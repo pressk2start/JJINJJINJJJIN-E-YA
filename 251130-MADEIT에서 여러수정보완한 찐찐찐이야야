@@ -2795,11 +2795,6 @@ def monitor_position(m,
             if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 open_auto_position(m, pre, dyn_stop, eff_sl_pct)
-
-            # === 타임가드: 최대 실행시간 초과시 강제 종료 ===
-            if time.time() - start_ts > MAX_RUNTIME:
-                verdict = "타임가드 종료"
-                break
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
