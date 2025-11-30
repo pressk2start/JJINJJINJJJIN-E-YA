@@ -2067,7 +2067,7 @@ def final_check_leader(m, pre, tight_mode=False):
     if tight_mode:
         MIN_TURNOVER_LOCAL += 0.003
     if 0 <= now_kst().hour < 6:
-        MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
+        MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002)  # 야간: 하한 0.020 유지, 완화폭 축소
     MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
 
     TICKS_BUY_RATIO_LOCAL = max(
@@ -2232,7 +2232,7 @@ def postcheck_6s(m, pre):
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
     # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    MAX_SURGE = 0.015  # 1.5% 이상이면 고점 추격으로 간주하고 컷
+    MAX_SURGE = 0.018  # 1.8% 이상이면 고점 추격으로 간주하고 컷 (강한 breakout 허용)
 
     while True:
         now = time.time()
