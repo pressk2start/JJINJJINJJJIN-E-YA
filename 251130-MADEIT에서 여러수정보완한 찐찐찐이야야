@@ -38,13 +38,13 @@ COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 5  # 진입 후 초기 노이즈 허용 구간
+WARMUP_SEC = 8  # 진입 후 초기 노이즈 허용 구간 (5→8초 연장)
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 트레일링 손절(이익발생 후만 무장)
-TRAIL_ARM_GAIN = 0.012  # +1.2% 이익 시 트레일링 활성화
+TRAIL_ARM_GAIN = 0.008  # +0.8% 이익 시 트레일링 활성화 (1.2%→0.8% 하향)
 TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격(1.0%)
 
@@ -2772,6 +2772,54 @@ def monitor_position(m: str,
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
                 verdict = "HARD_STOP"
                 break
+
+            # === 🆕 Break-Even 손절 업데이트 (균형형 전략) ===
+            if cur_gain >= 0.003:  # 0.3% 이상 수익
+                base_stop = max(base_stop, entry_price * 0.999)  # 손절을 -0.1%로 상향
+            if cur_gain >= 0.007:  # 0.7% 이상 수익
+                base_stop = max(base_stop, entry_price * 1.002)  # 손절을 +0.2%로 상향
+
+            # ①-A 초소익 확보 (0.15%~0.5%): 수수료 커버 즉시 익절
+            if 0.0015 <= cur_gain < 0.005:
+                if t15["buy_ratio"] < 0.52:  # 매수세 약화 시
+                    partial_volume = entry_volume * 0.3
+                    sell_market(m, partial_volume)
+
+                    realized_gain = cur_gain * 100
+                    realized_krw = partial_volume * curp
+
+                    tg_send_mid(
+                        f"💰 <b>{m}</b> 초소익 확보 (30%)<br>"
+                        f"💵 수익률 {realized_gain:+.2f}% | 💰 {realized_krw:,.0f} KRW<br>"
+                        f"🔹 수수료 커버 + 안전 확보"
+                    )
+                    verdict = "MICRO_PROFIT"
+                    entry_volume = entry_volume * 0.7
+
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
+
+            # ①-B 소익 확보 (0.5%~1.0%): 적극적 분할 익절
+            elif 0.005 <= cur_gain < 0.010:
+                if drop_from_high >= 0.002:  # 고점 대비 -0.2% 하락 시
+                    partial_volume = entry_volume * 0.4
+                    sell_market(m, partial_volume)
+
+                    realized_gain = cur_gain * 100
+                    realized_krw = partial_volume * curp
+
+                    tg_send_mid(
+                        f"💎 <b>{m}</b> 소익 확보 (40%)<br>"
+                        f"💵 수익률 {realized_gain:+.2f}% | 💰 {realized_krw:,.0f} KRW<br>"
+                        f"🔹 고점대비 -{drop_from_high*100:.2f}%"
+                    )
+                    verdict = "SMALL_PROFIT"
+                    entry_volume = entry_volume * 0.6
+
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
 
             # ② 조기익절: 고점 대비 -0.3% & 거래량감속
             if drop_from_high >= 0.003 and vdrop_trigger:
