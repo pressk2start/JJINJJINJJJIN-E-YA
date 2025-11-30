@@ -2548,8 +2548,6 @@ def monitor_position(m,
     if horizon is None:
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
     start_ts = time.time()
-    MAX_RUNTIME = horizon * 1.5  # 최대 허용 실행시간 (정상시간의 1.5배)
-
 
     # 디바운스/트레일 상태
     # 손절 디바운스용
@@ -2794,7 +2792,7 @@ def monitor_position(m,
             # ⑥ 추세 회복 재진입 (눌림 후 재상승)
             if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                open_auto_position(m, pre, base_stop, eff_sl_pct)
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
