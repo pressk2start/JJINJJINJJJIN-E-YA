@@ -201,6 +201,9 @@ TRADE_HISTORY = _deque_for_risk(maxlen=30)  # 최근 30개 거래 기록
 MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.05"))  # 일일 최대 5% 손실
 DAILY_LOSS_TRACKER = {"date": "", "loss_pct": 0.0}  # 일일 손실 추적
 
+# 🔒 중복 청산 방지 전역 세트 (멀티스레드 race condition 방지)
+_ACTIVE_CLOSE = set()  # 현재 청산 진행 중인 종목
+
 
 def record_trade(market: str, pnl_pct: float):
     """
@@ -754,9 +757,18 @@ def close_auto_position(m, reason=""):
             record_trade(m, ret_pct)
         except Exception as _e:
             print("[TRADE_RECORD_ERR]", _e)
-            # Fallback: 손실 시 일일 손실 추적기 직접 업데이트
+            # Fallback: 손실 시 일일 손실 추적기 직접 업데이트 (날짜 갱신 포함)
+            today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+            if DAILY_LOSS_TRACKER["date"] != today:
+                DAILY_LOSS_TRACKER["date"] = today
+                DAILY_LOSS_TRACKER["loss_pct"] = 0.0
             if ret_pct < 0:
                 DAILY_LOSS_TRACKER["loss_pct"] += abs(ret_pct) / 100.0
+
+        # ✅ 재진입 제어 정확성 강화: last_exit_ts 업데이트
+        with _POSITION_LOCK:
+            if m in OPEN_POSITIONS:
+                OPEN_POSITIONS[m]["last_exit_ts"] = time.time()
 
         tg_send(
             f"💥 <b>자동청산</b> {m}\n"
@@ -856,16 +868,17 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         return False, msg, 0.0
 
 
-def remonitor_until_close(m, entry_price, pre, tight_mode=False):
+def remonitor_until_close(m, entry_price, pre, tight_mode=False, max_attempts=3):
     """
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
+    - max_attempts: 최대 재시도 횟수 (기본값: 3, 무한 루프 방지)
     """
     CYCLE_SEC = 300
     cycle = 0
 
-    while True:
+    while cycle < max_attempts:
         cycle += 1
-        print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
+        print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작 (최대 {max_attempts}회)")
 
         verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
             monitor_position(
@@ -927,6 +940,10 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
             close_auto_position(m, reason)
             return True
+
+    # while 루프 종료 (최대 재시도 도달)
+    print(f"[REMONITOR] {m} 최대 재모니터링 횟수({max_attempts}회) 도달, 자동 종료")
+    return False
 
 
 # =========================
@@ -2577,6 +2594,24 @@ def monitor_position(m: str,
                      tight_mode: bool = False,
                      horizon: Optional[int] = None,
                      reentry: bool = False) -> Tuple[Optional[str], Optional[str], str, float, float, float, float]:
+    # 🔒 멀티스레드 중복 청산 방지
+    if m in _ACTIVE_CLOSE:
+        print(f"[SKIP] {m} 이미 청산 진행 중")
+        return None, None, "ALREADY_CLOSING", 0.0, 0.0, 0.0, 0.0
+
+    _ACTIVE_CLOSE.add(m)
+    try:
+        return _monitor_position_impl(m, entry_price, pre, tight_mode, horizon, reentry)
+    finally:
+        _ACTIVE_CLOSE.discard(m)
+
+
+def _monitor_position_impl(m: str,
+                           entry_price: float,
+                           pre: Dict[str, Any],
+                           tight_mode: bool = False,
+                           horizon: Optional[int] = None,
+                           reentry: bool = False) -> Tuple[Optional[str], Optional[str], str, float, float, float, float]:
     c1 = get_minutes_candles(1, m, 20)
     base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1)
 
