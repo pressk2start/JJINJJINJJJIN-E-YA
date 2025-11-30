@@ -754,6 +754,9 @@ def close_auto_position(m, reason=""):
             record_trade(m, ret_pct)
         except Exception as _e:
             print("[TRADE_RECORD_ERR]", _e)
+            # Fallback: 손실 시 일일 손실 추적기 직접 업데이트
+            if ret_pct < 0:
+                DAILY_LOSS_TRACKER["loss_pct"] += abs(ret_pct) / 100.0
 
         tg_send(
             f"💥 <b>자동청산</b> {m}\n"
@@ -2239,6 +2242,10 @@ def postcheck_6s(m, pre):
                    x.get("trade_volume"))
             if key in seen:
                 continue
+            # 10초 이상 오래된 틱 필터링 (밀리초 → 초 변환)
+            tick_ts = x.get("timestamp", now * 1000) / 1000
+            if now - tick_ts > 10:
+                continue
             seen.add(key)
             acc.appendleft(x)  # 최신이 앞
 
@@ -2608,6 +2615,7 @@ def monitor_position(m: str,
 
     verdict = None
     outcome_extra = ""
+    pos_closed = False  # 중복 청산 방지 플래그
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
@@ -2767,8 +2775,9 @@ def monitor_position(m: str,
             drop_from_high = (best - curp) / best
 
             # ① 급락 즉시 손절 (-1.5%)
-            if cur_gain <= -0.015:
+            if not pos_closed and cur_gain <= -0.015:
                 sell_market(m, entry_volume)
+                pos_closed = True
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
                 verdict = "HARD_STOP"
                 break
@@ -2780,7 +2789,7 @@ def monitor_position(m: str,
                 base_stop = max(base_stop, entry_price * 1.002)  # 손절을 +0.2%로 상향
 
             # ①-A 초소익 확보 (0.15%~0.5%): 수수료 커버 즉시 익절
-            if 0.0015 <= cur_gain < 0.005:
+            if not pos_closed and 0.0015 <= cur_gain < 0.005:
                 if t15["buy_ratio"] < 0.52:  # 매수세 약화 시
                     partial_volume = entry_volume * 0.3
                     sell_market(m, partial_volume)
@@ -2799,9 +2808,10 @@ def monitor_position(m: str,
                     with _POSITION_LOCK:
                         if m in OPEN_POSITIONS:
                             OPEN_POSITIONS[m]["volume"] = entry_volume
+                    continue  # 다음 루프로 (중복 익절 방지)
 
             # ①-B 소익 확보 (0.5%~1.0%): 적극적 분할 익절
-            elif 0.005 <= cur_gain < 0.010:
+            elif not pos_closed and 0.005 <= cur_gain < 0.010:
                 if drop_from_high >= 0.002:  # 고점 대비 -0.2% 하락 시
                     partial_volume = entry_volume * 0.4
                     sell_market(m, partial_volume)
@@ -2820,9 +2830,10 @@ def monitor_position(m: str,
                     with _POSITION_LOCK:
                         if m in OPEN_POSITIONS:
                             OPEN_POSITIONS[m]["volume"] = entry_volume
+                    continue  # 다음 루프로 (중복 익절 방지)
 
             # ② 조기익절: 고점 대비 -0.3% & 거래량감속
-            if drop_from_high >= 0.003 and vdrop_trigger:
+            if not pos_closed and drop_from_high >= 0.003 and vdrop_trigger:
                 partial_volume = entry_volume * 0.5
                 sell_market(m, partial_volume)
 
@@ -2841,33 +2852,41 @@ def monitor_position(m: str,
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         OPEN_POSITIONS[m]["volume"] = entry_volume
+                continue  # 다음 루프로 (중복 익절 방지)
 
             # ③ 전량익절: 고점 대비 -1.0% 이상
-            elif drop_from_high >= 0.010:
+            elif not pos_closed and drop_from_high >= 0.010:
                 sell_market(m, entry_volume)
+                pos_closed = True
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
                 break
 
-            # ④ 이익락 (Profit Lock)
-            if cur_gain >= 0.015:
-                profit_lock = curp * 0.992
-            elif cur_gain >= 0.010:
-                profit_lock = curp * 0.994
+            # ④ 이익락 (Profit Lock) - 완화형
+            if cur_gain >= 0.02:  # 2% 이상
+                profit_lock = curp * 0.990  # 1.0% 락
+            elif cur_gain >= 0.015:  # 1.5% 이상
+                profit_lock = curp * 0.992  # 0.8% 락
+            elif cur_gain >= 0.010:  # 1.0% 이상
+                profit_lock = curp * 0.994  # 0.6% 락
             else:
                 profit_lock = base_stop
 
-            if curp <= profit_lock:
+            if not pos_closed and curp <= profit_lock:
                 sell_market(m, entry_volume)
+                pos_closed = True
                 tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑤ 트레일링 스탑 (고점 대비 0.5%)
+            # ⑤ 트레일링 스탑 (최소 거리 보장)
             if trail_armed and curp > best:
-                trail_stop = max(trail_stop, curp * 0.995)
-            if trail_armed and curp <= trail_stop:
+                # 최소 트레일 거리 보장 (0.4%)
+                trail_dist = max(0.004, TRAIL_DISTANCE_MIN)
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+            if not pos_closed and trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
+                pos_closed = True
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
                 verdict = "TRAIL_EXIT"
                 break
