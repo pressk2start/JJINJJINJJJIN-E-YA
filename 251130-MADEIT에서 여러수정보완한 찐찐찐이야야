@@ -2787,6 +2787,12 @@ def monitor_position(m: str,
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
                 )
                 verdict = "PARTIAL_EXIT"
+                entry_volume = entry_volume * 0.5  # 잔여 수량으로 업데이트 (중복 청산 방지)
+
+                # OPEN_POSITIONS에도 잔여 수량 반영
+                with _POSITION_LOCK:
+                    if m in OPEN_POSITIONS:
+                        OPEN_POSITIONS[m]["volume"] = entry_volume
 
             # ③ 전량익절: 고점 대비 -1.0% 이상
             elif drop_from_high >= 0.010:
