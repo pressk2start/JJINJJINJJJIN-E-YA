@@ -2787,14 +2787,14 @@ def monitor_position(m,
             # 하드 스톱 (-1.5%)
             if cur_gain <= -0.015:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🩸 {m} 급락 -1.5% 하드스톱")
+                tg_send(f"🩸 {m} 급락 -1.5% 하드스톱")
                 verdict = "HARD_STOP"
                 break
 
             # 동적 손절 (base_stop 터치)
             if curp <= base_stop:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🛑 {m} 동적 손절 ({fmt6(base_stop)}원) 터치 → 손절")
+                tg_send(f"🛑 {m} 동적 손절 ({fmt6(base_stop)}원) 터치 → 손절")
                 verdict = "DYNAMIC_STOP"
                 break
 
@@ -2825,7 +2825,7 @@ def monitor_position(m,
                             OPEN_POSITIONS[m]["volume"] = entry_volume
                     # stop 승격
                     base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
-                    tg_send_mid(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
+                    tg_send(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
                     verdict = "TP1_PARTIAL"
                 continue
 
@@ -2842,7 +2842,7 @@ def monitor_position(m,
                     base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                     trail_armed = True
                     trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
-                    tg_send_mid(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
+                    tg_send(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
                     verdict = "TP2_PARTIAL"
                 continue
 
@@ -2861,7 +2861,7 @@ def monitor_position(m,
                 # 수정: 2/3 → 3/3 (모든 신호가 나빠야 전량매도)
                 if flow_votes >= 3 and cur_gain > -0.005:
                     sell_market(m, entry_volume)
-                    tg_send_mid(f"📊 {m} 테이프 투표 (3/3 전부 나쁨) → 흐름 붕괴 전량매도")
+                    tg_send(f"📊 {m} 테이프 투표 (3/3 전부 나쁨) → 흐름 붕괴 전량매도")
                     verdict = "FLOW_VOTED_EXIT"
                     break
 
@@ -2878,7 +2878,7 @@ def monitor_position(m,
                         if m in OPEN_POSITIONS:
                             OPEN_POSITIONS[m]["partial_done"] = True
                             OPEN_POSITIONS[m]["volume"] = entry_volume
-                    tg_send_mid(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
+                    tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
                     verdict = "PEAK_FADE_PARTIAL"
                 continue
 
@@ -2886,7 +2886,7 @@ def monitor_position(m,
             if drop_from_high >= 0.015 and cur_gain >= 0.008:
                 # -1.5% 되돌림 + 최소 0.8% 이익 → 전량
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절")
+                tg_send(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절")
                 verdict = "PEAK_CASCADE"
                 break
 
@@ -2904,7 +2904,7 @@ def monitor_position(m,
 
             if curp <= profit_lock and cur_gain > 0:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 전량청산")
+                tg_send(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 전량청산")
                 verdict = "PROFIT_LOCK"
                 break
 
@@ -2918,7 +2918,7 @@ def monitor_position(m,
 
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"📉 {m} 트레일링 스탑 ({fmt6(trail_stop)}) 터치 → 전량청산")
+                tg_send(f"📉 {m} 트레일링 스탑 ({fmt6(trail_stop)}) 터치 → 전량청산")
                 verdict = "TRAIL_EXIT"
                 break
 
@@ -2926,7 +2926,7 @@ def monitor_position(m,
             # 추가: 재진입 로직 (기존 유지)
             # ========================================
             if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
-                tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
+                tg_send(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 open_auto_position(m, pre, base_stop, eff_sl_pct)
 
         # ========================================
@@ -2936,7 +2936,7 @@ def monitor_position(m,
             # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
             if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
                 sell_market(m, entry_volume)
-                tg_send_mid(f"⏱️ {m} 시간만료 + 손실 → 안전청산 ({cur_gain*100:.2f}%)")
+                tg_send(f"⏱️ {m} 시간만료 + 손실 → 안전청산 ({cur_gain*100:.2f}%)")
                 verdict = "TIME_EXPIRED_SAFE_EXIT"
             else:
                 # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
