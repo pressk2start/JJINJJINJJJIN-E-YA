@@ -2765,75 +2765,173 @@ def monitor_position(m,
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
             effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
 
-            # === 🔥 심플매도 로직 (익절 우선 + 이익락 + 거래량감속) ===
+            # === 🔥 프로 매도 로직 (손실 최소화 + 익절 최대화) ===
             t15 = micro_tape_stats_from_ticks(ticks, 15)
             t30 = micro_tape_stats_from_ticks(ticks, 30)
-            avg_ref = (t15["krw_per_sec"] + t30["krw_per_sec"]) / 2
-            drop_ratio = t15["krw_per_sec"] / max(t30["krw_per_sec"], 1)
-            vdrop_trigger = drop_ratio < 0.65 and t15["buy_ratio"] < 0.55
 
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # ① 급락 즉시 손절 (-1.5%)
+            # ATR 계산 (동적 조정용)
+            atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+            atr_ratio = (atr / max(curp, 1)) if atr and atr > 0 else 0.01
+
+            # 부분익절 플래그 (1회만 허용)
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m, {})
+                partial_done = pos.get("partial_done", False)
+
+            # ========================================
+            # 우선순위 1: 손절 (하드스톱 + 동적 손절)
+            # ========================================
+            # 하드 스톱 (-1.5%)
             if cur_gain <= -0.015:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
+                tg_send_mid(f"🩸 {m} 급락 -1.5% 하드스톱")
                 verdict = "HARD_STOP"
                 break
 
-            # ② 조기익절: 고점 대비 -0.3% & 거래량감속
-            if drop_from_high >= 0.003 and vdrop_trigger:
-                partial_volume = entry_volume * 0.5
-                if sell_market(m, partial_volume):
-                    entry_volume = entry_volume * 0.5  # 남은 수량 업데이트
-                    realized_gain = (curp / entry_price - 1.0) * 100
-                    realized_krw = partial_volume * curp
-                    tg_send_mid(
-                        f"⚡ <b>{m}</b> 부분익절 (50%)<br>"
-                        f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
-                        f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
-                    )
-                    verdict = "PARTIAL_EXIT"
-                continue  # 다음 루프로 (중복 매도 방지)
-
-            # ③ 전량익절: 고점 대비 -1.0% 이상
-            if drop_from_high >= 0.010:
+            # 동적 손절 (base_stop 터치)
+            if curp <= base_stop:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
-                verdict = "FULL_EXIT"
+                tg_send_mid(f"🛑 {m} 동적 손절 ({fmt6(base_stop)}원) 터치 → 손절")
+                verdict = "DYNAMIC_STOP"
                 break
 
-            # ④ 이익락 (Profit Lock)
+            # ========================================
+            # 우선순위 2: BE(본절) 승격 (손실 최소화 핵심)
+            # ========================================
+            if cur_gain >= 0.006:
+                be_lock = entry_price * (1 + FEE_RATE * 2)  # 본절 + 수수료 여유
+                base_stop = max(base_stop, be_lock)
+
+            # ========================================
+            # 우선순위 3: 부분익절 3단계 (익절 최대화)
+            # ========================================
+            # TP1: 0.8% or ATR*1.2 중 큰 값
+            tp1 = entry_price * (1 + max(0.008, atr_ratio * 1.2))
+            # TP2: 1.5% or ATR*1.8 중 큰 값
+            tp2 = entry_price * (1 + max(0.015, atr_ratio * 1.8))
+
+            if not partial_done and curp >= tp1 and curp < tp2:
+                # TP1 도달: 30% 부분익절
+                partial_volume = entry_volume * 0.3
+                if sell_market(m, partial_volume):
+                    entry_volume = entry_volume * 0.7
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["partial_done"] = True
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
+                    # stop 승격
+                    base_stop = max(base_stop, entry_price * 1.003)  # 본절+0.3%
+                    tg_send_mid(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
+                    verdict = "TP1_PARTIAL"
+                continue
+
+            if not partial_done and curp >= tp2:
+                # TP2 도달: 40% 부분익절
+                partial_volume = entry_volume * 0.4
+                if sell_market(m, partial_volume):
+                    entry_volume = entry_volume * 0.6
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["partial_done"] = True
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
+                    # stop 승격 + 트레일 활성화
+                    base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
+                    trail_armed = True
+                    trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
+                    tg_send_mid(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
+                    verdict = "TP2_PARTIAL"
+                continue
+
+            # ========================================
+            # 우선순위 4: 테이프 투표 전량매도 (흐름 붕괴)
+            # ========================================
+            flow_votes = 0
+            flow_votes += int(t15["krw_per_sec"] < 0.65 * t30["krw_per_sec"])  # 거래량 급락
+            flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
+            flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
+
+            if flow_votes >= 2 and cur_gain > -0.005:  # 흐름 붕괴 + 손실 -0.5% 이내
+                sell_market(m, entry_volume)
+                tg_send_mid(f"📊 {m} 테이프 투표 ({flow_votes}/3) → 흐름 붕괴 전량매도")
+                verdict = "FLOW_VOTED_EXIT"
+                break
+
+            # ========================================
+            # 우선순위 5: 고점 되돌림 매도
+            # ========================================
+            if drop_from_high >= 0.005 and t15["buy_ratio"] < 0.53 and not partial_done:
+                # -0.5% 되돌림 + 매수세 약화 → 부분 30%
+                partial_volume = entry_volume * 0.3
+                if sell_market(m, partial_volume):
+                    entry_volume = entry_volume * 0.7
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["partial_done"] = True
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
+                    tg_send_mid(f"📉 {m} 고점 대비 -0.5% 되돌림 → 30% 부분매도")
+                    verdict = "PEAK_FADE_PARTIAL"
+                continue
+
+            if drop_from_high >= 0.010:
+                # -1.0% 되돌림 → 전량
+                sell_market(m, entry_volume)
+                tg_send_mid(f"🚨 {m} 고점 대비 -1.0% 하락 → 전량익절")
+                verdict = "PEAK_CASCADE"
+                break
+
+            # ========================================
+            # 우선순위 6: 이익락 (ATR 기반 동적)
+            # ========================================
             if cur_gain >= 0.015:
-                profit_lock = curp * 0.992
+                # 1.5% 이상: 고점 대비 ATR*1.0 (최소 0.8%)
+                profit_lock = best * (1.0 - max(0.008, atr_ratio * 1.0))
             elif cur_gain >= 0.010:
-                profit_lock = curp * 0.994
+                # 1.0% 이상: 고점 대비 ATR*0.8 (최소 0.6%)
+                profit_lock = best * (1.0 - max(0.006, atr_ratio * 0.8))
             else:
                 profit_lock = base_stop
 
-            if curp <= profit_lock:
+            if curp <= profit_lock and cur_gain > 0:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
+                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 전량청산")
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑤ 트레일링 스탑 (고점 대비 0.5%)
+            # ========================================
+            # 우선순위 7: 트레일링 스탑 (ATR 기반 동적)
+            # ========================================
             if trail_armed and curp > best:
-                trail_stop = max(trail_stop, curp * 0.995)
+                # ATR 기반 동적 트레일 거리 (최소 1.0%)
+                trail_dist = max(0.010, atr_ratio * 1.25)
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
+                tg_send_mid(f"📉 {m} 트레일링 스탑 ({fmt6(trail_stop)}) 터치 → 전량청산")
                 verdict = "TRAIL_EXIT"
                 break
 
-            # ⑥ 추세 회복 재진입 (눌림 후 재상승)
+            # ========================================
+            # 추가: 재진입 로직 (기존 유지)
+            # ========================================
             if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 open_auto_position(m, pre, base_stop, eff_sl_pct)
-        
+
+        # ========================================
+        # 시간 만료 시 매도 안전장치 (매도 미실행 방지)
+        # ========================================
         if verdict is None:
-            verdict = "시간 만료(모니터링 종료)"
+            # 손실/미세이익은 확실히 청산, 큰 수익만 재모니터링
+            if cur_gain <= 0.003:  # 손실~0.3% 이하 → 전량매도
+                sell_market(m, entry_volume)
+                tg_send_mid(f"⏱️ {m} 시간만료 + 미세수익 → 전량청산 ({cur_gain*100:.2f}%)")
+                verdict = "TIME_EXPIRED_SAFE_EXIT"
+            else:
+                verdict = "시간 만료(모니터링 종료)"
 
     finally:
         # ================================
