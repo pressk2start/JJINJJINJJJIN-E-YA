@@ -2814,7 +2814,11 @@ def monitor_position(m,
             # TP2: 2.0% or ATR*2.2 중 큰 값 (기존 1.5% → 2.0% 상향)
             tp2 = entry_price * (1 + max(0.020, atr_ratio * 2.2))
 
-            if not partial_done and curp >= tp1 and curp < tp2:
+            # 강한 신호 확인 (점화/메가/봇매집)
+            strong_signal = pre.get("ign_ok") or pre.get("mega_ok") or pre.get("botacc_ok")
+
+            # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
+            if not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
                 # TP1 도달: 30% 부분익절
                 partial_volume = entry_volume * 0.3
                 if sell_market(m, partial_volume):
@@ -2858,10 +2862,14 @@ def monitor_position(m,
                 flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
                 flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
 
-                # 수정: 2/3 → 3/3 (모든 신호가 나빠야 전량매도)
-                if flow_votes >= 3 and cur_gain > -0.005:
+                # 상단 투표 완화: 2.5% 이상 먹은 상태면 2/3로 완화 → 꼭대기 근처 회수율↑
+                need_votes = 3  # 기본: 모든 신호가 나빠야 (3/3)
+                if cur_gain >= 0.025:  # 2.5% 이상 고수익 구간
+                    need_votes = 2  # 2/3로 완화 (빠른 피크 탈출)
+
+                if flow_votes >= need_votes and cur_gain > -0.005:
                     sell_market(m, entry_volume)
-                    tg_send(f"📊 {m} 테이프 투표 (3/3 전부 나쁨) → 흐름 붕괴 전량매도")
+                    tg_send(f"📊 {m} 테이프 투표 ({flow_votes}/{need_votes}) → 흐름 붕괴 전량매도 (익절 {cur_gain*100:.2f}%)")
                     verdict = "FLOW_VOTED_EXIT"
                     break
 
@@ -2891,9 +2899,17 @@ def monitor_position(m,
                 break
 
             # ========================================
-            # 우선순위 6: 이익락 (ATR 기반 동적)
+            # 우선순위 6: 이익락 (ATR 기반 동적 + 고수익 타이트닝)
             # ========================================
-            if cur_gain >= 0.015:
+            if cur_gain >= 0.05:
+                # 5% 이상: 고점 대비 매우 촘촘 (최소 0.4%)
+                profit_lock = best * (1.0 - max(0.004, atr_ratio * 0.5))
+                trail_armed = True  # 강제 트레일 활성화
+            elif cur_gain >= 0.03:
+                # 3% 이상: 고점 대비 촘촘 (최소 0.5%)
+                profit_lock = best * (1.0 - max(0.005, atr_ratio * 0.7))
+                trail_armed = True  # 강제 트레일 활성화
+            elif cur_gain >= 0.015:
                 # 1.5% 이상: 고점 대비 ATR*1.0 (최소 0.8%)
                 profit_lock = best * (1.0 - max(0.008, atr_ratio * 1.0))
             elif cur_gain >= 0.010:
@@ -2909,11 +2925,19 @@ def monitor_position(m,
                 break
 
             # ========================================
-            # 우선순위 7: 트레일링 스탑 (ATR 기반 동적)
+            # 우선순위 7: 트레일링 스탑 (ATR 기반 동적 + 고수익 타이트닝)
             # ========================================
             if trail_armed and curp > best:
-                # ATR 기반 동적 트레일 거리 (최소 1.0%)
-                trail_dist = max(0.010, atr_ratio * 1.25)
+                # 고수익 구간은 트레일 거리 축소 (꼭대기 회수율↑)
+                if cur_gain >= 0.05:
+                    # 5% 이상: 매우 촘촘 (최소 0.4%)
+                    trail_dist = max(0.004, atr_ratio * 0.6)
+                elif cur_gain >= 0.03:
+                    # 3% 이상: 촘촘 (최소 0.6%)
+                    trail_dist = max(0.006, atr_ratio * 0.8)
+                else:
+                    # 기본: (최소 1.0%)
+                    trail_dist = max(0.010, atr_ratio * 1.25)
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             if trail_armed and curp <= trail_stop:
