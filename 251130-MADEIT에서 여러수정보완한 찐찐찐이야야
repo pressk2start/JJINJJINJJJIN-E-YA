@@ -333,7 +333,34 @@ def sell_market(market, volume, max_attempts=3):
     - market: 종목 코드
     - volume: 매도 수량
     - max_attempts: 최대 시도 횟수 (기본 3회)
+
+    업비트 최소 거래금액(5,000원) 체크 포함
     """
+    # 🔍 최소 거래금액 체크 (업비트: 5,000원 미만 거래 불가)
+    try:
+        ticker_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
+        if ticker_js and len(ticker_js) > 0:
+            current_price = ticker_js[0].get("trade_price", 0)
+            order_value = volume * current_price
+
+            if order_value < 5000:
+                # 소액 잔고: 매도 시도하지 않고 포지션만 정리
+                print(f"[SELL_SKIP] {market} 소액 잔고 무시: {volume:.6f}코인 (≈{order_value:.0f}원 < 5,000원)")
+                with _POSITION_LOCK:
+                    pos = OPEN_POSITIONS.get(market)
+                    if pos:
+                        current_vol = pos.get("volume", 0)
+                        new_vol = max(0, current_vol - volume)
+                        if new_vol > 0:
+                            pos["volume"] = new_vol
+                            OPEN_POSITIONS[market] = pos
+                        else:
+                            OPEN_POSITIONS.pop(market, None)
+                return True  # 정리 완료로 간주
+    except Exception as e:
+        print(f"[SELL_WARN] {market} 가격 조회 실패, 매도 계속 진행: {e}")
+
+    # 실제 매도 시도
     for attempt in range(1, max_attempts + 1):
         try:
             res = place_market_sell(market, volume)
@@ -2819,35 +2846,57 @@ def monitor_position(m,
 
             # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
             if not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
-                # TP1 도달: 30% 부분익절
-                partial_volume = entry_volume * 0.3
-                if sell_market(m, partial_volume):
-                    entry_volume = entry_volume * 0.7
-                    with _POSITION_LOCK:
-                        if m in OPEN_POSITIONS:
-                            OPEN_POSITIONS[m]["partial_done"] = True
-                            OPEN_POSITIONS[m]["volume"] = entry_volume
-                    # stop 승격
-                    base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
-                    tg_send(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
-                    verdict = "TP1_PARTIAL"
+                # TP1 도달: 30% 부분익절 (단, 남을 잔고가 5,000원 미만이면 전량매도)
+                remaining_volume = entry_volume * 0.7
+                remaining_value = remaining_volume * curp
+
+                if remaining_value < 5000:
+                    # 남을 잔고가 소액이면 전량 매도
+                    if sell_market(m, entry_volume):
+                        tg_send(f"💰 {m} TP1 도달 → 전량익절 (잔고소액 방지: {remaining_value:.0f}원)")
+                        verdict = "TP1_FULL_EXIT"
+                        break
+                else:
+                    # 정상 부분 익절
+                    partial_volume = entry_volume * 0.3
+                    if sell_market(m, partial_volume):
+                        entry_volume = entry_volume * 0.7
+                        with _POSITION_LOCK:
+                            if m in OPEN_POSITIONS:
+                                OPEN_POSITIONS[m]["partial_done"] = True
+                                OPEN_POSITIONS[m]["volume"] = entry_volume
+                        # stop 승격
+                        base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
+                        tg_send(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
+                        verdict = "TP1_PARTIAL"
                 continue
 
             if not partial_done and curp >= tp2:
-                # TP2 도달: 40% 부분익절
-                partial_volume = entry_volume * 0.4
-                if sell_market(m, partial_volume):
-                    entry_volume = entry_volume * 0.6
-                    with _POSITION_LOCK:
-                        if m in OPEN_POSITIONS:
-                            OPEN_POSITIONS[m]["partial_done"] = True
-                            OPEN_POSITIONS[m]["volume"] = entry_volume
-                    # stop 승격 + 트레일 활성화
-                    base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
-                    trail_armed = True
-                    trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
-                    tg_send(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
-                    verdict = "TP2_PARTIAL"
+                # TP2 도달: 40% 부분익절 (단, 남을 잔고가 5,000원 미만이면 전량매도)
+                remaining_volume = entry_volume * 0.6
+                remaining_value = remaining_volume * curp
+
+                if remaining_value < 5000:
+                    # 남을 잔고가 소액이면 전량 매도
+                    if sell_market(m, entry_volume):
+                        tg_send(f"🚀 {m} TP2 도달 → 전량익절 (잔고소액 방지: {remaining_value:.0f}원)")
+                        verdict = "TP2_FULL_EXIT"
+                        break
+                else:
+                    # 정상 부분 익절
+                    partial_volume = entry_volume * 0.4
+                    if sell_market(m, partial_volume):
+                        entry_volume = entry_volume * 0.6
+                        with _POSITION_LOCK:
+                            if m in OPEN_POSITIONS:
+                                OPEN_POSITIONS[m]["partial_done"] = True
+                                OPEN_POSITIONS[m]["volume"] = entry_volume
+                        # stop 승격 + 트레일 활성화
+                        base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
+                        trail_armed = True
+                        trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
+                        tg_send(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
+                        verdict = "TP2_PARTIAL"
                 continue
 
             # ========================================
@@ -2878,16 +2927,27 @@ def monitor_position(m,
             # ========================================
             # 수정: -0.5% → -0.8% 완화, 최소 이익 조건 추가
             if drop_from_high >= 0.008 and t15["buy_ratio"] < 0.53 and not partial_done and cur_gain >= 0.006:
-                # -0.5% 되돌림 + 매수세 약화 → 부분 30%
-                partial_volume = entry_volume * 0.3
-                if sell_market(m, partial_volume):
-                    entry_volume = entry_volume * 0.7
-                    with _POSITION_LOCK:
-                        if m in OPEN_POSITIONS:
-                            OPEN_POSITIONS[m]["partial_done"] = True
-                            OPEN_POSITIONS[m]["volume"] = entry_volume
-                    tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
-                    verdict = "PEAK_FADE_PARTIAL"
+                # -0.8% 되돌림 + 매수세 약화 → 부분 30% (단, 남을 잔고가 5,000원 미만이면 전량매도)
+                remaining_volume = entry_volume * 0.7
+                remaining_value = remaining_volume * curp
+
+                if remaining_value < 5000:
+                    # 남을 잔고가 소액이면 전량 매도
+                    if sell_market(m, entry_volume):
+                        tg_send(f"📉 {m} 고점 되돌림 → 전량매도 (잔고소액 방지: {remaining_value:.0f}원)")
+                        verdict = "PEAK_FADE_FULL_EXIT"
+                        break
+                else:
+                    # 정상 부분 익절
+                    partial_volume = entry_volume * 0.3
+                    if sell_market(m, partial_volume):
+                        entry_volume = entry_volume * 0.7
+                        with _POSITION_LOCK:
+                            if m in OPEN_POSITIONS:
+                                OPEN_POSITIONS[m]["partial_done"] = True
+                                OPEN_POSITIONS[m]["volume"] = entry_volume
+                        tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
+                        verdict = "PEAK_FADE_PARTIAL"
                 continue
 
             # 수정: -1.0% → -1.5% 완화, 최소 이익 조건 추가
