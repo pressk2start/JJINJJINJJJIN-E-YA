@@ -43,9 +43,9 @@ EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 트레일링 손절(이익발생 후만 무장)
-TRAIL_ARM_GAIN = 0.012  # +1.2% 이익 시 트레일링 활성화
+TRAIL_ARM_GAIN = 0.010  # +1.0% 이익 시 트레일링 활성화 (조기 무장)
 TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격(1.0%)
+TRAIL_DISTANCE_MIN = 0.012  # 최소 트레일 간격(1.2%) (여유 확보)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -2801,17 +2801,18 @@ def monitor_position(m,
             # ========================================
             # 우선순위 2: BE(본절) 승격 (손실 최소화 핵심)
             # ========================================
-            if cur_gain >= 0.006:
-                be_lock = entry_price * (1 + FEE_RATE * 2)  # 본절 + 수수료 여유
+            # 수정: 0.6% → 1.0% 늦춤, FEE*2 → FEE*1 (미세손절 방지)
+            if cur_gain >= 0.010:
+                be_lock = entry_price * (1 + FEE_RATE)  # 본절 + 수수료만
                 base_stop = max(base_stop, be_lock)
 
             # ========================================
             # 우선순위 3: 부분익절 3단계 (익절 최대화)
             # ========================================
-            # TP1: 0.8% or ATR*1.2 중 큰 값
-            tp1 = entry_price * (1 + max(0.008, atr_ratio * 1.2))
-            # TP2: 1.5% or ATR*1.8 중 큰 값
-            tp2 = entry_price * (1 + max(0.015, atr_ratio * 1.8))
+            # TP1: 1.2% or ATR*1.5 중 큰 값 (기존 0.8% → 1.2% 상향)
+            tp1 = entry_price * (1 + max(0.012, atr_ratio * 1.5))
+            # TP2: 2.0% or ATR*2.2 중 큰 값 (기존 1.5% → 2.0% 상향)
+            tp2 = entry_price * (1 + max(0.020, atr_ratio * 2.2))
 
             if not partial_done and curp >= tp1 and curp < tp2:
                 # TP1 도달: 30% 부분익절
@@ -2823,7 +2824,7 @@ def monitor_position(m,
                             OPEN_POSITIONS[m]["partial_done"] = True
                             OPEN_POSITIONS[m]["volume"] = entry_volume
                     # stop 승격
-                    base_stop = max(base_stop, entry_price * 1.003)  # 본절+0.3%
+                    base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                     tg_send_mid(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
                     verdict = "TP1_PARTIAL"
                 continue
@@ -2848,21 +2849,27 @@ def monitor_position(m,
             # ========================================
             # 우선순위 4: 테이프 투표 전량매도 (흐름 붕괴)
             # ========================================
+            # 초반 30초는 웜업 기간 (노이즈 무시)
+            alive_sec = time.time() - start_ts
             flow_votes = 0
-            flow_votes += int(t15["krw_per_sec"] < 0.65 * t30["krw_per_sec"])  # 거래량 급락
-            flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
-            flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
 
-            if flow_votes >= 2 and cur_gain > -0.005:  # 흐름 붕괴 + 손실 -0.5% 이내
-                sell_market(m, entry_volume)
-                tg_send_mid(f"📊 {m} 테이프 투표 ({flow_votes}/3) → 흐름 붕괴 전량매도")
-                verdict = "FLOW_VOTED_EXIT"
-                break
+            if alive_sec >= 30:  # 30초 이후만 투표 실행
+                flow_votes += int(t15["krw_per_sec"] < 0.65 * t30["krw_per_sec"])  # 거래량 급락
+                flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
+                flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
+
+                # 수정: 2/3 → 3/3 (모든 신호가 나빠야 전량매도)
+                if flow_votes >= 3 and cur_gain > -0.005:
+                    sell_market(m, entry_volume)
+                    tg_send_mid(f"📊 {m} 테이프 투표 (3/3 전부 나쁨) → 흐름 붕괴 전량매도")
+                    verdict = "FLOW_VOTED_EXIT"
+                    break
 
             # ========================================
             # 우선순위 5: 고점 되돌림 매도
             # ========================================
-            if drop_from_high >= 0.005 and t15["buy_ratio"] < 0.53 and not partial_done:
+            # 수정: -0.5% → -0.8% 완화, 최소 이익 조건 추가
+            if drop_from_high >= 0.008 and t15["buy_ratio"] < 0.53 and not partial_done and cur_gain >= 0.006:
                 # -0.5% 되돌림 + 매수세 약화 → 부분 30%
                 partial_volume = entry_volume * 0.3
                 if sell_market(m, partial_volume):
@@ -2871,14 +2878,15 @@ def monitor_position(m,
                         if m in OPEN_POSITIONS:
                             OPEN_POSITIONS[m]["partial_done"] = True
                             OPEN_POSITIONS[m]["volume"] = entry_volume
-                    tg_send_mid(f"📉 {m} 고점 대비 -0.5% 되돌림 → 30% 부분매도")
+                    tg_send_mid(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
                     verdict = "PEAK_FADE_PARTIAL"
                 continue
 
-            if drop_from_high >= 0.010:
-                # -1.0% 되돌림 → 전량
+            # 수정: -1.0% → -1.5% 완화, 최소 이익 조건 추가
+            if drop_from_high >= 0.015 and cur_gain >= 0.008:
+                # -1.5% 되돌림 + 최소 0.8% 이익 → 전량
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🚨 {m} 고점 대비 -1.0% 하락 → 전량익절")
+                tg_send_mid(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절")
                 verdict = "PEAK_CASCADE"
                 break
 
@@ -2925,13 +2933,14 @@ def monitor_position(m,
         # 시간 만료 시 매도 안전장치 (매도 미실행 방지)
         # ========================================
         if verdict is None:
-            # 손실/미세이익은 확실히 청산, 큰 수익만 재모니터링
-            if cur_gain <= 0.003:  # 손실~0.3% 이하 → 전량매도
+            # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
+            if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
                 sell_market(m, entry_volume)
-                tg_send_mid(f"⏱️ {m} 시간만료 + 미세수익 → 전량청산 ({cur_gain*100:.2f}%)")
+                tg_send_mid(f"⏱️ {m} 시간만료 + 손실 → 안전청산 ({cur_gain*100:.2f}%)")
                 verdict = "TIME_EXPIRED_SAFE_EXIT"
             else:
-                verdict = "시간 만료(모니터링 종료)"
+                # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
+                verdict = "시간 만료(유지)"
 
     finally:
         # ================================
