@@ -326,6 +326,44 @@ def place_market_sell(market, volume):
     }
     return upbit_private_post("/v1/orders", body)
 
+
+def sell_market(market, volume, max_attempts=3):
+    """
+    시장가 매도 with 재시도 로직
+    - market: 종목 코드
+    - volume: 매도 수량
+    - max_attempts: 최대 시도 횟수 (기본 3회)
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            res = place_market_sell(market, volume)
+            if res and res.get("uuid"):
+                # 성공: OPEN_POSITIONS 업데이트
+                with _POSITION_LOCK:
+                    pos = OPEN_POSITIONS.get(market)
+                    if pos:
+                        current_vol = pos.get("volume", 0)
+                        new_vol = max(0, current_vol - volume)
+                        if new_vol > 0:
+                            pos["volume"] = new_vol
+                            OPEN_POSITIONS[market] = pos
+                        else:
+                            # 전량 매도 → 포지션 제거
+                            OPEN_POSITIONS.pop(market, None)
+                print(f"[SELL_OK] {market} 매도 성공: {volume:.6f} (시도 {attempt}/{max_attempts})")
+                return True
+            else:
+                print(f"[SELL_WARN] {market} 매도 응답 이상 (시도 {attempt}/{max_attempts}): {res}")
+        except Exception as e:
+            print(f"[SELL_ERR] {market} 매도 실패 (시도 {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                time.sleep(0.5 * attempt)  # 재시도 전 대기 (0.5초, 1초, 1.5초...)
+
+    # 모든 시도 실패
+    tg_send(f"⚠️ <b>매도 실패</b> {market}\n수량: {volume:.6f}\n사유: sell failed after {max_attempts} attempts")
+    return False
+
+
 def final_price_guard(m, initial_price, max_drift=0.07):
     """
     주문 직전 가격 재확인
@@ -2747,20 +2785,20 @@ def monitor_position(m,
             # ② 조기익절: 고점 대비 -0.3% & 거래량감속
             if drop_from_high >= 0.003 and vdrop_trigger:
                 partial_volume = entry_volume * 0.5
-                sell_market(m, partial_volume)
-
-                realized_gain = (curp / entry_price - 1.0) * 100
-                realized_krw = partial_volume * curp
-
-                tg_send_mid(
-                    f"⚡ <b>{m}</b> 부분익절 (50%)<br>"
-                    f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
-                    f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
-                )
-                verdict = "PARTIAL_EXIT"
+                if sell_market(m, partial_volume):
+                    entry_volume = entry_volume * 0.5  # 남은 수량 업데이트
+                    realized_gain = (curp / entry_price - 1.0) * 100
+                    realized_krw = partial_volume * curp
+                    tg_send_mid(
+                        f"⚡ <b>{m}</b> 부분익절 (50%)<br>"
+                        f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
+                        f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
+                    )
+                    verdict = "PARTIAL_EXIT"
+                continue  # 다음 루프로 (중복 매도 방지)
 
             # ③ 전량익절: 고점 대비 -1.0% 이상
-            elif drop_from_high >= 0.010:
+            if drop_from_high >= 0.010:
                 sell_market(m, entry_volume)
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
