@@ -71,6 +71,14 @@ SNIPER_PULLBACK_MAX = 0.0060       # 0.60% 이하 눌림
 SNIPER_MAX_ADV_FROM_SIGNAL = 0.009 # 신호가 대비 +0.9% 넘게 튀면 추격금지
 SNIPER_MIN_UPTICKS = 2             # 재상승은 2연속 uptick
 
+# ==== Uptrend Hold Lock (상승추세 보유 락) ====
+HOLD_ON_UPTREND = os.getenv("HOLD_ON_UPTREND", "1") == "1"
+HOLD_LOCK_MIN_GAIN = 0.010         # +1.0% 이상 수익에서만 락 검토
+HOLD_LOCK_MIN_SEC  = 120           # 락 걸리면 최소 보유 시간(초)
+HOLD_UNLOCK_DROP_FROM_HIGH = 0.018 # 고점대비 -1.8% 하락 시 락 해제
+HOLD_UNLOCK_BUY_MAX = 0.50         # 매수비 50% 미만이 지속되면 해제
+HOLD_UNLOCK_CTX    = 1             # 컨텍스트 점수(CTX_EXIT_THRESHOLD+1)면 해제
+
 
 def _apply_exit_profile():
     """
@@ -1827,6 +1835,32 @@ def grind_break_ok(c1, ticks):
             and ia.get("cv", 9.9) <= 0.95)
 
 
+def uptrend_lock_ok(c1, ticks):
+    """
+    EMA/VWAP/테이프 기반 상승추세 확인
+    - EMA8 > EMA21, 현재가 > EMA8
+    - 현재가 > VWAP
+    - 15초 테이프가 30초 대비 유지 + 매수비 56% 이상
+    """
+    if not c1 or not ticks:
+        return False
+    closes = [x["trade_price"] for x in c1]
+    if len(closes) < 21:
+        return False
+
+    ema8  = ema_last(closes, 8)
+    ema21 = ema_last(closes, 21)
+    vwap  = vwap_from_candles_1m(c1, 20)
+    t15   = micro_tape_stats_from_ticks(ticks, 15)
+    t30   = micro_tape_stats_from_ticks(ticks, 30)
+
+    slope_ok = (ema8 is not None and ema21 is not None and ema8 > ema21 and (closes[-1] > ema8))
+    vwap_ok  = (vwap and closes[-1] > vwap)
+    tape_ok  = (t15["krw_per_sec"] >= max(15000, 0.75 * t30["krw_per_sec"]) and t15["buy_ratio"] >= 0.56)
+
+    return slope_ok and vwap_ok and tape_ok
+
+
 # =========================
 # 컷 로깅
 # =========================
@@ -2712,6 +2746,10 @@ def monitor_position(m,
     trail_armed = False
     trail_stop = 0.0
 
+    # 상승추세 보유 락 상태
+    lock_on = False
+    lock_since = 0.0
+
     # 스파이크/그레이스 기존 로직 재활용
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
@@ -2776,7 +2814,31 @@ def monitor_position(m,
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
-            
+
+            # === 상승추세 보유 락 제어 ===
+            if HOLD_ON_UPTREND:
+                c1_for_lock = get_minutes_candles(1, m, 25) if not c1 or len(c1) < 21 else c1
+                if (not lock_on) and (gain_from_entry >= HOLD_LOCK_MIN_GAIN) and uptrend_lock_ok(c1_for_lock, ticks):
+                    lock_on = True
+                    lock_since = time.time()
+                    tg_send_mid(f"🟢 {m} 상승추세 락 ON (최소 {HOLD_LOCK_MIN_SEC}s 보유)")
+                elif lock_on:
+                    # 해제 조건: 고점대비 급하락, 매수비 약화, 컨텍스트 악화
+                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                    ctx_score, _ = context_exit_score(m, ticks, ob_depth_default, entry_price, curp, c1_for_lock)
+                    drop_from_high = (best / max(curp, 1) - 1.0)
+                    hold_time_ok = (time.time() - lock_since) >= HOLD_LOCK_MIN_SEC
+                    unlock = False
+                    if drop_from_high >= HOLD_UNLOCK_DROP_FROM_HIGH:
+                        unlock = True
+                    if t15_now["buy_ratio"] < HOLD_UNLOCK_BUY_MAX and t15_now["n"] >= 5:
+                        unlock = True
+                    if ctx_score >= (CTX_EXIT_THRESHOLD + HOLD_UNLOCK_CTX):
+                        unlock = True
+                    if unlock and hold_time_ok:
+                        lock_on = False
+                        tg_send_mid(f"🔓 {m} 상승추세 락 OFF (보유 {int(time.time()-lock_since)}s)")
+
             # === PROBE → CONFIRM 전환 로직 ===
             with _POSITION_LOCK:
                 pos = OPEN_POSITIONS.get(m, {})
@@ -2935,29 +2997,37 @@ def monitor_position(m,
             # 우선순위 3.5: 꼭대기 스톨 익절 (고점 부근 70% 선제 회수)
             # ========================================
             if top_stall_exit_signal(ticks, best, entry_price):
-                take = entry_volume * 0.70
-                if sell_market(m, take):
-                    entry_volume = entry_volume * 0.30
-                    with _POSITION_LOCK:
-                        if m in OPEN_POSITIONS:
-                            OPEN_POSITIONS[m]["volume"] = entry_volume
-                            OPEN_POSITIONS[m]["partial_done"] = True
-                    # 남은 30%는 고점대비 0.8% 트레일
-                    atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
-                    atr_ratio = (atr / max(curp, 1)) if atr else 0.01
-                    trail_armed = True
-                    trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
-                    alert = format_sell_alert(m, "꼭대기 스톨 70% 익절", take, entry_price, curp,
-                                             "남은 30% 촘촘 트레일")
-                    tg_send(alert)
-                    verdict = "TOP_STALL_EXIT"
-                continue
+                # 락 중에는 최소 +2.5% 이상일 때만 스톨 익절 허용
+                if lock_on and gain_from_entry < 0.025:
+                    pass  # 스킵
+                else:
+                    take = entry_volume * 0.70
+                    if sell_market(m, take):
+                        entry_volume = entry_volume * 0.30
+                        with _POSITION_LOCK:
+                            if m in OPEN_POSITIONS:
+                                OPEN_POSITIONS[m]["volume"] = entry_volume
+                                OPEN_POSITIONS[m]["partial_done"] = True
+                        # 남은 30%는 고점대비 0.8% 트레일
+                        atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                        atr_ratio = (atr / max(curp, 1)) if atr else 0.01
+                        trail_armed = True
+                        trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
+                        alert = format_sell_alert(m, "꼭대기 스톨 70% 익절", take, entry_price, curp,
+                                                 "남은 30% 촘촘 트레일")
+                        tg_send(alert)
+                        verdict = "TOP_STALL_EXIT"
+                    continue
 
             # 강한 신호 확인 (점화/메가/봇매집)
             strong_signal = pre.get("ign_ok") or pre.get("mega_ok") or pre.get("botacc_ok")
 
+            # 락 상태에 따른 TP1/TP2 제어
+            skip_tp1 = lock_on
+            light_tp2 = lock_on
+
             # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
-            if not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
+            if not skip_tp1 and not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
                 # TP1 도달: 30% 부분익절 (단, 남을 잔고가 5,000원 미만이면 전량매도)
                 remaining_volume = entry_volume * 0.7
                 remaining_value = remaining_volume * curp
@@ -2989,8 +3059,15 @@ def monitor_position(m,
                 continue
 
             if not partial_done and curp >= tp2:
-                # TP2 도달: 40% 부분익절 (단, 남을 잔고가 5,000원 미만이면 전량매도)
-                remaining_volume = entry_volume * 0.6
+                # TP2 도달: 락중엔 20%만, 아니면 40% 부분익절
+                if light_tp2:
+                    partial_ratio = 0.2
+                    remaining_ratio = 0.8
+                else:
+                    partial_ratio = 0.4
+                    remaining_ratio = 0.6
+
+                remaining_volume = entry_volume * remaining_ratio
                 remaining_value = remaining_volume * curp
 
                 if remaining_value < 5000:
@@ -3003,9 +3080,9 @@ def monitor_position(m,
                         break
                 else:
                     # 정상 부분 익절
-                    partial_volume = entry_volume * 0.4
+                    partial_volume = entry_volume * partial_ratio
                     if sell_market(m, partial_volume):
-                        entry_volume = entry_volume * 0.6
+                        entry_volume = entry_volume * remaining_ratio
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
@@ -3014,8 +3091,10 @@ def monitor_position(m,
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True
                         trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
-                        alert = format_sell_alert(m, "TP2 부분익절 40%", partial_volume, entry_price, curp,
-                                                 "남은 60%는 트레일")
+                        ratio_pct = int(partial_ratio * 100)
+                        remain_pct = int(remaining_ratio * 100)
+                        alert = format_sell_alert(m, f"TP2 부분익절 {ratio_pct}%", partial_volume, entry_price, curp,
+                                                 f"남은 {remain_pct}%는 트레일")
                         tg_send(alert)
                         verdict = "TP2_PARTIAL"
                 continue
@@ -3027,7 +3106,7 @@ def monitor_position(m,
             alive_sec = time.time() - start_ts
             flow_votes = 0
 
-            if alive_sec >= 30:  # 30초 이후만 투표 실행
+            if alive_sec >= 30 and not lock_on:  # 30초 이후만 투표 실행 (락 중엔 비활성화)
                 flow_votes += int(t15["krw_per_sec"] < 0.65 * t30["krw_per_sec"])  # 거래량 급락
                 flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
                 flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
@@ -3049,7 +3128,9 @@ def monitor_position(m,
             # 우선순위 5: 고점 되돌림 매도
             # ========================================
             # 수정: -0.5% → -0.8% 완화, 최소 이익 조건 추가
-            if drop_from_high >= 0.008 and t15["buy_ratio"] < 0.53 and not partial_done and cur_gain >= 0.006:
+            # 락 중에는 -1.5%로 더 크게
+            peak_partial_trigger = 0.015 if lock_on else 0.008
+            if drop_from_high >= peak_partial_trigger and t15["buy_ratio"] < 0.53 and not partial_done and cur_gain >= 0.006:
                 # -0.8% 되돌림 + 매수세 약화 → 부분 30% (단, 남을 잔고가 5,000원 미만이면 전량매도)
                 remaining_volume = entry_volume * 0.7
                 remaining_value = remaining_volume * curp
@@ -3090,22 +3171,32 @@ def monitor_position(m,
             # ========================================
             # 우선순위 6: 이익락 (ATR 기반 동적 + 고수익 타이트닝)
             # ========================================
-            if cur_gain >= 0.05:
-                # 5% 이상: 고점 대비 매우 촘촘 (최소 0.4%)
-                profit_lock = best * (1.0 - max(0.004, atr_ratio * 0.5))
-                trail_armed = True  # 강제 트레일 활성화
-            elif cur_gain >= 0.03:
-                # 3% 이상: 고점 대비 촘촘 (최소 0.5%)
-                profit_lock = best * (1.0 - max(0.005, atr_ratio * 0.7))
-                trail_armed = True  # 강제 트레일 활성화
-            elif cur_gain >= 0.015:
-                # 1.5% 이상: 고점 대비 ATR*1.0 (최소 0.8%)
-                profit_lock = best * (1.0 - max(0.008, atr_ratio * 1.0))
-            elif cur_gain >= 0.010:
-                # 1.0% 이상: 고점 대비 ATR*0.8 (최소 0.6%)
-                profit_lock = best * (1.0 - max(0.006, atr_ratio * 0.8))
+            if lock_on:
+                # 락 중에는 이익락을 한 단계 느슨하게 (쫓겨나지 않게)
+                if cur_gain >= 0.03:
+                    profit_lock = best * (1.0 - max(0.007, atr_ratio * 0.9))
+                elif cur_gain >= 0.015:
+                    profit_lock = best * (1.0 - max(0.010, atr_ratio * 1.1))
+                else:
+                    profit_lock = base_stop
             else:
-                profit_lock = base_stop
+                # 기존 이익락 로직
+                if cur_gain >= 0.05:
+                    # 5% 이상: 고점 대비 매우 촘촘 (최소 0.4%)
+                    profit_lock = best * (1.0 - max(0.004, atr_ratio * 0.5))
+                    trail_armed = True  # 강제 트레일 활성화
+                elif cur_gain >= 0.03:
+                    # 3% 이상: 고점 대비 촘촘 (최소 0.5%)
+                    profit_lock = best * (1.0 - max(0.005, atr_ratio * 0.7))
+                    trail_armed = True  # 강제 트레일 활성화
+                elif cur_gain >= 0.015:
+                    # 1.5% 이상: 고점 대비 ATR*1.0 (최소 0.8%)
+                    profit_lock = best * (1.0 - max(0.008, atr_ratio * 1.0))
+                elif cur_gain >= 0.010:
+                    # 1.0% 이상: 고점 대비 ATR*0.8 (최소 0.6%)
+                    profit_lock = best * (1.0 - max(0.006, atr_ratio * 0.8))
+                else:
+                    profit_lock = base_stop
 
             if curp <= profit_lock and cur_gain > 0:
                 sell_market(m, entry_volume)
@@ -3120,15 +3211,23 @@ def monitor_position(m,
             # ========================================
             if trail_armed and curp > best:
                 # 고수익 구간은 트레일 거리 축소 (꼭대기 회수율↑)
-                if cur_gain >= 0.05:
-                    # 5% 이상: 매우 촘촘 (최소 0.4%)
-                    trail_dist = max(0.004, atr_ratio * 0.6)
-                elif cur_gain >= 0.03:
-                    # 3% 이상: 촘촘 (최소 0.6%)
-                    trail_dist = max(0.006, atr_ratio * 0.8)
+                if lock_on:
+                    # 락 중에는 트레일 간격을 한 단계 여유있게 (쫓겨나지 않게)
+                    if cur_gain >= 0.03:
+                        trail_dist = max(0.008, atr_ratio * 1.0)
+                    else:
+                        trail_dist = max(0.012, atr_ratio * 1.3)
                 else:
-                    # 기본: (최소 1.0%)
-                    trail_dist = max(0.010, atr_ratio * 1.25)
+                    # 기존 트레일 로직
+                    if cur_gain >= 0.05:
+                        # 5% 이상: 매우 촘촘 (최소 0.4%)
+                        trail_dist = max(0.004, atr_ratio * 0.6)
+                    elif cur_gain >= 0.03:
+                        # 3% 이상: 촘촘 (최소 0.6%)
+                        trail_dist = max(0.006, atr_ratio * 0.8)
+                    else:
+                        # 기본: (최소 1.0%)
+                        trail_dist = max(0.010, atr_ratio * 1.25)
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             if trail_armed and curp <= trail_stop:
@@ -3150,16 +3249,20 @@ def monitor_position(m,
         # 시간 만료 시 매도 안전장치 (매도 미실행 방지)
         # ========================================
         if verdict is None:
-            # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
-            if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
-                sell_market(m, entry_volume)
-                alert = format_sell_alert(m, "시간만료 안전청산", entry_volume, entry_price, curp,
-                                         "시간만료 + 손실")
-                tg_send(alert)
-                verdict = "TIME_EXPIRED_SAFE_EXIT"
+            if lock_on:
+                # 락 중에는 시간만료 무시 (락이 풀릴 때까지 계속 관찰)
+                verdict = "시간 연장(상승추세 보유)"
             else:
-                # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
-                verdict = "시간 만료(유지)"
+                # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
+                if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
+                    sell_market(m, entry_volume)
+                    alert = format_sell_alert(m, "시간만료 안전청산", entry_volume, entry_price, curp,
+                                             "시간만료 + 손실")
+                    tg_send(alert)
+                    verdict = "TIME_EXPIRED_SAFE_EXIT"
+                else:
+                    # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
+                    verdict = "시간 만료(유지)"
 
     finally:
         # ================================
