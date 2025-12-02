@@ -51,9 +51,7 @@ TRAIL_DISTANCE_MIN = 0.012  # 최소 트레일 간격(1.2%) (여유 확보)
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
 # === 하이브리드 모드 전역 설정 ===
-USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
-POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
-EARLY_FLOW_MIN_KRWPSEC = 22_000  # 초기 거래속도 완화
+# (실제 값은 하단 필터 파라미터 섹션에서 정의됨)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -142,9 +140,7 @@ print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 # =========================
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
 # =========================
-import uuid, hashlib
-import jwt
-from urllib.parse import urlencode
+# (uuid, hashlib, jwt, urlencode는 파일 상단에서 이미 import됨)
 
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
@@ -395,7 +391,7 @@ def final_price_guard(m, initial_price, max_drift=0.07):
     """
     주문 직전 가격 재확인
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 1.8%)
+    - max_drift: 신호가 대비 허용 상승률 (기본 7.0%)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
@@ -1064,7 +1060,7 @@ REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
 # 포스트체크(허수 2차)
-POSTCHECK_ENABLED = False
+POSTCHECK_ENABLED = True  # 6초 포스트체크로 허수 거름
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
@@ -2814,20 +2810,17 @@ def monitor_position(m,
             # 하드 스톱 (-1.5%)
             if cur_gain <= -0.015:
                 sell_market(m, entry_volume)
-                tg_send(f"🩸 <b>{m} 하드스톱 손절</b>\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
-                        f"수량: {entry_volume:.6f}\n"
-                        f"사유: -1.5% 급락")
+                alert = format_sell_alert(m, "하드스톱 (-1.5% 급락)", entry_volume, entry_price, curp)
+                tg_send(alert)
                 verdict = "HARD_STOP"
                 break
 
             # 동적 손절 (base_stop 터치)
             if curp <= base_stop:
                 sell_market(m, entry_volume)
-                tg_send(f"🛑 <b>{m} 동적 손절</b>\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
-                        f"수량: {entry_volume:.6f}\n"
-                        f"손절가: {fmt6(base_stop)}원")
+                alert = format_sell_alert(m, "동적 손절", entry_volume, entry_price, curp,
+                                         f"손절가 {fmt6(base_stop)}원")
+                tg_send(alert)
                 verdict = "DYNAMIC_STOP"
                 break
 
@@ -2859,9 +2852,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"💰 {m} TP1 도달 → 전량익절\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
+                        alert = format_sell_alert(m, "TP1 전량익절", entry_volume, entry_price, curp,
+                                                 f"잔고소액 방지 ({remaining_value:.0f}원)")
+                        tg_send(alert)
                         verdict = "TP1_FULL_EXIT"
                         break
                 else:
@@ -2876,9 +2869,9 @@ def monitor_position(m,
                         # stop 승격 + 트레일 활성화
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True  # 남은 70%는 트레일로 보호
-                        tg_send(f"💰 {m} TP1 도달 → 30% 익절\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"남은 70%는 트레일")
+                        alert = format_sell_alert(m, "TP1 부분익절 30%", partial_volume, entry_price, curp,
+                                                 "남은 70%는 트레일")
+                        tg_send(alert)
                         verdict = "TP1_PARTIAL"
                 continue
 
@@ -2890,9 +2883,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"🚀 {m} TP2 도달 → 전량익절\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
+                        alert = format_sell_alert(m, "TP2 전량익절", entry_volume, entry_price, curp,
+                                                 f"잔고소액 방지 ({remaining_value:.0f}원)")
+                        tg_send(alert)
                         verdict = "TP2_FULL_EXIT"
                         break
                 else:
@@ -2908,9 +2901,9 @@ def monitor_position(m,
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True
                         trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
-                        tg_send(f"🚀 {m} TP2 도달 → 40% 익절\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"남은 60%는 트레일 활성화")
+                        alert = format_sell_alert(m, "TP2 부분익절 40%", partial_volume, entry_price, curp,
+                                                 "남은 60%는 트레일")
+                        tg_send(alert)
                         verdict = "TP2_PARTIAL"
                 continue
 
@@ -2933,11 +2926,9 @@ def monitor_position(m,
 
                 if flow_votes >= need_votes and cur_gain > -0.005:
                     sell_market(m, entry_volume)
-                    result_type = "익절" if cur_gain > 0 else "손절"
-                    tg_send(f"📊 <b>{m} 테이프 투표 {result_type}</b>\n"
-                            f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
-                            f"수량: {entry_volume:.6f}\n"
-                            f"사유: 흐름 붕괴 ({flow_votes}/{need_votes})")
+                    alert = format_sell_alert(m, "테이프 투표", entry_volume, entry_price, curp,
+                                             f"흐름 붕괴 ({flow_votes}/{need_votes})")
+                    tg_send(alert)
                     verdict = "FLOW_VOTED_EXIT"
                     break
 
@@ -2953,9 +2944,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"📉 {m} 고점 되돌림 → 전량매도\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
+                        alert = format_sell_alert(m, "고점 되돌림 전량", entry_volume, entry_price, curp,
+                                                 f"잔고소액 방지 ({remaining_value:.0f}원)")
+                        tg_send(alert)
                         verdict = "PEAK_FADE_FULL_EXIT"
                         break
                 else:
@@ -2967,9 +2958,9 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
-                        tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도\n"
-                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                                f"남은 70% 보유")
+                        alert = format_sell_alert(m, "고점 되돌림 부분 30%", partial_volume, entry_price, curp,
+                                                 "고점 대비 -0.8%, 남은 70% 보유")
+                        tg_send(alert)
                         verdict = "PEAK_FADE_PARTIAL"
                 continue
 
@@ -2977,8 +2968,9 @@ def monitor_position(m,
             if drop_from_high >= 0.015 and cur_gain >= 0.008:
                 # -1.5% 되돌림 + 최소 0.8% 이익 → 전량
                 sell_market(m, entry_volume)
-                tg_send(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)")
+                alert = format_sell_alert(m, "고점 급락 전량익절", entry_volume, entry_price, curp,
+                                         "고점 대비 -1.5% 하락")
+                tg_send(alert)
                 verdict = "PEAK_CASCADE"
                 break
 
@@ -3004,10 +2996,9 @@ def monitor_position(m,
 
             if curp <= profit_lock and cur_gain > 0:
                 sell_market(m, entry_volume)
-                tg_send(f"💎 <b>{m} 이익락 익절</b>\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                        f"수량: {entry_volume:.6f}\n"
-                        f"락 가격: {fmt6(profit_lock)}원 (고점 대비 촘촘 보호)")
+                alert = format_sell_alert(m, "이익락 발동", entry_volume, entry_price, curp,
+                                         f"락 가격 {fmt6(profit_lock)}원")
+                tg_send(alert)
                 verdict = "PROFIT_LOCK"
                 break
 
@@ -3029,10 +3020,9 @@ def monitor_position(m,
 
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
-                tg_send(f"📉 <b>{m} 트레일링 스탑 익절</b>\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
-                        f"수량: {entry_volume:.6f}\n"
-                        f"스탑: {fmt6(trail_stop)}원 (고점 대비 -{trail_dist*100:.1f}%)")
+                alert = format_sell_alert(m, "트레일링 스탑", entry_volume, entry_price, curp,
+                                         f"스탑 {fmt6(trail_stop)}원 (고점 대비 -{trail_dist*100:.1f}%)")
+                tg_send(alert)
                 verdict = "TRAIL_EXIT"
                 break
 
@@ -3050,10 +3040,9 @@ def monitor_position(m,
             # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
             if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
                 sell_market(m, entry_volume)
-                tg_send(f"⏱️ <b>{m} 시간만료 안전청산</b>\n"
-                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
-                        f"수량: {entry_volume:.6f}\n"
-                        f"사유: 시간만료 + 손실")
+                alert = format_sell_alert(m, "시간만료 안전청산", entry_volume, entry_price, curp,
+                                         "시간만료 + 손실")
+                tg_send(alert)
                 verdict = "TIME_EXPIRED_SAFE_EXIT"
             else:
                 # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
@@ -3147,6 +3136,38 @@ def monitor_position(m,
 # =========================
 # 알림
 # =========================
+def format_sell_alert(market, reason, volume, entry_price, sell_price, extra_info=""):
+    """
+    매도 알람을 매수 청산처럼 상세하게 포맷
+    - market: 종목 코드
+    - reason: 매도 사유
+    - volume: 매도 수량
+    - entry_price: 진입가 (평단)
+    - sell_price: 매도가 (현재가)
+    - extra_info: 추가 정보 (선택)
+    """
+    buy_amount = entry_price * volume
+    sell_amount = sell_price * volume
+    profit = sell_amount - buy_amount
+    profit_rate = (sell_price / entry_price - 1.0) * 100
+
+    profit_sign = "+" if profit >= 0 else ""
+    emoji = "💰" if profit >= 0 else "🩸"
+
+    msg = f"{emoji} <b>자동청산 {market}</b>\n"
+    msg += f"• 사유: {reason}\n"
+    msg += f"• 수량: {volume:.6f}\n"
+    msg += f"• 매수평단: {fmt6(entry_price)}원\n"
+    msg += f"• 실매도가: {fmt6(sell_price)}원\n"
+    msg += f"• 매수금액: {fmt6(buy_amount)}원\n"
+    msg += f"• 청산금액: {fmt6(sell_amount)}원\n"
+    msg += f"• 실현손익: {profit_sign}{fmt6(profit)}원\n"
+    msg += f"• 수익률: {profit_sign}{profit_rate:.2f}%\n"
+    if extra_info:
+        msg += f"• 상세: {extra_info}\n"
+    msg += f"https://upbit.com/exchange?code=CRIX.UPBIT.{market}"
+    return msg
+
 def tg_send(t, retry=1):
     # 디버깅: tg_send 호출 확인
     print(f"[TG_SEND_CALLED] {t}")
