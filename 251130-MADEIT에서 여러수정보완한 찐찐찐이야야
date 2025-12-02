@@ -63,6 +63,14 @@ except Exception:
 # ==== Exit Profile (gentle/ balanced / strict) ====
 EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
 
+# ==== Sniper Mode (초입 보장, 늦은 추격 차단) ====
+SNIPER_MODE = os.getenv("SNIPER_MODE", "1") == "1"
+SNIPER_WAIT_SEC = 3                # 돌파 직후 관찰 시간 (3초로 단축)
+SNIPER_PULLBACK_MIN = 0.0025       # 0.25% 이상 눌림
+SNIPER_PULLBACK_MAX = 0.0060       # 0.60% 이하 눌림
+SNIPER_MAX_ADV_FROM_SIGNAL = 0.009 # 신호가 대비 +0.9% 넘게 튀면 추격금지
+SNIPER_MIN_UPTICKS = 2             # 재상승은 2연속 uptick
+
 
 def _apply_exit_profile():
     """
@@ -387,14 +395,16 @@ def sell_market(market, volume, max_attempts=3):
     return False
 
 
-def final_price_guard(m, initial_price, max_drift=0.07):
+def final_price_guard(m, initial_price, max_drift=None):
     """
     주문 직전 가격 재확인
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 7.0%)
+    - max_drift: 신호가 대비 허용 상승률 (기본: 평상시 0.8%, 공격모드 1.8%)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
+    if max_drift is None:
+        max_drift = 0.018 if AGGRESSIVE_MODE else 0.008  # 스나이퍼 모드: 추격 차단 강화
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
@@ -423,6 +433,74 @@ def final_price_guard(m, initial_price, max_drift=0.07):
     except Exception as e:
         print(f"[GUARD_ERR] {m}: {e}")
         return True, initial_price
+
+
+def sniper_gate(m, pre):
+    """
+    돌파 직후 첫 눌림-재상승에서만 진입 허용 (초입 보장)
+    - 늦은 추격 차단
+    - 짧은 눌림 후 재상승 포착
+    """
+    if not SNIPER_MODE:
+        return True, pre["price"], "OFF"
+
+    base = pre["price"]
+    start = time.time()
+    peak = base
+    low_after_peak = base
+
+    while time.time() - start <= SNIPER_WAIT_SEC:  # 3초만 대기
+        ticks = get_recent_ticks(m, 80)
+        if not ticks:
+            time.sleep(0.15)
+            continue
+
+        p = ticks[0].get("trade_price", base)
+        peak = max(peak, p)
+        if p < peak:
+            low_after_peak = min(low_after_peak, p)
+
+        # 1) 신호가 대비 과도 진행이면 추격 금지
+        if (p / base - 1.0) > SNIPER_MAX_ADV_FROM_SIGNAL:
+            return False, p, "LATE_ADV"
+
+        # 2) 눌림 범위 체크
+        dd = (low_after_peak / max(peak, 1) - 1.0)  # 음수
+        if -SNIPER_PULLBACK_MAX <= dd <= -SNIPER_PULLBACK_MIN:
+            # 3) 재상승 확인: 2 upticks + 5초 매수비
+            t5 = micro_tape_stats_from_ticks(ticks, 5)
+            if uptick_streak_from_ticks(ticks, need=SNIPER_MIN_UPTICKS) and t5["buy_ratio"] >= 0.58:
+                return True, p, "OK"
+
+        time.sleep(0.12)
+
+    return False, base, "TIMEOUT"
+
+
+def top_stall_exit_signal(ticks, best_price, entry_price):
+    """
+    고점 부근 스톨/둔화 감지 → 익절 트리거
+    - 최소 +1.2% 수익 구간에서만 작동
+    - 5초 테이프 둔화 + 매수비 약화 감지
+    """
+    if not ticks:
+        return False
+
+    nowp = ticks[0]["trade_price"]
+    gain = nowp / max(entry_price, 1) - 1.0
+    if gain < 0.012:  # 최소 +1.2% 수익 구간에서만 작동
+        return False
+
+    t5 = micro_tape_stats_from_ticks(ticks, 5)
+    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    drop_from_high = nowp / max(best_price, 1) - 1.0  # 음수면 고점대비 하락
+
+    stall = (t5["rate"] < max(0.3, t15["rate"] * 0.55)) and (t5["buy_ratio"] < 0.48)
+    no_uptick = not uptick_streak_from_ticks(ticks, need=2)
+    hard_fade = (drop_from_high <= -0.007 and t5["buy_ratio"] < 0.52)
+
+    return stall or hard_fade or (no_uptick and t5["buy_ratio"] < 0.50)
+
 
 # =========================
 # 🔥 자동 매수 진입
@@ -1761,7 +1839,8 @@ CUT_COUNTER = {
         "BUY_WEAK", "BUY_WEAK_MANYT", "FRESH_FAIL", "BIDASK_WEAK",
         "IGNITION_OK", "BOT_PINGPONG", "BOT_WASH", "BOTACC_OK", "WICK_SPIKE",
         "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
-        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS"
+        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
+        "SNIPER_SKIP"
     ]
 }
 
@@ -2066,6 +2145,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     }
     if mega:
         pre["mega_ok"] = True
+
+    # === 스나이퍼 모드: 늦은 추격 차단 (돌파 후 과도 진행 컷) ===
+    if SNIPER_MODE and not pre.get("mega_ok", False):
+        try:
+            IGN_BREAK_LOOKBACK = 5  # 돌파 판단용
+            prev_high = max(x["high_price"] for x in c1[-(IGN_BREAK_LOOKBACK + 1):-1])
+            progress = (c1[-1]["trade_price"] / max(prev_high, 1) - 1.0)
+            if progress > 0.015:  # 돌파 뒤 1.5% 이상 진행 = 늦은 추격
+                cut("PEAK_CHASE", f"{m} +{progress*100:.2f}% after break (late entry)")
+                return None
+        except Exception:
+            pass
 
     return pre
 
@@ -2840,6 +2931,28 @@ def monitor_position(m,
             # TP2: 2.0% or ATR*2.2 중 큰 값 (기존 1.5% → 2.0% 상향)
             tp2 = entry_price * (1 + max(0.020, atr_ratio * 2.2))
 
+            # ========================================
+            # 우선순위 3.5: 꼭대기 스톨 익절 (고점 부근 70% 선제 회수)
+            # ========================================
+            if top_stall_exit_signal(ticks, best, entry_price):
+                take = entry_volume * 0.70
+                if sell_market(m, take):
+                    entry_volume = entry_volume * 0.30
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            OPEN_POSITIONS[m]["volume"] = entry_volume
+                            OPEN_POSITIONS[m]["partial_done"] = True
+                    # 남은 30%는 고점대비 0.8% 트레일
+                    atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                    atr_ratio = (atr / max(curp, 1)) if atr else 0.01
+                    trail_armed = True
+                    trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
+                    alert = format_sell_alert(m, "꼭대기 스톨 70% 익절", take, entry_price, curp,
+                                             "남은 30% 촘촘 트레일")
+                    tg_send(alert)
+                    verdict = "TOP_STALL_EXIT"
+                continue
+
             # 강한 신호 확인 (점화/메가/봇매집)
             strong_signal = pre.get("ign_ok") or pre.get("mega_ok") or pre.get("botacc_ok")
 
@@ -3548,6 +3661,16 @@ def main():
                         append_csv(row)
                     except Exception as e:
                         print("[LOG_ERR]", e)
+
+                    # --- 🎯 스나이퍼 게이트 (초입 보장) ---
+                    try:
+                        ok_entry, new_price, why = sniper_gate(m, pre)
+                        if not ok_entry:
+                            cut("SNIPER_SKIP", f"{m} {why}")
+                            continue
+                        pre["price"] = new_price  # 재상승 순간 체결가로 교체
+                    except Exception as e:
+                        print("[SNIPER_GATE_ERR]", e)
 
                     # --- 🔥 자동매수 진입 ---
                     try:
