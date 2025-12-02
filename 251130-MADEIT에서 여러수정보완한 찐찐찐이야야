@@ -2873,8 +2873,9 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
-                        # stop 승격
+                        # stop 승격 + 트레일 활성화
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
+                        trail_armed = True  # 남은 70%는 트레일로 보호
                         tg_send(f"💰 {m} TP1 도달 → 30% 익절\n"
                                 f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
                                 f"남은 70%는 트레일")
