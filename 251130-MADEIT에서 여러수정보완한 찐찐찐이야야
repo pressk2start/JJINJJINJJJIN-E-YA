@@ -2814,14 +2814,20 @@ def monitor_position(m,
             # 하드 스톱 (-1.5%)
             if cur_gain <= -0.015:
                 sell_market(m, entry_volume)
-                tg_send(f"🩸 {m} 급락 -1.5% 하드스톱")
+                tg_send(f"🩸 <b>{m} 하드스톱 손절</b>\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
+                        f"수량: {entry_volume:.6f}\n"
+                        f"사유: -1.5% 급락")
                 verdict = "HARD_STOP"
                 break
 
             # 동적 손절 (base_stop 터치)
             if curp <= base_stop:
                 sell_market(m, entry_volume)
-                tg_send(f"🛑 {m} 동적 손절 ({fmt6(base_stop)}원) 터치 → 손절")
+                tg_send(f"🛑 <b>{m} 동적 손절</b>\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
+                        f"수량: {entry_volume:.6f}\n"
+                        f"손절가: {fmt6(base_stop)}원")
                 verdict = "DYNAMIC_STOP"
                 break
 
@@ -2926,7 +2932,11 @@ def monitor_position(m,
 
                 if flow_votes >= need_votes and cur_gain > -0.005:
                     sell_market(m, entry_volume)
-                    tg_send(f"📊 {m} 테이프 투표 ({flow_votes}/{need_votes}) → 흐름 붕괴 전량매도 (익절 {cur_gain*100:.2f}%)")
+                    result_type = "익절" if cur_gain > 0 else "손절"
+                    tg_send(f"📊 <b>{m} 테이프 투표 {result_type}</b>\n"
+                            f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
+                            f"수량: {entry_volume:.6f}\n"
+                            f"사유: 흐름 붕괴 ({flow_votes}/{need_votes})")
                     verdict = "FLOW_VOTED_EXIT"
                     break
 
@@ -2993,7 +3003,10 @@ def monitor_position(m,
 
             if curp <= profit_lock and cur_gain > 0:
                 sell_market(m, entry_volume)
-                tg_send(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 전량청산")
+                tg_send(f"💎 <b>{m} 이익락 익절</b>\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                        f"수량: {entry_volume:.6f}\n"
+                        f"락 가격: {fmt6(profit_lock)}원 (고점 대비 촘촘 보호)")
                 verdict = "PROFIT_LOCK"
                 break
 
@@ -3015,7 +3028,10 @@ def monitor_position(m,
 
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
-                tg_send(f"📉 {m} 트레일링 스탑 ({fmt6(trail_stop)}) 터치 → 전량청산")
+                tg_send(f"📉 <b>{m} 트레일링 스탑 익절</b>\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                        f"수량: {entry_volume:.6f}\n"
+                        f"스탑: {fmt6(trail_stop)}원 (고점 대비 -{trail_dist*100:.1f}%)")
                 verdict = "TRAIL_EXIT"
                 break
 
@@ -3033,7 +3049,10 @@ def monitor_position(m,
             # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
             if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
                 sell_market(m, entry_volume)
-                tg_send(f"⏱️ {m} 시간만료 + 손실 → 안전청산 ({cur_gain*100:.2f}%)")
+                tg_send(f"⏱️ <b>{m} 시간만료 안전청산</b>\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 ({cur_gain*100:.2f}%)\n"
+                        f"수량: {entry_volume:.6f}\n"
+                        f"사유: 시간만료 + 손실")
                 verdict = "TIME_EXPIRED_SAFE_EXIT"
             else:
                 # 수익/본절 구간은 강제 청산 없음 (재모니터링으로 기회 보존)
