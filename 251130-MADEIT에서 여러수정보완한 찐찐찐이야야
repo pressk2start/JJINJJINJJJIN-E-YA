@@ -2853,7 +2853,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"💰 {m} TP1 도달 → 전량익절 (잔고소액 방지: {remaining_value:.0f}원)")
+                        tg_send(f"💰 {m} TP1 도달 → 전량익절\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
                         verdict = "TP1_FULL_EXIT"
                         break
                 else:
@@ -2867,7 +2869,9 @@ def monitor_position(m,
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
                         # stop 승격
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
-                        tg_send(f"💰 {m} TP1 도달 → 30% 익절 (남은 70%는 트레일)")
+                        tg_send(f"💰 {m} TP1 도달 → 30% 익절\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"남은 70%는 트레일")
                         verdict = "TP1_PARTIAL"
                 continue
 
@@ -2879,7 +2883,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"🚀 {m} TP2 도달 → 전량익절 (잔고소액 방지: {remaining_value:.0f}원)")
+                        tg_send(f"🚀 {m} TP2 도달 → 전량익절\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
                         verdict = "TP2_FULL_EXIT"
                         break
                 else:
@@ -2895,7 +2901,9 @@ def monitor_position(m,
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True
                         trail_stop = max(trail_stop, curp * (1.0 - max(0.010, atr_ratio * 1.25)))
-                        tg_send(f"🚀 {m} TP2 도달 → 40% 익절 + 트레일 활성화 (남은 60%)")
+                        tg_send(f"🚀 {m} TP2 도달 → 40% 익절\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"남은 60%는 트레일 활성화")
                         verdict = "TP2_PARTIAL"
                 continue
 
@@ -2934,7 +2942,9 @@ def monitor_position(m,
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
                     if sell_market(m, entry_volume):
-                        tg_send(f"📉 {m} 고점 되돌림 → 전량매도 (잔고소액 방지: {remaining_value:.0f}원)")
+                        tg_send(f"📉 {m} 고점 되돌림 → 전량매도\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"사유: 잔고소액 방지 ({remaining_value:.0f}원)")
                         verdict = "PEAK_FADE_FULL_EXIT"
                         break
                 else:
@@ -2946,7 +2956,9 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
-                        tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도")
+                        tg_send(f"📉 {m} 고점 대비 -0.8% 되돌림 → 30% 부분매도\n"
+                                f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)\n"
+                                f"남은 70% 보유")
                         verdict = "PEAK_FADE_PARTIAL"
                 continue
 
@@ -2954,7 +2966,8 @@ def monitor_position(m,
             if drop_from_high >= 0.015 and cur_gain >= 0.008:
                 # -1.5% 되돌림 + 최소 0.8% 이익 → 전량
                 sell_market(m, entry_volume)
-                tg_send(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절")
+                tg_send(f"🚨 {m} 고점 대비 -1.5% 하락 → 전량익절\n"
+                        f"진입: {fmt6(entry_price)}원 → 현재: {fmt6(curp)}원 (+{cur_gain*100:.2f}%)")
                 verdict = "PEAK_CASCADE"
                 break
 
