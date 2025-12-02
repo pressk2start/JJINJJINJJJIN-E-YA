@@ -3115,8 +3115,12 @@ def monitor_position(m,
 # 알림
 # =========================
 def tg_send(t, retry=1):
+    # 디버깅: tg_send 호출 확인
+    print(f"[TG_SEND_CALLED] {t}")
+
     # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력
     if not TG_TOKEN or not CHAT_IDS:
+        print(f"[TG_WARN] 텔레그램 미설정 (TOKEN={bool(TG_TOKEN)}, CHAT_IDS={CHAT_IDS})")
         print(t)
         return True
 
