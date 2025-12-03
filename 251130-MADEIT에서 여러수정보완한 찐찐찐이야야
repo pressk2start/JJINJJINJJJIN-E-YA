@@ -824,7 +824,7 @@ def close_auto_position(m, reason=""):
 
     # 현재가(청산 전 기준) 조회
     try:
-        cur_js = upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})  # 공개 API는 upbit_get 사용
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m}, timeout=6)  # 안전한 래퍼 사용
         cur_price = cur_js[0].get("trade_price",
                                   entry_price) if cur_js else entry_price
     except Exception:
@@ -1370,9 +1370,11 @@ def zscore_krw_1m(c1, win=30):
 
 
 def uptick_streak_from_ticks(ticks, need=2):
-    t = sorted(ticks[:need + 4], key=lambda x: x.get("timestamp", 0))
+    """get_recent_ticks()가 이미 최신→과거 순으로 정렬해서 제공하므로 재정렬 불필요"""
+    t = ticks[:need + 4]  # 최신 우선(이미 정렬됨)
+    # 최신→과거 순이므로, 역방향으로 비교 (과거가 더 낮아야 상승)
     return sum(1 for a, b in zip(t, t[1:])
-               if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
+               if a.get("trade_price", 0) > b.get("trade_price", 0)) >= need
 
 
 def last_two_ticks_fresh(ticks, max_age=2.0):
@@ -2791,6 +2793,10 @@ def monitor_position(m,
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
     start_ts = time.time()
 
+    # 캔들 캐싱 (API 호출 최소화)
+    c1_cached = c1[:]  # 초기 캔들
+    last_candle_fetch = time.time()
+
     # 디바운스/트레일 상태
     # 손절 디바운스용
     stop_first_seen_ts = 0.0
@@ -2836,6 +2842,13 @@ def monitor_position(m,
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
 
+            # 캔들 캐시 갱신 (12초마다만 API 호출)
+            if time.time() - last_candle_fetch >= 12:
+                fresh_candles = get_minutes_candles(1, m, 20)
+                if fresh_candles:
+                    c1_cached = fresh_candles
+                last_candle_fetch = time.time()
+
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
                 consecutive_failures += 1
@@ -2874,7 +2887,7 @@ def monitor_position(m,
 
             # === 상승추세 보유 락 제어 ===
             if HOLD_ON_UPTREND:
-                c1_for_lock = get_minutes_candles(1, m, 25) if not c1 or len(c1) < 21 else c1
+                c1_for_lock = c1_cached if c1_cached and len(c1_cached) >= 20 else c1
                 if (not lock_on) and (gain_from_entry >= HOLD_LOCK_MIN_GAIN) and uptrend_lock_ok(c1_for_lock, ticks):
                     lock_on = True
                     lock_since = time.time()
@@ -2938,7 +2951,7 @@ def monitor_position(m,
             if (not trail_armed) and gain_from_entry >= TRAIL_ARM_GAIN:
                 trail_armed = True
                 # 초기 트레일: ATR 기준 혹은 최소거리
-                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                atr = atr14_from_candles(c1_cached, 14)
                 if atr and atr > 0:
                     trail_dist = max(TRAIL_DISTANCE_MIN,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
@@ -2987,7 +3000,7 @@ def monitor_position(m,
 
             # 트레일 업데이트(이익 확대 시에만 상향)
             if trail_armed and curp > best:
-                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                atr = atr14_from_candles(c1_cached, 14)
                 if atr and atr > 0:
                     trail_dist = max(TRAIL_DISTANCE_MIN,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
@@ -3065,8 +3078,12 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
                                 OPEN_POSITIONS[m]["partial_done"] = True
+                        # 매도 후 실제 수량 재동기화 (race 방지)
+                        with _POSITION_LOCK:
+                            pos_now = OPEN_POSITIONS.get(m)
+                            entry_volume = pos_now["volume"] if pos_now else 0.0
                         # 남은 30%는 고점대비 0.8% 트레일
-                        atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                        atr = atr14_from_candles(c1_cached, 14)
                         atr_ratio = (atr / max(curp, 1)) if atr else 0.01
                         trail_armed = True
                         trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
@@ -3106,6 +3123,10 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
+                        # 매도 후 실제 수량 재동기화 (race 방지)
+                        with _POSITION_LOCK:
+                            pos_now = OPEN_POSITIONS.get(m)
+                            entry_volume = pos_now["volume"] if pos_now else 0.0
                         # stop 승격 + 트레일 활성화
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True  # 남은 70%는 트레일로 보호
@@ -3144,6 +3165,10 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
+                        # 매도 후 실제 수량 재동기화 (race 방지)
+                        with _POSITION_LOCK:
+                            pos_now = OPEN_POSITIONS.get(m)
+                            entry_volume = pos_now["volume"] if pos_now else 0.0
                         # stop 승격 + 트레일 활성화
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
                         trail_armed = True
@@ -3209,6 +3234,10 @@ def monitor_position(m,
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
                                 OPEN_POSITIONS[m]["volume"] = entry_volume
+                        # 매도 후 실제 수량 재동기화 (race 방지)
+                        with _POSITION_LOCK:
+                            pos_now = OPEN_POSITIONS.get(m)
+                            entry_volume = pos_now["volume"] if pos_now else 0.0
                         alert = format_sell_alert(m, "고점 되돌림 부분 30%", partial_volume, entry_price, curp,
                                                  "고점 대비 -0.8%, 남은 70% 보유")
                         tg_send(alert)
