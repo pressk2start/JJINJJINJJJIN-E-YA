@@ -50,6 +50,9 @@ TRAIL_DISTANCE_MIN = 0.012  # 최소 트레일 간격(1.2%) (여유 확보)
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
+# === 업비트 최소 거래금액 ===
+MIN_ORDER_KRW = 5_000  # 업비트 최소 주문금액 (5,000원)
+
 # === 하이브리드 모드 전역 설정 ===
 # (실제 값은 하단 필터 파라미터 섹션에서 정의됨)
 
@@ -252,7 +255,8 @@ def _make_auth_headers(query: dict = None):
         'nonce': str(uuid.uuid4()),
     }
     if query:
-        q = urlencode(query).encode()
+        # 키 정렬로 안전성 강화 (중첩 구조 대응)
+        q = urlencode(sorted(query.items())).encode()
         m = hashlib.sha512()
         m.update(q)
         payload['query_hash'] = m.hexdigest()
@@ -383,9 +387,9 @@ def sell_market(market, volume, max_attempts=3):
             current_price = ticker_js[0].get("trade_price", 0)
             order_value = volume * current_price
 
-            if order_value < 5000:
+            if order_value < MIN_ORDER_KRW:
                 # 소액 잔고: 매도 시도하지 않고 포지션만 정리
-                print(f"[SELL_SKIP] {market} 소액 잔고 무시: {volume:.6f}코인 (≈{order_value:.0f}원 < 5,000원)")
+                print(f"[SELL_SKIP] {market} 소액 잔고 무시: {volume:.6f}코인 (≈{order_value:.0f}원 < {MIN_ORDER_KRW}원)")
                 with _POSITION_LOCK:
                     pos = OPEN_POSITIONS.get(market)
                     if pos:
@@ -636,8 +640,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     )
 
     krw_to_use = base_qty * entry_price
-    if krw_to_use < 5000:
-        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
+    if krw_to_use < MIN_ORDER_KRW:
+        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {MIN_ORDER_KRW}원 → 스킵")
         return
 
     krw_to_use = int(krw_to_use)
@@ -748,8 +752,8 @@ def add_auto_position(m, cur_price):
     qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
     krw_to_use = qty_theoretical * cur_price
 
-    if krw_to_use < 5000:
-        print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
+    if krw_to_use < MIN_ORDER_KRW:
+        print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < {MIN_ORDER_KRW}원 → 스킵")
         return False, None
 
     krw_to_use = int(krw_to_use)
@@ -865,18 +869,18 @@ def close_auto_position(m, reason="", attempt=1, max_attempts=5):
     # 2) 사후 검증: 실제 잔고 조회
     remain = _get_coin_balance(m)
     tries = 0
-    while remain * max(entry_price, 1) > 5000 and tries < 3:
+    while remain * max(entry_price, 1) > MIN_ORDER_KRW and tries < 3:
         tries += 1
         print(f"[POST-SELL] {m} 잔여 수량 재청산 시도 {tries}/3, remain={remain:.6f}")
         ok2 = sell_market(m, remain, max_attempts=3)
         time.sleep(1)  # API 반영 대기
         remain = _get_coin_balance(m)
-        if ok2 and remain * max(entry_price, 1) <= 5000:
+        if ok2 and remain * max(entry_price, 1) <= MIN_ORDER_KRW:
             break
 
     # 3) 최종 판정
     final_remain = _get_coin_balance(m)
-    if final_remain * max(entry_price, 1) > 5000:
+    if final_remain * max(entry_price, 1) > MIN_ORDER_KRW:
         # ⛔ 아직도 남아있다 → 포지션 기록 유지 + 재시도 예약
         if attempt >= max_attempts:
             # 최대 재시도 도달 → 경고만 발송하고 포지션 유지
@@ -954,14 +958,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         print(msg)
         return False, msg, 0.0
 
-    # 최소금액 가드 (Upbit 최소거래금액 5,000원)
+    # 최소금액 가드 (Upbit 최소거래금액)
     try:
         tkr = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         curp = tkr[0].get("trade_price") if tkr else None
     except Exception:
         curp = None
 
-    if curp and (sell_volume * curp) < 5000:
+    if curp and (sell_volume * curp) < MIN_ORDER_KRW:
         msg = f"[REMONITOR] {m} 부분청산 스킵: 최소금액 미만 ({sell_volume * curp:.0f}원)"
         print(msg)
         return False, msg, 0.0
@@ -3208,7 +3212,7 @@ def monitor_position(m,
                     remaining_volume = entry_volume * 0.30
                     remaining_value = remaining_volume * curp
 
-                    if remaining_value < 5000:
+                    if remaining_value < MIN_ORDER_KRW:
                         # 남을 잔고가 소액이면 전량 매도
                         if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                             alert = format_sell_alert(m, "꼭대기 스톨 전량익절", entry_volume, entry_price, curp,
@@ -3250,11 +3254,11 @@ def monitor_position(m,
 
             # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
             if not skip_tp1 and not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
-                # TP1 도달: 30% 부분익절 (단, 남을 잔고가 5,000원 미만이면 전량매도)
+                # TP1 도달: 30% 부분익절 (단, 남을 잔고가 최소금액 미만이면 전량매도)
                 remaining_volume = entry_volume * 0.7
                 remaining_value = remaining_volume * curp
 
-                if remaining_value < 5000:
+                if remaining_value < MIN_ORDER_KRW:
                     # 남을 잔고가 소액이면 전량 매도
                     if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "TP1 전량익절", entry_volume, entry_price, curp,
@@ -3296,7 +3300,7 @@ def monitor_position(m,
                 remaining_volume = entry_volume * remaining_ratio
                 remaining_value = remaining_volume * curp
 
-                if remaining_value < 5000:
+                if remaining_value < MIN_ORDER_KRW:
                     # 남을 잔고가 소액이면 전량 매도
                     if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "TP2 전량익절", entry_volume, entry_price, curp,
@@ -3362,11 +3366,11 @@ def monitor_position(m,
             # 락 중에는 -1.5%로 더 크게
             peak_partial_trigger = 0.015 if lock_on else 0.008
             if drop_from_high >= peak_partial_trigger and t15["buy_ratio"] < 0.53 and not partial_done and cur_gain >= 0.006:
-                # -0.8% 되돌림 + 매수세 약화 → 부분 30% (단, 남을 잔고가 5,000원 미만이면 전량매도)
+                # -0.8% 되돌림 + 매수세 약화 → 부분 30% (단, 남을 잔고가 최소금액 미만이면 전량매도)
                 remaining_volume = entry_volume * 0.7
                 remaining_value = remaining_volume * curp
 
-                if remaining_value < 5000:
+                if remaining_value < MIN_ORDER_KRW:
                     # 남을 잔고가 소액이면 전량 매도
                     if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "고점 되돌림 전량", entry_volume, entry_price, curp,
@@ -3613,7 +3617,9 @@ def format_sell_alert(market, reason, volume, entry_price, sell_price, extra_inf
     profit = sell_amount - buy_amount
     profit_rate = (sell_price / entry_price - 1.0) * 100
 
-    profit_sign = "+" if profit >= 0 else ""
+    # 부호 통일 (손익/수익률 모두 +/- 명시)
+    profit_sign = "+" if profit >= 0 else "-"
+    rate_sign = "+" if profit_rate >= 0 else "-"
     emoji = "💰" if profit >= 0 else "🩸"
 
     msg = f"{emoji} <b>자동청산 {market}</b>\n"
@@ -3623,8 +3629,8 @@ def format_sell_alert(market, reason, volume, entry_price, sell_price, extra_inf
     msg += f"• 실매도가: {fmt6(sell_price)}원\n"
     msg += f"• 매수금액: {fmt6(buy_amount)}원\n"
     msg += f"• 청산금액: {fmt6(sell_amount)}원\n"
-    msg += f"• 실현손익: {profit_sign}{fmt6(profit)}원\n"
-    msg += f"• 수익률: {profit_sign}{profit_rate:.2f}%\n"
+    msg += f"• 실현손익: {profit_sign}{fmt6(abs(profit))}원\n"
+    msg += f"• 수익률: {rate_sign}{abs(profit_rate):.2f}%\n"
     if extra_info:
         msg += f"• 상세: {extra_info}\n"
     msg += f"https://upbit.com/exchange?code=CRIX.UPBIT.{market}"
@@ -3660,8 +3666,18 @@ def tg_send(t, retry=1):
                     if js.get("ok") is True:
                         ok_any = True
                         break
+                elif r.status_code == 429:
+                    # Rate limit: 더 긴 대기 시간
+                    print(f"[TG][{cid}] 429 Too Many Requests - 긴 대기")
+                    time.sleep(1.5 + rnd())
+                    continue
+                elif 500 <= r.status_code < 600:
+                    # 서버 에러: 짧은 재시도
+                    print(f"[TG][{cid}] {r.status_code} Server Error - 재시도")
+                    time.sleep(0.5 + rnd() * 0.5)
+                    continue
                 else:
-                    # 디버깅용
+                    # 기타 에러 (4xx 등)
                     print(f"[TG][{cid}] status={r.status_code} body={r.text}")
             except Exception as e:
                 print(f"[TG][{cid}] exception: {e}")
@@ -3745,8 +3761,14 @@ def validate_config():
     if TICKS_BUY_RATIO < 0.5 or TICKS_BUY_RATIO > 1:
         errors.append(f"TICKS_BUY_RATIO={TICKS_BUY_RATIO} 범위 오류 (0.5~1)")
     if not TG_TOKEN or not CHAT_IDS: warnings.append("텔레그램 미설정 - 콘솔 출력만 사용")
-    if _BUCKET.get("rate", 0) <= 0: warnings.append("토큰버킷 rate<=0 → 0.1로 클램프")
-    if _BUCKET.get("cap", 0) <= 0: warnings.append("토큰버킷 cap<=0 → 1.0로 클램프")
+
+    # 토큰버킷 안전 클램프 (시작 시점에 강제 보정)
+    if _BUCKET.get("rate", 0) <= 0:
+        warnings.append("토큰버킷 rate<=0 → 0.1로 클램프")
+        _BUCKET["rate"] = 0.1
+    if _BUCKET.get("cap", 0) <= 0:
+        warnings.append("토큰버킷 cap<=0 → 1.0로 클램프")
+        _BUCKET["cap"] = 1.0
     if warnings:
         print("[CONFIG_WARNING]")
         for w in warnings:
