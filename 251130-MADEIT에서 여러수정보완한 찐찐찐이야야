@@ -2769,7 +2769,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
 # =========================
 # 끝알람 권고 생성 (END RECO)
 # =========================
-def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
+def _end_reco(market, entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
     """
     끝알람용 권고 생성:
       - 수익/손실, 컨텍스트, 테이프 흐름 종합으로
@@ -2783,7 +2783,7 @@ def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
     # 컨텍스트 스코어(추세역전 신호들)
     try:
         ctx_score, ctx_reasons = context_exit_score(
-            "KRW-XXX",
+            market,  # 실제 종목 코드 전달 (로그 일관성)
             ticks or [],
             ob_depth_krw or 10_000_000,
             entry_price,
@@ -3126,8 +3126,8 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # ATR 계산 (동적 조정용)
-            atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+            # ATR 계산 (동적 조정용, 캐시된 캔들 사용으로 API 호출 최소화)
+            atr = atr14_from_candles(c1_cached, 14)
             atr_ratio = (atr / max(curp, 1)) if atr and atr > 0 else 0.01
 
             # 부분익절 플래그 (1회만 허용)
@@ -3140,7 +3140,8 @@ def monitor_position(m,
             # ========================================
             # 하드 스톱 (-1.5%)
             if cur_gain <= -0.015:
-                sell_market(m, entry_volume)
+                if AUTO_TRADE and entry_volume > 0:
+                    sell_market(m, entry_volume)
                 alert = format_sell_alert(m, "하드스톱 (-1.5% 급락)", entry_volume, entry_price, curp)
                 tg_send(alert)
                 verdict = "HARD_STOP"
@@ -3148,7 +3149,8 @@ def monitor_position(m,
 
             # 동적 손절 (base_stop 터치)
             if curp <= base_stop:
-                sell_market(m, entry_volume)
+                if AUTO_TRADE and entry_volume > 0:
+                    sell_market(m, entry_volume)
                 alert = format_sell_alert(m, "동적 손절", entry_volume, entry_price, curp,
                                          f"손절가 {fmt6(base_stop)}원")
                 tg_send(alert)
@@ -3180,7 +3182,7 @@ def monitor_position(m,
                     pass  # 스킵
                 else:
                     take = entry_volume * 0.70
-                    if sell_market(m, take):
+                    if AUTO_TRADE and take > 0 and sell_market(m, take):
                         entry_volume = entry_volume * 0.30
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
@@ -3216,7 +3218,7 @@ def monitor_position(m,
 
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
-                    if sell_market(m, entry_volume):
+                    if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "TP1 전량익절", entry_volume, entry_price, curp,
                                                  f"잔고소액 방지 ({remaining_value:.0f}원)")
                         tg_send(alert)
@@ -3225,7 +3227,7 @@ def monitor_position(m,
                 else:
                     # 정상 부분 익절
                     partial_volume = entry_volume * 0.3
-                    if sell_market(m, partial_volume):
+                    if AUTO_TRADE and partial_volume > 0 and sell_market(m, partial_volume):
                         entry_volume = entry_volume * 0.7
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
@@ -3258,7 +3260,7 @@ def monitor_position(m,
 
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
-                    if sell_market(m, entry_volume):
+                    if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "TP2 전량익절", entry_volume, entry_price, curp,
                                                  f"잔고소액 방지 ({remaining_value:.0f}원)")
                         tg_send(alert)
@@ -3267,7 +3269,7 @@ def monitor_position(m,
                 else:
                     # 정상 부분 익절
                     partial_volume = entry_volume * partial_ratio
-                    if sell_market(m, partial_volume):
+                    if AUTO_TRADE and partial_volume > 0 and sell_market(m, partial_volume):
                         entry_volume = entry_volume * remaining_ratio
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
@@ -3307,7 +3309,8 @@ def monitor_position(m,
                     need_votes = 2  # 2/3로 완화 (빠른 피크 탈출)
 
                 if flow_votes >= need_votes and cur_gain > -0.005:
-                    sell_market(m, entry_volume)
+                    if AUTO_TRADE and entry_volume > 0:
+                        sell_market(m, entry_volume)
                     alert = format_sell_alert(m, "테이프 투표", entry_volume, entry_price, curp,
                                              f"흐름 붕괴 ({flow_votes}/{need_votes})")
                     tg_send(alert)
@@ -3327,7 +3330,7 @@ def monitor_position(m,
 
                 if remaining_value < 5000:
                     # 남을 잔고가 소액이면 전량 매도
-                    if sell_market(m, entry_volume):
+                    if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
                         alert = format_sell_alert(m, "고점 되돌림 전량", entry_volume, entry_price, curp,
                                                  f"잔고소액 방지 ({remaining_value:.0f}원)")
                         tg_send(alert)
@@ -3336,7 +3339,7 @@ def monitor_position(m,
                 else:
                     # 정상 부분 익절
                     partial_volume = entry_volume * 0.3
-                    if sell_market(m, partial_volume):
+                    if AUTO_TRADE and partial_volume > 0 and sell_market(m, partial_volume):
                         entry_volume = entry_volume * 0.7
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
@@ -3355,7 +3358,8 @@ def monitor_position(m,
             # 수정: -1.0% → -1.5% 완화, 최소 이익 조건 추가
             if drop_from_high >= 0.015 and cur_gain >= 0.008:
                 # -1.5% 되돌림 + 최소 0.8% 이익 → 전량
-                sell_market(m, entry_volume)
+                if AUTO_TRADE and entry_volume > 0:
+                    sell_market(m, entry_volume)
                 alert = format_sell_alert(m, "고점 급락 전량익절", entry_volume, entry_price, curp,
                                          "고점 대비 -1.5% 하락")
                 tg_send(alert)
@@ -3393,7 +3397,8 @@ def monitor_position(m,
                     profit_lock = base_stop
 
             if curp <= profit_lock and cur_gain > 0:
-                sell_market(m, entry_volume)
+                if AUTO_TRADE and entry_volume > 0:
+                    sell_market(m, entry_volume)
                 alert = format_sell_alert(m, "이익락 발동", entry_volume, entry_price, curp,
                                          f"락 가격 {fmt6(profit_lock)}원")
                 tg_send(alert)
@@ -3426,7 +3431,8 @@ def monitor_position(m,
                 last_trail_dist = trail_dist  # 마지막 계산값 저장
 
             if trail_armed and curp <= trail_stop:
-                sell_market(m, entry_volume)
+                if AUTO_TRADE and entry_volume > 0:
+                    sell_market(m, entry_volume)
                 dist_pct = (last_trail_dist * 100) if last_trail_dist is not None else None
                 detail = f"스탑 {fmt6(trail_stop)}원"
                 if dist_pct is not None:
@@ -3453,7 +3459,8 @@ def monitor_position(m,
             else:
                 # 수정: 0.3% → -0.25% (손실일 때만 강제청산, 수익은 유지)
                 if cur_gain <= -0.0025:  # 진짜 손실일 때만 → 전량매도
-                    sell_market(m, entry_volume)
+                    if AUTO_TRADE and entry_volume > 0:
+                        sell_market(m, entry_volume)
                     alert = format_sell_alert(m, "시간만료 안전청산", entry_volume, entry_price, curp,
                                              "시간만료 + 손실")
                     tg_send(alert)
@@ -3488,12 +3495,15 @@ def monitor_position(m,
         # ================================
         # 2) 끝알람 문구 생성
         # ================================
-        action, rationale = _end_reco(entry_price,
-                                      last_price,
-                                      c1,
-                                      ticks,
-                                      ob_depth_krw,
-                                      ctx_thr=CTX_EXIT_THRESHOLD)
+        action, rationale = _end_reco(
+            m,  # 종목 코드
+            entry_price,
+            last_price,
+            c1,
+            ticks,
+            ob_depth_krw,
+            ctx_thr=CTX_EXIT_THRESHOLD
+        )
 
         # ===========================================
         # 끝알람 / 재모니터링 알림 비활성화
