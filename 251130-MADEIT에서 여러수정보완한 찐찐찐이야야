@@ -980,8 +980,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     """
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
+    - 라운드트립 가드: 고점 대비 이익 많이 반납하면 정리
     """
-    CYCLE_SEC = 300
+    CYCLE_SEC = REMONITOR_CYCLE_SEC  # 환경변수로 조정 가능 (기본 180초)
     cycle = 0
 
     while True:
@@ -998,6 +999,30 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
         should_close = False
         reason = verdict or action or "모니터링 종료"
+
+        # ========================================
+        # 라운드트립 가드: 감시구간 최고수익은 컸는데 현재 이익이 너무 줄었으면 수익 보호
+        # 예) 5분간 +10% 찍었는데 종료 시점에 +0.5% 이하면 50% 털고 계속 / 음전이면 전량
+        # ========================================
+        try:
+            if (maxrun is not None and ret_pct is not None and
+                maxrun >= ROUNDTRIP_TP * 100 and (ret_pct / 100.0) <= ROUNDTRIP_KEEP):
+                # 현재가가 미세하게라도 플러스면 부분익절, 0 이하로 내려왔으면 전량
+                if ret_pct > 0:
+                    ok, msg, executed = safe_partial_sell(
+                        m, sell_ratio=ROUNDTRIP_PARTIAL,
+                        reason=f"라운드트립 가드: 최고 {maxrun:.2f}%→현재 {ret_pct:.2f}%"
+                    )
+                    if ok and executed > 0:
+                        print(msg)
+                        tg_send(f"⚠️ {m} 라운드트립 가드 발동\n최고: {maxrun:.2f}% → 현재: {ret_pct:.2f}%\n{ROUNDTRIP_PARTIAL*100:.0f}% 부분청산 완료")
+                    continue
+                else:
+                    should_close = True
+                    reason = f"라운드트립 가드: 최고 {maxrun:.2f}%→음전 {ret_pct:.2f}%"
+        except Exception as e:
+            print(f"[REMONITOR] 라운드트립 가드 오류: {e}")
+            pass
 
         # 1) 급락 / 손절 권고
         if verdict and ("급락" in verdict or "손절" in verdict):
@@ -1036,12 +1061,20 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 print(msg)
             continue
 
+        # 5-1) 부분 청산(본절) 권고 → 본절 수준에서 일부 정리
+        elif action == "부분 청산(본절)":
+            ok, msg, executed = safe_partial_sell(m, sell_ratio=0.5, reason="본절 부분청산")
+            if ok and executed > 0:
+                print(msg)
+                tg_send(f"⚠️ {m} 본절 구간 부분청산\n50% 정리 완료, 나머지 재모니터링")
+            continue
+
         # 6) 유지 권고 → 계속 재모니터링
         elif action == "유지 권고":
             continue
 
-        # 7) 그냥 시간 만료면 → 다시 한 번 사이클
-        elif verdict == "시간 만료(모니터링 종료)":
+        # 7) 시간 만료 / 시간 연장 → 다시 한 번 사이클
+        elif verdict in ("시간 만료(유지)", "시간 만료(모니터링 종료)", "시간 연장(상승추세 보유)"):
             continue
 
         if should_close:
@@ -1105,8 +1138,14 @@ MAX_FADE_RATIO = 0.70
 
 # 손절/모니터링
 STOP_LOSS_PCT = 0.008
-RECHECK_SEC = 5
+RECHECK_SEC = 3  # 6초→3초로 단축 (더 빠른 틱 반응)
 MONITOR_MAX = 180
+
+# 재모니터링 설정
+REMONITOR_CYCLE_SEC = int(os.getenv("REMONITOR_CYCLE_SEC", "180"))  # 기본 3분 재모니터 (더 빠른 반응)
+ROUNDTRIP_TP = float(os.getenv("ROUNDTRIP_TP", "0.04"))  # 감시 중 최고수익 4% 이상 찍었고
+ROUNDTRIP_KEEP = float(os.getenv("ROUNDTRIP_KEEP", "0.008"))  # 현재 이익이 0.8% 이하로 줄면
+ROUNDTRIP_PARTIAL = float(os.getenv("ROUNDTRIP_PARTIAL", "0.5"))  # 50% 부분청산 (또는 1.0=전량)
 
 # Ignition
 IGN_BREAK_LOOKBACK = 12
