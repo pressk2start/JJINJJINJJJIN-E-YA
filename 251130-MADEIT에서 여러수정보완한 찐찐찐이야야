@@ -311,6 +311,22 @@ def get_account_info():
         return []
 
 
+def _get_coin_balance(symbol: str) -> float:
+    """특정 코인의 실제 잔고 조회 (balance + locked)"""
+    try:
+        ac = get_account_info()
+        currency = symbol.split("-")[1]
+        for a in ac:
+            if a.get("currency") == currency:
+                balance = float(a.get("balance", "0") or "0")
+                locked = float(a.get("locked", "0") or "0")
+                return balance + locked
+    except Exception as e:
+        print(f"[BALANCE] {symbol} 잔고 조회 실패: {e}")
+        pass
+    return 0.0
+
+
 def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     """
     손절가 기준으로 포지션 크기 계산
@@ -651,6 +667,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "state": "open",
             "last_add_ts": 0.0,
             "entry_mode": pre.get("entry_mode", "confirm"),  # ★ 추가
+            "opened_ts": time.time(),  # 진입 시각 (절대 보유 한계 체크용)
         }
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
@@ -793,11 +810,11 @@ def add_auto_position(m, cur_price):
     return True, new_entry_price
 
 # =========================
-# 🔥 자동 청산
+# 🔥 자동 청산 (재시도 + 검증)
 # =========================
 def close_auto_position(m, reason=""):
     """
-    손절/청산 시 자동 매도
+    손절/청산 시 자동 매도 - 재시도 + 잔고검증 + 실패시 포지션 유지
     """
     if not AUTO_TRADE:
         print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
@@ -811,93 +828,68 @@ def close_auto_position(m, reason=""):
         tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
         return
 
-    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
-
-    vol = pos.get("volume", 0)
+    vol = float(pos.get("volume", 0) or 0.0)
     if vol <= 0:
         print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)
         return
 
-    entry_price = pos.get("entry_price", 0)
+    entry_price = float(pos.get("entry_price", 0) or 0.0)
 
-    # 현재가(청산 전 기준) 조회
-    try:
-        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m}, timeout=6)  # 안전한 래퍼 사용
-        cur_price = cur_js[0].get("trade_price",
-                                  entry_price) if cur_js else entry_price
-    except Exception:
-        cur_price = entry_price
+    print(f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}")
 
-    # 선 계산(대략)
-    ret_pct = (cur_price / entry_price -
-               1.0) * 100.0 if entry_price > 0 else 0.0
-    est_entry_value = entry_price * vol
-    est_exit_value = cur_price * vol
-    pl_value = est_exit_value - est_entry_value
+    # 1) 1차 매도 (sell_market은 이미 재시도 포함)
+    ok = sell_market(m, vol, max_attempts=3)
 
-    print(
-        f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}, PnL(선계산)={ret_pct:+.2f}%"
-    )
+    # 2) 사후 검증: 실제 잔고 조회
+    remain = _get_coin_balance(m)
+    tries = 0
+    while remain * max(entry_price, 1) > 5000 and tries < 3:
+        tries += 1
+        print(f"[POST-SELL] {m} 잔여 수량 재청산 시도 {tries}/3, remain={remain:.6f}")
+        ok2 = sell_market(m, remain, max_attempts=3)
+        time.sleep(1)  # API 반영 대기
+        remain = _get_coin_balance(m)
+        if ok2 and remain * max(entry_price, 1) <= 5000:
+            break
 
-    exit_price_used = cur_price  # 실제 체결가 성공 시 교체
+    # 3) 최종 판정
+    final_remain = _get_coin_balance(m)
+    if final_remain * max(entry_price, 1) > 5000:
+        # ⛔ 아직도 남아있다 → 포지션 기록 유지 + 재시도 예약
+        tg_send(f"⚠️ <b>자동청산 미완료</b> {m}\n"
+                f"• 사유: {reason}\n"
+                f"• 잔여: {final_remain:.6f} ({final_remain * max(entry_price,1):,.0f}원)\n"
+                f"→ 15초 후 재시도")
+        time.sleep(15)
+        return close_auto_position(m, reason=f"{reason} (retry)")
+    else:
+        # ✅ 완전 청산: 이제 포지션 제거
+        # 최종 수익률 계산 (현재가 기준)
+        try:
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m}, timeout=6)
+            cur_price = cur_js[0].get("trade_price", entry_price) if cur_js else entry_price
+        except Exception:
+            cur_price = entry_price
 
-    try:
-        res = place_market_sell(m, vol)
-        order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        if order_uuid:
-            od = get_order_result(order_uuid, timeout_sec=6.0)
-        else:
-            od = None
+        ret_pct = (cur_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
 
-        # 실제 체결가 계산
-        if od:
-            trades = od.get("trades") or []
-            total_krw = 0.0
-            total_vol = 0.0
-            for tr in trades:
-                try:
-                    p = float(tr.get("price", "0"))
-                    v = float(tr.get("volume", "0"))
-                except Exception:
-                    continue
-                total_krw += p * v
-                total_vol += v
-            if total_vol > 0:
-                exit_price_used = total_krw / total_vol
-
-        # 실제 체결가 기준으로 다시 계산
-        est_exit_value = exit_price_used * vol
-        pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price -
-                   1.0) * 100.0 if entry_price > 0 else 0.0
-
-        # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
+        # 거래 결과 기록
         try:
             record_trade(m, ret_pct)
         except Exception as _e:
             print("[TRADE_RECORD_ERR]", _e)
 
-        tg_send(
-            f"💥 <b>자동청산</b> {m}\n"
-            f"• 사유: {reason}\n"
-            f"• 수량: {vol:.6f}\n"
-            f"• 매수평단: {entry_price:,.0f}원\n"
-            f"• 실매도가(평균): {exit_price_used:,.0f}원\n"
-            f"• 매수금액(추정): {est_entry_value:,.0f}원\n"
-            f"• 청산금액(추정): {est_exit_value:,.0f}원\n"
-            f"• 실현손익(추정): {pl_value:,.0f}원\n"
-            f"• 수익률: {ret_pct:+.2f}%\n"
-            f"{link_for(m)}"
-        )
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)
 
-    except Exception as e:
-        print("[AUTO SELL ERR]", e)
-        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
-
-    with _POSITION_LOCK:
-        OPEN_POSITIONS.pop(m, None)
+        tg_send(f"💥 <b>자동청산 완료</b> {m}\n"
+                f"• 사유: {reason}\n"
+                f"• 수량: {vol:.6f}\n"
+                f"• 매수평단: {entry_price:,.0f}원\n"
+                f"• 추정수익률: {ret_pct:+.2f}%\n"
+                f"{link_for(m)}")
 
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
@@ -947,6 +939,20 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         f"• 요청 수량: {sell_volume:.6f}\n"
                         f"• 체결 수량: 0 (실패)\n"
                         f"→ 최소 주문금액 부족 / 주문거절 가능성")
+
+            # 대안: 비율을 올려서 재시도 (수량이 커지면 최소금액 통과 가능)
+            alt_ratio = min(1.0, max(0.6, sell_ratio * 1.8))
+            print(f"[PARTIAL_SELL] {m} 대안 매도 시도: {alt_ratio*100:.0f}% (원래 {sell_ratio*100:.0f}%)")
+            try2 = sell_market(m, current_volume * alt_ratio, max_attempts=3)
+            if try2:
+                with _POSITION_LOCK:
+                    pos2 = OPEN_POSITIONS.get(m)
+                    if pos2:
+                        pos2["volume"] = max(0.0, current_volume - current_volume * alt_ratio)
+                        pos2["partial_done"] = True
+                tg_send_mid(f"✅ 부분청산 대안 실행: {alt_ratio*100:.0f}% 전환 매도 성공")
+                return True, "[REMONITOR] 대안 부분청산 성공", current_volume * alt_ratio
+
             return False, msg, 0.0
 
         remaining_volume = max(current_volume - executed, 0.0)
@@ -981,13 +987,33 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     """
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
     - 라운드트립 가드: 고점 대비 이익 많이 반납하면 정리
+    - 절대 보유 한계: 시간/사이클 초과 시 강제 청산
     """
     CYCLE_SEC = REMONITOR_CYCLE_SEC  # 환경변수로 조정 가능 (기본 180초)
     cycle = 0
+    opened_ts = None
+    same_keep = 0  # 동일 판단 반복 카운트
+    last_verdict = None
+
+    # 진입 시각 확인
+    with _POSITION_LOCK:
+        pos0 = OPEN_POSITIONS.get(m)
+        if pos0:
+            opened_ts = pos0.get("opened_ts", time.time())
 
     while True:
         cycle += 1
-        print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
+
+        # ========================================
+        # 절대 보유 한계 가드 (무한 재모니터 방지)
+        # ========================================
+        held_min = (time.time() - (opened_ts or time.time())) / 60.0
+        if held_min >= MAX_HOLD_MINUTES or cycle >= MAX_REMONITOR_CYCLES:
+            print(f"[REMONITOR] {m} 절대 보유 한계 초과 → 강제 청산 ({int(held_min)}분/{cycle}회)")
+            close_auto_position(m, reason=f"ABS_LIMIT({int(held_min)}m/{cycle}cy)")
+            return True
+
+        print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작 (보유 {int(held_min)}분)")
 
         verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
             monitor_position(
@@ -1073,8 +1099,21 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action == "유지 권고":
             continue
 
-        # 7) 시간 만료 / 시간 연장 → 다시 한 번 사이클
+        # 7) 시간 만료 / 시간 연장 → 다시 한 번 사이클 (반복 시 보호익절)
         elif verdict in ("시간 만료(유지)", "시간 만료(모니터링 종료)", "시간 연장(상승추세 보유)"):
+            if last_verdict == verdict:
+                same_keep += 1
+            else:
+                same_keep = 1
+            last_verdict = verdict
+
+            # 3회 연속 동일 판단이면 보수적 부분익절 30% (수익 보호)
+            if same_keep >= 3 and ret_pct is not None and ret_pct > 0:
+                ok, msg, executed = safe_partial_sell(m, sell_ratio=0.3, reason="시간만료 반복 보호익절")
+                if ok and executed > 0:
+                    print(msg)
+                    tg_send(f"⏰ {m} 시간만료 {same_keep}회 반복\n보호익절 30% 실행 (현재 {ret_pct:.2f}%)")
+                same_keep = 0  # 리셋
             continue
 
         if should_close:
@@ -1146,6 +1185,10 @@ REMONITOR_CYCLE_SEC = int(os.getenv("REMONITOR_CYCLE_SEC", "180"))  # 기본 3�
 ROUNDTRIP_TP = float(os.getenv("ROUNDTRIP_TP", "0.04"))  # 감시 중 최고수익 4% 이상 찍었고
 ROUNDTRIP_KEEP = float(os.getenv("ROUNDTRIP_KEEP", "0.008"))  # 현재 이익이 0.8% 이하로 줄면
 ROUNDTRIP_PARTIAL = float(os.getenv("ROUNDTRIP_PARTIAL", "0.5"))  # 50% 부분청산 (또는 1.0=전량)
+
+# 절대 보유 한계 (무한 재모니터 방지)
+MAX_HOLD_MINUTES = int(os.getenv("MAX_HOLD_MINUTES", "90"))  # 최장 90분
+MAX_REMONITOR_CYCLES = int(os.getenv("MAX_REMONITOR_CYCLES", "40"))  # 최대 40회 재모니터
 
 # Ignition
 IGN_BREAK_LOOKBACK = 12
