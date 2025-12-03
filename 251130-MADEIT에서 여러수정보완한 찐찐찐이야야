@@ -257,7 +257,9 @@ def _make_auth_headers(query: dict = None):
         m.update(q)
         payload['query_hash'] = m.hexdigest()
         payload['query_hash_alg'] = 'SHA512'
-    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY)
+    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")  # 알고리즘 명시
+    if isinstance(jwt_token, bytes):  # 구버전 PyJWT 대응
+        jwt_token = jwt_token.decode("utf-8")
     return {"Authorization": f"Bearer {jwt_token}"}
 
 
@@ -822,7 +824,7 @@ def close_auto_position(m, reason=""):
 
     # 현재가(청산 전 기준) 조회
     try:
-        cur_js = upbit_private_get("/v1/ticker", {"markets": m})
+        cur_js = upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})  # 공개 API는 upbit_get 사용
         cur_price = cur_js[0].get("trade_price",
                                   entry_price) if cur_js else entry_price
     except Exception:
@@ -1198,6 +1200,7 @@ def _new_session():
 
 
 SESSION = _new_session()
+SESSION_TG = _new_session()  # 텔레그램 전용 세션 (네트워크 장애 격리)
 KST = timezone(timedelta(hours=9))
 
 def now_kst():
@@ -1261,14 +1264,16 @@ def _throttle():
 
 
 def _refresh_session():
-    global SESSION, _CONSEC_CONN_ERR
+    global SESSION, SESSION_TG, _CONSEC_CONN_ERR
     try:
         SESSION.close()
+        SESSION_TG.close()
     except Exception:
         pass
     SESSION = _new_session()
+    SESSION_TG = _new_session()
     _CONSEC_CONN_ERR = 0
-    print("[NET] session refreshed")
+    print("[NET] session refreshed (SESSION + SESSION_TG)")
 
 
 def upbit_get(url, params=None, timeout=7):
@@ -2796,6 +2801,7 @@ def monitor_position(m,
 
     trail_armed = False
     trail_stop = 0.0
+    last_trail_dist = None  # 마지막 트레일 거리 저장 (알림용)
 
     # 상승추세 보유 락 상태
     lock_on = False
@@ -3280,11 +3286,15 @@ def monitor_position(m,
                         # 기본: (최소 1.0%)
                         trail_dist = max(0.010, atr_ratio * 1.25)
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+                last_trail_dist = trail_dist  # 마지막 계산값 저장
 
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
-                alert = format_sell_alert(m, "트레일링 스탑", entry_volume, entry_price, curp,
-                                         f"스탑 {fmt6(trail_stop)}원 (고점 대비 -{trail_dist*100:.1f}%)")
+                dist_pct = (last_trail_dist * 100) if last_trail_dist is not None else None
+                detail = f"스탑 {fmt6(trail_stop)}원"
+                if dist_pct is not None:
+                    detail += f" (고점 대비 -{dist_pct:.1f}%)"
+                alert = format_sell_alert(m, "트레일링 스탑", entry_volume, entry_price, curp, detail)
                 tg_send(alert)
                 verdict = "TRAIL_EXIT"
                 break
@@ -3455,7 +3465,7 @@ def tg_send(t, retry=1):
         }
         for _ in range(retry + 1):
             try:
-                r = SESSION.post(
+                r = SESSION_TG.post(  # 텔레그램 전용 세션 사용
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload,
                     timeout=4,
