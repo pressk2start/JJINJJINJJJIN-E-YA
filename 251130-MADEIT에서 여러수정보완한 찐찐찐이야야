@@ -371,6 +371,11 @@ def sell_market(market, volume, max_attempts=3):
 
     업비트 최소 거래금액(5,000원) 체크 포함
     """
+    # AUTO_TRADE 최후 가드 (혹시 모를 호출 실수 방지)
+    if not AUTO_TRADE:
+        print(f"[SELL_SKIP] AUTO_TRADE=0 → 주문 스킵 ({market}, vol={volume:.6f})")
+        return False
+
     # 🔍 최소 거래금액 체크 (업비트: 5,000원 미만 거래 불가)
     try:
         ticker_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
@@ -925,6 +930,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     - partial_done 플래그로 1회만 부분청산/부분익절 허용
     반환: (성공여부:bool, 메시지:str, 체결량:float)
     """
+    # AUTO_TRADE 가드 (데모/관찰 모드 보호)
+    if not AUTO_TRADE:
+        msg = f"[REMONITOR] {m} 부분청산 스킵(AUTO_TRADE=0)"
+        print(msg)
+        return False, msg, 0.0
+
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
         if not pos or pos.get("volume", 0) <= 0:
@@ -940,6 +951,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     sell_volume = current_volume * sell_ratio
     if sell_volume <= 0:
         msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
+        print(msg)
+        return False, msg, 0.0
+
+    # 최소금액 가드 (Upbit 최소거래금액 5,000원)
+    try:
+        tkr = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        curp = tkr[0].get("trade_price") if tkr else None
+    except Exception:
+        curp = None
+
+    if curp and (sell_volume * curp) < 5000:
+        msg = f"[REMONITOR] {m} 부분청산 스킵: 최소금액 미만 ({sell_volume * curp:.0f}원)"
         print(msg)
         return False, msg, 0.0
 
@@ -3182,26 +3205,41 @@ def monitor_position(m,
                     pass  # 스킵
                 else:
                     take = entry_volume * 0.70
-                    if AUTO_TRADE and take > 0 and sell_market(m, take):
-                        entry_volume = entry_volume * 0.30
-                        with _POSITION_LOCK:
-                            if m in OPEN_POSITIONS:
-                                OPEN_POSITIONS[m]["volume"] = entry_volume
-                                OPEN_POSITIONS[m]["partial_done"] = True
-                        # 매도 후 실제 수량 재동기화 (race 방지)
-                        with _POSITION_LOCK:
-                            pos_now = OPEN_POSITIONS.get(m)
-                            entry_volume = pos_now["volume"] if pos_now else 0.0
-                        # 남은 30%는 고점대비 0.8% 트레일
-                        atr = atr14_from_candles(c1_cached, 14)
-                        atr_ratio = (atr / max(curp, 1)) if atr else 0.01
-                        trail_armed = True
-                        trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
-                        alert = format_sell_alert(m, "꼭대기 스톨 70% 익절", take, entry_price, curp,
-                                                 "남은 30% 촘촘 트레일")
-                        tg_send(alert)
-                        verdict = "TOP_STALL_EXIT"
-                    continue
+                    remaining_volume = entry_volume * 0.30
+                    remaining_value = remaining_volume * curp
+
+                    if remaining_value < 5000:
+                        # 남을 잔고가 소액이면 전량 매도
+                        if AUTO_TRADE and entry_volume > 0 and sell_market(m, entry_volume):
+                            alert = format_sell_alert(m, "꼭대기 스톨 전량익절", entry_volume, entry_price, curp,
+                                                     f"잔고소액 방지 ({remaining_value:.0f}원)")
+                            tg_send(alert)
+                            verdict = "TOP_STALL_FULL_EXIT"
+                            break
+                    else:
+                        # 정상 부분 익절
+                        if AUTO_TRADE and take > 0 and sell_market(m, take):
+                            entry_volume = entry_volume * 0.30
+                            with _POSITION_LOCK:
+                                if m in OPEN_POSITIONS:
+                                    OPEN_POSITIONS[m]["volume"] = entry_volume
+                                    OPEN_POSITIONS[m]["partial_done"] = True
+                            # 매도 후 실제 수량 재동기화 (race 방지)
+                            with _POSITION_LOCK:
+                                pos_now = OPEN_POSITIONS.get(m)
+                                entry_volume = pos_now["volume"] if pos_now else 0.0
+                            # stop 승격 + 트레일 활성화
+                            base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
+                            trail_armed = True
+                            # 남은 30%는 고점대비 0.8% 트레일
+                            atr = atr14_from_candles(c1_cached, 14)
+                            atr_ratio = (atr / max(curp, 1)) if atr else 0.01
+                            trail_stop = max(trail_stop, best * (1.0 - max(0.008, atr_ratio * 1.2)))
+                            alert = format_sell_alert(m, "꼭대기 스톨 70% 익절", take, entry_price, curp,
+                                                     "남은 30% 촘촘 트레일")
+                            tg_send(alert)
+                            verdict = "TOP_STALL_EXIT"
+                        continue
 
             # 강한 신호 확인 (점화/메가/봇매집)
             strong_signal = pre.get("ign_ok") or pre.get("mega_ok") or pre.get("botacc_ok")
@@ -3298,7 +3336,7 @@ def monitor_position(m,
             alive_sec = time.time() - start_ts
             flow_votes = 0
 
-            if alive_sec >= 30 and not lock_on:  # 30초 이후만 투표 실행 (락 중엔 비활성화)
+            if alive_sec >= 30 and not lock_on and cur_gain > 0.0:  # 수익 구간에서만 발동 (손실은 스톱이 담당)
                 flow_votes += int(t15["krw_per_sec"] < 0.65 * t30["krw_per_sec"])  # 거래량 급락
                 flow_votes += int(t15["buy_ratio"] < 0.52)  # 매수세 약화
                 flow_votes += int(not uptick_streak_from_ticks(ticks, need=2))  # uptick 부재
