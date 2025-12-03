@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, html
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +12,11 @@ import jwt
 
 
 def rnd():
-    return random.random()  # ← 이 줄이 4칸(스페이스) 들여쓰기 되어야 함
+    return random.random()
+
+def _esc_html(s):
+    """Telegram HTML 특수문자 이스케이프 (parse_mode=HTML 안전성)"""
+    return html.escape(str(s), quote=False)
 
 def fmt6(x):
     """
@@ -337,6 +341,10 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     - total_equity * risk_pct 만큼만 최대 손실 허용
     - MIN_LOSS_FLOOR: 최소 손실폭 (체결 스프레드 + 수수료 + 여유, 기본 0.35%)
     """
+    # 입력 검증 (None/0 방어)
+    if not entry_price or not stop_price or entry_price <= 0 or total_equity <= 0:
+        return 0.0
+
     risk_krw = total_equity * risk_pct
     per_unit_loss = max(entry_price - stop_price,
                         entry_price * MIN_LOSS_FLOOR)  # 환경변수로 조정 가능
@@ -880,7 +888,8 @@ def close_auto_position(m, reason="", attempt=1, max_attempts=5):
 
     # 3) 최종 판정
     final_remain = _get_coin_balance(m)
-    if final_remain * max(entry_price, 1) > MIN_ORDER_KRW:
+    # 최소금액 + 근사 0 체크 (미세 잔고 허용)
+    if final_remain * max(entry_price, 1) > MIN_ORDER_KRW and final_remain > 1e-8:
         # ⛔ 아직도 남아있다 → 포지션 기록 유지 + 재시도 예약
         if attempt >= max_attempts:
             # 최대 재시도 도달 → 경고만 발송하고 포지션 유지
@@ -3650,7 +3659,7 @@ def tg_send(t, retry=1):
     for cid in CHAT_IDS:
         payload = {
             "chat_id": cid,
-            "text": t,
+            "text": _esc_html(t),  # HTML 특수문자 이스케이프
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
