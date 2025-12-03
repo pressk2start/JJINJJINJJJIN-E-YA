@@ -79,6 +79,10 @@ HOLD_UNLOCK_DROP_FROM_HIGH = 0.018 # 고점대비 -1.8% 하락 시 락 해제
 HOLD_UNLOCK_BUY_MAX = 0.50         # 매수비 50% 미만이 지속되면 해제
 HOLD_UNLOCK_CTX    = 1             # 컨텍스트 점수(CTX_EXIT_THRESHOLD+1)면 해제
 
+# ==== Opening Window (장 시작 전용 스캔) ====
+OPENING_WIDE_SCAN = os.getenv("OPENING_WIDE_SCAN", "1") == "1"
+OPENING_MINUTES = 12               # 09:00~09:12 (12분간)
+
 
 def _apply_exit_profile():
     """
@@ -1202,6 +1206,13 @@ def now_kst():
 def now_kst_str():
     return now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
 
+def is_opening_window():
+    """09:00~09:12 오프닝 윈도우 체크"""
+    if not OPENING_WIDE_SCAN:
+        return False
+    t = now_kst()
+    return (t.hour == 9 and t.minute < OPENING_MINUTES)
+
 # =========================
 # 🔥 시간대별 스캔 간격
 # =========================
@@ -1526,6 +1537,23 @@ def get_top_krw_by_24h(n=TOP_N):
         _MKTS_CACHE["mkts"] = mkts
         _MKTS_CACHE["ts"] = now
     return mkts[:n]
+
+
+def get_all_krw_markets():
+    """전체 KRW 마켓 리스트 반환 (오프닝 전용)"""
+    js = upbit_get("https://api.upbit.com/v1/market/all") or []
+    return [d["market"] for d in js if d["market"].startswith("KRW-")]
+
+
+def get_scan_universe():
+    """
+    스캔 대상 종목 리스트
+    - 09:00~09:12: 전체 KRW 마켓 (오프닝 급등 포착)
+    - 그 외: TOP_N (거래대금 상위 60개)
+    """
+    if OPENING_WIDE_SCAN and is_opening_window():
+        return get_all_krw_markets()
+    return get_top_krw_by_24h(TOP_N)
 
 
 def get_minutes_candles(u, m, c):
@@ -1933,7 +1961,11 @@ def is_fake_pump(m,
                  ticks=None,
                  c1=None):
     h = now_kst().hour
-    min_depth = 6_000_000 if (0 <= h < 6) else MIN_DEPTH_KRW
+    # 오프닝 윈도우: 깊이 기준 완화 (3M)
+    if is_opening_window():
+        min_depth = 3_000_000
+    else:
+        min_depth = 6_000_000 if (0 <= h < 6) else MIN_DEPTH_KRW
     if not ob_snapshot or ob_snapshot.get("depth_krw", 0) < min_depth:
         return True
     if tape30.get("n", 0) < MIN_REAL_TRADES:
@@ -2010,6 +2042,12 @@ def meets_volume_surge(current_volume, past_volumes):
     avg_past = statistics.mean(
         past_volumes) if past_volumes else current_volume / 8
     rel_x = current_volume / max(avg_past, 1)
+
+    # 오프닝 윈도우: 서지 기준 완화 (상대 15%, 절대 25%)
+    if is_opening_window():
+        return (rel_x >= (MIN_RELATIVE_KRW_X * 0.85)) or \
+               (current_volume >= int(ABS_SURGE_KRW * 0.75))
+
     return (rel_x >= MIN_RELATIVE_KRW_X) or (current_volume >= ABS_SURGE_KRW
                                              and rel_x >= RELAXED_X)
 
@@ -2081,9 +2119,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("SPREAD_HIGH", f"{m} spread {ob['spread']:.2f}%")
         return None
 
-    # 거래량 조건
+    # 거래량 조건 (오프닝: 25% 완화)
     current_volume = cur.get("candle_acc_trade_price", 0)
-    if current_volume < MIN_VOLUME_KRW and not mega:
+    vol_floor = MIN_VOLUME_KRW * (0.75 if is_opening_window() else 1.0)
+    if current_volume < vol_floor and not mega:
         cut("VOL_LOW", f"{m} vol {int(current_volume)}")
         return None
 
@@ -2132,7 +2171,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
     vgap = (cur["trade_price"] / max(vwap_from_candles_1m(c1, 20), 1) - 1)
     turn = twin["krw"] / max(ob["depth_krw"], 1)
-    flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
+
+    # 오프닝: early 흐름 기준 30% 완화
+    if is_opening_window():
+        flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * 0.70)
+    else:
+        flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
 
     early_conds = [
         vgap >= max(th["vwap_gap"] - 0.0003, EARLY_MIN_VWAP_GAP),
@@ -2207,6 +2251,10 @@ def final_check_leader(m, pre, tight_mode=False):
         MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
     MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
 
+    # 오프닝: Turnover 기준 20% 완화
+    if is_opening_window():
+        MIN_TURNOVER_LOCAL *= 0.80
+
     TICKS_BUY_RATIO_LOCAL = max(
         0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
     TICKS_BUY_RATIO_LOCAL = max(0.54,
@@ -2233,7 +2281,10 @@ def final_check_leader(m, pre, tight_mode=False):
     raw_ob = ob["raw"]["orderbook_units"][:3]
     bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
     ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
-    if bid_sum / max(ask_sum, 1) < th["bidask_min"]:
+
+    # 오프닝: Bid/Ask 기준 0.05 완화
+    bidask_need = th["bidask_min"] - (0.05 if is_opening_window() else 0.0)
+    if bid_sum / max(ask_sum, 1) < bidask_need:
         cut("BIDASK_WEAK", f"{m} bidask weak")
         return None
 
@@ -3624,7 +3675,8 @@ def main():
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
 
-            mkts_all = get_top_krw_by_24h(TOP_N)
+            # 오프닝 윈도우: 전체 스캔, 그 외: TOP_N
+            mkts_all = get_scan_universe()
             if not mkts_all:
                 aligned_sleep(SCAN_INTERVAL)
                 continue
