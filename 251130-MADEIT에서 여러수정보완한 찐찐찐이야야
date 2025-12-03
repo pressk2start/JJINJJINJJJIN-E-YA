@@ -57,6 +57,11 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 업비트 최소 거래금액 ===
 MIN_ORDER_KRW = 5_000  # 업비트 최소 주문금액 (5,000원)
 
+# === Net BE(전체 손익분기) 보호 설정 ===
+# 부분익절 후 남은 물량이 전체 손실로 끝나지 않도록 보호
+NET_BE_PROTECT = os.getenv("NET_BE_PROTECT", "1") == "1"  # 기본 활성화
+NET_BE_BUFFER = float(os.getenv("NET_BE_BUFFER", "0.0005"))  # 0.05% 여유 (슬리피지 대비)
+
 # === 하이브리드 모드 전역 설정 ===
 # (실제 값은 하단 필터 파라미터 섹션에서 정의됨)
 
@@ -350,6 +355,34 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
                         entry_price * MIN_LOSS_FLOOR)  # 환경변수로 조정 가능
     qty = risk_krw / per_unit_loss
     return max(qty, 0)
+
+
+def compute_net_be_price(entry_price, total_vol, sold_vol, sold_avg,
+                         fee_side=None, buffer=None):
+    """
+    부분익절 후 남은 잔량이 이 가격에 팔리면 '전체 손익'이 0이 되는 가격 (Net BE)
+
+    - entry_price: 매수 평단
+    - total_vol: 전체 수량
+    - sold_vol: 이미 판 수량
+    - sold_avg: 부분익절 평균 체결가
+    - fee_side: 편도 수수료 (기본: FEE_RATE/2)
+    - buffer: 안전 여유폭 (기본: NET_BE_BUFFER)
+
+    수식: realized_cash + s * remain * (1-fee) >= buy_cash
+         → s = (buy_cash - realized_cash) / (remain * (1-fee))
+    """
+    if fee_side is None:
+        fee_side = FEE_RATE / 2
+    if buffer is None:
+        buffer = NET_BE_BUFFER
+
+    remain = max(total_vol - sold_vol, 1e-12)
+    buy_cash      = entry_price * total_vol * (1 + fee_side)  # 매수 시 지출 (수수료 포함)
+    realized_cash = sold_avg * sold_vol * (1 - fee_side)      # 이미 회수한 현금 (수수료 차감)
+
+    net_be = (buy_cash - realized_cash) / (remain * (1 - fee_side))
+    return net_be * (1 + buffer)  # 여유폭 추가
 
 
 def place_market_buy(market, krw_amount):
@@ -986,11 +1019,24 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                               timeout_sec=6.0) if order_uuid else None
 
         executed = 0.0
+        avg_price_sell = None
         if od:
             try:
                 executed = float(od.get("executed_volume") or "0")
             except Exception:
                 executed = 0.0
+
+            # 체결가 평균 계산 (Net BE 계산용)
+            trades = od.get("trades") or []
+            if trades:
+                _sum, _vol = 0.0, 0.0
+                for tr in trades:
+                    _p = float(tr.get("price", "0") or 0)
+                    _v = float(tr.get("volume", "0") or 0)
+                    _sum += _p * _v
+                    _vol += _v
+                if _vol > 0:
+                    avg_price_sell = _sum / _vol
 
         if executed <= 0:
             msg = f"[PARTIAL_SELL_ERR] {m}: executed_volume=0 (요청 {sell_volume:.6f})"
@@ -1019,23 +1065,44 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         remaining_volume = max(current_volume - executed, 0.0)
 
+        # Net BE 스톱 계산 및 저장
+        net_be_stop = None
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
                 pos2["volume"] = remaining_volume
                 pos2["partial_done"] = True
+                pos2["partial_ts"] = time.time()
+
+                # Net BE 보호 스톱 계산 (부분익절 후 전체 손실 방지)
+                if NET_BE_PROTECT and avg_price_sell and remaining_volume > 0:
+                    entry_price = float(pos2.get("entry_price", 0))
+                    if entry_price > 0:
+                        net_be_stop = compute_net_be_price(
+                            entry_price=entry_price,
+                            total_vol=current_volume,
+                            sold_vol=executed,
+                            sold_avg=avg_price_sell
+                        )
+                        pos2["net_be_stop"] = net_be_stop
+                        print(f"[NET_BE] {m} Net BE 스톱 설정: {net_be_stop:,.0f}원 (전체 손익 0 보장)")
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
-        tg_send(
-            f"🎯 <b>부분 청산</b> {m}\n"
-            f"• 사유: {reason or '부분청산'}\n"
-            f"• 매도 비율: {sell_ratio*100:.0f}%\n"
-            f"• 체결 수량: {executed:.6f}\n"
-            f"• 잔여 수량: {remaining_volume:.6f}\n"
-        )
+        # 텔레그램 알림 (Net BE 정보 포함)
+        tg_msg = (f"🎯 <b>부분 청산</b> {m}\n"
+                  f"• 사유: {reason or '부분청산'}\n"
+                  f"• 매도 비율: {sell_ratio*100:.0f}%\n")
+        if avg_price_sell:
+            tg_msg += f"• 체결가: {avg_price_sell:,.0f}원\n"
+        tg_msg += f"• 체결 수량: {executed:.6f}\n"
+        tg_msg += f"• 잔여 수량: {remaining_volume:.6f}\n"
+        if net_be_stop:
+            tg_msg += f"• Net BE 스톱: {net_be_stop:,.0f}원 (전체 손익 0 보장)\n"
+
+        tg_send(tg_msg)
 
         return True, msg, executed
 
@@ -3170,6 +3237,21 @@ def monitor_position(m,
             with _POSITION_LOCK:
                 pos = OPEN_POSITIONS.get(m, {})
                 partial_done = pos.get("partial_done", False)
+
+            # ========================================
+            # 우선순위 0: Net BE 스톱 (부분익절 후 전체 손실 방지)
+            # ========================================
+            # 부분익절 발생 후, 전체 거래 손익이 0 미만으로 가지 않도록 강제 청산
+            if NET_BE_PROTECT and pos and pos.get("partial_done"):
+                net_be = float(pos.get("net_be_stop", 0) or 0)
+                if net_be > 0 and curp <= net_be:
+                    if AUTO_TRADE and entry_volume > 0:
+                        sell_market(m, entry_volume)
+                    alert = format_sell_alert(m, "Net BE 스톱 (전체 손익 0 보장)", entry_volume, entry_price, curp,
+                                             f"Net BE {fmt6(net_be)}원")
+                    tg_send(alert)
+                    verdict = "NET_BREAKEVEN_STOP"
+                    break
 
             # ========================================
             # 우선순위 1: 손절 (하드스톱 + 동적 손절)
