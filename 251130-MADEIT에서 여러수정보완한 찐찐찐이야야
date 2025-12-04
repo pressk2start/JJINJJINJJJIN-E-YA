@@ -1169,14 +1169,24 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
-        # 텔레그램 알림 (Net BE 정보 포함)
+        # 텔레그램 알림 (상세 정보 포함)
+        with _POSITION_LOCK:
+            pos_info = OPEN_POSITIONS.get(m, {})
+        entry_price_display = float(pos_info.get("entry_price", 0) or 0)
+
         tg_msg = (f"🎯 <b>부분 청산</b> {m}\n"
                   f"• 사유: {reason or '부분청산'}\n"
                   f"• 매도 비율: {sell_ratio*100:.0f}%\n")
+        if entry_price_display > 0:
+            tg_msg += f"• 진입 평단: {entry_price_display:,.0f}원\n"
         if avg_price_sell:
-            tg_msg += f"• 체결가: {avg_price_sell:,.0f}원\n"
-        tg_msg += f"• 체결 수량: {executed:.6f}\n"
-        tg_msg += f"• 잔여 수량: {remaining_volume:.6f}\n"
+            tg_msg += f"• 체결 평균가: {avg_price_sell:,.0f}원\n"
+            if entry_price_display > 0:
+                profit_pct = (avg_price_sell / entry_price_display - 1.0) * 100.0
+                tg_msg += f"• 부분익절 수익률: {profit_pct:+.2f}%\n"
+        tg_msg += f"• 원래 수량: {current_volume:.6f}\n"
+        tg_msg += f"• 매도 수량: {executed:.6f}\n"
+        tg_msg += f"• 남은 수량: {remaining_volume:.6f}\n"
         if net_be_stop:
             tg_msg += f"• Net BE 스톱: {net_be_stop:,.0f}원 (전체 손익 0 보장)\n"
 
@@ -3899,7 +3909,7 @@ def tg_send(t, retry=1):
     for cid in CHAT_IDS:
         payload = {
             "chat_id": cid,
-            "text": _esc_html(t),  # HTML 특수문자 이스케이프
+            "text": t,  # HTML 태그 그대로 전송 (parse_mode=HTML과 함께 사용)
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
