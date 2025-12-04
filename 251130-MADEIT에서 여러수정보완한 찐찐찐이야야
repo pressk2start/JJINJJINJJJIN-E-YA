@@ -541,7 +541,8 @@ def final_price_guard(m, initial_price, max_drift=None):
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
     if max_drift is None:
-        max_drift = MAX_ENTRY_DRIFT  # 통일된 슬리피지 캡 사용
+        # 오프닝엔 postcheck와 정합성 맞춰 1.2%로 완화 (나머지 0.8%)
+        max_drift = 0.012 if is_opening_window() else MAX_ENTRY_DRIFT
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
@@ -1464,7 +1465,7 @@ REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
 # 포스트체크(허수 2차)
-POSTCHECK_ENABLED = True  # 6초 포스트체크로 허수 거름
+POSTCHECK_ENABLED = True  # 3초 포스트체크로 허수 거름
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
@@ -4295,7 +4296,7 @@ def main():
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
-                # === 6초 포스트체크 ===
+                # === 3초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
                     cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
