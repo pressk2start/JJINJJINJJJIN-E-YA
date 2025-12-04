@@ -1575,6 +1575,10 @@ def quick_confidence(tape, ob, regime=None):
     else:
         thr = 0.58
 
+    # === [BEAR] 베어에선 임계 강화 (모든 코인 공통) ===
+    if is_btc_bear():
+        thr = max(thr, 0.65)
+
     return conf, thr
 
 def is_opening_window():
@@ -1583,6 +1587,30 @@ def is_opening_window():
         return False
     t = now_kst()
     return (t.hour == 9 and t.minute < OPENING_MINUTES)
+
+# === 베어 레짐 판단 (BTC 기준) ===
+def is_btc_bear():
+    """
+    베어 레짐 감지 - BTC 5분 약세 + 1분 VWAP/EMA 하방
+    베어일 때 전 종목에 보수적 매매 적용
+    """
+    try:
+        c5 = get_minutes_candles(5, "KRW-BTC", 12)
+        if len(c5) < 6:
+            return False
+        chg5 = c5[-1]["trade_price"] / max(c5[-2]["trade_price"], 1) - 1
+        closes5 = [x["trade_price"] for x in c5]
+        ema8_5 = ema_last(closes5, 8)
+
+        c1 = get_minutes_candles(1, "KRW-BTC", 30)
+        last = c1[-1]["trade_price"] if c1 else c5[-1]["trade_price"]
+        vwap20 = vwap_from_candles_1m(c1, 20) if c1 else None
+
+        # 5분 약세 + 현가가 5m EMA8/1m VWAP 아래 → 베어
+        return (chg5 <= -0.003) and (last < ema8_5) and (vwap20 and last < vwap20)
+    except Exception as e:
+        print(f"[is_btc_bear] error: {e}")
+        return False
 
 # =========================
 # 🔥 시간대별 스캔 간격
@@ -2904,6 +2932,10 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
 
+    # === [BEAR] 베어에선 손절 타이트하게 (0.6%~1.2%) ===
+    if is_btc_bear() and signal_type != "mega":
+        pct = min(max(pct, 0.006), 0.012)  # 0.6%~1.2% 사이로 클램프
+
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
@@ -2988,6 +3020,10 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
         base = 180
     elif pre.get("two_green_break"):
         base = 210
+
+    # === [BEAR] 전 종목 공통 단축 (90s) ===
+    if is_btc_bear():
+        base = 90
 
     # 오더북 깊이 기반 (깊으면 여유 있게)
     ob_depth = 0
@@ -3158,7 +3194,13 @@ def monitor_position(m,
                      horizon=None,
                      reentry=False):
     c1 = get_minutes_candles(1, m, 20)
+
+    # === [BEAR] 베어 레짐 감지 ===
+    BEAR = is_btc_bear()
     base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1)
+
+    # 하드스톱 로컬 오버라이드 (기본 1.5% → 베어 1.2%)
+    HARD_STOP_LOCAL = 0.012 if BEAR else HARD_STOP_DD
 
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
@@ -3250,8 +3292,8 @@ def monitor_position(m,
             alive_sec = time.time() - start_ts
             dd_now = (curp / best - 1.0)
             if alive_sec < WARMUP_SEC:
-                if (curp / entry_price - 1.0) <= -HARD_STOP_DD:
-                    verdict = "급락 즉시 손절"
+                if (curp / entry_price - 1.0) <= -HARD_STOP_LOCAL:
+                    verdict = f"급락 즉시 손절 ({-HARD_STOP_LOCAL*100:.1f}%)"
                     outcome_extra = f"(DD {dd_now*100:.2f}%)"
                     break  # 청산은 finally에서 한 번만
                 # 웜업 중엔 소프트 스탑 미적용
@@ -3350,7 +3392,8 @@ def monitor_position(m,
                 trail_stop = curp * (1.0 - trail_dist)
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
-            if USE_PYRAMIDING and AUTO_TRADE:
+            # === [BEAR] 베어에선 피라미딩 금지 ===
+            if (not BEAR) and USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
@@ -3529,10 +3572,15 @@ def monitor_position(m,
             # ========================================
             # 우선순위 3: 부분익절 3단계 (익절 최대화)
             # ========================================
-            # TP1: 1.2% or ATR*1.5 중 큰 값 (기존 0.8% → 1.2% 상향)
-            tp1 = entry_price * (1 + max(0.012, atr_ratio * 1.5))
-            # TP2: 2.0% or ATR*2.2 중 큰 값 (기존 1.5% → 2.0% 상향)
-            tp2 = entry_price * (1 + max(0.020, atr_ratio * 2.2))
+            # === [BEAR] 베어에선 익절 빠르게 (TP 0.8% / 1.5%) ===
+            if BEAR:
+                tp1 = entry_price * (1 + max(0.008, atr_ratio * 0.9))   # ~0.8%+
+                tp2 = entry_price * (1 + max(0.015, atr_ratio * 1.6))   # ~1.5%+
+            else:
+                # TP1: 1.2% or ATR*1.5 중 큰 값 (기존 0.8% → 1.2% 상향)
+                tp1 = entry_price * (1 + max(0.012, atr_ratio * 1.5))
+                # TP2: 2.0% or ATR*2.2 중 큰 값 (기존 1.5% → 2.0% 상향)
+                tp2 = entry_price * (1 + max(0.020, atr_ratio * 2.2))
 
             # ========================================
             # 우선순위 3.5: 꼭대기 스톨 익절 (고점 부근 70% 선제 회수)
@@ -3588,8 +3636,11 @@ def monitor_position(m,
 
             # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
             if not skip_tp1 and not partial_done and not strong_signal and curp >= tp1 and curp < tp2:
-                # TP1 도달: 30% 부분익절 (단, 남을 잔고가 최소금액 미만이면 전량매도)
-                remaining_volume = entry_volume * 0.7
+                # === [BEAR] 베어에선 50% 익절, 그 외 30% ===
+                partial_ratio = 0.5 if BEAR else 0.3
+                remaining_ratio = 1.0 - partial_ratio
+
+                remaining_volume = entry_volume * remaining_ratio
                 remaining_value = remaining_volume * curp
 
                 if remaining_value < MIN_ORDER_KRW:
@@ -3602,9 +3653,9 @@ def monitor_position(m,
                         break
                 else:
                     # 정상 부분 익절
-                    partial_volume = entry_volume * 0.3
+                    partial_volume = entry_volume * partial_ratio
                     if AUTO_TRADE and partial_volume > 0 and sell_market(m, partial_volume):
-                        entry_volume = entry_volume * 0.7
+                        entry_volume = entry_volume * remaining_ratio
                         with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m]["partial_done"] = True
@@ -3745,7 +3796,23 @@ def monitor_position(m,
             # ========================================
             # 우선순위 6: 이익락 (ATR 기반 동적 + 고수익 타이트닝)
             # ========================================
-            if lock_on:
+            # === [BEAR] 베어에선 이익락 더 타이트 ===
+            if BEAR:
+                if cur_gain >= 0.015:
+                    profit_lock = best * (1.0 - max(0.006, atr_ratio * 0.9))
+                elif cur_gain >= 0.008:
+                    profit_lock = best * (1.0 - max(0.008, atr_ratio * 1.1))
+                else:
+                    profit_lock = base_stop
+                if curp <= profit_lock and cur_gain > 0:
+                    if AUTO_TRADE and entry_volume > 0:
+                        sell_market(m, entry_volume)
+                    alert = format_sell_alert(m, "베어 이익락", entry_volume, entry_price, curp,
+                                             f"락 {fmt6(profit_lock)}원")
+                    tg_send(alert)
+                    verdict = "BEAR_PROFIT_LOCK"
+                    break
+            elif lock_on:
                 # 락 중에는 이익락을 한 단계 느슨하게 (쫓겨나지 않게)
                 if cur_gain >= 0.03:
                     profit_lock = best * (1.0 - max(0.007, atr_ratio * 0.9))
