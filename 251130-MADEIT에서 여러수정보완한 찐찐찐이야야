@@ -2796,8 +2796,9 @@ def postcheck_6s(m, pre):
     peak = base_price
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
-    # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    MAX_SURGE = 0.012  # 1.2% 이상이면 고점 추격으로 간주하고 컷 (타이트하게 조정)
+    # ★★★ postcheck 중 최대 허용 급등 (레짐별 차등)
+    # 오프닝은 강한 러너가 많아 1.6%로 완화, 나머지 시간대는 1.2%로 타이트
+    MAX_SURGE = 0.016 if is_opening_window() else 0.012
 
     while True:
         now = time.time()
