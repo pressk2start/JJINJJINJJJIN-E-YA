@@ -79,6 +79,10 @@ PROBE_FAIL_EXIT_SEC = 45  # 45초
 # 손절 발생 시 기본 쿨다운에 추가 보너스 시간
 COOLDOWN_FAIL_BONUS = int(os.getenv("COOLDOWN_FAIL_BONUS", "60"))  # 60초 추가
 
+# === 총손익 giveback 보호 ===
+# 부분익절 후 실현+미실현 총합이 피크 대비 과도하게 반납되면 전량 청산
+TOTAL_PNL_GIVEBACK = float(os.getenv("TOTAL_PNL_GIVEBACK", "0.35"))  # 35% 반납 시 컷
+
 # === 하이브리드 모드 전역 설정 ===
 # (실제 값은 하단 필터 파라미터 섹션에서 정의됨)
 
@@ -641,7 +645,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.1   # 전체 리스크의 35%만 사용 (탐색용)
+        entry_fraction = 0.35   # 전체 리스크의 35%만 사용 (탐색용)
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
         entry_fraction = 1.0    # 전체 금액 (확정 진입)
@@ -746,6 +750,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "last_add_ts": 0.0,
             "entry_mode": pre.get("entry_mode", "confirm"),  # ★ 추가
             "opened_ts": time.time(),  # 진입 시각 (절대 보유 한계 체크용)
+            "entry_ts": time.time(),  # 진입 시각 (PROBE 빠른 컷 등에서 사용)
+            "realized_pnl_krw": 0.0,  # 부분익절 시 실현손익 누적 (giveback 체크용)
         }
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
@@ -1103,6 +1109,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         pos2["net_be_stop"] = net_be_stop
                         print(f"[NET_BE] {m} Net BE 스톱 설정: {net_be_stop:,.0f}원 (전체 손익 0 보장)")
 
+                # 총손익 giveback 보호를 위한 실현손익 누적
+                if executed > 0 and avg_price_sell:
+                    entry_price0 = float(pos2.get("entry_price", 0.0) or 0.0)
+                    realized_add = (avg_price_sell - entry_price0) * executed
+                    pos2["realized_pnl_krw"] = float(pos2.get("realized_pnl_krw", 0.0) or 0.0) + realized_add
+                    print(f"[GIVEBACK] {m} 실현손익 누적: {realized_add:+,.0f}원 (총 {pos2['realized_pnl_krw']:+,.0f}원)")
+
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
@@ -1259,6 +1272,10 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                     print(msg)
                     tg_send(f"⏰ {m} 시간만료 {same_keep}회 반복\n보호익절 30% 실행 (현재 {ret_pct:.2f}%)")
                 same_keep = 0  # 리셋
+            # 3회 연속 동일 판단인데 음전이면 전량 청산 (리스크 통제)
+            elif same_keep >= 3 and ret_pct is not None and ret_pct <= 0:
+                close_auto_position(m, reason=f"시간만료 {same_keep}회 반복 음전 보호")
+                return True
             continue
 
         if should_close:
@@ -3083,6 +3100,9 @@ def monitor_position(m,
         pos = OPEN_POSITIONS.get(m, {})
     entry_mode = pos.get("entry_mode", "confirm")
 
+    # 총손익 giveback 추적용 (부분익절 후)
+    total_pnl_peak = 0.0
+
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
@@ -3193,10 +3213,10 @@ def monitor_position(m,
             # === PROBE 실패 빠른 손절 (45초 제한) ===
             # 프로브가 45초 내에 성과를 내지 못하면 빠르게 컷
             if PROBE_FAIL_QUICK_EXIT and pos.get("entry_mode") == "probe":
-                entry_ts = pos.get("entry_ts", 0)
-                if entry_ts > 0:
-                    probe_elapsed = time.time() - entry_ts
-                    if probe_elapsed >= PROBE_FAIL_EXIT_SEC and cur_gain < 0.005:  # 45초 경과 + 0.5% 미만 수익
+                opened_ts = float(pos.get("opened_ts", 0) or 0)
+                if opened_ts > 0:
+                    probe_elapsed = time.time() - opened_ts
+                    if probe_elapsed >= PROBE_FAIL_EXIT_SEC and gain_from_entry < 0.005:  # 45초 경과 + 0.5% 미만 수익
                         if AUTO_TRADE and entry_volume > 0:
                             sell_market(m, entry_volume)
                         alert = format_sell_alert(m, f"프로브 실패 빠른 컷 ({int(probe_elapsed)}초)", entry_volume, entry_price, curp,
@@ -3315,6 +3335,27 @@ def monitor_position(m,
                         tg_send(alert)
                         verdict = "PARTIAL_TIME_LIMIT"
                         break
+
+            # ========================================
+            # 우선순위 0.6: 총손익 giveback 보호
+            # ========================================
+            # 부분익절 후 실현+미실현 총합이 피크 대비 과도하게 반납되면 전량 청산
+            if pos and pos.get("partial_done"):
+                with _POSITION_LOCK:
+                    _pos_now = OPEN_POSITIONS.get(m, {})
+                sold_pnl = float(_pos_now.get("realized_pnl_krw", 0.0) or 0.0)
+                unreal = (curp - entry_price) * float(_pos_now.get("volume", 0.0) or 0.0)
+                total_pnl = sold_pnl + unreal
+                total_pnl_peak = max(total_pnl_peak, total_pnl)
+
+                if total_pnl_peak > 0 and total_pnl <= total_pnl_peak * (1 - TOTAL_PNL_GIVEBACK):
+                    if AUTO_TRADE and entry_volume > 0:
+                        sell_market(m, entry_volume)
+                    alert = format_sell_alert(m, "총손익 giveback 컷", entry_volume, entry_price, curp,
+                                             f"피크 {total_pnl_peak:+,.0f}원 → 현재 {total_pnl:+,.0f}원")
+                    tg_send(alert)
+                    verdict = "TOTAL_PNL_GIVEBACK"
+                    break
 
             # ========================================
             # 우선순위 1: 손절 (하드스톱 + 동적 손절)
