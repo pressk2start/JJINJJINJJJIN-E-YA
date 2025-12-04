@@ -62,6 +62,23 @@ MIN_ORDER_KRW = 5_000  # 업비트 최소 주문금액 (5,000원)
 NET_BE_PROTECT = os.getenv("NET_BE_PROTECT", "1") == "1"  # 기본 활성화
 NET_BE_BUFFER = float(os.getenv("NET_BE_BUFFER", "0.0005"))  # 0.05% 여유 (슬리피지 대비)
 
+# === 부분익절 후 시간 데드라인 ===
+# 부분익절 후 너무 오래 끌지 않도록 최대 보유 시간 제한
+PARTIAL_MAX_HOLD_SEC = int(os.getenv("PARTIAL_MAX_HOLD_SEC", "1800"))  # 30분 (1800초)
+
+# === 슬리피지 캡 통일 ===
+# 진입 시 시그널가 대비 허용 최대 상승폭 (슬리피지 제한)
+MAX_ENTRY_DRIFT = float(os.getenv("MAX_ENTRY_DRIFT", "0.008"))  # 0.8% 제한
+
+# === 프로브 실패 빠른 손절 ===
+# 프로브가 실패(손절)하면 45초 내 빠른 컷
+PROBE_FAIL_QUICK_EXIT = os.getenv("PROBE_FAIL_QUICK_EXIT", "1") == "1"  # 기본 활성화
+PROBE_FAIL_EXIT_SEC = 45  # 45초
+
+# === 실패 후 추가 쿨다운 ===
+# 손절 발생 시 기본 쿨다운에 추가 보너스 시간
+COOLDOWN_FAIL_BONUS = int(os.getenv("COOLDOWN_FAIL_BONUS", "60"))  # 60초 추가
+
 # === 하이브리드 모드 전역 설정 ===
 # (실제 값은 하단 필터 파라미터 섹션에서 정의됨)
 
@@ -492,12 +509,12 @@ def final_price_guard(m, initial_price, max_drift=None):
     """
     주문 직전 가격 재확인
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본: 평상시 0.8%, 공격모드 1.8%)
+    - max_drift: 신호가 대비 허용 상승률 (기본: MAX_ENTRY_DRIFT 사용)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
     if max_drift is None:
-        max_drift = 0.018 if AGGRESSIVE_MODE else 0.008  # 스나이퍼 모드: 추격 차단 강화
+        max_drift = MAX_ENTRY_DRIFT  # 통일된 슬리피지 캡 사용
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
@@ -633,10 +650,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         entry_fraction = 1.0
         mode_emoji = "🤖"
 
-    # ★ 공격모드일 경우 가격 가드 완화
-    max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
-
-    ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
+    # ★ 통일된 슬리피지 캡 사용 (MAX_ENTRY_DRIFT)
+    ok_guard, current_price = final_price_guard(m, signal_price)
     if not ok_guard:
         tg_send(
             f"⚠️ <b>진입 취소</b> {m}\n"
@@ -1058,6 +1073,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     if pos2:
                         pos2["volume"] = max(0.0, current_volume - current_volume * alt_ratio)
                         pos2["partial_done"] = True
+                        pos2["partial_sell_time"] = time.time()  # 부분익절 시간 기록 (시간 데드라인용)
                 tg_send_mid(f"✅ 부분청산 대안 실행: {alt_ratio*100:.0f}% 전환 매도 성공")
                 return True, "[REMONITOR] 대안 부분청산 성공", current_volume * alt_ratio
 
@@ -1072,7 +1088,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             if pos2:
                 pos2["volume"] = remaining_volume
                 pos2["partial_done"] = True
-                pos2["partial_ts"] = time.time()
+                pos2["partial_sell_time"] = time.time()  # 부분익절 시간 기록 (시간 데드라인용)
 
                 # Net BE 보호 스톱 계산 (부분익절 후 전체 손실 방지)
                 if NET_BE_PROTECT and avg_price_sell and remaining_volume > 0:
@@ -3174,6 +3190,21 @@ def monitor_position(m,
                         base_stop, eff_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
+            # === PROBE 실패 빠른 손절 (45초 제한) ===
+            # 프로브가 45초 내에 성과를 내지 못하면 빠르게 컷
+            if PROBE_FAIL_QUICK_EXIT and pos.get("entry_mode") == "probe":
+                entry_ts = pos.get("entry_ts", 0)
+                if entry_ts > 0:
+                    probe_elapsed = time.time() - entry_ts
+                    if probe_elapsed >= PROBE_FAIL_EXIT_SEC and cur_gain < 0.005:  # 45초 경과 + 0.5% 미만 수익
+                        if AUTO_TRADE and entry_volume > 0:
+                            sell_market(m, entry_volume)
+                        alert = format_sell_alert(m, f"프로브 실패 빠른 컷 ({int(probe_elapsed)}초)", entry_volume, entry_price, curp,
+                                                 f"제한 {PROBE_FAIL_EXIT_SEC}초")
+                        tg_send(alert)
+                        verdict = "PROBE_FAIL_QUICK_EXIT"
+                        break
+
             if (not trail_armed) and gain_from_entry >= TRAIL_ARM_GAIN:
                 trail_armed = True
                 # 초기 트레일: ATR 기준 혹은 최소거리
@@ -3267,6 +3298,23 @@ def monitor_position(m,
                     tg_send(alert)
                     verdict = "NET_BREAKEVEN_STOP"
                     break
+
+            # ========================================
+            # 우선순위 0.5: 부분익절 후 시간 데드라인
+            # ========================================
+            # 부분익절 후 너무 오래 끌지 않도록 최대 보유 시간 제한
+            if pos and pos.get("partial_done"):
+                partial_sell_time = pos.get("partial_sell_time", 0)
+                if partial_sell_time > 0:
+                    elapsed = time.time() - partial_sell_time
+                    if elapsed >= PARTIAL_MAX_HOLD_SEC:
+                        if AUTO_TRADE and entry_volume > 0:
+                            sell_market(m, entry_volume)
+                        alert = format_sell_alert(m, f"부분익절 시간초과 ({int(elapsed)}초)", entry_volume, entry_price, curp,
+                                                 f"제한 {PARTIAL_MAX_HOLD_SEC}초")
+                        tg_send(alert)
+                        verdict = "PARTIAL_TIME_LIMIT"
+                        break
 
             # ========================================
             # 우선순위 1: 손절 (하드스톱 + 동적 손절)
@@ -3809,15 +3857,28 @@ def get_cooldown_sec(market: str) -> int:
     - 09시대: 3분
     - 10~14시: 5분
     - 그 외: 기본 COOLDOWN(8분)
+    - 손절 후: 기본 쿨다운 + COOLDOWN_FAIL_BONUS
     """
     h = now_kst().hour
 
     if h == 9:
-        return 180  # 3분
+        base_cooldown = 180  # 3분
     elif 10 <= h <= 14:
-        return 300  # 5분
+        base_cooldown = 300  # 5분
     else:
-        return COOLDOWN  # 전역 기본값(480)
+        base_cooldown = COOLDOWN  # 전역 기본값(480)
+
+    # 손절 후 추가 쿨다운 보너스
+    # 해당 종목의 가장 최근 거래가 손실이었으면 보너스 시간 추가
+    if TRADE_HISTORY:
+        # 최근 거래 중 해당 종목의 마지막 거래 찾기
+        market_trades = [t for t in TRADE_HISTORY if t.get("market") == market]
+        if market_trades:
+            last_trade = market_trades[-1]
+            if not last_trade.get("win", True):  # 손실 거래
+                base_cooldown += COOLDOWN_FAIL_BONUS
+
+    return base_cooldown
 
 def cooldown_ok(market, price=None, reason=None):
     now = time.time()
