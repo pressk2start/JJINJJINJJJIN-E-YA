@@ -1530,6 +1530,46 @@ def flow_floor_by_hour():
     else:
         return 50_000
 
+def quick_confidence(tape, ob, regime=None):
+    """
+    진입 전 신뢰도 게이트: 약한 신호 사전 차단
+    - tape: {"buy_ratio", "krw_per_sec"}
+    - ob: {"depth_krw", "spread"}
+    - regime: "open"/"night"/"day" (None이면 자동 판단)
+
+    반환: (confidence, threshold)
+    """
+    # 1) 0~1 스케일로 안전 캡
+    depth_s = min(ob.get("depth_krw", 0) / 12_000_000, 1.0)               # ≥12M → 1
+    buy_s   = min(max((tape.get("buy_ratio", 0) - 0.50) / 0.15, 0.0), 1.0)  # 0.50~0.65 → 0~1
+    spread_s= max(0.0, min(1.0 - (ob.get("spread", 5.0) / 1.0), 1.0))      # 1.0% 이상이면 0
+    flow_s  = min(tape.get("krw_per_sec", 0) / 80_000, 1.0)
+
+    # 2) 상관 항목 합치기 (유동성·흐름은 평균으로 묶어 중복 가점 완화)
+    liquidity = 0.5 * depth_s + 0.5 * flow_s
+
+    # 3) 가중합 (가중치는 나중에 분석 후 조정 가능)
+    conf = 0.4 * liquidity + 0.35 * buy_s + 0.25 * spread_s
+
+    # 4) 레짐별 임계
+    if regime is None:
+        h = now_kst().hour
+        if h == 9 and is_opening_window():
+            regime = "open"
+        elif 0 <= h < 6:
+            regime = "night"
+        else:
+            regime = "day"
+
+    if regime == "open":
+        thr = 0.52
+    elif regime == "night":
+        thr = 0.60
+    else:
+        thr = 0.58
+
+    return conf, thr
+
 def is_opening_window():
     """09:00~09:12 오프닝 윈도우 체크"""
     if not OPENING_WIDE_SCAN:
@@ -3442,12 +3482,33 @@ def monitor_position(m,
                 break
 
             # ========================================
-            # 우선순위 2: BE(본절) 승격 (손실 최소화 핵심)
+            # 우선순위 2: BE(본절) 승격 (빠른 승격으로 손실 전환 차단)
             # ========================================
-            # 수정: 0.6% → 1.0% 늦춤, FEE*2 → FEE*1 (미세손절 방지)
-            if cur_gain >= 0.010:
-                be_lock = entry_price * (1 + FEE_RATE)  # 본절 + 수수료만
+            # 테이프가 약하면 +0.6%에서, 강하면 +1.0%에서 본절 승격
+            t15_now = micro_tape_stats_from_ticks(ticks, 15)
+            need_gain = 0.006 if (t15_now["buy_ratio"] < 0.58 or t15_now["krw_per_sec"] < 20000) else 0.010
+            if cur_gain >= need_gain:
+                be_lock = entry_price * (1 + FEE_RATE)  # 수수료만 반영한 본절
                 base_stop = max(base_stop, be_lock)
+
+            # ========================================
+            # 우선순위 2.5: VWAP·EMA 이탈 소손실 컷 (락 미적용 구간에만)
+            # ========================================
+            # 진입 직후 ±0.4% 박스권에서 VWAP와 EMA5 둘 다 아래로 밀리면 바로 소손실 정리
+            if not lock_on:
+                vwap_now = vwap_from_candles_1m(c1_cached, 20) if c1_cached else 0
+                ema5_now = ema_last([x["trade_price"] for x in (c1_cached or [])], 5) if c1_cached else 0
+                if vwap_now and ema5_now:
+                    mild_zone = (-0.004 <= cur_gain <= 0.004)  # -0.4% ~ +0.4%
+                    below_both = (curp < vwap_now and curp < ema5_now)
+                    if mild_zone and below_both:
+                        if AUTO_TRADE and entry_volume > 0:
+                            sell_market(m, entry_volume)
+                        alert = format_sell_alert(m, "VWAP·EMA 이탈 소손실 컷", entry_volume, entry_price, curp,
+                                                 f"±0.4% 박스권 (VWAP {vwap_now:,.0f}, EMA5 {ema5_now:,.0f})")
+                        tg_send(alert)
+                        verdict = "VWAP_EMA_MILD_CUT"
+                        break
 
             # ========================================
             # 우선순위 3: 부분익절 3단계 (익절 최대화)
@@ -4232,6 +4293,12 @@ def main():
                 if flow < flow_min or depth < MIN_DEPTH_KRW:
                     cut("FLOW_OR_DEPTH_LOW",
                         f"{m} flow {int(flow)} KRW/s (min {flow_min}), depth {int(depth/1_000_000):.1f}M (min {int(MIN_DEPTH_KRW/1_000_000)}M)")
+                    continue
+
+                # === 신뢰도 게이트 (약한 신호 사전 차단) ===
+                conf, thr = quick_confidence(pre["tape"], pre["ob"])
+                if conf < thr:
+                    cut("CONF_LOW", f"{m} confidence {conf:.2f} < threshold {thr:.2f} (약한 신호)")
                     continue
 
                 if m in recent_alerts and time.time(
