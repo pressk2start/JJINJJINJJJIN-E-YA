@@ -1282,21 +1282,33 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action and "전량 청산 권고" in action:
             should_close = True
 
-        # 3) 수익 실현:
-        #    - 2.5% 이상: 전량 청산
-        #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
-        elif ret_pct is not None and ret_pct >= 2.5:
-            should_close = True
-            reason = f"수익실현 {ret_pct:.2f}%"
-
-        elif ret_pct is not None and ret_pct >= 1.5:
-            # 중간 구간: 30% 부분 수익실현 후 계속 보유
-            ok, msg, executed = safe_partial_sell(
-                m, sell_ratio=0.3, reason=f"부분 수익실현 {ret_pct:.2f}%")
-            if ok and executed > 0:
-                print(msg)
-            # 부분익절 후에는 계속 재모니터링
-            continue
+        # 3) 수익 실현: 베어 레짐별 차등
+        # === [BEAR] 베어에선 1.5% 전량, 0.8% 부분익절 (빠르게 회수) ===
+        elif ret_pct is not None:
+            BEAR = is_btc_bear()
+            if BEAR:
+                if ret_pct >= 1.5:
+                    should_close = True
+                    reason = f"베어 수익실현 {ret_pct:.2f}%"
+                elif ret_pct >= 0.8:
+                    ok, msg, executed = safe_partial_sell(
+                        m, sell_ratio=0.5, reason=f"베어 부분 수익실현 {ret_pct:.2f}%")
+                    if ok and executed > 0:
+                        print(msg)
+                    continue
+            else:
+                # 일반 모드: 2.5% 전량, 1.5% 부분익절 (기존 로직)
+                if ret_pct >= 2.5:
+                    should_close = True
+                    reason = f"수익실현 {ret_pct:.2f}%"
+                elif ret_pct >= 1.5:
+                    # 중간 구간: 30% 부분 수익실현 후 계속 보유
+                    ok, msg, executed = safe_partial_sell(
+                        m, sell_ratio=0.3, reason=f"부분 수익실현 {ret_pct:.2f}%")
+                    if ok and executed > 0:
+                        print(msg)
+                    # 부분익절 후에는 계속 재모니터링
+                    continue
 
         # 4) 컨텍스트 청산 권고는 → 청산 안 하고 계속 재모니터링
         elif verdict and verdict.startswith("청산 권고("):
@@ -3345,25 +3357,27 @@ def monitor_position(m,
                 )
 
                 if gain_now >= 0.012 and strong_flow:
-                    ok_add, new_entry = add_auto_position(m, curp)
-                    if ok_add and new_entry:
-                        # 진입모드 승격
-                        with _POSITION_LOCK:
-                            pos["entry_mode"] = "confirm"
-                            pos["entry_price"] = new_entry
-                            pos["added"] = True
-                            pos["last_add_ts"] = time.time()
-                            OPEN_POSITIONS[m] = pos
+                    # === [BEAR] 베어에선 추매 금지 ===
+                    if not BEAR:
+                        ok_add, new_entry = add_auto_position(m, curp)
+                        if ok_add and new_entry:
+                            # 진입모드 승격
+                            with _POSITION_LOCK:
+                                pos["entry_mode"] = "confirm"
+                                pos["entry_price"] = new_entry
+                                pos["added"] = True
+                                pos["last_add_ts"] = time.time()
+                                OPEN_POSITIONS[m] = pos
 
-                        tg_send_mid(
-                            f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
-                            f"추매 후 평단: {fmt6(new_entry)}원"
-                        )
+                            tg_send_mid(
+                                f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
+                                f"추매 후 평단: {fmt6(new_entry)}원"
+                            )
 
-                        # 동적 손절 재계산
-                        c1_for_sl = get_minutes_candles(1, m, 20)
-                        base_stop, eff_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
-                        trail_armed = False  # 새 기준으로 트레일링 리셋
+                            # 동적 손절 재계산
+                            c1_for_sl = get_minutes_candles(1, m, 20)
+                            base_stop, eff_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
+                            trail_armed = False  # 새 기준으로 트레일링 리셋
 
             # === PROBE 실패 빠른 손절 (45초 제한) ===
             # 프로브가 45초 내에 성과를 내지 못하면 빠르게 컷
@@ -3516,11 +3530,11 @@ def monitor_position(m,
             # ========================================
             # 우선순위 1: 손절 (하드스톱 + 동적 손절)
             # ========================================
-            # 하드 스톱 (-1.5%)
-            if cur_gain <= -0.015:
+            # 하드 스톱 (베어: -1.2%, 일반: -1.5%)
+            if cur_gain <= -HARD_STOP_LOCAL:
                 if AUTO_TRADE and entry_volume > 0:
                     sell_market(m, entry_volume)
-                alert = format_sell_alert(m, "하드스톱 (-1.5% 급락)", entry_volume, entry_price, curp)
+                alert = format_sell_alert(m, f"하드스톱 ({-HARD_STOP_LOCAL*100:.1f}%)", entry_volume, entry_price, curp)
                 tg_send(alert)
                 verdict = "HARD_STOP"
                 break
@@ -3630,8 +3644,8 @@ def monitor_position(m,
             # 강한 신호 확인 (점화/메가/봇매집)
             strong_signal = pre.get("ign_ok") or pre.get("mega_ok") or pre.get("botacc_ok")
 
-            # 락 상태에 따른 TP1/TP2 제어
-            skip_tp1 = lock_on
+            # 락 상태에 따른 TP1/TP2 제어 (베어에선 TP1 스킵 금지)
+            skip_tp1 = (lock_on and not BEAR)
             light_tp2 = lock_on
 
             # TP1은 약한 신호에서만 실행 (강한 신호는 스킵 → 익절 극대화)
@@ -3666,9 +3680,9 @@ def monitor_position(m,
                             entry_volume = pos_now["volume"] if pos_now else 0.0
                         # stop 승격 + 트레일 활성화
                         base_stop = max(base_stop, entry_price * 1.005)  # 본절+0.5%
-                        trail_armed = True  # 남은 70%는 트레일로 보호
-                        alert = format_sell_alert(m, "TP1 부분익절 30%", partial_volume, entry_price, curp,
-                                                 "남은 70%는 트레일")
+                        trail_armed = True  # 남은 잔량은 트레일로 보호
+                        alert = format_sell_alert(m, f"TP1 부분익절 {int(partial_ratio*100)}%", partial_volume, entry_price, curp,
+                                                 f"남은 {int(remaining_ratio*100)}% 트레일")
                         tg_send(alert)
                         verdict = "TP1_PARTIAL"
                 continue
