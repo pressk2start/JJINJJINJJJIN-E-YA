@@ -466,6 +466,8 @@ def sell_market(market, volume, max_attempts=3):
                             OPEN_POSITIONS[market] = pos
                         else:
                             OPEN_POSITIONS.pop(market, None)
+                            # ✅ 전량 소멸 시에도 최근 청산 이력 반영
+                            LAST_EXIT_TS[market] = time.time()
                 return True  # 정리 완료로 간주
     except Exception as e:
         print(f"[SELL_WARN] {market} 가격 조회 실패, 매도 계속 진행: {e}")
@@ -499,6 +501,23 @@ def sell_market(market, volume, max_attempts=3):
                         else:
                             # 전량 매도 → 포지션 제거
                             OPEN_POSITIONS.pop(market, None)
+                            # ✅ 전량 청산 타임스탬프 기록 (쿨다운/재진입 보호)
+                            LAST_EXIT_TS[market] = time.time()
+                            # ✅ 최근 거래 결과 기록(근사) — 평균 체결가가 없을 수 있어 현재가로 보수 근사
+                            try:
+                                entry_price0 = float(pos.get("entry_price", 0.0) or 0.0)
+                                # 가능하면 체결 평균가 추정
+                                try:
+                                    tkr2 = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
+                                    curp2 = tkr2[0].get("trade_price") if tkr2 else None
+                                except Exception:
+                                    curp2 = None
+                                exit_price_est = curp2 or entry_price0
+                                if entry_price0 > 0 and exit_price_est > 0:
+                                    ret_pct = (exit_price_est / entry_price0 - 1.0) * 100.0
+                                    record_trade(market, ret_pct)
+                            except Exception as _e:
+                                print("[TRADE_RECORD_ERR@SM]", _e)
                 print(f"[SELL_OK] {market} 매도 체결: {executed:.6f} (요청 {volume:.6f}, 시도 {attempt}/{max_attempts})")
                 return True
             else:
@@ -1082,29 +1101,36 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             try2 = sell_market(m, current_volume * alt_ratio, max_attempts=3)
             if try2:
                 with _POSITION_LOCK:
-                    pos2 = OPEN_POSITIONS.get(m)
-                    if pos2:
-                        pos2["volume"] = max(0.0, current_volume - current_volume * alt_ratio)
-                        pos2["partial_done"] = True
-                        pos2["partial_sell_time"] = time.time()  # 부분익절 시간 기록 (시간 데드라인용)
+                    # sell_market 호출 전/후를 비교해서 실제 매도량 계산
+                    pos_after = OPEN_POSITIONS.get(m)
+                    if pos_after:
+                        new_vol = float(pos_after.get("volume", 0.0) or 0.0)
+                    else:
+                        new_vol = 0.0
+                    executed2 = max(0.0, current_volume - new_vol)
 
-                        # 대안 경로 실현손익 누적 (정확한 체결가 없으니 현재가로 근사)
+                    # 부분청산 플래그/타임만 갱신 (수량은 sell_market이 이미 반영)
+                    if pos_after:
+                        pos_after["partial_done"] = True
+                        pos_after["partial_sell_time"] = time.time()
+                        # 실현손익(근사) 누적
                         try:
                             tkr2 = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
                             curp2 = tkr2[0].get("trade_price") if tkr2 else None
                         except Exception:
                             curp2 = None
-                        est_price = curp2 or float(pos2.get("entry_price", 0.0) or 0.0)
-                        entry_price0 = float(pos2.get("entry_price", 0.0) or 0.0)
-                        executed2 = current_volume * alt_ratio
+                        entry_price0 = float(pos_after.get("entry_price", 0.0) or 0.0)
+                        est_price = curp2 or entry_price0
                         realized_add = (est_price - entry_price0) * executed2
-                        pos2["realized_pnl_krw"] = float(pos2.get("realized_pnl_krw", 0.0) or 0.0) + realized_add
-                        print(f"[GIVEBACK_ALT] {m} 대안 경로 실현손익 누적: {realized_add:+,.0f}원 (총 {pos2['realized_pnl_krw']:+,.0f}원)")
-
-                        OPEN_POSITIONS[m] = pos2
+                        pos_after["realized_pnl_krw"] = float(pos_after.get("realized_pnl_krw", 0.0) or 0.0) + realized_add
+                        print(f"[GIVEBACK_ALT] {m} 대안 경로 실현손익(근사) +{realized_add:+,.0f}원 → 합계 {pos_after['realized_pnl_krw']:+,.0f}원")
+                        OPEN_POSITIONS[m] = pos_after
+                    else:
+                        # 전량 소멸된 경우: sell_market 쪽에서 LAST_EXIT_TS 처리됨
+                        pass
 
                 tg_send_mid(f"✅ 부분청산 대안 실행: {alt_ratio*100:.0f}% 전환 매도 성공")
-                return True, "[REMONITOR] 대안 부분청산 성공", current_volume * alt_ratio
+                return True, "[REMONITOR] 대안 부분청산 성공", executed2
 
             return False, msg, 0.0
 
@@ -2361,12 +2387,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         pos = OPEN_POSITIONS.get(m)
     if pos:
         last_add_ts = pos.get("last_add_ts", 0)
-        last_exit_ts = pos.get("last_exit_ts", 0)
-        # 최근 120초(2분) 내 진입 or 청산 기록이 있으면 스킵
-        if time.time() - max(last_add_ts, last_exit_ts) < 120:
+        if time.time() - last_add_ts < 120:
             return None
 
-    # 최근 완전 청산 이력도 2분 쿨다운 적용
+    # 최근 완전 청산 이력도 2분 쿨다운 적용 (전역)
     last_exit = LAST_EXIT_TS.get(m, 0)
     if last_exit and (time.time() - last_exit) < 120:
         return None
