@@ -230,6 +230,93 @@ def get_adaptive_risk() -> float:
     else:
         return RISK_PER_TRADE
 
+
+# =========================
+# 💰 수수료 포함 수익률 계산
+# =========================
+def net_pct(entry_price, exit_price):
+    """
+    수수료 포함 실제 수익률 (% 단위)
+    FEE_RATE = 0.001 (왕복 0.1%: 매수 0.05% + 매도 0.05%)
+    """
+    gross_ret = (exit_price / max(entry_price, 1e-9)) - 1.0
+    net_ret = gross_ret - FEE_RATE  # 왕복 수수료 차감
+    return net_ret * 100.0  # % 단위 반환
+
+
+def compute_net_be_price(entry_price):
+    """
+    수수료 포함 손익분기 가격
+    진입가 대비 FEE_RATE 만큼 상승해야 손익분기
+    """
+    return entry_price * (1.0 + FEE_RATE)
+
+
+# =========================
+# 🛡️ Risk-off 레벨 시스템
+# =========================
+def risk_off_level():
+    """
+    최근 거래 성적 기반 리스크 레짐 판단
+    - Level 0 (Normal): 평상시 / 히스토리 부족
+    - Level 1 (Caution): 최근 10건 중 승률 <40% 또는 평균 손실 <-0.5%
+    - Level 2 (Defensive): 최근 10건 중 승률 <30% 또는 평균 손실 <-1.0%
+    """
+    if len(TRADE_HISTORY) < 10:
+        return 0  # 데이터 부족 시 일반 모드
+
+    recent_10 = list(TRADE_HISTORY)[-10:]
+    wins = sum(1 for t in recent_10 if t.get("win", False))
+    win_rate = wins / len(recent_10)
+    avg_pnl = sum(t.get("pnl", 0) for t in recent_10) / len(recent_10)
+
+    # Level 2: 매우 방어적
+    if win_rate < 0.30 or avg_pnl < -1.0:
+        return 2
+    # Level 1: 조심
+    elif win_rate < 0.40 or avg_pnl < -0.5:
+        return 1
+    # Level 0: 정상
+    else:
+        return 0
+
+
+# =========================
+# 📉 일일 손실 한도 체크
+# =========================
+DAILY_LOSS_LIMIT_PCT = 3.0  # 일일 최대 손실 한도 3%
+DAILY_LOSS_START = None
+DAILY_CUMULATIVE_LOSS = 0.0
+
+
+def check_daily_loss_limit():
+    """
+    일일 손실 한도 체크
+    - 자정 기준 리셋
+    - 누적 손실이 DAILY_LOSS_LIMIT_PCT 초과 시 거래 금지
+    Returns: (allowed: bool, reason: str)
+    """
+    global DAILY_LOSS_START, DAILY_CUMULATIVE_LOSS
+
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # 자정 넘어가면 리셋
+    if DAILY_LOSS_START is None or DAILY_LOSS_START < today_start:
+        DAILY_LOSS_START = today_start
+        DAILY_CUMULATIVE_LOSS = 0.0
+
+    # 오늘 거래 집계
+    today_trades = [t for t in TRADE_HISTORY if t.get("time", 0) >= today_start.timestamp()]
+    if today_trades:
+        DAILY_CUMULATIVE_LOSS = sum(t.get("pnl", 0) for t in today_trades)
+
+    if DAILY_CUMULATIVE_LOSS <= -DAILY_LOSS_LIMIT_PCT:
+        return False, f"일일 손실 한도 초과 ({DAILY_CUMULATIVE_LOSS:.2f}% / -{DAILY_LOSS_LIMIT_PCT}%)"
+
+    return True, "OK"
+
+
 def _make_auth_headers(query: dict = None):
     payload = {
         'access_key': UPBIT_ACCESS_KEY,
@@ -326,14 +413,44 @@ def place_market_sell(market, volume):
     }
     return upbit_private_post("/v1/orders", body)
 
-def final_price_guard(m, initial_price, max_drift=0.07):
+
+def is_opening_window():
     """
-    주문 직전 가격 재확인
+    변동성 높은 오프닝 시간대 판단
+    - 09:00~09:30 (아시아 장 오픈)
+    - 21:00~21:30 (유럽/미국 활성)
+    """
+    now = datetime.now()
+    hour = now.hour
+    minute = now.minute
+
+    # 09:00~09:29 또는 21:00~21:29
+    if (hour == 9 and minute < 30) or (hour == 21 and minute < 30):
+        return True
+    return False
+
+
+MAX_ENTRY_DRIFT = 0.008  # 비오프닝 기본 상한 (0.8%)
+
+
+def final_price_guard(m, initial_price, max_drift=None):
+    """
+    주문 직전 가격 재확인 (타이트 모드)
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 1.8%)
+    - max_drift: 신호가 대비 허용 상승률
+      * 오프닝(09:00~09:30, 21:00~21:30): 1.2%
+      * 비오프닝: 0.8% (추격 진입 차단)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
+    # === max_drift 자동 설정 ===
+    if max_drift is None:
+        max_drift = 0.012 if is_opening_window() else MAX_ENTRY_DRIFT
+
+    # ★ 비오프닝은 0.8% 상한으로 타이트 (추격 차단)
+    if not is_opening_window():
+        max_drift = min(max_drift, 0.008)
+
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
@@ -677,9 +794,8 @@ def close_auto_position(m, reason=""):
     except Exception:
         cur_price = entry_price
 
-    # 선 계산(대략)
-    ret_pct = (cur_price / entry_price -
-               1.0) * 100.0 if entry_price > 0 else 0.0
+    # 선 계산(대략) - 수수료 포함
+    ret_pct = net_pct(entry_price, cur_price) if entry_price > 0 else 0.0
     est_entry_value = entry_price * vol
     est_exit_value = cur_price * vol
     pl_value = est_exit_value - est_entry_value
@@ -714,11 +830,10 @@ def close_auto_position(m, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
-        # 실제 체결가 기준으로 다시 계산
+        # 실제 체결가 기준으로 다시 계산 - 수수료 포함
         est_exit_value = exit_price_used * vol
         pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price -
-                   1.0) * 100.0 if entry_price > 0 else 0.0
+        ret_pct = net_pct(entry_price, exit_price_used) if entry_price > 0 else 0.0
 
         # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
         try:
@@ -2294,6 +2409,63 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
 
     return entry_price * (1 - pct), pct
 
+
+# =========================
+# 🎯 진입 전 기대값(EV) + RR 게이트
+# =========================
+def pre_entry_ev_gate(pre, entry_price, stop_price):
+    """
+    진입 직전 기대값(Expected Value) + Risk/Reward 비율 검증
+
+    Args:
+        pre: 신호 딕셔너리
+        entry_price: 진입 예정 가격
+        stop_price: 손절가
+
+    Returns:
+        (EV: float, win_prob: float, tp1_dist: float, sl_dist: float)
+        - EV: 기대값 (양수여야 진입 가치 있음)
+        - win_prob: 승률 추정치
+        - tp1_dist: TP1까지 거리 (비율)
+        - sl_dist: 손절까지 거리 (비율)
+    """
+    # === TP1 목표 설정 (신호 강도별) ===
+    if pre.get("mega_ok"):
+        tp1_target = 0.025  # 메가: +2.5%
+    elif pre.get("ign_ok"):
+        tp1_target = 0.020  # 점화: +2.0%
+    elif pre.get("early_ok"):
+        tp1_target = 0.015  # 초기: +1.5%
+    else:
+        tp1_target = 0.018  # 기본: +1.8%
+
+    # === 승률 추정 (거래 이력 기반) ===
+    if len(TRADE_HISTORY) >= 5:
+        recent_5 = list(TRADE_HISTORY)[-5:]
+        wins = sum(1 for t in recent_5 if t.get("win", False))
+        base_prob = wins / len(recent_5)
+    else:
+        base_prob = 0.50  # 기본 50%
+
+    # 신호 강도별 승률 보정
+    if pre.get("mega_ok"):
+        win_prob = min(base_prob * 1.15, 0.70)
+    elif pre.get("ign_ok"):
+        win_prob = min(base_prob * 1.10, 0.65)
+    else:
+        win_prob = base_prob
+
+    # === 거리 계산 ===
+    tp1_dist = tp1_target
+    sl_dist = abs((entry_price - stop_price) / max(entry_price, 1e-9))
+
+    # === 기대값 계산 ===
+    # EV = (승률 × TP1 이익) - (패률 × SL 손실)
+    EV = (win_prob * tp1_dist) - ((1 - win_prob) * sl_dist)
+
+    return EV, win_prob, tp1_dist, sl_dist
+
+
 # =========================
 # 컨텍스트 기반 청산 점수
 # =========================
@@ -2421,7 +2593,7 @@ def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
         👉 유지 / 부분청산 / 전량청산 세 가지 액션 제안
     """
     try:
-        ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
+        ret_pct = net_pct(entry_price, last_price)
     except:
         ret_pct = 0.0
 
@@ -2815,7 +2987,7 @@ def monitor_position(m,
         ob_depth_krw = ob.get("depth_krw", 10_000_000)
 
         try:
-            ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
+            ret_pct = net_pct(entry_price, last_price)
         except:
             ret_pct = 0.0
 
@@ -3194,14 +3366,48 @@ def main():
                 last_reason[m] = reason
 
                 # 동적 손절가
-                dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
+                signal_type = 'mega' if pre.get('mega_ok') else ('ign' if pre.get('ign_ok') else 'early')
+                dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1, signal_type=signal_type)
+
+                # === 🎯 EV + RR 게이트 (진입 직전 검증) ===
+                EV, win_prob, tp1_dist, sl_dist = pre_entry_ev_gate(pre, pre['price'], dyn_stop)
+                rr = tp1_dist / max(sl_dist, 1e-9)
+                lvl = risk_off_level()
+
+                # 기본 컷: 기대값 음수
+                if EV <= 0:
+                    cut("EV_NEG", f"{m} EV≤0 (p≈{win_prob:.2f}, TP1 {tp1_dist*100:.2f}%, SL {sl_dist*100:.2f}%)")
+                    tg_send(f"🔔 <b>관찰 알림</b> {m}\n기대값 음수 → 거래보류 (p≈{win_prob:.2f}, RR {rr:.2f})\n{link_for(m)}", retry=1)
+                    continue
+
+                # 최소 RR(리워드:리스크) 1.1 배
+                if rr < 1.10:
+                    cut("RR_LOW", f"{m} RR {rr:.2f} (<1.10)")
+                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRR {rr:.2f} < 1.10 → 보류\n{link_for(m)}", retry=1)
+                    continue
+
+                # 리스크-오프 레벨에 따른 기대값 임계 강화
+                if lvl >= 1 and EV <= 0.0005:
+                    cut("EV_LOW_RISKOFF", f"{m} EV {EV:.4f} @Lv1")
+                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRisk-off Lv{lvl}: EV {EV:.4f} 부족\n{link_for(m)}", retry=1)
+                    continue
+                if lvl >= 2 and EV <= 0.0010:
+                    cut("EV_LOW_RISKOFF2", f"{m} EV {EV:.4f} @Lv2")
+                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRisk-off Lv{lvl}: EV {EV:.4f} 부족\n{link_for(m)}", retry=1)
+                    continue
+
+                # ✅ 여기까지 통과 → 거래 가능 신호
+                entry_mode = pre.get("entry_mode", "confirm")
+                mode_emoji = "🧭" if entry_mode == "probe" else "🔥"
+                mode_label = "탐색 진입候補" if entry_mode == "probe" else "거래 진입候補"
 
                 txt = (
-                    f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
+                    f"{mode_emoji} <b>{mode_label}</b> {m} <code>#{reason}</code>\n"
                     f"💵 <b>현재가</b> {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
+                    f"📈 EV {EV:.4f} | RR {rr:.2f} | 승률 {win_prob*100:.1f}%\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
 
@@ -3264,8 +3470,23 @@ def main():
                     except Exception as e:
                         print("[LOG_ERR]", e)
 
-                    # --- 🔥 자동매수 진입 ---
+                    # --- 🔥 자동매수 진입 (최종 가격/한도 체크) ---
                     try:
+                        # === 최종 가격 가드 (추격 방지) ===
+                        ok_guard, current_price = final_price_guard(m, pre['price'])
+                        if not ok_guard:
+                            tg_send(f"⚠️ {m} 진입 취소 (가격 급등/추격 위험)\n현재가: {fmt6(current_price)}원\n{link_for(m)}", retry=1)
+                            continue
+
+                        # === 일일 손실 한도 체크 ===
+                        allowed, deny_reason = check_daily_loss_limit()
+                        if not allowed:
+                            cut("DAILY_LIMIT", f"{m} {deny_reason}")
+                            tg_send(f"⛔ {m} 진입 금지: {deny_reason}\n{link_for(m)}", retry=1)
+                            continue
+
+                        # ✅ 최종 진입 (가격 업데이트)
+                        pre['price'] = current_price
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
