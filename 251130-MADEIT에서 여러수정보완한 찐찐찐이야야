@@ -68,7 +68,7 @@ PARTIAL_MAX_HOLD_SEC = int(os.getenv("PARTIAL_MAX_HOLD_SEC", "900"))  # 15분 (9
 
 # === 슬리피지 캡 통일 ===
 # 진입 시 시그널가 대비 허용 최대 상승폭 (슬리피지 제한)
-MAX_ENTRY_DRIFT = float(os.getenv("MAX_ENTRY_DRIFT", "0.008"))  # 0.8% 제한
+MAX_ENTRY_DRIFT = float(os.getenv("MAX_ENTRY_DRIFT", "0.012"))  # 1.2% 완화 (0.8% → 1.2%, 신호 후 추격 여유)
 
 # === 프로브 실패 빠른 손절 ===
 # 프로브가 실패(손절)하면 45초 내 빠른 컷
@@ -110,7 +110,7 @@ NO_TRADE_CLOSING_MIN = 30  # 장 마감 30분 전부터 진입 금지
 NO_TRADE_RSI_THRESHOLD = 75  # RSI 75 이상 과매수 구간 진입 금지
 
 # ==== Sniper Mode (초입 보장, 늦은 추격 차단) ====
-SNIPER_MODE = os.getenv("SNIPER_MODE", "1") == "1"
+SNIPER_MODE = os.getenv("SNIPER_MODE", "0") == "1"  # 임시 OFF (진입 병목 제거)
 SNIPER_WAIT_SEC = 3                # 돌파 직후 관찰 시간 (3초로 단축)
 SNIPER_PULLBACK_MIN = 0.0025       # 0.25% 이상 눌림 (오프닝에선 0.002)
 SNIPER_PULLBACK_MAX = 0.0060       # 0.60% 이하 눌림
@@ -1516,7 +1516,7 @@ TICKS_BUY_RATIO = 0.56
 # 위험 관리 (스프레드) - 호가 깊이 강화
 MAX_SPREAD_BASE = 0.70  # 0.60 -> 0.45
 MAX_SPREAD_FAST = 1.00  # 1.10 -> 0.80
-MIN_DEPTH_KRW = 12_000_000  # 호가 깊이 하한 (6M -> 12M, 얇은 호가 제외)
+MIN_DEPTH_KRW = 6_000_000  # 호가 깊이 하한 (12M → 6M 완화, 알트 진입 가능)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
@@ -1585,7 +1585,7 @@ REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
 # 포스트체크(허수 2차)
-POSTCHECK_ENABLED = True  # 3초 포스트체크로 허수 거름
+POSTCHECK_ENABLED = False  # 임시 OFF (진입 병목 제거, 나중에 재활성화)
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
@@ -1644,18 +1644,18 @@ def now_kst_str():
 
 def flow_floor_by_hour():
     """
-    시간대별 초당 체결 KRW 하한 (강한 유동성만 타기)
-    - 주간(9~14시): 60,000 KRW/s
-    - 심야(0~6시): 40,000 KRW/s
-    - 기타: 50,000 KRW/s
+    시간대별 초당 체결 KRW 하한 (현실적 완화)
+    - 주간(9~14시): 18,000 KRW/s (기존 60k → 완화)
+    - 심야(0~6시): 12,000 KRW/s (기존 40k → 완화)
+    - 기타: 15,000 KRW/s (기존 50k → 완화)
     """
     h = now_kst().hour
     if 9 <= h <= 14:
-        return 60_000
+        return 18_000
     elif 0 <= h < 6:
-        return 40_000
+        return 12_000
     else:
-        return 50_000
+        return 15_000
 
 def quick_confidence(tape, ob, regime=None):
     """
@@ -2829,26 +2829,26 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     return pre
 
 def final_check_leader(m, pre, tight_mode=False):
-    # ★★★ 완화 노브 적용
+    # ★★★ 완화 노브 적용 (진입 가능하도록 기준 하향)
     r = relax_knob()
     t = pre["tape"]
     ob = pre["ob"]
     ticks = pre["ticks"]
-    MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
+    MIN_TURNOVER_LOCAL = max(0.016, _turn_needed(ob.get("depth_krw", 0)) - 0.004)  # 0.020 → 0.016
     if tight_mode:
         MIN_TURNOVER_LOCAL += 0.003
     if 0 <= now_kst().hour < 6:
-        MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
-    MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
+        MIN_TURNOVER_LOCAL = max(0.014, MIN_TURNOVER_LOCAL - 0.004)  # 0.018 → 0.014
+    MIN_TURNOVER_LOCAL = max(0.016, MIN_TURNOVER_LOCAL - 0.002 * r)  # 0.020 → 0.016
 
     # 오프닝: Turnover 기준 20% 완화
     if is_opening_window():
         MIN_TURNOVER_LOCAL *= 0.80
 
     TICKS_BUY_RATIO_LOCAL = max(
-        0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
-    TICKS_BUY_RATIO_LOCAL = max(0.54,
-                                TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # ★ 추가
+        0.54, TICKS_BUY_RATIO - 0.02 + (0.02 if tight_mode else 0.0))  # 0.56 → 0.54
+    TICKS_BUY_RATIO_LOCAL = max(0.52,
+                                TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # 0.54 → 0.52 (하한 완화)
 
     if t["n"] < MIN_TICKS_COUNT:
         cut("TICKS_LOW", f"{m} {t['n']}")
