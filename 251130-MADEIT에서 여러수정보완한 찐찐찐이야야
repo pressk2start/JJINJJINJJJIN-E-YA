@@ -74,6 +74,7 @@ MAX_ENTRY_DRIFT = float(os.getenv("MAX_ENTRY_DRIFT", "0.012"))  # 1.2% 완화 (0
 # 프로브가 실패(손절)하면 45초 내 빠른 컷
 PROBE_FAIL_QUICK_EXIT = os.getenv("PROBE_FAIL_QUICK_EXIT", "1") == "1"  # 기본 활성화
 PROBE_FAIL_EXIT_SEC = 45  # 45초
+PROBE_FAIL_MIN_GAIN = float(os.getenv("PROBE_FAIL_MIN_GAIN", "0.003"))  # 최소 +0.3% 성과 요구
 
 # === 실패 후 추가 쿨다운 ===
 # 손절 발생 시 기본 쿨다운에 추가 보너스 시간
@@ -838,8 +839,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     )
 
     krw_to_use = base_qty * entry_price
+
+    # === Depth 기반 자동 사이징 (얇은 호가 = 슬리피지 위험 → 감산) ===
+    depth = pre["ob"]["depth_krw"]
+    depth_scale = 1.0
+    if depth < 8_000_000:
+        depth_scale = 0.6
+    elif depth < 12_000_000:
+        depth_scale = 0.8
+    krw_to_use = int(krw_to_use * depth_scale)
+
+    # Risk-Off 레벨에 따른 추가 감산
+    lvl = risk_off_level()
+    if lvl >= 1:
+        krw_to_use = int(krw_to_use * 0.7)
+    if lvl >= 2:
+        krw_to_use = int(krw_to_use * 0.6)
+
     if krw_to_use < MIN_ORDER_KRW:
-        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {MIN_ORDER_KRW}원 → 스킵")
+        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {MIN_ORDER_KRW}원 (depth_scale {depth_scale:.1f}, risk-off Lv{lvl}) → 스킵")
         return
 
     krw_to_use = int(krw_to_use)
@@ -2428,6 +2446,75 @@ def atr14_from_candles(candles, period=14):
 
 
 # =========================
+# 기대값(EV) 게이트 - 진입 전 필터
+# =========================
+def pre_entry_ev_gate(pre, entry_price, base_stop):
+    """
+    진입 전 기대값 계산
+    - p (승률 추정): 매수비 기반
+    - TP1 거리: ATR 기반
+    - SL 거리: 동적 손절가 기반
+    - EV = p*TP1 - (1-p)*SL - (수수료+슬리피지)
+
+    Returns: (EV, p, tp1_dist, sl_dist)
+    """
+    t = pre["tape"]
+    buy = t.get("buy_ratio", 0.5)
+
+    # p 추정: 매수비 50% → 0, 62% 이상 → 1 근처
+    p = max(0.0, min(1.0, (buy - 0.50) / 0.12))
+
+    # TP1 거리: ATR 기반 (최소 1.2%)
+    try:
+        c1 = get_minutes_candles(1, pre["ob"]["raw"]["market"], 20)
+        atr = atr14_from_candles(c1, 14) if c1 else None
+        atr_ratio = (atr / max(entry_price, 1)) if atr else 0.01
+        tp1_dist = max(0.012, atr_ratio * 1.5)
+    except Exception:
+        tp1_dist = 0.012
+
+    # SL 거리: 동적 손절가 기반 (최소 0.6%)
+    sl_dist = max((entry_price - base_stop) / entry_price, 0.006)
+
+    # 수수료+슬리피지 버퍼 (왕복 0.1% + 여유 0.1%)
+    friction = FEE_RATE + 0.001
+
+    # 기대값 계산
+    EV = p * tp1_dist - (1 - p) * sl_dist - friction
+
+    return EV, p, tp1_dist, sl_dist
+
+
+def risk_off_level():
+    """
+    최근 승률/연속손실 기반 Risk-Off 레벨 반환
+    - 0: 정상
+    - 1: 약간 보수 (2연속 손실 or 승률 < 40%)
+    - 2: 매우 보수 (3연속 손실 or 승률 < 30%)
+    """
+    if len(TRADE_HISTORY) < 10:
+        return 0
+
+    last10 = list(TRADE_HISTORY)[-10:]
+    wins = sum(1 for t in last10 if t.get("win"))
+    wr = wins / 10.0
+
+    # 연속 손실 카운트
+    cons_lose = 0
+    for t in reversed(last10):
+        if t.get("win"):
+            break
+        cons_lose += 1
+
+    # 레벨 판정
+    if cons_lose >= 3 or wr < 0.3:
+        return 2
+    if cons_lose >= 2 or wr < 0.4:
+        return 1
+    return 0
+
+
+# =========================
 # ★ 그라인드(계단식 상승) 예외
 # =========================
 # === PATCH: grind detector ===
@@ -3686,16 +3773,18 @@ def monitor_position(m,
                             trail_armed = False  # 새 기준으로 트레일링 리셋
 
             # === PROBE 실패 빠른 손절 (45초 제한) ===
-            # 프로브가 45초 내에 성과를 내지 못하면 빠르게 컷
+            # 프로브가 45초 내에 성과를 내지 못하면 빠르게 컷 (매수비도 확인)
             if PROBE_FAIL_QUICK_EXIT and pos.get("entry_mode") == "probe":
                 opened_ts = float(pos.get("opened_ts", 0) or 0)
                 if opened_ts > 0:
                     probe_elapsed = time.time() - opened_ts
-                    if probe_elapsed >= PROBE_FAIL_EXIT_SEC and gain_from_entry < 0.005:  # 45초 경과 + 0.5% 미만 수익
+                    t10_now = micro_tape_stats_from_ticks(ticks, 10)
+                    # 45초 경과 + 성과 미흡 + 매수비 약하면 컷
+                    if probe_elapsed >= PROBE_FAIL_EXIT_SEC and gain_from_entry < PROBE_FAIL_MIN_GAIN and t10_now["buy_ratio"] < 0.55:
                         if AUTO_TRADE and entry_volume > 0:
                             sell_market(m, entry_volume)
                         alert = format_sell_alert(m, f"프로브 실패 빠른 컷 ({int(probe_elapsed)}초)", entry_volume, entry_price, curp,
-                                                 f"제한 {PROBE_FAIL_EXIT_SEC}초")
+                                                 f"성과 < {PROBE_FAIL_MIN_GAIN*100:.1f}%, buy < 55%")
                         tg_send(alert)
                         verdict = "PROBE_FAIL_QUICK_EXIT"
                         break
@@ -4721,6 +4810,54 @@ def main():
                     cut("NO_TRADE_ZONE", f"{m} {zone_reason}")
                     continue
 
+                # === 동적 손절가 (EV 계산을 위해 먼저) ===
+                dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
+
+                # === 기대값(EV) 게이트 + RR 필터 ===
+                EV, p, tp1_dist, sl_dist = pre_entry_ev_gate(pre, pre['price'], dyn_stop)
+                rr = tp1_dist / max(sl_dist, 1e-9)
+
+                # RR 필터: 최소 1.1R
+                if rr < 1.1:
+                    cut("RR_LOW", f"{m} RR {rr:.2f} < 1.1 (TP1 {tp1_dist*100:.2f}% / SL {sl_dist*100:.2f}%)")
+                    # 알림은 보내되 거래는 보류
+                    tg_send_mid(f"🔔 {m} 관찰 알림 | RR {rr:.2f} 낮음 (기대값 {EV*100:.2f}%)")
+                    continue
+
+                # === Risk-Off 레벨 체크 ===
+                lvl = risk_off_level()
+                if lvl >= 1:
+                    # 기대값 임계 강화
+                    ev_threshold = 0.0010 if lvl >= 2 else 0.0005
+                    if EV <= ev_threshold:
+                        cut("EV_LOW_RISKOFF", f"{m} EV {EV*100:.3f}% < {ev_threshold*100:.2f}% (Risk-Off Lv{lvl})")
+                        tg_send_mid(f"⚠️ {m} Risk-Off Lv{lvl} | EV {EV*100:.3f}% 낮음")
+                        continue
+
+                    # 테이프·깊이 강화
+                    if pre["tape"]["buy_ratio"] < 0.56 or pre["ob"]["depth_krw"] < 10_000_000:
+                        cut("FLOW_DEPTH_RISKOFF", f"{m} buy {pre['tape']['buy_ratio']:.2f}, depth {int(pre['ob']['depth_krw']/1_000_000):.1f}M (Risk-Off)")
+                        continue
+
+                if lvl >= 2:
+                    # 더 엄격한 기준
+                    if pre["tape"]["buy_ratio"] < 0.58 or pre["tape"]["krw_per_sec"] < 30000:
+                        cut("FLOW_RISKOFF2", f"{m} flow {int(pre['tape']['krw_per_sec'])} < 30k (Risk-Off Lv2)")
+                        continue
+
+                # EV 음수면 거래 보류 (알림만)
+                if EV <= 0:
+                    cut("EV_NEG", f"{m} EV {EV*100:.3f}% (p≈{p:.2f}, RR {rr:.2f})")
+                    tg_send_mid(f"ℹ️ {m} 알림만 | EV 음수 {EV*100:.3f}% (p≈{p:.2f}, TP1 {tp1_dist*100:.1f}% / SL {sl_dist*100:.1f}%)")
+                    continue
+
+                # === 베어 레짐 시 강제 보수화 ===
+                if is_btc_bear():
+                    # EV 임계 추가 상향
+                    if EV <= 0.0005:
+                        cut("EV_BEAR_LOW", f"{m} EV {EV*100:.3f}% < 0.05% (베어 레짐)")
+                        continue
+
                 if m in recent_alerts and time.time(
                 ) - recent_alerts[m] < ALERT_TTL:
                     continue
@@ -4735,9 +4872,6 @@ def main():
                 recent_alerts[m] = time.time()
                 last_price_at_alert[m] = pre['price']
                 last_reason[m] = reason
-
-                # 동적 손절가
-                dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
 
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
