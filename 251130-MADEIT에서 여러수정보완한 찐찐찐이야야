@@ -53,7 +53,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
-EARLY_FLOW_MIN_KRWPSEC = 22_000  # 초기 거래속도 완화
+# EARLY_FLOW_MIN_KRWPSEC는 아래 line 983에서 재정의됨 (22_000)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -937,8 +937,8 @@ MIN_RELATIVE_KRW_X = 1.08  # 1.18 -> 1.25 (과거대비 증가율)
 # 틱/체결 기반
 TAPE_WINDOW_SEC = 15
 MIN_TICKS_COUNT = 3
-MIN_TURNOVER = 0.018
-TICKS_BUY_RATIO = 0.56
+MIN_TURNOVER = 0.016  # 0.018 → 0.016 (그라인드 상승 포착 완화)
+TICKS_BUY_RATIO = 0.54  # 0.56 → 0.54 (매수비 문턱 완화)
 
 # 위험 관리 (스프레드)
 MAX_SPREAD_BASE = 0.70  # 0.60 -> 0.45
@@ -980,7 +980,7 @@ EARLY_MIN_VWAP_GAP = 0.0005
 EARLY_MIN_BUY = 0.50
 EARLY_MIN_TURN = 0.012
 EARLY_MIN_TICKS = 2
-EARLY_FLOW_MIN_KRWPSEC = 26_000  # 45k -> 38k
+EARLY_FLOW_MIN_KRWPSEC = 22_000  # 26k → 22k (초기 거래속도 완화, 그라인드 포착)
 EARLY_MAX_VWAP_GAP = 0.018  # 1분봉가-VWAP 최대 괴리 (1.8%) 허용
 EARLY_MAX_EMA5_GAP = 0.022
 
@@ -1974,9 +1974,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     early_ok = all(early_conds)
 
+    # === 그라인드(계단식 상승) 예외 체크 ===
+    grind_ok = grind_break_ok(c1, ticks)
+
     # === Confirm (확정 진입 판단) ===
     confirm_ok = (
-        ign_ok or botacc_ok or mega or two_green_and_break
+        ign_ok or botacc_ok or mega or two_green_and_break or grind_ok
         or (early_ok and twin["buy_ratio"] >= 0.58 and uptick_streak_from_ticks(ticks, need=3))
     )
 
@@ -2001,6 +2004,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "botacc_ok": botacc_ok,
         "two_green_break": two_green_and_break,
         "early_ok": early_ok,
+        "grind_ok": grind_ok,  # 그라인드 플래그 추가
         "entry_mode": entry_mode,
     }
     if mega:
@@ -2014,17 +2018,25 @@ def final_check_leader(m, pre, tight_mode=False):
     t = pre["tape"]
     ob = pre["ob"]
     ticks = pre["ticks"]
+    is_grind = pre.get("grind_ok", False)  # 그라인드 모드 체크
+
     MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
     if tight_mode:
         MIN_TURNOVER_LOCAL += 0.003
     if 0 <= now_kst().hour < 6:
         MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
     MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
+    # 그라인드 모드일 때 회전율 문턱 추가 완화
+    if is_grind:
+        MIN_TURNOVER_LOCAL = max(0.015, MIN_TURNOVER_LOCAL - 0.004)
 
     TICKS_BUY_RATIO_LOCAL = max(
         0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
     TICKS_BUY_RATIO_LOCAL = max(0.54,
                                 TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # ★ 추가
+    # 그라인드 모드일 때 매수비 문턱 추가 완화
+    if is_grind:
+        TICKS_BUY_RATIO_LOCAL = max(0.52, TICKS_BUY_RATIO_LOCAL - 0.03)
 
     if t["n"] < MIN_TICKS_COUNT:
         cut("TICKS_LOW", f"{m} {t['n']}")
@@ -2047,7 +2059,11 @@ def final_check_leader(m, pre, tight_mode=False):
     raw_ob = ob["raw"]["orderbook_units"][:3]
     bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
     ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
-    if bid_sum / max(ask_sum, 1) < th["bidask_min"]:
+    bidask_min = th["bidask_min"]
+    # 그라인드 모드일 때 bid/ask 문턱 완화
+    if is_grind:
+        bidask_min = max(1.02, bidask_min - 0.05)
+    if bid_sum / max(ask_sum, 1) < bidask_min:
         cut("BIDASK_WEAK", f"{m} bidask weak")
         return None
 
