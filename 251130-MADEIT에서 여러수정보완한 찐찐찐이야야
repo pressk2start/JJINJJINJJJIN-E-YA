@@ -64,7 +64,7 @@ NET_BE_BUFFER = float(os.getenv("NET_BE_BUFFER", "0.0005"))  # 0.05% 여유 (슬
 
 # === 부분익절 후 시간 데드라인 ===
 # 부분익절 후 너무 오래 끌지 않도록 최대 보유 시간 제한
-PARTIAL_MAX_HOLD_SEC = int(os.getenv("PARTIAL_MAX_HOLD_SEC", "1800"))  # 30분 (1800초)
+PARTIAL_MAX_HOLD_SEC = int(os.getenv("PARTIAL_MAX_HOLD_SEC", "900"))  # 15분 (900초) - SIMPLE MODE에선 더 짧게
 
 # === 슬리피지 캡 통일 ===
 # 진입 시 시그널가 대비 허용 최대 상승폭 (슬리피지 제한)
@@ -96,12 +96,25 @@ except Exception:
 # ==== Exit Profile (gentle/ balanced / strict) ====
 EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
 
+# ==== SIMPLE MODE: 기대값 우선 R-based 관리 ====
+SIMPLE_MODE = os.getenv("SIMPLE_MODE", "1") == "1"  # 기본 활성화
+
+# ==== 일일 손실 한도 보호 ====
+DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))  # -2% 손실 시 당일 거래 중단
+CONSECUTIVE_LOSS_PAUSE_COUNT = int(os.getenv("CONSECUTIVE_LOSS_PAUSE", "3"))  # 3연속 손실 시 1시간 대기
+CONSECUTIVE_LOSS_PAUSE_SEC = 3600  # 1시간
+
+# ==== No Trade Zone (위험 시간대 진입 금지) ====
+NO_TRADE_OPENING_MIN = 5   # 장 시작 후 5분간 진입 금지
+NO_TRADE_CLOSING_MIN = 30  # 장 마감 30분 전부터 진입 금지
+NO_TRADE_RSI_THRESHOLD = 75  # RSI 75 이상 과매수 구간 진입 금지
+
 # ==== Sniper Mode (초입 보장, 늦은 추격 차단) ====
 SNIPER_MODE = os.getenv("SNIPER_MODE", "1") == "1"
 SNIPER_WAIT_SEC = 3                # 돌파 직후 관찰 시간 (3초로 단축)
-SNIPER_PULLBACK_MIN = 0.0025       # 0.25% 이상 눌림
+SNIPER_PULLBACK_MIN = 0.0025       # 0.25% 이상 눌림 (오프닝에선 0.002)
 SNIPER_PULLBACK_MAX = 0.0060       # 0.60% 이하 눌림
-SNIPER_MAX_ADV_FROM_SIGNAL = 0.009 # 신호가 대비 +0.9% 넘게 튀면 추격금지
+SNIPER_MAX_ADV_FROM_SIGNAL = 0.009 # 신호가 대비 +0.9% 넘게 튀면 추격금지 (오프닝에선 0.016)
 SNIPER_MIN_UPTICKS = 2             # 재상승은 2연속 uptick
 
 # ==== Uptrend Hold Lock (상승추세 보유 락) ====
@@ -214,8 +227,8 @@ print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # === 공격 모드 / 피라미딩 설정 ===
 AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 
-# 소액 선진입 + 추매 구조
-USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
+# 소액 선진입 + 추매 구조 (SIMPLE_MODE에선 비활성화 권장)
+USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "0") == "1"  # 기본 비활성화
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
@@ -243,6 +256,17 @@ REMONITOR_COOLDOWN_SEC = 300  # 5분
 REMONITOR_LAST_ALERT = {}
 
 # =========================
+# 🛡️ 일일 손실 한도 추적
+# =========================
+DAILY_LOSS_TRACKER = {
+    "date": None,           # 추적 시작 날짜
+    "total_pnl_pct": 0.0,   # 당일 누적 손익 (%)
+    "paused_until": 0.0,    # 일시정지 종료 시각 (timestamp)
+    "consecutive_losses": 0 # 연속 손실 카운트
+}
+_DAILY_LOSS_LOCK = threading.Lock()
+
+# =========================
 # 📈 최근 승률 기반 리스크 튜닝
 # =========================
 from collections import deque as _deque_for_risk  # 기존 deque와 별도 alias
@@ -261,6 +285,62 @@ def record_trade(market: str, pnl_pct: float):
         "win": pnl_pct > 0,
         "time": time.time(),
     })
+
+    # 일일 손실 한도 업데이트
+    update_daily_loss(pnl_pct)
+
+
+def update_daily_loss(pnl_pct: float):
+    """
+    일일 손실 한도 추적 업데이트
+    - 손실 발생 시 누적 손익에 반영
+    - 연속 손실 카운트 업데이트
+    """
+    with _DAILY_LOSS_LOCK:
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+
+        # 날짜 변경 시 리셋
+        if DAILY_LOSS_TRACKER["date"] != today:
+            DAILY_LOSS_TRACKER["date"] = today
+            DAILY_LOSS_TRACKER["total_pnl_pct"] = 0.0
+            DAILY_LOSS_TRACKER["consecutive_losses"] = 0
+            DAILY_LOSS_TRACKER["paused_until"] = 0.0
+
+        # 누적 손익 업데이트
+        DAILY_LOSS_TRACKER["total_pnl_pct"] += pnl_pct
+
+        # 연속 손실 카운트
+        if pnl_pct < 0:
+            DAILY_LOSS_TRACKER["consecutive_losses"] += 1
+        else:
+            DAILY_LOSS_TRACKER["consecutive_losses"] = 0
+
+        # 연속 손실 3회 이상 시 1시간 일시정지
+        if DAILY_LOSS_TRACKER["consecutive_losses"] >= CONSECUTIVE_LOSS_PAUSE_COUNT:
+            DAILY_LOSS_TRACKER["paused_until"] = time.time() + CONSECUTIVE_LOSS_PAUSE_SEC
+            DAILY_LOSS_TRACKER["consecutive_losses"] = 0  # 카운트 리셋
+            tg_send(f"⚠️ 연속 {CONSECUTIVE_LOSS_PAUSE_COUNT}회 손실 발생\n"
+                   f"1시간 거래 일시정지")
+
+
+def check_daily_loss_limit() -> tuple[bool, str]:
+    """
+    일일 손실 한도 체크
+    Returns: (allowed, reason)
+        - allowed: True면 거래 가능, False면 금지
+        - reason: 금지 사유
+    """
+    with _DAILY_LOSS_LOCK:
+        # 일시정지 중인지 체크
+        if time.time() < DAILY_LOSS_TRACKER["paused_until"]:
+            remain_sec = int(DAILY_LOSS_TRACKER["paused_until"] - time.time())
+            return False, f"연속 손실로 일시정지 중 (남은 시간: {remain_sec//60}분)"
+
+        # 일일 손실 한도 체크
+        if DAILY_LOSS_TRACKER["total_pnl_pct"] <= -DAILY_LOSS_LIMIT_PCT * 100:
+            return False, f"일일 손실 한도 도달 ({DAILY_LOSS_TRACKER['total_pnl_pct']:.2f}%)"
+
+        return True, ""
 
 
 def get_adaptive_risk() -> float:
@@ -584,9 +664,16 @@ def sniper_gate(m, pre):
     돌파 직후 첫 눌림-재상승에서만 진입 허용 (초입 보장)
     - 늦은 추격 차단
     - 짧은 눌림 후 재상승 포착
+    - 오프닝 윈도우: 더 관대 (pullback 0.2%, max_adv 1.6%)
+    - 일반 시간대: 더 보수적 (pullback 0.25%, max_adv 0.9%)
     """
     if not SNIPER_MODE:
         return True, pre["price"], "OFF"
+
+    # === 진입 품질 파라미터 동적 조정 ===
+    opening = is_opening_window()
+    pullback_min = 0.0020 if opening else SNIPER_PULLBACK_MIN
+    max_adv = 0.016 if opening else SNIPER_MAX_ADV_FROM_SIGNAL
 
     base = pre["price"]
     start = time.time()
@@ -605,12 +692,12 @@ def sniper_gate(m, pre):
             low_after_peak = min(low_after_peak, p)
 
         # 1) 신호가 대비 과도 진행이면 추격 금지
-        if (p / base - 1.0) > SNIPER_MAX_ADV_FROM_SIGNAL:
+        if (p / base - 1.0) > max_adv:
             return False, p, "LATE_ADV"
 
         # 2) 눌림 범위 체크
         dd = (low_after_peak / max(peak, 1) - 1.0)  # 음수
-        if -SNIPER_PULLBACK_MAX <= dd <= -SNIPER_PULLBACK_MIN:
+        if -SNIPER_PULLBACK_MAX <= dd <= -pullback_min:
             # 3) 재상승 확인: 2 upticks + 5초 매수비
             t5 = micro_tape_stats_from_ticks(ticks, 5)
             if uptick_streak_from_ticks(ticks, need=SNIPER_MIN_UPTICKS) and t5["buy_ratio"] >= 0.58:
@@ -1599,6 +1686,67 @@ def is_opening_window():
         return False
     t = now_kst()
     return (t.hour == 9 and t.minute < OPENING_MINUTES)
+
+
+def check_no_trade_zone(m: str) -> tuple[bool, str]:
+    """
+    No Trade Zone 체크 - 위험 시간대/과매수 구간 진입 금지
+    Returns: (allowed, reason)
+        - allowed: True면 진입 가능, False면 금지
+        - reason: 금지 사유
+    """
+    t = now_kst()
+
+    # 1) 장 시작 직후 NO_TRADE_OPENING_MIN 분간 금지
+    if t.hour == 9 and t.minute < NO_TRADE_OPENING_MIN:
+        return False, f"장 시작 {NO_TRADE_OPENING_MIN}분간 진입 금지"
+
+    # 2) 장 마감 NO_TRADE_CLOSING_MIN 분 전부터 금지
+    # (한국 암호화폐는 24시간이지만, 변동성 큰 시간대 회피)
+    # 여기서는 주요 변동성 시간대로 해석 - 예: 23:30~00:30
+    if (t.hour == 23 and t.minute >= 30) or (t.hour == 0 and t.minute < 30):
+        return False, "고변동성 시간대 진입 금지 (23:30~00:30)"
+
+    # 3) RSI 과매수 구간 체크 (옵션)
+    try:
+        c1 = get_minutes_candles(1, m, 15)
+        if len(c1) >= 14:
+            closes = [float(x["trade_price"]) for x in c1[:14]]
+            rsi = calculate_rsi(closes, period=14)
+            if rsi > NO_TRADE_RSI_THRESHOLD:
+                return False, f"RSI 과매수 ({rsi:.1f} > {NO_TRADE_RSI_THRESHOLD})"
+    except Exception:
+        pass  # RSI 계산 실패 시 무시
+
+    return True, ""
+
+
+def calculate_rsi(prices: list, period: int = 14) -> float:
+    """간단한 RSI 계산"""
+    if len(prices) < period + 1:
+        return 50.0  # 기본값
+
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 
 # === 베어 레짐 판단 (BTC 기준) ===
 def is_btc_bear():
@@ -3197,6 +3345,131 @@ def _end_reco(market, entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=
 
 
 # =========================
+# SIMPLE MODE: R-based 관리
+# =========================
+def _fractals_lows_from_ticks(ticks, n=12):
+    """
+    최근 n개 틱에서 스윙 로우(프랙탈) 감지
+    - 중간점이 양옆보다 낮으면 스윙 로우
+    - 최근 3개만 반환
+    """
+    ps = [x.get("trade_price", 0.0) for x in ticks[:n]]
+    if len(ps) < 5:
+        return []
+    lows = []
+    for i in range(2, len(ps) - 2):
+        if ps[i] < ps[i-1] and ps[i] < ps[i+1]:
+            lows.append(ps[i])
+    return lows[-3:]  # 최근 3개만
+
+
+def monitor_simple_R(m, entry_price, pre):
+    """
+    초간단 기대값 우선 R-based 관리
+    - 1R(entry-stop)에서 50% 부분익절
+    - 2R에서 전량 청산 or 구조 트레일
+    - 시간 스톱: 베어/오프닝 90초, 일반 180초
+    - 구조 트레일: 스윙 로우 기반 스톱 끌어올리기
+    """
+    BEAR = is_btc_bear()
+    c1 = get_minutes_candles(1, m, 20)
+    base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1, signal_type=("mega" if pre.get("mega_ok") else "early"))
+
+    # R 정의 (entry - stop). stop이 너무 가깝지 않게 최소폭
+    min_sl = entry_price * 0.006  # 0.6%
+    R = max(entry_price - base_stop, min_sl)
+    stop = entry_price - R
+
+    tp1 = entry_price + R           # 1R
+    tp2 = entry_price + 2 * R       # 2R
+
+    # 시간 데드라인: 베어/오프닝 90초, 일반 180초
+    deadline_sec = 90 if (BEAR or is_opening_window()) else 180
+    deadline = time.time() + deadline_sec
+
+    # 포지션 수량
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m, {})
+    vol = float(pos.get("volume", 0.0) or 0.0)
+    if vol <= 0:
+        return ("NO_POSITION", "", "", 0.0, entry_price, 0.0, 0.0)
+
+    took_tp1 = False
+    best = entry_price
+    last_swing_stop = stop
+
+    while time.time() < deadline:
+        time.sleep(RECHECK_SEC)
+        ticks = get_recent_ticks(m, 80)
+        if not ticks:
+            continue
+        p = ticks[0]["trade_price"]
+        best = max(best, p)
+
+        # 손절
+        if p <= stop:
+            if AUTO_TRADE and vol > 0:
+                sell_market(m, vol)
+            tg_send(format_sell_alert(m, "SIMPLE_STOP", vol, entry_price, p, f"R={fmt6(R)}"))
+            return ("STOP", "", "", (p/entry_price - 1 - FEE_RATE) * 100, p, (best/entry_price - 1) * 100, 0.0)
+
+        # 1R 부분익절 50%
+        if (not took_tp1) and p >= tp1:
+            take = vol * 0.5
+            if AUTO_TRADE and take > 0:
+                sell_market(m, take)
+            with _POSITION_LOCK:
+                if m in OPEN_POSITIONS:
+                    OPEN_POSITIONS[m]["volume"] = vol * 0.5
+            vol *= 0.5
+            took_tp1 = True
+            # 본절 승격
+            stop = max(stop, entry_price * (1 + FEE_RATE))
+            tg_send_mid(f"🎯 {m} 1R 도달 50% 청산 | stop 본절로 승격")
+
+        # 2R: 전량 or 구조 트레일
+        if p >= tp2:
+            # 구조 트레일: 최근 스윙 로우 - 여유
+            lows = _fractals_lows_from_ticks(ticks, 40)
+            if lows:
+                swing = lows[-1]
+                last_swing_stop = max(last_swing_stop, swing * 0.997)
+
+            # 베어나 오프닝이면 전량, 그 외엔 트레일
+            if is_opening_window() or BEAR:
+                if AUTO_TRADE and vol > 0:
+                    sell_market(m, vol)
+                tg_send(format_sell_alert(m, "SIMPLE_TP2_FULL", vol, entry_price, p, "오프닝/베어 전량"))
+                return ("TP2_FULL", "", "", (p/entry_price - 1 - FEE_RATE) * 100, p, (best/entry_price - 1) * 100, 0.0)
+            else:
+                stop = max(stop, last_swing_stop, best * (1 - 0.006))  # 구조 or 고점대비 0.6%
+                # 고점이 꺾여 스톱 히트하면 종료
+                if p <= stop:
+                    if AUTO_TRADE and vol > 0:
+                        sell_market(m, vol)
+                    tg_send(format_sell_alert(m, "SIMPLE_TRAIL_EXIT", vol, entry_price, p, f"trail {fmt6(stop)}"))
+                    return ("TRAIL", "", "", (p/entry_price - 1 - FEE_RATE) * 100, p, (best/entry_price - 1) * 100, 0.0)
+
+    # 시간 스톱: 수익/본절 이상이면 잔량 전량
+    ticks_final = get_recent_ticks(m, 10)
+    if not ticks_final:
+        cur = entry_price
+    else:
+        cur = ticks_final[0]["trade_price"]
+
+    if cur <= entry_price * (1 - 0.002):  # -0.2% 이하
+        if AUTO_TRADE and vol > 0:
+            sell_market(m, vol)
+        tg_send(format_sell_alert(m, "SIMPLE_TIME_STOP(neg)", vol, entry_price, cur, "시간만료-음전"))
+        return ("TIME_NEG", "", "", (cur/entry_price - 1 - FEE_RATE) * 100, cur, (best/entry_price - 1) * 100, 0.0)
+    else:
+        if AUTO_TRADE and vol > 0:
+            sell_market(m, vol)
+        tg_send(format_sell_alert(m, "SIMPLE_TIME_EXIT", vol, entry_price, cur, "시간만료-본절/소익"))
+        return ("TIME_POS", "", "", (cur/entry_price - 1 - FEE_RATE) * 100, cur, (best/entry_price - 1) * 100, 0.0)
+
+
+# =========================
 # 모니터링(최종형)
 # =========================
 def monitor_position(m,
@@ -3205,6 +3478,9 @@ def monitor_position(m,
                      tight_mode=False,
                      horizon=None,
                      reentry=False):
+    # === SIMPLE MODE 우회 ===
+    if SIMPLE_MODE:
+        return monitor_simple_R(m, entry_price, pre)
     c1 = get_minutes_candles(1, m, 20)
 
     # === [BEAR] 베어 레짐 감지 ===
@@ -4396,6 +4672,18 @@ def main():
                 conf, thr = quick_confidence(pre["tape"], pre["ob"])
                 if conf < thr:
                     cut("CONF_LOW", f"{m} confidence {conf:.2f} < threshold {thr:.2f} (약한 신호)")
+                    continue
+
+                # === 일일 손실 한도 체크 ===
+                loss_ok, loss_reason = check_daily_loss_limit()
+                if not loss_ok:
+                    cut("DAILY_LOSS_LIMIT", f"{m} {loss_reason}")
+                    continue
+
+                # === No Trade Zone 체크 ===
+                zone_ok, zone_reason = check_no_trade_zone(m)
+                if not zone_ok:
+                    cut("NO_TRADE_ZONE", f"{m} {zone_reason}")
                     continue
 
                 if m in recent_alerts and time.time(
