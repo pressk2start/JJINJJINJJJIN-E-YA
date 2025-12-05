@@ -53,7 +53,6 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
-EARLY_FLOW_MIN_KRWPSEC = 22_000  # 초기 거래속도 완화
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -509,7 +508,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.1   # 전체 리스크의 35%만 사용 (탐색용)
+        entry_fraction = 0.10  # 전체 리스크의 10%만 사용 (탐색용)
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
         entry_fraction = 1.0    # 전체 금액 (확정 진입)
@@ -788,7 +787,7 @@ def close_auto_position(m, reason=""):
 
     # 현재가(청산 전 기준) 조회
     try:
-        cur_js = upbit_private_get("/v1/ticker", {"markets": m})
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         cur_price = cur_js[0].get("trade_price",
                                   entry_price) if cur_js else entry_price
     except Exception:
@@ -858,7 +857,11 @@ def close_auto_position(m, reason=""):
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
+    # 쿨다운용 last_exit_ts 기록
     with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m)
+        if pos:
+            pos["last_exit_ts"] = time.time()
         OPEN_POSITIONS.pop(m, None)
 
 
@@ -2913,29 +2916,20 @@ def monitor_position(m,
 
             # ① 급락 즉시 손절 (-1.5%)
             if cur_gain <= -0.015:
-                sell_market(m, entry_volume)
-                tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
+                close_auto_position(m, "HARD_STOP")
                 verdict = "HARD_STOP"
                 break
 
             # ② 조기익절: 고점 대비 -0.3% & 거래량감속
             if drop_from_high >= 0.003 and vdrop_trigger:
-                partial_volume = entry_volume * 0.5
-                sell_market(m, partial_volume)
-
-                realized_gain = (curp / entry_price - 1.0) * 100
-                realized_krw = partial_volume * curp
-
-                tg_send_mid(
-                    f"⚡ <b>{m}</b> 부분익절 (50%)<br>"
-                    f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
-                    f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
-                )
+                ok, _, executed = safe_partial_sell(m, sell_ratio=0.5, reason="거래량 감속 부분익절")
+                if ok and executed > 0:
+                    tg_send_mid(f"⚡ {m} 부분익절 50% 실행")
                 verdict = "PARTIAL_EXIT"
 
             # ③ 전량익절: 고점 대비 -1.0% 이상
             elif drop_from_high >= 0.010:
-                sell_market(m, entry_volume)
+                close_auto_position(m, "FULL_EXIT")
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
                 break
@@ -2949,7 +2943,7 @@ def monitor_position(m,
                 profit_lock = base_stop
 
             if curp <= profit_lock:
-                sell_market(m, entry_volume)
+                close_auto_position(m, "PROFIT_LOCK")
                 tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
                 verdict = "PROFIT_LOCK"
                 break
@@ -2958,7 +2952,7 @@ def monitor_position(m,
             if trail_armed and curp > best:
                 trail_stop = max(trail_stop, curp * 0.995)
             if trail_armed and curp <= trail_stop:
-                sell_market(m, entry_volume)
+                close_auto_position(m, "TRAIL_EXIT")
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
                 verdict = "TRAIL_EXIT"
                 break
@@ -2966,7 +2960,7 @@ def monitor_position(m,
             # ⑥ 추세 회복 재진입 (눌림 후 재상승)
             if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                open_auto_position(m, pre, base_stop, eff_sl_pct)
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
@@ -3369,40 +3363,29 @@ def main():
                 signal_type = 'mega' if pre.get('mega_ok') else ('ign' if pre.get('ign_ok') else 'early')
                 dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1, signal_type=signal_type)
 
-                # === 🎯 EV + RR 게이트 (진입 직전 검증) ===
+                # === 🎯 EV + RR 계산 (알림용) ===
                 EV, win_prob, tp1_dist, sl_dist = pre_entry_ev_gate(pre, pre['price'], dyn_stop)
                 rr = tp1_dist / max(sl_dist, 1e-9)
                 lvl = risk_off_level()
 
-                # 기본 컷: 기대값 음수
-                if EV <= 0:
-                    cut("EV_NEG", f"{m} EV≤0 (p≈{win_prob:.2f}, TP1 {tp1_dist*100:.2f}%, SL {sl_dist*100:.2f}%)")
-                    tg_send(f"🔔 <b>관찰 알림</b> {m}\n기대값 음수 → 거래보류 (p≈{win_prob:.2f}, RR {rr:.2f})\n{link_for(m)}", retry=1)
-                    continue
-
-                # 최소 RR(리워드:리스크) 1.1 배
-                if rr < 1.10:
-                    cut("RR_LOW", f"{m} RR {rr:.2f} (<1.10)")
-                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRR {rr:.2f} < 1.10 → 보류\n{link_for(m)}", retry=1)
-                    continue
-
-                # 리스크-오프 레벨에 따른 기대값 임계 강화
-                if lvl >= 1 and EV <= 0.0005:
-                    cut("EV_LOW_RISKOFF", f"{m} EV {EV:.4f} @Lv1")
-                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRisk-off Lv{lvl}: EV {EV:.4f} 부족\n{link_for(m)}", retry=1)
-                    continue
-                if lvl >= 2 and EV <= 0.0010:
-                    cut("EV_LOW_RISKOFF2", f"{m} EV {EV:.4f} @Lv2")
-                    tg_send(f"🔔 <b>관찰 알림</b> {m}\nRisk-off Lv{lvl}: EV {EV:.4f} 부족\n{link_for(m)}", retry=1)
-                    continue
-
-                # ✅ 여기까지 통과 → 거래 가능 신호
+                # === ✅ 알림 발송 (항상 실행) ===
                 entry_mode = pre.get("entry_mode", "confirm")
                 mode_emoji = "🧭" if entry_mode == "probe" else "🔥"
                 mode_label = "탐색 진입候補" if entry_mode == "probe" else "거래 진입候補"
 
+                # EV 기반 알림 계층화
+                if EV <= -0.001:
+                    alert_emoji = "🔔"
+                    alert_label = "관찰 알림"
+                elif EV <= 0.0003:
+                    alert_emoji = "⚡"
+                    alert_label = "주의 알림"
+                else:
+                    alert_emoji = mode_emoji
+                    alert_label = mode_label
+
                 txt = (
-                    f"{mode_emoji} <b>{mode_label}</b> {m} <code>#{reason}</code>\n"
+                    f"{alert_emoji} <b>{alert_label}</b> {m} <code>#{reason}</code>\n"
                     f"💵 <b>현재가</b> {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
@@ -3472,6 +3455,25 @@ def main():
 
                     # --- 🔥 자동매수 진입 (최종 가격/한도 체크) ---
                     try:
+                        # === 🎯 EV + RR 게이트 (거래 진입 선별, 완화된 기준) ===
+                        # 기본 컷: 기대값이 매우 나쁨
+                        if EV <= -0.001:
+                            cut("EV_NEG", f"{m} EV {EV:.4f} (매우 낮음)")
+                            continue
+
+                        # 최소 RR(리워드:리스크) 0.8 배 (완화)
+                        if rr < 0.8:
+                            cut("RR_LOW", f"{m} RR {rr:.2f} (<0.8)")
+                            continue
+
+                        # 리스크-오프 레벨에 따른 기대값 임계 강화 (거래만)
+                        if lvl >= 1 and EV <= 0.0003:
+                            cut("EV_LOW_RISKOFF", f"{m} EV {EV:.4f} @Lv1")
+                            continue
+                        if lvl >= 2 and EV <= 0.0008:
+                            cut("EV_LOW_RISKOFF2", f"{m} EV {EV:.4f} @Lv2")
+                            continue
+
                         # === 최종 가격 가드 (추격 방지) ===
                         ok_guard, current_price = final_price_guard(m, pre['price'])
                         if not ok_guard:
