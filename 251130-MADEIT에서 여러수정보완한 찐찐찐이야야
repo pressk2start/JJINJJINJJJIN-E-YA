@@ -189,6 +189,19 @@ PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60")) 
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
 
+# === 초입 빈도 증가 설정 ===
+ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
+PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가
+PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.52"))  # probe-lite 최소 매수비
+PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "9000"))  # probe-lite 최소 거래속도
+PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.018"))  # VWAP 괴리 상한
+PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "1.20"))  # 스프레드 상한
+
+# === 스캘프/추세 분기 설정 ===
+TREND_THRESHOLD = float(os.getenv("TREND_THRESHOLD", "0.03"))  # 3% 이상: 큰 추세, 미만: 스캘프
+SCALP_MICRO_MARGIN = float(os.getenv("SCALP_MICRO_MARGIN", "0.0010"))  # 수수료 위 추가 마진 (0.1%)
+SCALP_MICRO_LOCK = float(os.getenv("SCALP_MICRO_LOCK", "0.0002"))  # 미세익절 lock 마진 (0.02%)
+
 
 # 현재 열린 포지션 기록용
 # 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
@@ -511,6 +524,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     # === 하이브리드 진입모드 반영 ===
     entry_mode = pre.get("entry_mode", "confirm")
+
+    # ✅ ALWAYS_PROBE_FIRST: 첫 진입은 무조건 probe (7000원)
+    if ALWAYS_PROBE_FIRST:
+        entry_mode = "probe"
 
     if entry_mode == "probe":
         entry_fraction = 0.1   # (참고) 계산은 하되, 실제 주문금액은 PROBE_KRW로 강제
@@ -2063,8 +2080,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
-    # === 동일 종목 중복 진입 방지 (최근 진입/청산/청산시도 후 2분간 무시) ===
-    cooldown_after_exit = 120
+    # === 동일 종목 중복 진입 방지 (probe 모드는 45초, 일반은 120초) ===
+    cooldown_after_exit = 45 if ALWAYS_PROBE_FIRST else 120
     now_ts = time.time()
 
     with _POSITION_LOCK:
@@ -2109,6 +2126,31 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 "early_ok": True,
             }
             return pre
+
+    # === Probe-Lite: 가벼운 조건으로 초입 빈도 증가 ===
+    if PROBE_LITE_ON:
+        ticks_lite = ticks_now if ticks_now else get_recent_ticks(m, 80)
+        ob_lite = obc.get(m)
+        if ticks_lite and ob_lite and c1:
+            t10 = micro_tape_stats_from_ticks(ticks_lite, 10)
+            vwap20 = vwap_from_candles_1m(c1, 20)
+            vgap = (c1[-1]["trade_price"] / max(vwap20, 1) - 1.0) if vwap20 else 0.0
+
+            if (t10["buy_ratio"] >= PROBE_LITE_MIN_BUY and
+                t10["krw_per_sec"] >= PROBE_LITE_MIN_KRWPSEC and
+                uptick_streak_from_ticks(ticks_lite, need=1) and
+                ob_lite.get("spread", 999) <= PROBE_LITE_MAX_SPREAD and
+                abs(vgap) <= PROBE_LITE_MAX_VWAP_GAP):
+
+                cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {t10['buy_ratio']:.2f}, 속도 {t10['krw_per_sec']:.0f})")
+                return {
+                    "price": ticks_lite[0]["trade_price"],
+                    "ob": ob_lite,
+                    "ticks": ticks_lite,
+                    "tape": t10,
+                    "early_ok": True,
+                    "entry_mode": "probe"
+                }
 
     # (이하 기존 detect_leader_stock 코드 계속)
 
@@ -2863,7 +2905,10 @@ def monitor_position(m,
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
-            
+
+            # === 📊 스캘프 vs 추세 분기: run_from_entry 기준 ===
+            run_from_entry = (best / entry_price - 1.0)
+
             # === PROBE → CONFIRM 전환 로직 ===
             with _POSITION_LOCK:
                 pos = (OPEN_POSITIONS.get(m) or {}).copy()  # ✅ 안전 읽기
@@ -2984,7 +3029,37 @@ def monitor_position(m,
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
             effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
 
-            # === 🔥 심플매도 로직 (익절 우선 + 이익락 + 거래량감속) ===
+            # === 🎯 스캘프 모드: run < 3%면 미세익절 우선 (상단추적 OFF) ===
+            if run_from_entry < TREND_THRESHOLD:
+                # 스캘프 모드: 수수료(0.1%) + 미세마진(0.1%) = 0.2% 이상이면 익절 시도
+                micro_target = SCALP_MICRO_MARGIN + FEE_RATE  # 기본 0.11%
+                micro_lock_gain = SCALP_MICRO_LOCK + FEE_RATE  # 0.12%
+
+                # 🔒 미세익절 락: gain이 목표 도달 후 약간 되돌리면 즉시 청산
+                if gain_from_entry >= micro_lock_gain:
+                    drop_from_high = (best - curp) / max(best, 1)
+                    # 0.05% 이상 되돌림 감지하면 즉시 청산
+                    if drop_from_high >= 0.0005:
+                        exit_reason = "SCALP_MICRO_EXIT"
+                        verdict = f"스캘프 미세익절 (run={run_from_entry*100:.2f}%, gain={gain_from_entry*100:.2f}%)"
+                        break
+
+                # 📉 스캘프 모드 손절: 일반보다 타이트하게 (-0.8%)
+                if gain_from_entry <= -0.008:
+                    exit_reason = "SCALP_STOP"
+                    verdict = f"스캘프 손절 (gain={gain_from_entry*100:.2f}%)"
+                    break
+
+                # ⏰ 스캘프 타임아웃: 30초 내 목표 미달성 시 본전 근처면 청산
+                if alive_sec >= 30 and -0.002 <= gain_from_entry <= 0.002:
+                    exit_reason = "SCALP_TIMEOUT"
+                    verdict = f"스캘프 타임아웃 본전청산 (gain={gain_from_entry*100:.2f}%)"
+                    break
+
+                # 스캘프 모드에서는 복잡한 상단추적 로직 스킵
+                continue
+
+            # === 🔥 추세 모드: run ≥ 3%, 심플매도 로직 (익절 우선 + 이익락 + 거래량감속) ===
             t15 = micro_tape_stats_from_ticks(ticks, 15)
             t30 = micro_tape_stats_from_ticks(ticks, 30)
             avg_ref = (t15["krw_per_sec"] + t30["krw_per_sec"]) / 2
