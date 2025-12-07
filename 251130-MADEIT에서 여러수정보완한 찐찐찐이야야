@@ -171,6 +171,12 @@ AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 # 소액 선진입 + 추매 구조
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
+# === 염탐(probe) 금액/타임아웃/추매 횟수 ===
+PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "60")) # probe가 N초 안에 못 터지면 본절/소손절
+PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.001"))  # +0.1% 못 가면 exit
+MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
+
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
 SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
@@ -454,17 +460,20 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.1   # 전체 리스크의 10%만 사용 (탐색용)
+        entry_fraction = 0.1   # (참고) 계산은 하되, 실제 주문금액은 PROBE_KRW로 강제
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
-        entry_fraction = 1.0    # 전체 금액 (확정 진입)
+        entry_fraction = 1.0
         mode_emoji = "🔥"
     else:
         entry_fraction = 1.0
         mode_emoji = "🤖"
 
-    # ★ 공격모드일 경우 가격 가드 완화
-    max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
+    # ★ 가격 가드: probe/confirm 분리 (probe는 더 과감히)
+    if entry_mode == "probe":
+        max_drift = 0.030 if AGGRESSIVE_MODE else 0.018
+    else:
+        max_drift = 0.025 if AGGRESSIVE_MODE else 0.012
 
     ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
     if not ok_guard:
@@ -526,7 +535,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         risk_to_use,
     )
 
-    krw_to_use = base_qty * entry_price
+    if entry_mode == "probe":
+        # ✅ 염탐은 항상 고정 최소금액으로만
+        krw_to_use = min(krw_bal, max(5000, PROBE_KRW))
+    else:
+        krw_to_use = base_qty * entry_price
+
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
         return
@@ -575,8 +589,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "sl_pct": eff_sl_pct,
             "state": "open",
             "last_add_ts": 0.0,
-            "entry_mode": entry_mode,  # <-- 로컬 변수 사용 (중요)
+            "entry_mode": entry_mode,
+            "adds": 0,                 # ✅ 추매 횟수 카운터
         }
+
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
 
@@ -607,8 +623,8 @@ def add_auto_position(m, cur_price):
         pos = OPEN_POSITIONS.get(m)
         if not pos or pos.get("volume", 0) <= 0:
             return False, None
-        if pos.get("added"):
-            # 이미 한 번 추매한 포지션
+        if pos.get("adds", 0) >= MAX_ADDS:
+            # 추매 최대 횟수 도달
             return False, None
         last_add_ts = pos.get("last_add_ts", 0.0)
 
@@ -702,9 +718,10 @@ def add_auto_position(m, cur_price):
 
         pos["entry_price"] = new_entry_price
         pos["volume"] = new_vol
-        pos["added"] = True
+        pos["adds"] = pos.get("adds", 0) + 1     # ✅ 누적 추매회수
         pos["last_add_ts"] = time.time()
-        pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
+        pos["entry_mode"] = "confirm"
+        pos["added"] = True                      # (하위호환용, 다른 곳에서 참조할 수도 있으니 유지)
 
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
@@ -2765,9 +2782,15 @@ def monitor_position(m,
             if not cur_js or len(cur_js) == 0:
                 continue
             curp = cur_js[0].get("trade_price", last_price)
+
+            # 🔧 신고점/신저점 '갱신' 감지를 위해 이전값 저장
+            prev_best = best
+            prev_worst = worst
+
             last_price = curp
             best = max(best, curp)
             worst = min(worst, curp)
+
 
             # === 1) 웜업 구간: 소폭 되돌림 무시 (단, 급락은 즉시 컷)
             alive_sec = time.time() - start_ts
@@ -2811,12 +2834,11 @@ def monitor_position(m,
                 if condition_original or condition_rebound:
                     ok_add, new_entry = add_auto_position(m, curp)
                     if ok_add and new_entry:
-                        with _POSITION_LOCK:                          # ✅ 일괄 갱신
+                        with _POSITION_LOCK:
                             if m in OPEN_POSITIONS:
                                 OPEN_POSITIONS[m].update({
                                     "entry_mode": "confirm",
                                     "entry_price": float(new_entry),
-                                    "added": True,
                                     "last_add_ts": time.time(),
                                 })
 
@@ -2840,6 +2862,18 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
+            # === PROBE 타임아웃: 빨리 안 터지면 본절/소손절로 철수 ===
+            with _POSITION_LOCK:
+                pos_probe = (OPEN_POSITIONS.get(m) or {})
+            if pos_probe.get("entry_mode") == "probe":
+                if alive_sec >= PROBE_TIMEOUT_SEC:
+                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                    gain_now = (curp / entry_price - 1.0)
+                    if (gain_now < PROBE_BREAKEVEN_EXIT) and (t15_now["buy_ratio"] < 0.58):
+                        exit_reason = "PROBE_TIMEOUT"
+                        verdict = "probe_timeout_exit"
+                        break
+
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
@@ -2861,13 +2895,13 @@ def monitor_position(m,
                 if add_cond_price and add_cond_flow and short_term_up:
                     with _POSITION_LOCK:
                         pos = OPEN_POSITIONS.get(m)
-                        already_added = pos.get("added") if pos else True
+                        adds_used = pos.get("adds", 0) if pos else MAX_ADDS
                         last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
 
                     # 쿨다운을 40% 단축해 재진입성 향상
                     cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
 
-                    if pos and (not already_added) and cooldown_ok:
+                    if pos and (adds_used < MAX_ADDS) and cooldown_ok:
                         ok_add, new_entry = add_auto_position(m, curp)
                         if ok_add and new_entry:
                             entry_price = new_entry
@@ -2879,8 +2913,9 @@ def monitor_position(m,
                                 f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
                             )
 
-            # 트레일 업데이트(이익 확대 시에만 상향)
-            if trail_armed and curp > best:
+
+            # 트레일 업데이트(이익 확대 시에만 상향) — '신고점 갱신' 기준
+            if trail_armed and best > prev_best:
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
                 if atr and atr > 0:
                     trail_dist = max(TRAIL_DISTANCE_MIN,
@@ -2888,6 +2923,7 @@ def monitor_position(m,
                 else:
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+
 
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
             effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
@@ -2955,8 +2991,15 @@ def monitor_position(m,
                 safe_partial_sell(m, sell_ratio=0.5, reason="조기익절 50%")
                 verdict = "PARTIAL_EXIT"
 
-            # ③ 전량익절: 고점 대비 -1.0% 이상
-            elif drop_from_high >= 0.010:
+            # ③ 전량익절: 고점대비 하락 임계치(동적)
+            dyn_drop_thr = 0.010
+            if t15["krw_per_sec"] >= 25000 and t15["buy_ratio"] >= 0.60:
+                dyn_drop_thr = 0.016   # 강추세: 더 여유
+            elif t15["krw_per_sec"] <= 12000 or t15["buy_ratio"] < 0.52:
+                dyn_drop_thr = 0.008   # 둔화: 더 타이트
+
+            # ← 임계치 산정과 판정을 분리
+            if drop_from_high >= dyn_drop_thr:
                 exit_reason = "DROP_FROM_HIGH"
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절(대기)")
                 verdict = "FULL_EXIT"
@@ -2976,15 +3019,15 @@ def monitor_position(m,
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑤ 트레일링 스탑 (고점 대비 0.5%)
-
-            if trail_armed and curp > best:
-                trail_stop = max(trail_stop, curp * 0.995)
+            # ⑤ 트레일링 스탑 (고점 대비 0.5%) — '신고점 갱신' 시만 상향
+            if trail_armed and best > prev_best:
+                trail_stop = max(trail_stop, best * 0.995)
             if trail_armed and curp <= trail_stop:
                 exit_reason = "TRAIL_EXIT"
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산(대기)")
                 verdict = "TRAIL_EXIT"
                 break
+
 
             # ⑥ 재진입은 remonitor_until_close()가 청산 후 처리하므로 여기서는 불필요
 
