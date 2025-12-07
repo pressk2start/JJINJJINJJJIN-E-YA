@@ -3,7 +3,7 @@ import os, time, math, requests, statistics, traceback, threading, csv, sys, jso
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlencode
+from urllib.parse import urlencode, unquote
 
 import uuid
 import hashlib
@@ -258,8 +258,8 @@ def _make_auth_headers(query: dict = None):
                     items.append((k, str(x)))
             else:
                 items.append((k, str(v)))
-        # doseq=True: 동일 키 다값 처리, safe=""로 표준 인코딩
-        return urlencode(items, doseq=True, safe="")
+        # doseq=True: 동일 키 다값 처리, unquote로 업비트 스펙 준수
+        return unquote(urlencode(items, doseq=True))
 
     payload = {
         'access_key': UPBIT_ACCESS_KEY,
