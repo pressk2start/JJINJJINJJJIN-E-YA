@@ -2868,7 +2868,7 @@ def monitor_position(m,
             if pos.get("entry_mode") == "probe":
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                gain_now = (Decimal(curp) / Decimal(entry_price) - Decimal(1))
+                gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
                 strong_flow = (
                     t15_now["buy_ratio"] >= 0.58
@@ -2879,7 +2879,7 @@ def monitor_position(m,
                 c1m_ema = get_minutes_candles(1, m, 20)
                 ema3_cross = ema_last([c["trade_price"] for c in c1m_ema], 3)
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
-                ema_crossover = ema3_cross > ema8_cross if (ema3_cross and ema8_cross) else False
+                ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
                 condition_original = (gain_now >= 0.012 and strong_flow)
                 condition_rebound  = (ema_crossover and gain_now >= 0.006 and strong_flow)
