@@ -3,7 +3,7 @@ import os, time, math, requests, statistics, traceback, threading, csv, sys, jso
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlencode, unquote
+from urllib.parse import urlencode
 from decimal import Decimal, getcontext
 
 import uuid
@@ -255,15 +255,16 @@ def _make_auth_headers(query: dict = None):
         if not d:
             return ""
         items = []
-        for k in sorted(d.keys()):  # 키 정렬
+        for k in sorted(d.keys()):
             v = d[k]
             if isinstance(v, (list, tuple)):
                 for x in v:
                     items.append((k, str(x)))
+            elif v is None:
+                continue
             else:
                 items.append((k, str(v)))
-        # doseq=True: 동일 키 다값 처리, unquote로 업비트 스펙 준수
-        return unquote(urlencode(items, doseq=True))
+        return urlencode(items, doseq=True)  # unquote 제거
 
     payload = {
         'access_key': UPBIT_ACCESS_KEY,
@@ -320,8 +321,7 @@ def upbit_private_post(path, body=None, timeout=7):
         try:
             _throttle()
             with _session_lock:
-                # ❗ Upbit는 query string/form 기준으로 검증 → JSON 금지
-                r = SESSION.post(url, headers=headers, params=body, timeout=timeout)
+                r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
