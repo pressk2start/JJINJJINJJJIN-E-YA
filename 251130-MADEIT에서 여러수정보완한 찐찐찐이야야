@@ -144,15 +144,12 @@ print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 # =========================
 # uuid, hashlib, jwt, urlencode는 상단에서 이미 import됨
 
-UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
-UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
+# 키 끝에 공백/개행 붙어 401 나는 케이스 방지
+UPBIT_ACCESS_KEY = (os.getenv("UPBIT_ACCESS_KEY", "") or "").strip()
+UPBIT_SECRET_KEY = (os.getenv("UPBIT_SECRET_KEY", "") or "").strip()
 
-print(
-    "[UPBIT_KEYS] access_len=",
-    len(UPBIT_ACCESS_KEY),
-    "secret_len=",
-    len(UPBIT_SECRET_KEY),
-)
+print("[UPBIT_KEYS] access_len=", len(UPBIT_ACCESS_KEY),
+      "secret_len=", len(UPBIT_SECRET_KEY))
 
 # AUTO_TRADE = 1 이면 실제 주문, 0이면 알림 + 모니터링만
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
@@ -284,17 +281,35 @@ def _make_auth_headers(query: dict = None):
 def upbit_private_get(path, params=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     headers = _make_auth_headers(params or {})
-    for attempt in range(3):  # ✅ 간단 백오프+재시도
+    for attempt in range(3):
         try:
             _throttle()
-            with _session_lock:  # ✅ 세션 동시접근 보호
+            with _session_lock:
                 r = SESSION.get(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.RequestException:
+
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body_txt = getattr(e.response, "text", "")
+            print(f"[UPBIT_GET_HTTPERROR] {path} {e} body={body_txt}")
+            if status == 401:
+                tg_send(f"❌ Upbit 401(GET) {path}\n{body_txt[:800]}")
+            if attempt == 2:
+                raise
+            time.sleep(0.25 * (2 ** attempt))
+
+        except requests.RequestException as e:
+            print(f"[UPBIT_GET_REQERR] {path} {e}")
+            if attempt == 2:
+                raise
+            time.sleep(0.25 * (2 ** attempt))
+
+        except requests.RequestException as e:
+            print(f"[UPBIT_GET_REQERR] {path} {e}")
             if attempt == 2:
                 raise
             time.sleep(0.25 * (2 ** attempt))
@@ -303,17 +318,29 @@ def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
     headers = _make_auth_headers(body)
-    for attempt in range(3):  # ✅ 간단 백오프+재시도
+    for attempt in range(3):
         try:
             _throttle()
-            with _session_lock:  # ✅ 세션 동시접근 보호
+            with _session_lock:
                 r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.RequestException:
+
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body_txt = getattr(e.response, "text", "")
+            print(f"[UPBIT_POST_HTTPERROR] {path} {e} body={body_txt}")
+            if status == 401:
+                tg_send(f"❌ Upbit 401(POST) {path}\n{body_txt[:800]}")
+            if attempt == 2:
+                raise
+            time.sleep(0.25 * (2 ** attempt))
+
+        except requests.RequestException as e:
+            print(f"[UPBIT_POST_REQERR] {path} {e}")
             if attempt == 2:
                 raise
             time.sleep(0.25 * (2 ** attempt))
@@ -359,6 +386,30 @@ def get_account_info():
     except Exception as e:
         print("[AUTO] 계좌 조회 실패:", e)
         return []
+
+def startup_selfcheck():
+    """
+    업비트 Private 인증 즉시 점검.
+    - /v1/accounts 호출 성공 → True
+    - 401/권한/화이트리스트/키오류 등 → TG로 본문까지 전송하고 False
+    """
+    try:
+        js = upbit_private_get("/v1/accounts")
+        if isinstance(js, list):
+            print("✅ Upbit private OK (accounts 조회 성공)")
+            return True
+        print("⚠️ accounts 응답 비정상:", js)
+        tg_send(f"⚠️ Upbit accounts 응답 비정상\n{js}")
+        return False
+    except requests.HTTPError as e:
+        body = getattr(e.response, "text", "")
+        print("❌ Upbit auth 실패:", e, "| body=", body)
+        tg_send(f"❌ Upbit 인증 실패\n{e}\n{body[:800]}")
+        return False
+    except Exception as e:
+        print("❌ Upbit selfcheck 예외:", e)
+        tg_send(f"❌ Upbit selfcheck 예외\n{e}")
+        return False
 
 
 def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
@@ -575,6 +626,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         else:
             avg_price = float(entry_price)  # 명시적 float
 
+    except requests.HTTPError as e:
+        body = getattr(e.response, "text", "")
+        print("[AUTO BUY ERR]", e, body)
+        tg_send(f"⚠️ 매수 실패 {m}\n{e}\n{body}")
+        return
     except Exception as e:
         print("[AUTO BUY ERR]", e)
         tg_send(f"⚠️ 매수 실패 {m}\n{e}")
@@ -3575,6 +3631,10 @@ def main():
 
 if __name__ == "__main__":
     validate_config()
+    # 시작 즉시 인증 점검. 실패면 자동매매 차단
+    if not startup_selfcheck():
+        print("⛔ 인증 실패 → AUTO_TRADE 강제 OFF")
+        AUTO_TRADE = False
     bot_start_time = time.time()
     start_health_server()
     main()
