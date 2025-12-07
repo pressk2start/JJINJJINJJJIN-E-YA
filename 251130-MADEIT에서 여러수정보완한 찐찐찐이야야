@@ -250,47 +250,40 @@ def get_adaptive_risk() -> float:
     else:
         return RISK_PER_TRADE
 
-def _make_auth_headers(query: dict = None):
-    def _canonical_qs(d: dict) -> str:
-        if not d:
-            return ""
-        items = []
-        for k in sorted(d.keys()):
-            v = d[k]
-            if isinstance(v, (list, tuple)):
-                for x in v:
-                    items.append((k, str(x)))
-            elif v is None:
-                continue
-            else:
-                items.append((k, str(v)))
-        return urlencode(items, doseq=True)  # unquote 제거
+def _make_auth_headers(params=None):
+    """
+    업비트 Private API 인증 헤더 생성
+    - params: list[tuple] 또는 dict (순서 보존, 정렬 금지!)
+    """
+    payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
 
-    payload = {
-        'access_key': UPBIT_ACCESS_KEY,
-        'nonce': str(uuid.uuid4()),
-    }
+    if params:
+        # params를 list[tuple] 형태로 통일 (순서 보존)
+        if isinstance(params, list):
+            items = params
+        elif isinstance(params, dict):
+            items = list(params.items())  # dict 삽입 순서 유지 (Python 3.7+)
+        else:
+            raise TypeError("params must be list[tuple] or dict")
 
-    if query:
-        qs = _canonical_qs(query).encode("utf-8")
-        m = hashlib.sha512()
-        m.update(qs)
-        payload['query_hash'] = m.hexdigest()
-        payload['query_hash_alg'] = 'SHA512'
+        qs = urlencode(items, doseq=True)
+        payload["query_hash"] = hashlib.sha512(qs.encode()).hexdigest()
+        payload["query_hash_alg"] = "SHA512"
 
-    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm='HS256')
-    if isinstance(jwt_token, bytes):  # PyJWT 호환
-        jwt_token = jwt_token.decode('utf-8')
-    return {"Authorization": f"Bearer {jwt_token}"}
+    token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
+    if isinstance(token, bytes):
+        token = token.decode()
+    return {"Authorization": f"Bearer {token}"}
 
 def upbit_private_get(path, params=None, timeout=7):
     url = f"https://api.upbit.com{path}"
+    items = list(params.items()) if isinstance(params, dict) else (params or [])
     for attempt in range(3):
-        headers = _make_auth_headers(params or {})  # ❗ 매시도마다 새 nonce/JWT
+        headers = _make_auth_headers(items)  # ❗ 매시도마다 새 nonce/JWT
         try:
             _throttle()
             with _session_lock:
-                r = SESSION.get(url, headers=headers, params=params, timeout=timeout)
+                r = SESSION.get(url, headers=headers, params=items, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
@@ -316,13 +309,21 @@ def upbit_private_get(path, params=None, timeout=7):
 def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
+    # 순서 보존: dict면 items로, list면 그대로
+    if isinstance(body, dict):
+        items = list(body.items())
+    elif isinstance(body, list):
+        items = body[:]
+    else:
+        raise TypeError("body must be dict or list[tuple]")
+
     for attempt in range(3):
-        headers = _make_auth_headers(body)  # ❗ 매시도마다 새 nonce/JWT
+        headers = _make_auth_headers(items)  # ❗ 매시도마다 새 nonce/JWT
         try:
             _throttle()
             with _session_lock:
                 # Upbit는 query string 기준으로 query_hash 검증
-                r = SESSION.post(url, headers=headers, params=body, timeout=timeout)
+                r = SESSION.post(url, headers=headers, params=items, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
@@ -427,23 +428,23 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
 
 def place_market_buy(market, krw_amount):
     """KRW 기준 시장가 매수 (ord_type=price)"""
-    body = {
-        "market": market,
-        "side": "bid",
-        "ord_type": "price",
-        "price": str(int(krw_amount))  # 사용할 KRW 금액
-    }
+    body = [
+        ("market", market),
+        ("side", "bid"),
+        ("ord_type", "price"),
+        ("price", str(int(krw_amount))),
+    ]
     return upbit_private_post("/v1/orders", body)
 
 
 def place_market_sell(market, volume):
     """수량 기준 시장가 매도"""
-    body = {
-        "market": market,
-        "side": "ask",
-        "ord_type": "market",
-        "volume": str(volume)
-    }
+    body = [
+        ("market", market),
+        ("side", "ask"),
+        ("ord_type", "market"),
+        ("volume", str(volume)),
+    ]
     return upbit_private_post("/v1/orders", body)
 
 def final_price_guard(m, initial_price, max_drift=0.018):
