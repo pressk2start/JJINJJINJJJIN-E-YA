@@ -321,7 +321,8 @@ def upbit_private_post(path, body=None, timeout=7):
         try:
             _throttle()
             with _session_lock:
-                r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
+                # Upbit는 query string 기준으로 query_hash 검증
+                r = SESSION.post(url, headers=headers, params=body, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
