@@ -284,8 +284,8 @@ def _make_auth_headers(query: dict = None):
 
 def upbit_private_get(path, params=None, timeout=7):
     url = f"https://api.upbit.com{path}"
-    headers = _make_auth_headers(params or {})
     for attempt in range(3):
+        headers = _make_auth_headers(params or {})  # ❗ 매시도마다 새 nonce/JWT
         try:
             _throttle()
             with _session_lock:
@@ -315,12 +315,13 @@ def upbit_private_get(path, params=None, timeout=7):
 def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
-    headers = _make_auth_headers(body)
     for attempt in range(3):
+        headers = _make_auth_headers(body)  # ❗ 매시도마다 새 nonce/JWT
         try:
             _throttle()
             with _session_lock:
-                r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
+                # ❗ Upbit는 query string/form 기준으로 검증 → JSON 금지
+                r = SESSION.post(url, headers=headers, params=body, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
