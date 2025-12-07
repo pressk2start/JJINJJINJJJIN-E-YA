@@ -4,11 +4,15 @@ from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode, unquote
+from decimal import Decimal, getcontext
 
 import uuid
 import hashlib
 import hmac
 import jwt
+
+# Decimal 정밀도 설정
+getcontext().prec = 10
 
 
 def rnd():
@@ -308,12 +312,6 @@ def upbit_private_get(path, params=None, timeout=7):
                 raise
             time.sleep(0.25 * (2 ** attempt))
 
-        except requests.RequestException as e:
-            print(f"[UPBIT_GET_REQERR] {path} {e}")
-            if attempt == 2:
-                raise
-            time.sleep(0.25 * (2 ** attempt))
-
 def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
@@ -418,8 +416,9 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     - total_equity * risk_pct 만큼만 최대 손실 허용
     """
     risk_krw = total_equity * risk_pct
-    per_unit_loss = max(entry_price - stop_price,
-                        entry_price * 0.01)  # 최소 1% 방어
+    per_unit_loss = entry_price - stop_price
+    if per_unit_loss <= 0:  # 비정상 stop 방어
+        per_unit_loss = entry_price * 0.01
     qty = risk_krw / per_unit_loss
     return max(qty, 0)
 
@@ -2868,8 +2867,6 @@ def monitor_position(m,
 
             if pos.get("entry_mode") == "probe":
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                from decimal import Decimal, getcontext
-                getcontext().prec = 10
 
                 gain_now = (Decimal(curp) / Decimal(entry_price) - Decimal(1))
 
@@ -3211,13 +3208,12 @@ def tg_send(t, retry=1):
                         json=payload,
                         timeout=4,
                     )
-                if r.status_code == 200:
-                    js = r.json()
-                    if js.get("ok") is True:
-                        ok_any = True
-                        break
-                else:
-                    print(f"[TG][{cid}] status={r.status_code} body={r.text}")
+                js = r.json()
+                if r.status_code == 200 and js.get("ok") is True:
+                    ok_any = True
+                    break
+                # ok:false 또는 비정상 status 모두 로깅
+                print(f"[TG][{cid}] status={r.status_code} body={r.text}")
             except Exception as e:
                 print(f"[TG][{cid}] exception: {e}")
             time.sleep(0.25 + rnd() * 0.25)
