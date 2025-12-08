@@ -174,8 +174,8 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "45")) # probe가 N초 안에 못 터지면 본절 정리 (빠른 결론)
-PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.0003"))  # 본절 중심 (가격 요구치 제거)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "25")) # probe가 N초 안에 못 터지면 본절 정리 (45 → 25, 빠른 결론)
+PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.0000"))  # 딱 본절 중심 (-0.0003 → 0.0000)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
@@ -192,10 +192,10 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # �
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
 PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가 (알림 양 증가)
-PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.53"))  # probe-lite 최소 매수비 (0.52 → 0.53)
-PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "12000"))  # probe-lite 최소 거래속도 (9000 → 12000)
-PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.012"))  # VWAP 괴리 상한 (0.018 → 0.012)
-PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "0.90"))  # 스프레드 상한 (1.20 → 0.90)
+PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.50"))  # probe-lite 최소 매수비 (0.53 → 0.50, 초완화)
+PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "8000"))  # probe-lite 최소 거래속도 (12000 → 8000, 초완화)
+PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.017"))  # VWAP 괴리 상한 (0.012 → 0.017, 초완화)
+PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "2.00"))  # 스프레드 상한 (0.90 → 2.00, 초완화)
 
 # === 스캘프/추세 분기 설정 ===
 TREND_THRESHOLD = float(os.getenv("TREND_THRESHOLD", "0.03"))  # 3% 이상: 큰 추세, 미만: 스캘프
@@ -1204,10 +1204,10 @@ ABS_SURGE_KRW = 2_000_000   # 절대 거래대금 서지 기준 (2.0M KRW, 친�
 RELAXED_X = 1.08            # 과거대비 거래대금 완화 배율
 
 # 쿨다운 히스테리시스
-REARM_MIN_SEC = 45
+REARM_MIN_SEC = 20  # 45 → 20 (초완화, 빠른 재시도)
 REARM_PRICE_GAP = 0.009
 REARM_PULLBACK_MAX = 0.005  # 0.004 → 0.005 (되돌림 후 재시도 여지↑)
-REARM_REBREAK_MIN = 0.0018  # 0.0028 → 0.0018 (재돌파 재알림 문턱↓)
+REARM_REBREAK_MIN = 0.0012  # 0.0018 → 0.0012 (재돌파 재알림 문턱↓, 초완화)
 
 # 포스트체크(허수 2차)
 # POSTCHECK_ENABLED는 상단 전역 설정(59라인)에서 True로 설정됨 (컨펌만 적용, 프로브는 패스)
@@ -2106,21 +2106,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if ticks_now:
         t6 = micro_tape_stats_from_ticks(ticks_now, 6)
         if (
-            t6["n"] >= 3 and                    # 체결 3개 이상
-            t6["buy_ratio"] >= 0.50 and         # 매수비 50%+
-            t6["krw_per_sec"] >= 7000 and       # 속도 7k KRW/s+
+            t6["n"] >= 2 and                    # 체결 2개 이상 (3 → 2, 초완화)
+            t6["buy_ratio"] >= 0.48 and         # 매수비 48%+ (0.50 → 0.48, 초완화)
+            t6["krw_per_sec"] >= 4000 and       # 속도 4k KRW/s+ (7000 → 4000, 초완화)
             last_two_ticks_fresh(ticks_now) and
             uptick_streak_from_ticks(ticks_now, need=1)
         ):
             ob_l = obc.get(m)
-            if ob_l and ob_l.get("depth_krw", 0) >= 5_000_000 and ob_l.get("spread", 999) <= 1.5:
+            if ob_l and ob_l.get("depth_krw", 0) >= 3_000_000 and ob_l.get("spread", 999) <= 2.0:  # 5M → 3M, 1.5 → 2.0, 초완화
                 # VWAP 과열 추격만 피하기
                 vgap_mp = 0.0
                 if c1:
                     v20 = vwap_from_candles_1m(c1, 20)
                     if v20:
                         vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
-                if vgap_mp <= 0.018:
+                if vgap_mp <= 0.022:  # 0.018 → 0.022, 초완화
                     cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
                     return {
                         "price": ticks_now[0]["trade_price"],
@@ -2326,11 +2326,11 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
-    # 프로브는 빠른 체결 목적: 최소 조건만 통과하면 즉시 진입
+    # 프로브는 빠른 체결 목적: 최소 조건만 통과하면 즉시 진입 (초완화)
     if pre.get("entry_mode") == "probe":
         t = pre.get("tape", {"n":0,"buy_ratio":0})
         ob = pre.get("ob", {})
-        if t.get("n",0) >= 3 and ob.get("depth_krw",0) >= 5_000_000 and ob.get("spread",99) <= 1.6:
+        if t.get("n",0) >= 2 and ob.get("depth_krw",0) >= 3_000_000 and ob.get("spread",99) <= 2.0:  # 3→2, 5M→3M, 1.6→2.0, 초완화
             return {
                 "price": pre["price"],
                 "chg": 0.0,
@@ -3031,25 +3031,25 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
-            # === PROBE 미세익절: +0.15% 찍고 밀리면 즉시 본절-소익 확정 ===
+            # === PROBE 미세익절: +0.10% 찍고 밀리면 즉시 본절-소익 확정 (초완화) ===
             with _POSITION_LOCK:
                 pos_probe = (OPEN_POSITIONS.get(m) or {})
             if pos_probe.get("entry_mode") == "probe":
                 run_from_entry_probe = (best / entry_price - 1.0)
                 drop_from_best = (curp / best - 1.0)
-                # 프로브가 +0.15% 이상 찍고 -0.1% 되밀리면 즉시 청산
-                if run_from_entry_probe >= 0.0015 and drop_from_best <= -0.001:
+                # 프로브가 +0.10% 이상 찍고 -0.08% 되밀리면 즉시 청산 (0.15→0.10, 0.1→0.08, 초완화)
+                if run_from_entry_probe >= 0.0010 and drop_from_best <= -0.0008:
                     exit_reason = "PROBE_MICRO_PROFIT"
                     verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
                     break
 
-            # === PROBE 타임아웃: 빨리 안 터지면 본절/소손절로 철수 ===
+            # === PROBE 타임아웃: 빨리 안 터지면 본절 쪽으로만 철수 (초완화) ===
             if pos_probe.get("entry_mode") == "probe":
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     t15_now = micro_tape_stats_from_ticks(ticks, 15)
                     gain_now = (curp / entry_price - 1.0)
-                    # 시간 초과 시 약손/본절 쪽으로 빠르게 정리 (매수비 무관하게)
-                    if (gain_now < max(PROBE_BREAKEVEN_EXIT, -0.001)) or (t15_now["buy_ratio"] < 0.54):
+                    # 시간 초과 시 본절 ±0.05% 범위 내에서만 정리 (초완화)
+                    if gain_now <= 0.0005 and gain_now >= -0.0005:
                         exit_reason = "PROBE_TIMEOUT"
                         verdict = "probe_timeout_exit"
                         break
