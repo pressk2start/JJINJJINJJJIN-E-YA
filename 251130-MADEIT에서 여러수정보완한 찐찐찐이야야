@@ -1152,8 +1152,8 @@ MIN_TURNOVER = 0.018
 TICKS_BUY_RATIO = 0.58  # 0.56 → 0.58 (초입 품질 향상)
 
 # 위험 관리 (스프레드)
-MAX_SPREAD_BASE = 0.70  # 0.60 -> 0.45
-MAX_SPREAD_FAST = 1.00  # 1.10 -> 0.80
+MAX_SPREAD_BASE = 0.70  # 단위: %, 0.70 = 0.70% (일반 신호)
+MAX_SPREAD_FAST = 1.00  # 단위: %, 1.00 = 1.00% (메가 브레이크아웃)
 MIN_DEPTH_KRW = 12_000_000  # 6M → 12M (얕은 호가 컷 강화)
 
 # 허수 방어
@@ -1210,7 +1210,7 @@ REARM_PULLBACK_MAX = 0.005  # 0.004 → 0.005 (되돌림 후 재시도 여지↑
 REARM_REBREAK_MIN = 0.0018  # 0.0028 → 0.0018 (재돌파 재알림 문턱↓)
 
 # 포스트체크(허수 2차)
-# POSTCHECK_ENABLED는 상단 전역 설정(55라인)에서 False로 설정됨
+# POSTCHECK_ENABLED는 상단 전역 설정(59라인)에서 True로 설정됨 (컨펌만 적용, 프로브는 패스)
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
@@ -2123,6 +2123,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 "price": ticks_now[0]["trade_price"],
                 "ob": obc.get(m),
                 "ticks": ticks_now,
+                "tape": t10s,  # ← tape 추가 (final_check_leader 크래시 방지)
                 "entry_mode": "probe",
                 "early_ok": True,
             }
@@ -2289,6 +2290,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     return pre
 
 def final_check_leader(m, pre, tight_mode=False):
+    # 안전 가드: tape 없으면 ticks로 즉석 계산
+    if "tape" not in pre:
+        ticks = pre.get("ticks") or []
+        pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
+
     # ★★★ 완화 노브 적용
     r = relax_knob()
     t = pre["tape"]
