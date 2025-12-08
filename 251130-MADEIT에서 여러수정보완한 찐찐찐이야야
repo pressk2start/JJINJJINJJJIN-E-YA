@@ -517,6 +517,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
             return
 
+    # 보유 종목 상한
+    with _POSITION_LOCK:
+        open_cnt = sum(1 for v in OPEN_POSITIONS.values() if v.get("volume", 0) > 0)
+    if open_cnt >= MAX_OPEN_POSITIONS:
+        msg = f"[AUTO] 보유 상한 {MAX_OPEN_POSITIONS}개 도달 → {m} 신규 진입 스킵"
+        print(msg)
+        tg_send_mid(msg)
+        return
+
     signal_price = pre.get("price")
     if not signal_price:
         print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
@@ -1261,6 +1270,16 @@ SESSION = _new_session()
 _session_lock = threading.Lock()   # ✅ 세션 접근 전용 락 추가
 KST = timezone(timedelta(hours=9))
 
+# === 모니터 실행 풀 & 동시성 제한 ===
+# (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "6"))  # 보유 종목 상한(3) 단계에서 사용)
+
+MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
+ACTIVE_MONITORS = {}    # { market: Future }
+ACTIVE_MON_LOCK = threading.Lock()
+
+LAST_PRE = {}           # { market: 마지막 pre 패킷 } (워치독/재기동 시 사용 예정)
 
 def now_kst():
     return datetime.now(KST)
@@ -3389,7 +3408,6 @@ def tg_send(t, retry=1):
             time.sleep(0.25 + rnd() * 0.25)
     return ok_any
 
-
 # =========================
 # 메인 루프 준비
 # =========================
@@ -3514,6 +3532,9 @@ class HealthHandler(BaseHTTPRequestHandler):
             with _POSITION_LOCK:            # ✅ 포지션 카운트 스냅샷
                 open_positions_count = len(OPEN_POSITIONS)
 
+            with ACTIVE_MON_LOCK:
+                running_monitors = sum(1 for f in ACTIVE_MONITORS.values() if f and not f.done())
+
             status = {
                 "status": "running",
                 "version": "3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry",
@@ -3524,6 +3545,9 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "alerts_count": len(last_signal_at),
                 "cache_size": len(_TICKS_CACHE.cache) if hasattr(_TICKS_CACHE, 'cache') else 0,
                 "open_positions": open_positions_count,         # ✅ 선택 지표
+                "running_monitors": running_monitors,
+                "max_concurrent": MAX_CONCURRENT,
+                "max_open_positions": MAX_OPEN_POSITIONS,
                 "config": {
                     "top_n": TOP_N,
                     "scan_interval": SCAN_INTERVAL,
@@ -3549,6 +3573,35 @@ def start_health_server(port=8080):
         except OSError:
             continue
     print("[HEALTH_ERR] 포트 사용 불가 (8080~8084)")
+
+def start_monitor_watchdog():
+    def _loop():
+        while True:
+            time.sleep(5)
+            with _POSITION_LOCK:
+                opens = list(OPEN_POSITIONS.keys())
+            with ACTIVE_MON_LOCK:
+                running = {k for k, f in ACTIVE_MONITORS.items() if f and not f.done()}
+            for m in opens:
+                if m not in running:
+                    pre = LAST_PRE.get(m) or {
+                        "ob": {},
+                        "ticks": [],
+                        "tape": {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0},
+                        "entry_mode": (OPEN_POSITIONS.get(m) or {}).get("entry_mode","confirm")
+                    }
+
+                    entry = (OPEN_POSITIONS.get(m) or {}).get("entry_price")
+                    if entry and entry > 0:  # ✅ 0/None 방지
+                        # 🔧 누락된 price 보정
+                        if "price" not in pre or not pre.get("price"):
+                            pre["price"] = float(entry)
+                        launch_monitor(m, pre, tight_mode=False)
+
+
+
+
+    threading.Thread(target=_loop, daemon=True).start()
 
 # ===== 오더북 캐시 =====
 def fetch_orderbook_cache(mkts):
@@ -3587,6 +3640,38 @@ def fetch_orderbook_cache(mkts):
                 # 비정상 데이터는 건너뛰고 계속
                 continue
     return cache
+
+def launch_monitor(market, pre, tight_mode=False):
+    """
+    monitor_position()을 스레드풀에서 실행.
+    - 같은 종목 중복 실행 방지
+    - 동시 실행 개수 제한(MAX_CONCURRENT)
+    """
+    with ACTIVE_MON_LOCK:
+        # 이미 실행 중이면 스킵
+        fut = ACTIVE_MONITORS.get(market)
+        if fut and not fut.done():
+            print(f"[MON_DUP] {market} 모니터 이미 실행 중 → 스킵")
+            return False
+
+        # 동시 개수 제한 체크
+        running = sum(1 for f in ACTIVE_MONITORS.values() if f and not f.done())
+        if running >= MAX_CONCURRENT:
+            print(f"[MON_LIMIT] 동시 모니터 한도({MAX_CONCURRENT}) 도달 → {market} 보류")
+            return False
+
+        # 제출
+        f = MONITOR_POOL.submit(monitor_position, market, pre["price"], pre, tight_mode)
+        ACTIVE_MONITORS[market] = f
+
+        # 완료 시 정리
+        def _cleanup(_):
+            with ACTIVE_MON_LOCK:
+                ACTIVE_MONITORS.pop(market, None)
+        f.add_done_callback(_cleanup)
+
+        print(f"[MON_LAUNCH] {market} 모니터 시작")
+        return True
 
 # =========================
 # 메인
@@ -3764,14 +3849,23 @@ def main():
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
 
-                    # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
+                    # --- 🧵 모니터는 스레드풀에서 비동기로 실행 ---
+                    launched = False  # ✅ 기본값으로 초기화
                     try:
-                        monitor_position(m,
-                                         pre["price"],
-                                         pre,
-                                         tight_mode=tight_mode)
+                        launched = launch_monitor(m, pre, tight_mode=tight_mode)
+                        if not launched:
+                            print(f"[MON_SKIP] {m} 모니터 시작 보류/중복")
+                    except Exception as e:
+                        print("[MON_LAUNCH_ERR]", e)
+
+                    # --- 모니터 비동기 실행 (동시성 제한) ---
+                    try:
+                        LAST_PRE[m] = pre  # 워치독에서 재기동 시 참조
+                        if not launched:
+                            print(f"[MONITOR_SKIP] {m} 모니터 시작 보류/중복")
                     except Exception as e:
                         print("[MON_ERR]", e)
+
 
             cut_summary()
             if found == 0:
@@ -3791,10 +3885,18 @@ def main():
 
 if __name__ == "__main__":
     validate_config()
-    # 시작 즉시 인증 점검. 실패면 자동매매 차단
     if not startup_selfcheck():
         print("⛔ 인증 실패 → AUTO_TRADE 강제 OFF")
         AUTO_TRADE = False
     bot_start_time = time.time()
     start_health_server()
-    main()
+    start_monitor_watchdog()  # 워치독 시작
+
+    try:
+        main()
+    finally:
+        try:
+            MONITOR_POOL.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
