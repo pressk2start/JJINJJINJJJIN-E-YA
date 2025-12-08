@@ -2080,8 +2080,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
-    # === 동일 종목 중복 진입 방지 (probe 모드는 45초, 일반은 120초) ===
-    cooldown_after_exit = 45 if ALWAYS_PROBE_FIRST else 120
+    # === 동일 종목 중복 진입 방지 (probe 모드는 25초로 단축, 일반은 90초) ===
+    cooldown_after_exit = 25 if ALWAYS_PROBE_FIRST else 90
     now_ts = time.time()
 
     with _POSITION_LOCK:
@@ -2101,9 +2101,39 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (now_ts - last_block) < cooldown_after_exit:
             return None
 
+    # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
+    ticks_now = get_recent_ticks(m, 80)
+    if ticks_now:
+        t6 = micro_tape_stats_from_ticks(ticks_now, 6)
+        if (
+            t6["n"] >= 3 and                    # 체결 3개 이상
+            t6["buy_ratio"] >= 0.50 and         # 매수비 50%+
+            t6["krw_per_sec"] >= 7000 and       # 속도 7k KRW/s+
+            last_two_ticks_fresh(ticks_now) and
+            uptick_streak_from_ticks(ticks_now, need=1)
+        ):
+            ob_l = obc.get(m)
+            if ob_l and ob_l.get("depth_krw", 0) >= 5_000_000 and ob_l.get("spread", 999) <= 1.5:
+                # VWAP 과열 추격만 피하기
+                vgap_mp = 0.0
+                if c1:
+                    v20 = vwap_from_candles_1m(c1, 20)
+                    if v20:
+                        vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
+                if vgap_mp <= 0.018:
+                    cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
+                    return {
+                        "price": ticks_now[0]["trade_price"],
+                        "ob": ob_l,
+                        "ticks": ticks_now,
+                        "tape": t6,
+                        "early_ok": True,
+                        "entry_mode": "probe"
+                    }
 
     # === 틱 기반 초봉(10초) 선행 진입 시그널 (강화된 필터링) ===
-    ticks_now = get_recent_ticks(m, 80)
+    if not ticks_now:
+        ticks_now = get_recent_ticks(m, 80)
     if ticks_now:
         t10s = micro_tape_stats_from_ticks(ticks_now, 10)
         t30s = micro_tape_stats_from_ticks(ticks_now, 30)
@@ -2296,22 +2326,38 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
-    # ★★★ 완화 노브 적용
+    # 프로브는 빠른 체결 목적: 최소 조건만 통과하면 즉시 진입
+    if pre.get("entry_mode") == "probe":
+        t = pre.get("tape", {"n":0,"buy_ratio":0})
+        ob = pre.get("ob", {})
+        if t.get("n",0) >= 3 and ob.get("depth_krw",0) >= 5_000_000 and ob.get("spread",99) <= 1.6:
+            return {
+                "price": pre["price"],
+                "chg": 0.0,
+                "current_volume": 0,
+                "volume_surge": 0.0,
+                "buy": round(t.get("buy_ratio",0)*100,1),
+                "n": t.get("n",0),
+                "spread": round(ob.get("spread",0),2),
+                "turn": 0.0
+            }
+
+    # ★★★ 완화 노브 적용 (컨펌 신호만)
     r = relax_knob()
     t = pre["tape"]
     ob = pre["ob"]
     ticks = pre["ticks"]
-    MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
+    MIN_TURNOVER_LOCAL = max(0.018, _turn_needed(ob.get("depth_krw", 0)))  # 0.020 → 0.018
     if tight_mode:
-        MIN_TURNOVER_LOCAL += 0.003
+        MIN_TURNOVER_LOCAL += 0.002  # 0.003 → 0.002
     if 0 <= now_kst().hour < 6:
         MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
     MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
 
     TICKS_BUY_RATIO_LOCAL = max(
-        0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
-    TICKS_BUY_RATIO_LOCAL = max(0.54,
-                                TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # ★ 추가
+        0.55, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))  # 0.56 → 0.55
+    TICKS_BUY_RATIO_LOCAL = max(0.53,
+                                TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # 0.54 → 0.53 (최저치 보장)
 
     if t["n"] < MIN_TICKS_COUNT:
         cut("TICKS_LOW", f"{m} {t['n']}")
@@ -2984,9 +3030,19 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
-            # === PROBE 타임아웃: 빨리 안 터지면 본절/소손절로 철수 ===
+            # === PROBE 미세익절: +0.15% 찍고 밀리면 즉시 본절-소익 확정 ===
             with _POSITION_LOCK:
                 pos_probe = (OPEN_POSITIONS.get(m) or {})
+            if pos_probe.get("entry_mode") == "probe":
+                run_from_entry_probe = (best / entry_price - 1.0)
+                drop_from_best = (curp / best - 1.0)
+                # 프로브가 +0.15% 이상 찍고 -0.1% 되밀리면 즉시 청산
+                if run_from_entry_probe >= 0.0015 and drop_from_best <= -0.001:
+                    exit_reason = "PROBE_MICRO_PROFIT"
+                    verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
+                    break
+
+            # === PROBE 타임아웃: 빨리 안 터지면 본절/소손절로 철수 ===
             if pos_probe.get("entry_mode") == "probe":
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     t15_now = micro_tape_stats_from_ticks(ticks, 15)
