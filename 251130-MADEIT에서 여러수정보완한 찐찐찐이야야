@@ -2838,6 +2838,10 @@ def monitor_position(m,
     micro_arm = False
     micro_floor = 0.0
 
+    # 이익락 제어 (고정 가격, 상향만 가능)
+    profit_lock_active = False
+    profit_lock_price = 0.0
+
     # 스파이크/그레이스 기존 로직 재활용
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
@@ -3145,17 +3149,21 @@ def monitor_position(m,
                 verdict = "FULL_EXIT"
                 break
 
-            # ④ 이익락 (Profit Lock)
-            if cur_gain >= 0.015:
-                profit_lock = curp * 0.992
-            elif cur_gain >= 0.010:
-                profit_lock = curp * 0.994
-            else:
-                profit_lock = base_stop
+            # ④ 이익락 (Profit Lock) — 고정식으로 무장 & 상향만
+            if not profit_lock_active and cur_gain >= 0.010:
+                # 수익 구간 진입 시 락 무장 (임계에 따라 여유폭 다르게)
+                lock_gap = 0.008 if cur_gain >= 0.015 else 0.006  # 0.8% or 0.6%
+                profit_lock_price = best * (1.0 - lock_gap)
+                profit_lock_active = True
+            elif profit_lock_active:
+                # 신고점 갱신 시에만 '상향' 조정 (결코 하향 X)
+                lock_gap = 0.008 if cur_gain >= 0.015 else 0.006
+                profit_lock_price = max(profit_lock_price, best * (1.0 - lock_gap))
 
-            if curp <= profit_lock:
+            # 트리거 판정은 '고정된' 락 가격으로
+            if profit_lock_active and curp <= profit_lock_price:
                 exit_reason = "PROFIT_LOCK"
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산(대기)")
+                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock_price)}원) → 청산(대기)")
                 verdict = "PROFIT_LOCK"
                 break
 
