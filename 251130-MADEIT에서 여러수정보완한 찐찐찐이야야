@@ -1969,14 +1969,15 @@ def is_mega_breakout(c1):
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
 def _turn_needed(ob_depth_krw):
+    """그라인드형 상승 포착을 위한 회전율 요구치 완화"""
     if ob_depth_krw >= 30_000_000:
-        return 0.022
+        return 0.020   # 0.022 → 0.020
     elif ob_depth_krw >= 15_000_000:
-        return 0.026
+        return 0.022   # 0.026 → 0.022
     elif ob_depth_krw >= 8_000_000:
-        return 0.025
+        return 0.020   # 0.025 → 0.020
     else:
-        return 0.023
+        return 0.018   # 0.023 → 0.018
 
 def is_fake_pump(m,
                  current_volume,
@@ -2239,18 +2240,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     turn = twin["krw"] / max(ob["depth_krw"], 1)
     flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
 
-    # Early 조건 강화: 더 신중한 초입 신호
+    # Early 조건: 그라인드형 포착 위해 완화
     early_conds = [
         vgap >= max(th["vwap_gap"] - 0.0003, EARLY_MIN_VWAP_GAP),
         vgap <= EARLY_MAX_VWAP_GAP,
         price_change <= 0.020,
         (ema5 is None) or (dist_ema5 <= EARLY_MAX_EMA5_GAP),
-        twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.55),  # 0.51 → 0.55 (더 강한 매수비 요구)
-        twin["krw_per_sec"] >= max(flow_floor, 16000),  # 절대 하한 16000 추가
-        turn >= max(EARLY_MIN_TURN, 0.018),  # 0.015 → 0.018 (더 강한 회전율)
-        twin["n"] >= max(EARLY_MIN_TICKS, 8),  # 최소 8틱 요구
+        twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.53),  # 0.55 → 0.53 (그라인드 대응)
+        twin["krw_per_sec"] >= max(flow_floor, 16000),  # 절대 하한 16000
+        turn >= max(EARLY_MIN_TURN, 0.018),  # 회전율
+        twin["n"] >= max(EARLY_MIN_TICKS, 6),  # 8 → 6 (최소 틱 수 완화)
         last_two_ticks_fresh(ticks),
-        uptick_streak_from_ticks(ticks, need=2),  # 연속 상승 2틱 추가
+        uptick_streak_from_ticks(ticks, need=2),  # 연속 상승 2틱
     ]
 
     early_ok = all(early_conds)
@@ -2937,10 +2938,10 @@ def monitor_position(m,
 
                 gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
-                # 프로브→컨펌 전환 완화 (빠른 초입 포착)
+                # 프로브→컨펌 전환 완화 (그라인드형 포착)
                 strong_flow = (
-                    t15_now["buy_ratio"] >= 0.56  # 0.58 → 0.56
-                    and t15_now["krw_per_sec"] >= 16000  # 18000 → 16000
+                    t15_now["buy_ratio"] >= 0.54  # 0.56 → 0.54 (그라인드 대응)
+                    and t15_now["krw_per_sec"] >= 14000  # 16000 → 14000
                     and uptick_streak_from_ticks(ticks, need=2)
                 )
 
@@ -2949,7 +2950,7 @@ def monitor_position(m,
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
                 ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
-                condition_original = (gain_now >= 0.004 and strong_flow)  # 0.012 → 0.004 (빠른 전환)
+                condition_original = (gain_now >= 0.003 and strong_flow)  # 0.004 → 0.003 (45초 내 전환)
                 condition_rebound  = (ema_crossover and gain_now >= 0.003 and strong_flow)  # 0.006 → 0.003
 
                 if condition_original or condition_rebound:
