@@ -2963,6 +2963,7 @@ def monitor_position(m,
             dd_now = (curp / best - 1.0)
             if alive_sec < WARMUP_SEC:
                 if (curp / entry_price - 1.0) <= -HARD_STOP_DD:
+                    exit_reason = "HARD_STOP"  # ← finally에서 실청산되도록 추가
                     verdict = "급락 즉시 손절"
                     outcome_extra = f"(DD {dd_now*100:.2f}%)"
                     break  # 청산은 finally에서 한 번만
