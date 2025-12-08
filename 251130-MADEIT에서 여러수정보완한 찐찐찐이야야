@@ -2834,6 +2834,10 @@ def monitor_position(m,
     trail_armed = False
     trail_stop = 0.0
 
+    # 스캘프 미세익절 제어 (순이익 보장)
+    micro_arm = False
+    micro_floor = 0.0
+
     # 스파이크/그레이스 기존 로직 재활용
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
@@ -3031,17 +3035,22 @@ def monitor_position(m,
 
             # === 🎯 스캘프 모드: run < 3%면 미세익절 우선 (상단추적 OFF) ===
             if run_from_entry < TREND_THRESHOLD:
-                # 스캘프 모드: 수수료(0.1%) + 미세마진(0.1%) = 0.2% 이상이면 익절 시도
-                micro_target = SCALP_MICRO_MARGIN + FEE_RATE  # 기본 0.11%
-                micro_lock_gain = SCALP_MICRO_LOCK + FEE_RATE  # 0.12%
+                # 🔒 최저 청산가 (수수료+마진 보장)
+                if micro_floor == 0.0:
+                    micro_floor = entry_price * (1.0 + FEE_RATE + SCALP_MICRO_MARGIN)  # 0.11% 최저선
 
-                # 🔒 미세익절 락: gain이 목표 도달 후 약간 되돌리면 즉시 청산
-                if gain_from_entry >= micro_lock_gain:
+                # 목표가 도달 시 락 armed
+                if curp >= micro_floor:
+                    micro_arm = True
+
+                # 🎯 미세익절 청산 조건 (순이익 보장)
+                if micro_arm:
                     drop_from_high = (best - curp) / max(best, 1)
-                    # 0.05% 이상 되돌림 감지하면 즉시 청산
-                    if drop_from_high >= 0.0005:
+                    # 1) 현재가가 최저 청산가 이하로 내려오면 → 즉시 청산 (순이익 확정)
+                    # 2) 또는 고점대비 0.05% 하락이면서 여전히 최저가 이상 → 청산
+                    if (curp <= micro_floor) or (drop_from_high >= 0.0005 and curp >= micro_floor):
                         exit_reason = "SCALP_MICRO_EXIT"
-                        verdict = f"스캘프 미세익절 (run={run_from_entry*100:.2f}%, gain={gain_from_entry*100:.2f}%)"
+                        verdict = f"스캘프 미세익절 확정 (gain={gain_from_entry*100:.2f}%, 순익보장)"
                         break
 
                 # 📉 스캘프 모드 손절: 일반보다 타이트하게 (-0.8%)
