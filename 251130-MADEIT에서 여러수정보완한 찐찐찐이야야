@@ -56,8 +56,8 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
-POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
-EARLY_FLOW_MIN_KRWPSEC = 16_000  # 초기 거래속도 완화 (친구 제안: 22k → 16k)
+POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (가짜 돌파 2차 필터)
+EARLY_FLOW_MIN_KRWPSEC = 22_000  # 초기 거래속도 하한 (헛방 방지)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -1147,14 +1147,14 @@ MIN_RELATIVE_KRW_X = 1.08  # 1.18 -> 1.25 (과거대비 증가율)
 
 # 틱/체결 기반
 TAPE_WINDOW_SEC = 15
-MIN_TICKS_COUNT = 3
+MIN_TICKS_COUNT = 5  # 3 → 5 (허수틱 패스)
 MIN_TURNOVER = 0.018
-TICKS_BUY_RATIO = 0.56
+TICKS_BUY_RATIO = 0.58  # 0.56 → 0.58 (초입 품질 향상)
 
 # 위험 관리 (스프레드)
 MAX_SPREAD_BASE = 0.70  # 0.60 -> 0.45
 MAX_SPREAD_FAST = 1.00  # 1.10 -> 0.80
-MIN_DEPTH_KRW = 6_000_000
+MIN_DEPTH_KRW = 12_000_000  # 6M → 12M (얕은 호가 컷 강화)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
@@ -1985,9 +1985,8 @@ def is_fake_pump(m,
                  tape30,
                  ticks=None,
                  c1=None):
-    h = now_kst().hour
-    # 야간(0~6시) 유동성 완화: 6M → 4M (친구 제안)
-    min_depth = 4_000_000 if (0 <= h < 6) else MIN_DEPTH_KRW
+    # 호가 깊이 고정 기준 (야간 완화 삭제 - 허수펌프 그대로 컷)
+    min_depth = MIN_DEPTH_KRW
     if not ob_snapshot or ob_snapshot.get("depth_krw", 0) < min_depth:
         return True
     if tape30.get("n", 0) < MIN_REAL_TRADES:
