@@ -174,7 +174,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "25")) # probe가 N초 안에 못 터지면 본절 정리 (45 → 25, 빠른 결론)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "40")) # probe가 N초 안에 못 터지면 본절 정리 (25 → 40, 들락날락 방지)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.0000"))  # 딱 본절 중심 (-0.0003 → 0.0000)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
 
@@ -187,7 +187,7 @@ ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.000"))  # UNUSED (흐름 기반 추매로 전환)
 PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비 (참고용)
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (참고용)
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # 추매 간 최소 간격(초) (10 → 15, 버스트 과열 방지)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
@@ -1272,8 +1272,8 @@ KST = timezone(timedelta(hours=9))
 
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "6"))  # 보유 종목 상한(3) 단계에서 사용)
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "6"))          # 동시에 몇 종목 모니터링 허용 (4 → 6, 병목 완화)
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "8"))  # 보유 종목 상한 (6 → 8, 기회 확대)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
@@ -1385,7 +1385,7 @@ def upbit_get(url, params=None, timeout=7):
                 REQ_STATS["errors"] += 1                           # ✅ 통계 잠금
                 REQ_STATS["conn_err"] += 1
             _CONSEC_CONN_ERR += 1
-            if _CONSEC_CONN_ERR >= 3:
+            if _CONSEC_CONN_ERR >= 2:  # 3 → 2 (실시간 마켓 네트워크 리프레시 강화)
                 _refresh_session()
                 time.sleep(0.6)
             else:
@@ -3158,17 +3158,32 @@ def monitor_position(m,
                                     f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
                                 )
 
-                elif is_stall:
-                    # ★ 정체면 부분익절 → 재정체면 전량
-                    # 수익이 충분하면 50%, 애매하면 30%
-                    sell_ratio = 0.50 if gain_from_entry >= 0.012 else 0.30
-                    ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 부분청산")
-                    if ok and executed > 0:
-                        # 추가로 계속 정체면 전량
-                        if stall_age >= 10.0:
-                            exit_reason = "STALL_FULL_EXIT"
-                            verdict = "정체 지속 전량 청산"
-                            break
+                elif is_stall or (stall_age >= 15.0):
+                    # ★ 정체면 부분익절 → 재정체면 전량 (타임아웃 강화)
+
+                    # ⏰ 강제 탈출: 신고점 30초 미갱신 → 전량 청산
+                    if stall_age >= 30.0:
+                        exit_reason = "STALL_TIMEOUT_30S"
+                        verdict = "정체 30초 강제 전량 청산"
+                        break
+
+                    # 신고점 15초 미갱신 + 거래속도 60% 이하 → 부분 청산
+                    if stall_age >= 15.0 and t15_now["krw_per_sec"] <= t30_now["krw_per_sec"] * 0.6:
+                        sell_ratio = 0.30
+                        ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 15s 부분청산")
+                        if ok and executed > 0:
+                            tg_send_mid(f"⚠️ {m} 정체 15초 → 30% 부분 청산")
+
+                    # 일반 정체 (기존 로직)
+                    elif is_stall:
+                        sell_ratio = 0.50 if gain_from_entry >= 0.012 else 0.30
+                        ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 부분청산")
+                        if ok and executed > 0:
+                            # 추가로 10초 더 정체면 전량
+                            if stall_age >= 10.0:
+                                exit_reason = "STALL_FULL_EXIT"
+                                verdict = "정체 지속 전량 청산"
+                                break
 
 
             # 트레일 업데이트(이익 확대 시에만 상향) — '신고점 갱신' 기준
