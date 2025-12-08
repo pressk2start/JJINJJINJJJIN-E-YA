@@ -174,7 +174,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "90")) # probe가 N초 안에 못 터지면 본절/소손절 (60→90)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "60")) # probe가 N초 안에 못 터지면 본절/소손절
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.001"))  # +0.1% 못 가면 exit
 MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
 
@@ -2102,19 +2102,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             return None
 
 
-    # === 틱 기반 초봉(10초) 선행 진입 시그널 ===
+    # === 틱 기반 초봉(10초) 선행 진입 시그널 (강화된 필터링) ===
     ticks_now = get_recent_ticks(m, 80)
     if ticks_now:
         t10s = micro_tape_stats_from_ticks(ticks_now, 10)
         t30s = micro_tape_stats_from_ticks(ticks_now, 30)
 
+        # 초입 신호 강화: 더 강한 매수비 + 더 많은 틱 + 연속 상승
         sudden_burst = (
-            t10s["krw_per_sec"] >= 1.8 * t30s["krw_per_sec"]
-            and t10s["buy_ratio"] >= 0.58
-            and t10s["n"] >= 3
+            t10s["krw_per_sec"] >= 2.0 * t30s["krw_per_sec"]  # 1.8 → 2.0 (더 강한 가속)
+            and t10s["buy_ratio"] >= 0.60  # 0.58 → 0.60 (더 강한 매수세)
+            and t10s["n"] >= 5  # 3 → 5 (더 많은 틱 필요)
+            and t10s["krw_per_sec"] >= 18000  # 절대 거래속도 하한 추가
         )
 
-        fresh = uptick_streak_from_ticks(ticks_now, need=1)
+        fresh = uptick_streak_from_ticks(ticks_now, need=2)  # need=1 → need=2 (연속 상승 강화)
 
         if sudden_burst and fresh:
             cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
@@ -2235,16 +2237,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     turn = twin["krw"] / max(ob["depth_krw"], 1)
     flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
 
+    # Early 조건 강화: 더 신중한 초입 신호
     early_conds = [
         vgap >= max(th["vwap_gap"] - 0.0003, EARLY_MIN_VWAP_GAP),
         vgap <= EARLY_MAX_VWAP_GAP,
         price_change <= 0.020,
         (ema5 is None) or (dist_ema5 <= EARLY_MAX_EMA5_GAP),
-        twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.51),
-        twin["krw_per_sec"] >= flow_floor,
-        turn >= max(EARLY_MIN_TURN, 0.015),
-        twin["n"] >= EARLY_MIN_TICKS,
+        twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.55),  # 0.51 → 0.55 (더 강한 매수비 요구)
+        twin["krw_per_sec"] >= max(flow_floor, 16000),  # 절대 하한 16000 추가
+        turn >= max(EARLY_MIN_TURN, 0.018),  # 0.015 → 0.018 (더 강한 회전율)
+        twin["n"] >= max(EARLY_MIN_TICKS, 8),  # 최소 8틱 요구
         last_two_ticks_fresh(ticks),
+        uptick_streak_from_ticks(ticks, need=2),  # 연속 상승 2틱 추가
     ]
 
     early_ok = all(early_conds)
@@ -2252,7 +2256,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # === Confirm (확정 진입 판단) ===
     confirm_ok = (
         ign_ok or botacc_ok or mega or two_green_and_break
-        or (early_ok and twin["buy_ratio"] >= 0.58 and uptick_streak_from_ticks(ticks, need=3))
+        or (early_ok and twin["buy_ratio"] >= 0.60 and uptick_streak_from_ticks(ticks, need=3))  # 0.58 → 0.60
     )
 
     # === Probe/Confirm 결과 ===
