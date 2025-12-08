@@ -35,7 +35,7 @@ def fmt6(x):
 # =========================
 # 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
 # =========================
-TOP_N = 60
+TOP_N = 120  # 수직 러너 포착 위해 확장 (60→120)
 SCAN_INTERVAL = 6
 COOLDOWN = 480
 PARALLEL_WORKERS = 12
@@ -174,7 +174,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "60")) # probe가 N초 안에 못 터지면 본절/소손절
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "90")) # probe가 N초 안에 못 터지면 본절/소손절 (60→90)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.001"))  # +0.1% 못 가면 exit
 MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
 
@@ -191,7 +191,7 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # �
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
-PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가
+PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "0") == "1"  # 가벼운 조건 probe 신호 추가 (헛방 주범, 기본 OFF)
 PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.52"))  # probe-lite 최소 매수비
 PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "9000"))  # probe-lite 최소 거래속도
 PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.018"))  # VWAP 괴리 상한
@@ -1576,7 +1576,7 @@ def relax_knob():
 # =========================
 # 데이터 수집/캐시
 # =========================
-MKTS_CACHE_TTL = 90
+MKTS_CACHE_TTL = 30  # 수직 러너 빠른 포착 (90→30초)
 _MKTS_CACHE = {"ts": 0.0, "mkts": []}
 
 
@@ -2926,9 +2926,10 @@ def monitor_position(m,
 
                 gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
+                # 프로브→컨펌 전환 완화 (빠른 초입 포착)
                 strong_flow = (
-                    t15_now["buy_ratio"] >= 0.58
-                    and t15_now["krw_per_sec"] >= 18000
+                    t15_now["buy_ratio"] >= 0.56  # 0.58 → 0.56
+                    and t15_now["krw_per_sec"] >= 16000  # 18000 → 16000
                     and uptick_streak_from_ticks(ticks, need=2)
                 )
 
@@ -2937,8 +2938,8 @@ def monitor_position(m,
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
                 ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
-                condition_original = (gain_now >= 0.012 and strong_flow)
-                condition_rebound  = (ema_crossover and gain_now >= 0.006 and strong_flow)
+                condition_original = (gain_now >= 0.004 and strong_flow)  # 0.012 → 0.004 (빠른 전환)
+                condition_rebound  = (ema_crossover and gain_now >= 0.003 and strong_flow)  # 0.006 → 0.003
 
                 if condition_original or condition_rebound:
                     ok_add, new_entry = add_auto_position(m, curp)
@@ -3037,8 +3038,12 @@ def monitor_position(m,
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
             effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
 
-            # === 🎯 스캘프 모드: run < 3%면 미세익절 우선 (상단추적 OFF) ===
-            if run_from_entry < TREND_THRESHOLD:
+            # === 🎯 스캘프 모드: run < 3%면 미세익절 우선 (단, PROBE는 제외!) ===
+            # 프로브는 탐색 모드이므로 빠른 정리 없이 컨펌 전환 기회를 줘야 함
+            with _POSITION_LOCK:
+                current_mode = (OPEN_POSITIONS.get(m) or {}).get("entry_mode", "confirm")
+
+            if run_from_entry < TREND_THRESHOLD and current_mode != "probe":
                 # 🔒 최저 청산가 (수수료+마진 보장)
                 if micro_floor == 0.0:
                     micro_floor = entry_price * (1.0 + FEE_RATE + SCALP_MICRO_MARGIN)  # 0.11% 최저선
