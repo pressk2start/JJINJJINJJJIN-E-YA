@@ -3115,27 +3115,28 @@ def monitor_position(m,
             )
 
             # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
-            if current_mode != "probe":
+            if pos_probe.get("entry_mode") != "probe":  # ✅ current_mode → pos_probe.get() 사용
                 if strong_up and USE_PYRAMIDING and AUTO_TRADE:
                     t15_now = micro_tape_stats_from_ticks(ticks, 15)
-
-                    # 기존 조건
-                    add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
-                    add_cond_flow = (
-                        t15_now["buy_ratio"] >= 0.55 and
-                        t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
-                        last_two_ticks_fresh(ticks)
-                    )
+                    t30_now = micro_tape_stats_from_ticks(ticks, 30)
 
                     # 단기 EMA 상승 전환
                     c1m = get_minutes_candles(1, m, 20)
                     ema3 = ema_last([c["trade_price"] for c in c1m], 3)
                     ema8 = ema_last([c["trade_price"] for c in c1m], 8)
-                    short_term_up = ema3 > ema8
+                    short_term_up = (ema3 is not None and ema8 is not None and ema3 > ema8)
 
-                    # ★ 기존 조건 OR 완화된 상승세 조건
-                    if (add_cond_price and add_cond_flow and short_term_up) or \
-                       (gain_from_entry >= 0.004 and strong_up and short_term_up):
+                    # ★ 순수 흐름 기반 추매 (가격 조건 제거)
+                    # 최근(15s)이 직전(30s) 대비 가속 + 매수비 강함 + 단기상승 + 틱 신선
+                    flow_ok = (
+                        t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 가속도 15%+
+                        t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
+                        last_two_ticks_fresh(ticks) and
+                        short_term_up and
+                        strong_up  # 위에서 계산된 단기 강세 플래그
+                    )
+
+                    if flow_ok:
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
                             adds_used = pos.get("adds", 0) if pos else MAX_ADDS
