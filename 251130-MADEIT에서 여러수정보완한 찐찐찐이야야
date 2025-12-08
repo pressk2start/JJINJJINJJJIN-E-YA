@@ -440,25 +440,43 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
 
 
 def place_market_buy(market, krw_amount):
-    """KRW 기준 시장가 매수 (ord_type=price)"""
+    """KRW 기준 시장가 매수 (ord_type=price) - 재시도 내장"""
     body = [
         ("market", market),
         ("side", "bid"),
         ("ord_type", "price"),
         ("price", str(int(krw_amount))),
     ]
-    return upbit_private_post("/v1/orders", body)
+
+    # ✅ 네트워크 실패 시 최대 2회 재시도 (짧은 백오프)
+    for attempt in range(3):
+        result = upbit_private_post("/v1/orders", body)
+        if result:  # 성공 시 즉시 반환
+            return result
+        if attempt < 2:  # 실패 시 재시도
+            print(f"[PLACE_BUY_RETRY] {market} 매수 실패 (attempt {attempt+1}/3), 재시도 중...")
+            time.sleep(0.3 * (attempt + 1))  # 0.3초, 0.6초 백오프
+    return None  # 3회 모두 실패
 
 
 def place_market_sell(market, volume):
-    """수량 기준 시장가 매도"""
+    """수량 기준 시장가 매도 - 재시도 내장"""
     body = [
         ("market", market),
         ("side", "ask"),
         ("ord_type", "market"),
         ("volume", str(volume)),
     ]
-    return upbit_private_post("/v1/orders", body)
+
+    # ✅ 네트워크 실패 시 최대 2회 재시도 (짧은 백오프)
+    for attempt in range(3):
+        result = upbit_private_post("/v1/orders", body)
+        if result:  # 성공 시 즉시 반환
+            return result
+        if attempt < 2:  # 실패 시 재시도
+            print(f"[PLACE_SELL_RETRY] {market} 매도 실패 (attempt {attempt+1}/3), 재시도 중...")
+            time.sleep(0.3 * (attempt + 1))  # 0.3초, 0.6초 백오프
+    return None  # 3회 모두 실패
 
 def final_price_guard(m, initial_price, max_drift=0.018):
     """
@@ -834,6 +852,15 @@ def close_auto_position(m, reason=""):
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
 
+        # ✅ 이중 청산 레이스 방지
+        if pos and pos.get("closing"):
+            print(f"[AUTO] {m} 이미 청산 중 → 스킵 (reason={reason})")
+            return
+
+        # ✅ closing 플래그 설정
+        if pos:
+            pos["closing"] = True
+
     if not pos:
         print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
         tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
@@ -980,6 +1007,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 실패: 포지션 없음/수량 0"
             print(msg)
             return False, msg, 0.0
+
+        # ✅ 전체 청산 중이면 부분청산 스킵
+        if pos.get("closing"):
+            msg = f"[REMONITOR] {m} 전체 청산 중 → 부분청산 스킵"
+            print(msg)
+            return False, msg, 0.0
+
         if pos.get("partial_done"):
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
@@ -1272,8 +1306,8 @@ KST = timezone(timedelta(hours=9))
 
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "6"))          # 동시에 몇 종목 모니터링 허용 (4 → 6, 병목 완화)
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "8"))  # 보유 종목 상한 (6 → 8, 기회 확대)
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "8"))          # 동시에 몇 종목 모니터링 허용 (6 → 8, 무감시 방지)
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "8"))  # 보유 종목 상한 (= MAX_CONCURRENT, 무감시 방지)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
@@ -3115,11 +3149,13 @@ def monitor_position(m,
                 and w_now["krw_per_sec"] >= max(14000, 0.7 * w_early["krw_per_sec"])
             )
 
+            # ✅ t15_now/t30_now 사전 계산 (모든 분기에서 공통 사용)
+            t15_now = micro_tape_stats_from_ticks(ticks, 15)
+            t30_now = micro_tape_stats_from_ticks(ticks, 30)
+
             # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
             if pos_probe.get("entry_mode") != "probe":  # ✅ current_mode → pos_probe.get() 사용
                 if strong_up and USE_PYRAMIDING and AUTO_TRADE:
-                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                    t30_now = micro_tape_stats_from_ticks(ticks, 30)
 
                     # 단기 EMA 상승 전환
                     c1m = get_minutes_candles(1, m, 20)
