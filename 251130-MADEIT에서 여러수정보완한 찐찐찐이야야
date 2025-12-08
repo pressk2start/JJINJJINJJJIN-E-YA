@@ -183,11 +183,11 @@ MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 �
 SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
 ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
-# 추매 트리거 조건 (현실화: 0.6%에서 추매 가능, 속도 완화)
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.006"))  # +0.6% 이상에서 추매 (0.008 → 0.006)
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (35000 → 22000, 현실화)
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초) (12 → 10)
+# 추매 트리거 조건 (순수 흐름 기반, 가격 임계 미사용)
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.000"))  # UNUSED (흐름 기반 추매로 전환)
+PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비 (참고용)
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (참고용)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
@@ -3024,8 +3024,9 @@ def monitor_position(m,
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
                 ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
-                condition_original = (gain_now >= 0.003 and strong_flow)  # 0.004 → 0.003 (45초 내 전환)
-                condition_rebound  = (ema_crossover and gain_now >= 0.003 and strong_flow)  # 0.006 → 0.003
+                # ★ 순수 흐름 기반 전환 (가격 임계 제거)
+                condition_original = strong_flow                    # 가격 조건 제거
+                condition_rebound  = (ema_crossover and strong_flow)  # 가격 조건 제거
 
                 if condition_original or condition_rebound:
                     ok_add, new_entry = add_auto_position(m, curp)
