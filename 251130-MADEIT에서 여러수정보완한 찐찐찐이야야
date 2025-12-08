@@ -174,7 +174,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "40")) # probe가 N초 안에 못 터지면 본절 정리 (25 → 40, 들락날락 방지)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "25")) # probe가 N초 안에 못 터지면 본절 정리 (45 → 25, 빠른 결론)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.0000"))  # 딱 본절 중심 (-0.0003 → 0.0000)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
 
@@ -187,7 +187,7 @@ ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.000"))  # UNUSED (흐름 기반 추매로 전환)
 PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비 (참고용)
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (참고용)
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # 추매 간 최소 간격(초) (10 → 15, 버스트 과열 방지)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
@@ -440,43 +440,25 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
 
 
 def place_market_buy(market, krw_amount):
-    """KRW 기준 시장가 매수 (ord_type=price) - 재시도 내장"""
+    """KRW 기준 시장가 매수 (ord_type=price)"""
     body = [
         ("market", market),
         ("side", "bid"),
         ("ord_type", "price"),
         ("price", str(int(krw_amount))),
     ]
-
-    # ✅ 네트워크 실패 시 최대 2회 재시도 (짧은 백오프)
-    for attempt in range(3):
-        result = upbit_private_post("/v1/orders", body)
-        if result:  # 성공 시 즉시 반환
-            return result
-        if attempt < 2:  # 실패 시 재시도
-            print(f"[PLACE_BUY_RETRY] {market} 매수 실패 (attempt {attempt+1}/3), 재시도 중...")
-            time.sleep(0.3 * (attempt + 1))  # 0.3초, 0.6초 백오프
-    return None  # 3회 모두 실패
+    return upbit_private_post("/v1/orders", body)
 
 
 def place_market_sell(market, volume):
-    """수량 기준 시장가 매도 - 재시도 내장"""
+    """수량 기준 시장가 매도"""
     body = [
         ("market", market),
         ("side", "ask"),
         ("ord_type", "market"),
         ("volume", str(volume)),
     ]
-
-    # ✅ 네트워크 실패 시 최대 2회 재시도 (짧은 백오프)
-    for attempt in range(3):
-        result = upbit_private_post("/v1/orders", body)
-        if result:  # 성공 시 즉시 반환
-            return result
-        if attempt < 2:  # 실패 시 재시도
-            print(f"[PLACE_SELL_RETRY] {market} 매도 실패 (attempt {attempt+1}/3), 재시도 중...")
-            time.sleep(0.3 * (attempt + 1))  # 0.3초, 0.6초 백오프
-    return None  # 3회 모두 실패
+    return upbit_private_post("/v1/orders", body)
 
 def final_price_guard(m, initial_price, max_drift=0.018):
     """
@@ -852,15 +834,6 @@ def close_auto_position(m, reason=""):
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
 
-        # ✅ 이중 청산 레이스 방지
-        if pos and pos.get("closing"):
-            print(f"[AUTO] {m} 이미 청산 중 → 스킵 (reason={reason})")
-            return
-
-        # ✅ closing 플래그 설정
-        if pos:
-            pos["closing"] = True
-
     if not pos:
         print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
         tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
@@ -933,12 +906,8 @@ def close_auto_position(m, reason=""):
             pl_value = est_exit_value - est_entry_value
             ret_pct = ((exit_price_used / entry_price - 1.0) * 100.0) if entry_price > 0 else 0.0
 
-            # ✅ 거래 결과 기록 (수수료 반영)
-            ret_pct_after_fee = ret_pct - (FEE_RATE * 100.0)
-            try:
-                record_trade(m, ret_pct_after_fee)
-            except Exception as _e:
-                print("[TRADE_RECORD_ERR]", _e)
+            # ❌ 여기서 record_trade() 호출/수수료 반영 부분은 제거 (완전종료에서만 기록)
+
 
         if sell_ok:
             tg_send(
@@ -966,33 +935,40 @@ def close_auto_position(m, reason=""):
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
     finally:
-        # ✅ 청산 시각 및 사유 기록 (동시성 보호)
-        try:
-            profit_keywords = ["PROFIT", "TRAIL", "DROP_FROM_HIGH", "PARTIAL", "LOCK", "익절", "수익"]
-            is_profit = any(kw in (reason or "").upper() for kw in profit_keywords)
-            with _POSITION_LOCK:
-                if sell_ok:
-                    LAST_EXIT_AT[m] = time.time()
-                    LAST_EXIT_CAUSE[m] = "profit" if is_profit else "loss"
-                else:
-                    # ❗ 미체결/실패도 '시도'를 찍어 과도한 재시도/재신호 억제
-                    LAST_EXIT_ATTEMPT[m] = time.time()
-        except Exception:
-            pass
-
-        # 🔒 포지션 업데이트: 실제 체결 기준
+        # 🔒 포지션 업데이트 및 통계 기록은 '완전 종료'에서만
         if sell_ok:
             remaining = max(vol - executed_vol, 0.0)
             if remaining <= 1e-12:
+                # ✅ 완전 종료: 통계/쿨다운 기록 + 트레이드 기록
+                ret_pct_after_fee = ret_pct - (FEE_RATE * 100.0)
+                try:
+                    record_trade(m, ret_pct_after_fee)
+                except Exception as _e:
+                    print("[TRADE_RECORD_ERR]", _e)
+
+                profit_keywords = ["PROFIT", "TRAIL", "DROP_FROM_HIGH", "LOCK", "익절", "수익"]
+                is_profit = any(kw in (reason or "").upper() for kw in profit_keywords)
+
                 with _POSITION_LOCK:
+                    LAST_EXIT_AT[m] = time.time()
+                    LAST_EXIT_CAUSE[m] = "profit" if is_profit else "loss"
                     OPEN_POSITIONS.pop(m, None)
             else:
+                # ✅ 부분청산: 잔량 유지, closing 해제, 쿨다운/기록 미반영
                 with _POSITION_LOCK:
                     pos = OPEN_POSITIONS.get(m, {})
                     if pos:
                         pos["volume"] = remaining
+                        pos["closing"] = False
                         OPEN_POSITIONS[m] = pos
                 tg_send_mid(f"ℹ️ {m} 부분 청산: 체결 {executed_vol:.6f}, 잔여 {remaining:.6f} (포지션 유지)")
+        else:
+            # ✅ 실패/미체결: 시도만 기록 + closing 해제
+            with _POSITION_LOCK:
+                LAST_EXIT_ATTEMPT[m] = time.time()
+                pos = OPEN_POSITIONS.get(m)
+                if pos:
+                    pos["closing"] = False
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
@@ -1007,13 +983,6 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 실패: 포지션 없음/수량 0"
             print(msg)
             return False, msg, 0.0
-
-        # ✅ 전체 청산 중이면 부분청산 스킵
-        if pos.get("closing"):
-            msg = f"[REMONITOR] {m} 전체 청산 중 → 부분청산 스킵"
-            print(msg)
-            return False, msg, 0.0
-
         if pos.get("partial_done"):
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
@@ -1141,6 +1110,13 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             continue
 
         if should_close:
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m)
+                if not pos or pos.get("closing"):
+                    return False  # 이미 청산 중/없음
+                pos["closing"] = True
+                OPEN_POSITIONS[m] = pos
+
             print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
             close_auto_position(m, reason)
             return True
@@ -1306,8 +1282,8 @@ KST = timezone(timedelta(hours=9))
 
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "8"))          # 동시에 몇 종목 모니터링 허용 (6 → 8, 무감시 방지)
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "8"))  # 보유 종목 상한 (= MAX_CONCURRENT, 무감시 방지)
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "6"))  # 보유 종목 상한(3) 단계에서 사용)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
@@ -1419,7 +1395,7 @@ def upbit_get(url, params=None, timeout=7):
                 REQ_STATS["errors"] += 1                           # ✅ 통계 잠금
                 REQ_STATS["conn_err"] += 1
             _CONSEC_CONN_ERR += 1
-            if _CONSEC_CONN_ERR >= 2:  # 3 → 2 (실시간 마켓 네트워크 리프레시 강화)
+            if _CONSEC_CONN_ERR >= 3:
                 _refresh_session()
                 time.sleep(0.6)
             else:
@@ -3149,13 +3125,11 @@ def monitor_position(m,
                 and w_now["krw_per_sec"] >= max(14000, 0.7 * w_early["krw_per_sec"])
             )
 
-            # ✅ t15_now/t30_now 사전 계산 (모든 분기에서 공통 사용)
-            t15_now = micro_tape_stats_from_ticks(ticks, 15)
-            t30_now = micro_tape_stats_from_ticks(ticks, 30)
-
             # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
             if pos_probe.get("entry_mode") != "probe":  # ✅ current_mode → pos_probe.get() 사용
                 if strong_up and USE_PYRAMIDING and AUTO_TRADE:
+                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                    t30_now = micro_tape_stats_from_ticks(ticks, 30)
 
                     # 단기 EMA 상승 전환
                     c1m = get_minutes_candles(1, m, 20)
@@ -3194,32 +3168,17 @@ def monitor_position(m,
                                     f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
                                 )
 
-                elif is_stall or (stall_age >= 15.0):
-                    # ★ 정체면 부분익절 → 재정체면 전량 (타임아웃 강화)
-
-                    # ⏰ 강제 탈출: 신고점 30초 미갱신 → 전량 청산
-                    if stall_age >= 30.0:
-                        exit_reason = "STALL_TIMEOUT_30S"
-                        verdict = "정체 30초 강제 전량 청산"
-                        break
-
-                    # 신고점 15초 미갱신 + 거래속도 60% 이하 → 부분 청산
-                    if stall_age >= 15.0 and t15_now["krw_per_sec"] <= t30_now["krw_per_sec"] * 0.6:
-                        sell_ratio = 0.30
-                        ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 15s 부분청산")
-                        if ok and executed > 0:
-                            tg_send_mid(f"⚠️ {m} 정체 15초 → 30% 부분 청산")
-
-                    # 일반 정체 (기존 로직)
-                    elif is_stall:
-                        sell_ratio = 0.50 if gain_from_entry >= 0.012 else 0.30
-                        ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 부분청산")
-                        if ok and executed > 0:
-                            # 추가로 10초 더 정체면 전량
-                            if stall_age >= 10.0:
-                                exit_reason = "STALL_FULL_EXIT"
-                                verdict = "정체 지속 전량 청산"
-                                break
+                elif is_stall:
+                    # ★ 정체면 부분익절 → 재정체면 전량
+                    # 수익이 충분하면 50%, 애매하면 30%
+                    sell_ratio = 0.50 if gain_from_entry >= 0.012 else 0.30
+                    ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 부분청산")
+                    if ok and executed > 0:
+                        # 추가로 계속 정체면 전량
+                        if stall_age >= 10.0:
+                            exit_reason = "STALL_FULL_EXIT"
+                            verdict = "정체 지속 전량 청산"
+                            break
 
 
             # 트레일 업데이트(이익 확대 시에만 상향) — '신고점 갱신' 기준
@@ -3244,7 +3203,8 @@ def monitor_position(m,
             if run_from_entry < TREND_THRESHOLD and current_mode != "probe":
                 # 🔒 최저 청산가 (수수료+마진 보장)
                 if micro_floor == 0.0:
-                    micro_floor = entry_price * (1.0 + FEE_RATE + SCALP_MICRO_MARGIN)  # 0.11% 최저선
+                    micro_floor = entry_price * (1.0 + FEE_RATE + SCALP_MICRO_MARGIN + 0.0001)  # +0.01% 쿠션
+
 
                 # 목표가 도달 시 락 armed
                 if curp >= micro_floor:
@@ -4008,4 +3968,3 @@ if __name__ == "__main__":
             MONITOR_POOL.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
-
