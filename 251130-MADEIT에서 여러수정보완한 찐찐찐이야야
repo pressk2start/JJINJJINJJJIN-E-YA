@@ -3047,7 +3047,8 @@ def monitor_position(m,
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     t15_now = micro_tape_stats_from_ticks(ticks, 15)
                     gain_now = (curp / entry_price - 1.0)
-                    if (gain_now < PROBE_BREAKEVEN_EXIT) and (t15_now["buy_ratio"] < 0.58):
+                    # 시간 초과 시 약손/본절 쪽으로 빠르게 정리 (매수비 무관하게)
+                    if (gain_now < max(PROBE_BREAKEVEN_EXIT, -0.001)) or (t15_now["buy_ratio"] < 0.54):
                         exit_reason = "PROBE_TIMEOUT"
                         verdict = "probe_timeout_exit"
                         break
@@ -3655,17 +3656,8 @@ def main():
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre: continue
 
-                # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
-                buy_ratio = pre["tape"]["buy_ratio"]
-                turn = pre["tape"]["krw"] / max(pre["ob"]["depth_krw"], 1)
-                if buy_ratio >= 0.55 and turn >= 0.018:
-                    pre["entry_mode"] = "confirm"
-                elif buy_ratio >= 0.50 and turn >= 0.015:
-                    pre["entry_mode"] = "probe"
-                else:
-                    if DEBUG_MODE:
-                        print(f"[DEBUG] {m} 하이브리드 진입 실패: buy_ratio={buy_ratio:.2f}, turn={turn:.3f}")
-                    continue
+                # detect_leader_stock()가 이미 entry_mode를 결정했으므로 재판단 금지
+                # (프로브 postcheck 스킵 등이 무효화되는 치명적 버그 방지)
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
