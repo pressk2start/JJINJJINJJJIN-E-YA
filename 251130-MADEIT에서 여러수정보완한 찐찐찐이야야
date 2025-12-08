@@ -183,11 +183,11 @@ MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 �
 SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
 ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
-# 추매 트리거 조건
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.008"))  # +0.8% 이상에서 추매
+# 추매 트리거 조건 (현실화: 0.6%에서 추매 가능, 속도 완화)
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.006"))  # +0.6% 이상에서 추매 (0.008 → 0.006)
 PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (35000 → 22000, 현실화)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초) (12 → 10)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
@@ -2932,6 +2932,10 @@ def monitor_position(m,
     best = entry_price
     worst = entry_price
 
+    # ★ 정체 감지용 상태 변수
+    best_ts = time.time()        # 마지막 신고점 찍은 시각
+    stall_arm_ts = None          # 정체 시작 후보 시각(디바운싱용)
+
     # 실제 보유 수량 확보 (익절 시 매도용)
     with _POSITION_LOCK:
         entry_volume = OPEN_POSITIONS.get(m, {}).get("volume", 0.0)
@@ -2976,6 +2980,10 @@ def monitor_position(m,
             best = max(best, curp)
             worst = min(worst, curp)
 
+            # ★ 신고점 갱신 시 정체 타이머 리셋
+            if best > prev_best:
+                best_ts = time.time()
+                stall_arm_ts = None
 
             # === 1) 웜업 구간: 소폭 되돌림 무시 (단, 급락은 즉시 컷)
             alive_sec = time.time() - start_ts
@@ -3062,55 +3070,103 @@ def monitor_position(m,
                     verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
                     break
 
-            # === PROBE 타임아웃: 빨리 안 터지면 본절 쪽으로만 철수 (초완화) ===
+            # === ★ 공통 STALL(정체) 감지 ===
+            # 최근 0~5초 vs 5~20초 비교 + 신고점 정지 시간
+            w_now = _win_stats(ticks, 0, 5)      # 최근
+            w_early = _win_stats(ticks, 5, 20)   # 직전
+            stall_age = time.time() - best_ts
+
+            # 거래속도/매수비가 직전 대비 명확히 둔화 & 신고점 갱신 정지
+            flow_decel = (w_now["krw_per_sec"] <= w_early["krw_per_sec"] * 0.6)
+            buy_drop   = (w_now["buy_ratio"]   <= w_early["buy_ratio"]   - 0.10)
+            tick_slow  = (w_now["rate"]        <= max(0.25, w_early["rate"] * 0.6))
+
+            is_stall_candidate = (stall_age >= 5.0) and (flow_decel or buy_drop or tick_slow)
+
+            # 1초 디바운싱(연속 확인)
+            if is_stall_candidate and stall_arm_ts is None:
+                stall_arm_ts = time.time()
+            elif not is_stall_candidate:
+                stall_arm_ts = None
+            is_stall = bool(stall_arm_ts and (time.time() - stall_arm_ts >= 1.0))
+
+            # === PROBE 타임아웃 + 정체 청산: 빨리 안 터지거나 정체면 철수 ===
             if pos_probe.get("entry_mode") == "probe":
                 if alive_sec >= PROBE_TIMEOUT_SEC:
-                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
                     gain_now = (curp / entry_price - 1.0)
-                    # 시간 초과 시 본절 ±0.05% 범위 내에서만 정리 (초완화)
-                    if gain_now <= 0.0005 and gain_now >= -0.0005:
+                    # 본절 근처는 기존처럼 정리
+                    if -0.0005 <= gain_now <= 0.0005:
                         exit_reason = "PROBE_TIMEOUT"
                         verdict = "probe_timeout_exit"
                         break
 
-            # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
-            if USE_PYRAMIDING and AUTO_TRADE:
-                t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                # ★ 정체면(+수익이든 아니든) 정리
+                if is_stall:
+                    gain_now = (curp / entry_price - 1.0)
+                    exit_reason = "PROBE_STALL_EXIT"
+                    verdict = f"probe 정체 청산 ({gain_now*100:+.2f}%)"
+                    break
 
-                # 💡 조건 완화 — 약상승에서도 반응하도록
-                add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
-                add_cond_flow = (
-                    t15_now["buy_ratio"] >= 0.55 and
-                    t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
-                    last_two_ticks_fresh(ticks)
-                )
+            # === ★ 상승세 판정 (추매용) ===
+            strong_up = (
+                uptick_streak_from_ticks(ticks, need=2)
+                and w_now["buy_ratio"] >= 0.58
+                and w_now["krw_per_sec"] >= max(14000, 0.7 * w_early["krw_per_sec"])
+            )
 
-                # 📊 단기 EMA 기준으로 단기 상승 전환 감지 (1분봉)
-                c1m = get_minutes_candles(1, m, 20)
-                ema3 = ema_last([c["trade_price"] for c in c1m], 3)
-                ema8 = ema_last([c["trade_price"] for c in c1m], 8)
-                short_term_up = ema3 > ema8
+            # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
+            if current_mode != "probe":
+                if strong_up and USE_PYRAMIDING and AUTO_TRADE:
+                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                if add_cond_price and add_cond_flow and short_term_up:
-                    with _POSITION_LOCK:
-                        pos = OPEN_POSITIONS.get(m)
-                        adds_used = pos.get("adds", 0) if pos else MAX_ADDS
-                        last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
+                    # 기존 조건
+                    add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
+                    add_cond_flow = (
+                        t15_now["buy_ratio"] >= 0.55 and
+                        t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
+                        last_two_ticks_fresh(ticks)
+                    )
 
-                    # 쿨다운을 40% 단축해 재진입성 향상
-                    cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
+                    # 단기 EMA 상승 전환
+                    c1m = get_minutes_candles(1, m, 20)
+                    ema3 = ema_last([c["trade_price"] for c in c1m], 3)
+                    ema8 = ema_last([c["trade_price"] for c in c1m], 8)
+                    short_term_up = ema3 > ema8
 
-                    if pos and (adds_used < MAX_ADDS) and cooldown_ok:
-                        ok_add, new_entry = add_auto_position(m, curp)
-                        if ok_add and new_entry:
-                            entry_price = new_entry
-                            c1_for_sl = get_minutes_candles(1, m, 20)
-                            base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
-                            tg_send_mid(
-                                f"➕ <b>{m}</b> 재상승 감지 → 추매 체결<br>"
-                                f"💵 새 평단 {entry_price:,.0f}원<br>"
-                                f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
-                            )
+                    # ★ 기존 조건 OR 완화된 상승세 조건
+                    if (add_cond_price and add_cond_flow and short_term_up) or \
+                       (gain_from_entry >= 0.004 and strong_up and short_term_up):
+                        with _POSITION_LOCK:
+                            pos = OPEN_POSITIONS.get(m)
+                            adds_used = pos.get("adds", 0) if pos else MAX_ADDS
+                            last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
+
+                        # 쿨다운 40% 단축
+                        cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
+
+                        if pos and (adds_used < MAX_ADDS) and cooldown_ok:
+                            ok_add, new_entry = add_auto_position(m, curp)
+                            if ok_add and new_entry:
+                                entry_price = new_entry
+                                c1_for_sl = get_minutes_candles(1, m, 20)
+                                base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
+                                tg_send_mid(
+                                    f"➕ <b>{m}</b> 상승세 추매 체결<br>"
+                                    f"💵 새 평단 {entry_price:,.0f}원<br>"
+                                    f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
+                                )
+
+                elif is_stall:
+                    # ★ 정체면 부분익절 → 재정체면 전량
+                    # 수익이 충분하면 50%, 애매하면 30%
+                    sell_ratio = 0.50 if gain_from_entry >= 0.012 else 0.30
+                    ok, _, executed = safe_partial_sell(m, sell_ratio=sell_ratio, reason="stall 부분청산")
+                    if ok and executed > 0:
+                        # 추가로 계속 정체면 전량
+                        if stall_age >= 10.0:
+                            exit_reason = "STALL_FULL_EXIT"
+                            verdict = "정체 지속 전량 청산"
+                            break
 
 
             # 트레일 업데이트(이익 확대 시에만 상향) — '신고점 갱신' 기준
