@@ -2413,17 +2413,18 @@ def final_check_leader(m, pre, tight_mode=False):
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
-        # 진입 조건: 양질의 신호만 필터링 (허수 배제)
-        if (t.get("n",0) >= 4 and                          # 4개 이상 틱 (3→4, 확실한 흐름)
-            t.get("buy_ratio",0) >= 0.57 and              # 매수비 57% 이상 (55→57, 강한 매수세)
-            t.get("krw_per_sec",0) >= 14_000 and          # 거래속도 14,000원/초 이상 (12k→14k)
-            ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
-            ob.get("spread",99) <= 2.0):                  # 스프레드 2.0% (타이트한 호가)
+        # 실제 값 계산 (조건 체크에 사용)
+        price_change = pre.get("change", 0.0)
+        volume_surge = pre.get("volume_surge", 0.0)
+        turn = t.get("krw") / max(ob.get("depth_krw"), 1)
 
-            # 실제 값 계산해서 표시 (0.0 하드코딩 제거)
-            price_change = pre.get("change", 0.0)
-            volume_surge = pre.get("volume_surge", 0.0)
-            turn = t.get("krw") / max(ob.get("depth_krw"), 1)
+        # 진입 조건: 양질의 신호만 필터링 (허수 + 스테이블코인 배제)
+        if (t.get("n",0) >= 4 and                          # 4개 이상 틱 (확실한 흐름)
+            t.get("buy_ratio",0) >= 0.57 and              # 매수비 57% 이상 (강한 매수세)
+            t.get("krw_per_sec",0) >= 14_000 and          # 거래속도 14,000원/초 이상
+            ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
+            ob.get("spread",99) <= 2.0 and                # 스프레드 2.0% (타이트한 호가)
+            abs(price_change) >= 0.003):                  # ★ 최소 0.3% 가격 변동 (스테이블코인 배제)
 
             return {
                 "price": pre["price"],
