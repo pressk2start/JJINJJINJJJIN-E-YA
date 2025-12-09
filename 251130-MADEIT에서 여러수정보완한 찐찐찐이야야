@@ -57,7 +57,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (컨펌만 적용)
-EARLY_FLOW_MIN_KRWPSEC = 16_000  # 초기 거래속도 하한 (프로브 알림 회복, 22k → 16k)
+EARLY_FLOW_MIN_KRWPSEC = 12_000  # 초기 거래속도 하한 (프로브 빈도 증가, 16k → 12k)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -183,17 +183,17 @@ MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 �
 SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
 ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
-# 추매 트리거 조건 (현실화: 0.6%에서 추매 가능, 속도 완화)
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.006"))  # +0.6% 이상에서 추매 (0.008 → 0.006)
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (35000 → 22000, 현실화)
+# 추매 트리거 조건 (보수적 강화: 확실한 상승세에서만)
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.008"))  # +0.8% 이상에서 추매 (0.006 → 0.008, 보수화)
+PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.62"))  # 매수비 (0.60 → 0.62, 강화)
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "28000"))  # KRW/s (22000 → 28000, 강화)
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초) (12 → 10)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
 PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가 (알림 양 증가)
-PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.50"))  # probe-lite 최소 매수비 (0.53 → 0.50, 초완화)
-PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "8000"))  # probe-lite 최소 거래속도 (12000 → 8000, 초완화)
+PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.48"))  # probe-lite 최소 매수비 (0.50 → 0.48, 빈도 증가)
+PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "6500"))  # probe-lite 최소 거래속도 (8000 → 6500, 빈도 증가)
 PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.017"))  # VWAP 괴리 상한 (0.012 → 0.017, 초완화)
 PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "2.00"))  # 스프레드 상한 (0.90 → 2.00, 초완화)
 
@@ -2386,23 +2386,23 @@ def monitor_position(m,
                     verdict = f"probe 정체 청산 ({gain_now*100:+.2f}%)"
                     break
 
-            # === ★ 상승세 판정 (추매용) ===
+            # === ★ 상승세 판정 (추매용, 보수적 강화) ===
             strong_up = (
                 uptick_streak_from_ticks(ticks, need=2)
-                and w_now["buy_ratio"] >= 0.58
-                and w_now["krw_per_sec"] >= max(14000, 0.7 * w_early["krw_per_sec"])
+                and w_now["buy_ratio"] >= 0.62
+                and w_now["krw_per_sec"] >= max(16000, 0.8 * w_early["krw_per_sec"])
             )
 
-            # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
+            # === 2-1) 피라미딩(추매): 확실한 상승세에서만 ===
             if current_mode != "probe":
                 if strong_up and USE_PYRAMIDING and AUTO_TRADE:
                     t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                    # 기존 조건
-                    add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
+                    # 보수적 추매 조건 강화
+                    add_cond_price = gain_from_entry >= max(0.006, PYRAMID_ADD_MIN_GAIN * 0.9)
                     add_cond_flow = (
-                        t15_now["buy_ratio"] >= 0.55 and
-                        t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
+                        t15_now["buy_ratio"] >= 0.60 and
+                        t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.9 and
                         last_two_ticks_fresh(ticks)
                     )
 
@@ -2412,9 +2412,9 @@ def monitor_position(m,
                     ema8 = ema_last([c["trade_price"] for c in c1m], 8)
                     short_term_up = ema3 > ema8
 
-                    # ★ 기존 조건 OR 완화된 상승세 조건
+                    # ★ 엄격한 조건으로 통일 (확실한 상승세만)
                     if (add_cond_price and add_cond_flow and short_term_up) or \
-                       (gain_from_entry >= 0.004 and strong_up and short_term_up):
+                       (gain_from_entry >= 0.007 and strong_up and short_term_up):
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
                             adds_used = pos.get("adds", 0) if pos else MAX_ADDS
