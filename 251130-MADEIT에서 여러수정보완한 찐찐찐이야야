@@ -359,6 +359,10 @@ def place_market_sell(market, volume):
         print(f"[SELL_ERR] {market} {e}")
         raise
 
+def _guard_order_dict(od):
+    """주문 결과가 None이면 빈 dict 반환 (안전 가드)"""
+    return od if isinstance(od, dict) else {}
+
 def get_order_result(order_uuid, timeout_sec=6.0):
     """
     주문 결과 조회 (폴링 방식)
@@ -459,6 +463,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # 주문 결과 확인 (폴링)
         od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+        od = _guard_order_dict(od)  # None 가드
 
         executed_vol = 0.0
         avg_price = current_price
@@ -592,6 +597,7 @@ def close_auto_position(market: str, reason: str = "") -> bool:
     try:
         res = place_market_sell(market, volume)
         od = get_order_result(res.get("uuid") if isinstance(res, dict) else None, timeout_sec=6.0)
+        od = _guard_order_dict(od)  # None 가드
 
         executed = 0.0
         if od:
@@ -651,6 +657,7 @@ def add_auto_position(m, curp):
         res = place_market_buy(m, add_krw)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+        od = _guard_order_dict(od)  # None 가드
 
         executed_vol = 0.0
         avg_price = curp
@@ -724,6 +731,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         res = place_market_sell(m, sell_volume)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+        od = _guard_order_dict(od)  # None 가드
 
         executed = 0.0
         if od:
@@ -746,8 +754,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         if remaining_volume <= 0:
             with _POSITION_LOCK:                                 # ✅ 완전 종료
-                LAST_EXIT_AT[m] = time.time()
                 OPEN_POSITIONS.pop(m, None)
+            mark_exit(m, cause="partial_close")  # monotonic 기록
         else:
             with _POSITION_LOCK:                                 # ✅ 부분청산 플래그
                 pos2 = OPEN_POSITIONS.get(m)
