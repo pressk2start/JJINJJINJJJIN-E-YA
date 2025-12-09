@@ -32,6 +32,20 @@ def fmt6(x):
             return s
     return str(x)
 
+
+def fmt_price(x):
+    """
+    가격을 최대한 정밀하게 표시 (소수점 최대 8자리, trailing zero 제거)
+    - 업비트 체결가/호가 등 모든 가격에 사용
+    - 의미있는 소수점까지만 표시
+    """
+    if isinstance(x, (int, float)):
+        s = f"{x:,.8f}".rstrip('0')
+        if s.endswith('.'):
+            s += '0'  # 최소 소수점 1자리는 표시
+        return s
+    return str(x)
+
 # =========================
 # 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
 # =========================
@@ -592,8 +606,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
     if not ok_guard:
         tg_send(
             f"⚠️ <b>진입 취소</b> {m}\n"
-            f"• 신호가: {signal_price:,.0f}원\n"
-            f"• 현재가: {current_price:,.0f}원\n"
+            f"• 신호가: {fmt_price(signal_price)}원\n"
+            f"• 현재가: {fmt_price(current_price)}원\n"
             f"• 상승률: {((current_price / signal_price - 1) * 100):.2f}%\n"
             f"• 사유: 가격 급등 (초입 추격 위험)"
         )
@@ -718,12 +732,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
 
     tg_send(
         f"{mode_emoji} <b>자동매수 체결 ({entry_mode})</b> {m}\n"
-        f"• 신호가: {signal_price:,.0f}원\n"
-        f"• 체결가: {avg_price:,.0f}원\n"
+        f"• 신호가: {fmt_price(signal_price)}원\n"
+        f"• 체결가: {fmt_price(avg_price)}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
         f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}% 비중)\n"
         f"• 수량: {volume_filled:.6f}\n"
-        f"• 손절가: {stop_price:,.0f}원\n"
+        f"• 손절가: {fmt_price(stop_price)}원\n"
         f"{link_for(m)}"
     )
 
@@ -845,10 +859,10 @@ def add_auto_position(m, cur_price):
 
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
-        f"• 추가 체결가: {avg_price_add:,.0f}원\n"
+        f"• 추가 체결가: {fmt_price(avg_price_add)}원\n"
         f"• 추가 수량: {volume_filled:.6f}\n"
         f"• 총 수량: {new_vol:.6f}\n"
-        f"• 새로운 평단: {new_entry_price:,.0f}원\n"
+        f"• 새로운 평단: {fmt_price(new_entry_price)}원\n"
         f"{link_for(m)}"
     )
 
@@ -958,8 +972,8 @@ def close_auto_position(m, reason=""):
                 f"• 사유: {reason}\n"
                 f"• 요청 수량: {vol:.6f}\n"
                 f"• 체결 수량: {executed_vol:.6f}\n"
-                f"• 매수평단: {entry_price:,.0f}원\n"
-                f"• 실매도가(평균): {exit_price_used:,.0f}원\n"
+                f"• 매수평단: {fmt_price(entry_price)}원\n"
+                f"• 실매도가(평균): {fmt_price(exit_price_used)}원\n"
                 f"• 매수금액(체결분): {est_entry_value:,.0f}원\n"
                 f"• 청산금액(체결분): {est_exit_value:,.0f}원\n"
                 f"• 수익률(수수료후): {ret_pct_after_fee:+.2f}%\n"
@@ -3859,7 +3873,7 @@ def monitor_position(m,
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
-                            f"추매 후 평단: {fmt6(new_entry)}원"
+                            f"추매 후 평단: {fmt_price(new_entry)}원"
                         )
 
                         c1_for_sl = get_minutes_candles(1, m, 20)
@@ -3988,8 +4002,8 @@ def monitor_position(m,
                                 base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
                                 tg_send_mid(
                                     f"➕ <b>{m}</b> 상승세 추매 체결<br>"
-                                    f"💵 새 평단 {entry_price:,.0f}원<br>"
-                                    f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
+                                    f"💵 새 평단 {fmt_price(entry_price)}원<br>"
+                                    f"🧯 손절 {fmt_price(base_stop)}원 ({eff_sl_pct*100:.2f}%)"
                                 )
 
                 elif is_stall:
@@ -4161,7 +4175,7 @@ def monitor_position(m,
             # 트리거 판정은 '고정된' 락 가격으로
             if profit_lock_active and curp <= profit_lock_price:
                 exit_reason = "PROFIT_LOCK"
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock_price)}원) → 청산(대기)")
+                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt_price(profit_lock_price)}원) → 청산(대기)")
                 verdict = "PROFIT_LOCK"
                 break
 
@@ -4170,7 +4184,7 @@ def monitor_position(m,
                 trail_stop = max(trail_stop, best * 0.995)
             if trail_armed and curp <= trail_stop:
                 exit_reason = "TRAIL_EXIT"
-                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산(대기)")
+                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt_price(trail_stop)}원) 터치 → 청산(대기)")
                 verdict = "TRAIL_EXIT"
                 break
 
@@ -4580,7 +4594,7 @@ def start_probe_v2_monitor():
                                 if ok_add and new_entry:
                                     tg_send(
                                         f"➕ <b>프로브 2.0 승격 (1차 추매)</b> {m}\n"
-                                        f"💵 <b>새 평단</b> {new_entry:,.0f}원\n"
+                                        f"💵 <b>새 평단</b> {fmt_price(new_entry)}원\n"
                                         f"💰 <b>추매금액</b> {add_size_krw:,}원\n"
                                         f"📊 <b>점수</b> {current_score}"
                                     )
@@ -4836,10 +4850,10 @@ def main():
 
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
-                    f"💵 <b>현재가</b> {fmt6(pre['price'])}원\n"
+                    f"💵 <b>현재가</b> {fmt_price(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
-                    f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
+                    f"🧯 손절가: {fmt_price(dyn_stop)}원 (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
 
