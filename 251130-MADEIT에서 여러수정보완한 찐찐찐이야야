@@ -941,6 +941,18 @@ def close_auto_position(m, reason=""):
 
     print(f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}, PnL(선계산)={ret_pct:+.2f}%")
 
+    # ★ 최소 주문금액 체크 (5,000원 미만 시 거절 방지)
+    estimated_order_krw = cur_price * vol
+    if estimated_order_krw < 5000:
+        print(f"[AUTO] {m} 청산 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 → 주문 스킵")
+        tg_send_mid(f"⚠️ {m} 청산 불가: 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 (최소주문금액)")
+        # closing 플래그 해제
+        with _POSITION_LOCK:
+            pos = OPEN_POSITIONS.get(m)
+            if pos:
+                pos["closing"] = False
+        return
+
     exit_price_used = cur_price  # 실제 체결가 성공 시 교체
     executed_vol = 0.0           # 실제 체결 수량
     sell_ok = False
