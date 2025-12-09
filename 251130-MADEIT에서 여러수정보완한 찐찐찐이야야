@@ -423,6 +423,16 @@ def get_account_info():
         print("[AUTO] 계좌 조회 실패:", e)
         return []
 
+
+def get_krw_balance():
+    """KRW 잔고 조회"""
+    accounts = get_account_info()
+    for a in accounts or []:
+        if a.get("currency") == "KRW":
+            return float(a.get("balance", "0"))
+    return 0.0
+
+
 def startup_selfcheck():
     """
     업비트 Private 인증 즉시 점검.
@@ -2163,7 +2173,7 @@ def probe_v2_prefilter(candles, orderbook):
     - 스프레드 <= 0.2%
     - EMA 5,10,20 중 최소 2개 상승
     """
-    if len(candles) < 30:
+    if len(candles) < 30 or not orderbook:
         return False
 
     # 1) RVOL 계산 (최근 거래량 / 30봉 평균)
@@ -2175,17 +2185,19 @@ def probe_v2_prefilter(candles, orderbook):
     if rvol < PROBE_V2_PREFILTER_RVOL:
         return False
 
-    # 2) 스프레드 체크
-    if not orderbook:
+    # 2) 스프레드 체크 (fetch_orderbook_cache 구조: {'spread', 'depth_krw', 'raw'})
+    # spread는 이미 %로 저장됨
+    spread_pct = orderbook.get("spread", 999)
+    if spread_pct > (PROBE_V2_PREFILTER_SPREAD * 100):  # 0.002 → 0.2%
         return False
-    bid = orderbook.get("bid", 0)
-    ask = orderbook.get("ask", 0)
-    mid = (bid + ask) / 2
-    if mid == 0:
-        return False
-    spread = (ask - bid) / mid
 
-    if spread > PROBE_V2_PREFILTER_SPREAD:
+    # bid/ask 확인 (optional, raw에서)
+    raw_units = (orderbook.get("raw") or {}).get("orderbook_units") or []
+    if not raw_units:
+        return False
+    bid = raw_units[0].get("bid_price", 0)
+    ask = raw_units[0].get("ask_price", 0)
+    if not (bid and ask):
         return False
 
     # 3) EMA 기울기 (5, 10, 20)
@@ -2194,7 +2206,7 @@ def probe_v2_prefilter(candles, orderbook):
     ema10 = ema_series(closes, 10)
     ema20 = ema_series(closes, 20)
 
-    if len(ema5) < 4 or len(ema10) < 4 or len(ema20) < 4:
+    if len(ema5) < 6 or len(ema10) < 6 or len(ema20) < 6:
         return False
 
     # 기울기 체크 (최근 3봉 평균 > 이전 3봉 평균)
@@ -4706,36 +4718,46 @@ def main():
                             # 프로브 2.0 상태 추가
                             probe_v2_add_state(m, trigger_type)
 
-                            # 프로브 진입 신호 생성 (기존 포맷 활용)
-                            pre = {
-                                "price": c1[-1]["trade_price"],
-                                "entry_mode": "probe_v2",
-                                "trigger_type": trigger_type,
-                                "change": 0.0,
-                                "volume_surge": 0.0,
-                                "tape": {"n": 0, "buy_ratio": 0, "krw": 0, "krw_per_sec": 0},
-                                "ob": ob_data if ob_data else {"depth_krw": 0, "spread": 99},
-                            }
-
-                            # 프로브 2.0는 postcheck 스킵
-                            payload = {"entry_mode": "probe_v2", "trigger_type": trigger_type}
-
-                            # 진입 실행
+                            # 프로브 진입 실행
                             if AUTO_TRADE and m not in OPEN_POSITIONS:
-                                # 프로브 크기로 진입
+                                # 프로브 크기 계산
                                 krw_bal = get_krw_balance()
                                 probe_size_krw = int(krw_bal * PROBE_V2_SIZE_PROBE)
-                                probe_size_krw = max(min(probe_size_krw, 10000), 5000)  # 5k~10k 범위
+                                probe_size_krw = max(min(probe_size_krw, 10000), 5000)  # 5k~10k
 
-                                ok, entry_price = open_auto_position(m, pre["price"], entry_mode="probe_v2", probe_krw=probe_size_krw)
-                                if ok:
-                                    tg_send(
-                                        f"🔬 <b>프로브 2.0 진입</b> {m} <code>#{trigger_type}</code>\n"
-                                        f"💵 <b>진입가</b> {entry_price:,.0f}원\n"
-                                        f"💰 <b>금액</b> {probe_size_krw:,}원\n"
-                                        f"📊 <b>점수</b> 0 (관찰 시작)"
-                                    )
-                                    found += 1
+                                # pre dict 생성 (open_auto_position 시그니처 맞춤)
+                                pre = {
+                                    "price": c1[-1]["trade_price"],
+                                    "entry_mode": "probe",  # probe_v2가 아닌 probe로 (기존 로직 활용)
+                                    "ign_ok": False,
+                                    "mega_ok": False,
+                                    "early_ok": True,
+                                    "ticks": [],
+                                    "tape": {"n": 0, "buy_ratio": 0, "krw": 0, "krw_per_sec": 0},
+                                    "ob": ob_data if ob_data else {"depth_krw": 0, "spread": 99},
+                                }
+
+                                # 동적 손절가 계산
+                                dyn_stop, eff_sl = dynamic_stop_loss(pre["price"], c1)
+
+                                # 프로브 금액 임시 변경
+                                global PROBE_KRW
+                                orig_probe = PROBE_KRW
+                                PROBE_KRW = probe_size_krw
+
+                                # 진입
+                                open_auto_position(m, pre, dyn_stop, eff_sl)
+
+                                # 프로브 금액 복원
+                                PROBE_KRW = orig_probe
+
+                                # 알림 (단순화)
+                                tg_send(
+                                    f"🔬 <b>프로브 2.0 진입</b> {m} <code>#{trigger_type}</code>\n"
+                                    f"💰 <b>금액</b> {probe_size_krw:,}원\n"
+                                    f"📊 <b>점수</b> 0 (관찰 시작)"
+                                )
+                                found += 1
 
                             continue  # 프로브 2.0 진입했으면 기존 로직 스킵
 
