@@ -57,7 +57,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (컨펌만 적용)
-EARLY_FLOW_MIN_KRWPSEC = 16_000  # 초기 거래속도 하한 (프로브 알림 회복, 22k → 16k)
+EARLY_FLOW_MIN_KRWPSEC = 20_000  # 초기 거래속도 하한 (프로브 빈도 조절, 16k → 20k 상향)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -191,11 +191,11 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # �
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
-PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가 (알림 양 증가)
-PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.50"))  # probe-lite 최소 매수비 (0.53 → 0.50, 초완화)
-PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "8000"))  # probe-lite 최소 거래속도 (12000 → 8000, 초완화)
-PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.017"))  # VWAP 괴리 상한 (0.012 → 0.017, 초완화)
-PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "2.00"))  # 스프레드 상한 (0.90 → 2.00, 초완화)
+PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가
+PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.55"))  # probe-lite 최소 매수비 (보수적 조정: 0.50 → 0.55)
+PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "12000"))  # probe-lite 최소 거래속도 (보수적 조정: 8000 → 12000)
+PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.012"))  # VWAP 괴리 상한 (보수적 조정: 0.017 → 0.012)
+PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "1.20"))  # 스프레드 상한 (보수적 조정: 2.00 → 1.20)
 
 # === 스캘프/추세 분기 설정 ===
 TREND_THRESHOLD = float(os.getenv("TREND_THRESHOLD", "0.03"))  # 3% 이상: 큰 추세, 미만: 스캘프
