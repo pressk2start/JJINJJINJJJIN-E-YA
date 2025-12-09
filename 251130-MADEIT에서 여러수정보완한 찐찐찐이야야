@@ -140,15 +140,15 @@ ENTRY_MAX_SPREAD = float(os.getenv("ENTRY_MAX_SPREAD", "0.80"))      # 스프레
 ENTRY_MIN_BIDASK = float(os.getenv("ENTRY_MIN_BIDASK", "1.10"))      # bid/ask ≥ 1.10
 ENTRY_MAX_VWAP_GAP = float(os.getenv("ENTRY_MAX_VWAP_GAP", "0.012")) # VWAP 괴리 ≤ 1.2%
 
-# 보수적 추매 하한
-ADD_MIN_BUY = float(os.getenv("ADD_MIN_BUY", "0.62"))
-ADD_ACCEL_RATIO = float(os.getenv("ADD_ACCEL_RATIO", "1.20"))        # t15.krw/s ≥ 1.20 * t30.krw/s
-ADD_MIN_KRWPSEC = int(os.getenv("ADD_MIN_KRWPSEC", "26000"))
-ADD_MIN_BIDASK = float(os.getenv("ADD_MIN_BIDASK", "1.12"))
+# 보수적 추매 하한 (기본값 하향 - 추세 붙을 때 추매 빈도 개선)
+ADD_MIN_BUY = float(os.getenv("ADD_MIN_BUY", "0.60"))               # 0.62 → 0.60
+ADD_ACCEL_RATIO = float(os.getenv("ADD_ACCEL_RATIO", "1.12"))       # 1.20 → 1.12, t15.krw/s ≥ 1.12 * t30.krw/s
+ADD_MIN_KRWPSEC = int(os.getenv("ADD_MIN_KRWPSEC", "22000"))        # 26000 → 22000
+ADD_MIN_BIDASK = float(os.getenv("ADD_MIN_BIDASK", "1.08"))         # 1.12 → 1.08
 ADD_MAX_SPREAD = float(os.getenv("ADD_MAX_SPREAD", "0.80"))
 ADD_MIN_DEPTH_KRW = int(os.getenv("ADD_MIN_DEPTH_KRW", "15000000"))
-ADD_MAX_VWAP_GAP = float(os.getenv("ADD_MAX_VWAP_GAP", "0.018"))     # 과열 추격 방지
-ADD_NEWHIGH_EPS = float(os.getenv("ADD_NEWHIGH_EPS", "0.0005"))      # 신고점 소폭 갱신 요구(0.05%)
+ADD_MAX_VWAP_GAP = float(os.getenv("ADD_MAX_VWAP_GAP", "0.022"))    # 0.018 → 0.022, 과열 추격 방지
+ADD_NEWHIGH_EPS = float(os.getenv("ADD_NEWHIGH_EPS", "0.0003"))     # 0.0005 → 0.0003, 신고점 소폭 갱신 요구
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
 
@@ -223,6 +223,9 @@ PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.50"))  # probe-lit
 PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "8000"))  # probe-lite 최소 거래속도 (12000 → 8000, 초완화)
 PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.017"))  # VWAP 괴리 상한 (0.012 → 0.017, 초완화)
 PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "2.00"))  # 스프레드 상한 (0.90 → 2.00, 초완화)
+
+# === 염탐(micro-probe) on strict 허용 스위치 ===
+ALLOW_MICRO_PROBE_WHEN_STRICT = os.getenv("ALLOW_MICRO_PROBE_WHEN_STRICT", "1") == "1"
 
 # STRICT 모드에서는 프로브 과다생성 기능 차단
 if STRICT_ENTRY:
@@ -2300,9 +2303,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (now_ts - last_block) < cooldown_after_exit:
             return None
 
-    # === Micro-Probe: 초경량 즉시 찌르기 (STRICT_ENTRY이면 비활성) ===
+    # === Micro-Probe: 초경량 즉시 찌르기 ===
     ticks_now = None
-    if not STRICT_ENTRY:
+    if (not STRICT_ENTRY) or ALLOW_MICRO_PROBE_WHEN_STRICT:
         ticks_now = get_recent_ticks(m, 80)
         if ticks_now:
             t6 = micro_tape_stats_from_ticks(ticks_now, 6)
@@ -2627,8 +2630,8 @@ def final_check_leader(m, pre, tight_mode=False):
         cut("ENTRY_STRICT_DROP", f"{m} {reason}")
         return None
 
-    # 2) 모든 진입에 6초 포스트체크 강제
-    if STRICT_POSTCHECK_ALL:
+    # 2) 포스트체크는 컨펌에만 적용 (프로브는 스킵)
+    if STRICT_POSTCHECK_ALL and pre.get("entry_mode") != "probe":
         ok_pc, why = postcheck_6s(m, pre)
         if not ok_pc:
             cut("ENTRY_PC_DROP", f"{m} {why}")
