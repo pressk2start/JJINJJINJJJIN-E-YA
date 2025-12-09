@@ -11,8 +11,8 @@ import hashlib
 import hmac
 import jwt
 
-# Decimal 정밀도 설정
-getcontext().prec = 10
+# Decimal 정밀도 설정 (암호화폐 수량은 소수점 8자리까지 정확히 표현 필요)
+getcontext().prec = 18
 
 
 def rnd():
@@ -31,6 +31,14 @@ def fmt6(x):
             s = f"{x:,.6f}".rstrip('0').rstrip('.')
             return s
     return str(x)
+
+def _fmt_qty(x):
+    """
+    업비트 주문 수량을 고정 소수점 문자열로 변환 (지수표기 방지)
+    - 예: 0.0000001 → "0.0000001" (NOT "1e-07")
+    - Decimal을 사용해 정확한 소수 표현 보장
+    """
+    return format(Decimal(str(x)).quantize(Decimal('0.00000001')), 'f')
 
 # =========================
 # 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
@@ -53,6 +61,9 @@ TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격(1.0%)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
+
+# === 업비트 주문 제한 ===
+UPBIT_MIN_ORDER_KRW = 5000  # 최소 주문금액 5,000원 (업비트 정책)
 
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
@@ -346,7 +357,7 @@ def place_market_sell(market, volume):
         "market": market,
         "side": "ask",
         "ord_type": "market",
-        "volume": str(volume)
+        "volume": _fmt_qty(volume)  # 지수표기 방지
     }
 
     headers = _make_auth_headers(params)
@@ -594,6 +605,17 @@ def close_auto_position(market: str, reason: str = "") -> bool:
     except Exception:
         last_price = entry_price
 
+    # 최소 주문금액 검증 (5,000원)
+    estimated_krw = volume * last_price
+    if estimated_krw < UPBIT_MIN_ORDER_KRW:
+        print(f"[CLOSE_FAIL] {market} 예상금액 {estimated_krw:,.0f}원 < 최소 {UPBIT_MIN_ORDER_KRW:,}원 - 청산 불가")
+        tg_send_mid(f"⚠️ <b>청산 실패</b> {market}\n"
+                    f"• 사유: 최소 주문금액 미달\n"
+                    f"• 예상금액: {estimated_krw:,.0f}원\n"
+                    f"• 최소금액: {UPBIT_MIN_ORDER_KRW:,}원\n"
+                    f"→ 포지션 보유 유지 (수동 청산 필요)")
+        return False
+
     try:
         res = place_market_sell(market, volume)
         od = get_order_result(res.get("uuid") if isinstance(res, dict) else None, timeout_sec=6.0)
@@ -726,6 +748,26 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
         print(msg)
         return False, msg, 0.0
+
+    # 최소 주문금액 검증 (5,000원)
+    try:
+        ticker_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m}, timeout=3)
+        if ticker_js and isinstance(ticker_js, list) and len(ticker_js) > 0:
+            current_price = float(ticker_js[0].get("trade_price", 0))
+            estimated_krw = sell_volume * current_price
+            if estimated_krw < UPBIT_MIN_ORDER_KRW:
+                msg = f"[REMONITOR] {m} 부분청산 실패: 예상금액 {estimated_krw:,.0f}원 < 최소 {UPBIT_MIN_ORDER_KRW:,}원"
+                print(msg)
+                # 최소금액 미달 시 전량 청산 시도
+                sell_volume = current_volume
+                estimated_krw = sell_volume * current_price
+                if estimated_krw < UPBIT_MIN_ORDER_KRW:
+                    msg2 = f"[REMONITOR] {m} 전량도 최소금액 미달 ({estimated_krw:,.0f}원) - 청산 스킵"
+                    print(msg2)
+                    return False, msg2, 0.0
+                print(f"[REMONITOR] {m} → 전량 청산으로 변경 (예상 {estimated_krw:,.0f}원)")
+    except Exception as e:
+        print(f"[REMONITOR] {m} 최소금액 검증 실패 (계속 진행): {e}")
 
     try:
         res = place_market_sell(m, sell_volume)
