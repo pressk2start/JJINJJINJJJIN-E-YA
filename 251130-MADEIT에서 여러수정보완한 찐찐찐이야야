@@ -618,7 +618,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # ✅ 염탐은 항상 고정 최소금액으로만
         krw_to_use = min(krw_bal, max(5000, PROBE_KRW))
     else:
-        krw_to_use = base_qty * entry_price
+        krw_to_use = min(krw_bal, int(base_qty * entry_price))  # ★ 잔고 초과 방지
 
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
@@ -736,7 +736,7 @@ def add_auto_position(m, cur_price):
 
     add_risk_pct = max(0.0001, RISK_PER_TRADE * ADD_RISK_FRACTION)
     qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
-    krw_to_use = qty_theoretical * cur_price
+    krw_to_use = min(krw_bal, int(qty_theoretical * cur_price))  # ★ 잔고 초과 방지
 
     if krw_to_use < 5000:
         print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
@@ -831,6 +831,12 @@ def close_auto_position(m, reason=""):
         print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
         return
 
+    # ★ 청산 실패 쿨다운 체크 (스팸 주문 방지)
+    last_attempt = LAST_EXIT_ATTEMPT.get(m, 0)
+    if time.time() - last_attempt < 10:  # 10초 쿨다운
+        print(f"[AUTO] {m} 청산 재시도 쿨다운 중 (마지막 시도 {time.time()-last_attempt:.1f}초 전)")
+        return
+
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
 
@@ -905,8 +911,9 @@ def close_auto_position(m, reason=""):
             est_entry_value = entry_price * executed_vol
             pl_value = est_exit_value - est_entry_value
             ret_pct = ((exit_price_used / entry_price - 1.0) * 100.0) if entry_price > 0 else 0.0
+            ret_pct_after_fee = ret_pct - (FEE_RATE * 100.0)  # ★ 왕복 수수료 반영 (일관성)
 
-            # ❌ 여기서 record_trade() 호출/수수료 반영 부분은 제거 (완전종료에서만 기록)
+            # ❌ 여기서 record_trade() 호출은 제거 (완전종료에서만 기록)
 
 
         if sell_ok:
@@ -919,7 +926,7 @@ def close_auto_position(m, reason=""):
                 f"• 실매도가(평균): {exit_price_used:,.0f}원\n"
                 f"• 매수금액(체결분): {est_entry_value:,.0f}원\n"
                 f"• 청산금액(체결분): {est_exit_value:,.0f}원\n"
-                f"• 수익률(체결분): {ret_pct:+.2f}%\n"
+                f"• 수익률(수수료후): {ret_pct_after_fee:+.2f}%\n"
                 f"{link_for(m)}"
             )
         else:
