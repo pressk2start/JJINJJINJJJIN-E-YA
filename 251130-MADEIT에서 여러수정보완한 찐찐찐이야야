@@ -123,6 +123,33 @@ def _apply_exit_profile():
 
 _apply_exit_profile()
 
+# ============================================
+# [PATCH A] 엄격 초입/추매 스위치 & 하한선
+# ============================================
+# --- 엄격 초입/추매 스위치 & 하한선 ---
+STRICT_ENTRY = (os.getenv("STRICT_ENTRY", "1") == "1")   # 기본 ON
+STRICT_POSTCHECK_ALL = (os.getenv("STRICT_POSTCHECK_ALL", "1") == "1")  # 진입 전부 6초 포스트체크
+
+# 초입 하한 (확정 신호만 통과)
+ENTRY_MIN_BUY = float(os.getenv("ENTRY_MIN_BUY", "0.64"))            # t15/twin 매수비 ≥ 0.64
+ENTRY_MIN_KRWPSEC = int(os.getenv("ENTRY_MIN_KRWPSEC", "26000"))     # 거래속도 ≥ 26k KRW/s
+ENTRY_MIN_TICKS = int(os.getenv("ENTRY_MIN_TICKS", "8"))             # 틱 수 ≥ 8
+ENTRY_MIN_TURN = float(os.getenv("ENTRY_MIN_TURN", "0.024"))         # 회전율 ≥ 2.4%
+ENTRY_MIN_DEPTH_KRW = int(os.getenv("ENTRY_MIN_DEPTH_KRW", "15000000"))  # 오더북 깊이 ≥ 15M
+ENTRY_MAX_SPREAD = float(os.getenv("ENTRY_MAX_SPREAD", "0.80"))      # 스프레드 ≤ 0.80%
+ENTRY_MIN_BIDASK = float(os.getenv("ENTRY_MIN_BIDASK", "1.10"))      # bid/ask ≥ 1.10
+ENTRY_MAX_VWAP_GAP = float(os.getenv("ENTRY_MAX_VWAP_GAP", "0.012")) # VWAP 괴리 ≤ 1.2%
+
+# 보수적 추매 하한
+ADD_MIN_BUY = float(os.getenv("ADD_MIN_BUY", "0.62"))
+ADD_ACCEL_RATIO = float(os.getenv("ADD_ACCEL_RATIO", "1.20"))        # t15.krw/s ≥ 1.20 * t30.krw/s
+ADD_MIN_KRWPSEC = int(os.getenv("ADD_MIN_KRWPSEC", "26000"))
+ADD_MIN_BIDASK = float(os.getenv("ADD_MIN_BIDASK", "1.12"))
+ADD_MAX_SPREAD = float(os.getenv("ADD_MAX_SPREAD", "0.80"))
+ADD_MIN_DEPTH_KRW = int(os.getenv("ADD_MIN_DEPTH_KRW", "15000000"))
+ADD_MAX_VWAP_GAP = float(os.getenv("ADD_MAX_VWAP_GAP", "0.018"))     # 과열 추격 방지
+ADD_NEWHIGH_EPS = float(os.getenv("ADD_NEWHIGH_EPS", "0.0005"))      # 신고점 소폭 갱신 요구(0.05%)
+
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
 
 # 📌 여러 명에게 보내기용 chat_id 목록
@@ -197,6 +224,11 @@ PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "8000"))  # pro
 PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.017"))  # VWAP 괴리 상한 (0.012 → 0.017, 초완화)
 PROBE_LITE_MAX_SPREAD = float(os.getenv("PROBE_LITE_MAX_SPREAD", "2.00"))  # 스프레드 상한 (0.90 → 2.00, 초완화)
 
+# STRICT 모드에서는 프로브 과다생성 기능 차단
+if STRICT_ENTRY:
+    PROBE_LITE_ON = False
+    ALWAYS_PROBE_FIRST = False
+
 # === 스캘프/추세 분기 설정 ===
 TREND_THRESHOLD = float(os.getenv("TREND_THRESHOLD", "0.03"))  # 3% 이상: 큰 추세, 미만: 스캘프
 SCALP_MICRO_MARGIN = float(os.getenv("SCALP_MICRO_MARGIN", "0.0010"))  # 수수료 위 추가 마진 (0.1%)
@@ -217,6 +249,10 @@ LAST_EXIT_CAUSE = {}
 
 # 청산 시도(미체결 포함) 타임스탬프
 LAST_EXIT_ATTEMPT = {}
+
+# 청산 실패 얼럿 중복 방지 (종목별 마지막 청산 실패 얼럿 시간)
+LAST_CLOSE_FAIL_ALERT = {}
+CLOSE_FAIL_ALERT_COOLDOWN_SEC = 60  # 60초 내 중복 얼럿 방지
 
 # 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
 REMONITOR_COOLDOWN_SEC = 300  # 5분
@@ -836,10 +872,11 @@ def close_auto_position(m, reason=""):
 
     if not pos:
         print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
-        tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
+        # ⚠️ 얼럿 과다 방지: 이미 판 종목은 콘솔만 출력 (텔레그램 전송 제거)
         return
 
-    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
+    # 청산 시도 로그 (과다 얼럿 방지: 콘솔만)
+    print(f"[AUTO] {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
 
     vol = pos.get("volume", 0.0)
     if vol <= 0:
@@ -923,16 +960,30 @@ def close_auto_position(m, reason=""):
                 f"{link_for(m)}"
             )
         else:
-            tg_send_mid(
-                f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
-                f"• 요청 수량: {vol:.6f}\n"
-                f"• 체결 수량: 0\n"
-                f"→ 최소 주문금액 부족 / 유동성 부족 / 주문 거절 가능성 점검"
-            )
+            # ⚠️ 청산 실패 얼럿 중복 방지: 60초 쿨다운
+            now_ts = time.time()
+            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
+            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
+                tg_send_mid(
+                    f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
+                    f"• 요청 수량: {vol:.6f}\n"
+                    f"• 체결 수량: 0\n"
+                    f"→ 최소 주문금액 부족 / 유동성 부족 / 주문 거절 가능성 점검"
+                )
+                LAST_CLOSE_FAIL_ALERT[m] = now_ts
+            else:
+                print(f"[AUTO] {m} 청산 실패 (얼럿 쿨다운 중, 마지막 얼럿: {int(now_ts - last_alert)}초 전)")
 
     except Exception as e:
         print("[AUTO SELL ERR]", e)
-        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+        # ⚠️ 청산 실패 얼럿 중복 방지: 60초 쿨다운
+        now_ts = time.time()
+        last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
+        if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
+            tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+            LAST_CLOSE_FAIL_ALERT[m] = now_ts
+        else:
+            print(f"[AUTO] {m} 청산 예외 (얼럿 쿨다운 중)")
 
     finally:
         # 🔒 포지션 업데이트 및 통계 기록은 '완전 종료'에서만
@@ -1920,6 +1971,125 @@ def atr14_from_candles(candles, period=14):
     return sum(trs[-period:]) / period if len(trs) >= period else None
 
 
+# ============================================
+# [PATCH B] 엄격 초입/추매 게이트 유틸
+# ============================================
+def _bidask_ratio_top3(ob: dict) -> float:
+    """상위 3호가 bid/ask 비율"""
+    raw_units = (ob.get("raw") or {}).get("orderbook_units") or []
+    raw = raw_units[:3]
+    if not raw:
+        return 0.0
+    bid = sum(u.get("bid_price", 0) * u.get("bid_size", 0) for u in raw)
+    ask = sum(u.get("ask_price", 0) * u.get("ask_size", 0) for u in raw)
+    return (bid / max(ask, 1)) if ask else 0.0
+
+
+def _strict_entry_gate(m: str, pre: dict, c1: list):
+    """
+    초입 품질 하한(프로브/컨펌 공통). 실패시 진입 드롭.
+    Returns: (bool, str) - (통과여부, 실패사유)
+    """
+    try:
+        ob = pre.get("ob") or {}
+        t = pre.get("tape") or {}
+        ticks = pre.get("ticks") or []
+        if not ob or not t or not ticks or not c1:
+            return False, "ENTRY_INIT"
+
+        # 오더북 · 스프레드 · 깊이
+        if ob.get("depth_krw", 0) < ENTRY_MIN_DEPTH_KRW:
+            return False, f"ENTRY_DEPTH({int(ob.get('depth_krw',0))})"
+        if ob.get("spread", 999) > ENTRY_MAX_SPREAD:
+            return False, f"ENTRY_SPREAD({ob.get('spread'):.2f}%)"
+        if _bidask_ratio_top3(ob) < ENTRY_MIN_BIDASK:
+            return False, "ENTRY_BIDASK"
+
+        # 테이프 (twin = pre['tape'])
+        n = int(t.get("n", 0))
+        buy = float(t.get("buy_ratio", 0.0))
+        kps = float(t.get("krw_per_sec", 0.0))
+        if n < ENTRY_MIN_TICKS:
+            return False, f"ENTRY_TICKS({n})"
+        if buy < ENTRY_MIN_BUY:
+            return False, f"ENTRY_BUY({buy:.2f})"
+        if kps < ENTRY_MIN_KRWPSEC:
+            return False, f"ENTRY_KRWPSEC({kps:.0f})"
+        if not uptick_streak_from_ticks(ticks, need=2):
+            return False, "ENTRY_UPTICK"
+
+        # 회전율(테이프 KRW / 오더북 깊이)
+        turn = (t.get("krw", 0.0) / max(ob.get("depth_krw", 1), 1))
+        if turn < ENTRY_MIN_TURN:
+            return False, f"ENTRY_TURN({turn:.3f})"
+
+        # 과열 추격 금지: VWAP(20) 대비 괴리 상한
+        v20 = vwap_from_candles_1m(c1, 20)
+        if v20:
+            vgap = (pre["price"] / v20 - 1.0)
+            if vgap > ENTRY_MAX_VWAP_GAP:
+                return False, f"ENTRY_VGAP({vgap:.3f})"
+
+        return True, "OK"
+    except Exception as e:
+        return False, f"ENTRY_EX({e})"
+
+
+def conservative_add_ok(m: str, ticks: list, ob: dict, c1: list,
+                        entry_price: float, curp: float, best_price: float):
+    """
+    '확실한 상승 지속'에서만 추매 허용.
+    - t15.krw/s ≥ max(ADD_MIN_KRWPSEC, ADD_ACCEL_RATIO * t30.krw/s)
+    - t15.buy ≥ ADD_MIN_BUY, uptick 연속 ≥ 3
+    - ema3 > ema8 > ema20 (상승 기울기)
+    - VWAP 괴리 과열 금지 (≤ ADD_MAX_VWAP_GAP)
+    - bid/ask ≥ ADD_MIN_BIDASK, spread ≤ ADD_MAX_SPREAD, depth ≥ ADD_MIN_DEPTH_KRW
+    - 직전 신고점 대비 소폭 갱신(curp ≥ best*(1+eps))
+    Returns: (bool, str) - (통과여부, 실패사유)
+    """
+    try:
+        if not ticks or not ob or not c1:
+            return False, "ADD_INIT"
+
+        t15 = micro_tape_stats_from_ticks(ticks, 15)
+        t30 = micro_tape_stats_from_ticks(ticks, 30)
+
+        if t15["buy_ratio"] < ADD_MIN_BUY:
+            return False, f"ADD_BUY({t15['buy_ratio']:.2f})"
+        if t15["krw_per_sec"] < max(ADD_MIN_KRWPSEC, ADD_ACCEL_RATIO * max(t30["krw_per_sec"], 1)):
+            return False, f"ADD_KRWPSEC({t15['krw_per_sec']:.0f})"
+        if not uptick_streak_from_ticks(ticks, need=3):
+            return False, "ADD_UPTICK"
+
+        closes = [c["trade_price"] for c in c1][-20:]
+        e3 = ema_last(closes, 3)
+        e8 = ema_last(closes, 8)
+        e20 = ema_last(closes, 20) if len(closes) >= 20 else ema_last(closes, 14)
+        if not (e3 and e8 and e20 and (e3 > e8 > e20) and (e3 - e8) > 0 and (e8 - e20) > 0):
+            return False, "ADD_EMA"
+
+        v20 = vwap_from_candles_1m(c1, 20)
+        if v20:
+            vgap = (curp / v20 - 1.0)
+            if vgap > ADD_MAX_VWAP_GAP:
+                return False, f"ADD_VGAP({vgap:.3f})"
+
+        if ob.get("spread", 999) > ADD_MAX_SPREAD:
+            return False, f"ADD_SPREAD({ob.get('spread'):.2f}%)"
+        if ob.get("depth_krw", 0) < ADD_MIN_DEPTH_KRW:
+            return False, f"ADD_DEPTH({int(ob.get('depth_krw',0))})"
+        if _bidask_ratio_top3(ob) < ADD_MIN_BIDASK:
+            return False, "ADD_BIDASK"
+
+        # 신고점 소폭 갱신 요구(되돌림 추매 방지)
+        if best_price and curp < best_price * (1.0 + ADD_NEWHIGH_EPS):
+            return False, "ADD_NEWHIGH"
+
+        return True, "OK"
+    except Exception as e:
+        return False, f"ADD_EX({e})"
+
+
 # =========================
 # ★ 그라인드(계단식 상승) 예외
 # =========================
@@ -2130,35 +2300,37 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (now_ts - last_block) < cooldown_after_exit:
             return None
 
-    # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
-    ticks_now = get_recent_ticks(m, 80)
-    if ticks_now:
-        t6 = micro_tape_stats_from_ticks(ticks_now, 6)
-        if (
-            t6["n"] >= 2 and                    # 체결 2개 이상 (3 → 2, 초완화)
-            t6["buy_ratio"] >= 0.48 and         # 매수비 48%+ (0.50 → 0.48, 초완화)
-            t6["krw_per_sec"] >= 4000 and       # 속도 4k KRW/s+ (7000 → 4000, 초완화)
-            last_two_ticks_fresh(ticks_now) and
-            uptick_streak_from_ticks(ticks_now, need=1)
-        ):
-            ob_l = obc.get(m)
-            if ob_l and ob_l.get("depth_krw", 0) >= 3_000_000 and ob_l.get("spread", 999) <= 2.0:  # 5M → 3M, 1.5 → 2.0, 초완화
-                # VWAP 과열 추격만 피하기
-                vgap_mp = 0.0
-                if c1:
-                    v20 = vwap_from_candles_1m(c1, 20)
-                    if v20:
-                        vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
-                if vgap_mp <= 0.022:  # 0.018 → 0.022, 초완화
-                    cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
-                    return {
-                        "price": ticks_now[0]["trade_price"],
-                        "ob": ob_l,
-                        "ticks": ticks_now,
-                        "tape": t6,
-                        "early_ok": True,
-                        "entry_mode": "probe"
-                    }
+    # === Micro-Probe: 초경량 즉시 찌르기 (STRICT_ENTRY이면 비활성) ===
+    ticks_now = None
+    if not STRICT_ENTRY:
+        ticks_now = get_recent_ticks(m, 80)
+        if ticks_now:
+            t6 = micro_tape_stats_from_ticks(ticks_now, 6)
+            if (
+                t6["n"] >= 2 and                    # 체결 2개 이상 (3 → 2, 초완화)
+                t6["buy_ratio"] >= 0.48 and         # 매수비 48%+ (0.50 → 0.48, 초완화)
+                t6["krw_per_sec"] >= 4000 and       # 속도 4k KRW/s+ (7000 → 4000, 초완화)
+                last_two_ticks_fresh(ticks_now) and
+                uptick_streak_from_ticks(ticks_now, need=1)
+            ):
+                ob_l = obc.get(m)
+                if ob_l and ob_l.get("depth_krw", 0) >= 3_000_000 and ob_l.get("spread", 999) <= 2.0:  # 5M → 3M, 1.5 → 2.0, 초완화
+                    # VWAP 과열 추격만 피하기
+                    vgap_mp = 0.0
+                    if c1:
+                        v20 = vwap_from_candles_1m(c1, 20)
+                        if v20:
+                            vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
+                    if vgap_mp <= 0.022:  # 0.018 → 0.022, 초완화
+                        cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
+                        return {
+                            "price": ticks_now[0]["trade_price"],
+                            "ob": ob_l,
+                            "ticks": ticks_now,
+                            "tape": t6,
+                            "early_ok": True,
+                            "entry_mode": "probe"
+                        }
 
     # === 틱 기반 초봉(10초) 선행 진입 시그널 (강화된 필터링) ===
     if not ticks_now:
@@ -2189,32 +2361,33 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             }
             return pre
 
-    # === Probe-Lite: 가벼운 조건으로 초입 빈도 증가 ===
-    if PROBE_LITE_ON:
-        ticks_lite = ticks_now if ticks_now else get_recent_ticks(m, 80)
-        ob_lite = obc.get(m)
-        if ticks_lite and ob_lite and c1:
-            t10 = micro_tape_stats_from_ticks(ticks_lite, 10)
-            vwap20 = vwap_from_candles_1m(c1, 20)
-            vgap = (c1[-1]["trade_price"] / max(vwap20, 1) - 1.0) if vwap20 else 0.0
+    # === Probe-Lite: (STRICT_ENTRY이면 비활성) ===
+    if not STRICT_ENTRY:
+        if PROBE_LITE_ON:
+            ticks_lite = ticks_now if ticks_now else get_recent_ticks(m, 80)
+            ob_lite = obc.get(m)
+            if ticks_lite and ob_lite and c1:
+                t10 = micro_tape_stats_from_ticks(ticks_lite, 10)
+                vwap20 = vwap_from_candles_1m(c1, 20)
+                vgap = (c1[-1]["trade_price"] / max(vwap20, 1) - 1.0) if vwap20 else 0.0
 
-            # 오더북 최소 깊이 가드 추가 (허수 배제)
-            if (ob_lite.get("depth_krw", 0) >= 8_000_000 and
-                t10["buy_ratio"] >= PROBE_LITE_MIN_BUY and
-                t10["krw_per_sec"] >= PROBE_LITE_MIN_KRWPSEC and
-                uptick_streak_from_ticks(ticks_lite, need=1) and
-                ob_lite.get("spread", 999) <= PROBE_LITE_MAX_SPREAD and
-                abs(vgap) <= PROBE_LITE_MAX_VWAP_GAP):
+                # 오더북 최소 깊이 가드 추가 (허수 배제)
+                if (ob_lite.get("depth_krw", 0) >= 8_000_000 and
+                    t10["buy_ratio"] >= PROBE_LITE_MIN_BUY and
+                    t10["krw_per_sec"] >= PROBE_LITE_MIN_KRWPSEC and
+                    uptick_streak_from_ticks(ticks_lite, need=1) and
+                    ob_lite.get("spread", 999) <= PROBE_LITE_MAX_SPREAD and
+                    abs(vgap) <= PROBE_LITE_MAX_VWAP_GAP):
 
-                cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {t10['buy_ratio']:.2f}, 속도 {t10['krw_per_sec']:.0f})")
-                return {
-                    "price": ticks_lite[0]["trade_price"],
-                    "ob": ob_lite,
-                    "ticks": ticks_lite,
-                    "tape": t10,
-                    "early_ok": True,
-                    "entry_mode": "probe"
-                }
+                    cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {t10['buy_ratio']:.2f}, 속도 {t10['krw_per_sec']:.0f})")
+                    return {
+                        "price": ticks_lite[0]["trade_price"],
+                        "ob": ob_lite,
+                        "ticks": ticks_lite,
+                        "tape": t10,
+                        "early_ok": True,
+                        "entry_mode": "probe"
+                    }
 
     # (이하 기존 detect_leader_stock 코드 계속)
 
@@ -2435,6 +2608,33 @@ def final_check_leader(m, pre, tight_mode=False):
         "spread": round(ob["spread"], 2),
         "turn": round((t['krw'] / max(ob['depth_krw'], 1)) * 100, 2)
     }
+
+
+# ============================================
+# [PATCH C] final_check_leader() 엄격 게이트 래핑
+# ============================================
+_original_final_check_leader = final_check_leader
+
+def final_check_leader(m, pre, tight_mode=False):
+    payload = _original_final_check_leader(m, pre, tight_mode)
+    if not payload or not STRICT_ENTRY:
+        return payload
+
+    # 1) 초입 엄격 게이트(프로브/컨펌 공통)
+    c1 = get_minutes_candles(1, m, 20)
+    ok, reason = _strict_entry_gate(m, pre, c1)
+    if not ok:
+        cut("ENTRY_STRICT_DROP", f"{m} {reason}")
+        return None
+
+    # 2) 모든 진입에 6초 포스트체크 강제
+    if STRICT_POSTCHECK_ALL:
+        ok_pc, why = postcheck_6s(m, pre)
+        if not ok_pc:
+            cut("ENTRY_PC_DROP", f"{m} {why}")
+            return None
+
+    return payload
 
 
 # =========================
@@ -3137,24 +3337,18 @@ def monitor_position(m,
                     ema8 = ema_last([c["trade_price"] for c in c1m], 8)
                     short_term_up = (ema3 is not None and ema8 is not None and ema3 > ema8)
 
-                    # ★ 순수 흐름 기반 추매 (가격 조건 제거)
-                    # 최근(15s)이 직전(30s) 대비 가속 + 매수비 강함 + 단기상승 + 틱 신선
-                    flow_ok = (
-                        t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 가속도 15%+
-                        t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
-                        last_two_ticks_fresh(ticks) and
-                        short_term_up and
-                        strong_up  # 위에서 계산된 단기 강세 플래그
+                    # ★ 보수적 추매 게이트 (확실한 상승 지속에서만)
+                    ok_add_gate, add_reason = conservative_add_ok(
+                        m, ticks, ob or pre.get("ob") or {}, get_minutes_candles(1, m, 20),
+                        entry_price, curp, best
                     )
-
-                    if flow_ok:
+                    if ok_add_gate:
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
                             adds_used = pos.get("adds", 0) if pos else MAX_ADDS
                             last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
 
-                        # 쿨다운 40% 단축
-                        cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
+                        cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC)  # 보수적: 쿨다운 단축 제거
 
                         if pos and (adds_used < MAX_ADDS) and cooldown_ok:
                             ok_add, new_entry = add_auto_position(m, curp)
@@ -3163,10 +3357,10 @@ def monitor_position(m,
                                 c1_for_sl = get_minutes_candles(1, m, 20)
                                 base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
                                 tg_send_mid(
-                                    f"➕ <b>{m}</b> 상승세 추매 체결<br>"
-                                    f"💵 새 평단 {entry_price:,.0f}원<br>"
-                                    f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
+                                    f"➕ {m} 보수 추매 체결\n"
+                                    f"근거: {add_reason}"
                                 )
+                    # else: 게이트 실패시, 추매 무시 (불필요 로그 과다 방지: 주석)
 
                 elif is_stall:
                     # ★ 정체면 부분익절 → 재정체면 전량
@@ -3749,6 +3943,17 @@ SHARD_SIZE = TOP_N
 _cursor = 0
 
 
+# ============================================
+# [PATCH F] 프로브 신호 묵음 처리
+# ============================================
+def _send_signal_or_mute_for_probe(m: str, pre: dict, txt: str, retry: int = 2) -> bool:
+    """STRICT_ENTRY 모드에서 probe 신호는 묵음(콘솔만 출력)"""
+    if STRICT_ENTRY and pre.get("entry_mode") == "probe":
+        print("[MUTED_PROBE_SIGNAL]", m, "|", txt.replace("\n", " | "))
+        return True
+    return tg_send(txt, retry=retry)
+
+
 def main():
     global _cursor
     # 🔧 진단 모드 활성화 (환경변수로 제어)
@@ -3853,7 +4058,7 @@ def main():
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
 
-                sent = tg_send(txt, retry=2)
+                sent = _send_signal_or_mute_for_probe(m, pre, txt, retry=2)
 
                 if sent:
                     found += 1
