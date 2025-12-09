@@ -2355,21 +2355,34 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
-    # 프로브는 빠른 체결 목적: 최소 조건만 통과하면 즉시 진입 (초완화)
+    # 프로브는 소액 테스트 진입: 확실한 신호에만 반응 (강화)
     if pre.get("entry_mode") == "probe":
-        t = pre.get("tape", {"n":0,"buy_ratio":0})
-        ob = pre.get("ob", {})
-        if t.get("n",0) >= 2 and ob.get("depth_krw",0) >= 3_000_000 and ob.get("spread",99) <= 2.0:  # 3→2, 5M→3M, 1.6→2.0, 초완화
+        t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
+        ob = pre.get("ob", {"depth_krw":0,"spread":99})
+
+        # 진입 조건 강화: 더 확실한 신호만
+        if (t.get("n",0) >= 5 and                          # 5개 이상 틱 (2→5, 더 확실한 흐름)
+            t.get("buy_ratio",0) >= 0.60 and              # 매수비 60% 이상 (강한 매수세)
+            t.get("krw_per_sec",0) >= 15_000 and          # 거래속도 15,000원/초 이상
+            ob.get("depth_krw",0) >= 5_000_000 and        # 깊이 500만원 (3M→5M, 유동성 확보)
+            ob.get("spread",99) <= 1.5):                  # 스프레드 1.5% (2.0→1.5, 더 타이트)
+
+            # 실제 값 계산해서 표시 (0.0 하드코딩 제거)
+            price_change = pre.get("change", 0.0)
+            volume_surge = pre.get("volume_surge", 0.0)
+            turn = t.get("krw") / max(ob.get("depth_krw"), 1)
+
             return {
                 "price": pre["price"],
-                "chg": 0.0,
-                "current_volume": 0,
-                "volume_surge": 0.0,
+                "chg": round(price_change * 100, 2),
+                "current_volume": int(pre.get("current_volume", 0)),
+                "volume_surge": round(volume_surge, 2),
                 "buy": round(t.get("buy_ratio",0)*100,1),
                 "n": t.get("n",0),
                 "spread": round(ob.get("spread",0),2),
-                "turn": 0.0
+                "turn": round(turn * 100, 2)
             }
+        return None  # 조건 미충족 시 진입 안 함
 
     # ★★★ 완화 노브 적용 (컨펌 신호만)
     r = relax_knob()
@@ -3105,22 +3118,24 @@ def monitor_position(m,
                 stall_arm_ts = None
             is_stall = bool(stall_arm_ts and (time.time() - stall_arm_ts >= 1.0))
 
-            # === PROBE 타임아웃 + 정체 청산: 빨리 안 터지거나 정체면 철수 ===
+            # === PROBE 타임아웃 + 정체 청산: 충분히 관찰 후 판단 ===
             if pos_probe.get("entry_mode") == "probe":
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     gain_now = (curp / entry_price - 1.0)
-                    # 본절 근처는 기존처럼 정리
-                    if -0.0005 <= gain_now <= 0.0005:
-                        exit_reason = "PROBE_TIMEOUT"
-                        verdict = "probe_timeout_exit"
+                    # 본절 근처 또는 손실이면 정리
+                    if gain_now <= PROBE_BREAKEVEN_EXIT:  # -0.5% 이하면 청산
+                        exit_reason = "PROBE_TIMEOUT_CUT"
+                        verdict = "probe 타임아웃 손절"
                         break
 
-                # ★ 정체면(+수익이든 아니든) 정리
-                if is_stall:
+                # ★ 정체는 손실일 때만 청산 (수익이면 유지)
+                if is_stall and alive_sec >= 30:  # 최소 30초 경과 후에만 정체 판단
                     gain_now = (curp / entry_price - 1.0)
-                    exit_reason = "PROBE_STALL_EXIT"
-                    verdict = f"probe 정체 청산 ({gain_now*100:+.2f}%)"
-                    break
+                    if gain_now < -0.003:  # -0.3% 이하 손실이면 정체 시 청산
+                        exit_reason = "PROBE_STALL_CUT"
+                        verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%)"
+                        break
+                    # 수익 중이면 정체여도 유지 (추세 기다림)
 
             # === ★ 상승세 판정 (추매용) ===
             strong_up = (
