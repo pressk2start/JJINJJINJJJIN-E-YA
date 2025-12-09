@@ -274,11 +274,11 @@ def _make_auth_headers(params=None):
     payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
 
     if params:
-        # params를 list[tuple] 형태로 통일
+        # params를 list[tuple] 형태로 통일하고 모든 값을 문자열화
         if isinstance(params, list):
-            items = params
+            items = [(k, str(v)) for k, v in params]
         elif isinstance(params, dict):
-            items = list(params.items())
+            items = [(k, str(v)) for k, v in params.items()]
         else:
             raise TypeError("params must be list[tuple] or dict")
 
@@ -336,11 +336,15 @@ def place_market_buy(market, krw_amount):
     headers = _make_auth_headers(params)
 
     try:
-        r = requests.post(url, json=params, headers=headers, timeout=10)
+        r = requests.post(url, params=params, headers=headers, timeout=10)  # json → params (Upbit 표준)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"[BUY_ERR] {market} {e}")
+        err_body = getattr(e, 'response', None)
+        if err_body and hasattr(err_body, 'text'):
+            print(f"[BUY_ERR] {market} {e}\nResponse: {err_body.text}")
+        else:
+            print(f"[BUY_ERR] {market} {e}")
         raise
 
 def place_market_sell(market, volume):
@@ -365,11 +369,15 @@ def place_market_sell(market, volume):
     headers = _make_auth_headers(params)
 
     try:
-        r = requests.post(url, json=params, headers=headers, timeout=10)
+        r = requests.post(url, params=params, headers=headers, timeout=10)  # json → params (Upbit 표준)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"[SELL_ERR] {market} {e}")
+        err_body = getattr(e, 'response', None)
+        if err_body and hasattr(err_body, 'text'):
+            print(f"[SELL_ERR] {market} {e}\nResponse: {err_body.text}")
+        else:
+            print(f"[SELL_ERR] {market} {e}")
         raise
 
 def _guard_order_dict(od):
