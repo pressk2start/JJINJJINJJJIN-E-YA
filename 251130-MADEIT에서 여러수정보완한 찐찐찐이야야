@@ -269,19 +269,21 @@ REMONITOR_COOLDOWN_SEC = 120  # 재모니터 요약 알림 최소 간격(초)
 def _make_auth_headers(params=None):
     """
     업비트 Private API 인증 헤더 생성
-    - params: list[tuple] 또는 dict (순서 보존, 정렬 금지!)
+    - params: list[tuple] 또는 dict (자동 알파벳순 정렬)
     """
     payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
 
     if params:
-        # params를 list[tuple] 형태로 통일 (순서 보존)
+        # params를 list[tuple] 형태로 통일
         if isinstance(params, list):
             items = params
         elif isinstance(params, dict):
-            items = list(params.items())  # dict 삽입 순서 유지 (Python 3.7+)
+            items = list(params.items())
         else:
             raise TypeError("params must be list[tuple] or dict")
 
+        # 업비트 API는 쿼리 해시 계산 시 알파벳순 정렬 필요
+        items = sorted(items, key=lambda x: x[0])
         qs = urlencode(items, doseq=True)
         payload["query_hash"] = hashlib.sha512(qs.encode()).hexdigest()
         payload["query_hash_alg"] = "SHA512"
