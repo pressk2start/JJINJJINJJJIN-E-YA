@@ -965,14 +965,18 @@ def close_auto_position(m, reason=""):
                     LAST_EXIT_AT[m] = time.time()
                     LAST_EXIT_CAUSE[m] = "profit" if is_profit else "loss"
                     OPEN_POSITIONS.pop(m, None)
+                    # ★ 완전청산 성공 시 쿨다운 초기화
+                    LAST_EXIT_ATTEMPT.pop(m, None)
             else:
-                # ✅ 부분청산: 잔량 유지, closing 해제, 쿨다운/기록 미반영
+                # ✅ 부분청산: 잔량 유지, closing 해제, 쿨다운 초기화
                 with _POSITION_LOCK:
                     pos = OPEN_POSITIONS.get(m, {})
                     if pos:
                         pos["volume"] = remaining
                         pos["closing"] = False
                         OPEN_POSITIONS[m] = pos
+                    # ★ 부분청산 성공 시 쿨다운 초기화 (이전 실패 기록 제거)
+                    LAST_EXIT_ATTEMPT.pop(m, None)
                 tg_send_mid(f"ℹ️ {m} 부분 청산: 체결 {executed_vol:.6f}, 잔여 {remaining:.6f} (포지션 유지)")
         else:
             # ✅ 실패/미체결: 시도만 기록 + closing 해제
@@ -1035,12 +1039,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             with _POSITION_LOCK:                                 # ✅ 완전 종료
                 LAST_EXIT_AT[m] = time.time()
                 OPEN_POSITIONS.pop(m, None)
+                LAST_EXIT_ATTEMPT.pop(m, None)  # ★ 쿨다운 초기화
         else:
             with _POSITION_LOCK:                                 # ✅ 부분청산 플래그
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
                     pos2["volume"] = remaining_volume
                     pos2["partial_done"] = True
+                LAST_EXIT_ATTEMPT.pop(m, None)  # ★ 쿨다운 초기화
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
