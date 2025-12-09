@@ -869,6 +869,8 @@ def add_auto_position(m, cur_price, override_krw=None):
         pos["volume"] = new_vol
         pos["adds"] = pos.get("adds", 0) + 1     # ✅ 누적 추매회수
         pos["last_add_ts"] = time.time()
+        pos["last_add_price"] = avg_price_add   # ★ 추매 검증용
+        pos["last_add_volume"] = volume_filled  # ★ 추매 롤백용
         pos["entry_mode"] = "confirm"
         pos["added"] = True                      # (하위호환용, 다른 곳에서 참조할 수도 있으니 유지)
 
@@ -3916,8 +3918,12 @@ def monitor_position(m,
                             f"추매 후 평단: {fmt_price(new_entry)}원"
                         )
 
+                        # ★ 추매 후 스탑은 절대 위로 당기지 않음 (정상 눌림 보호)
                         c1_for_sl = get_minutes_candles(1, m, 20)
-                        base_stop, eff_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
+                        old_stop = base_stop
+                        new_stop, new_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
+                        base_stop = min(old_stop, new_stop)  # 스탑은 절대 상향 안됨
+                        eff_sl_pct = min(eff_sl_pct, new_sl_pct)
                         trail_armed = False
 
             if (not trail_armed) and gain_from_entry >= TRAIL_ARM_GAIN:
@@ -3942,6 +3948,38 @@ def monitor_position(m,
                     exit_reason = "PROBE_MICRO_PROFIT"
                     verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
                     break
+
+            # === ★ 추매 직후 45초 검증 (실패하면 추가분만 롤백) ===
+            with _POSITION_LOCK:
+                p_check = OPEN_POSITIONS.get(m) or {}
+            last_add_ts = p_check.get("last_add_ts", 0.0)
+            last_add_vol = p_check.get("last_add_volume", 0.0)
+            last_add_px = p_check.get("last_add_price", 0.0)
+
+            if last_add_vol > 0 and (time.time() - last_add_ts) <= 45:
+                t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                t30_now = micro_tape_stats_from_ticks(ticks, 30)
+                made_new_high = curp >= best * 0.999  # 신고점 재도전
+                reaccel = (t15_now["krw_per_sec"] >= 1.15 * max(t30_now["krw_per_sec"], 1)
+                          and t15_now["buy_ratio"] >= 0.58)
+
+                # 실패 조건: 신고점 미갱신 + 재가속 실패 or 가격 이탈
+                fail_add = (not made_new_high and not reaccel) or (curp <= last_add_px * 0.997)
+
+                if fail_add:
+                    # 추가분만 롤백 (부분 매도)
+                    current_vol = p_check.get("volume", 1e-12)
+                    rollback_ratio = min(1.0, last_add_vol / max(current_vol, 1e-12))
+                    ok_rb, _, exec_rb = safe_partial_sell(m, sell_ratio=rollback_ratio, reason="추매 실패 롤백")
+
+                    if ok_rb and exec_rb > 0:
+                        print(f"[ADD_ROLLBACK] {m} 추매 검증 실패 → {exec_rb:.6f} 롤백")
+                        # 롤백 완료 표시 (재롤백 방지)
+                        with _POSITION_LOCK:
+                            q = OPEN_POSITIONS.get(m)
+                            if q:
+                                q["last_add_volume"] = 0.0
+                                OPEN_POSITIONS[m] = q
 
             # === ★ 공통 STALL(정체) 감지 ===
             # 최근 0~5초 vs 5~20초 비교 + 신고점 정지 시간
@@ -4006,6 +4044,11 @@ def monitor_position(m,
                         adds_used = pos.get("adds", 0) if pos else MAX_ADDS
                         last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
 
+                    # ★ VWAP 과열 방지 (상단 확장 추격 차단)
+                    vwap20 = vwap_from_candles_1m(c1m, 20)
+                    vgap = (curp / max(vwap20, 1) - 1.0) if vwap20 else 0.0
+                    vgap_ok = (vgap <= 0.018)  # VWAP 대비 1.8% 이내만 추매 허용
+
                     # ★★★ 1차 추매 (probe→confirm): 찐 신호만 (까다롭게)
                     if adds_used == 0:
                         first_add_ok = (
@@ -4014,6 +4057,7 @@ def monitor_position(m,
                             t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.30 and  # 거래량 30% 가속
                             t15_now["buy_ratio"] >= 0.60 and  # 매수비 60% 이상
                             short_term_up and
+                            vgap_ok and  # ★ VWAP 과열 방지
                             last_two_ticks_fresh(ticks)
                         )
                         flow_ok = first_add_ok
@@ -4024,6 +4068,7 @@ def monitor_position(m,
                             t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
                             last_two_ticks_fresh(ticks) and
                             short_term_up and
+                            vgap_ok and  # ★ VWAP 과열 방지
                             strong_up  # 위에서 계산된 단기 강세 플래그
                         )
 
@@ -4038,8 +4083,12 @@ def monitor_position(m,
                             ok_add, new_entry = add_auto_position(m, curp)
                             if ok_add and new_entry:
                                 entry_price = new_entry
+                                # ★ 추매 후 스탑은 절대 위로 당기지 않음 (정상 눌림 보호)
                                 c1_for_sl = get_minutes_candles(1, m, 20)
-                                base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
+                                old_stop = base_stop
+                                new_stop, new_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
+                                base_stop = min(old_stop, new_stop)  # 스탑은 절대 상향 안됨
+                                eff_sl_pct = min(eff_sl_pct, new_sl_pct)
                                 tg_send_mid(
                                     f"➕ <b>{m}</b> 상승세 추매 체결<br>"
                                     f"💵 새 평단 {fmt_price(entry_price)}원<br>"
