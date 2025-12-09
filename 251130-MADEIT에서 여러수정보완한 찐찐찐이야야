@@ -248,6 +248,281 @@ def last_exit_block_ts(market: str) -> float:
         tried = LAST_EXIT_ATTEMPT.get(market, 0.0)
     return max(done, tried)
 
+# =========================
+# 📈 업비트 Private API 함수들
+# =========================
+def _make_auth_headers(params=None):
+    """
+    업비트 Private API 인증 헤더 생성
+    - params: list[tuple] 또는 dict (순서 보존, 정렬 금지!)
+    """
+    payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
+
+    if params:
+        # params를 list[tuple] 형태로 통일 (순서 보존)
+        if isinstance(params, list):
+            items = params
+        elif isinstance(params, dict):
+            items = list(params.items())  # dict 삽입 순서 유지 (Python 3.7+)
+        else:
+            raise TypeError("params must be list[tuple] or dict")
+
+        qs = urlencode(items, doseq=True)
+        payload["query_hash"] = hashlib.sha512(qs.encode()).hexdigest()
+        payload["query_hash_alg"] = "SHA512"
+
+    token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
+    if isinstance(token, bytes):
+        token = token.decode()
+    return {"Authorization": f"Bearer {token}"}
+
+def get_balance(market="KRW"):
+    """원화 또는 특정 코인 잔고 조회"""
+    if not AUTO_TRADE:
+        return 0.0
+
+    url = "https://api.upbit.com/v1/accounts"
+    headers = _make_auth_headers()
+
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        r.raise_for_status()
+        accounts = r.json()
+
+        for acc in accounts:
+            if acc.get("currency") == market:
+                return float(acc.get("balance", 0))
+        return 0.0
+    except Exception as e:
+        print(f"[BALANCE_ERR] {e}")
+        return 0.0
+
+def place_market_buy(market, krw_amount):
+    """
+    시장가 매수
+    - market: "KRW-BTC" 등
+    - krw_amount: 매수 금액 (원화)
+    반환: API 응답 dict
+    """
+    if not AUTO_TRADE:
+        print(f"[DRY_RUN] 매수: {market}, {krw_amount:,.0f}원")
+        return {"uuid": "dry_run_" + str(uuid.uuid4())}
+
+    url = "https://api.upbit.com/v1/orders"
+    params = {
+        "market": market,
+        "side": "bid",
+        "ord_type": "price",
+        "price": str(int(krw_amount))
+    }
+
+    headers = _make_auth_headers(params)
+
+    try:
+        r = requests.post(url, json=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[BUY_ERR] {market} {e}")
+        raise
+
+def place_market_sell(market, volume):
+    """
+    시장가 매도
+    - market: "KRW-BTC" 등
+    - volume: 매도 수량 (코인)
+    반환: API 응답 dict
+    """
+    if not AUTO_TRADE:
+        print(f"[DRY_RUN] 매도: {market}, {volume:.8f}")
+        return {"uuid": "dry_run_" + str(uuid.uuid4())}
+
+    url = "https://api.upbit.com/v1/orders"
+    params = {
+        "market": market,
+        "side": "ask",
+        "ord_type": "market",
+        "volume": str(volume)
+    }
+
+    headers = _make_auth_headers(params)
+
+    try:
+        r = requests.post(url, json=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[SELL_ERR] {market} {e}")
+        raise
+
+def get_order_result(order_uuid, timeout_sec=5.0):
+    """주문 결과 조회"""
+    if not AUTO_TRADE or not order_uuid or "dry_run" in order_uuid:
+        return {"executed_volume": "0", "state": "done"}
+
+    url = f"https://api.upbit.com/v1/order"
+    params = {"uuid": order_uuid}
+    headers = _make_auth_headers(params)
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=timeout_sec)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[ORDER_QUERY_ERR] {e}")
+        return None
+
+def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
+    """
+    초입 매수 진입
+    - probe 모드: PROBE_KRW (7,000원)
+    - 일반: RISK_PER_TRADE 기반 계산
+    """
+    if not AUTO_TRADE:
+        print(f"[AUTO_TRADE_OFF] {m} 매수 스킵 (신호만 발생)")
+        return
+
+    with _POSITION_LOCK:
+        if m in OPEN_POSITIONS:
+            print(f"[OPEN_SKIP] {m} 이미 포지션 존재")
+            return
+
+    entry_mode = pre.get("entry_mode", "confirm")
+
+    # 프로브는 고정 금액, 일반은 계좌 기반 계산
+    if entry_mode == "probe":
+        buy_krw = PROBE_KRW
+    else:
+        krw_balance = get_balance("KRW")
+        buy_krw = krw_balance * RISK_PER_TRADE * SEED_RISK_FRACTION
+        buy_krw = max(5000, min(buy_krw, krw_balance * 0.01))  # 5천원~1% 제한
+
+    try:
+        res = place_market_buy(m, buy_krw)
+        order_uuid = res.get("uuid") if isinstance(res, dict) else None
+
+        # 주문 결과 확인
+        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+
+        executed_vol = 0.0
+        avg_price = pre["price"]
+
+        if od:
+            try:
+                executed_vol = float(od.get("executed_volume") or "0")
+                trades = od.get("trades") or []
+                if trades:
+                    total_funds = sum(float(t.get("funds", 0)) for t in trades)
+                    total_vol = sum(float(t.get("volume", 0)) for t in trades)
+                    if total_vol > 0:
+                        avg_price = total_funds / total_vol
+            except Exception as e:
+                print(f"[ORDER_PARSE_ERR] {e}")
+
+        if executed_vol <= 0:
+            print(f"[BUY_FAIL] {m} 체결량 0")
+            tg_send(f"⚠️ <b>매수 실패</b> {m}\n• 체결량: 0\n• 주문 금액: {buy_krw:,.0f}원")
+            return
+
+        # 포지션 등록
+        with _POSITION_LOCK:
+            OPEN_POSITIONS[m] = {
+                "entry_price": avg_price,
+                "volume": executed_vol,
+                "stop": dyn_stop,
+                "sl_pct": eff_sl_pct,
+                "entry_mode": entry_mode,
+                "entry_time": time.time(),
+                "adds": 0,
+                "last_add_ts": 0.0,
+                "partial_done": False,
+                "closing": False
+            }
+
+        mode_txt = "🔬 프로브" if entry_mode == "probe" else "✅ 확정"
+        tg_send(
+            f"{mode_txt} <b>매수 체결</b> {m}\n"
+            f"💵 평단가: {avg_price:,.0f}원\n"
+            f"📦 수량: {executed_vol:.8f}\n"
+            f"💰 금액: {buy_krw:,.0f}원\n"
+            f"🧯 손절: {dyn_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
+        )
+
+        print(f"[BUY_OK] {m} @{avg_price:,.0f} vol={executed_vol:.8f} mode={entry_mode}")
+
+    except Exception as e:
+        print(f"[OPEN_ERR] {m} {e}")
+        tg_send(f"⚠️ <b>매수 오류</b> {m}\n{str(e)[:200]}")
+
+def add_auto_position(m, curp):
+    """
+    추매 (피라미딩)
+    반환: (성공여부, 새평단가 or None)
+    """
+    if not AUTO_TRADE:
+        return False, None
+
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m)
+        if not pos:
+            return False, None
+
+        entry_price = pos["entry_price"]
+        current_vol = pos["volume"]
+
+    # 추매 금액 계산
+    krw_balance = get_balance("KRW")
+    add_krw = krw_balance * RISK_PER_TRADE * ADD_RISK_FRACTION
+    add_krw = max(5000, min(add_krw, krw_balance * 0.01))
+
+    try:
+        res = place_market_buy(m, add_krw)
+        order_uuid = res.get("uuid") if isinstance(res, dict) else None
+        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+
+        executed_vol = 0.0
+        avg_price = curp
+
+        if od:
+            try:
+                executed_vol = float(od.get("executed_volume") or "0")
+                trades = od.get("trades") or []
+                if trades:
+                    total_funds = sum(float(t.get("funds", 0)) for t in trades)
+                    total_vol = sum(float(t.get("volume", 0)) for t in trades)
+                    if total_vol > 0:
+                        avg_price = total_funds / total_vol
+            except Exception:
+                pass
+
+        if executed_vol <= 0:
+            print(f"[ADD_FAIL] {m} 체결량 0")
+            return False, None
+
+        # 평단가 재계산
+        total_vol = current_vol + executed_vol
+        new_entry = (entry_price * current_vol + avg_price * executed_vol) / total_vol
+
+        # 포지션 업데이트
+        with _POSITION_LOCK:
+            pos2 = OPEN_POSITIONS.get(m)
+            if pos2:
+                pos2["entry_price"] = new_entry
+                pos2["volume"] = total_vol
+                pos2["adds"] = pos2.get("adds", 0) + 1
+                pos2["last_add_ts"] = time.time()
+
+        print(f"[ADD_OK] {m} 추매 #{pos.get('adds', 0)+1} @{avg_price:,.0f} 새평단={new_entry:,.0f}")
+
+        return True, new_entry
+
+    except Exception as e:
+        print(f"[ADD_ERR] {m} {e}")
+        return False, None
+
+# =========================
+# 부분 청산 및 재모니터링
+# =========================
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
     부분 청산 공용 함수
