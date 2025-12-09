@@ -46,10 +46,10 @@ HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
-# 트레일링 손절(이익발생 후만 무장)
-TRAIL_ARM_GAIN = 0.012  # +1.2% 이익 시 트레일링 활성화
+# 트레일링 손절 (이익발생 후 꼭대기 포착)
+TRAIL_ARM_GAIN = 0.008  # +0.8% 이익 시 트레일링 활성화 (조기 활성화, 1.2% → 0.8%)
 TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격(1.0%)
+TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격 (1.0%, 휩쏘 방지)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -173,21 +173,21 @@ AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
-PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 염탐은 항상 최소금액(권장 7,000원)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "25")) # probe가 N초 안에 못 터지면 본절 정리 (45 → 25, 빠른 결론)
-PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "0.0000"))  # 딱 본절 중심 (-0.0003 → 0.0000)
-MAX_ADDS = int(os.getenv("MAX_ADDS", "3"))                    # 추매 최대 회수(기본 3회)
+PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "120")) # 프로브 충분한 관찰 시간 (25초 → 120초, 긴 모니터링)
+PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
+MAX_ADDS = int(os.getenv("MAX_ADDS", "5"))                    # 추매 최대 회수 (3회 → 5회, 적극적 추매)
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
-# 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
+# 프로브 확인 후 추매는 정상 금액으로 (확신 있는 진입)
 SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
-ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
+ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "1.0"))  # 추매는 정상 금액 (0.55 → 1.0)
 
-# 추매 트리거 조건 (순수 흐름 기반, 가격 임계 미사용)
+# 추매 트리거 조건 (오름추세 감지 시 적극적 추매)
 PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.000"))  # UNUSED (흐름 기반 추매로 전환)
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비 (참고용)
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "22000"))  # KRW/s (참고용)
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "10"))  # 추매 간 최소 간격(초)
+PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.55"))  # 매수비 완화 (0.60 → 0.55)
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "18000"))  # 거래속도 완화 (22000 → 18000)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # 추매 간격 적절히 유지 (10 → 15초)
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
@@ -1283,7 +1283,7 @@ KST = timezone(timedelta(hours=9))
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "6"))  # 보유 종목 상한(3) 단계에서 사용)
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))  # 프로브 동시 보유 상한 (집중 관리)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
