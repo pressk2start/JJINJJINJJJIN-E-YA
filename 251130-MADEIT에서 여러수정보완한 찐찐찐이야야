@@ -582,11 +582,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         entry_fraction = 1.0
         mode_emoji = "🤖"
 
-    # ★ 가격 가드: probe/confirm 분리 (probe는 더 과감히)
+    # ★ 가격 가드: probe/confirm 분리 (고점 추격 방지 강화)
     if entry_mode == "probe":
-        max_drift = 0.030 if AGGRESSIVE_MODE else 0.018
+        max_drift = 0.020 if AGGRESSIVE_MODE else 0.012  # 2.0% / 1.2% (축소)
     else:
-        max_drift = 0.025 if AGGRESSIVE_MODE else 0.012
+        max_drift = 0.015 if AGGRESSIVE_MODE else 0.008  # 1.5% / 0.8% (축소)
 
     ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
     if not ok_guard:
@@ -1046,6 +1046,20 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
         print(msg)
         return False, msg, 0.0
+
+    # ★ 최소 주문금액 체크 (5,000원 이상)
+    try:
+        ticker_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        current_price = float(ticker_js[0].get("trade_price", 0)) if ticker_js else 0
+        if current_price > 0:
+            order_krw = sell_volume * current_price
+            if order_krw < 5000:
+                msg = f"[PARTIAL_SELL_SKIP] {m} 주문금액 {order_krw:.0f}원 < 5,000원 → 스킵"
+                print(msg)
+                return False, msg, 0.0
+    except Exception as e:
+        print(f"[PARTIAL_SELL_CHECK_ERR] {m} 가격 조회 실패: {e}")
+        # 조회 실패 시에도 진행 (보수적)
 
     try:
         res = place_market_sell(m, sell_volume)
@@ -4444,9 +4458,10 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def start_health_server(port=8080):
+    """헬스체크 서버 시작 (로컬호스트만 바인딩)"""
     for p in range(port, port + 5):
         try:
-            server = HTTPServer(("0.0.0.0", p), HealthHandler)
+            server = HTTPServer(("127.0.0.1", p), HealthHandler)  # 보안: 외부 접근 차단
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             print(f"🏥 Health check server: http://localhost:{p}/health")
