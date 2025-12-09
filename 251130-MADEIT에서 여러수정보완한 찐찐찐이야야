@@ -538,6 +538,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if ALWAYS_PROBE_FIRST:
         entry_mode = "probe"
 
+    # ✅ 프로브 진입 간격 체크 (무분별한 진입 방지)
+    global last_probe_entry_time
+    if entry_mode == "probe":
+        now = time.time()
+        if (now - last_probe_entry_time) < PROBE_ENTRY_COOLDOWN:
+            elapsed = now - last_probe_entry_time
+            print(f"[AUTO] 프로브 진입 간격 부족 ({elapsed:.1f}초 < {PROBE_ENTRY_COOLDOWN}초) → {m} 스킵")
+            return
+        # 쿨다운 통과 시 시간 업데이트 (진입 직전)
+        last_probe_entry_time = now
+
     if entry_mode == "probe":
         entry_fraction = 0.1   # (참고) 계산은 하되, 실제 주문금액은 PROBE_KRW로 강제
         mode_emoji = "🧭"
@@ -1288,7 +1299,7 @@ KST = timezone(timedelta(hours=9))
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))  # 프로브 동시 보유 상한 (집중 관리)
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "7"))  # 프로브 동시 보유 상한 (3→7, 양질 신호 관리)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
@@ -3582,6 +3593,10 @@ recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
 ALERT_TTL = 1800
+
+# 프로브 진입 간격 제어 (무분별한 진입 방지)
+last_probe_entry_time = 0.0
+PROBE_ENTRY_COOLDOWN = 8  # 프로브 간 최소 8초 간격
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
     ttl = ttl_sec or max(COOLDOWN, ALERT_TTL)
