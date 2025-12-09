@@ -47,9 +47,9 @@ EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 트레일링 손절 (이익발생 후 꼭대기 포착)
-TRAIL_ARM_GAIN = 0.008  # +0.8% 이익 시 트레일링 활성화 (조기 활성화, 1.2% → 0.8%)
+TRAIL_ARM_GAIN = 0.003  # +0.3% 이익 시 트레일링 활성화 (0.8→0.3%, 고점 조기 포착)
 TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격 (1.0%, 휩쏘 방지)
+TRAIL_DISTANCE_MIN = 0.005  # 최소 트레일 간격 (0.5%, 1.0→0.5%, 더 타이트하게)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -2619,9 +2619,9 @@ def postcheck_6s(m, pre):
     # ★★★ postcheck 중 최대 허용 급등 (probe는 더 완화)
     entry_mode = pre.get("entry_mode", "confirm")
     if entry_mode == "probe":
-        MAX_SURGE = 0.022  # probe: 2.2% 허용 (공격적 진입)
+        MAX_SURGE = 0.050  # probe: 5% 허용 (2.2→5%, 진짜 상승 놓치지 않기)
     else:
-        MAX_SURGE = 0.015  # confirm: 1.5% (보수적)
+        MAX_SURGE = 0.030  # confirm: 3% (1.5→3%, 완화)
 
     while True:
         now = time.time()
@@ -3357,18 +3357,29 @@ def monitor_position(m,
                     trail_stop = tight_profit_trail
                     print(f"[PROFIT_TRAIL] {m} 수익구간 트레일 조임 → 0.6% (gain={cur_gain*100:.2f}%, drop_ratio={drop_ratio:.2f})")
 
-            # ① 급락 즉시 손절 (-1.5%)
-          
+            # ① 급락 즉시 손절 (-1.5%) - 최소 보유 시간 예외
             if cur_gain <= -0.015:
                 exit_reason = "HARD_STOP"
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷(대기)")
                 verdict = "HARD_STOP"
                 break
 
+            # === 최소 보유 시간 10초 (급락 외에는 적용) ===
+            if alive_sec < 10:
+                continue  # 10초 미만은 청산 로직 스킵
+
             # ② 조기익절: 고점 대비 -0.3% & 거래량감속
             if drop_from_high >= 0.003 and vdrop_trigger:
                 safe_partial_sell(m, sell_ratio=0.5, reason="조기익절 50%")
                 verdict = "PARTIAL_EXIT"
+
+            # ②-2 거래량 급감 조기 청산 (고점 포착)
+            if drop_ratio < 0.60 and t15["buy_ratio"] < 0.50 and cur_gain >= 0.005:
+                # 거래량 40% 감소 + 매수비 50% 미만 + 최소 0.5% 이익
+                exit_reason = "VOLUME_DROP_EARLY"
+                tg_send_mid(f"📉 {m} 거래량 급감 감지 → 조기 청산 (gain={cur_gain*100:.2f}%)")
+                verdict = "VOLUME_DROP_EXIT"
+                break
 
             # ③ 전량익절: 고점대비 하락 임계치(동적)
             dyn_drop_thr = 0.010
