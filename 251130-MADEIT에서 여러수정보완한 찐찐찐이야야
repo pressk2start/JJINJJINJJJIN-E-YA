@@ -218,72 +218,35 @@ LAST_EXIT_CAUSE = {}
 # 청산 시도(미체결 포함) 타임스탬프
 LAST_EXIT_ATTEMPT = {}
 
-            # ⚠️ 청산 실패 얼럿 중복 방지: 60초 쿨다운
-            now_ts = time.time()
-            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
-            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
-                tg_send_mid(
-                    f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
-                    f"• 요청 수량: {vol:.6f}\n"
-                    f"• 체결 수량: 0\n"
-                    f"→ 최소 주문금액 부족 / 유동성 부족 / 주문 거절 가능성 점검"
-                )
-                LAST_CLOSE_FAIL_ALERT[m] = now_ts
-            else:
-                print(f"[AUTO] {m} 청산 실패 (얼럿 쿨다운 중, 마지막 얼럿: {int(now_ts - last_alert)}초 전)")
+# 청산 실패 얼럿 중복 방지 (종목별 마지막 청산 실패 얼럿 시간)
+LAST_CLOSE_FAIL_ALERT = {}
+CLOSE_FAIL_ALERT_COOLDOWN_SEC = 60  # 60초 내 중복 얼럿 방지
 
-    except requests.HTTPError as e:
-        # ⚠️ 400 에러: 잔고 부족 / 이미 매도됨 → 포지션 제거
-        status = getattr(e.response, "status_code", None)
-        body_txt = getattr(e.response, "text", "")
+# ==== [PATCH] 청산 상태 락 & monotonic 시간 유틸 ====
+_EXIT_STATE_LOCK = threading.Lock()  # 청산 상태 전용 락
 
-        if status == 400:
-            print(f"[AUTO] {m} 400 에러 (이미 매도됨/잔고 부족): {body_txt[:200]}")
-            # 포지션이 실제로 없으므로 제거
-            mark_exit(m, "already_sold")  # 락 보호된 청산 기록
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            print(f"[AUTO] {m} 포지션 제거 완료 (400 에러 처리)")
-            return
-        else:
-            # 다른 HTTP 에러는 일반 에러로 처리
-            print("[AUTO SELL HTTP ERR]", status, e)
-            now_ts = time.time()
-            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
-            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
-                tg_send(f"⚠️ <b>자동청산 HTTP 에러</b> {m}\n상태코드: {status}\n사유: {body_txt[:200]}")
-                LAST_CLOSE_FAIL_ALERT[m] = now_ts
+# 경과시간/타임아웃용 monotonic (시스템 시각 변경 영향 없음)
+now_mono = time.monotonic
 
-    except Exception as e:
-        print("[AUTO SELL ERR]", e)
-        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+# 청산 상태 안전 접근 헬퍼
+def mark_exit(market: str, cause: str):
+    """청산 완료 기록 (락 보호)"""
+    t = now_mono()
+    with _EXIT_STATE_LOCK:
+        LAST_EXIT_AT[market] = t
+        LAST_EXIT_CAUSE[market] = cause
 
-    finally:
-        # ✅ 청산 시각 및 사유 기록 (동시성 보호)
-        try:
-            profit_keywords = ["PROFIT", "TRAIL", "DROP_FROM_HIGH", "PARTIAL", "LOCK", "익절", "수익"]
-            is_profit = any(kw in (reason or "").upper() for kw in profit_keywords)
-            with _POSITION_LOCK:
-                if sell_ok:
-                    LAST_EXIT_AT[m] = time.time()
-                    LAST_EXIT_CAUSE[m] = "profit" if is_profit else "loss"
-                else:
-                    # ❗ 미체결/실패도 '시도'를 찍어 과도한 재시도/재신호 억제
-                    LAST_EXIT_ATTEMPT[m] = time.time()
-        except Exception:
-            pass
+def mark_exit_attempt(market: str):
+    """청산 시도 기록 (락 보호)"""
+    with _EXIT_STATE_LOCK:
+        LAST_EXIT_ATTEMPT[market] = now_mono()
 
-        # 🔒 포지션 업데이트: 실제 체결 기준
-        if sell_ok:
-            remaining = max(vol - executed_vol, 0.0)
-            if remaining <= 1e-12:
-        else:
-            # ✅ 실패/미체결: 시도만 기록 + closing 해제
-            mark_exit_attempt(m)  # 락 보호된 청산 시도 기록
-            with _POSITION_LOCK:
-                pos = OPEN_POSITIONS.get(m)
-                if pos:
-                    pos["closing"] = False
+def last_exit_block_ts(market: str) -> float:
+    """최근 완전청산 or 시도 시각 (monotonic 기준)"""
+    with _EXIT_STATE_LOCK:
+        done = LAST_EXIT_AT.get(market, 0.0)
+        tried = LAST_EXIT_ATTEMPT.get(market, 0.0)
+    return max(done, tried)
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
