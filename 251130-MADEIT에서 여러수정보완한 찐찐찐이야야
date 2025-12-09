@@ -274,19 +274,22 @@ def _make_auth_headers(params=None):
     payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
 
     if params:
-        # params를 list[tuple] 형태로 통일하고 모든 값을 문자열화
-        if isinstance(params, list):
-            items = [(k, str(v)) for k, v in params]
-        elif isinstance(params, dict):
-            items = [(k, str(v)) for k, v in params.items()]
-        else:
-            raise TypeError("params must be list[tuple] or dict")
+        # Upbit 공식 문서: 파라미터를 알파벳순 정렬 후 해시 계산
+        sorted_params = sorted(params.items()) if isinstance(params, dict) else sorted(params)
+        query_string = urlencode(sorted_params, doseq=True).encode()
+        m = hashlib.sha512()
+        m.update(query_string)
+        query_hash = m.hexdigest()
 
-        # 업비트 API는 쿼리 해시 계산 시 알파벳순 정렬 필요
-        items = sorted(items, key=lambda x: x[0])
-        qs = urlencode(items, doseq=True)
-        payload["query_hash"] = hashlib.sha512(qs.encode()).hexdigest()
+        payload["query_hash"] = query_hash
         payload["query_hash_alg"] = "SHA512"
+
+        # 디버깅: 실제 전송 내용 확인
+        print(f"[AUTH_DEBUG] params: {params}")
+        print(f"[AUTH_DEBUG] sorted: {sorted_params}")
+        print(f"[AUTH_DEBUG] query_string: {query_string.decode()}")
+        print(f"[AUTH_DEBUG] query_hash: {query_hash[:16]}...")
+        print(f"[AUTH_DEBUG] access_key_len: {len(UPBIT_ACCESS_KEY)}, secret_key_len: {len(UPBIT_SECRET_KEY)}")
 
     token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
     if isinstance(token, bytes):
