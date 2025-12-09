@@ -933,6 +933,11 @@ def close_auto_position(m, reason=""):
     except Exception as e:
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+        # 🔒 실패 시 closing 해제 (재시도 가능하게)
+        with _POSITION_LOCK:
+            pos = OPEN_POSITIONS.get(m)
+            if pos:
+                pos["closing"] = False
 
     finally:
         # 🔒 포지션 업데이트 및 통계 기록은 '완전 종료'에서만
@@ -3973,9 +3978,12 @@ def main():
 
 if __name__ == "__main__":
     validate_config()
-    if not startup_selfcheck():
-        print("⛔ 인증 실패 → AUTO_TRADE 강제 OFF")
-        AUTO_TRADE = False
+    if AUTO_TRADE:
+        if not startup_selfcheck():
+            print("⛔ 인증 실패 → AUTO_TRADE 강제 OFF")
+            AUTO_TRADE = False
+    else:
+        print("ℹ️  AUTO_TRADE=0 → Upbit selfcheck 생략")
     bot_start_time = time.time()
     start_health_server()
     start_monitor_watchdog()  # 워치독 시작
