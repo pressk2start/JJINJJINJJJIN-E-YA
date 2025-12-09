@@ -538,17 +538,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if ALWAYS_PROBE_FIRST:
         entry_mode = "probe"
 
-    # ✅ 프로브 진입 간격 체크 (무분별한 진입 방지)
-    global last_probe_entry_time
-    if entry_mode == "probe":
-        now = time.time()
-        if (now - last_probe_entry_time) < PROBE_ENTRY_COOLDOWN:
-            elapsed = now - last_probe_entry_time
-            print(f"[AUTO] 프로브 진입 간격 부족 ({elapsed:.1f}초 < {PROBE_ENTRY_COOLDOWN}초) → {m} 스킵")
-            return
-        # 쿨다운 통과 시 시간 업데이트 (진입 직전)
-        last_probe_entry_time = now
-
     if entry_mode == "probe":
         entry_fraction = 0.1   # (참고) 계산은 하되, 실제 주문금액은 PROBE_KRW로 강제
         mode_emoji = "🧭"
@@ -2419,17 +2408,17 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
-    # 프로브는 소액 테스트 진입: 초입 신호 최대한 포착 (완화)
+    # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
-        # 진입 조건 완화: 초입 신호 많이 잡기 (1차 진입용)
-        if (t.get("n",0) >= 3 and                          # 3개 이상 틱 (5→3, 더 빠른 진입)
-            t.get("buy_ratio",0) >= 0.55 and              # 매수비 55% 이상 (60→55, 완화)
-            t.get("krw_per_sec",0) >= 12_000 and          # 거래속도 12,000원/초 이상 (15k→12k)
-            ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (5M→3M, 완화)
-            ob.get("spread",99) <= 2.0):                  # 스프레드 2.0% (1.5→2.0, 완화)
+        # 진입 조건: 양질의 신호만 필터링 (허수 배제)
+        if (t.get("n",0) >= 4 and                          # 4개 이상 틱 (3→4, 확실한 흐름)
+            t.get("buy_ratio",0) >= 0.57 and              # 매수비 57% 이상 (55→57, 강한 매수세)
+            t.get("krw_per_sec",0) >= 14_000 and          # 거래속도 14,000원/초 이상 (12k→14k)
+            ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
+            ob.get("spread",99) <= 2.0):                  # 스프레드 2.0% (타이트한 호가)
 
             # 실제 값 계산해서 표시 (0.0 하드코딩 제거)
             price_change = pre.get("change", 0.0)
@@ -3593,10 +3582,6 @@ recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
 ALERT_TTL = 1800
-
-# 프로브 진입 간격 제어 (무분별한 진입 방지)
-last_probe_entry_time = 0.0
-PROBE_ENTRY_COOLDOWN = 8  # 프로브 간 최소 8초 간격
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
     ttl = ttl_sec or max(COOLDOWN, ALERT_TTL)
