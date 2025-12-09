@@ -218,721 +218,41 @@ LAST_EXIT_CAUSE = {}
 # 청산 시도(미체결 포함) 타임스탬프
 LAST_EXIT_ATTEMPT = {}
 
-# 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
-REMONITOR_COOLDOWN_SEC = 300  # 5분
-REMONITOR_LAST_ALERT = {}
-
-# =========================
-# 📈 최근 승률 기반 리스크 튜닝
-# =========================
-from collections import deque as _deque_for_risk  # 기존 deque와 별도 alias
-
-TRADE_HISTORY = _deque_for_risk(maxlen=30)  # 최근 30개 거래 기록
-
-
-def record_trade(market: str, pnl_pct: float):
-    """
-    거래 결과 기록
-    - pnl_pct: % 단위 수익률 (예: +2.3, -1.5)
-    """
-    TRADE_HISTORY.append({
-        "market": market,
-        "pnl": pnl_pct,
-        "win": pnl_pct > 0,
-        "time": time.time(),
-    })
-
-
-def get_adaptive_risk() -> float:
-    """
-    최근 승률 기반 RISK_PER_TRADE 가변 조정
-    - 히스토리 10건 미만: 기본값
-    - winrate < 30% : 리스크 0.5배
-    - winrate >= 50%: 리스크 1.2배
-    """
-    if len(TRADE_HISTORY) < 10:
-        return RISK_PER_TRADE
-
-    wins = sum(1 for t in TRADE_HISTORY if t.get("win"))
-    win_rate = wins / len(TRADE_HISTORY)
-
-    if win_rate < 0.30:
-        return RISK_PER_TRADE * 0.5
-    elif win_rate >= 0.50:
-        return RISK_PER_TRADE * 1.2
-    else:
-        return RISK_PER_TRADE
-
-def _make_auth_headers(params=None):
-    """
-    업비트 Private API 인증 헤더 생성
-    - params: list[tuple] 또는 dict (순서 보존, 정렬 금지!)
-    """
-    payload = {"access_key": UPBIT_ACCESS_KEY, "nonce": str(uuid.uuid4())}
-
-    if params:
-        # params를 list[tuple] 형태로 통일 (순서 보존)
-        if isinstance(params, list):
-            items = params
-        elif isinstance(params, dict):
-            items = list(params.items())  # dict 삽입 순서 유지 (Python 3.7+)
-        else:
-            raise TypeError("params must be list[tuple] or dict")
-
-        qs = urlencode(items, doseq=True)
-        payload["query_hash"] = hashlib.sha512(qs.encode()).hexdigest()
-        payload["query_hash_alg"] = "SHA512"
-
-    token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
-    if isinstance(token, bytes):
-        token = token.decode()
-    return {"Authorization": f"Bearer {token}"}
-
-def upbit_private_get(path, params=None, timeout=7):
-    url = f"https://api.upbit.com{path}"
-    items = list(params.items()) if isinstance(params, dict) else (params or [])
-    for attempt in range(3):
-        headers = _make_auth_headers(items)  # ❗ 매시도마다 새 nonce/JWT
-        try:
-            _throttle()
-            with _session_lock:
-                r = SESSION.get(url, headers=headers, params=items, timeout=timeout)
-            if r.status_code in (429, 500, 502, 503, 504):
-                time.sleep(0.25 * (2 ** attempt))
-                continue
-            r.raise_for_status()
-            return r.json()
-
-        except requests.HTTPError as e:
-            status = getattr(e.response, "status_code", None)
-            body_txt = getattr(e.response, "text", "")
-            print(f"[UPBIT_GET_HTTPERROR] {path} {e} body={body_txt}")
-            if status == 401:
-                tg_send(f"❌ Upbit 401(GET) {path}\n{body_txt[:800]}")
-            if attempt == 2:
-                raise
-            time.sleep(0.25 * (2 ** attempt))
-
-        except requests.RequestException as e:
-            print(f"[UPBIT_GET_REQERR] {path} {e}")
-            if attempt == 2:
-                raise
-            time.sleep(0.25 * (2 ** attempt))
-
-def upbit_private_post(path, body=None, timeout=7):
-    url = f"https://api.upbit.com{path}"
-    body = body or {}
-    # 순서 보존: dict면 items로, list면 그대로
-    if isinstance(body, dict):
-        items = list(body.items())
-    elif isinstance(body, list):
-        items = body[:]
-    else:
-        raise TypeError("body must be dict or list[tuple]")
-
-    for attempt in range(3):
-        headers = _make_auth_headers(items)  # ❗ 매시도마다 새 nonce/JWT
-        try:
-            _throttle()
-            with _session_lock:
-                # Upbit는 query string 기준으로 query_hash 검증
-                r = SESSION.post(url, headers=headers, params=items, timeout=timeout)
-            if r.status_code in (429, 500, 502, 503, 504):
-                time.sleep(0.25 * (2 ** attempt))
-                continue
-            r.raise_for_status()
-            return r.json()
-
-        except requests.HTTPError as e:
-            status = getattr(e.response, "status_code", None)
-            body_txt = getattr(e.response, "text", "")
-            print(f"[UPBIT_POST_HTTPERROR] {path} {e} body={body_txt}")
-            if status == 401:
-                tg_send(f"❌ Upbit 401(POST) {path}\n{body_txt[:800]}")
-            if attempt == 2:
-                raise
-            time.sleep(0.25 * (2 ** attempt))
-
-        except requests.RequestException as e:
-            print(f"[UPBIT_POST_REQERR] {path} {e}")
-            if attempt == 2:
-                raise
-            time.sleep(0.25 * (2 ** attempt))
-
-
-def get_order_result(uuid_str, timeout_sec=10.0):
-    """
-    주문 uuid 로 최종 체결 결과 조회 (지연 내성 강화)
-    - done / cancel 상태가 되거나 timeout 될 때까지 polling
-    - 타임아웃 임박 시 1회 추가 지연 후 재조회
-    """
-    if not uuid_str:
-        return None
-    deadline = time.time() + timeout_sec
-    last = None
-    while time.time() < deadline:
-        try:
-            od = upbit_private_get("/v1/order", {"uuid": uuid_str})
-            last = od
-            state = od.get("state")
-            if state in ("done", "cancel"):
-                break
-        except requests.HTTPError as e:
-            if getattr(e, "response", None) and e.response.status_code == 404:
-                break
-        except Exception:
-            last = None
-        time.sleep(0.3)
-
-    # 상태 반영 지연 대비: 마지막으로 한 번 더
-    if last and last.get("state") not in ("done", "cancel"):
-        time.sleep(0.8)
-        try:
-            last = upbit_private_get("/v1/order", {"uuid": uuid_str})
-        except Exception:
-            pass
-    return last
-
-def get_account_info():
-    """업비트 계좌(잔고) 조회"""
-    try:
-        return upbit_private_get("/v1/accounts")
-    except Exception as e:
-        print("[AUTO] 계좌 조회 실패:", e)
-        return []
-
-def startup_selfcheck():
-    """
-    업비트 Private 인증 즉시 점검.
-    - /v1/accounts 호출 성공 → True
-    - 401/권한/화이트리스트/키오류 등 → TG로 본문까지 전송하고 False
-    """
-    try:
-        js = upbit_private_get("/v1/accounts")
-        if isinstance(js, list):
-            print("✅ Upbit private OK (accounts 조회 성공)")
-            return True
-        print("⚠️ accounts 응답 비정상:", js)
-        tg_send(f"⚠️ Upbit accounts 응답 비정상\n{js}")
-        return False
-    except requests.HTTPError as e:
-        body = getattr(e.response, "text", "")
-        print("❌ Upbit auth 실패:", e, "| body=", body)
-        tg_send(f"❌ Upbit 인증 실패\n{e}\n{body[:800]}")
-        return False
-    except Exception as e:
-        print("❌ Upbit selfcheck 예외:", e)
-        tg_send(f"❌ Upbit selfcheck 예외\n{e}")
-        return False
-
-
-def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
-    """
-    손절가 기준으로 포지션 크기 계산
-    - total_equity * risk_pct 만큼만 최대 손실 허용
-    """
-    risk_krw = total_equity * risk_pct
-    per_unit_loss = entry_price - stop_price
-    if per_unit_loss <= 0:  # 비정상 stop 방어
-        per_unit_loss = entry_price * 0.01
-    qty = risk_krw / per_unit_loss
-    return max(qty, 0)
-
-
-def place_market_buy(market, krw_amount):
-    """KRW 기준 시장가 매수 (ord_type=price)"""
-    body = [
-        ("market", market),
-        ("side", "bid"),
-        ("ord_type", "price"),
-        ("price", str(int(krw_amount))),
-    ]
-    return upbit_private_post("/v1/orders", body)
-
-
-def place_market_sell(market, volume):
-    """수량 기준 시장가 매도"""
-    body = [
-        ("market", market),
-        ("side", "ask"),
-        ("ord_type", "market"),
-        ("volume", str(volume)),
-    ]
-    return upbit_private_post("/v1/orders", body)
-
-def final_price_guard(m, initial_price, max_drift=0.018):
-    """
-    주문 직전 가격 재확인
-    - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 1.8%)
-    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
-      '추격 진입'으로 소액/피라미딩 기반 진입 허용
-    """
-    try:
-        js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-        if not js:
-            print(f"[GUARD] {m} 티커 조회 실패 → 가드 스킵")
-            return True, initial_price
-
-        current_price = js[0].get("trade_price", initial_price)
-        drift = (current_price / initial_price - 1.0)
-
-        if drift > max_drift:
-            # 평소라면 고점 추격으로 컷
-            # 하지만 공격 모드면 일정 구간까지는 허용
-            if AGGRESSIVE_MODE and drift <= (max_drift + 0.015):
-                print(
-                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% "
-                    f"→ 공격 모드: 추격 진입 허용 (소액/피라미딩 전제)"
+            # ⚠️ 청산 실패 얼럿 중복 방지: 60초 쿨다운
+            now_ts = time.time()
+            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
+            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
+                tg_send_mid(
+                    f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
+                    f"• 요청 수량: {vol:.6f}\n"
+                    f"• 체결 수량: 0\n"
+                    f"→ 최소 주문금액 부족 / 유동성 부족 / 주문 거절 가능성 점검"
                 )
-                return True, current_price
-
-            # 이 이상은 진짜 너무 튄 거라 컷
-            print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% → 진입 취소")
-            return False, current_price
-
-        return True, current_price
-
-    except Exception as e:
-        print(f"[GUARD_ERR] {m}: {e}")
-        return True, initial_price
-
-# =========================
-# 🔥 자동 매수 진입
-# =========================
-def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
-    """
-    초입·공격모드 대응 자동 매수 진입
-    """
-    if not AUTO_TRADE:
-        return
-
-    if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        print("[AUTO] API 키 미설정 → 자동매수 스킵")
-        return
-
-    # 이미 포지션 있으면 스킵
-    with _POSITION_LOCK:
-        if m in OPEN_POSITIONS:
-            print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
-            return
-
-    # 보유 종목 상한
-    with _POSITION_LOCK:
-        open_cnt = sum(1 for v in OPEN_POSITIONS.values() if v.get("volume", 0) > 0)
-    if open_cnt >= MAX_OPEN_POSITIONS:
-        msg = f"[AUTO] 보유 상한 {MAX_OPEN_POSITIONS}개 도달 → {m} 신규 진입 스킵"
-        print(msg)
-        tg_send_mid(msg)
-        return
-
-    signal_price = pre.get("price")
-    if not signal_price:
-        print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
-        return
-
-    # === 하이브리드 진입모드 반영 ===
-    entry_mode = pre.get("entry_mode", "confirm")
-
-    # ✅ ALWAYS_PROBE_FIRST: 첫 진입은 무조건 probe (7000원)
-    if ALWAYS_PROBE_FIRST:
-        entry_mode = "probe"
-
-    if entry_mode == "probe":
-        entry_fraction = 0.1   # (참고) 계산은 하되, 실제 주문금액은 PROBE_KRW로 강제
-        mode_emoji = "🧭"
-    elif entry_mode == "confirm":
-        entry_fraction = 1.0
-        mode_emoji = "🔥"
-    else:
-        entry_fraction = 1.0
-        mode_emoji = "🤖"
-
-    # ★ 가격 가드: probe/confirm 분리 (probe는 더 과감히)
-    if entry_mode == "probe":
-        max_drift = 0.030 if AGGRESSIVE_MODE else 0.018
-    else:
-        max_drift = 0.025 if AGGRESSIVE_MODE else 0.012
-
-    ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
-    if not ok_guard:
-        tg_send(
-            f"⚠️ <b>진입 취소</b> {m}\n"
-            f"• 신호가: {signal_price:,.0f}원\n"
-            f"• 현재가: {current_price:,.0f}원\n"
-            f"• 상승률: {((current_price / signal_price - 1) * 100):.2f}%\n"
-            f"• 사유: 가격 급등 (초입 추격 위험)"
-        )
-        return
-
-    # === 과열 추격 방지: VWAP/EMA5 과열이면 confirm→probe 강등 ===
-    try:
-        c1m = get_minutes_candles(1, m, 20)
-        vwap20 = vwap_from_candles_1m(c1m, 20)
-        ema5_now = ema_last([c["trade_price"] for c in c1m], 5)
-        vgap = (current_price / max(vwap20, 1) - 1.0) if vwap20 else 0.0
-        egap = (current_price / max(ema5_now, 1) - 1.0) if ema5_now else 0.0
-    except Exception:
-        vgap = egap = 0.0
-
-    if entry_mode == "confirm" and (vgap >= 0.018 or egap >= 0.022):
-        entry_mode = "probe"
-        entry_fraction = 0.10
-        mode_emoji = "🧭"
-        print(f"[OVERHEAT] {m} 과열 추격 방지: confirm→probe 강등 (vgap={vgap:.3f}, egap={egap:.3f})")
-
-    # === 계좌 & 주문금액 계산 ===
-    accounts = get_account_info()
-    if not accounts:
-        print("[AUTO] 계좌 조회 실패 → 스킵")
-        return
-
-    krw_bal = 0.0
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            krw_bal = float(a.get("balance", "0"))
-            break
-
-    if krw_bal < 6000:
-        print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
-        return
-
-    entry_price = current_price
-    stop_price = dyn_stop
-
-    # ✅ 최근 승률 기반 동적 리스크
-    adaptive_risk = get_adaptive_risk()
-
-    # === 하이브리드 진입 구조 ===
-    risk_to_use = adaptive_risk * SEED_RISK_FRACTION if USE_PYRAMIDING else adaptive_risk
-    risk_to_use *= entry_fraction  # probe는 리스크 축소 반영
-
-    base_qty = calc_position_size(
-        entry_price,
-        stop_price,
-        krw_bal,
-        risk_to_use,
-    )
-
-    if entry_mode == "probe":
-        # ✅ 염탐은 항상 고정 최소금액으로만
-        krw_to_use = min(krw_bal, max(5000, PROBE_KRW))
-    else:
-        krw_to_use = base_qty * entry_price
-
-    if krw_to_use < 5000:
-        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        return
-
-    krw_to_use = int(krw_to_use)
-
-    # === 매수 ===
-    try:
-        res = place_market_buy(m, krw_to_use)
-        print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))  # ★추가
-        oid = res.get("uuid") if isinstance(res, dict) else None
-        od = get_order_result(oid, timeout_sec=6) if oid else None
-        print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))  # ★추가
-
-        if od:
-            volume_filled = float(od.get("executed_volume") or "0")
-        else:
-            volume_filled = 0.0
-
-        if volume_filled <= 0:
-            msg = f"[AUTO] {m} 자동매수 체결 0 → 포지션 생성 안 함"
-            print(msg)
-            tg_send(f"⚠️ {msg}")
-            return
-
-        # 평균가 계산
-        trades = od.get("trades") or []
-        if trades:
-            total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
-            total_vol = sum(float(tr["volume"]) for tr in trades)
-            avg_price = total_krw / total_vol if total_vol > 0 else entry_price
-        else:
-            avg_price = float(entry_price)  # 명시적 float
+                LAST_CLOSE_FAIL_ALERT[m] = now_ts
+            else:
+                print(f"[AUTO] {m} 청산 실패 (얼럿 쿨다운 중, 마지막 얼럿: {int(now_ts - last_alert)}초 전)")
 
     except requests.HTTPError as e:
-        body = getattr(e.response, "text", "")
-        print("[AUTO BUY ERR]", e, body)
-        tg_send(f"⚠️ 매수 실패 {m}\n{e}\n{body}")
-        return
-    except Exception as e:
-        print("[AUTO BUY ERR]", e)
-        tg_send(f"⚠️ 매수 실패 {m}\n{e}")
-        return
+        # ⚠️ 400 에러: 잔고 부족 / 이미 매도됨 → 포지션 제거
+        status = getattr(e.response, "status_code", None)
+        body_txt = getattr(e.response, "text", "")
 
-    # === 포지션 저장 ===
-    with _POSITION_LOCK:
-        OPEN_POSITIONS[m] = {
-            "entry_price": avg_price,
-            "volume": volume_filled,
-            "stop": stop_price,
-            "sl_pct": eff_sl_pct,
-            "state": "open",
-            "last_add_ts": 0.0,
-            "entry_mode": entry_mode,
-            "adds": 0,                 # ✅ 추매 횟수 카운터
-        }
-
-
-    slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
-
-    tg_send(
-        f"{mode_emoji} <b>자동매수 체결 ({entry_mode})</b> {m}\n"
-        f"• 신호가: {signal_price:,.0f}원\n"
-        f"• 체결가: {avg_price:,.0f}원\n"
-        f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}% 비중)\n"
-        f"• 수량: {volume_filled:.6f}\n"
-        f"• 손절가: {stop_price:,.0f}원\n"
-        f"{link_for(m)}"
-    )
-
-def add_auto_position(m, cur_price):
-    """
-    이미 seed 포지션이 있을 때, 강한 추세에서 1회 추매(add) 수행
-    - ADD_RISK_FRACTION 비율만큼 RISK_PER_TRADE를 다시 사용
-    - 평균단가 재계산
-    """
-    if not AUTO_TRADE:
-        return False, None
-
-    if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        return False, None
-
-    with _POSITION_LOCK:
-        pos = OPEN_POSITIONS.get(m)
-        if not pos or pos.get("volume", 0) <= 0:
-            return False, None
-        if pos.get("adds", 0) >= MAX_ADDS:
-            # 추매 최대 횟수 도달
-            return False, None
-        last_add_ts = pos.get("last_add_ts", 0.0)
-
-    now = time.time()
-    if (now - last_add_ts) < PYRAMID_ADD_COOLDOWN_SEC:
-        return False, None
-
-    accounts = get_account_info()
-    if not accounts:
-        print("[AUTO_ADD] 계좌 조회 실패")
-        return False, None
-
-    krw_bal = 0.0
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            krw_bal = float(a.get("balance", "0"))
-            break
-
-    if krw_bal < 6000:
-        print(f"[AUTO_ADD] KRW 부족({krw_bal:,.0f}) → 추매 스킵")
-        return False, None
-
-    entry_price_old = pos["entry_price"]
-    stop_price = pos["stop"]
-
-    add_risk_pct = max(0.0001, RISK_PER_TRADE * ADD_RISK_FRACTION)
-    qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
-    krw_to_use = qty_theoretical * cur_price
-
-    if krw_to_use < 5000:
-        print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        return False, None
-
-    krw_to_use = int(krw_to_use)
-
-    print(
-        f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW "
-        f"(이론수량≈{qty_theoretical:.6f}, 현재가 {cur_price:,.0f})"
-    )
-
-    volume_filled = 0.0
-    avg_price_add = cur_price
-
-    try:
-        res = place_market_buy(m, krw_to_use)
-        order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
-
-        if od:
-            try:
-                volume_filled = float(od.get("executed_volume") or "0")
-            except Exception:
-                volume_filled = 0.0
-
-            trades = od.get("trades") or []
-            if trades and volume_filled > 0:
-                total_krw = 0.0
-                total_vol = 0.0
-                for tr in trades:
-                    p = float(tr.get("price", "0"))
-                    v = float(tr.get("volume", "0"))
-                    total_krw += p * v
-                    total_vol += v
-                if total_vol > 0:
-                    avg_price_add = total_krw / total_vol
-            else:
-                if volume_filled > 0:
-                    avg_price_add = krw_to_use / volume_filled
-
-        if volume_filled <= 0:
-            msg = f"[AUTO_ADD] {m} 추매 체결 0 → 무시"
-            print(msg)
-            tg_send(f"⚠️ {msg}")
-            return False, None
-
-    except Exception as e:
-        print("[AUTO_ADD ERR]", e)
-        tg_send(f"⚠️ <b>추매 실패</b> {m}\n사유: {e}")
-        return False, None
-
-    # 평균단가 갱신
-    with _POSITION_LOCK:
-        pos = OPEN_POSITIONS.get(m)
-        if not pos:
-            return False, None
-        old_vol = pos.get("volume", 0.0)
-        new_vol = old_vol + volume_filled
-        if new_vol <= 0:
-            return False, None
-        new_entry_price = (entry_price_old * old_vol + avg_price_add * volume_filled) / new_vol
-
-        pos["entry_price"] = new_entry_price
-        pos["volume"] = new_vol
-        pos["adds"] = pos.get("adds", 0) + 1     # ✅ 누적 추매회수
-        pos["last_add_ts"] = time.time()
-        pos["entry_mode"] = "confirm"
-        pos["added"] = True                      # (하위호환용, 다른 곳에서 참조할 수도 있으니 유지)
-
-    tg_send(
-        f"📈 <b>추매 체결</b> {m}\n"
-        f"• 추가 체결가: {avg_price_add:,.0f}원\n"
-        f"• 추가 수량: {volume_filled:.6f}\n"
-        f"• 총 수량: {new_vol:.6f}\n"
-        f"• 새로운 평단: {new_entry_price:,.0f}원\n"
-        f"{link_for(m)}"
-    )
-
-    return True, new_entry_price
-
-# =========================
-# 🔥 자동 청산
-# =========================
-def close_auto_position(m, reason=""):
-    """
-    손절/청산 시 자동 매도
-    - 실제 체결된 경우에만 포지션 제거
-    - 부분체결이면 잔량 유지(volume 업데이트)
-    """
-    if not AUTO_TRADE:
-        print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
-        return
-
-    with _POSITION_LOCK:
-        pos = OPEN_POSITIONS.get(m)
-
-    if not pos:
-        print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
-        tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
-        return
-
-    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
-
-    vol = pos.get("volume", 0.0)
-    if vol <= 0:
-        print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
-        with _POSITION_LOCK:
-            OPEN_POSITIONS.pop(m, None)
-        return
-
-    entry_price = float(pos.get("entry_price", 0.0)) or 0.0
-
-    # 현재가(청산 전 기준) 조회 - 공용 엔드포인트 사용 (서명 오버헤드 제거)
-    try:
-        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-        cur_price = float(cur_js[0].get("trade_price", entry_price)) if cur_js else entry_price
-    except Exception:
-        cur_price = entry_price
-
-    # 선 계산(대략)
-    ret_pct = ((cur_price / entry_price - 1.0) * 100.0) if entry_price > 0 else 0.0
-    est_entry_value = entry_price * vol
-    est_exit_value = cur_price * vol
-    pl_value = est_exit_value - est_entry_value
-
-    print(f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}, PnL(선계산)={ret_pct:+.2f}%")
-
-    exit_price_used = cur_price  # 실제 체결가 성공 시 교체
-    executed_vol = 0.0           # 실제 체결 수량
-    sell_ok = False
-
-    try:
-        res = place_market_sell(m, vol)
-        order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
-
-        # 실제 체결가/체결수량 계산
-        if od:
-            trades = od.get("trades") or []
-            total_krw = 0.0
-            total_vol = 0.0
-            for tr in trades:
-                try:
-                    p = float(tr.get("price", "0") or 0)
-                    v = float(tr.get("volume", "0") or 0)
-                except Exception:
-                    continue
-                total_krw += p * v
-                total_vol += v
-            if total_vol > 0:
-                exit_price_used = total_krw / total_vol
-                executed_vol = total_vol
-            else:
-                # 백업: 상위 필드에 executed_volume 제공될 수 있음
-                try:
-                    executed_vol = float(od.get("executed_volume") or 0.0)
-                except Exception:
-                    executed_vol = 0.0
-
-        sell_ok = executed_vol > 0.0
-
-        # 실제 체결 기준으로 재계산(부분체결 포함)
-        if sell_ok:
-            est_exit_value = exit_price_used * executed_vol
-            est_entry_value = entry_price * executed_vol
-            pl_value = est_exit_value - est_entry_value
-            ret_pct = ((exit_price_used / entry_price - 1.0) * 100.0) if entry_price > 0 else 0.0
-
-            # ✅ 거래 결과 기록 (수수료 반영)
-            ret_pct_after_fee = ret_pct - (FEE_RATE * 100.0)
-            try:
-                record_trade(m, ret_pct_after_fee)
-            except Exception as _e:
-                print("[TRADE_RECORD_ERR]", _e)
-
-        if sell_ok:
-            tg_send(
-                f"💥 <b>자동청산</b> {m}\n"
-                f"• 사유: {reason}\n"
-                f"• 요청 수량: {vol:.6f}\n"
-                f"• 체결 수량: {executed_vol:.6f}\n"
-                f"• 매수평단: {entry_price:,.0f}원\n"
-                f"• 실매도가(평균): {exit_price_used:,.0f}원\n"
-                f"• 매수금액(체결분): {est_entry_value:,.0f}원\n"
-                f"• 청산금액(체결분): {est_exit_value:,.0f}원\n"
-                f"• 수익률(체결분): {ret_pct:+.2f}%\n"
-                f"{link_for(m)}"
-            )
+        if status == 400:
+            print(f"[AUTO] {m} 400 에러 (이미 매도됨/잔고 부족): {body_txt[:200]}")
+            # 포지션이 실제로 없으므로 제거
+            mark_exit(m, "already_sold")  # 락 보호된 청산 기록
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            print(f"[AUTO] {m} 포지션 제거 완료 (400 에러 처리)")
+            return
         else:
-            tg_send_mid(
-                f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
-                f"• 요청 수량: {vol:.6f}\n"
-                f"• 체결 수량: 0\n"
-                f"→ 최소 주문금액 부족 / 유동성 부족 / 주문 거절 가능성 점검"
-            )
+            # 다른 HTTP 에러는 일반 에러로 처리
+            print("[AUTO SELL HTTP ERR]", status, e)
+            now_ts = time.time()
+            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
+            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
+                tg_send(f"⚠️ <b>자동청산 HTTP 에러</b> {m}\n상태코드: {status}\n사유: {body_txt[:200]}")
+                LAST_CLOSE_FAIL_ALERT[m] = now_ts
 
     except Exception as e:
         print("[AUTO SELL ERR]", e)
@@ -957,15 +277,13 @@ def close_auto_position(m, reason=""):
         if sell_ok:
             remaining = max(vol - executed_vol, 0.0)
             if remaining <= 1e-12:
-                with _POSITION_LOCK:
-                    OPEN_POSITIONS.pop(m, None)
-            else:
-                with _POSITION_LOCK:
-                    pos = OPEN_POSITIONS.get(m, {})
-                    if pos:
-                        pos["volume"] = remaining
-                        OPEN_POSITIONS[m] = pos
-                tg_send_mid(f"ℹ️ {m} 부분 청산: 체결 {executed_vol:.6f}, 잔여 {remaining:.6f} (포지션 유지)")
+        else:
+            # ✅ 실패/미체결: 시도만 기록 + closing 해제
+            mark_exit_attempt(m)  # 락 보호된 청산 시도 기록
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m)
+                if pos:
+                    pos["closing"] = False
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
@@ -2101,7 +1419,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # === 동일 종목 중복 진입 방지 (probe 모드는 25초로 단축, 일반은 90초) ===
     cooldown_after_exit = 25 if ALWAYS_PROBE_FIRST else 90
-    now_ts = time.time()
+    now_ts = time.time()  # 포지션 내부 필드는 wall-clock 유지
+    now = now_mono()      # 청산 쿨다운은 monotonic 사용
 
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -2113,11 +1432,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             return None
     else:
         # 포지션이 없어도 최근 '청산 완료' 또는 '청산 시도(미체결 포함)'가 가까우면 스킵
-        with _POSITION_LOCK:
-            last_exit_done    = LAST_EXIT_AT.get(m, 0.0)
-            last_exit_attempt = LAST_EXIT_ATTEMPT.get(m, 0.0)
-        last_block = max(last_exit_done, last_exit_attempt)
-        if (now_ts - last_block) < cooldown_after_exit:
+        last_block = last_exit_block_ts(m)  # 락 보호된 청산 시각 조회
+        if (now - last_block) < cooldown_after_exit:
             return None
 
     # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
@@ -3618,17 +2934,22 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+_health_server = None  # 전역 보관 (graceful shutdown용)
+
 def start_health_server(port=8080):
+    global _health_server
     for p in range(port, port + 5):
         try:
             server = HTTPServer(("0.0.0.0", p), HealthHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
+            _health_server = server  # 전역 보관
             print(f"🏥 Health check server: http://localhost:{p}/health")
-            return
+            return server
         except OSError:
             continue
     print("[HEALTH_ERR] 포트 사용 불가 (8080~8084)")
+    return None
 
 def start_monitor_watchdog():
     def _loop():
@@ -3953,5 +3274,11 @@ if __name__ == "__main__":
     finally:
         try:
             MONITOR_POOL.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            if _health_server:
+                _health_server.shutdown()
+                print("[SHUTDOWN] Health server stopped")
         except Exception:
             pass
