@@ -248,6 +248,10 @@ def last_exit_block_ts(market: str) -> float:
         tried = LAST_EXIT_ATTEMPT.get(market, 0.0)
     return max(done, tried)
 
+# 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
+REMONITOR_LAST_ALERT = {}
+REMONITOR_COOLDOWN_SEC = 120  # 재모니터 요약 알림 최소 간격(초)
+
 # =========================
 # 📈 업비트 Private API 함수들
 # =========================
@@ -531,6 +535,96 @@ def _pick_monitor_entry_price(m, signal_price):
                 if entry_price and entry_price > 0:
                     return float(entry_price)
     return float(signal_price) if signal_price else 0.0
+
+def startup_selfcheck() -> bool:
+    """
+    시작 시 자가 진단
+    - 퍼블릭 API 통신 확인
+    - AUTO_TRADE=1이면 키 형식 점검
+    실패 시 False 반환
+    """
+    try:
+        js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": "KRW-BTC"}, timeout=5)
+        if not js or not isinstance(js, list):
+            print("[SELFCHECK] 퍼블릭 API 실패")
+            return False
+    except Exception as e:
+        print(f"[SELFCHECK] 예외 발생: {e}")
+        return False
+
+    if AUTO_TRADE:
+        if len(UPBIT_ACCESS_KEY) < 10 or len(UPBIT_SECRET_KEY) < 10:
+            print("[SELFCHECK] AUTO_TRADE=1인데 API 키가 유효하지 않음")
+            return False
+
+    print("✅ [SELFCHECK] 통과")
+    return True
+
+def close_auto_position(market: str, reason: str = "") -> bool:
+    """
+    전량 청산 공용 함수
+    - 시장가 전량 매도
+    - 내부 상태 정리 + 쿨다운/종료사유 기록
+    """
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(market)
+        if not pos:
+            print(f"[CLOSE] {market} 포지션 없음")
+            return False
+        volume = float(pos.get("volume", 0.0))
+        entry_price = float(pos.get("entry_price", 0.0))
+
+    if volume <= 0:
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(market, None)
+        print(f"[CLOSE] {market} 수량 0 → 상태정리만")
+        mark_exit(market, cause="unknown")
+        LAST_EXIT_CAUSE[market] = "unknown"
+        return True
+
+    # 현재가 조회 (수익/손실 라벨링용)
+    try:
+        tkr = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market}, timeout=5)
+        last_price = float(tkr[0].get("trade_price", entry_price)) if tkr else entry_price
+    except Exception:
+        last_price = entry_price
+
+    try:
+        res = place_market_sell(market, volume)
+        od = get_order_result(res.get("uuid") if isinstance(res, dict) else None, timeout_sec=6.0)
+
+        executed = 0.0
+        if od:
+            try:
+                executed = float(od.get("executed_volume") or "0")
+            except Exception:
+                executed = 0.0
+
+        if executed <= 0:
+            # 체결 실패 → 재시도는 상위 로직에 맡김
+            print(f"[CLOSE_FAIL] {market} executed=0")
+            return False
+
+        # 내부 상태 정리
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(market, None)
+
+        # 종료 시각/사유 기록 (모니터 중복 진입 방지)
+        mark_exit(market, cause=reason or "manual")
+
+        # 수익/손실 라벨
+        LAST_EXIT_CAUSE[market] = "profit" if last_price > entry_price else "loss"
+
+        tg_send_mid(
+            f"✅ <b>전량 청산</b> {market}\n"
+            f"• 사유: {reason or 'exit'}\n"
+            f"• 평단: {fmt6(entry_price)} / 체결가(대략): {fmt6(last_price)}"
+        )
+        return True
+
+    except Exception as e:
+        print(f"[CLOSE_ERR] {market} {e}")
+        return False
 
 def add_auto_position(m, curp):
     """
@@ -2738,6 +2832,10 @@ def monitor_position(m,
                     exit_reason = "PROBE_STALL_EXIT"
                     verdict = f"probe 정체 청산 ({gain_now*100:+.2f}%)"
                     break
+
+            # === current_mode 정의 (사용 전에 먼저 정의) ===
+            with _POSITION_LOCK:
+                current_mode = (OPEN_POSITIONS.get(m) or {}).get("entry_mode", "confirm")
 
             # === ★ 상승세 판정 (추매용, 보수적 강화) ===
             strong_up = (
