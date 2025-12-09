@@ -3833,9 +3833,18 @@ def monitor_position(m,
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
                 ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
-                # ★ 순수 흐름 기반 전환 (가격 임계 제거)
-                condition_original = strong_flow                    # 가격 조건 제거
-                condition_rebound  = (ema_crossover and strong_flow)  # 가격 조건 제거
+                # ★ 가격 게이트: +0.3% 이상 or 최근 전고 돌파 (횡보 필터)
+                price_ok = False
+                if gain_now >= 0.003:  # +0.3% 최소 수익
+                    price_ok = True
+                elif c1m_ema and len(c1m_ema) >= 6:
+                    recent_high = max(c["high_price"] for c in c1m_ema[-6:])
+                    if curp > recent_high:  # 최근 6개 봉 전고 돌파
+                        price_ok = True
+
+                # ★ 흐름 + 가격 게이트 조합 (횡보 추매 방지)
+                condition_original = strong_flow and price_ok
+                condition_rebound  = (ema_crossover and strong_flow and price_ok)
 
                 if condition_original or condition_rebound:
                     ok_add, new_entry = add_auto_position(m, curp)
