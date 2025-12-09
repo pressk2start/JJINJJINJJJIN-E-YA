@@ -532,9 +532,11 @@ def final_price_guard(m, initial_price, max_drift=0.018):
 # =========================
 # 🔥 자동 매수 진입
 # =========================
-def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
+def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
     """
     초입·공격모드 대응 자동 매수 진입
+    Args:
+        override_krw: 프로브 금액 오버라이드 (글로벌 변경 방지)
     """
     if not AUTO_TRADE:
         return
@@ -648,7 +650,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if entry_mode == "probe":
         # ✅ 염탐은 항상 고정 최소금액으로만
-        krw_to_use = min(krw_bal, max(5000, PROBE_KRW))
+        # override_krw가 있으면 우선 사용 (글로벌 변경 방지)
+        probe_krw = override_krw if override_krw is not None else PROBE_KRW
+        krw_to_use = min(krw_bal, max(5000, probe_krw))
     else:
         krw_to_use = min(krw_bal, int(base_qty * entry_price))  # ★ 잔고 초과 방지
 
@@ -1957,6 +1961,22 @@ def ema_last(vals, period):
     return ema_series(vals, period)[-1]
 
 
+def avg_past_volume(candles, n=5, field="candle_acc_trade_volume"):
+    """최근 N개 캔들의 평균 거래량/금액 계산 (현재 캔들 제외)
+    Args:
+        candles: 캔들 리스트
+        n: 평균 계산할 캔들 수
+        field: 집계 필드 (candle_acc_trade_volume 또는 candle_acc_trade_price)
+    Returns:
+        평균값 또는 0
+    """
+    if not candles or len(candles) < n + 1:
+        return 0
+    # 최근 n+1개 중 마지막(현재) 제외하고 n개만 사용
+    past = [c.get(field, 0) for c in candles[-(n+1):-1] if c.get(field, 0) > 0]
+    return statistics.mean(past) if past else 0
+
+
 def atr14_from_candles(candles, period=14):
     if len(candles) < period + 1:
         return None
@@ -2859,9 +2879,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                         price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
                     if c1:
                         current_volume = c1[-1].get("candle_acc_trade_volume", 0)
-                        past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
-                        if past_volumes and current_volume > 0:
-                            volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+                        avg_past = avg_past_volume(c1, n=5, field="candle_acc_trade_volume")
+                        if avg_past > 0 and current_volume > 0:
+                            volume_surge = current_volume / max(avg_past, current_volume / 8, 1)
 
                     return {
                         "price": cur_price,
@@ -2903,9 +2923,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
             if c1:
                 current_volume = c1[-1].get("candle_acc_trade_volume", 0)
-                past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
-                if past_volumes and current_volume > 0:
-                    volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+                avg_past = avg_past_volume(c1, n=5, field="candle_acc_trade_volume")
+                if avg_past > 0 and current_volume > 0:
+                    volume_surge = current_volume / max(avg_past, current_volume / 8, 1)
 
             pre = {
                 "price": cur_price,
@@ -2947,9 +2967,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                     price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
                 if c1:
                     current_volume = c1[-1].get("candle_acc_trade_volume", 0)
-                    past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
-                    if past_volumes and current_volume > 0:
-                        volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+                    avg_past = avg_past_volume(c1, n=5, field="candle_acc_trade_volume")
+                    if avg_past > 0 and current_volume > 0:
+                        volume_surge = current_volume / max(avg_past, current_volume / 8, 1)
 
                 return {
                     "price": cur_price,
@@ -4740,16 +4760,8 @@ def main():
                                 # 동적 손절가 계산
                                 dyn_stop, eff_sl = dynamic_stop_loss(pre["price"], c1)
 
-                                # 프로브 금액 임시 변경
-                                global PROBE_KRW
-                                orig_probe = PROBE_KRW
-                                PROBE_KRW = probe_size_krw
-
-                                # 진입
-                                open_auto_position(m, pre, dyn_stop, eff_sl)
-
-                                # 프로브 금액 복원
-                                PROBE_KRW = orig_probe
+                                # 진입 (override_krw로 안전하게 전달)
+                                open_auto_position(m, pre, dyn_stop, eff_sl, override_krw=probe_size_krw)
 
                                 # 알림 (단순화)
                                 tg_send(
