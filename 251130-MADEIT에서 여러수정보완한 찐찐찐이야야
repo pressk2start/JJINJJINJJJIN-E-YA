@@ -2156,8 +2156,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                         vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
                 if vgap_mp <= 0.022:  # 0.018 → 0.022, 초완화
                     cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
+
+                    # change와 volume_surge 계산
+                    cur_price = ticks_now[0]["trade_price"]
+                    price_change = 0.0
+                    volume_surge = 1.0
+                    if c1 and len(c1) >= 2:
+                        price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
+                    if c1:
+                        current_volume = c1[-1].get("candle_acc_trade_volume", 0)
+                        past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
+                        if past_volumes and current_volume > 0:
+                            volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+
                     return {
-                        "price": ticks_now[0]["trade_price"],
+                        "price": cur_price,
+                        "change": price_change,
+                        "volume_surge": volume_surge,
+                        "current_volume": c1[-1].get("candle_acc_trade_volume", 0) if c1 else 0,
                         "ob": ob_l,
                         "ticks": ticks_now,
                         "tape": t6,
@@ -2184,8 +2200,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
         if sudden_burst and fresh:
             cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
+
+            # change와 volume_surge 계산
+            cur_price = ticks_now[0]["trade_price"]
+            price_change = 0.0
+            volume_surge = 1.0
+            if c1 and len(c1) >= 2:
+                price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
+            if c1:
+                current_volume = c1[-1].get("candle_acc_trade_volume", 0)
+                past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
+                if past_volumes and current_volume > 0:
+                    volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+
             pre = {
-                "price": ticks_now[0]["trade_price"],
+                "price": cur_price,
+                "change": price_change,
+                "volume_surge": volume_surge,
+                "current_volume": c1[-1].get("candle_acc_trade_volume", 0) if c1 else 0,
                 "ob": obc.get(m),
                 "ticks": ticks_now,
                 "tape": t10s,  # ← tape 추가 (final_check_leader 크래시 방지)
@@ -2212,8 +2244,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 abs(vgap) <= PROBE_LITE_MAX_VWAP_GAP):
 
                 cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {t10['buy_ratio']:.2f}, 속도 {t10['krw_per_sec']:.0f})")
+
+                # change와 volume_surge 계산
+                cur_price = ticks_lite[0]["trade_price"]
+                price_change = 0.0
+                volume_surge = 1.0
+                if c1 and len(c1) >= 2:
+                    price_change = (cur_price / max(c1[-2]["trade_price"], 1) - 1)
+                if c1:
+                    current_volume = c1[-1].get("candle_acc_trade_volume", 0)
+                    past_volumes = [c[-2].get("candle_acc_trade_volume", 0) for c in [c1] if len(c) >= 3]
+                    if past_volumes and current_volume > 0:
+                        volume_surge = current_volume / max(statistics.mean(past_volumes), current_volume / 8, 1)
+
                 return {
-                    "price": ticks_lite[0]["trade_price"],
+                    "price": cur_price,
+                    "change": price_change,
+                    "volume_surge": volume_surge,
+                    "current_volume": c1[-1].get("candle_acc_trade_volume", 0) if c1 else 0,
                     "ob": ob_lite,
                     "ticks": ticks_lite,
                     "tape": t10,
