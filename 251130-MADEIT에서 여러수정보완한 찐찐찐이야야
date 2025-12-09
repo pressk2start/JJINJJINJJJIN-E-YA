@@ -4604,7 +4604,9 @@ def start_monitor_watchdog():
                         # 🔧 누락된 price 보정
                         if "price" not in pre or not pre.get("price"):
                             pre["price"] = float(entry)
-                        launch_monitor(m, pre, tight_mode=False)
+                        # ★ force=True: 청산은 무조건 실행 (한도 무시)
+                        launch_monitor(m, pre, tight_mode=False, force=True)
+                        print(f"[WATCHDOG] {m} 모니터 재시작 (포지션 청산 필요)")
 
 
 
@@ -4740,11 +4742,14 @@ def fetch_orderbook_cache(mkts):
                 continue
     return cache
 
-def launch_monitor(market, pre, tight_mode=False):
+def launch_monitor(market, pre, tight_mode=False, force=False):
     """
     monitor_position()을 스레드풀에서 실행.
     - 같은 종목 중복 실행 방지
     - 동시 실행 개수 제한(MAX_CONCURRENT)
+
+    Args:
+        force: True면 한도 무시 (워치독/청산용)
     """
     with ACTIVE_MON_LOCK:
         # 이미 실행 중이면 스킵
@@ -4753,9 +4758,9 @@ def launch_monitor(market, pre, tight_mode=False):
             print(f"[MON_DUP] {market} 모니터 이미 실행 중 → 스킵")
             return False
 
-        # 동시 개수 제한 체크
+        # 동시 개수 제한 체크 (force=True면 무시)
         running = sum(1 for f in ACTIVE_MONITORS.values() if f and not f.done())
-        if running >= MAX_CONCURRENT:
+        if not force and running >= MAX_CONCURRENT:
             print(f"[MON_LIMIT] 동시 모니터 한도({MAX_CONCURRENT}) 도달 → {market} 보류")
             return False
 
