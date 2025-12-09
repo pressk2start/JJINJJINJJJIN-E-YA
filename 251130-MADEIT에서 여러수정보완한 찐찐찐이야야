@@ -977,6 +977,29 @@ def close_auto_position(m, reason=""):
             else:
                 print(f"[AUTO] {m} 청산 실패 (얼럿 쿨다운 중, 마지막 얼럿: {int(now_ts - last_alert)}초 전)")
 
+    except requests.HTTPError as e:
+        # ⚠️ 400 에러: 잔고 부족 / 이미 매도됨 → 포지션 제거
+        status = getattr(e.response, "status_code", None)
+        body_txt = getattr(e.response, "text", "")
+
+        if status == 400:
+            print(f"[AUTO] {m} 400 에러 (이미 매도됨/잔고 부족): {body_txt[:200]}")
+            # 포지션이 실제로 없으므로 제거
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+                LAST_EXIT_AT[m] = time.time()
+                LAST_EXIT_CAUSE[m] = "already_sold"
+            print(f"[AUTO] {m} 포지션 제거 완료 (400 에러 처리)")
+            return
+        else:
+            # 다른 HTTP 에러는 일반 에러로 처리
+            print("[AUTO SELL HTTP ERR]", status, e)
+            now_ts = time.time()
+            last_alert = LAST_CLOSE_FAIL_ALERT.get(m, 0.0)
+            if (now_ts - last_alert) >= CLOSE_FAIL_ALERT_COOLDOWN_SEC:
+                tg_send(f"⚠️ <b>자동청산 HTTP 에러</b> {m}\n상태코드: {status}\n사유: {body_txt[:200]}")
+                LAST_CLOSE_FAIL_ALERT[m] = now_ts
+
     except Exception as e:
         print("[AUTO SELL ERR]", e)
         # ⚠️ 청산 실패 얼럿 중복 방지: 60초 쿨다운
@@ -2536,15 +2559,21 @@ def final_check_leader(m, pre, tight_mode=False):
         t = pre.get("tape", {"n":0,"buy_ratio":0})
         ob = pre.get("ob", {})
         if t.get("n",0) >= 2 and ob.get("depth_krw",0) >= 3_000_000 and ob.get("spread",99) <= 2.0:  # 3→2, 5M→3M, 1.6→2.0, 초완화
+            # 프로브 모드에서도 실제 값 계산 (0.0 하드코딩 제거)
+            price_change = pre.get("change", 0.0)
+            current_vol = pre.get("current_volume", 0)
+            vol_surge = pre.get("volume_surge", 0.0)
+            turn = (t.get("krw", 0) / max(ob.get("depth_krw", 1), 1)) * 100  # 회전율 계산
+
             return {
                 "price": pre["price"],
-                "chg": 0.0,
-                "current_volume": 0,
-                "volume_surge": 0.0,
+                "chg": round(price_change * 100, 2),
+                "current_volume": int(current_vol),
+                "volume_surge": round(vol_surge, 2),
                 "buy": round(t.get("buy_ratio",0)*100,1),
                 "n": t.get("n",0),
                 "spread": round(ob.get("spread",0),2),
-                "turn": 0.0
+                "turn": round(turn, 2)
             }
 
     # ★★★ 완화 노브 적용 (컨펌 신호만)
