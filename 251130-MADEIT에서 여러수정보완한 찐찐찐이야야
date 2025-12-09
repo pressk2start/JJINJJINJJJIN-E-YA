@@ -514,6 +514,11 @@ def final_price_guard(m, initial_price, max_drift=0.018):
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
+    # ★ 가격 0/None 방어 (비정상 신호 차단)
+    if not initial_price or initial_price <= 0:
+        print(f"[GUARD] {m} initial_price 비정상({initial_price}) → 진입 취소")
+        return False, 0
+
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
@@ -575,8 +580,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         return
 
     signal_price = pre.get("price")
-    if not signal_price:
-        print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
+    # ★ 가격 0/None 방어 (비정상 신호 차단)
+    if not signal_price or signal_price <= 0:
+        print(f"[AUTO] {m} pre['price'] 비정상({signal_price}) → 진입 스킵")
         return
 
     # === 하이브리드 진입모드 반영 ===
@@ -790,6 +796,7 @@ def add_auto_position(m, cur_price, override_krw=None):
     # ★ override_krw가 지정되면 그 금액 사용, 아니면 리스크 기반 계산
     if override_krw is not None:
         krw_to_use = min(krw_bal, int(override_krw))
+        qty_theoretical = None  # override 모드에서는 이론수량 계산 안 함
     else:
         add_risk_pct = max(0.0001, RISK_PER_TRADE * ADD_RISK_FRACTION)
         qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
@@ -801,10 +808,11 @@ def add_auto_position(m, cur_price, override_krw=None):
 
     krw_to_use = int(krw_to_use)
 
-    print(
-        f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW "
-        f"(이론수량≈{qty_theoretical:.6f}, 현재가 {cur_price:,.0f})"
-    )
+    # ★ NameError 방지: override 모드에서는 이론수량 출력 생략
+    if qty_theoretical is not None:
+        print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (이론수량≈{qty_theoretical:.6f}, 현재가 {cur_price:,.0f})")
+    else:
+        print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (고정금액, 현재가 {cur_price:,.0f})")
 
     volume_filled = 0.0
     avg_price_add = cur_price
@@ -1047,6 +1055,14 @@ def close_auto_position(m, reason=""):
                 pos = OPEN_POSITIONS.get(m)
                 if pos:
                     pos["closing"] = False
+
+        # ★ 최종 안전망: 모든 경로에서 closing 플래그 확실히 해제 (완전종료 제외)
+        with _POSITION_LOCK:
+            if m in OPEN_POSITIONS:  # 포지션이 아직 남아있으면
+                pos = OPEN_POSITIONS.get(m)
+                if pos and pos.get("closing") is not False:
+                    pos["closing"] = False
+                    print(f"[CLOSING_GUARD] {m} closing 플래그 강제 해제 (안전망)")
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
