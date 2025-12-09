@@ -2870,7 +2870,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (
             t6["n"] >= 2 and                    # 체결 2개 이상 (3 → 2, 초완화)
             t6["buy_ratio"] >= 0.48 and         # 매수비 48%+ (0.50 → 0.48, 초완화)
-            t6["krw_per_sec"] >= 4000 and       # 속도 4k KRW/s+ (7000 → 4000, 초완화)
+            t6["krw_per_sec"] >= 8000 and       # 속도 8k KRW/s+ (4000 → 8000, 타이트)
             last_two_ticks_fresh(ticks_now) and
             uptick_streak_from_ticks(ticks_now, need=1)
         ):
