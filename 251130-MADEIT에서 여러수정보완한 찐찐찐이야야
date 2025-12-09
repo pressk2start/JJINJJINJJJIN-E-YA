@@ -2408,17 +2408,17 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
-    # 프로브는 소액 테스트 진입: 확실한 신호에만 반응 (강화)
+    # 프로브는 소액 테스트 진입: 초입 신호 최대한 포착 (완화)
     if pre.get("entry_mode") == "probe":
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
-        # 진입 조건 강화: 더 확실한 신호만
-        if (t.get("n",0) >= 5 and                          # 5개 이상 틱 (2→5, 더 확실한 흐름)
-            t.get("buy_ratio",0) >= 0.60 and              # 매수비 60% 이상 (강한 매수세)
-            t.get("krw_per_sec",0) >= 15_000 and          # 거래속도 15,000원/초 이상
-            ob.get("depth_krw",0) >= 5_000_000 and        # 깊이 500만원 (3M→5M, 유동성 확보)
-            ob.get("spread",99) <= 1.5):                  # 스프레드 1.5% (2.0→1.5, 더 타이트)
+        # 진입 조건 완화: 초입 신호 많이 잡기 (1차 진입용)
+        if (t.get("n",0) >= 3 and                          # 3개 이상 틱 (5→3, 더 빠른 진입)
+            t.get("buy_ratio",0) >= 0.55 and              # 매수비 55% 이상 (60→55, 완화)
+            t.get("krw_per_sec",0) >= 12_000 and          # 거래속도 12,000원/초 이상 (15k→12k)
+            ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (5M→3M, 완화)
+            ob.get("spread",99) <= 2.0):                  # 스프레드 2.0% (1.5→2.0, 완화)
 
             # 실제 값 계산해서 표시 (0.0 하드코딩 제거)
             price_change = pre.get("change", 0.0)
@@ -3209,24 +3209,38 @@ def monitor_position(m,
                     ema8 = ema_last([c["trade_price"] for c in c1m], 8)
                     short_term_up = (ema3 is not None and ema8 is not None and ema3 > ema8)
 
-                    # ★ 순수 흐름 기반 추매 (가격 조건 제거)
-                    # 최근(15s)이 직전(30s) 대비 가속 + 매수비 강함 + 단기상승 + 틱 신선
-                    flow_ok = (
-                        t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 가속도 15%+
-                        t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
-                        last_two_ticks_fresh(ticks) and
-                        short_term_up and
-                        strong_up  # 위에서 계산된 단기 강세 플래그
-                    )
+                    with _POSITION_LOCK:
+                        pos = OPEN_POSITIONS.get(m)
+                        adds_used = pos.get("adds", 0) if pos else MAX_ADDS
+                        last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
+
+                    # ★★★ 1차 추매 (probe→confirm): 찐 신호만 (까다롭게)
+                    if adds_used == 0:
+                        first_add_ok = (
+                            alive_sec >= 15 and  # 최소 15초 관찰
+                            curp > entry_price * 1.005 and  # 실제 +0.5% 이상 상승
+                            t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.30 and  # 거래량 30% 가속
+                            t15_now["buy_ratio"] >= 0.60 and  # 매수비 60% 이상
+                            short_term_up and
+                            last_two_ticks_fresh(ticks)
+                        )
+                        flow_ok = first_add_ok
+                    # ★★★ 2차+ 추매: 상승세 계속되면 빠르게 (완화)
+                    else:
+                        flow_ok = (
+                            t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 가속도 15%+
+                            t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
+                            last_two_ticks_fresh(ticks) and
+                            short_term_up and
+                            strong_up  # 위에서 계산된 단기 강세 플래그
+                        )
 
                     if flow_ok:
-                        with _POSITION_LOCK:
-                            pos = OPEN_POSITIONS.get(m)
-                            adds_used = pos.get("adds", 0) if pos else MAX_ADDS
-                            last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
-
-                        # 쿨다운 40% 단축
-                        cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
+                        # 쿨다운: 1차는 없음, 2차+는 60% 단축 (6초)
+                        if adds_used == 0:
+                            cooldown_ok = True  # 1차 추매는 쿨다운 없음
+                        else:
+                            cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.4)  # 0.6→0.4 (더 빠르게)
 
                         if pos and (adds_used < MAX_ADDS) and cooldown_ok:
                             ok_add, new_entry = add_auto_position(m, curp)
