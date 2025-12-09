@@ -4452,6 +4452,96 @@ def start_monitor_watchdog():
 
     threading.Thread(target=_loop, daemon=True).start()
 
+
+def start_probe_v2_monitor():
+    """프로브 2.0 모니터링 스레드: 1분마다 점수 업데이트 및 승격/실패 체크"""
+    def _probe_v2_loop():
+        while True:
+            try:
+                time.sleep(60)  # 1분마다
+
+                if not PROBE_V2_ENABLED:
+                    continue
+
+                # 활성 프로브 2.0 상태 복사
+                with _PROBE_V2_LOCK:
+                    active_probes = list(PROBE_V2_STATES.keys())
+
+                for m in active_probes:
+                    try:
+                        # 1분봉 가져오기
+                        c1 = get_minutes_candles(1, m, 30)
+                        if not c1:
+                            continue
+
+                        # 바 카운트 증가
+                        probe_v2_increment_bars(m)
+
+                        # 점수 업데이트
+                        score_delta = probe_v2_update_score(m, c1)
+
+                        with _PROBE_V2_LOCK:
+                            if m not in PROBE_V2_STATES:
+                                continue
+                            current_score = PROBE_V2_STATES[m]["score"]
+
+                        if score_delta != 0:
+                            print(f"[PROBE_V2] {m} 점수 변화: {score_delta:+d} (총점: {current_score})")
+
+                        # 실패 체크 (우선 처리)
+                        if probe_v2_check_failure(m, c1):
+                            print(f"[PROBE_V2] {m} 실패 조건 충족 → 청산")
+                            probe_v2_remove_state(m)
+
+                            # 포지션이 있으면 청산
+                            with _POSITION_LOCK:
+                                if m in OPEN_POSITIONS:
+                                    close_auto_position(m, reason="PROBE_V2_FAILURE")
+                            continue
+
+                        # 승격 체크
+                        if probe_v2_check_upgrade(m, c1):
+                            print(f"[PROBE_V2] {m} 승격 조건 충족 → 1차 추매")
+
+                            with _POSITION_LOCK:
+                                pos = OPEN_POSITIONS.get(m)
+                                if not pos:
+                                    probe_v2_remove_state(m)
+                                    continue
+
+                                entry_price = pos["entry_price"]
+                                adds_used = pos.get("adds", 0)
+
+                            # 1차 추매 실행
+                            if adds_used == 0:
+                                krw_bal = get_krw_balance()
+                                add_size_krw = int(krw_bal * PROBE_V2_SIZE_ADD1)
+                                add_size_krw = max(min(add_size_krw, 50000), 10000)  # 10k~50k
+
+                                current_price = c1[-1]["trade_price"]
+                                ok_add, new_entry = add_auto_position(m, current_price)
+
+                                if ok_add and new_entry:
+                                    tg_send(
+                                        f"➕ <b>프로브 2.0 승격 (1차 추매)</b> {m}\n"
+                                        f"💵 <b>새 평단</b> {new_entry:,.0f}원\n"
+                                        f"💰 <b>추매금액</b> {add_size_krw:,}원\n"
+                                        f"📊 <b>점수</b> {current_score}"
+                                    )
+
+                    except Exception as e:
+                        print(f"[PROBE_V2] {m} 모니터링 오류: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+            except Exception as e:
+                print(f"[PROBE_V2] 모니터링 루프 오류: {e}")
+                import traceback
+                traceback.print_exc()
+
+    threading.Thread(target=_probe_v2_loop, daemon=True).start()
+    print("[PROBE_V2] 모니터링 스레드 시작 (60초 주기)")
+
 # ===== 오더북 캐시 =====
 def fetch_orderbook_cache(mkts):
     cache = {}
@@ -4588,6 +4678,68 @@ def main():
                 c1 = c1_cache.get(m, [])
                 if not c1: continue
 
+                # === 프로브 2.0 트리거 체크 (옵션) ===
+                if PROBE_V2_ENABLED:
+                    # 이미 포지션이 있으면 스킵
+                    with _POSITION_LOCK:
+                        if m in OPEN_POSITIONS:
+                            continue
+
+                    # 이미 프로브 2.0 상태가 있으면 스킵
+                    with _PROBE_V2_LOCK:
+                        if m in PROBE_V2_STATES:
+                            continue
+
+                    # 선필터
+                    ob_data = obc.get(m)
+                    if ob_data and probe_v2_prefilter(c1, ob_data):
+                        # 3가지 트리거 중 하나라도 발동
+                        trigger_type = None
+                        if probe_v2_trigger_breakout(c1):
+                            trigger_type = "A_BREAKOUT"
+                        elif probe_v2_trigger_momentum(c1):
+                            trigger_type = "B_MOMENTUM"
+                        elif probe_v2_trigger_trend(c1):
+                            trigger_type = "C_TREND"
+
+                        if trigger_type:
+                            # 프로브 2.0 상태 추가
+                            probe_v2_add_state(m, trigger_type)
+
+                            # 프로브 진입 신호 생성 (기존 포맷 활용)
+                            pre = {
+                                "price": c1[-1]["trade_price"],
+                                "entry_mode": "probe_v2",
+                                "trigger_type": trigger_type,
+                                "change": 0.0,
+                                "volume_surge": 0.0,
+                                "tape": {"n": 0, "buy_ratio": 0, "krw": 0, "krw_per_sec": 0},
+                                "ob": ob_data if ob_data else {"depth_krw": 0, "spread": 99},
+                            }
+
+                            # 프로브 2.0는 postcheck 스킵
+                            payload = {"entry_mode": "probe_v2", "trigger_type": trigger_type}
+
+                            # 진입 실행
+                            if AUTO_TRADE and m not in OPEN_POSITIONS:
+                                # 프로브 크기로 진입
+                                krw_bal = get_krw_balance()
+                                probe_size_krw = int(krw_bal * PROBE_V2_SIZE_PROBE)
+                                probe_size_krw = max(min(probe_size_krw, 10000), 5000)  # 5k~10k 범위
+
+                                ok, entry_price = open_auto_position(m, pre["price"], entry_mode="probe_v2", probe_krw=probe_size_krw)
+                                if ok:
+                                    tg_send(
+                                        f"🔬 <b>프로브 2.0 진입</b> {m} <code>#{trigger_type}</code>\n"
+                                        f"💵 <b>진입가</b> {entry_price:,.0f}원\n"
+                                        f"💰 <b>금액</b> {probe_size_krw:,}원\n"
+                                        f"📊 <b>점수</b> 0 (관찰 시작)"
+                                    )
+                                    found += 1
+
+                            continue  # 프로브 2.0 진입했으면 기존 로직 스킵
+
+                # === 기존 로직 (프로브 2.0 미사용 또는 미발동 시) ===
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre: continue
 
@@ -4743,6 +4895,7 @@ if __name__ == "__main__":
     bot_start_time = time.time()
     start_health_server()
     start_monitor_watchdog()  # 워치독 시작
+    start_probe_v2_monitor()  # 프로브 2.0 모니터링 시작
 
     try:
         main()
