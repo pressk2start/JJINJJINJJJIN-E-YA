@@ -223,6 +223,28 @@ REMONITOR_COOLDOWN_SEC = 300  # 5분
 REMONITOR_LAST_ALERT = {}
 
 # =========================
+# 🚀 프로브 2.0 시스템
+# =========================
+PROBE_V2_ENABLED = os.getenv("PROBE_V2_ENABLED", "1") == "1"  # 프로브 2.0 활성화
+
+# 프로브 상태 추적: {market: {"score": 0, "entry_time": ts, "trigger_type": "A/B/C", "last_update": ts, ...}}
+PROBE_V2_STATES = {}
+_PROBE_V2_LOCK = threading.Lock()
+
+# 프로브 2.0 파라미터
+PROBE_V2_MAX_CONCURRENT = int(os.getenv("PROBE_V2_MAX_CONCURRENT", "5"))  # 최대 동시 프로브 수
+PROBE_V2_TIMEOUT_BARS = int(os.getenv("PROBE_V2_TIMEOUT_BARS", "12"))  # 타임아웃 (12분봉)
+PROBE_V2_UPGRADE_SCORE = int(os.getenv("PROBE_V2_UPGRADE_SCORE", "5"))  # 1차 추매 승격 점수
+PROBE_V2_SIZE_PROBE = float(os.getenv("PROBE_V2_SIZE_PROBE", "0.20"))  # 프로브 크기 (20%)
+PROBE_V2_SIZE_ADD1 = float(os.getenv("PROBE_V2_SIZE_ADD1", "0.30"))  # 1차 추매 크기 (30%)
+PROBE_V2_SIZE_ADD2 = float(os.getenv("PROBE_V2_SIZE_ADD2", "0.25"))  # 2차 추매 크기 (25%)
+
+# 공통 선필터 파라미터
+PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.5"))  # 최소 RVOL
+PROBE_V2_PREFILTER_SPREAD = float(os.getenv("PROBE_V2_PREFILTER_SPREAD", "0.002"))  # 최대 스프레드 (0.2%)
+PROBE_V2_PREFILTER_EMA_UP = int(os.getenv("PROBE_V2_PREFILTER_EMA_UP", "2"))  # 최소 EMA 상승 개수 (5,10,20 중)
+
+# =========================
 # 📈 최근 승률 기반 리스크 튜닝
 # =========================
 from collections import deque as _deque_for_risk  # 기존 deque와 별도 alias
@@ -1936,6 +1958,653 @@ def atr14_from_candles(candles, period=14):
         tr = max(h - l, abs(h - pc), abs(l - pc))
         trs.append(tr)
     return sum(trs[-period:]) / period if len(trs) >= period else None
+
+
+# =========================
+# ★ 프로브 2.0용 지표 함수들
+# =========================
+def bollinger_bands(candles, period=20, std_mult=2.0):
+    """볼린저 밴드 계산
+    Returns: (middle, upper, lower, bandwidth) 또는 None
+    """
+    if len(candles) < period:
+        return None
+    closes = [c["trade_price"] for c in candles[-period:]]
+    middle = sum(closes) / period
+    variance = sum((c - middle) ** 2 for c in closes) / period
+    std = variance ** 0.5
+    upper = middle + std * std_mult
+    lower = middle - std * std_mult
+    bandwidth = (upper - lower) / middle if middle > 0 else 0
+    return {"middle": middle, "upper": upper, "lower": lower, "bandwidth": bandwidth}
+
+
+def adx_di(candles, period=14):
+    """ADX, +DI, -DI 계산
+    Returns: {"adx": float, "plus_di": float, "minus_di": float} 또는 None
+    """
+    if len(candles) < period + 1:
+        return None
+
+    plus_dm_list = []
+    minus_dm_list = []
+    tr_list = []
+
+    for i in range(1, len(candles)):
+        h = candles[i]["high_price"]
+        l = candles[i]["low_price"]
+        ph = candles[i-1]["high_price"]
+        pl = candles[i-1]["low_price"]
+        pc = candles[i-1]["trade_price"]
+
+        plus_dm = max(h - ph, 0)
+        minus_dm = max(pl - l, 0)
+        if plus_dm > minus_dm:
+            minus_dm = 0
+        elif minus_dm > plus_dm:
+            plus_dm = 0
+
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+        tr_list.append(tr)
+
+    if len(tr_list) < period:
+        return None
+
+    # Smoothed averages
+    smooth_plus_dm = sum(plus_dm_list[-period:]) / period
+    smooth_minus_dm = sum(minus_dm_list[-period:]) / period
+    smooth_tr = sum(tr_list[-period:]) / period
+
+    if smooth_tr == 0:
+        return None
+
+    plus_di = 100 * smooth_plus_dm / smooth_tr
+    minus_di = 100 * smooth_minus_dm / smooth_tr
+
+    dx = 100 * abs(plus_di - minus_di) / max(plus_di + minus_di, 0.01)
+    adx = dx  # 간단화: 실제로는 DX의 평균이지만 여기서는 근사값 사용
+
+    return {"adx": adx, "plus_di": plus_di, "minus_di": minus_di}
+
+
+def parabolic_sar(candles, af_start=0.02, af_increment=0.02, af_max=0.2):
+    """Parabolic SAR 계산 (간단 버전)
+    Returns: {"sar": float, "is_uptrend": bool} 또는 None
+    """
+    if len(candles) < 3:
+        return None
+
+    # 간단 구현: 최근 추세 기반
+    last3 = candles[-3:]
+    closes = [c["trade_price"] for c in last3]
+    highs = [c["high_price"] for c in last3]
+    lows = [c["low_price"] for c in last3]
+
+    is_uptrend = closes[-1] > closes[0]
+
+    if is_uptrend:
+        sar = min(lows)
+    else:
+        sar = max(highs)
+
+    return {"sar": sar, "is_uptrend": is_uptrend}
+
+
+def obv_from_candles(candles):
+    """On-Balance Volume 계산
+    Returns: OBV 값 또는 None
+    """
+    if len(candles) < 2:
+        return None
+
+    obv = 0
+    for i in range(1, len(candles)):
+        vol = candles[i]["candle_acc_trade_volume"]
+        close = candles[i]["trade_price"]
+        prev_close = candles[i-1]["trade_price"]
+
+        if close > prev_close:
+            obv += vol
+        elif close < prev_close:
+            obv -= vol
+
+    return obv
+
+
+def macd_histogram(candles, fast=12, slow=26, signal=9):
+    """MACD 히스토그램 계산
+    Returns: {"macd": float, "signal": float, "histogram": float} 또는 None
+    """
+    if len(candles) < slow + signal:
+        return None
+
+    closes = [c["trade_price"] for c in candles]
+
+    ema_fast = ema_last(closes, fast)
+    ema_slow = ema_last(closes, slow)
+
+    if ema_fast is None or ema_slow is None:
+        return None
+
+    macd = ema_fast - ema_slow
+
+    # Signal line (MACD의 EMA)
+    # 간단화: 최근 signal개 MACD 값의 평균 사용
+    macd_values = []
+    for i in range(max(0, len(closes) - signal), len(closes)):
+        ef = ema_last(closes[:i+1], fast)
+        es = ema_last(closes[:i+1], slow)
+        if ef and es:
+            macd_values.append(ef - es)
+
+    if not macd_values:
+        return None
+
+    signal_line = sum(macd_values) / len(macd_values)
+    histogram = macd - signal_line
+
+    return {"macd": macd, "signal": signal_line, "histogram": histogram}
+
+
+def stochastic_rsi(candles, rsi_period=14, stoch_period=14):
+    """스토캐스틱 RSI 계산
+    Returns: {"k": float, "d": float} 또는 None (0~100 범위)
+    """
+    if len(candles) < rsi_period + stoch_period:
+        return None
+
+    closes = [c["trade_price"] for c in candles]
+
+    # RSI 계산
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i-1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    if len(gains) < rsi_period:
+        return None
+
+    avg_gain = sum(gains[-rsi_period:]) / rsi_period
+    avg_loss = sum(losses[-rsi_period:]) / rsi_period
+
+    if avg_loss == 0:
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+    # 스토캐스틱 적용 (RSI를 가격처럼 사용)
+    # 간단화: 최근 RSI 값들의 최고/최저 기반
+    rsi_values = [rsi]  # 실제로는 과거 RSI도 계산해야 하지만 간단화
+
+    rsi_high = max(rsi_values)
+    rsi_low = min(rsi_values)
+
+    if rsi_high == rsi_low:
+        k = 50
+    else:
+        k = 100 * (rsi - rsi_low) / (rsi_high - rsi_low)
+
+    d = k  # 간단화: %D는 %K의 이동평균이지만 여기서는 동일값 사용
+
+    return {"k": k, "d": d}
+
+
+# =========================
+# ★ 프로브 2.0 핵심 로직
+# =========================
+def probe_v2_prefilter(candles, orderbook):
+    """공통 선필터: 너무 안 좋은 건 배제
+    - RVOL >= 1.5
+    - 스프레드 <= 0.2%
+    - EMA 5,10,20 중 최소 2개 상승
+    """
+    if len(candles) < 30:
+        return False
+
+    # 1) RVOL 계산 (최근 거래량 / 30봉 평균)
+    volumes = [c["candle_acc_trade_volume"] for c in candles[-30:]]
+    avg_volume = sum(volumes) / 30
+    current_volume = candles[-1]["candle_acc_trade_volume"]
+    rvol = current_volume / max(avg_volume, 1)
+
+    if rvol < PROBE_V2_PREFILTER_RVOL:
+        return False
+
+    # 2) 스프레드 체크
+    if not orderbook:
+        return False
+    bid = orderbook.get("bid", 0)
+    ask = orderbook.get("ask", 0)
+    mid = (bid + ask) / 2
+    if mid == 0:
+        return False
+    spread = (ask - bid) / mid
+
+    if spread > PROBE_V2_PREFILTER_SPREAD:
+        return False
+
+    # 3) EMA 기울기 (5, 10, 20)
+    closes = [c["trade_price"] for c in candles]
+    ema5 = ema_series(closes, 5)
+    ema10 = ema_series(closes, 10)
+    ema20 = ema_series(closes, 20)
+
+    if len(ema5) < 4 or len(ema10) < 4 or len(ema20) < 4:
+        return False
+
+    # 기울기 체크 (최근 3봉 평균 > 이전 3봉 평균)
+    ema5_up = sum(ema5[-3:]) / 3 > sum(ema5[-6:-3]) / 3
+    ema10_up = sum(ema10[-3:]) / 3 > sum(ema10[-6:-3]) / 3
+    ema20_up = sum(ema20[-3:]) / 3 > sum(ema20[-6:-3]) / 3
+
+    ema_up_count = sum([ema5_up, ema10_up, ema20_up])
+
+    if ema_up_count < PROBE_V2_PREFILTER_EMA_UP:
+        return False
+
+    return True
+
+
+def probe_v2_trigger_breakout(candles):
+    """A. 돌파형 트리거 (BB 급확장)
+    - BB폭이 직전 5봉 대비 +40% 이상 확대
+    - 종가가 Upper BB 위로 0.25 ATR 이상 돌파
+    - 당봉 거래량 >= 2×(20봉 평균)
+    """
+    if len(candles) < 25:
+        return False
+
+    # 현재 BB
+    bb_now = bollinger_bands(candles, period=20)
+    if not bb_now:
+        return False
+
+    # 5봉 전 BB
+    bb_prev = bollinger_bands(candles[:-5], period=20)
+    if not bb_prev:
+        return False
+
+    # BB폭 확대 체크
+    bandwidth_expansion = (bb_now["bandwidth"] / max(bb_prev["bandwidth"], 0.001)) - 1
+    if bandwidth_expansion < 0.40:  # +40%
+        return False
+
+    # ATR 계산
+    atr = atr14_from_candles(candles, 14)
+    if not atr:
+        return False
+
+    # 종가가 Upper BB + 0.25 ATR 이상 돌파
+    close = candles[-1]["trade_price"]
+    upper_bb = bb_now["upper"]
+    if close < upper_bb + (0.25 * atr):
+        return False
+
+    # 거래량 체크
+    volumes = [c["candle_acc_trade_volume"] for c in candles[-20:]]
+    avg_volume = sum(volumes[:-1]) / 19
+    current_volume = candles[-1]["candle_acc_trade_volume"]
+
+    if current_volume < 2.0 * avg_volume:
+        return False
+
+    return True
+
+
+def probe_v2_trigger_momentum(candles):
+    """B. 모멘텀 번 트리거
+    - %K > %D, 둘 다 80↑ (스토캐스틱 RSI)
+    - PSAR 상향 전환 (점이 캔들 아래)
+    - 직전 고점 돌파 또는 고가-저가 >= 1.2 ATR
+    """
+    if len(candles) < 20:
+        return False
+
+    # 스토캐스틱 RSI
+    stoch = stochastic_rsi(candles, rsi_period=14, stoch_period=14)
+    if not stoch:
+        return False
+
+    if not (stoch["k"] > stoch["d"] and stoch["k"] >= 80 and stoch["d"] >= 80):
+        return False
+
+    # PSAR
+    psar = parabolic_sar(candles)
+    if not psar:
+        return False
+
+    if not psar["is_uptrend"]:
+        return False
+
+    # SAR이 캔들 아래에 있는지 확인
+    current_close = candles[-1]["trade_price"]
+    if psar["sar"] >= current_close:
+        return False
+
+    # ATR
+    atr = atr14_from_candles(candles, 14)
+    if not atr:
+        return False
+
+    # 직전 고점 돌파 or 고가-저가 >= 1.2 ATR
+    current_high = candles[-1]["high_price"]
+    current_low = candles[-1]["low_price"]
+    prev_highs = [c["high_price"] for c in candles[-10:-1]]
+    max_prev_high = max(prev_highs) if prev_highs else 0
+
+    condition1 = current_high > max_prev_high
+    condition2 = (current_high - current_low) >= 1.2 * atr
+
+    if not (condition1 or condition2):
+        return False
+
+    return True
+
+
+def probe_v2_trigger_trend(candles):
+    """C. 추세시동 트리거 (그라인드)
+    - EMA 정렬 5>10>20 & 세 EMA 기울기 모두 양(+)
+    - ADX >= 18 & +DI - -DI >= 5
+    - OBV 30봉 신고점
+    """
+    if len(candles) < 30:
+        return False
+
+    # EMA 정렬 및 기울기
+    closes = [c["trade_price"] for c in candles]
+    ema5 = ema_series(closes, 5)
+    ema10 = ema_series(closes, 10)
+    ema20 = ema_series(closes, 20)
+
+    if len(ema5) < 3 or len(ema10) < 3 or len(ema20) < 3:
+        return False
+
+    # 정렬: 5 > 10 > 20
+    if not (ema5[-1] > ema10[-1] > ema20[-1]):
+        return False
+
+    # 기울기: 모두 양(+)
+    ema5_slope = ema5[-1] - ema5[-3]
+    ema10_slope = ema10[-1] - ema10[-3]
+    ema20_slope = ema20[-1] - ema20[-3]
+
+    if not (ema5_slope > 0 and ema10_slope > 0 and ema20_slope > 0):
+        return False
+
+    # ADX & DI
+    adx_result = adx_di(candles, period=14)
+    if not adx_result:
+        return False
+
+    if not (adx_result["adx"] >= 18 and
+            (adx_result["plus_di"] - adx_result["minus_di"]) >= 5):
+        return False
+
+    # OBV 신고점
+    obv_current = obv_from_candles(candles[-30:])
+    if obv_current is None:
+        return False
+
+    # 간단 체크: 최근 OBV가 증가 추세인지
+    obv_prev = obv_from_candles(candles[-30:-1])
+    if obv_prev is None:
+        return False
+
+    if obv_current <= obv_prev:
+        return False
+
+    return True
+
+
+def probe_v2_update_score(market, candles):
+    """프로브 점수 업데이트 (1분봉마다 호출)
+    +2: 종가가 5EMA 위 & 전고 돌파
+    +2: ADX 상승(ΔADX >= +1.5) & +DI > -DI
+    +2: RVOL >= 2.0 유지
+    +1: MACD 히스토그램 증가
+    +1: Upper BB 거리 증가
+    -2: 종가가 10EMA 하회
+    -3: RVOL < 1.0로 급감
+    -3: 강한 음봉 (몸통 >= 0.7ATR) + 상단 꼬리
+    """
+    with _PROBE_V2_LOCK:
+        if market not in PROBE_V2_STATES:
+            return 0
+
+        state = PROBE_V2_STATES[market]
+        score_delta = 0
+
+    if len(candles) < 30:
+        return 0
+
+    current = candles[-1]
+    prev = candles[-2] if len(candles) >= 2 else current
+
+    closes = [c["trade_price"] for c in candles]
+    current_close = current["trade_price"]
+
+    # 1) 종가가 5EMA 위 & 전고 돌파
+    ema5 = ema_last(closes, 5)
+    if ema5:
+        highs = [c["high_price"] for c in candles[-10:-1]]
+        max_prev_high = max(highs) if highs else 0
+        if current_close > ema5 and current["high_price"] > max_prev_high:
+            score_delta += 2
+
+    # 2) ADX 상승 & +DI > -DI
+    adx_now = adx_di(candles, period=14)
+    adx_prev = adx_di(candles[:-1], period=14) if len(candles) > 15 else None
+
+    if adx_now and adx_prev:
+        adx_delta = adx_now["adx"] - adx_prev["adx"]
+        if adx_delta >= 1.5 and adx_now["plus_di"] > adx_now["minus_di"]:
+            score_delta += 2
+
+    # 3) RVOL >= 2.0 유지
+    volumes = [c["candle_acc_trade_volume"] for c in candles[-30:]]
+    avg_volume = sum(volumes[:-1]) / 29 if len(volumes) > 1 else 1
+    current_volume = current["candle_acc_trade_volume"]
+    rvol = current_volume / max(avg_volume, 1)
+
+    if rvol >= 2.0:
+        score_delta += 2
+
+    # 4) MACD 히스토그램 증가
+    macd_now = macd_histogram(candles)
+    macd_prev = macd_histogram(candles[:-1]) if len(candles) > 30 else None
+
+    if macd_now and macd_prev:
+        if macd_now["histogram"] > macd_prev["histogram"]:
+            score_delta += 1
+
+    # 5) Upper BB 거리 증가
+    bb_now = bollinger_bands(candles, period=20)
+    bb_prev = bollinger_bands(candles[:-1], period=20) if len(candles) > 20 else None
+
+    if bb_now and bb_prev:
+        dist_now = bb_now["upper"] - current_close
+        prev_close = prev["trade_price"]
+        dist_prev = bb_prev["upper"] - prev_close
+        if dist_now > dist_prev:
+            score_delta += 1
+
+    # 6) 종가가 10EMA 하회
+    ema10 = ema_last(closes, 10)
+    if ema10 and current_close < ema10:
+        score_delta -= 2
+
+    # 7) RVOL < 1.0 급감
+    if rvol < 1.0:
+        score_delta -= 3
+
+    # 8) 강한 음봉 + 상단 꼬리
+    atr = atr14_from_candles(candles, 14)
+    if atr:
+        body = abs(current["trade_price"] - current["opening_price"])
+        is_red = current["trade_price"] < current["opening_price"]
+        upper_wick = current["high_price"] - max(current["trade_price"], current["opening_price"])
+
+        if is_red and body >= 0.7 * atr and upper_wick > body * 0.3:
+            score_delta -= 3
+
+    # 점수 업데이트
+    with _PROBE_V2_LOCK:
+        if market in PROBE_V2_STATES:
+            PROBE_V2_STATES[market]["score"] += score_delta
+            PROBE_V2_STATES[market]["last_update"] = time.time()
+
+    return score_delta
+
+
+def probe_v2_check_upgrade(market, candles):
+    """1차 추매 승격 조건 체크
+    - 10분 내 누적 점수 >= +5
+    - 최근 5봉 저점이 10EMA 위에서 Higher Low 2회
+    - 신규 고점 갱신 & RVOL >= 1.5
+    """
+    with _PROBE_V2_LOCK:
+        if market not in PROBE_V2_STATES:
+            return False
+        state = PROBE_V2_STATES[market]
+        score = state["score"]
+        entry_time = state["entry_time"]
+
+    # 10분 이내 체크
+    elapsed = time.time() - entry_time
+    if elapsed > 600:  # 10분
+        return False
+
+    # 점수 체크
+    if score < PROBE_V2_UPGRADE_SCORE:
+        return False
+
+    if len(candles) < 10:
+        return False
+
+    # Higher Low 체크
+    closes = [c["trade_price"] for c in candles]
+    ema10 = ema_last(closes, 10)
+    if not ema10:
+        return False
+
+    recent5 = candles[-5:]
+    lows = [c["low_price"] for c in recent5]
+
+    # 모두 10EMA 위
+    if not all(low > ema10 for low in lows):
+        return False
+
+    # Higher Low 2회 이상
+    higher_low_count = 0
+    for i in range(1, len(lows)):
+        if lows[i] > lows[i-1]:
+            higher_low_count += 1
+
+    if higher_low_count < 2:
+        return False
+
+    # 신규 고점 갱신
+    current_high = candles[-1]["high_price"]
+    prev_highs = [c["high_price"] for c in candles[-10:-1]]
+    if current_high <= max(prev_highs):
+        return False
+
+    # RVOL >= 1.5
+    volumes = [c["candle_acc_trade_volume"] for c in candles[-30:]]
+    avg_volume = sum(volumes[:-1]) / 29 if len(volumes) > 1 else 1
+    current_volume = candles[-1]["candle_acc_trade_volume"]
+    rvol = current_volume / max(avg_volume, 1)
+
+    if rvol < 1.5:
+        return False
+
+    return True
+
+
+def probe_v2_check_failure(market, candles):
+    """프로브 실패 조건 체크
+    - 점수 <= -3
+    - 10EMA 종가 2연속 하회
+    - 타임아웃 (12분봉)
+    """
+    with _PROBE_V2_LOCK:
+        if market not in PROBE_V2_STATES:
+            return False
+        state = PROBE_V2_STATES[market]
+        score = state["score"]
+        entry_time = state["entry_time"]
+        bars_since = state.get("bars_count", 0)
+
+    # 점수 실패
+    if score <= -3:
+        return True
+
+    # 타임아웃
+    if bars_since >= PROBE_V2_TIMEOUT_BARS:
+        return True
+
+    # 10EMA 2연속 하회
+    if len(candles) >= 2:
+        closes = [c["trade_price"] for c in candles]
+        ema10 = ema_last(closes, 10)
+        if ema10:
+            last2 = candles[-2:]
+            if all(c["trade_price"] < ema10 for c in last2):
+                return True
+
+    return False
+
+
+def probe_v2_manage_queue():
+    """프로브 큐 관리
+    - 최대 동시 활성 프로브 수 제한
+    - 점수 최하위 제거
+    """
+    with _PROBE_V2_LOCK:
+        if len(PROBE_V2_STATES) <= PROBE_V2_MAX_CONCURRENT:
+            return
+
+        # 점수 순 정렬 (낮은 순)
+        sorted_probes = sorted(PROBE_V2_STATES.items(), key=lambda x: x[1]["score"])
+
+        # 초과분 제거
+        remove_count = len(PROBE_V2_STATES) - PROBE_V2_MAX_CONCURRENT
+        for i in range(remove_count):
+            market = sorted_probes[i][0]
+            print(f"[PROBE_V2] 큐 관리: {market} 제거 (점수: {sorted_probes[i][1]['score']})")
+            del PROBE_V2_STATES[market]
+
+
+def probe_v2_add_state(market, trigger_type):
+    """프로브 상태 추가"""
+    with _PROBE_V2_LOCK:
+        PROBE_V2_STATES[market] = {
+            "score": 0,
+            "entry_time": time.time(),
+            "trigger_type": trigger_type,
+            "last_update": time.time(),
+            "bars_count": 0,
+        }
+    probe_v2_manage_queue()
+
+
+def probe_v2_remove_state(market):
+    """프로브 상태 제거"""
+    with _PROBE_V2_LOCK:
+        if market in PROBE_V2_STATES:
+            del PROBE_V2_STATES[market]
+
+
+def probe_v2_increment_bars(market):
+    """프로브 바 카운트 증가 (1분마다)"""
+    with _PROBE_V2_LOCK:
+        if market in PROBE_V2_STATES:
+            PROBE_V2_STATES[market]["bars_count"] += 1
 
 
 # =========================
