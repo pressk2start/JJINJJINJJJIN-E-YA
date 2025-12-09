@@ -355,82 +355,139 @@ def place_market_sell(market, volume):
         print(f"[SELL_ERR] {market} {e}")
         raise
 
-def get_order_result(order_uuid, timeout_sec=5.0):
-    """주문 결과 조회"""
+def get_order_result(order_uuid, timeout_sec=6.0):
+    """
+    주문 결과 조회 (폴링 방식)
+    - Upbit state: wait(대기) / done(완료) / cancel(취소)
+    - timeout 시 마지막 조회 스냅샷 반환
+    """
     if not AUTO_TRADE or not order_uuid or "dry_run" in order_uuid:
         return {"executed_volume": "0", "state": "done"}
 
-    url = f"https://api.upbit.com/v1/order"
+    url = "https://api.upbit.com/v1/order"
     params = {"uuid": order_uuid}
-    headers = _make_auth_headers(params)
 
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=timeout_sec)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[ORDER_QUERY_ERR] {e}")
-        return None
+    deadline = time.time() + timeout_sec
+    last_result = None
+
+    while time.time() < deadline:
+        try:
+            headers = _make_auth_headers(params)
+            r = requests.get(url, params=params, headers=headers, timeout=3)
+            r.raise_for_status()
+            od = r.json()
+            last_result = od
+
+            state = str(od.get("state", "")).lower()
+            if state in ("done", "cancel"):
+                return od
+
+        except Exception as e:
+            print(f"[ORDER_QUERY_ERR] {e}")
+
+        time.sleep(0.3)
+
+    # 타임아웃 시 마지막 스냅샷 반환
+    return last_result if last_result else None
 
 def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     초입 매수 진입
     - probe 모드: PROBE_KRW (7,000원)
     - 일반: RISK_PER_TRADE 기반 계산
+    반환: (ok:bool, avg_price:float|None, volume:float|None)
     """
     if not AUTO_TRADE:
         print(f"[AUTO_TRADE_OFF] {m} 매수 스킵 (신호만 발생)")
-        return
+        return False, None, None
 
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
             print(f"[OPEN_SKIP] {m} 이미 포지션 존재")
-            return
+            return False, None, None
+
+    signal_price = pre.get("price")
+    if not signal_price or signal_price <= 0:
+        print(f"[OPEN_ERR] {m} 신호가 없음")
+        return False, None, None
 
     entry_mode = pre.get("entry_mode", "confirm")
+
+    # 가격 급등 체크 (신호가 대비 현재가)
+    try:
+        ticker_data = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        current_price = float(ticker_data[0]["trade_price"]) if ticker_data else signal_price
+        price_drift = (current_price / signal_price - 1.0) if signal_price > 0 else 0.0
+
+        # 급등 시 진입 취소 (1.2% 이상 상승)
+        if price_drift > 0.012:
+            tg_send(
+                f"⚠️ <b>진입 취소</b> {m}\n"
+                f"• 신호가: {signal_price:,.0f}원\n"
+                f"• 현재가: {current_price:,.0f}원\n"
+                f"• 상승률: {price_drift*100:.2f}%\n"
+                f"• 사유: 가격 급등 (추격 위험)"
+            )
+            return False, None, None
+    except Exception as e:
+        print(f"[PRICE_CHECK_ERR] {m} {e}")
+        current_price = signal_price
 
     # 프로브는 고정 금액, 일반은 계좌 기반 계산
     if entry_mode == "probe":
         buy_krw = PROBE_KRW
     else:
         krw_balance = get_balance("KRW")
+        if krw_balance < 6000:
+            print(f"[OPEN_ERR] {m} 잔고 부족 ({krw_balance:,.0f}원)")
+            return False, None, None
+
         buy_krw = krw_balance * RISK_PER_TRADE * SEED_RISK_FRACTION
         buy_krw = max(5000, min(buy_krw, krw_balance * 0.01))  # 5천원~1% 제한
+
+    if buy_krw < 5000:
+        print(f"[OPEN_ERR] {m} 주문금액 부족 ({buy_krw:,.0f}원)")
+        return False, None, None
 
     try:
         res = place_market_buy(m, buy_krw)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
 
-        # 주문 결과 확인
+        # 주문 결과 확인 (폴링)
         od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
 
         executed_vol = 0.0
-        avg_price = pre["price"]
+        avg_price = current_price
 
         if od:
             try:
-                executed_vol = float(od.get("executed_volume") or "0")
                 trades = od.get("trades") or []
                 if trades:
-                    total_funds = sum(float(t.get("funds", 0)) for t in trades)
+                    total_funds = sum(float(t.get("price", 0)) * float(t.get("volume", 0)) for t in trades)
                     total_vol = sum(float(t.get("volume", 0)) for t in trades)
                     if total_vol > 0:
                         avg_price = total_funds / total_vol
+                        executed_vol = total_vol
+                else:
+                    # trades 없으면 executed_volume 사용
+                    executed_vol = float(od.get("executed_volume") or "0")
+                    if executed_vol > 0:
+                        avg_price = buy_krw / executed_vol
             except Exception as e:
                 print(f"[ORDER_PARSE_ERR] {e}")
 
         if executed_vol <= 0:
             print(f"[BUY_FAIL] {m} 체결량 0")
             tg_send(f"⚠️ <b>매수 실패</b> {m}\n• 체결량: 0\n• 주문 금액: {buy_krw:,.0f}원")
-            return
+            return False, None, None
 
         # 포지션 등록
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
-                "entry_price": avg_price,
-                "volume": executed_vol,
-                "stop": dyn_stop,
-                "sl_pct": eff_sl_pct,
+                "entry_price": float(avg_price),
+                "volume": float(executed_vol),
+                "stop": float(dyn_stop),
+                "sl_pct": float(eff_sl_pct),
                 "entry_mode": entry_mode,
                 "entry_time": time.time(),
                 "adds": 0,
@@ -439,20 +496,41 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "closing": False
             }
 
+        slip_pct = (avg_price / signal_price - 1.0) if signal_price > 0 else 0.0
         mode_txt = "🔬 프로브" if entry_mode == "probe" else "✅ 확정"
         tg_send(
             f"{mode_txt} <b>매수 체결</b> {m}\n"
-            f"💵 평단가: {avg_price:,.0f}원\n"
-            f"📦 수량: {executed_vol:.8f}\n"
-            f"💰 금액: {buy_krw:,.0f}원\n"
-            f"🧯 손절: {dyn_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
+            f"• 신호가: {signal_price:,.0f}원\n"
+            f"• 체결가: {avg_price:,.0f}원\n"
+            f"• 슬리피지: {slip_pct*100:+.3f}%\n"
+            f"• 주문금액: {buy_krw:,.0f}원\n"
+            f"• 수량: {executed_vol:.8f}\n"
+            f"• 손절가: {dyn_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
         )
 
         print(f"[BUY_OK] {m} @{avg_price:,.0f} vol={executed_vol:.8f} mode={entry_mode}")
 
+        return True, float(avg_price), float(executed_vol)
+
     except Exception as e:
         print(f"[OPEN_ERR] {m} {e}")
         tg_send(f"⚠️ <b>매수 오류</b> {m}\n{str(e)[:200]}")
+        return False, None, None
+
+def _pick_monitor_entry_price(m, signal_price):
+    """
+    모니터 시작 진입가 결정:
+    - 자동매매 on & 포지션 존재하면 실제 평단
+    - 아니면 신호가
+    """
+    if AUTO_TRADE:
+        with _POSITION_LOCK:
+            pos = OPEN_POSITIONS.get(m)
+            if pos:
+                entry_price = pos.get("entry_price")
+                if entry_price and entry_price > 0:
+                    return float(entry_price)
+    return float(signal_price) if signal_price else 0.0
 
 def add_auto_position(m, curp):
     """
@@ -3275,8 +3353,9 @@ def launch_monitor(market, pre, tight_mode=False):
             print(f"[MON_LIMIT] 동시 모니터 한도({MAX_CONCURRENT}) 도달 → {market} 보류")
             return False
 
-        # 제출
-        f = MONITOR_POOL.submit(monitor_position, market, pre["price"], pre, tight_mode)
+        # 제출 (실제 평단가 사용)
+        monitor_entry = _pick_monitor_entry_price(market, pre.get("price"))
+        f = MONITOR_POOL.submit(monitor_position, market, monitor_entry, pre, tight_mode)
         ACTIVE_MONITORS[market] = f
 
         # 완료 시 정리
@@ -3460,7 +3539,9 @@ def main():
 
                     # --- 🔥 자동매수 진입 ---
                     try:
-                        open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                        ok_buy, _avg, _vol = open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                        if ok_buy:
+                            print(f"[BUY] {m} 체결 완료: avg={_avg:,.0f} vol={_vol:.8f}")
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
 
