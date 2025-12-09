@@ -714,14 +714,21 @@ def add_auto_position(m, curp):
         total_vol = current_vol + executed_vol
         new_entry = (entry_price * current_vol + avg_price * executed_vol) / total_vol
 
-        # 포지션 업데이트
+        # 포지션 업데이트 (체결 후 재확인 - 레이스 컨디션 방지)
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
-            if pos2:
-                pos2["entry_price"] = new_entry
-                pos2["volume"] = total_vol
-                pos2["adds"] = pos2.get("adds", 0) + 1
-                pos2["last_add_ts"] = time.time()
+            if not pos2 or pos2.get("closing"):
+                # 체결 완료했지만 포지션이 이미 청산됨 (레이스 컨디션)
+                print(f"[ADD_RACE] {m} 추매 체결됐지만 포지션 이미 종료됨 (체결량 {executed_vol:.6f})")
+                tg_send_mid(f"⚠️ <b>추매 레이스</b> {m}\n"
+                            f"• 체결량: {executed_vol:.6f}\n"
+                            f"• 평균가: {avg_price:,.0f}원\n"
+                            f"→ 포지션 이미 청산 상태 (수동 확인 권장)")
+                return False, None
+            pos2["entry_price"] = new_entry
+            pos2["volume"] = total_vol
+            pos2["adds"] = pos2.get("adds", 0) + 1
+            pos2["last_add_ts"] = time.time()
 
         print(f"[ADD_OK] {m} 추매 #{pos.get('adds', 0)+1} @{avg_price:,.0f} 새평단={new_entry:,.0f}")
 
@@ -3424,7 +3431,7 @@ def start_health_server(port=8080):
     global _health_server
     for p in range(port, port + 5):
         try:
-            server = HTTPServer(("0.0.0.0", p), HealthHandler)
+            server = HTTPServer(("127.0.0.1", p), HealthHandler)  # 로컬만 바인딩 (보안)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             _health_server = server  # 전역 보관
