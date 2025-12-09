@@ -2550,8 +2550,12 @@ def postcheck_6s(m, pre):
     peak = base_price
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
-    # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    MAX_SURGE = 0.015  # 1.5% 이상이면 고점 추격으로 간주하고 컷
+    # ★★★ postcheck 중 최대 허용 급등 (probe는 더 완화)
+    entry_mode = pre.get("entry_mode", "confirm")
+    if entry_mode == "probe":
+        MAX_SURGE = 0.022  # probe: 2.2% 허용 (공격적 진입)
+    else:
+        MAX_SURGE = 0.015  # confirm: 1.5% (보수적)
 
     while True:
         now = time.time()
