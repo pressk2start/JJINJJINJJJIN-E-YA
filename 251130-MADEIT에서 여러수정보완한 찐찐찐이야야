@@ -223,6 +223,11 @@ OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 _FUNDS_LOCK = threading.Lock()  # ★ 잔고 사용 전역 락 (추매 동시성 경합 방지)
 
+def get_pos_snapshot(m):
+    """포지션 스냅샷 (락 안전). 경쟁상태 방지용."""
+    with _POSITION_LOCK:
+        return (OPEN_POSITIONS.get(m) or {}).copy()
+
 # 청산 시각 기록 (재탐지 방지용)
 LAST_EXIT_AT = {}
 
@@ -4268,14 +4273,14 @@ def monitor_position(m,
 
 
             # 트레일 업데이트(이익 확대 시에만 상향) — '신고점 갱신' 기준
+            # ★ ATR 실패 시 동결 (상향 금지, 조기청산 방지)
             if trail_armed and best > prev_best:
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
-                if atr and atr > 0:
+                if atr and atr > 0:  # ★ 정상 ATR일 때만 상향
                     trail_dist = max(TRAIL_DISTANCE_MIN,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
-                else:
-                    trail_dist = TRAIL_DISTANCE_MIN
-                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+                    trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+                # else: ATR 실패 시 동결 (trail_stop 유지)
 
 
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
@@ -4751,14 +4756,15 @@ def start_monitor_watchdog():
                 running = {k for k, f in ACTIVE_MONITORS.items() if f and not f.done()}
             for m in opens:
                 if m not in running:
+                    pos_snap = get_pos_snapshot(m)  # ★ 락 안전 스냅샷
                     pre = LAST_PRE.get(m) or {
                         "ob": {},
                         "ticks": [],
                         "tape": {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0},
-                        "entry_mode": (OPEN_POSITIONS.get(m) or {}).get("entry_mode","confirm")
+                        "entry_mode": pos_snap.get("entry_mode","confirm")
                     }
 
-                    entry = (OPEN_POSITIONS.get(m) or {}).get("entry_price")
+                    entry = pos_snap.get("entry_price")
                     if entry and entry > 0:  # ✅ 0/None 방지
                         # 🔧 누락된 price 보정
                         if "price" not in pre or not pre.get("price"):
