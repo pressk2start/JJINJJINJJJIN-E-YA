@@ -793,6 +793,7 @@ def add_auto_position(m, cur_price, override_krw=None):
             # 추매 최대 횟수 도달
             return False, None
         last_add_ts = pos.get("last_add_ts", 0.0)
+        adds_count = pos.get("adds", 0)  # ★ 추매 횟수 (차등 비율용)
 
     now = time.time()
     if (now - last_add_ts) < PYRAMID_ADD_COOLDOWN_SEC:
@@ -821,7 +822,16 @@ def add_auto_position(m, cur_price, override_krw=None):
         krw_to_use = min(krw_bal, int(override_krw))
         qty_theoretical = None  # override 모드에서는 이론수량 계산 안 함
     else:
-        add_risk_pct = max(0.0001, RISK_PER_TRADE * ADD_RISK_FRACTION)
+        # ★★★ 추매 차등 비율: 1차(확신) 크게 → 점점 작게 (고점 물림 방지)
+        if adds_count == 0:  # 1차 추매 (probe→confirm 전환)
+            add_risk_pct = 0.01  # 1.0% (가장 크게, 확신 진입)
+        elif adds_count == 1:  # 2차 추매
+            add_risk_pct = 0.006  # 0.6%
+        elif adds_count == 2:  # 3차 추매
+            add_risk_pct = 0.004  # 0.4%
+        else:  # 4차+ 추매
+            add_risk_pct = 0.003  # 0.3%
+
         qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
         krw_to_use = min(krw_bal, int(qty_theoretical * cur_price))  # ★ 잔고 초과 방지
 
@@ -897,11 +907,16 @@ def add_auto_position(m, cur_price, override_krw=None):
         pos["entry_mode"] = "confirm"
         pos["added"] = True                      # (하위호환용, 다른 곳에서 참조할 수도 있으니 유지)
 
-    # 추매 금액 계산
+    # 추매 금액 계산 및 차수 표시
     add_krw_amount = avg_price_add * volume_filled
+    current_adds = pos.get("adds", 0)  # 방금 업데이트된 값 (1, 2, 3, ...)
+
+    # 비율 매핑 (표시용)
+    risk_pct_map = {1: "1.0%", 2: "0.6%", 3: "0.4%"}
+    risk_label = risk_pct_map.get(current_adds, "0.3%")
 
     tg_send(
-        f"📈 <b>추매 체결</b> {m}\n"
+        f"📈 <b>추매 체결 ({current_adds}차 - {risk_label})</b> {m}\n"
         f"• 추가 체결가: {fmt_price(avg_price_add)}원\n"
         f"• 추가 수량: {volume_filled:.6f}\n"
         f"• 추가 금액: {add_krw_amount:,.0f}원\n"
