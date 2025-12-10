@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, ROUND_DOWN
 
 import uuid
 import hashlib
@@ -367,6 +367,18 @@ def upbit_private_get(path, params=None, timeout=7):
                 raise
             time.sleep(0.25 * (2 ** attempt))
 
+def fmt_volume_for_api(x: float, dp: int = 8) -> str:
+    """
+    API 전송용 volume 포맷 (지수표기/반올림 방지)
+    - 8자리 고정, 내림(ROUND_DOWN)으로 안전
+    - 지수표기(1e-07) 완전 방지
+    """
+    q = Decimal('1').scaleb(-dp)  # 10^-dp
+    d = Decimal(str(x)).quantize(q, rounding=ROUND_DOWN)
+    s = format(d, 'f')
+    # 후행 0 제거 (0.00001000 → 0.00001)
+    return s.rstrip('0').rstrip('.') if '.' in s else s
+
 def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
@@ -383,8 +395,9 @@ def upbit_private_post(path, body=None, timeout=7):
         try:
             _throttle()
             with _session_lock:
-                # Upbit는 query string 기준으로 query_hash 검증
-                r = SESSION.post(url, headers=headers, params=items, timeout=timeout)
+                # Upbit는 POST에서 query string 기준 query_hash 검증 (body 아님)
+                # data=items로 전송 (호환성 강화)
+                r = SESSION.post(url, headers=headers, data=items, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(0.25 * (2 ** attempt))
                 continue
@@ -517,12 +530,12 @@ def place_market_buy(market, krw_amount):
 
 
 def place_market_sell(market, volume):
-    """수량 기준 시장가 매도"""
+    """수량 기준 시장가 매도 (지수표기 방지)"""
     body = [
         ("market", market),
         ("side", "ask"),
         ("ord_type", "market"),
-        ("volume", str(volume)),
+        ("volume", fmt_volume_for_api(volume)),  # ★ 지수표기/반올림 방지
     ]
     return upbit_private_post("/v1/orders", body)
 
@@ -1046,9 +1059,10 @@ def close_auto_position(m, reason=""):
     except Exception as e:
         print(f"[AUTO] {m} 계좌 조회 실패: {e}")
 
-    # 포지션 기록 vs 실제 보유량 중 큰 값 사용 (찌꺼기 완전 제거)
+    # ★ 과청산 방지: 실제 보유량 vs 포지션 기록 중 작은 값 사용 (금융사고 방지)
     pos_vol = pos.get("volume", 0.0)
-    vol = max(actual_vol, pos_vol) if actual_vol > 0 else pos_vol
+    vol = min(actual_vol, pos_vol) if actual_vol > 0 else pos_vol
+    vol = float(Decimal(fmt_volume_for_api(vol)))  # 정밀도 내림 + 지수표기 방지
 
     print(f"[AUTO] {m} 청산 수량: pos={pos_vol:.8f}, actual={actual_vol:.8f}, use={vol:.8f}")
 
@@ -1268,8 +1282,29 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         current_volume = pos["volume"]
 
     sell_volume = current_volume * sell_ratio
+
+    # ★ 부분청산 가드: 실제 잔량 재조회 및 과매도 방지 (금융사고 방지)
+    actual_available = 0.0
+    try:
+        accounts = get_account_info()
+        if accounts:
+            currency = m.split("-")[1] if "-" in m else ""
+            for acc in accounts:
+                if acc.get("currency") == currency:
+                    actual_available = float(acc.get("balance", "0"))
+                    break
+    except Exception as e:
+        print(f"[PARTIAL_SELL] {m} 실제 잔량 조회 실패: {e}")
+        actual_available = current_volume  # fallback
+
+    # 과매도 방지: 실제 보유량 vs 계산값 중 작은 값 사용
+    sell_volume = min(sell_volume, actual_available)
+    # 정밀도 내림 + 지수표기 방지
+    sell_volume = float(Decimal(fmt_volume_for_api(sell_volume)))
+    print(f"[PARTIAL_SELL] {m} 판매량: calc={current_volume * sell_ratio:.8f}, actual={actual_available:.8f}, final={sell_volume:.8f}")
+
     if sell_volume <= 0:
-        msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
+        msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0 (precision floor)"
         print(msg)
         return False, msg, 0.0
 
