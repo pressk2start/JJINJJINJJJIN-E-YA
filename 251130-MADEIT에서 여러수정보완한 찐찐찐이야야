@@ -619,16 +619,39 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         )
         return
 
-    # === 과열 추격 방지: VWAP/EMA5 과열이면 confirm→probe 강등 ===
+    # === 과열 추격 방지: VWAP/EMA5/BB 과열이면 차단 또는 강등 ===
     try:
         c1m = get_minutes_candles(1, m, 20)
         vwap20 = vwap_from_candles_1m(c1m, 20)
         ema5_now = ema_last([c["trade_price"] for c in c1m], 5)
         vgap = (current_price / max(vwap20, 1) - 1.0) if vwap20 else 0.0
         egap = (current_price / max(ema5_now, 1) - 1.0) if ema5_now else 0.0
+
+        # ★ 볼린저 밴드 상단 체크 (확장 끝 추격 차단)
+        bb = bollinger_bands(c1m, period=20, std_mult=2.0)
+        bb_upper = bb["upper"] if bb else current_price * 1.02
+        bb_exceed = (current_price > bb_upper * 1.001)  # 상단 0.1% 초과
+
+        # ★ 거래량 추세 체크 (둔화 시 진입 금지)
+        if len(c1m) >= 4:
+            vol_recent = sum(c["candle_acc_trade_volume"] for c in c1m[-2:]) / 2  # 최근 2봉 평균
+            vol_prev = sum(c["candle_acc_trade_volume"] for c in c1m[-4:-2]) / 2  # 직전 2봉 평균
+            vol_declining = (vol_recent < vol_prev * 0.7)  # 30% 이상 감소
+        else:
+            vol_declining = False
     except Exception:
         vgap = egap = 0.0
+        bb_exceed = False
+        vol_declining = False
 
+    # ★ BB 상단 초과 or 거래량 둔화 → 진입 금지
+    if bb_exceed or vol_declining:
+        reason = "BB상단초과" if bb_exceed else "거래량둔화"
+        print(f"[EXPANSION_END] {m} 확장 끝 추격 차단 ({reason}) → 진입 스킵")
+        tg_send_mid(f"⚠️ {m} 진입 스킵: {reason} (고점 추격 방지)")
+        return
+
+    # VWAP/EMA5 과열 → confirm→probe 강등
     if entry_mode == "confirm" and (vgap >= 0.018 or egap >= 0.022):
         entry_mode = "probe"
         entry_fraction = 0.10
