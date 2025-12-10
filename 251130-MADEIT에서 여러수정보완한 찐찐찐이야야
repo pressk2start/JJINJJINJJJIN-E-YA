@@ -216,6 +216,12 @@ TREND_THRESHOLD = float(os.getenv("TREND_THRESHOLD", "0.03"))  # 3% 이상: 큰 
 SCALP_MICRO_MARGIN = float(os.getenv("SCALP_MICRO_MARGIN", "0.0010"))  # 수수료 위 추가 마진 (0.1%)
 SCALP_MICRO_LOCK = float(os.getenv("SCALP_MICRO_LOCK", "0.0002"))  # 미세익절 lock 마진 (0.02%)
 
+# === 1차 추매(probe→confirm) 엄격 조건 (손절 방지) ===
+ADD1_MIN_GAIN = float(os.getenv("ADD1_MIN_GAIN", "0.004"))     # +0.4% 이상 (0.3→0.4 강화)
+ADD1_MIN_BUY = float(os.getenv("ADD1_MIN_BUY", "0.60"))        # 매수비 60%+ (0.56→0.60 강화)
+ADD1_MIN_KRWPSEC = int(os.getenv("ADD1_MIN_KRWPSEC", "20000")) # 절대속도 20k+/s (14k→20k 강화)
+ADD1_MIN_ACCEL = float(os.getenv("ADD1_MIN_ACCEL", "1.25"))    # 상대가속 t15 ≥ 1.25×t30 (신규)
+
 
 # 현재 열린 포지션 기록용
 # 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
@@ -4102,12 +4108,13 @@ def monitor_position(m,
             # === 📊 스캘프 vs 추세 분기: run_from_entry 기준 ===
             run_from_entry = (best / entry_price - 1.0)
 
-            # === PROBE → CONFIRM 전환 로직 ===
+            # === PROBE → CONFIRM 전환 로직 (1차 추매: 가장 엄격한 허들) ===
             with _POSITION_LOCK:
                 pos = (OPEN_POSITIONS.get(m) or {}).copy()  # ✅ 안전 읽기
 
             if pos.get("entry_mode") == "probe":
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                t30_now = micro_tape_stats_from_ticks(ticks, 30)
 
                 gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
@@ -4116,26 +4123,44 @@ def monitor_position(m,
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
                 ema_crossover = (ema3_cross and ema8_cross) and (ema3_cross > ema8_cross)
 
-                # ★ 가격 게이트: +0.3% 이상 or 최근 전고 돌파 (횡보 필터)
-                price_ok = False
-                if gain_now >= 0.003:  # +0.3% 최소 수익
-                    price_ok = True
-                elif c1m_ema and len(c1m_ema) >= 6:
-                    recent_high = max(c["high_price"] for c in c1m_ema[-6:])
-                    if curp > recent_high:  # 최근 6개 봉 전고 돌파
-                        price_ok = True
+                # ★ 1차 추매 엄격 조건 (손절 방지)
+                # 1) 가격 상승 체크: +0.4% 이상 (0.3→0.4 강화)
+                gain_ok = (gain_now >= ADD1_MIN_GAIN)
 
-                # ★ 테이프 조건 (휩쏘 방지 - 필수)
-                flow_ok = (
-                    t15_now["buy_ratio"] >= 0.56  # 매수비 56% 이상
-                    and t15_now["krw_per_sec"] >= 14000  # 거래속도 14,000원/초 이상
+                # 2) 전고 돌파 체크 (최근 6개 봉)
+                break_ok = False
+                if c1m_ema and len(c1m_ema) >= 6:
+                    recent_high = max(c["high_price"] for c in c1m_ema[-6:])
+                    break_ok = (curp > recent_high)
+
+                # 3) 상대 가속 체크: t15 ≥ 1.25×t30 (신규 추가)
+                accel_ok = (t15_now["krw_per_sec"] >= ADD1_MIN_ACCEL * max(t30_now["krw_per_sec"], 1)) and \
+                           (t15_now["krw_per_sec"] >= ADD1_MIN_KRWPSEC)
+
+                # 4) 매수비 체크: 60% 이상 (0.56→0.60 강화)
+                buy_ok = (t15_now["buy_ratio"] >= ADD1_MIN_BUY)
+
+                # 5) VWAP 과열 방지 (기존 가드 유지)
+                vgap_ok = True
+                try:
+                    vwap20 = vwap_from_candles_1m(c1m_ema, 20)
+                    if vwap20 and vwap20 > 0:
+                        vgap_ok = (curp / vwap20 - 1.0) <= 0.015  # 1.5% 이내
+                except Exception:
+                    pass
+
+                # 6) EMA 골든크로스 체크
+                ema_ok = bool(ema_crossover)
+
+                # ★★ 1차 추매 최종 조건 (가장 높은 허들):
+                # (가격상승 + 전고돌파) 또는 (EMA골든크로스 + 가격상승)
+                # + 상대가속 + 매수비 + VWAP안전
+                first_add_ok = (
+                    ((gain_ok and break_ok) or (ema_ok and gain_ok)) and
+                    accel_ok and buy_ok and vgap_ok
                 )
 
-                # ★ 흐름 + 가격 게이트 조합 (가격만으로는 전환 불가)
-                condition_original = price_ok and flow_ok
-                condition_rebound = (ema_crossover and flow_ok)
-
-                if condition_original or condition_rebound:
+                if first_add_ok:
                     ok_add, new_entry = add_auto_position(m, curp)
                     if ok_add and new_entry:
                         with _POSITION_LOCK:
@@ -4148,7 +4173,9 @@ def monitor_position(m,
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
-                            f"추매 후 평단: {fmt_price(new_entry)}원"
+                            f"추매 후 평단: {fmt_price(new_entry)}원\n"
+                            f"(gain≥{ADD1_MIN_GAIN*100:.1f}%, buy≥{ADD1_MIN_BUY*100:.0f}%, "
+                            f"t15≥{ADD1_MIN_ACCEL:.2f}×t30 & ≥{ADD1_MIN_KRWPSEC:,}/s)"
                         )
 
                         # ★ 추매 후 스탑은 절대 위로 당기지 않음 (정상 눌림 보호)
