@@ -221,6 +221,7 @@ SCALP_MICRO_LOCK = float(os.getenv("SCALP_MICRO_LOCK", "0.0002"))  # 미세익�
 # 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
 OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
+_FUNDS_LOCK = threading.Lock()  # ★ 잔고 사용 전역 락 (추매 동시성 경합 방지)
 
 # 청산 시각 기록 (재탐지 방지용)
 LAST_EXIT_AT = {}
@@ -820,93 +821,114 @@ def add_auto_position(m, cur_price, override_krw=None):
     if (now - last_add_ts) < PYRAMID_ADD_COOLDOWN_SEC:
         return False, None
 
-    accounts = get_account_info()
-    if not accounts:
-        print("[AUTO_ADD] 계좌 조회 실패")
-        return False, None
-
-    krw_bal = 0.0
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            krw_bal = float(a.get("balance", "0"))
-            break
-
-    if krw_bal < 6000:
-        print(f"[AUTO_ADD] KRW 부족({krw_bal:,.0f}) → 추매 스킵")
-        return False, None
-
-    entry_price_old = pos["entry_price"]
-    stop_price = pos["stop"]
-
-    # ★ override_krw가 지정되면 그 금액 사용, 아니면 리스크 기반 계산
-    if override_krw is not None:
-        krw_to_use = min(krw_bal, int(override_krw))
-        qty_theoretical = None  # override 모드에서는 이론수량 계산 안 함
-    else:
-        # ★★★ 추매 차등 비율: 1차(확신) 크게 → 점점 작게 (고점 물림 방지)
-        if adds_count == 0:  # 1차 추매 (probe→confirm 전환)
-            add_risk_pct = 0.01  # 1.0% (가장 크게, 확신 진입)
-        elif adds_count == 1:  # 2차 추매
-            add_risk_pct = 0.006  # 0.6%
-        elif adds_count == 2:  # 3차 추매
-            add_risk_pct = 0.004  # 0.4%
-        else:  # 4차+ 추매
-            add_risk_pct = 0.003  # 0.3%
-
-        qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
-        krw_to_use = min(krw_bal, int(qty_theoretical * cur_price))  # ★ 잔고 초과 방지
-
-    if krw_to_use < 5000:
-        print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        return False, None
-
-    krw_to_use = int(krw_to_use)
-
-    # ★ NameError 방지: override 모드에서는 이론수량 출력 생략
-    if qty_theoretical is not None:
-        print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (이론수량≈{qty_theoretical:.6f}, 현재가 {cur_price:,.0f})")
-    else:
-        print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (고정금액, 현재가 {cur_price:,.0f})")
-
-    volume_filled = 0.0
-    avg_price_add = cur_price
-
-    try:
-        res = place_market_buy(m, krw_to_use)
-        order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
-
-        if od:
-            try:
-                volume_filled = float(od.get("executed_volume") or "0")
-            except Exception:
-                volume_filled = 0.0
-
-            trades = od.get("trades") or []
-            if trades and volume_filled > 0:
-                total_krw = 0.0
-                total_vol = 0.0
-                for tr in trades:
-                    p = float(tr.get("price", "0"))
-                    v = float(tr.get("volume", "0"))
-                    total_krw += p * v
-                    total_vol += v
-                if total_vol > 0:
-                    avg_price_add = total_krw / total_vol
-            else:
-                if volume_filled > 0:
-                    avg_price_add = krw_to_use / volume_filled
-
-        if volume_filled <= 0:
-            msg = f"[AUTO_ADD] {m} 추매 체결 0 → 무시"
-            print(msg)
-            tg_send(f"⚠️ {msg}")
+    # ★ 잔고 사용 전역 락 (동시성 경합 방지)
+    with _FUNDS_LOCK:
+        accounts = get_account_info()
+        if not accounts:
+            print("[AUTO_ADD] 계좌 조회 실패")
             return False, None
 
-    except Exception as e:
-        print("[AUTO_ADD ERR]", e)
-        tg_send(f"⚠️ <b>추매 실패</b> {m}\n사유: {e}")
-        return False, None
+        krw_bal = 0.0
+        for a in accounts:
+            if a.get("currency") == "KRW":
+                krw_bal = float(a.get("balance", "0"))
+                break
+
+        # ★ 헤드룸 적용: 수수료+여유 0.7% 차감
+        SAFE_HEADROOM = 0.007
+        usable_krw = max(0, int(krw_bal * (1 - SAFE_HEADROOM)))
+
+        if usable_krw < 6000:
+            print(f"[AUTO_ADD] 가용 KRW 부족({usable_krw:,.0f}) → 추매 스킵")
+            return False, None
+
+        entry_price_old = pos["entry_price"]
+        stop_price = pos["stop"]
+
+        # ★ override_krw가 지정되면 그 금액 사용, 아니면 리스크 기반 계산
+        if override_krw is not None:
+            want_krw = int(override_krw)
+            qty_theoretical = None  # override 모드에서는 이론수량 계산 안 함
+        else:
+            # ★★★ 추매 차등 비율: 1차(확신) 크게 → 점점 작게 (고점 물림 방지)
+            if adds_count == 0:  # 1차 추매 (probe→confirm 전환)
+                add_risk_pct = 0.01  # 1.0% (가장 크게, 확신 진입)
+            elif adds_count == 1:  # 2차 추매
+                add_risk_pct = 0.006  # 0.6%
+            elif adds_count == 2:  # 3차 추매
+                add_risk_pct = 0.004  # 0.4%
+            else:  # 4차+ 추매
+                add_risk_pct = 0.003  # 0.3%
+
+            qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
+            want_krw = int(qty_theoretical * cur_price) if qty_theoretical else 0
+
+        krw_to_use = min(usable_krw, want_krw)
+
+        # ★ 최소 금액 5100원 (수수료 헤드룸 포함)
+        if krw_to_use < 5100:
+            print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,100원 → 스킵")
+            return False, None
+
+        krw_to_use = int(krw_to_use)
+
+        # ★ NameError 방지: override 모드에서는 이론수량 출력 생략
+        if qty_theoretical is not None:
+            print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (이론수량≈{qty_theoretical:.6f}, 현재가 {cur_price:,.0f})")
+        else:
+            print(f"[AUTO_ADD] {m} 추매 시도: {krw_to_use:,.0f} KRW (고정금액, 현재가 {cur_price:,.0f})")
+
+        volume_filled = 0.0
+        avg_price_add = cur_price
+
+        try:
+            res = place_market_buy(m, krw_to_use)
+            order_uuid = res.get("uuid") if isinstance(res, dict) else None
+            od = get_order_result(order_uuid, timeout_sec=15.0) if order_uuid else None  # ★ 6→15초 연장
+
+            if od:
+                try:
+                    volume_filled = float(od.get("executed_volume") or "0")
+                except Exception:
+                    volume_filled = 0.0
+
+                trades = od.get("trades") or []
+                if trades and volume_filled > 0:
+                    total_krw = 0.0
+                    total_vol = 0.0
+                    for tr in trades:
+                        p = float(tr.get("price", "0"))
+                        v = float(tr.get("volume", "0"))
+                        total_krw += p * v
+                        total_vol += v
+                    if total_vol > 0:
+                        avg_price_add = total_krw / total_vol
+                else:
+                    if volume_filled > 0:
+                        avg_price_add = krw_to_use / volume_filled
+
+            if volume_filled <= 0:
+                msg = f"[AUTO_ADD] {m} 추매 체결 0 → 무시"
+                print(msg)
+                tg_send(f"⚠️ {msg}")
+                return False, None
+
+        except requests.HTTPError as e:
+            # ★ HTTP 400 상세 사유 로깅
+            status = getattr(e.response, "status_code", None)
+            body = ""
+            try:
+                body = e.response.text
+            except Exception:
+                pass
+            reason = body[:300] if body else str(e)
+            print(f"[AUTO_ADD HTTP {status}]", reason)
+            tg_send(f"⚠️ <b>추매 실패 (HTTP {status})</b> {m}\n{reason}")
+            return False, None
+        except Exception as e:
+            print("[AUTO_ADD ERR]", e)
+            tg_send(f"⚠️ <b>추매 실패</b> {m}\n사유: {e}")
+            return False, None
 
     # 평균단가 갱신
     with _POSITION_LOCK:
