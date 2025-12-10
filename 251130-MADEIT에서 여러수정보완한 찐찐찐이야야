@@ -1086,13 +1086,14 @@ def close_auto_position(m, reason=""):
             tg_send(
                 f"💥 <b>자동청산</b> {m}\n"
                 f"• 사유: {reason}\n"
-                f"• 요청 수량: {vol:.6f}\n"
-                f"• 체결 수량: {executed_vol:.6f}\n"
                 f"• 매수평단: {fmt_price(entry_price)}원\n"
                 f"• 실매도가(평균): {fmt_price(exit_price_used)}원\n"
-                f"• 매수금액(체결분): {est_entry_value:,.0f}원\n"
-                f"• 청산금액(체결분): {est_exit_value:,.0f}원\n"
                 f"• 수익률(수수료후): {ret_pct_after_fee:+.2f}%\n"
+                f"\n"
+                f"• 요청 수량: {vol:.6f}\n"
+                f"• 체결 수량: {executed_vol:.6f}\n"
+                f"• 매수금액: {est_entry_value:,.0f}원\n"
+                f"• 청산금액: {est_exit_value:,.0f}원\n"
                 f"{link_for(m)}"
             )
         else:
@@ -1143,7 +1144,16 @@ def close_auto_position(m, reason=""):
                         OPEN_POSITIONS[m] = pos
                     # ★ 부분청산 성공 시 쿨다운 초기화 (이전 실패 기록 제거)
                     LAST_EXIT_ATTEMPT.pop(m, None)
-                tg_send_mid(f"ℹ️ {m} 부분 청산: 체결 {executed_vol:.6f}, 잔여 {remaining:.6f} (포지션 유지)")
+                partial_krw = exit_price_used * executed_vol
+                tg_send(
+                    f"ℹ️ <b>부분 청산</b> {m}\n"
+                    f"• 사유: {reason}\n"
+                    f"• 체결가: {fmt_price(exit_price_used)}원\n"
+                    f"• 잔여 수량: {remaining:.6f}\n"
+                    f"\n"
+                    f"• 체결 수량: {executed_vol:.6f}\n"
+                    f"• 체결 금액: {partial_krw:,.0f}원\n"
+                )
         else:
             # ✅ 실패/미체결: 시도만 기록 + closing 해제
             with _POSITION_LOCK:
@@ -1255,9 +1265,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         tg_send(
             f"🎯 <b>부분 청산</b> {m}\n"
             f"• 사유: {reason or '부분청산'}\n"
+            f"• 체결가: {fmt_price(avg_sell_price)}원\n"
+            f"• 잔여 수량: {remaining_volume:.6f}\n"
+            f"\n"
             f"• 체결 수량: {executed:.6f}\n"
             f"• 체결 금액: {partial_sell_krw:,.0f}원\n"
-            f"• 잔여 수량: {remaining_volume:.6f}\n"
         )
 
         return True, msg, executed
