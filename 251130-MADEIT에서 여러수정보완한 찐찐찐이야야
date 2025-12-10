@@ -188,7 +188,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "240")) # 프로브 관찰 시간 (120초 → 240초, 일찍 청산 방지)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "420")) # 프로브 관찰 시간 (240초 → 420초, 7분 충분한 관찰)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "5"))                    # 추매 최대 회수 (3회 → 5회, 적극적 추매)
 
@@ -653,20 +653,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         bb_exceed = False
         vol_declining = False
 
-    # ★ BB 상단 초과 or 거래량 둔화 → 컨펌 차단, 프로브는 강등/축소
+    # ★ BB 상단 초과 or 거래량 둔화 → 완전 차단 (꼭지 추격 방지)
     if bb_exceed or vol_declining:
         reason = "BB상단초과" if bb_exceed else "거래량둔화"
-        if entry_mode == "confirm":
-            # 컨펌은 차단하되 프로브로 강등해 소액 탐색 허용
-            entry_mode = "probe"
-            entry_fraction = 0.10
-            mode_emoji = "🧭"
-            override_krw = min(PROBE_KRW, 7000)
-            print(f"[EXPANSION_END] {m} {reason} → confirm→probe 강등 (소액 탐색)")
-        else:
-            # 이미 probe면 진입은 허용하되 금액 축소
-            override_krw = min(PROBE_KRW, 7000)
-            print(f"[EXPANSION_END] {m} {reason} → probe 금액 축소 진입")
+        print(f"[EXPANSION_END] {m} {reason} → 진입 완전 차단 (꼭지 추격 방지)")
+        tg_send_mid(f"⛔ {m} {reason} → 진입 차단")
+        return
 
     # VWAP/EMA5 과열 → confirm→probe 강등
     if entry_mode == "confirm" and (vgap >= 0.018 or egap >= 0.022):
@@ -3289,6 +3281,72 @@ def final_check_leader(m, pre, tight_mode=False):
         ticks = pre.get("ticks") or []
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
+    # ★★★ 꼭지 추격 금지 하드 게이트 (probe/confirm 공통)
+    ticks = pre.get("ticks") or []
+    if ticks:
+        c1_now = get_minutes_candles(1, m, 20)
+        if c1_now and len(c1_now) >= 14:
+            cur = c1_now[-1]
+            cur_price = cur["trade_price"]
+            open_price = cur["opening_price"]
+            high_price = cur["high_price"]
+
+            # ATR 계산
+            atr = atr14_from_candles(c1_now, 14)
+            if not atr or atr <= 0:
+                atr = cur_price * 0.006  # fallback
+
+            # 장대양봉 체크
+            body = abs(cur_price - open_price)
+            is_long_body = (body >= 0.80 * atr)
+
+            # 상단 꼬리 체크
+            upper_wick = high_price - max(cur_price, open_price)
+            is_upper_wick = (upper_wick >= 0.40 * max(body, 1e-8))
+
+            # VWAP 과열 체크
+            vwap20 = vwap_from_candles_1m(c1_now, 20)
+            if vwap20 and vwap20 > 0:
+                vgap = (cur_price / vwap20 - 1.0)
+            else:
+                vgap = 0.0
+            is_vwap_hot = (vgap >= 0.018)
+
+            # 감속 체크 (t5 vs t15)
+            t5 = micro_tape_stats_from_ticks(ticks, 5)
+            t15 = micro_tape_stats_from_ticks(ticks, 15)
+            speed_decel = (t5["krw_per_sec"] < 0.80 * max(t15["krw_per_sec"], 1))
+            buy_decel = (t5["buy_ratio"] < t15["buy_ratio"] - 0.06)
+            is_decel = (speed_decel or buy_decel)
+
+            # 꼭지 신호 종합
+            if (is_vwap_hot or is_long_body or is_upper_wick or is_decel):
+                cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
+                return None
+
+    # === ★★ CONFIRM 음봉/상단꼬리 추가 필터 (confirm 전용 안전장치) ===
+    if pre.get("entry_mode") == "confirm":
+        c1_check = get_minutes_candles(1, m, 3)
+        if c1_check and len(c1_check) >= 1:
+            latest = c1_check[-1]
+            cp = latest["trade_price"]
+            op = latest["opening_price"]
+            hp = latest["high_price"]
+
+            # 음봉 체크 (종가 < 시가)
+            is_red = (cp < op)
+
+            # 상단 꼬리 체크 (ATR 대비 25% 이상)
+            b = abs(cp - op)
+            uw = hp - max(cp, op)
+            atr_ref = atr14_from_candles(c1_check, min(14, len(c1_check))) or (cp * 0.006)
+            has_wick = (uw >= 0.25 * atr_ref)
+
+            if is_red or has_wick:
+                reason = "음봉" if is_red else "상단꼬리"
+                cut("CONFIRM_FILTER", f"{m} confirm {reason} 금지 (close={cp:.1f}, open={op:.1f}, wick={uw:.1f})")
+                return None
+
     # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
@@ -4033,14 +4091,14 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
-            # === PROBE 미세익절: +0.10% 찍고 밀리면 즉시 본절-소익 확정 (초완화) ===
+            # === PROBE 미세익절: +0.25% 찍고 밀리면 즉시 본절-소익 확정 (완화) ===
             with _POSITION_LOCK:
                 pos_probe = (OPEN_POSITIONS.get(m) or {})
             if pos_probe.get("entry_mode") == "probe":
                 run_from_entry_probe = (best / entry_price - 1.0)
                 drop_from_best = (curp / best - 1.0)
-                # 프로브가 +0.10% 이상 찍고 -0.08% 되밀리면 즉시 청산 (0.15→0.10, 0.1→0.08, 초완화)
-                if run_from_entry_probe >= 0.0010 and drop_from_best <= -0.0008:
+                # 프로브가 +0.25% 이상 찍고 -0.15% 되밀리면 즉시 청산 (0.10→0.25, 0.08→0.15 완화)
+                if run_from_entry_probe >= 0.0025 and drop_from_best <= -0.0015:
                     exit_reason = "PROBE_MICRO_PROFIT"
                     verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
                     break
