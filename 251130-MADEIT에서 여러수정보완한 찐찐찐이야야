@@ -476,13 +476,21 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     """
     손절가 기준으로 포지션 크기 계산
     - total_equity * risk_pct 만큼만 최대 손실 허용
+    - 손절폭이 0.05% 미만이면 0 반환 (과대매수 방지)
     """
-    risk_krw = total_equity * risk_pct
+    # ★ 안전가드: 비정상 가격/손절 시 진입 금지
+    if entry_price <= 0 or stop_price <= 0:
+        return 0.0
+
     per_unit_loss = entry_price - stop_price
-    if per_unit_loss <= 0:  # 비정상 stop 방어
-        per_unit_loss = entry_price * 0.01
+
+    # ★ 손절폭이 0.05% 미만이면 진입 스킵 (과대매수 방지)
+    if per_unit_loss <= entry_price * 0.0005:
+        return 0.0
+
+    risk_krw = total_equity * max(risk_pct, 0)
     qty = risk_krw / per_unit_loss
-    return max(qty, 0)
+    return max(qty, 0.0)
 
 
 def place_market_buy(market, krw_amount):
@@ -644,12 +652,20 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         bb_exceed = False
         vol_declining = False
 
-    # ★ BB 상단 초과 or 거래량 둔화 → 진입 금지
+    # ★ BB 상단 초과 or 거래량 둔화 → 컨펌 차단, 프로브는 강등/축소
     if bb_exceed or vol_declining:
         reason = "BB상단초과" if bb_exceed else "거래량둔화"
-        print(f"[EXPANSION_END] {m} 확장 끝 추격 차단 ({reason}) → 진입 스킵")
-        tg_send_mid(f"⚠️ {m} 진입 스킵: {reason} (고점 추격 방지)")
-        return
+        if entry_mode == "confirm":
+            # 컨펌은 차단하되 프로브로 강등해 소액 탐색 허용
+            entry_mode = "probe"
+            entry_fraction = 0.10
+            mode_emoji = "🧭"
+            override_krw = min(PROBE_KRW, 7000)
+            print(f"[EXPANSION_END] {m} {reason} → confirm→probe 강등 (소액 탐색)")
+        else:
+            # 이미 probe면 진입은 허용하되 금액 축소
+            override_krw = min(PROBE_KRW, 7000)
+            print(f"[EXPANSION_END] {m} {reason} → probe 금액 축소 진입")
 
     # VWAP/EMA5 과열 → confirm→probe 강등
     if entry_mode == "confirm" and (vgap >= 0.018 or egap >= 0.022):
@@ -690,6 +706,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         krw_bal,
         risk_to_use,
     )
+
+    # ★ 안전가드: 포지션 사이즈 0이면 진입 스킵 (비정상 손절가 등)
+    if base_qty <= 0 and entry_mode != "probe":
+        print(f"[AUTO] {m} 포지션 사이즈 0 (손절폭 부족) → 진입 스킵")
+        return
 
     if entry_mode == "probe":
         # ✅ 염탐은 항상 고정 최소금액으로만
@@ -2263,48 +2284,47 @@ def macd_histogram(candles, fast=12, slow=26, signal=9):
     return {"macd": macd, "signal": signal_line, "histogram": histogram}
 
 
-def stochastic_rsi(candles, rsi_period=14, stoch_period=14):
-    """스토캐스틱 RSI 계산
+def stochastic_rsi(candles, rsi_period=14, stoch_period=14, smooth_k=3, smooth_d=3):
+    """스토캐스틱 RSI 계산 (RSI 시계열 기반)
     Returns: {"k": float, "d": float} 또는 None (0~100 범위)
     """
-    if len(candles) < rsi_period + stoch_period:
-        return None
-
     closes = [c["trade_price"] for c in candles]
-
-    # RSI 계산
-    gains = []
-    losses = []
-    for i in range(1, len(closes)):
-        change = closes[i] - closes[i-1]
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
-
-    if len(gains) < rsi_period:
+    if len(closes) < rsi_period + stoch_period + smooth_d:
         return None
 
-    avg_gain = sum(gains[-rsi_period:]) / rsi_period
-    avg_loss = sum(losses[-rsi_period:]) / rsi_period
+    # ★ RSI 시계열 생성 (단일 값이 아닌 시리즈)
+    gains, losses = [0], [0]
+    for i in range(1, len(closes)):
+        ch = closes[i] - closes[i-1]
+        gains.append(max(ch, 0))
+        losses.append(max(-ch, 0))
 
-    if avg_loss == 0:
-        rsi = 100
-    else:
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
+    rsi_vals = []
+    avg_g = sum(gains[1:rsi_period+1]) / rsi_period
+    avg_l = sum(losses[1:rsi_period+1]) / rsi_period
+    rsi_vals.append(100 if avg_l == 0 else 100 - 100/(1 + avg_g/max(avg_l, 1e-12)))
 
-    # 스토캐스틱 적용 (RSI를 가격처럼 사용)
-    # 간단화: 최근 RSI 값들의 최고/최저 기반
-    rsi_values = [rsi]  # 실제로는 과거 RSI도 계산해야 하지만 간단화
+    for i in range(rsi_period+1, len(closes)):
+        avg_g = (avg_g*(rsi_period-1) + gains[i]) / rsi_period
+        avg_l = (avg_l*(rsi_period-1) + losses[i]) / rsi_period
+        rsi_vals.append(100 if avg_l == 0 else 100 - 100/(1 + avg_g/max(avg_l, 1e-12)))
 
-    rsi_high = max(rsi_values)
-    rsi_low = min(rsi_values)
+    # ★ Stochastic on RSI 시계열
+    stoch_src = rsi_vals[-(stoch_period + smooth_k + smooth_d):]
+    if len(stoch_src) < stoch_period + smooth_k + smooth_d:
+        return None
 
-    if rsi_high == rsi_low:
-        k = 50
-    else:
-        k = 100 * (rsi - rsi_low) / (rsi_high - rsi_low)
+    k_raw = []
+    for i in range(stoch_period, len(stoch_src)+1):
+        win = stoch_src[i-stoch_period:i]
+        hi, lo = max(win), min(win)
+        k_raw.append(50 if hi == lo else 100*(win[-1]-lo)/max(hi-lo, 1e-12))
 
-    d = k  # 간단화: %D는 %K의 이동평균이지만 여기서는 동일값 사용
+    def sma(a, n):
+        return [sum(a[i-n:i])/n for i in range(n, len(a)+1)]
+
+    k = sma(k_raw, smooth_k)[-1]
+    d = sma(sma(k_raw, smooth_k), smooth_d)[-1]
 
     return {"k": k, "d": d}
 
@@ -3932,13 +3952,6 @@ def monitor_position(m,
 
                 gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
-                # 프로브→컨펌 전환 완화 (그라인드형 포착)
-                strong_flow = (
-                    t15_now["buy_ratio"] >= 0.54  # 0.56 → 0.54 (그라인드 대응)
-                    and t15_now["krw_per_sec"] >= 14000  # 16000 → 14000
-                    and uptick_streak_from_ticks(ticks, need=2)
-                )
-
                 c1m_ema = get_minutes_candles(1, m, 20)
                 ema3_cross = ema_last([c["trade_price"] for c in c1m_ema], 3)
                 ema8_cross = ema_last([c["trade_price"] for c in c1m_ema], 8)
@@ -3953,9 +3966,15 @@ def monitor_position(m,
                     if curp > recent_high:  # 최근 6개 봉 전고 돌파
                         price_ok = True
 
-                # ★ 흐름 + 가격 게이트 조합 (횡보 추매 방지)
-                condition_original = strong_flow and price_ok
-                condition_rebound  = (ema_crossover and strong_flow and price_ok)
+                # ★ 테이프 조건 (휩쏘 방지 - 필수)
+                flow_ok = (
+                    t15_now["buy_ratio"] >= 0.56  # 매수비 56% 이상
+                    and t15_now["krw_per_sec"] >= 14000  # 거래속도 14,000원/초 이상
+                )
+
+                # ★ 흐름 + 가격 게이트 조합 (가격만으로는 전환 불가)
+                condition_original = price_ok and flow_ok
+                condition_rebound = (ema_crossover and flow_ok)
 
                 if condition_original or condition_rebound:
                     ok_add, new_entry = add_auto_position(m, curp)
@@ -4852,6 +4871,11 @@ def main():
     # 텔레그램 배관 확인
     tg_send("🔧 PING: 봇 알림 경로 점검 완료")
 
+    # ★ 프로브 2.0 모니터링 스레드 시작
+    if PROBE_V2_ENABLED:
+        start_probe_v2_monitor()
+        print("[PROBE_V2] 모니터링 스레드 시작됨")
+
     while True:
         try:
             # BTC_guard 제거 — 항상 기본 모드로 실행
@@ -4867,7 +4891,7 @@ def main():
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
-                aligned_sleep(SCAN_INTERVAL)
+                aligned_sleep(get_scan_interval())
                 continue
 
             start = _cursor
