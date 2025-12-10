@@ -71,7 +71,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (컨펌만 적용)
-EARLY_FLOW_MIN_KRWPSEC = 20_000  # 초기 거래속도 하한 (프로브 빈도 조절, 16k → 20k 상향)
+EARLY_FLOW_MIN_KRWPSEC = 28_000  # 초기 거래속도 하한 (횡보 과다 방지: 20k → 28k 상향)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -188,9 +188,9 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "420")) # 프로브 관찰 시간 (240초 → 420초, 7분 충분한 관찰)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "240")) # 프로브 관찰 시간 (횡보 정리: 420→240초, 4분)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
-MAX_ADDS = int(os.getenv("MAX_ADDS", "5"))                    # 추매 최대 회수 (3회 → 5회, 적극적 추매)
+MAX_ADDS = int(os.getenv("MAX_ADDS", "2"))                    # 추매 최대 회수 (품질 우선: 5→2회)
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 프로브 확인 후 추매는 정상 금액으로 (확신 있는 진입)
@@ -205,7 +205,7 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # �
 
 # === 초입 빈도 증가 설정 ===
 ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
-PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "1") == "1"  # 가벼운 조건 probe 신호 추가
+PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "0") == "1"  # 가벼운 조건 probe 신호 (횡보 방지: OFF)
 PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.55"))  # probe-lite 최소 매수비 (보수적 조정: 0.50 → 0.55)
 PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "12000"))  # probe-lite 최소 거래속도 (보수적 조정: 8000 → 12000)
 PROBE_LITE_MAX_VWAP_GAP = float(os.getenv("PROBE_LITE_MAX_VWAP_GAP", "0.012"))  # VWAP 괴리 상한 (보수적 조정: 0.017 → 0.012)
@@ -258,7 +258,7 @@ PROBE_V2_STATES = {}
 _PROBE_V2_LOCK = threading.Lock()
 
 # 프로브 2.0 파라미터
-PROBE_V2_MAX_CONCURRENT = int(os.getenv("PROBE_V2_MAX_CONCURRENT", "5"))  # 최대 동시 프로브 수
+PROBE_V2_MAX_CONCURRENT = int(os.getenv("PROBE_V2_MAX_CONCURRENT", "3"))  # 최대 동시 프로브 수 (품질 우선: 5→3)
 PROBE_V2_TIMEOUT_BARS = int(os.getenv("PROBE_V2_TIMEOUT_BARS", "12"))  # 타임아웃 (12분봉)
 PROBE_V2_UPGRADE_SCORE = int(os.getenv("PROBE_V2_UPGRADE_SCORE", "5"))  # 1차 추매 승격 점수
 PROBE_V2_SIZE_PROBE = float(os.getenv("PROBE_V2_SIZE_PROBE", "0.20"))  # 프로브 크기 (20%)
@@ -868,15 +868,13 @@ def add_auto_position(m, cur_price, override_krw=None):
             want_krw = int(override_krw)
             qty_theoretical = None  # override 모드에서는 이론수량 계산 안 함
         else:
-            # ★★★ 추매 차등 비율: 1차(확신) 크게 → 점점 작게 (고점 물림 방지)
+            # ★★★ 추매 차등 비율: 품질 우선 (1차 0.8%, 2차 0.4%)
             if adds_count == 0:  # 1차 추매 (probe→confirm 전환)
-                add_risk_pct = 0.01  # 1.0% (가장 크게, 확신 진입)
+                add_risk_pct = 0.008  # 0.8% (1.0→0.8 품질 우선)
             elif adds_count == 1:  # 2차 추매
-                add_risk_pct = 0.006  # 0.6%
-            elif adds_count == 2:  # 3차 추매
-                add_risk_pct = 0.004  # 0.4%
-            else:  # 4차+ 추매
-                add_risk_pct = 0.003  # 0.3%
+                add_risk_pct = 0.004  # 0.4% (0.6→0.4 품질 우선)
+            else:  # MAX_ADDS=2 설정으로 3차 이상은 차단됨
+                add_risk_pct = 0.003  # 0.3% (사용 안 함)
 
             qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
             want_krw = int(qty_theoretical * cur_price) if qty_theoretical else 0
@@ -972,8 +970,8 @@ def add_auto_position(m, cur_price, override_krw=None):
     add_krw_amount = avg_price_add * volume_filled
     current_adds = pos.get("adds", 0)  # 방금 업데이트된 값 (1, 2, 3, ...)
 
-    # 비율 매핑 (표시용)
-    risk_pct_map = {1: "1.0%", 2: "0.6%", 3: "0.4%"}
+    # 비율 매핑 (표시용, 품질 우선)
+    risk_pct_map = {1: "0.8%", 2: "0.4%"}
     risk_label = risk_pct_map.get(current_adds, "0.3%")
 
     # ★ 찌꺼기 KRW 체크 (100원 미만은 정상 범위)
@@ -1610,7 +1608,7 @@ KST = timezone(timedelta(hours=9))
 # === 모니터 실행 풀 & 동시성 제한 ===
 # (주의) ThreadPoolExecutor는 이미 import 되어 있음: from concurrent.futures import ThreadPoolExecutor, as_completed
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))          # 동시에 몇 종목 모니터링 허용
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "7"))  # 프로브 동시 보유 상한 (3→7, 양질 신호 관리)
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "4"))  # 프로브 동시 보유 상한 (품질 우선: 7→4)
 
 MONITOR_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)   # 모니터 스레드 풀
 ACTIVE_MONITORS = {}    # { market: Future }
@@ -2917,9 +2915,9 @@ def probe_v2_increment_bars(market):
 # === PATCH: grind detector ===
 def grind_break_ok(c1, ticks):
     """계단식(그라인드) 상승 예외:
-       - 최근 8봉 중 7봉 이상이 EMA5 위
+       - 최근 8봉 중 6봉 이상이 EMA5 위 (7→6 완화)
        - 매수비(15s) >= 0.56
-       - 체결간 간격 변동계수(CV, 30s) <= 0.95 (너무 고른 TWAP/봇 제외)
+       - 체결간 간격 변동계수(CV, 30s) <= 1.05 (0.95→1.05 완화)
     """
     if len(c1) < 10 or not ticks:
         return False
@@ -2930,8 +2928,8 @@ def grind_break_ok(c1, ticks):
     ema_slope = (e5[-1] - e5[-4]) if len(e5) >= 4 else 0
     t15 = micro_tape_stats_from_ticks(ticks, 15)
     ia = inter_arrival_stats(ticks, 30)
-    return (above >= 7 and ema_slope > 0 and t15.get("buy_ratio", 0) >= 0.56
-            and ia.get("cv", 9.9) <= 0.95)
+    return (above >= 6 and ema_slope > 0 and t15.get("buy_ratio", 0) >= 0.56
+            and ia.get("cv", 9.9) <= 1.05)
 
 
 # =========================
@@ -3121,8 +3119,41 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (now_ts - last_block) < cooldown_after_exit:
             return None
 
-    # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
+    # === ★ 계단식(그라인드) 상승: 최우선 분기 (confirm 직행) ===
     ticks_now = get_recent_ticks(m, 80)
+    if grind_break_ok(c1, ticks_now):
+        ob_l = obc.get(m)
+        if ob_l and ob_l.get("depth_krw", 0) >= 12_000_000:
+            cur_price = ticks_now[0]["trade_price"] if ticks_now else c1[-1]["trade_price"]
+            price_change = 0.0
+            volume_surge = 1.0
+            if c1 and len(c1) >= 2:
+                price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1)
+            if c1:
+                current_volume = c1[-1].get("candle_acc_trade_volume", 0)
+                avg_past = avg_past_volume(c1, n=5, field="candle_acc_trade_volume")
+                if avg_past > 0 and current_volume > 0:
+                    volume_surge = current_volume / max(avg_past, current_volume / 8, 1)
+
+            t15_grind = micro_tape_stats_from_ticks(ticks_now, 15) if ticks_now else {"n":0, "buy_ratio":0, "krw":0, "krw_per_sec":0}
+
+            cut("GRIND_BREAK", f"{m} 계단식 상승 포착 → confirm 직행 (매수비 {t15_grind.get('buy_ratio',0):.2f})")
+
+            return {
+                "price": cur_price,
+                "change": price_change,
+                "current_volume": current_volume if c1 else 0,
+                "volume_surge": volume_surge,
+                "ob": ob_l,
+                "ticks": ticks_now or [],
+                "tape": t15_grind,
+                "early_ok": False,
+                "ign_ok": False,
+                "botacc_ok": False,
+                "entry_mode": "confirm"  # ★ 계단식은 곧장 confirm
+            }
+
+    # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
     if ticks_now:
         t6 = micro_tape_stats_from_ticks(ticks_now, 6)
         if (
