@@ -897,10 +897,14 @@ def add_auto_position(m, cur_price, override_krw=None):
         pos["entry_mode"] = "confirm"
         pos["added"] = True                      # (하위호환용, 다른 곳에서 참조할 수도 있으니 유지)
 
+    # 추매 금액 계산
+    add_krw_amount = avg_price_add * volume_filled
+
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
         f"• 추가 체결가: {fmt_price(avg_price_add)}원\n"
         f"• 추가 수량: {volume_filled:.6f}\n"
+        f"• 추가 금액: {add_krw_amount:,.0f}원\n"
         f"• 총 수량: {new_vol:.6f}\n"
         f"• 새로운 평단: {fmt_price(new_entry_price)}원\n"
         f"{link_for(m)}"
@@ -1146,11 +1150,20 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
 
         executed = 0.0
+        avg_sell_price = 0.0
         if od:
             try:
                 executed = float(od.get("executed_volume") or "0")
             except Exception:
                 executed = 0.0
+
+            # 평균 체결가 계산
+            trades = od.get("trades") or []
+            if trades and executed > 0:
+                total_krw = sum(float(tr.get("price", 0)) * float(tr.get("volume", 0)) for tr in trades)
+                avg_sell_price = total_krw / executed if executed > 0 else 0.0
+            elif executed > 0 and current_price > 0:
+                avg_sell_price = current_price  # fallback
 
         if executed <= 0:
             msg = f"[PARTIAL_SELL_ERR] {m}: executed_volume=0 (요청 {sell_volume:.6f})"
@@ -1181,10 +1194,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
+        # 부분청산 금액 계산
+        partial_sell_krw = avg_sell_price * executed if avg_sell_price > 0 else 0.0
+
         tg_send(
             f"🎯 <b>부분 청산</b> {m}\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 체결 수량: {executed:.6f}\n"
+            f"• 체결 금액: {partial_sell_krw:,.0f}원\n"
             f"• 잔여 수량: {remaining_volume:.6f}\n"
         )
 
