@@ -722,13 +722,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         probe_krw = override_krw if override_krw is not None else PROBE_KRW
         krw_to_use = min(krw_bal, max(5000, probe_krw))
     else:
-        krw_to_use = min(krw_bal, int(base_qty * entry_price))  # ★ 잔고 초과 방지
+        # ★ 찌꺼기 방지: 0.2% headroom 추가 (수수료 0.05% + 슬리피지)
+        raw_krw = base_qty * entry_price
+        usable_krw = krw_bal * 0.998  # 99.8% 사용
+        krw_to_use = min(usable_krw, raw_krw)
+
+    krw_to_use = int(krw_to_use)  # 정수 변환
 
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
         return
-
-    krw_to_use = int(krw_to_use)
 
     # === 매수 ===
     try:
@@ -781,6 +784,18 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
             "adds": 0,                 # ✅ 추매 횟수 카운터
         }
 
+    # ★ 찌꺼기 KRW 체크 (100원 미만은 정상 범위)
+    try:
+        accounts_after = get_account_info()
+        if accounts_after:
+            for a in accounts_after:
+                if a.get("currency") == "KRW":
+                    remaining_krw = float(a.get("balance", "0"))
+                    if 0 < remaining_krw < 100:
+                        print(f"[AUTO] {m} 매수 후 KRW 찌꺼기: {remaining_krw:.0f}원 (정상 범위, 무시)")
+                    break
+    except Exception:
+        pass
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
 
@@ -837,8 +852,8 @@ def add_auto_position(m, cur_price, override_krw=None):
                 krw_bal = float(a.get("balance", "0"))
                 break
 
-        # ★ 헤드룸 적용: 수수료+여유 0.7% 차감
-        SAFE_HEADROOM = 0.007
+        # ★ 헤드룸 적용: 수수료+여유 0.2% 차감 (0.7→0.2 찌꺼기 최소화)
+        SAFE_HEADROOM = 0.002
         usable_krw = max(0, int(krw_bal * (1 - SAFE_HEADROOM)))
 
         if usable_krw < 6000:
@@ -960,6 +975,19 @@ def add_auto_position(m, cur_price, override_krw=None):
     # 비율 매핑 (표시용)
     risk_pct_map = {1: "1.0%", 2: "0.6%", 3: "0.4%"}
     risk_label = risk_pct_map.get(current_adds, "0.3%")
+
+    # ★ 찌꺼기 KRW 체크 (100원 미만은 정상 범위)
+    try:
+        accounts_after = get_account_info()
+        if accounts_after:
+            for a in accounts_after:
+                if a.get("currency") == "KRW":
+                    remaining_krw = float(a.get("balance", "0"))
+                    if 0 < remaining_krw < 100:
+                        print(f"[AUTO_ADD] {m} 추매 후 KRW 찌꺼기: {remaining_krw:.0f}원 (정상 범위, 무시)")
+                    break
+    except Exception:
+        pass
 
     tg_send(
         f"📈 <b>추매 체결 ({current_adds}차 - {risk_label})</b> {m}\n"
