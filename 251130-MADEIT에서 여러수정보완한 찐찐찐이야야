@@ -3185,6 +3185,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 "early_ok": False,
                 "ign_ok": False,
                 "botacc_ok": False,
+                "grind_break": True,  # ★ anti-peak 바이패스용
                 "entry_mode": "confirm"  # ★ 계단식은 곧장 confirm
             }
 
@@ -4720,7 +4721,8 @@ def monitor_position(m,
         # ===========================================
         # 3) probe 손절 후 빠른 재진입 허용 로직
         # ===========================================
-        if AUTO_TRADE and verdict and "손절" in verdict:
+        # ★ 손절 판정: 한글 "손절" 또는 영문 "HARD_STOP" 모두 포함
+        if AUTO_TRADE and verdict and ("손절" in verdict or verdict == "HARD_STOP"):
             with _POSITION_LOCK:
                 pos = OPEN_POSITIONS.get(m)
                 if pos and pos.get("entry_mode") == "probe":
