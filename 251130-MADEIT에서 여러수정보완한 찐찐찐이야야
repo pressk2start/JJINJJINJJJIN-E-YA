@@ -265,10 +265,10 @@ PROBE_V2_SIZE_PROBE = float(os.getenv("PROBE_V2_SIZE_PROBE", "0.20"))  # 프로�
 PROBE_V2_SIZE_ADD1 = float(os.getenv("PROBE_V2_SIZE_ADD1", "0.30"))  # 1차 추매 크기 (30%)
 PROBE_V2_SIZE_ADD2 = float(os.getenv("PROBE_V2_SIZE_ADD2", "0.25"))  # 2차 추매 크기 (25%)
 
-# 공통 선필터 파라미터 (★ 부드러운 우상향 포착 완화)
-PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.2"))  # 최소 RVOL (1.5→1.2 완화)
+# 공통 선필터 파라미터 (★ 부드러운 우상향 포착 대폭 완화)
+PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.0"))  # 최소 RVOL (1.2→1.0, 거래량 동일해도 통과)
 PROBE_V2_PREFILTER_SPREAD = float(os.getenv("PROBE_V2_PREFILTER_SPREAD", "0.002"))  # 최대 스프레드 (0.2%)
-PROBE_V2_PREFILTER_EMA_UP = int(os.getenv("PROBE_V2_PREFILTER_EMA_UP", "2"))  # 최소 EMA 상승 개수 (5,10,20 중)
+PROBE_V2_PREFILTER_EMA_UP = int(os.getenv("PROBE_V2_PREFILTER_EMA_UP", "1"))  # 최소 EMA 상승 개수 (2→1, 하나만 상승해도 통과)
 
 # =========================
 # 📈 최근 승률 기반 리스크 튜닝
