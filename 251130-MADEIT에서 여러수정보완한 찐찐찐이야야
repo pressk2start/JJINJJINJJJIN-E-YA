@@ -3552,7 +3552,7 @@ def final_check_leader(m, pre, tight_mode=False):
             else:
                 # 일반 신호: 진짜 과열만 컷 (기준 완화)
                 entry_mode = pre.get("entry_mode", "probe")
-                is_vwap_hot = (vgap >= 0.026 if entry_mode == "probe" else 0.022)  # 0.018→0.026/0.022
+                is_vwap_hot = vgap >= (0.026 if entry_mode == "probe" else 0.022)  # 비교식 수정 (버그픽스)
                 is_long_body = (body >= 1.10 * atr)  # 0.80→1.10 (더 확실한 장대양봉만)
                 is_upper_wick = (upper_wick >= 0.60 * max(body, 1e-8))  # 0.40→0.60 (꼬리 큰 것만)
 
@@ -4742,13 +4742,24 @@ def monitor_position(m,
                               ctx_thr=CTX_EXIT_THRESHOLD)
 
         # ===========================================
-        # 끝알람 / 재모니터링 알림 비활성화
-        #  (실제 로직은 유지하지만 텔레그램 메시지 과다 방지)
+        # 끝알람 / 재모니터링 알림 활성화
+        #  (실전 감시력 향상)
         # ===========================================
         if not reentry:
-            pass  # 끝알람 비활성화
+            tg_send(
+                f"🔚 <b>끝알람</b> {m}\n"
+                f"• 판정: {verdict}\n"
+                f"• 권고: {action}\n"
+                f"• 근거: {rationale}\n"
+                f"• 수익률: {ret_pct:+.2f}%\n"
+                f"• 최대상승/최대하락: {maxrun:+.2f}% / {maxdd:+.2f}%\n"
+                f"{link_for(m)}"
+            )
         else:
-            pass  # 재모니터링 요약 비활성화
+            send_remonitor_alert(
+                m,
+                f"{verdict} | {action} | {rationale} | {ret_pct:+.2f}%"
+            )
 
         # ===========================================
         # 재모니터링 루프 시작
