@@ -71,7 +71,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
 POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (컨펌만 적용)
-EARLY_FLOW_MIN_KRWPSEC = 28_000  # 초기 거래속도 하한 (횡보 과다 방지: 20k → 28k 상향)
+EARLY_FLOW_MIN_KRWPSEC = 18_000  # 초기 거래속도 하한 (무알람 해결: 28k → 18k 완화)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -267,7 +267,7 @@ PROBE_V2_SIZE_ADD2 = float(os.getenv("PROBE_V2_SIZE_ADD2", "0.25"))  # 2차 추�
 
 # 공통 선필터 파라미터 (★ 부드러운 우상향 포착 대폭 완화)
 PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.0"))  # 최소 RVOL (1.2→1.0, 거래량 동일해도 통과)
-PROBE_V2_PREFILTER_SPREAD = float(os.getenv("PROBE_V2_PREFILTER_SPREAD", "0.002"))  # 최대 스프레드 (0.2%)
+PROBE_V2_PREFILTER_SPREAD = float(os.getenv("PROBE_V2_PREFILTER_SPREAD", "0.006"))  # 최대 스프레드 (0.2%→0.6% 완화)
 PROBE_V2_PREFILTER_EMA_UP = int(os.getenv("PROBE_V2_PREFILTER_EMA_UP", "1"))  # 최소 EMA 상승 개수 (2→1, 하나만 상승해도 통과)
 
 # =========================
@@ -1488,9 +1488,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     return False
 
 # =========================
-# 얼럿 정책
+# 얼럿 정책 (★ 중간 알림 활성화: 5시간 무알람 해결)
 # =========================
-SILENT_MIDDLE_ALERTS = True
+SILENT_MIDDLE_ALERTS = False  # True → False (중간 알림 텔레그램 전송)
 
 
 def tg_send_mid(t):
@@ -1533,7 +1533,7 @@ TICKS_BUY_RATIO = 0.58  # 0.56 → 0.58 (초입 품질 향상)
 # 위험 관리 (스프레드)
 MAX_SPREAD_BASE = 0.70  # 단위: %, 0.70 = 0.70% (일반 신호)
 MAX_SPREAD_FAST = 1.00  # 단위: %, 1.00 = 1.00% (메가 브레이크아웃)
-MIN_DEPTH_KRW = 12_000_000  # 6M → 12M (얕은 호가 컷 강화)
+MIN_DEPTH_KRW = 6_000_000  # 12M → 6M (소형 알트 허용, 무알람 해결)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
