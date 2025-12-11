@@ -635,11 +635,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         entry_fraction = 1.0
         mode_emoji = "🤖"
 
-    # ★ 가격 가드: probe/confirm 분리 (고점 추격 방지 강화)
+    # ★ 가격 가드: probe/confirm 분리 (수직 초동 추격 허용 폭 확대)
     if entry_mode == "probe":
-        max_drift = 0.020 if AGGRESSIVE_MODE else 0.012  # 2.0% / 1.2% (축소)
+        max_drift = 0.030 if AGGRESSIVE_MODE else 0.018  # 3.0% / 1.8% (초동 추격 허용)
     else:
-        max_drift = 0.015 if AGGRESSIVE_MODE else 0.008  # 1.5% / 0.8% (축소)
+        max_drift = 0.020 if AGGRESSIVE_MODE else 0.012  # 2.0% / 1.2% (confirm 추격 허용)
 
     ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
     if not ok_guard:
@@ -3240,12 +3240,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         t10s = micro_tape_stats_from_ticks(ticks_now, 10)
         t30s = micro_tape_stats_from_ticks(ticks_now, 30)
 
-        # 초입 신호 강화: 더 강한 매수비 + 더 많은 틱 + 연속 상승
+        # 초입 신호 완화: 수직 초동 빠른 포착 (5→4틱, 18K→16K)
         sudden_burst = (
             t10s["krw_per_sec"] >= 2.0 * t30s["krw_per_sec"]  # 1.8 → 2.0 (더 강한 가속)
             and t10s["buy_ratio"] >= 0.60  # 0.58 → 0.60 (더 강한 매수세)
-            and t10s["n"] >= 5  # 3 → 5 (더 많은 틱 필요)
-            and t10s["krw_per_sec"] >= 18000  # 절대 거래속도 하한 추가
+            and t10s["n"] >= 4  # 5 → 4 (수직 초동 빠른 포착)
+            and t10s["krw_per_sec"] >= 16000  # 18000 → 16000 (초동 허용 폭 확대)
         )
 
         fresh = uptick_streak_from_ticks(ticks_now, need=2)  # need=1 → need=2 (연속 상승 강화)
@@ -3461,6 +3461,7 @@ def final_check_leader(m, pre, tight_mode=False):
         pre["tape"] = micro_tape_stats_from_ticks(ticks, 15) if ticks else {"n":0,"buy_ratio":0,"krw":0,"krw_per_sec":0}
 
     # ★★★ 꼭지 추격 금지 하드 게이트 (probe/confirm 공통)
+    # ★ 강력 신호 시 바이패스: 수직 초동 포착 허용
     ticks = pre.get("ticks") or []
     if ticks:
         c1_now = get_minutes_candles(1, m, 20)
@@ -3477,11 +3478,9 @@ def final_check_leader(m, pre, tight_mode=False):
 
             # 장대양봉 체크
             body = abs(cur_price - open_price)
-            is_long_body = (body >= 0.80 * atr)
 
             # 상단 꼬리 체크
             upper_wick = high_price - max(cur_price, open_price)
-            is_upper_wick = (upper_wick >= 0.40 * max(body, 1e-8))
 
             # VWAP 과열 체크
             vwap20 = vwap_from_candles_1m(c1_now, 20)
@@ -3489,7 +3488,6 @@ def final_check_leader(m, pre, tight_mode=False):
                 vgap = (cur_price / vwap20 - 1.0)
             else:
                 vgap = 0.0
-            is_vwap_hot = (vgap >= 0.018)
 
             # 감속 체크 (t5 vs t15)
             t5 = micro_tape_stats_from_ticks(ticks, 5)
@@ -3498,10 +3496,24 @@ def final_check_leader(m, pre, tight_mode=False):
             buy_decel = (t5["buy_ratio"] < t15["buy_ratio"] - 0.06)
             is_decel = (speed_decel or buy_decel)
 
-            # 꼭지 신호 종합
-            if (is_vwap_hot or is_long_body or is_upper_wick or is_decel):
-                cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
-                return None
+            # ★ 강력 신호 바이패스: ign_ok/mega_ok/two_green_break/grind_break 시 anti-peak 미적용
+            strong = (pre.get("ign_ok") or pre.get("mega_ok") or
+                     pre.get("two_green_break") or pre.get("grind_break"))
+
+            if strong:
+                # 수직 초동은 추격 허용 (anti-peak 통과)
+                pass
+            else:
+                # 일반 신호: 진짜 과열만 컷 (기준 완화)
+                entry_mode = pre.get("entry_mode", "probe")
+                is_vwap_hot = (vgap >= 0.026 if entry_mode == "probe" else 0.022)  # 0.018→0.026/0.022
+                is_long_body = (body >= 1.10 * atr)  # 0.80→1.10 (더 확실한 장대양봉만)
+                is_upper_wick = (upper_wick >= 0.60 * max(body, 1e-8))  # 0.40→0.60 (꼬리 큰 것만)
+
+                # 꼭지 신호 종합
+                if (is_vwap_hot or is_long_body or is_upper_wick or is_decel):
+                    cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
+                    return None
 
     # === ★★ CONFIRM 음봉/상단꼬리 추가 필터 (confirm 전용 안전장치) ===
     if pre.get("entry_mode") == "confirm":
@@ -3735,12 +3747,12 @@ def postcheck_6s(m, pre):
     peak = base_price
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
-    # ★★★ postcheck 중 최대 허용 급등 (probe는 더 완화)
+    # ★★★ postcheck 중 최대 허용 급등 (수직 초동 생존율 대폭 확대)
     entry_mode = pre.get("entry_mode", "confirm")
     if entry_mode == "probe":
-        MAX_SURGE = 0.050  # probe: 5% 허용 (2.2→5%, 진짜 상승 놓치지 않기)
+        MAX_SURGE = 0.080  # probe: 8% 허용 (5→8%, 수직 초동 포착)
     else:
-        MAX_SURGE = 0.030  # confirm: 3% (1.5→3%, 완화)
+        MAX_SURGE = 0.050  # confirm: 5% (3→5%, 초동 허용)
 
     while True:
         now = time.time()
