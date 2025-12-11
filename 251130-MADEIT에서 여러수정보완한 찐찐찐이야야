@@ -265,8 +265,8 @@ PROBE_V2_SIZE_PROBE = float(os.getenv("PROBE_V2_SIZE_PROBE", "0.20"))  # 프로�
 PROBE_V2_SIZE_ADD1 = float(os.getenv("PROBE_V2_SIZE_ADD1", "0.30"))  # 1차 추매 크기 (30%)
 PROBE_V2_SIZE_ADD2 = float(os.getenv("PROBE_V2_SIZE_ADD2", "0.25"))  # 2차 추매 크기 (25%)
 
-# 공통 선필터 파라미터
-PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.5"))  # 최소 RVOL
+# 공통 선필터 파라미터 (★ 부드러운 우상향 포착 완화)
+PROBE_V2_PREFILTER_RVOL = float(os.getenv("PROBE_V2_PREFILTER_RVOL", "1.2"))  # 최소 RVOL (1.5→1.2 완화)
 PROBE_V2_PREFILTER_SPREAD = float(os.getenv("PROBE_V2_PREFILTER_SPREAD", "0.002"))  # 최대 스프레드 (0.2%)
 PROBE_V2_PREFILTER_EMA_UP = int(os.getenv("PROBE_V2_PREFILTER_EMA_UP", "2"))  # 최소 EMA 상승 개수 (5,10,20 중)
 
@@ -3153,6 +3153,51 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         last_block = max(last_exit_done, last_exit_attempt)
         if (now_ts - last_block) < cooldown_after_exit:
             return None
+
+    # === ★ PROBE_V2: 부드러운 우상향 포착 (트렌드/돌파/모멘텀) ===
+    if PROBE_V2_ENABLED:
+        obx = obc.get(m)
+        if obx and probe_v2_prefilter(c1, obx):
+            trigger_type = None
+            if probe_v2_trigger_trend(c1):
+                trigger_type = "C_TREND"
+            elif probe_v2_trigger_breakout(c1):
+                trigger_type = "A_BREAKOUT"
+            elif probe_v2_trigger_momentum(c1):
+                trigger_type = "B_MOMENTUM"
+
+            if trigger_type:
+                # 프로브 2.0 상태 추가
+                probe_v2_add_state(m, trigger_type)
+
+                # 틱 데이터 준비
+                ticks_v2 = get_recent_ticks(m, 80)
+                tape_v2 = micro_tape_stats_from_ticks(ticks_v2, 15) if ticks_v2 else {"n":0, "buy_ratio":0, "krw":0, "krw_per_sec":0}
+
+                # change 계산
+                price_change = 0.0
+                if len(c1) >= 2:
+                    price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1)
+
+                # volume_surge 계산
+                current_volume = c1[-1].get("candle_acc_trade_volume", 0)
+                avg_past = avg_past_volume(c1, n=5, field="candle_acc_trade_volume")
+                volume_surge = current_volume / max(avg_past, 1) if avg_past > 0 else 1.0
+
+                cut("PROBE_V2", f"{m} 프로브2.0 포착 → {trigger_type}")
+
+                return {
+                    "price": c1[-1]["trade_price"],
+                    "change": price_change,
+                    "current_volume": current_volume,
+                    "volume_surge": volume_surge,
+                    "ob": obx,
+                    "ticks": ticks_v2,
+                    "tape": tape_v2,
+                    "early_ok": True,  # 트렌드형 probe
+                    "probe_v2": True,  # PROBE_V2 플래그
+                    "entry_mode": "probe"
+                }
 
     # === ★ 계단식(그라인드) 상승: 최우선 분기 (confirm 직행) ===
     ticks_now = get_recent_ticks(m, 80)
