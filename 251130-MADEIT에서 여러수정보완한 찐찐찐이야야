@@ -4550,12 +4550,20 @@ def monitor_position(m,
 
                     if ok_rb and exec_rb > 0:
                         print(f"[ADD_ROLLBACK] {m} 추매 검증 실패 → {exec_rb:.6f} 롤백")
-                        # 롤백 완료 표시 (재롤백 방지)
+                        # 🔒 롤백 완료: 수량 + adds 카운트 + entry_price 원복 (리스크·TP·스탑 왜곡 방지)
                         with _POSITION_LOCK:
                             q = OPEN_POSITIONS.get(m)
                             if q:
+                                cur_vol = float(q.get("volume", 0.0))
+                                old_avg = float(q.get("entry_price", 0.0))
+                                # 새 평단 = (기존평단*현재수량 - 롤백분*추매가) / (현재수량 - 롤백분)
+                                new_vol = max(cur_vol - exec_rb, 1e-12)
+                                q["entry_price"] = ((old_avg * cur_vol) - (last_add_px * exec_rb)) / new_vol
+                                q["volume"] = new_vol
+                                q["adds"] = max(0, int(q.get("adds", 1)) - 1)  # 추매 카운트 되돌림
                                 q["last_add_volume"] = 0.0
                                 OPEN_POSITIONS[m] = q
+                                print(f"[ADD_ROLLBACK] {m} 상태 원복 완료: adds={q['adds']}, entry={q['entry_price']:.2f}, vol={q['volume']:.6f}")
 
             # === ★ 공통 STALL(정체) 감지 ===
             # 최근 0~5초 vs 5~20초 비교 + 신고점 정지 시간
