@@ -2086,6 +2086,119 @@ def micro_tape_stats_from_ticks(ticks, sec):
     }
 
 
+def micro_tape_stats_from_ticks_v2(ticks, sec,
+                                   use_now_anchor=True,
+                                   winsor_p=0.95,
+                                   min_ticks=0):
+    """
+    현재 시각 기준 + 금액 가중 Buy Ratio (밤사이 손실 방지)
+
+    핵심 개선:
+    - 현재 시각 기준 윈도우 (마지막 체결 시각이 오래되면 자동 약 신호)
+    - 금액 가중 buy_value_ratio (큰손 유입 정확 포착)
+    - winsor_p로 대형 체결 편향 완화
+
+    반환:
+      {
+        "n": 틱개수, "age": 신선도(초),
+        "rate": 초당틱수, "krw": 총거래대금, "krw_per_sec": 초당거래대금,
+        "buy_count_ratio": 건수기반,
+        "buy_value_ratio": 금액가중 (핵심!),
+        "buy_vol_ratio": 수량가중,
+        "total_val": 총거래대금, "total_vol": 총수량
+      }
+    """
+    if not ticks:
+        return {"n":0,"age":999,"rate":0,"krw":0,"krw_per_sec":0,
+                "buy_count_ratio":0,"buy_value_ratio":0,"buy_vol_ratio":0,
+                "buy_ratio":0,"total_val":0,"total_vol":0}
+
+    try:
+        now_ms = int(time.time()*1000)
+        newest_ts = ticks[0].get("timestamp", now_ms)
+    except:
+        return {"n":0,"age":999,"rate":0,"krw":0,"krw_per_sec":0,
+                "buy_count_ratio":0,"buy_value_ratio":0,"buy_vol_ratio":0,
+                "buy_ratio":0,"total_val":0,"total_vol":0}
+
+    # ★ 현재 시각 기준 윈도우 (마지막 체결이 오래되면 자동 약화)
+    cutoff = (now_ms - sec*1000) if use_now_anchor else (newest_ts - sec*1000)
+
+    # 창 내 틱 (오름차순 정렬: duration 계산용)
+    win = [x for x in ticks if x.get("timestamp", 0) >= cutoff]
+    if not win:
+        age = (now_ms - newest_ts)/1000.0
+        return {"n":0,"age":age,"rate":0,"krw":0,"krw_per_sec":0,
+                "buy_count_ratio":0,"buy_value_ratio":0,"buy_vol_ratio":0,
+                "buy_ratio":0,"total_val":0,"total_vol":0}
+
+    win = sorted(win, key=lambda t: t.get("timestamp", 0))
+    n = len(win)
+    if min_ticks and n < min_ticks:
+        age = (now_ms - win[-1]["timestamp"])/1000.0
+        return {"n":n,"age":age,"rate":0,"krw":0,"krw_per_sec":0,
+                "buy_count_ratio":0,"buy_value_ratio":0,"buy_vol_ratio":0,
+                "buy_ratio":0,"total_val":0,"total_vol":0}
+
+    duration = max((win[-1]["timestamp"] - win[0]["timestamp"])/1000.0, 1.0)
+    age = (now_ms - win[-1]["timestamp"])/1000.0
+
+    # Winsorize를 위한 pv 수집
+    pvs = []
+    for x in win:
+        p = float(x.get("trade_price", 0.0))
+        v = float(x.get("trade_volume", 0.0))
+        pvs.append(p * v)
+
+    # 상위 분위수 캡 (대형체결 한 방 편향 완화)
+    pv_cap = None
+    if pvs and 0.0 < (winsor_p or 0) < 1.0:
+        pvs_sorted = sorted(pvs)
+        idx = max(0, min(len(pvs_sorted)-1, int(len(pvs_sorted)*winsor_p)-1))
+        pv_cap = pvs_sorted[idx]
+
+    # 재합산
+    total_val = 0.0; total_vol = 0.0
+    buy_val = 0.0; buy_vol = 0.0; buys = 0
+    krw_raw = 0.0
+    buy_val_w = 0.0; total_val_w = 0.0
+
+    for x in win:
+        p = float(x.get("trade_price", 0.0))
+        v = float(x.get("trade_volume", 0.0))
+        pv = p * v
+        krw_raw += pv
+        total_val += pv
+        total_vol += v
+
+        # winsorized pv
+        pv_w = min(pv, pv_cap) if pv_cap is not None else pv
+
+        if x.get("ask_bid") == "BID":
+            buys += 1
+            buy_val += pv
+            buy_vol += v
+            buy_val_w += pv_w
+        total_val_w += pv_w
+
+    rate = n / duration
+    krw_per_sec = krw_raw / duration
+
+    buy_count_ratio = (buys / n) if n else 0.0
+    buy_value_ratio = (buy_val_w / total_val_w) if total_val_w > 0 else 0.0
+    buy_vol_ratio = (buy_vol / total_vol) if total_vol > 0 else 0.0
+
+    return {
+        "n": n, "age": age, "rate": rate,
+        "krw": krw_raw, "krw_per_sec": krw_per_sec,
+        "buy_count_ratio": buy_count_ratio,
+        "buy_value_ratio": buy_value_ratio,  # ★ 금액 가중 (핵심!)
+        "buy_vol_ratio": buy_vol_ratio,
+        "buy_ratio": buy_count_ratio,  # 호환성
+        "total_val": total_val, "total_vol": total_vol
+    }
+
+
 # ===== Bot Heuristics =====
 def _pct(a, b):
     try:
@@ -2164,8 +2277,10 @@ def wash_trade_pattern(ticks, sec=30, repeats=BOT_WASH_REPEAT_VOL_N):
 
 def bot_accum_trigger_ok(m, ticks, ob, c1):
     if not ticks or not ob or not c1: return (False, "BOTACC_INIT_FAIL")
-    t30 = micro_tape_stats_from_ticks(ticks, 30)
-    if not (BOT_ACCUM_MIN_BUY <= t30["buy_ratio"] <= BOT_ACCUM_MAX_BUY):
+    # ★ v2: 금액가중 buy ratio 사용
+    t30 = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
+    buy_ratio = t30.get("buy_value_ratio", 0)
+    if not (BOT_ACCUM_MIN_BUY <= buy_ratio <= BOT_ACCUM_MAX_BUY):
         return (False, "BOTACC_BUY_RANGE")
     ia = inter_arrival_stats(ticks, 30)
     if ia["cv"] > BOT_TWAP_MAX_CV or ia["count"] < 6:
@@ -2961,9 +3076,10 @@ def grind_break_ok(c1, ticks):
     last8 = list(zip(c1[-8:], e5[-8:]))
     above = sum(1 for c, e in last8 if c["trade_price"] >= e)
     ema_slope = (e5[-1] - e5[-4]) if len(e5) >= 4 else 0
-    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    # ★ v2: 금액가중 buy ratio 사용
+    t15 = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
     ia = inter_arrival_stats(ticks, 30)
-    return (above >= 6 and ema_slope > 0 and t15.get("buy_ratio", 0) >= 0.56
+    return (above >= 6 and ema_slope > 0 and t15.get("buy_value_ratio", 0) >= 0.56
             and ia.get("cv", 9.9) <= 1.05)
 
 
@@ -3053,7 +3169,9 @@ def is_fake_pump(m,
         if pp >= BOT_PINGPONG_MIN_ALT:
             ia = inter_arrival_stats(ticks, 30)
             pstd = price_band_std(ticks, 30)
-            buy = micro_tape_stats_from_ticks(ticks, 30).get("buy_ratio", 0)
+            # ★ v2: 금액가중 buy ratio 사용 (봇 탐지에도 적용)
+            t30_bot = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
+            buy = t30_bot.get("buy_value_ratio", 0)
             if (pstd <= 0.0009) and (ia["cv"] <= 0.35) and (buy < 0.45
                                                             or buy > 0.75):
                 cut(
@@ -3083,9 +3201,10 @@ def ignition_trigger_ok(m, c1, ticks, ob):
         return False, "IGN_NO_BREAK"
     if body_ratio(cur) < IGN_MIN_BODY:
         return False, "IGN_BODY_SMALL"
-    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    # ★ v2: 금액가중 buy ratio 사용
+    t15 = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
     turn = t15["krw"] / max(ob.get("depth_krw", 1), 1)
-    if t15["buy_ratio"] < IGN_MIN_BUY:
+    if t15.get("buy_value_ratio", 0) < IGN_MIN_BUY:
         return False, "IGN_BUY_WEAK"
     if turn < _turn_needed(ob.get("depth_krw", 0)):
         return False, "IGN_TURN_LOW"
@@ -3106,9 +3225,10 @@ def tick_breakout_ok(m, c1, ticks, ob, lookback=12):
     if not last_prices: return False
     cur_max = max(last_prices)
     gap = cur_max / max(prev_high, 1) - 1
-    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    # ★ v2: 금액가중 buy ratio 사용
+    t15 = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
     depth_ok = ob.get("depth_krw", 0) >= 12_000_000
-    return (gap >= TICK_BREAK_GAP) and (t15["buy_ratio"]
+    return (gap >= TICK_BREAK_GAP) and (t15.get("buy_value_ratio", 0)
                                         >= 0.60) and uptick_streak_from_ticks(
                                             ticks, need=2) and depth_ok
 
@@ -3236,10 +3356,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # === Micro-Probe: 초경량 즉시 찌르기 (가장 먼저 평가) ===
     if ticks_now:
-        t6 = micro_tape_stats_from_ticks(ticks_now, 6)
+        # ★ v2: 금액가중 buy ratio 사용
+        t6 = micro_tape_stats_from_ticks_v2(ticks_now, 6, use_now_anchor=True, winsor_p=0.95)
+        buy_ratio_6 = t6.get("buy_value_ratio", 0)
         if (
             t6["n"] >= 2 and                    # 체결 2개 이상 (3 → 2, 초완화)
-            t6["buy_ratio"] >= 0.48 and         # 매수비 48%+ (0.50 → 0.48, 초완화)
+            buy_ratio_6 >= 0.48 and             # 매수비 48%+ (금액가중, 0.50 → 0.48, 초완화)
             t6["krw_per_sec"] >= 8000 and       # 속도 8k KRW/s+ (4000 → 8000, 타이트)
             last_two_ticks_fresh(ticks_now) and
             uptick_streak_from_ticks(ticks_now, need=1)
@@ -3253,7 +3375,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                     if v20:
                         vgap_mp = (ticks_now[0]["trade_price"]/v20 - 1.0)
                 if vgap_mp <= 0.022:  # 0.018 → 0.022, 초완화
-                    cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {t6['buy_ratio']:.2f}, 속도 {t6['krw_per_sec']:.0f})")
+                    cut("MICRO_PROBE", f"{m} 초경량 찌르기 (매수비 {buy_ratio_6:.2f}, 속도 {t6['krw_per_sec']:.0f})")
 
                     # change와 volume_surge 계산
                     cur_price = ticks_now[0]["trade_price"]
@@ -3283,13 +3405,15 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if not ticks_now:
         ticks_now = get_recent_ticks(m, 80)
     if ticks_now:
-        t10s = micro_tape_stats_from_ticks(ticks_now, 10)
-        t30s = micro_tape_stats_from_ticks(ticks_now, 30)
+        # ★ v2: 금액가중 buy ratio 사용
+        t10s = micro_tape_stats_from_ticks_v2(ticks_now, 10, use_now_anchor=True, winsor_p=0.95)
+        t30s = micro_tape_stats_from_ticks_v2(ticks_now, 30, use_now_anchor=True, winsor_p=0.95)
+        buy_ratio_10s = t10s.get("buy_value_ratio", 0)
 
         # 초입 신호 완화: 수직 초동 빠른 포착 (5→4틱, 18K→16K)
         sudden_burst = (
             t10s["krw_per_sec"] >= 2.0 * t30s["krw_per_sec"]  # 1.8 → 2.0 (더 강한 가속)
-            and t10s["buy_ratio"] >= 0.60  # 0.58 → 0.60 (더 강한 매수세)
+            and buy_ratio_10s >= 0.60  # 0.58 → 0.60 (금액가중, 더 강한 매수세)
             and t10s["n"] >= 4  # 5 → 4 (수직 초동 빠른 포착)
             and t10s["krw_per_sec"] >= 16000  # 18000 → 16000 (초동 허용 폭 확대)
         )
@@ -3297,7 +3421,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         fresh = uptick_streak_from_ticks(ticks_now, need=2)  # need=1 → need=2 (연속 상승 강화)
 
         if sudden_burst and fresh:
-            cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
+            cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {buy_ratio_10s:.2f})")
 
             # change와 volume_surge 계산
             cur_price = ticks_now[0]["trade_price"]
@@ -3329,19 +3453,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ticks_lite = ticks_now if ticks_now else get_recent_ticks(m, 80)
         ob_lite = obc.get(m)
         if ticks_lite and ob_lite and c1:
-            t10 = micro_tape_stats_from_ticks(ticks_lite, 10)
+            # ★ v2: 금액가중 buy ratio 사용
+            t10 = micro_tape_stats_from_ticks_v2(ticks_lite, 10, use_now_anchor=True, winsor_p=0.95)
+            buy_ratio_lite = t10.get("buy_value_ratio", 0)
             vwap20 = vwap_from_candles_1m(c1, 20)
             vgap = (c1[-1]["trade_price"] / max(vwap20, 1) - 1.0) if vwap20 else 0.0
 
             # 오더북 최소 깊이 가드 추가 (허수 배제)
             if (ob_lite.get("depth_krw", 0) >= 8_000_000 and
-                t10["buy_ratio"] >= PROBE_LITE_MIN_BUY and
+                buy_ratio_lite >= PROBE_LITE_MIN_BUY and
                 t10["krw_per_sec"] >= PROBE_LITE_MIN_KRWPSEC and
                 uptick_streak_from_ticks(ticks_lite, need=1) and
                 ob_lite.get("spread", 999) <= PROBE_LITE_MAX_SPREAD and
                 abs(vgap) <= PROBE_LITE_MAX_VWAP_GAP):
 
-                cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {t10['buy_ratio']:.2f}, 속도 {t10['krw_per_sec']:.0f})")
+                cut("PROBE_LITE", f"{m} probe-lite 신호 (매수비 {buy_ratio_lite:.2f}, 속도 {t10['krw_per_sec']:.0f})")
 
                 # change와 volume_surge 계산
                 cur_price = ticks_lite[0]["trade_price"]
@@ -4265,8 +4391,9 @@ def monitor_position(m,
                 pos = (OPEN_POSITIONS.get(m) or {}).copy()  # ✅ 안전 읽기
 
             if pos.get("entry_mode") == "probe":
-                t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                t30_now = micro_tape_stats_from_ticks(ticks, 30)
+                # ★ v2: 현재시각 기준 + 금액가중 buy ratio (밤사이 손실 방지)
+                t15_now = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
+                t30_now = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
 
                 gain_now = (float(curp) / float(entry_price) - 1.0)  # float 통일
 
@@ -4289,8 +4416,18 @@ def monitor_position(m,
                 accel_ok = (t15_now["krw_per_sec"] >= ADD1_MIN_ACCEL * max(t30_now["krw_per_sec"], 1)) and \
                            (t15_now["krw_per_sec"] >= ADD1_MIN_KRWPSEC)
 
-                # 4) 매수비 체크: 60% 이상 (0.56→0.60 강화)
-                buy_ok = (t15_now["buy_ratio"] >= ADD1_MIN_BUY)
+                # 4) 매수비 체크: 금액가중(value-weighted) + 하이브리드 임계값 (밤사이 손실 방지)
+                #    - 기본: buy_value_ratio >= 0.58 AND buy_count_ratio >= 0.56
+                #    - 강유입: buy_value_ratio >= 0.64면 buy_count_ratio >= 0.53 허용
+                #    - 총거래대금: >= 1.5M KRW (저유동성 회피)
+                buy_val_ratio = t15_now.get("buy_value_ratio", 0.0)
+                buy_cnt_ratio = t15_now.get("buy_count_ratio", 0.0)
+                total_val = t15_now.get("total_val", 0.0)
+
+                buy_ok = (total_val >= 1_500_000) and (
+                    (buy_val_ratio >= 0.58 and buy_cnt_ratio >= 0.56) or
+                    (buy_val_ratio >= 0.64 and buy_cnt_ratio >= 0.53)
+                )
 
                 # 5) VWAP 과열 방지 (기존 가드 유지)
                 vgap_ok = True
@@ -4326,7 +4463,8 @@ def monitor_position(m,
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
                             f"추매 후 평단: {fmt_price(new_entry)}원\n"
-                            f"(gain≥{ADD1_MIN_GAIN*100:.1f}%, buy≥{ADD1_MIN_BUY*100:.0f}%, "
+                            f"(gain≥{ADD1_MIN_GAIN*100:.1f}%, "
+                            f"buy_val={buy_val_ratio*100:.0f}%/cnt={buy_cnt_ratio*100:.0f}%, "
                             f"t15≥{ADD1_MIN_ACCEL:.2f}×t30 & ≥{ADD1_MIN_KRWPSEC:,}/s)"
                         )
 
@@ -4369,11 +4507,12 @@ def monitor_position(m,
             last_add_px = p_check.get("last_add_price", 0.0)
 
             if last_add_vol > 0 and (time.time() - last_add_ts) <= 45:
-                t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                t30_now = micro_tape_stats_from_ticks(ticks, 30)
+                # ★ v2: 추매 검증도 금액가중 ratio 사용
+                t15_now = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
+                t30_now = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
                 made_new_high = curp >= best * 0.999  # 신고점 재도전
                 reaccel = (t15_now["krw_per_sec"] >= 1.15 * max(t30_now["krw_per_sec"], 1)
-                          and t15_now["buy_ratio"] >= 0.58)
+                          and t15_now.get("buy_value_ratio", 0) >= 0.58)
 
                 # 실패 조건: 신고점 미갱신 + 재가속 실패 or 가격 이탈
                 fail_add = (not made_new_high and not reaccel) or (curp <= last_add_px * 0.997)
@@ -4442,8 +4581,9 @@ def monitor_position(m,
             # === 2-1) 피라미딩(추매): 상승세면 추매 / 정체면 부분청산 ===
             if pos_probe.get("entry_mode") != "probe":  # ✅ current_mode → pos_probe.get() 사용
                 if strong_up and USE_PYRAMIDING and AUTO_TRADE:
-                    t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                    t30_now = micro_tape_stats_from_ticks(ticks, 30)
+                    # ★ v2: 피라미딩도 금액가중 ratio 사용
+                    t15_now = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
+                    t30_now = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
 
                     # 단기 EMA 상승 전환
                     c1m = get_minutes_candles(1, m, 20)
@@ -4462,7 +4602,7 @@ def monitor_position(m,
                     vgap_ok = (vgap <= 0.015)  # VWAP 대비 1.5% 이내만 추매 허용 (1.8→1.5 강화)
 
                     # ★ 버스트 소진 가드 (속도 저하 시 추매 금지)
-                    t5_now = micro_tape_stats_from_ticks(ticks, 5)
+                    t5_now = micro_tape_stats_from_ticks_v2(ticks, 5, use_now_anchor=True, winsor_p=0.95)
                     burst_exhausted = (t5_now["krw_per_sec"] < t30_now["krw_per_sec"] * 0.85)  # 15% 이상 둔화
 
                     # ★★★ 1차 추매 (probe→confirm): 조건 완화 (추매 실패 감소)
@@ -4471,7 +4611,7 @@ def monitor_position(m,
                             alive_sec >= 15 and  # 최소 15초 관찰
                             curp > entry_price * 1.003 and  # 실제 +0.3% 이상 상승 (0.5→0.3 완화)
                             t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 거래량 15% 가속 (30→15 완화)
-                            t15_now["buy_ratio"] >= 0.54 and  # 매수비 54% 이상 (60→54 완화)
+                            t15_now.get("buy_value_ratio", 0) >= 0.54 and  # 매수비 54% 이상 (금액가중, 60→54 완화)
                             short_term_up and
                             vgap_ok and  # ★ VWAP 과열 방지
                             not burst_exhausted and  # ★ 버스트 소진 체크
@@ -4482,7 +4622,7 @@ def monitor_position(m,
                     else:
                         flow_ok = (
                             t15_now["krw_per_sec"] >= t30_now["krw_per_sec"] * 1.15 and  # 가속도 15%+
-                            t15_now["buy_ratio"]   >= 0.58 and                           # 매수비 58%+
+                            t15_now.get("buy_value_ratio", 0) >= 0.58 and                # 매수비 58%+ (금액가중)
                             last_two_ticks_fresh(ticks) and
                             short_term_up and
                             vgap_ok and  # ★ VWAP 과열 방지
