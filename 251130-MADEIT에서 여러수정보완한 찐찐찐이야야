@@ -4769,18 +4769,46 @@ def monitor_position(m,
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     gain_now = (curp / entry_price - 1.0)
                     # 본절 근처 또는 손실이면 정리
-                    if gain_now <= PROBE_BREAKEVEN_EXIT:  # -0.5% 이하면 청산
+                    if gain_now <= PROBE_BREAKEVEN_EXIT:  # -0.3% 이하면 청산
                         exit_reason = "PROBE_TIMEOUT_CUT"
                         verdict = "probe 타임아웃 손절"
                         break
 
-                # ★ 정체는 손실일 때만 청산 (수익이면 유지)
+                # ★ 정체 청산: 구조까지 무너졌을 때만 (VWAP/EMA/매수세 동시 확인)
                 if is_stall and alive_sec >= 30:  # 최소 30초 경과 후에만 정체 판단
                     gain_now = (curp / entry_price - 1.0)
-                    if gain_now < -0.003:  # -0.3% 이하 손실이면 정체 시 청산
-                        exit_reason = "PROBE_STALL_CUT"
-                        verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%)"
-                        break
+
+                    if gain_now < -0.003:  # -0.3% 이하 손실
+                        # ★ 구조 체크: VWAP/EMA5 이탈 + 매수세 약화 확인
+                        c1m_stall = get_minutes_candles(1, m, 20)
+                        vwap20_stall = vwap_from_candles_1m(c1m_stall, 20)
+                        ema5_stall = ema_last([c["trade_price"] for c in c1m_stall], 5)
+
+                        # 구조 이탈: VWAP 아래 AND EMA5 아래
+                        under_structure = (
+                            (vwap20_stall and curp < vwap20_stall) and
+                            (ema5_stall and curp < ema5_stall)
+                        )
+
+                        # 매수세 약화: 금액가중 매수비 < 53% OR 거래속도 < 9k/s
+                        t15_stall = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
+                        buyer_weak = (
+                            t15_stall.get("buy_value_ratio", 0) < 0.53 or
+                            t15_stall.get("krw_per_sec", 0) < 9000
+                        )
+
+                        if under_structure and buyer_weak:
+                            # ★ 구조 + 매수세 둘 다 무너짐 → 전량 청산
+                            exit_reason = "PROBE_STALL_CUT"
+                            verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 구조이탈)"
+                            break
+                        else:
+                            # ★ 구조 살아있음 → 30% 부분청산만 (재상승 기회 보존)
+                            ok, _, ex = safe_partial_sell(m, sell_ratio=0.3, reason=f"probe 정체 30% 축소 ({gain_now*100:+.2f}%)")
+                            if ok and ex > 0:
+                                stall_arm_ts = None  # 디바운스 리셋
+                                tg_send_mid(f"⚡ {m} 정체 중 구조 유지 → 30% 축소 (VWAP/EMA 위)")
+                            # 전량 청산 안 함 → continue
                     # 수익 중이면 정체여도 유지 (추세 기다림)
 
             # === ★ 상승세 판정 (추매용) ===
