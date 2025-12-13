@@ -1,3 +1,5 @@
+코드수정해봤어 크리티컬한것만봐줘 매수매도와 관련해서 수익률나는 더 좋은의견도있으면말해주고
+
 # -*- coding: utf-8 -*-
 import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random
 from datetime import datetime, timedelta, timezone
@@ -983,8 +985,8 @@ def add_auto_position(m, cur_price, override_krw=None):
     add_krw_amount = avg_price_add * volume_filled
     current_adds = pos.get("adds", 0)  # 방금 업데이트된 값 (1, 2, 3, ...)
 
-    # 비율 매핑 (표시용, 실제 값과 일치)
-    risk_pct_map = {1: "0.5%", 2: "0.4%"}  # 1차: 0.5%, 2차: 0.4%
+    # 비율 매핑 (표시용, 품질 우선)
+    risk_pct_map = {1: "0.8%", 2: "0.4%"}
     risk_label = risk_pct_map.get(current_adds, "0.3%")
 
     # ★ 찌꺼기 KRW 체크 (100원 미만은 정상 범위)
@@ -1266,7 +1268,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
     부분 청산 공용 함수
     - sell_ratio: 0.5 → 50%, 0.3 → 30% 등
-    - partial_count로 최대 2회까지 부분청산/부분익절 허용 (단, TP는 제외)
+    - partial_count로 최대 2회까지 부분청산/부분익절 허용 (TP1/TP2)
     반환: (성공여부:bool, 메시지:str, 체결량:float)
     """
     with _POSITION_LOCK:
@@ -1275,11 +1277,10 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 실패: 포지션 없음/수량 0"
             print(msg)
             return False, msg, 0.0
-        # 🔁 TP는 한도 미적용 (TP1/TP2 보장)
-        is_tp = str(reason).upper().startswith("TP")
+        # 🔁 기존: partial_done (1회) → partial_count (2회까지)
         partial_count = int(pos.get("partial_count", 0))
-        if (not is_tp) and partial_count >= 2:
-            msg = f"[REMONITOR] {m} 부분청산 한도(2회) 초과 → 스킵 (TP는 제외)"
+        if partial_count >= 2:
+            msg = f"[REMONITOR] {m} 부분청산 한도(2회) 초과 → 스킵"
             print(msg)
             return False, msg, 0.0
         current_volume = pos["volume"]
@@ -1384,9 +1385,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
                     pos2["volume"] = remaining_volume
-                    # 🔁 TP는 카운트 제외 (TP1/TP2가 정체 부분익절로 막히는 것 방지)
-                    if not is_tp:
-                        pos2["partial_count"] = int(pos2.get("partial_count", 0)) + 1
+                    # 🔁 카운터 증가 + 하위 호환(partial_done 유지)
+                    pos2["partial_count"] = int(pos2.get("partial_count", 0)) + 1
                     pos2["partial_done"] = True  # 하위 호환성 유지
                 LAST_EXIT_ATTEMPT.pop(m, None)  # ★ 쿨다운 초기화
 
@@ -3259,24 +3259,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
-    # === 동일 종목 중복 진입 방지 (수익/손실별 차등 쿨다운) ===
+    # === 동일 종목 중복 진입 방지 (probe 모드는 25초로 단축, 일반은 90초) ===
+    cooldown_after_exit = 25 if ALWAYS_PROBE_FIRST else 90
     now_ts = time.time()
-
-    # 🔄 수익 청산 후엔 짧게, 손실 청산 후엔 길게
-    with _POSITION_LOCK:
-        last_exit_done    = LAST_EXIT_AT.get(m, 0.0)
-        last_exit_attempt = LAST_EXIT_ATTEMPT.get(m, 0.0)
-        last_cause        = LAST_EXIT_CAUSE.get(m, "loss")
-
-    # 수익 청산은 25초, 손실 청산은 120초
-    if last_cause == "profit":
-        cooldown_after_exit = 25
-    else:
-        cooldown_after_exit = 120
-
-    # probe 항상 우선이면 더 단축
-    if ALWAYS_PROBE_FIRST:
-        cooldown_after_exit = min(cooldown_after_exit, 25)
 
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -3287,7 +3272,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if (now_ts - max(last_add_ts, last_exit_ts)) < cooldown_after_exit:
             return None
     else:
-        # 포지션이 없어도 최근 청산이 가까우면 스킵
+        # 포지션이 없어도 최근 '청산 완료' 또는 '청산 시도(미체결 포함)'가 가까우면 스킵
+        with _POSITION_LOCK:
+            last_exit_done    = LAST_EXIT_AT.get(m, 0.0)
+            last_exit_attempt = LAST_EXIT_ATTEMPT.get(m, 0.0)
         last_block = max(last_exit_done, last_exit_attempt)
         if (now_ts - last_block) < cooldown_after_exit:
             return None
@@ -4041,8 +4029,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if not atr or atr <= 0:
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT
 
-    base_pct = (atr / max(entry_price, 1)) * ATR_MULT
-    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX * 0.9)
+    pct = min(max((atr / max(entry_price, 1)) * ATR_MULT, DYN_SL_MIN), DYN_SL_MAX * 0.9)
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
@@ -4051,9 +4038,6 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
-
-    # 🔒 최종 하드 클램프 (리스크 예산 유지 - 1.3x, 1.5x 가중 후에도 최대치 준수)
-    pct = min(max(pct, DYN_SL_MIN), DYN_SL_MAX)
 
     return entry_price * (1 - pct), pct
 
@@ -4550,20 +4534,12 @@ def monitor_position(m,
 
                     if ok_rb and exec_rb > 0:
                         print(f"[ADD_ROLLBACK] {m} 추매 검증 실패 → {exec_rb:.6f} 롤백")
-                        # 🔒 롤백 완료: 수량 + adds 카운트 + entry_price 원복 (리스크·TP·스탑 왜곡 방지)
+                        # 롤백 완료 표시 (재롤백 방지)
                         with _POSITION_LOCK:
                             q = OPEN_POSITIONS.get(m)
                             if q:
-                                cur_vol = float(q.get("volume", 0.0))
-                                old_avg = float(q.get("entry_price", 0.0))
-                                # 새 평단 = (기존평단*현재수량 - 롤백분*추매가) / (현재수량 - 롤백분)
-                                new_vol = max(cur_vol - exec_rb, 1e-12)
-                                q["entry_price"] = ((old_avg * cur_vol) - (last_add_px * exec_rb)) / new_vol
-                                q["volume"] = new_vol
-                                q["adds"] = max(0, int(q.get("adds", 1)) - 1)  # 추매 카운트 되돌림
                                 q["last_add_volume"] = 0.0
                                 OPEN_POSITIONS[m] = q
-                                print(f"[ADD_ROLLBACK] {m} 상태 원복 완료: adds={q['adds']}, entry={q['entry_price']:.2f}, vol={q['volume']:.6f}")
 
             # === ★ 공통 STALL(정체) 감지 ===
             # 최근 0~5초 vs 5~20초 비교 + 신고점 정지 시간
@@ -4763,14 +4739,8 @@ def monitor_position(m,
             drop_from_high = (best - curp) / best
 
             # === 🎯 TP1/TP2 단계적 익절 + 스탑 잠금 (원점 손절 방지) ===
-            # ★ TP 체크 직전에 최신 상태 읽기 (stale 플래그 방지)
-            with _POSITION_LOCK:
-                _p = OPEN_POSITIONS.get(m, {})
-            tp1_done = bool(_p.get("tp1_done"))
-            tp2_done = bool(_p.get("tp2_done"))
-
             # TP1 (1R): 35% 익절 + 스탑을 본전(BE) 위로 → 최소한 본전 보장
-            if cur_gain >= eff_sl_pct and not tp1_done:
+            if cur_gain >= eff_sl_pct and not pos_probe.get("tp1_done", False):
                 ok, _, execd = safe_partial_sell(m, sell_ratio=0.35, reason="TP1 1R 부분익절")
                 if ok and execd > 0:
                     with _POSITION_LOCK:
@@ -4788,7 +4758,7 @@ def monitor_position(m,
 
             # TP2 (2R): 추가 35% 익절 + 스탑을 '+1R'로 → 수익 완전 잠금
             run_from_entry = (best / entry_price - 1.0)
-            if run_from_entry >= (2.0 * eff_sl_pct) and not tp2_done:
+            if run_from_entry >= (2.0 * eff_sl_pct) and not pos_probe.get("tp2_done", False):
                 ok, _, execd = safe_partial_sell(m, sell_ratio=0.35, reason="TP2 2R 부분익절")
                 if ok and execd > 0:
                     with _POSITION_LOCK:
@@ -4934,25 +4904,11 @@ def monitor_position(m,
             # ⑤ 트레일링 스탑 (고점 대비 0.5%) — '신고점 갱신' 시만 상향
             if trail_armed and best > prev_best:
                 trail_stop = max(trail_stop, best * 0.995)
-
-            # 🔒 스탑/트레일 발동 디바운스 (확실한 컷)
-            effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
-            if curp <= effective_stop:
-                if stop_first_seen_ts == 0.0:
-                    stop_first_seen_ts = time.time()
-                    stop_hits = 1
-                else:
-                    stop_hits += 1
-                # 디바운스: EXIT_DEBOUNCE_SEC 초 경과 OR EXIT_DEBOUNCE_N회 연속 히트
-                if (time.time() - stop_first_seen_ts) >= EXIT_DEBOUNCE_SEC or stop_hits >= EXIT_DEBOUNCE_N:
-                    exit_reason = "TRAIL/STOP_HIT"
-                    verdict = f"스탑 체결 (eff_stop={fmt_price(effective_stop)})"
-                    tg_send_mid(f"📉 {m} {verdict}")
-                    break
-            else:
-                # 스탑 위로 복귀 → 디바운스 리셋
-                stop_first_seen_ts = 0.0
-                stop_hits = 0
+            if trail_armed and curp <= trail_stop:
+                exit_reason = "TRAIL_EXIT"
+                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt_price(trail_stop)}원) 터치 → 청산(대기)")
+                verdict = "TRAIL_EXIT"
+                break
 
 
             # ⑥ 재진입은 remonitor_until_close()가 청산 후 처리하므로 여기서는 불필요
