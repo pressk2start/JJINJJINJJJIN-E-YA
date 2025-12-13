@@ -4797,17 +4797,30 @@ def monitor_position(m,
                             t15_stall.get("krw_per_sec", 0) < 9000
                         )
 
+                        # ★ 부분청산 횟수 체크 (계속 횡보 대응)
+                        with _POSITION_LOCK:
+                            stall_partial_cnt = (OPEN_POSITIONS.get(m) or {}).get("stall_partial_cnt", 0)
+
                         if under_structure and buyer_weak:
                             # ★ 구조 + 매수세 둘 다 무너짐 → 전량 청산
                             exit_reason = "PROBE_STALL_CUT"
                             verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 구조이탈)"
+                            break
+                        elif stall_partial_cnt >= 2:
+                            # ★ 2회 부분청산 후에도 계속 정체 → 포기하고 전량 청산
+                            exit_reason = "PROBE_STALL_CUT"
+                            verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 2회 축소 후 지속)"
                             break
                         else:
                             # ★ 구조 살아있음 → 30% 부분청산만 (재상승 기회 보존)
                             ok, _, ex = safe_partial_sell(m, sell_ratio=0.3, reason=f"probe 정체 30% 축소 ({gain_now*100:+.2f}%)")
                             if ok and ex > 0:
                                 stall_arm_ts = None  # 디바운스 리셋
-                                tg_send_mid(f"⚡ {m} 정체 중 구조 유지 → 30% 축소 (VWAP/EMA 위)")
+                                with _POSITION_LOCK:
+                                    p = OPEN_POSITIONS.get(m)
+                                    if p:
+                                        p["stall_partial_cnt"] = stall_partial_cnt + 1
+                                tg_send_mid(f"⚡ {m} 정체 중 구조 유지 → 30% 축소 ({stall_partial_cnt+1}/2)")
                             # 전량 청산 안 함 → continue
                     # 수익 중이면 정체여도 유지 (추세 기다림)
 
