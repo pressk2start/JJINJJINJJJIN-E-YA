@@ -188,7 +188,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "180")) # 프로브 관찰 시간 (손실 축소: 240→180초, 3분)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "120")) # 프로브 관찰 시간 (회전율 향상: 180→120초, 2분)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "1"))                    # 추매 최대 회수 (리스크 축소: 2→1회)
 
@@ -278,17 +278,41 @@ from collections import deque as _deque_for_risk  # 기존 deque와 별도 alias
 TRADE_HISTORY = _deque_for_risk(maxlen=30)  # 최근 30개 거래 기록
 
 
-def record_trade(market: str, pnl_pct: float):
+def record_trade(market: str, pnl_pct: float, mfe_pct: float = 0.0, mae_pct: float = 0.0):
     """
     거래 결과 기록
     - pnl_pct: % 단위 수익률 (예: +2.3, -1.5)
+    - mfe_pct: Maximum Favorable Excursion (최대 수익률)
+    - mae_pct: Maximum Adverse Excursion (최대 손실률, 음수)
     """
-    TRADE_HISTORY.append({
+    trade_record = {
         "market": market,
         "pnl": pnl_pct,
         "win": pnl_pct > 0,
         "time": time.time(),
-    })
+        "mfe": mfe_pct,
+        "mae": mae_pct,
+    }
+    TRADE_HISTORY.append(trade_record)
+
+    # 📊 CSV 로깅 (MFE/MAE 진단용)
+    try:
+        csv_file = "trade_history_mfe_mae.csv"
+        file_exists = os.path.isfile(csv_file)
+        with open(csv_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "market", "pnl", "mfe", "mae", "win"])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                "timestamp": datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S"),
+                "market": market,
+                "pnl": f"{pnl_pct:.2f}",
+                "mfe": f"{mfe_pct:.2f}",
+                "mae": f"{mae_pct:.2f}",
+                "win": pnl_pct > 0,
+            })
+    except Exception as e:
+        print(f"[CSV_LOG_ERR] {e}")
 
 
 def get_adaptive_risk() -> float:
@@ -709,6 +733,23 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
 
     entry_price = current_price
     stop_price = dyn_stop
+
+    # 📊 리스크/리워드 사전검증 (구조적으로 불리한 진입 차단)
+    try:
+        c1_rr = get_minutes_candles(1, m, 20)
+        atr_value = atr14_from_candles(c1_rr, 14) if c1_rr else None
+        if atr_value and atr_value > 0 and stop_price > 0:
+            expected_loss = entry_price - stop_price
+            expected_profit = atr_value * 1.3  # ATR의 1.3배를 목표로 설정 (보수적)
+            rr_ratio = expected_profit / expected_loss if expected_loss > 0 else 0
+
+            if rr_ratio < 1.5 and entry_mode == "confirm":  # probe는 제외 (탐색 목적)
+                print(f"[RR_FILTER] {m} RR비율 {rr_ratio:.2f} < 1.5 → 진입 차단 (불리한 구조)")
+                tg_send_mid(f"⚠️ {m} RR비율 {rr_ratio:.2f} 불리 → 진입 스킵")
+                return
+    except Exception as e:
+        # RR 계산 실패 시 무시하고 진행
+        print(f"[RR_CALC_ERR] {m}: {e}")
 
     # ✅ 최근 승률 기반 동적 리스크
     adaptive_risk = get_adaptive_risk()
@@ -1220,8 +1261,15 @@ def close_auto_position(m, reason=""):
             if remaining <= 1e-12:
                 # ✅ 완전 종료: 통계/쿨다운 기록 + 트레이드 기록
                 ret_pct_after_fee = ret_pct - (FEE_RATE * 100.0)
+
+                # 📊 MFE/MAE 추출
+                with _POSITION_LOCK:
+                    pos_final = OPEN_POSITIONS.get(m, {})
+                    mfe_final = pos_final.get("mfe_pct", 0.0)
+                    mae_final = pos_final.get("mae_pct", 0.0)
+
                 try:
-                    record_trade(m, ret_pct_after_fee)
+                    record_trade(m, ret_pct_after_fee, mfe_final, mae_final)
                 except Exception as _e:
                     print("[TRADE_RECORD_ERR]", _e)
 
@@ -3267,6 +3315,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
+    # 📊 볼린저 밴드 횡보 필터 (변동성 낮은 장 회피)
+    if len(c1) >= 20:
+        bb_upper, bb_middle, bb_lower = bollinger_bands(c1, period=20, std_mult=2.0)
+        if bb_upper and bb_middle and bb_lower:
+            bb_width = (bb_upper - bb_lower) / bb_middle if bb_middle > 0 else 0
+            if bb_width < 0.02:  # 폭 2% 미만 → 횡보장
+                return None  # 진입 스킵
+
     # === 동일 종목 중복 진입 방지 (probe 모드는 25초로 단축, 일반은 90초) ===
     cooldown_after_exit = 25 if ALWAYS_PROBE_FIRST else 90
     now_ts = time.time()
@@ -4332,6 +4388,17 @@ def monitor_position(m,
     best = entry_price
     worst = entry_price
 
+    # 📊 MFE/MAE 트래킹 (Maximum Favorable/Adverse Excursion)
+    mfe_pct = 0.0  # 진입 후 최대 수익률
+    mae_pct = 0.0  # 진입 후 최대 손실률
+
+    # 🛡️ 동적 수익 보호 (Break-even Floor)
+    # 트레일링과 별개로 최소 수익 하한선 보장 (절대 하향 금지)
+    breakeven_floor = None  # None이면 미활성, 설정되면 entry_price 대비 %
+
+    # 🚨 절대 손실 하드 캡 2단계 (최종 안전망)
+    hard_cap_warning_sent = False  # -2.0% 경고 발송 여부
+
     # ★ 정체 감지용 상태 변수
     best_ts = time.time()        # 마지막 신고점 찍은 시각
     stall_arm_ts = None          # 정체 시작 후보 시각(디바운싱용)
@@ -4380,6 +4447,35 @@ def monitor_position(m,
             best = max(best, curp)
             worst = min(worst, curp)
 
+            # 📊 MFE/MAE 실시간 갱신
+            current_gain = (curp / entry_price - 1.0) * 100.0  # %
+            mfe_pct = max(mfe_pct, current_gain)  # 최대 수익률
+            mae_pct = min(mae_pct, current_gain)  # 최대 손실률 (음수)
+
+            # OPEN_POSITIONS에 실시간 저장 (완전 종료 시 record_trade에 전달용)
+            with _POSITION_LOCK:
+                pos_update = OPEN_POSITIONS.get(m)
+                if pos_update:
+                    pos_update["mfe_pct"] = mfe_pct
+                    pos_update["mae_pct"] = mae_pct
+                    OPEN_POSITIONS[m] = pos_update
+
+            # 🛡️ 동적 수익 보호: 계단식 하한선 상향 (절대 하향 금지)
+            if gain_from_entry >= 0.020:  # +2.0% 도달
+                breakeven_floor = max(breakeven_floor or 0.0, 0.010)  # 최소 +1.0% 보장
+            elif gain_from_entry >= 0.015:  # +1.5% 도달
+                breakeven_floor = max(breakeven_floor or 0.0, 0.005)  # 최소 +0.5% 보장
+            elif gain_from_entry >= 0.010:  # +1.0% 도달
+                breakeven_floor = max(breakeven_floor or 0.0, 0.000)  # 본절 보장
+
+            # 🛡️ Break-even Floor 위반 체크 (소익/본절 보호)
+            if breakeven_floor is not None:
+                floor_price = entry_price * (1.0 + breakeven_floor)
+                if curp < floor_price:
+                    exit_reason = "BREAKEVEN_FLOOR"
+                    verdict = f"수익 보호 하한선 위반 (최소 {breakeven_floor*100:+.1f}% 보장)"
+                    break
+
             # ★ 신고점 갱신 시 정체 타이머 리셋
             if best > prev_best:
                 best_ts = time.time()
@@ -4396,6 +4492,29 @@ def monitor_position(m,
                     break  # 청산은 finally에서 한 번만
                 # 웜업 중엔 소프트 스탑 미적용
                 continue
+
+            # 🚨 절대 손실 하드 캡 2단계 (최종 안전망)
+            loss_from_entry = (curp / entry_price - 1.0)
+            if loss_from_entry <= -0.025:  # -2.5% 도달 → 즉시 청산 (디바운스 없음)
+                exit_reason = "ABSOLUTE_HARD_CAP_2_5"
+                verdict = "절대 손실 -2.5% 하드 캡 (즉시 청산)"
+                tg_send_mid(f"🚨 {m} 절대 손실 -2.5% 하드 캡 도달 → 즉시 청산")
+                break
+            elif loss_from_entry <= -0.020 and not hard_cap_warning_sent:  # -2.0% 도달 → 경고
+                hard_cap_warning_sent = True
+                tg_send_mid(f"⚠️ {m} 절대 손실 -2.0% 경고 (하드 캡 근접)")
+
+            # ⏰ 시간 기반 손절 (Time Stop Loss)
+            if alive_sec >= 300:  # 5분 경과
+                if loss_from_entry <= -0.005:  # -0.5% 이상 손실
+                    exit_reason = "TIME_STOP_5MIN"
+                    verdict = f"시간 기반 손절 (5분 경과, {loss_from_entry*100:.2f}%)"
+                    break
+            elif alive_sec >= 180:  # 3분 경과
+                if loss_from_entry < 0:  # 손실 상태
+                    exit_reason = "TIME_STOP_3MIN"
+                    verdict = f"시간 기반 손절 (3분 경과, 손실 {loss_from_entry*100:.2f}%)"
+                    break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
@@ -4765,10 +4884,22 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # === 🎯 TP1/TP2 단계적 익절 + 스탑 잠금 (원점 손절 방지) ===
-            # TP1 (1R): 35% 익절 + 스탑을 본전(BE) 위로 → 최소한 본전 보장
-            if cur_gain >= eff_sl_pct and not pos_probe.get("tp1_done", False):
-                ok, _, execd = safe_partial_sell(m, sell_ratio=0.35, reason="TP1 1R 부분익절")
+            # === 🎯 TP0/TP1/TP2 사다리 익절 (소익 확보 + 스탑 잠금) ===
+            run_from_entry = (best / entry_price - 1.0)
+
+            # TP0 (+0.6%): 30% 익절 (소익 조기 확보)
+            if cur_gain >= 0.006 and not pos_probe.get("tp0_done", False):
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.30, reason="TP0 +0.6% 부분익절")
+                if ok and execd > 0:
+                    with _POSITION_LOCK:
+                        p = OPEN_POSITIONS.get(m, {}) or {}
+                        p["tp0_done"] = True
+                        OPEN_POSITIONS[m] = p
+                    tg_send_mid(f"💰 {m} TP0(+0.6%) → 30% 익절")
+
+            # TP1 (+1.0%): 30% 익절 + 스탑을 본전(BE) 위로
+            if cur_gain >= 0.010 and not pos_probe.get("tp1_done", False):
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.30, reason="TP1 +1.0% 부분익절")
                 if ok and execd > 0:
                     with _POSITION_LOCK:
                         p = OPEN_POSITIONS.get(m, {}) or {}
@@ -4781,25 +4912,24 @@ def monitor_position(m,
                         q = OPEN_POSITIONS.get(m, {}) or {}
                         q["stop"] = max(float(q.get("stop", 0.0)), float(base_stop))
                         OPEN_POSITIONS[m] = q
-                    tg_send_mid(f"🔒 {m} TP1(+1R={eff_sl_pct*100:.2f}%) → 스탑 본전상향 {fmt_price(be_lock)}")
+                    tg_send_mid(f"🔒 {m} TP1(+1.0%) → 30% 익절 + 본전 잠금 {fmt_price(be_lock)}")
 
-            # TP2 (2R): 추가 35% 익절 + 스탑을 '+1R'로 → 수익 완전 잠금
-            run_from_entry = (best / entry_price - 1.0)
-            if run_from_entry >= (2.0 * eff_sl_pct) and not pos_probe.get("tp2_done", False):
-                ok, _, execd = safe_partial_sell(m, sell_ratio=0.35, reason="TP2 2R 부분익절")
+            # TP2 (+1.5%): 20% 익절 + 스탑을 +0.5%로
+            if run_from_entry >= 0.015 and not pos_probe.get("tp2_done", False):
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.20, reason="TP2 +1.5% 부분익절")
                 if ok and execd > 0:
                     with _POSITION_LOCK:
                         p = OPEN_POSITIONS.get(m, {}) or {}
                         p["tp2_done"] = True
                         OPEN_POSITIONS[m] = p
-                    # +1R 잠금 (entry + 1R)
-                    lock_1R = entry_price * (1.0 + eff_sl_pct)
-                    base_stop = max(base_stop, lock_1R)
+                    # +0.5% 잠금
+                    lock_0_5 = entry_price * 1.005
+                    base_stop = max(base_stop, lock_0_5)
                     with _POSITION_LOCK:
                         q = OPEN_POSITIONS.get(m, {}) or {}
                         q["stop"] = max(float(q.get("stop", 0.0)), float(base_stop))
                         OPEN_POSITIONS[m] = q
-                    tg_send_mid(f"🔒 {m} TP2(+2R={2*eff_sl_pct*100:.2f}%) → 스탑 +1R 잠금 {fmt_price(lock_1R)}")
+                    tg_send_mid(f"🔒 {m} TP2(+1.5%) → 20% 익절 + 스탑 +0.5% 잠금 {fmt_price(lock_0_5)}")
 
             # === 🎯 Patch #2: 수직 확장 상단 캡처 (고점에서 파기) ===
             # 스파이크 감지: EMA3/VWAP 갭 과도 + 가속→감속 전환
