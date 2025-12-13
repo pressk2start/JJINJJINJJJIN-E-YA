@@ -1516,7 +1516,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             backoff = min(backoff + 30, 120)
             continue
         elif action in ("부분 청산(50%) 권고", "부분 청산(본절)"):
-            ok, msg, executed = safe_partial_sell(m, sell_ratio=0.5, reason="끝알람 부분청산 50%")
+            ok, msg, executed = safe_partial_sell(m, sell_ratio=0.5, reason="부분청산 50%")
             if ok and executed > 0:
                 print(msg)
             time.sleep(backoff)
