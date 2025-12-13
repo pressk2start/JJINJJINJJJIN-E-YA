@@ -760,6 +760,43 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         mode_emoji = "🧭"
         print(f"[OVERHEAT] {m} 과열 추격 방지: confirm→probe 강등 (vgap={vgap:.3f}, egap={egap:.3f})")
 
+    # ★★★ 거리 게이트 (Late Entry Gate): 끝자락 추격 방지 ★★★
+    try:
+        # MA10 대비 이격 체크
+        ema10_now = ema_last([c["trade_price"] for c in c1m], 10)
+        ma10_gap = (current_price / max(ema10_now, 1) - 1.0) if ema10_now else 0.0
+
+        # BB %b 체크 (밴드 내 위치: 0=하단, 0.5=중간, 1=상단)
+        bb_percent_b = 0.5
+        if bb and bb.get("upper") and bb.get("lower"):
+            bb_range = bb["upper"] - bb["lower"]
+            if bb_range > 0:
+                bb_percent_b = (current_price - bb["lower"]) / bb_range
+
+        # ATR 대비 이격 체크
+        atr_entry = atr14_from_candles(c1m, 14) if len(c1m) >= 14 else None
+        atr_gap_ratio = (current_price - ema10_now) / atr_entry if (atr_entry and ema10_now and atr_entry > 0) else 0
+
+        # 늦은 진입 판정: MA10 이격 > 0.8% AND BB %b > 0.85 AND ATR 이격 > 0.5
+        late_entry = (ma10_gap > 0.008 and bb_percent_b > 0.85 and atr_gap_ratio > 0.5)
+
+        if late_entry and not trend_boost:
+            # 추세-가속 모드가 아니면 늦은 진입 차단
+            print(f"[LATE_ENTRY] {m} 끝자락 추격 차단 (MA10이격={ma10_gap*100:.2f}%, BB%b={bb_percent_b:.2f}, ATR이격={atr_gap_ratio:.2f})")
+            tg_send_mid(f"⏰ {m} 끝자락 추격 차단 → 눌림 대기")
+            with _PENDING_LOCK:
+                PENDING_ENTRY.discard(m)
+            return
+        elif late_entry and trend_boost:
+            # 추세-가속 모드면 경고만 하고 probe로 진입
+            if entry_mode == "confirm":
+                entry_mode = "probe"
+                entry_fraction = 0.10
+                mode_emoji = "⏰"
+            print(f"[LATE_ENTRY_WARN] {m} 늦은 진입이지만 강추세 → probe 허용 (MA10={ma10_gap*100:.2f}%, BB%b={bb_percent_b:.2f})")
+    except Exception as e:
+        print(f"[LATE_ENTRY_ERR] {m}: {e}")
+
     # === 계좌 & 주문금액 계산 ===
     accounts = get_account_info()
     if not accounts:
