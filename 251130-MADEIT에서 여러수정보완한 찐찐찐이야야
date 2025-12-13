@@ -188,7 +188,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "120")) # 프로브 관찰 시간 (회전율 향상: 180→120초, 2분)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "180")) # 프로브 관찰 시간 (✅ 개선: 120→180초, 횡보 후 급등 포착)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "1"))                    # 추매 최대 회수 (리스크 축소: 2→1회)
 
@@ -743,9 +743,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
             expected_profit = atr_value * 1.3  # ATR의 1.3배를 목표로 설정 (보수적)
             rr_ratio = expected_profit / expected_loss if expected_loss > 0 else 0
 
-            if rr_ratio < 1.5 and entry_mode == "confirm":  # probe는 제외 (탐색 목적)
-                print(f"[RR_FILTER] {m} RR비율 {rr_ratio:.2f} < 1.5 → 진입 차단 (불리한 구조)")
-                tg_send_mid(f"⚠️ {m} RR비율 {rr_ratio:.2f} 불리 → 진입 스킵")
+            # ✅ 개선: probe도 RR 검증 적용 (probe 1.2+, confirm 1.5+)
+            rr_threshold = 1.2 if entry_mode == "probe" else 1.5
+            if rr_ratio < rr_threshold:
+                print(f"[RR_FILTER] {m} RR비율 {rr_ratio:.2f} < {rr_threshold} ({entry_mode}) → 진입 차단")
+                tg_send_mid(f"⚠️ {m} RR비율 {rr_ratio:.2f} 불리 → 진입 스킵 ({entry_mode})")
                 return
     except Exception as e:
         # RR 계산 실패 시 무시하고 진행
@@ -4510,15 +4512,16 @@ def monitor_position(m,
                 continue
 
             # 🚨 절대 손실 하드 캡 2단계 (최종 안전망)
+            # ✅ 개선: -2.5%→-1.5% 강화 (대손 방지)
             loss_from_entry = (curp / entry_price - 1.0)
-            if loss_from_entry <= -0.025:  # -2.5% 도달 → 즉시 청산 (디바운스 없음)
-                exit_reason = "ABSOLUTE_HARD_CAP_2_5"
-                verdict = "절대 손실 -2.5% 하드 캡 (즉시 청산)"
-                tg_send_mid(f"🚨 {m} 절대 손실 -2.5% 하드 캡 도달 → 즉시 청산")
+            if loss_from_entry <= -0.015:  # -1.5% 도달 → 즉시 청산 (디바운스 없음)
+                exit_reason = "ABSOLUTE_HARD_CAP_1_5"
+                verdict = "절대 손실 -1.5% 하드 캡 (즉시 청산)"
+                tg_send_mid(f"🚨 {m} 절대 손실 -1.5% 하드 캡 도달 → 즉시 청산")
                 break
-            elif loss_from_entry <= -0.020 and not hard_cap_warning_sent:  # -2.0% 도달 → 경고
+            elif loss_from_entry <= -0.012 and not hard_cap_warning_sent:  # -1.2% 도달 → 경고
                 hard_cap_warning_sent = True
-                tg_send_mid(f"⚠️ {m} 절대 손실 -2.0% 경고 (하드 캡 근접)")
+                tg_send_mid(f"⚠️ {m} 절대 손실 -1.2% 경고 (하드 캡 근접)")
 
             # ⏰ 시간 기반 손절 (Time Stop Loss)
             if alive_sec >= 300:  # 5분 경과
@@ -4899,18 +4902,19 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # === 🎯 TP0/TP1/TP2 사다리 익절 (소익 확보 + 스탑 잠금) ===
+            # === 🎯 TP0/TP1/TP2/TP3 사다리 익절 (소익 확보 + 스탑 잠금) ===
             run_from_entry = (best / entry_price - 1.0)
 
-            # TP0 (+0.6%): 30% 익절 (소익 조기 확보)
+            # TP0 (+0.6%): 20% 익절 (소익 조기 확보, 러너 보존)
+            # ✅ 개선: 30% → 20% (큰 상승 시 수익 극대화)
             if cur_gain >= 0.006 and not pos_probe.get("tp0_done", False):
-                ok, _, execd = safe_partial_sell(m, sell_ratio=0.30, reason="TP0 +0.6% 부분익절")
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.20, reason="TP0 +0.6% 부분익절")
                 if ok and execd > 0:
                     with _POSITION_LOCK:
                         p = OPEN_POSITIONS.get(m, {}) or {}
                         p["tp0_done"] = True
                         OPEN_POSITIONS[m] = p
-                    tg_send_mid(f"💰 {m} TP0(+0.6%) → 30% 익절")
+                    tg_send_mid(f"💰 {m} TP0(+0.6%) → 20% 익절")
 
             # TP1 (+1.0%): 30% 익절 + 스탑을 본전(BE) 위로
             if cur_gain >= 0.010 and not pos_probe.get("tp1_done", False):
@@ -4945,6 +4949,24 @@ def monitor_position(m,
                         q["stop"] = max(float(q.get("stop", 0.0)), float(base_stop))
                         OPEN_POSITIONS[m] = q
                     tg_send_mid(f"🔒 {m} TP2(+1.5%) → 20% 익절 + 스탑 +0.5% 잠금 {fmt_price(lock_0_5)}")
+
+            # TP3 (+2.5%): 15% 익절 + 스탑을 +1.2%로 (대박 상승 포착)
+            # ✅ 신규: 큰 상승 시 추가 수익 확보
+            if run_from_entry >= 0.025 and not pos_probe.get("tp3_done", False):
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.15, reason="TP3 +2.5% 부분익절")
+                if ok and execd > 0:
+                    with _POSITION_LOCK:
+                        p = OPEN_POSITIONS.get(m, {}) or {}
+                        p["tp3_done"] = True
+                        OPEN_POSITIONS[m] = p
+                    # +1.2% 잠금 (안전 마진)
+                    lock_1_2 = entry_price * 1.012
+                    base_stop = max(base_stop, lock_1_2)
+                    with _POSITION_LOCK:
+                        q = OPEN_POSITIONS.get(m, {}) or {}
+                        q["stop"] = max(float(q.get("stop", 0.0)), float(base_stop))
+                        OPEN_POSITIONS[m] = q
+                    tg_send_mid(f"🎉 {m} TP3(+2.5%) → 15% 익절 + 스탑 +1.2% 잠금 {fmt_price(lock_1_2)}")
 
             # === 🎯 Patch #2: 수직 확장 상단 캡처 (고점에서 파기) ===
             # 스파이크 감지: EMA3/VWAP 갭 과도 + 가속→감속 전환
