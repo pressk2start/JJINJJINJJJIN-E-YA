@@ -4860,11 +4860,35 @@ def monitor_position(m,
                             bw_expanding = (bb_prev and bb_stall["bandwidth"] > bb_prev["bandwidth"])  # 밴드 확장 중
                             band_walk_hold = (in_upper_zone and bw_expanding)
 
-                        # 3) 임펄스 타임락: 진입 후 최소 60초는 강제 보유 (큰 초동 후 눌림 보호)
-                        impulse_hold = (alive_sec < 60)
+                        # 3) 임펄스 타임락: 진입 후 최소 180초(3분)는 강제 보유 (너무 빠른 컷 방지)
+                        impulse_hold = (alive_sec < 180)
 
-                        # ★ 추세 지속 신호 2개 이상이면 stall cut 보류
-                        trend_hold_cnt = sum([adx_trend_hold, band_walk_hold, impulse_hold])
+                        # 4) EMA20 기울기 체크: 기울기 > 0 이면 아직 상승추세
+                        ema20_stall = ema_last([c["trade_price"] for c in c1m_stall], 20)
+                        ema20_prev = ema_last([c["trade_price"] for c in c1m_stall[:-3]], 20) if len(c1m_stall) > 23 else None
+                        ema20_slope_hold = False
+                        if ema20_stall and ema20_prev:
+                            ema20_slope = (ema20_stall - ema20_prev) / max(ema20_prev, 1)
+                            ema20_slope_hold = (ema20_slope > 0 and curp > ema20_stall)  # 기울기+ & 가격>EMA20
+
+                        # 5) BB 수축 감지 (깃발/수렴 패턴): 밴드폭이 줄어드는 중 → 터지기 전 숨고르기
+                        bb_contraction_hold = False
+                        if bb_stall and bb_prev:
+                            bw_contracting = (bb_stall["bandwidth"] < bb_prev["bandwidth"] * 0.95)  # 5% 이상 수축
+                            bb_contraction_hold = bw_contracting
+
+                        # 6) 거래량 수축 감지: 저거래량 = 숨고르기 (매도 압력 아님)
+                        vol_contraction_hold = False
+                        if len(c1m_stall) >= 20:
+                            vol_list = [c["candle_acc_trade_volume"] for c in c1m_stall]
+                            vol_sma5 = sum(vol_list[-5:]) / 5
+                            vol_sma20 = sum(vol_list[-20:]) / 20
+                            vol_contraction_hold = (vol_sma5 <= vol_sma20)  # 최근 거래량 감소 = 숨고르기
+
+                        # ★ 추세 지속 신호 1개 이상이면 stall cut 보류
+                        trend_signals = [adx_trend_hold, band_walk_hold, impulse_hold,
+                                        ema20_slope_hold, bb_contraction_hold, vol_contraction_hold]
+                        trend_hold_cnt = sum(trend_signals)
                         trend_hold = (trend_hold_cnt >= 1)  # 1개만 있어도 보류 (보수적)
 
                         if trend_hold and not (under_structure and buyer_weak):
@@ -4875,7 +4899,13 @@ def monitor_position(m,
                             if band_walk_hold:
                                 hold_reasons.append("밴드워크")
                             if impulse_hold:
-                                hold_reasons.append("초동보호")
+                                hold_reasons.append(f"초동보호({int(alive_sec)}s)")
+                            if ema20_slope_hold:
+                                hold_reasons.append("EMA20↑")
+                            if bb_contraction_hold:
+                                hold_reasons.append("BB수축")
+                            if vol_contraction_hold:
+                                hold_reasons.append("거래량↓")
                             print(f"[TREND_HOLD] {m} 정체지만 추세 유지 신호: {', '.join(hold_reasons)} → 컷 보류")
                             # 컷 안하고 continue
                         else:
