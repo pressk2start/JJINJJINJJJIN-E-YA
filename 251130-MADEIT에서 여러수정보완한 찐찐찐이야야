@@ -729,6 +729,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         bb_exceed = False
         vol_declining = False
         trend_boost = False
+        adx_entry = None  # ★ 크리티컬: 예외 시 명시적 초기화 (NameError 방지)
 
     # ★ 초강추세 판정 (거래량둔화도 우회할 정도로 강한 추세)
     # ADX > 30 & +DI 우위 >= 12 → "거래량 잠깐 줄어도 괜찮은" 수준
