@@ -730,14 +730,32 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         vol_declining = False
         trend_boost = False
 
-    # ★ BB 상단 초과 or 거래량 둔화 → 완전 차단 (단, 추세-가속 모드에서는 BB 우회)
-    if vol_declining:
-        # 거래량 둔화는 항상 차단 (추세 모드여도)
+    # ★ 초강추세 판정 (거래량둔화도 우회할 정도로 강한 추세)
+    # ADX > 30 & +DI 우위 >= 12 → "거래량 잠깐 줄어도 괜찮은" 수준
+    super_trend_boost = False
+    if adx_entry:
+        adx_val = adx_entry.get("adx", 0)
+        plus_di = adx_entry.get("plus_di", 0)
+        minus_di = adx_entry.get("minus_di", 0)
+        super_trend_boost = (adx_val > 30 and (plus_di - minus_di) >= 12)
+        if super_trend_boost and vol_declining:
+            print(f"[SUPER_TREND] {m} ADX={adx_val:.1f}, +DI-DI={plus_di-minus_di:.1f} → 거래량둔화 우회")
+
+    # ★ BB 상단 초과 or 거래량 둔화 → 완전 차단 (단, 초강추세에서는 거래량둔화도 우회)
+    if vol_declining and not super_trend_boost:
+        # 거래량 둔화 차단 (초강추세 아니면)
         print(f"[EXPANSION_END] {m} 거래량둔화 → 진입 완전 차단")
         tg_send_mid(f"⛔ {m} 거래량둔화 → 진입 차단")
         with _PENDING_LOCK:
             PENDING_ENTRY.discard(m)
         return
+    elif vol_declining and super_trend_boost:
+        # 초강추세면 거래량둔화 무시하고 probe로 진입
+        if entry_mode == "confirm":
+            entry_mode = "probe"
+            entry_fraction = 0.10
+            mode_emoji = "💪"  # 초강추세 진입
+        print(f"[SUPER_TREND_ENTRY] {m} 거래량둔화지만 초강추세 → probe로 진입 허용")
     elif bb_exceed and not trend_boost:
         # BB 초과는 추세-가속 모드가 아닐 때만 차단
         print(f"[EXPANSION_END] {m} BB상단초과 → 진입 완전 차단 (꼭지 추격 방지)")
