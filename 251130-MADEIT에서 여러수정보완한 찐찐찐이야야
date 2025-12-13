@@ -226,7 +226,7 @@ ADD1_MIN_ACCEL = float(os.getenv("ADD1_MIN_ACCEL", "1.25"))    # 상대가속 t1
 # 현재 열린 포지션 기록용
 # 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
 OPEN_POSITIONS = {}
-_POSITION_LOCK = threading.Lock()  # 포지션 접근 락
+_POSITION_LOCK = threading.RLock()  # 포지션 접근 락 (★ RLock으로 변경: 재진입 허용, 데드락 방지)
 _FUNDS_LOCK = threading.Lock()  # ★ 잔고 사용 전역 락 (추매 동시성 경합 방지)
 
 def get_pos_snapshot(m):
@@ -1556,8 +1556,18 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 OPEN_POSITIONS[m] = pos
 
             print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
-            close_auto_position(m, reason)
-            return True
+            try:
+                close_auto_position(m, reason)
+                return True
+            except Exception as e:
+                print(f"[REMONITOR_ERR] {m} 청산 실패: {e}")
+                return False
+            finally:
+                # ★ 안전망: 예외 발생해도 closing 플래그 해제
+                with _POSITION_LOCK:
+                    pos = OPEN_POSITIONS.get(m)
+                    if pos:
+                        pos["closing"] = False
 
         time.sleep(backoff)
         backoff = min(backoff + 30, 120)
