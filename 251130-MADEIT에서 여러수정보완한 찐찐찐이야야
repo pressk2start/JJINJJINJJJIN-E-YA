@@ -1027,7 +1027,8 @@ def add_auto_position(m, cur_price, override_krw=None):
     current_adds = pos.get("adds", 0)  # 방금 업데이트된 값 (1, 2, 3, ...)
 
     # 비율 매핑 (표시용, 품질 우선)
-    risk_pct_map = {1: "0.8%", 2: "0.4%"}
+    # ✅ 크리티컬: 실제 리스크와 일치 (0.8%→0.5%)
+    risk_pct_map = {1: "0.5%", 2: "0.4%"}
     risk_label = risk_pct_map.get(current_adds, "0.3%")
 
     # ★ 찌꺼기 KRW 체크 (100원 미만은 정상 범위)
@@ -1069,7 +1070,10 @@ def close_auto_position(m, reason=""):
         return
 
     # ★ 청산 실패 쿨다운 체크 (스팸 주문 방지)
-    last_attempt = LAST_EXIT_ATTEMPT.get(m, 0)
+    # ✅ 크리티컬: 락 안에서 읽기 (레이스 컨디션 방지)
+    with _POSITION_LOCK:
+        last_attempt = LAST_EXIT_ATTEMPT.get(m, 0)
+
     if time.time() - last_attempt < 10:  # 10초 쿨다운
         print(f"[AUTO] {m} 청산 재시도 쿨다운 중 (마지막 시도 {time.time()-last_attempt:.1f}초 전)")
         # ★ 교착 방지: closing 플래그 해제 (쿨다운 중에는 재시도 가능하게)
@@ -3810,7 +3814,7 @@ def final_check_leader(m, pre, tight_mode=False):
             t.get("buy_ratio",0) >= 0.53 and              # 매수비 53% 이상 (0.57→0.53 완화)
             t.get("krw_per_sec",0) >= 10_000 and          # 거래속도 10,000원/초 이상 (14K→10K 완화)
             ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
-            ob.get("spread",99) <= 2.2 and                # 스프레드 2.2% (2.0→2.2 완화)
+            ob.get("spread",99) <= 1.2 and                # 스프레드 1.2% (✅ 크리티컬: 2.2→1.2 슬리피지 방지)
             abs(price_change) >= 0.0015):                 # ★ 최소 0.15% 가격 변동 (0.3→0.15 완화)
 
             return {
