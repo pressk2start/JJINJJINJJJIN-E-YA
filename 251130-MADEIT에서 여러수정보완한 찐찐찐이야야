@@ -2688,9 +2688,12 @@ def probe_v2_prefilter(candles, orderbook):
         return False
 
     # 2) 스프레드 체크 (fetch_orderbook_cache 구조: {'spread', 'depth_krw', 'raw'})
-    # spread는 이미 %로 저장됨
+    # 📊 단위 명확화:
+    #   - orderbook["spread"]는 "퍼센트 포인트 값" (예: 0.70 = 0.70%)
+    #   - PROBE_V2_PREFILTER_SPREAD는 소수로 설정 (0.006 = 0.6%)
+    #   - 비교 시 ×100하여 통일: 0.006 × 100 = 0.6
     spread_pct = orderbook.get("spread", 999)
-    if spread_pct > (PROBE_V2_PREFILTER_SPREAD * 100):  # 0.002 → 0.2%
+    if spread_pct > (PROBE_V2_PREFILTER_SPREAD * 100):  # 0.006 → 0.6%
         return False
 
     # bid/ask 확인 (optional, raw에서)
@@ -3317,9 +3320,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 📊 볼린저 밴드 횡보 필터 (변동성 낮은 장 회피)
     if len(c1) >= 20:
-        bb_upper, bb_middle, bb_lower = bollinger_bands(c1, period=20, std_mult=2.0)
-        if bb_upper and bb_middle and bb_lower:
-            bb_width = (bb_upper - bb_lower) / bb_middle if bb_middle > 0 else 0
+        bb = bollinger_bands(c1, period=20, std_mult=2.0)
+        if bb:
+            bb_width = bb["bandwidth"]
             if bb_width < 0.02:  # 폭 2% 미만 → 횡보장
                 return None  # 진입 스킵
 
@@ -4460,6 +4463,9 @@ def monitor_position(m,
                     pos_update["mae_pct"] = mae_pct
                     OPEN_POSITIONS[m] = pos_update
 
+            # 수익률 계산 (여러 블록에서 사용)
+            gain_from_entry = (curp / entry_price - 1.0)
+
             # 🛡️ 동적 수익 보호: 계단식 하한선 상향 (절대 하향 금지)
             if gain_from_entry >= 0.020:  # +2.0% 도달
                 breakeven_floor = max(breakeven_floor or 0.0, 0.010)  # 최소 +1.0% 보장
@@ -4517,7 +4523,6 @@ def monitor_position(m,
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
-            gain_from_entry = (curp / entry_price - 1.0)
 
             # === 📊 스캘프 vs 추세 분기: run_from_entry 기준 ===
             run_from_entry = (best / entry_price - 1.0)
