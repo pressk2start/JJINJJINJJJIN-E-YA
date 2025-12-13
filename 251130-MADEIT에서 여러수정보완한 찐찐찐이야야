@@ -1,5 +1,3 @@
-코드수정해봤어 크리티컬한것만봐줘 매수매도와 관련해서 수익률나는 더 좋은의견도있으면말해주고
-
 # -*- coding: utf-8 -*-
 import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random
 from datetime import datetime, timedelta, timezone
