@@ -711,19 +711,47 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
             vol_declining = (vol_recent < vol_prev * 0.7)  # 30% 이상 감소
         else:
             vol_declining = False
+
+        # ★★★ 추세-가속 모드 (Trend Boost): ADX 강할 때 BB 필터 우회 ★★★
+        adx_entry = adx_di(c1m, period=14)
+        trend_boost = False
+        if adx_entry:
+            adx_val = adx_entry.get("adx", 0)
+            plus_di = adx_entry.get("plus_di", 0)
+            minus_di = adx_entry.get("minus_di", 0)
+            # ADX > 25 & +DI 우위 >= 8 → 진짜 추세 돌파 (BB 상단 초과해도 진입 허용)
+            trend_boost = (adx_val > 25 and (plus_di - minus_di) >= 8)
+            if trend_boost:
+                print(f"[TREND_BOOST] {m} ADX={adx_val:.1f}, +DI-DI={plus_di-minus_di:.1f} → BB필터 우회")
+
     except Exception:
         vgap = egap = 0.0
         bb_exceed = False
         vol_declining = False
+        trend_boost = False
 
-    # ★ BB 상단 초과 or 거래량 둔화 → 완전 차단 (꼭지 추격 방지)
-    if bb_exceed or vol_declining:
-        reason = "BB상단초과" if bb_exceed else "거래량둔화"
-        print(f"[EXPANSION_END] {m} {reason} → 진입 완전 차단 (꼭지 추격 방지)")
-        tg_send_mid(f"⛔ {m} {reason} → 진입 차단")
+    # ★ BB 상단 초과 or 거래량 둔화 → 완전 차단 (단, 추세-가속 모드에서는 BB 우회)
+    if vol_declining:
+        # 거래량 둔화는 항상 차단 (추세 모드여도)
+        print(f"[EXPANSION_END] {m} 거래량둔화 → 진입 완전 차단")
+        tg_send_mid(f"⛔ {m} 거래량둔화 → 진입 차단")
         with _PENDING_LOCK:
             PENDING_ENTRY.discard(m)
         return
+    elif bb_exceed and not trend_boost:
+        # BB 초과는 추세-가속 모드가 아닐 때만 차단
+        print(f"[EXPANSION_END] {m} BB상단초과 → 진입 완전 차단 (꼭지 추격 방지)")
+        tg_send_mid(f"⛔ {m} BB상단초과 → 진입 차단")
+        with _PENDING_LOCK:
+            PENDING_ENTRY.discard(m)
+        return
+    elif bb_exceed and trend_boost:
+        # 추세-가속 모드 + BB 초과 → probe로 강등해서 진입 (손절 타이트하게)
+        if entry_mode == "confirm":
+            entry_mode = "probe"
+            entry_fraction = 0.10
+            mode_emoji = "🚀"  # 추세 부스트 진입
+            print(f"[TREND_BOOST_ENTRY] {m} BB초과지만 강추세 → probe로 진입 허용")
 
     # VWAP/EMA5 과열 → confirm→probe 강등
     if entry_mode == "confirm" and (vgap >= 0.018 or egap >= 0.022):
@@ -4860,8 +4888,13 @@ def monitor_position(m,
                             bw_expanding = (bb_prev and bb_stall["bandwidth"] > bb_prev["bandwidth"])  # 밴드 확장 중
                             band_walk_hold = (in_upper_zone and bw_expanding)
 
-                        # 3) 임펄스 타임락: 진입 후 최소 180초(3분)는 강제 보유 (너무 빠른 컷 방지)
-                        impulse_hold = (alive_sec < 180)
+                        # 3) 임펄스 타임락: 가변 대기시간 (기본 180초, 강추세 300초)
+                        # ADX > 25 & +DI 우위면 5분까지 연장 (강추세에서 더 오래 기다림)
+                        if adx_data and adx_data.get("adx", 0) > 25 and adx_data.get("plus_di", 0) > adx_data.get("minus_di", 0):
+                            patience_sec = 300  # 강추세: 5분
+                        else:
+                            patience_sec = 180  # 기본: 3분
+                        impulse_hold = (alive_sec < patience_sec)
 
                         # 4) EMA20 기울기 체크: 기울기 > 0 이면 아직 상승추세
                         ema20_stall = ema_last([c["trade_price"] for c in c1m_stall], 20)
@@ -4899,7 +4932,7 @@ def monitor_position(m,
                             if band_walk_hold:
                                 hold_reasons.append("밴드워크")
                             if impulse_hold:
-                                hold_reasons.append(f"초동보호({int(alive_sec)}s)")
+                                hold_reasons.append(f"초동보호({int(alive_sec)}/{patience_sec}s)")
                             if ema20_slope_hold:
                                 hold_reasons.append("EMA20↑")
                             if bb_contraction_hold:
