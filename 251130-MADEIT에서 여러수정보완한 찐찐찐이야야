@@ -4841,31 +4841,69 @@ def monitor_position(m,
                             t15_stall.get("krw_per_sec", 0) < 9000
                         )
 
-                        # ★ 부분청산 횟수 체크 (계속 횡보 대응)
-                        with _POSITION_LOCK:
-                            stall_partial_cnt = (OPEN_POSITIONS.get(m) or {}).get("stall_partial_cnt", 0)
+                        # ★★★ 추세 지속 예외 (continuation hold) ★★★
+                        # 1) ADX/DI 추세 필터: ADX > 20 & +DI 우위 >= 5 → 강한 추세 중
+                        adx_data = adx_di(c1m_stall, period=14)
+                        adx_trend_hold = False
+                        if adx_data:
+                            adx_val = adx_data.get("adx", 0)
+                            plus_di = adx_data.get("plus_di", 0)
+                            minus_di = adx_data.get("minus_di", 0)
+                            adx_trend_hold = (adx_val > 20 and (plus_di - minus_di) >= 5)
 
-                        if under_structure and buyer_weak:
-                            # ★ 구조 + 매수세 둘 다 무너짐 → 전량 청산
-                            exit_reason = "PROBE_STALL_CUT"
-                            verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 구조이탈)"
-                            break
-                        elif stall_partial_cnt >= 2:
-                            # ★ 2회 부분청산 후에도 계속 정체 → 포기하고 전량 청산
-                            exit_reason = "PROBE_STALL_CUT"
-                            verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 2회 축소 후 지속)"
-                            break
+                        # 2) 상단밴드 워크 예외: 가격이 Upper~5MA 사이 + 밴드폭 확장 중
+                        bb_stall = bollinger_bands(c1m_stall, period=20, std_mult=2.0)
+                        bb_prev = bollinger_bands(c1m_stall[:-3], period=20, std_mult=2.0) if len(c1m_stall) > 23 else None
+                        band_walk_hold = False
+                        if bb_stall and ema5_stall:
+                            in_upper_zone = (ema5_stall <= curp <= bb_stall["upper"] * 1.005)  # 5MA~Upper 사이
+                            bw_expanding = (bb_prev and bb_stall["bandwidth"] > bb_prev["bandwidth"])  # 밴드 확장 중
+                            band_walk_hold = (in_upper_zone and bw_expanding)
+
+                        # 3) 임펄스 타임락: 진입 후 최소 60초는 강제 보유 (큰 초동 후 눌림 보호)
+                        impulse_hold = (alive_sec < 60)
+
+                        # ★ 추세 지속 신호 2개 이상이면 stall cut 보류
+                        trend_hold_cnt = sum([adx_trend_hold, band_walk_hold, impulse_hold])
+                        trend_hold = (trend_hold_cnt >= 1)  # 1개만 있어도 보류 (보수적)
+
+                        if trend_hold and not (under_structure and buyer_weak):
+                            # 추세 신호 있고 구조 완전 붕괴 아님 → 컷 보류, 계속 관찰
+                            hold_reasons = []
+                            if adx_trend_hold:
+                                hold_reasons.append("ADX추세")
+                            if band_walk_hold:
+                                hold_reasons.append("밴드워크")
+                            if impulse_hold:
+                                hold_reasons.append("초동보호")
+                            print(f"[TREND_HOLD] {m} 정체지만 추세 유지 신호: {', '.join(hold_reasons)} → 컷 보류")
+                            # 컷 안하고 continue
                         else:
-                            # ★ 구조 살아있음 → 30% 부분청산만 (재상승 기회 보존)
-                            ok, _, ex = safe_partial_sell(m, sell_ratio=0.3, reason=f"probe 정체 30% 축소 ({gain_now*100:+.2f}%)")
-                            if ok and ex > 0:
-                                stall_arm_ts = None  # 디바운스 리셋
-                                with _POSITION_LOCK:
-                                    p = OPEN_POSITIONS.get(m)
-                                    if p:
-                                        p["stall_partial_cnt"] = stall_partial_cnt + 1
-                                tg_send_mid(f"⚡ {m} 정체 중 구조 유지 → 30% 축소 ({stall_partial_cnt+1}/2)")
-                            # 전량 청산 안 함 → continue
+                            # ★ 부분청산 횟수 체크 (계속 횡보 대응)
+                            with _POSITION_LOCK:
+                                stall_partial_cnt = (OPEN_POSITIONS.get(m) or {}).get("stall_partial_cnt", 0)
+
+                            if under_structure and buyer_weak:
+                                # ★ 구조 + 매수세 둘 다 무너짐 → 전량 청산
+                                exit_reason = "PROBE_STALL_CUT"
+                                verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 구조이탈)"
+                                break
+                            elif stall_partial_cnt >= 2:
+                                # ★ 2회 부분청산 후에도 계속 정체 → 포기하고 전량 청산
+                                exit_reason = "PROBE_STALL_CUT"
+                                verdict = f"probe 정체 손절 ({gain_now*100:+.2f}%, 2회 축소 후 지속)"
+                                break
+                            else:
+                                # ★ 구조 살아있음 → 30% 부분청산만 (재상승 기회 보존)
+                                ok, _, ex = safe_partial_sell(m, sell_ratio=0.3, reason=f"probe 정체 30% 축소 ({gain_now*100:+.2f}%)")
+                                if ok and ex > 0:
+                                    stall_arm_ts = None  # 디바운스 리셋
+                                    with _POSITION_LOCK:
+                                        p = OPEN_POSITIONS.get(m)
+                                        if p:
+                                            p["stall_partial_cnt"] = stall_partial_cnt + 1
+                                    tg_send_mid(f"⚡ {m} 정체 중 구조 유지 → 30% 축소 ({stall_partial_cnt+1}/2)")
+                                # 전량 청산 안 함 → continue
                     # 수익 중이면 정체여도 유지 (추세 기다림)
 
             # === ★ 상승세 판정 (추매용) ===
