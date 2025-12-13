@@ -817,7 +817,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         f"• 신호가: {fmt_price(signal_price)}원\n"
         f"• 체결가: {fmt_price(avg_price)}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}% 비중)\n"
+        f"• 주문금액: {krw_to_use:,.0f}원\n"
         f"• 수량: {volume_filled:.6f}\n"
         f"• 손절가: {fmt_price(stop_price)}원\n"
         f"{link_for(m)}"
@@ -1044,7 +1044,7 @@ def close_auto_position(m, reason=""):
         tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
         return
 
-    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
+    # 🔇 자동청산 시도 알람 제거 (불필요한 노이즈)
 
     # ★ 찌꺼기 방지: 실제 계좌 보유량 재조회 (부동소수점 오차 제거)
     actual_vol = 0.0
@@ -1147,17 +1147,25 @@ def close_auto_position(m, reason=""):
 
 
         if sell_ok:
+            # 🔥 순손익 계산 (수수료 반영)
+            total_fees = (est_entry_value + est_exit_value) * FEE_RATE
+            net_profit = pl_value - total_fees
+
+            # 🔥 더 눈에 띄는 자동청산 알람 (순손익 강조)
+            profit_emoji = "🟢" if net_profit >= 0 else "🔴"
             tg_send(
-                f"💥 <b>자동청산</b> {m}\n"
+                f"{'='*30}\n"
+                f"{profit_emoji} <b>자동청산 완료</b> {m}\n"
+                f"{'='*30}\n"
+                f"💰 <b>순손익: {net_profit:+,.0f}원 ({ret_pct_after_fee:+.2f}%)</b>\n"
+                f"\n"
                 f"• 사유: {reason}\n"
                 f"• 매수평단: {fmt_price(entry_price)}원\n"
-                f"• 실매도가(평균): {fmt_price(exit_price_used)}원\n"
-                f"• 수익률(수수료후): {ret_pct_after_fee:+.2f}%\n"
-                f"\n"
-                f"• 요청 수량: {vol:.6f}\n"
-                f"• 체결 수량: {executed_vol:.6f}\n"
+                f"• 실매도가: {fmt_price(exit_price_used)}원\n"
+                f"• 체결수량: {executed_vol:.6f}\n"
                 f"• 매수금액: {est_entry_value:,.0f}원\n"
                 f"• 청산금액: {est_exit_value:,.0f}원\n"
+                f"• 수수료: {total_fees:,.0f}원\n"
                 f"{link_for(m)}"
             )
         else:
@@ -1275,10 +1283,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 실패: 포지션 없음/수량 0"
             print(msg)
             return False, msg, 0.0
-        # 🔁 기존: partial_done (1회) → partial_count (2회까지)
+        # 🔁 TP는 한도 미적용 (TP1/TP2 보장)
+        is_tp = str(reason).upper().startswith("TP")
         partial_count = int(pos.get("partial_count", 0))
-        if partial_count >= 2:
-            msg = f"[REMONITOR] {m} 부분청산 한도(2회) 초과 → 스킵"
+        if (not is_tp) and partial_count >= 2:
+            msg = f"[REMONITOR] {m} 부분청산 한도(2회) 초과 → 스킵 (TP는 제외)"
             print(msg)
             return False, msg, 0.0
         current_volume = pos["volume"]
@@ -1383,8 +1392,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
                     pos2["volume"] = remaining_volume
-                    # 🔁 카운터 증가 + 하위 호환(partial_done 유지)
-                    pos2["partial_count"] = int(pos2.get("partial_count", 0)) + 1
+                    # 🔁 TP는 카운트 제외 (TP1/TP2가 정체 부분익절로 막히는 것 방지)
+                    if not is_tp:
+                        pos2["partial_count"] = int(pos2.get("partial_count", 0)) + 1
                     pos2["partial_done"] = True  # 하위 호환성 유지
                 LAST_EXIT_ATTEMPT.pop(m, None)  # ★ 쿨다운 초기화
 
@@ -4494,14 +4504,14 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
-            # === PROBE 미세익절: +0.25% 찍고 밀리면 즉시 본절-소익 확정 (완화) ===
+            # === PROBE 미세익절: +0.25% 찍고 밀리면 즉시 본절-소익 확정 (강화) ===
             with _POSITION_LOCK:
                 pos_probe = (OPEN_POSITIONS.get(m) or {})
             if pos_probe.get("entry_mode") == "probe":
                 run_from_entry_probe = (best / entry_price - 1.0)
                 drop_from_best = (curp / best - 1.0)
-                # 프로브가 +0.25% 이상 찍고 -0.15% 되밀리면 즉시 청산 (0.10→0.25, 0.08→0.15 완화)
-                if run_from_entry_probe >= 0.0025 and drop_from_best <= -0.0015:
+                # 프로브가 +0.25% 이상 찍고 -0.10% 되밀리면 즉시 청산 (0.15→0.10 강화)
+                if run_from_entry_probe >= 0.0025 and drop_from_best <= -0.0010:
                     exit_reason = "PROBE_MICRO_PROFIT"
                     verdict = f"probe 미세익절 (고점 {run_from_entry_probe*100:.2f}%, 현재 {gain_from_entry*100:.2f}%)"
                     break
@@ -4527,17 +4537,36 @@ def monitor_position(m,
                 if fail_add:
                     # 추가분만 롤백 (부분 매도)
                     current_vol = p_check.get("volume", 1e-12)
+                    current_entry = p_check.get("entry_price", 1.0)
+                    current_adds = p_check.get("adds", 0)
+
                     rollback_ratio = min(1.0, last_add_vol / max(current_vol, 1e-12))
                     ok_rb, _, exec_rb = safe_partial_sell(m, sell_ratio=rollback_ratio, reason="추매 실패 롤백")
 
                     if ok_rb and exec_rb > 0:
                         print(f"[ADD_ROLLBACK] {m} 추매 검증 실패 → {exec_rb:.6f} 롤백")
-                        # 롤백 완료 표시 (재롤백 방지)
+                        # 🔁 추매 롤백 완전 원복 (adds/entry_price/last_add 전부 복구)
                         with _POSITION_LOCK:
                             q = OPEN_POSITIONS.get(m)
                             if q:
+                                # 추매 카운트 원복
+                                q["adds"] = max(0, current_adds - 1)
+
+                                # 평단 원복 (역가중평균 계산)
+                                # 기존: new_entry = (old_entry * old_vol + add_price * add_vol) / new_vol
+                                # 역산: old_entry = (new_entry * new_vol - add_price * add_vol) / old_vol
+                                vol_before_add = current_vol - last_add_vol
+                                if vol_before_add > 1e-8:
+                                    restored_entry = (current_entry * current_vol - last_add_px * last_add_vol) / vol_before_add
+                                    q["entry_price"] = max(1.0, restored_entry)  # 음수/0 방지
+
+                                # 추매 메타 초기화 (재검증 방지)
                                 q["last_add_volume"] = 0.0
+                                q["last_add_price"] = 0.0
+                                q["last_add_ts"] = 0.0
+
                                 OPEN_POSITIONS[m] = q
+                                print(f"[ADD_ROLLBACK] {m} 상태 완전 원복: adds={q['adds']}, entry={q['entry_price']:.1f}")
 
             # === ★ 공통 STALL(정체) 감지 ===
             # 최근 0~5초 vs 5~20초 비교 + 신고점 정지 시간
@@ -4902,11 +4931,25 @@ def monitor_position(m,
             # ⑤ 트레일링 스탑 (고점 대비 0.5%) — '신고점 갱신' 시만 상향
             if trail_armed and best > prev_best:
                 trail_stop = max(trail_stop, best * 0.995)
+
+            # 🔒 트레일 스탑 디바운스 (일시적 되밀림 허위 청산 방지)
             if trail_armed and curp <= trail_stop:
-                exit_reason = "TRAIL_EXIT"
-                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt_price(trail_stop)}원) 터치 → 청산(대기)")
-                verdict = "TRAIL_EXIT"
-                break
+                if stop_first_seen_ts == 0.0:
+                    stop_first_seen_ts = time.time()
+                    stop_hits = 1
+                else:
+                    stop_hits += 1
+                # EXIT_DEBOUNCE_SEC(6초) 경과 OR EXIT_DEBOUNCE_N(2회) 연속 히트
+                if (time.time() - stop_first_seen_ts) >= EXIT_DEBOUNCE_SEC or stop_hits >= EXIT_DEBOUNCE_N:
+                    exit_reason = "TRAIL_EXIT"
+                    tg_send_mid(f"📉 {m} 트레일링 스탑({fmt_price(trail_stop)}원) 확정 청산")
+                    verdict = "TRAIL_EXIT"
+                    break
+            else:
+                # 스탑 위로 복귀 → 디바운스 리셋
+                if trail_armed:
+                    stop_first_seen_ts = 0.0
+                    stop_hits = 0
 
 
             # ⑥ 재진입은 remonitor_until_close()가 청산 후 처리하므로 여기서는 불필요
@@ -4950,24 +4993,24 @@ def monitor_position(m,
                               ctx_thr=CTX_EXIT_THRESHOLD)
 
         # ===========================================
-        # 끝알람 / 재모니터링 알림 활성화
-        #  (실전 감시력 향상)
+        # 🔇 끝알람 / 재모니터링 알림 제거 (불필요한 노이즈)
+        #  → 자동청산 완료 알람만 남김
         # ===========================================
-        if not reentry:
-            tg_send(
-                f"🔚 <b>끝알람</b> {m}\n"
-                f"• 판정: {verdict}\n"
-                f"• 권고: {action}\n"
-                f"• 근거: {rationale}\n"
-                f"• 수익률: {ret_pct:+.2f}%\n"
-                f"• 최대상승/최대하락: {maxrun:+.2f}% / {maxdd:+.2f}%\n"
-                f"{link_for(m)}"
-            )
-        else:
-            send_remonitor_alert(
-                m,
-                f"{verdict} | {action} | {rationale} | {ret_pct:+.2f}%"
-            )
+        # if not reentry:
+        #     tg_send(
+        #         f"🔚 <b>끝알람</b> {m}\n"
+        #         f"• 판정: {verdict}\n"
+        #         f"• 권고: {action}\n"
+        #         f"• 근거: {rationale}\n"
+        #         f"• 수익률: {ret_pct:+.2f}%\n"
+        #         f"• 최대상승/최대하락: {maxrun:+.2f}% / {maxdd:+.2f}%\n"
+        #         f"{link_for(m)}"
+        #     )
+        # else:
+        #     send_remonitor_alert(
+        #         m,
+        #         f"{verdict} | {action} | {rationale} | {ret_pct:+.2f}%"
+        #     )
 
         # ===========================================
         # 재모니터링 루프 시작
