@@ -189,7 +189,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
 PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "180")) # 프로브 관찰 시간 (✅ 개선: 120→180초, 횡보 후 급등 포착)
-PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.005"))  # 프로브 손절선 (-0.5%, 트레일링 우선)
+PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.003"))  # 프로브 손절선 (-0.3%, 손실 축소)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "1"))                    # 추매 최대 회수 (리스크 축소: 2→1회)
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
@@ -2266,6 +2266,24 @@ def micro_tape_stats_from_ticks_v2(ticks, sec,
     buy_value_ratio = (buy_val_w / total_val_w) if total_val_w > 0 else 0.0
     buy_vol_ratio = (buy_vol / total_vol) if total_vol > 0 else 0.0
 
+    # ★ 큰손 매수 감지 (Big Buy Detection)
+    # 1회 체결량이 평균의 3배 이상 = 기관/세력 매수 신호
+    avg_trade_val = total_val / n if n > 0 else 0
+    big_buy_count = 0
+    big_buy_total = 0.0
+    BIG_BUY_MULT = 3.0  # 평균 대비 3배 이상이면 큰손
+
+    for x in win:
+        if x.get("ask_bid") == "BID":
+            p = float(x.get("trade_price", 0.0))
+            v = float(x.get("trade_volume", 0.0))
+            pv = p * v
+            if avg_trade_val > 0 and pv >= avg_trade_val * BIG_BUY_MULT:
+                big_buy_count += 1
+                big_buy_total += pv
+
+    big_buy_detected = big_buy_count >= 1 and big_buy_total >= (total_val * 0.15)  # 큰손 매수가 전체의 15%+
+
     return {
         "n": n, "age": age, "rate": rate,
         "krw": krw_raw, "krw_per_sec": krw_per_sec,
@@ -2273,7 +2291,10 @@ def micro_tape_stats_from_ticks_v2(ticks, sec,
         "buy_value_ratio": buy_value_ratio,  # ★ 금액 가중 (핵심!)
         "buy_vol_ratio": buy_vol_ratio,
         "buy_ratio": buy_count_ratio,  # 호환성
-        "total_val": total_val, "total_vol": total_vol
+        "total_val": total_val, "total_vol": total_vol,
+        "big_buy_count": big_buy_count,  # ★ 큰손 매수 건수
+        "big_buy_total": big_buy_total,  # ★ 큰손 매수 총액
+        "big_buy_detected": big_buy_detected  # ★ 큰손 신호 감지 여부
     }
 
 
@@ -4577,14 +4598,17 @@ def monitor_position(m,
                 # 4) 매수비 체크: 금액가중(value-weighted) + 하이브리드 임계값 (밤사이 손실 방지)
                 #    - 기본: buy_value_ratio >= 0.58 AND buy_count_ratio >= 0.56
                 #    - 강유입: buy_value_ratio >= 0.64면 buy_count_ratio >= 0.53 허용
+                #    - 큰손매수: big_buy_detected면 buy_value_ratio >= 0.54 허용 (신규)
                 #    - 총거래대금: >= 1.5M KRW (저유동성 회피)
                 buy_val_ratio = t15_now.get("buy_value_ratio", 0.0)
                 buy_cnt_ratio = t15_now.get("buy_count_ratio", 0.0)
                 total_val = t15_now.get("total_val", 0.0)
+                big_buy = t15_now.get("big_buy_detected", False)  # ★ 큰손 매수 감지
 
                 buy_ok = (total_val >= 1_500_000) and (
                     (buy_val_ratio >= 0.58 and buy_cnt_ratio >= 0.56) or
-                    (buy_val_ratio >= 0.64 and buy_cnt_ratio >= 0.53)
+                    (buy_val_ratio >= 0.64 and buy_cnt_ratio >= 0.53) or
+                    (big_buy and buy_val_ratio >= 0.54 and buy_cnt_ratio >= 0.52)  # ★ 큰손 매수 시 완화
                 )
 
                 # 5) VWAP 과열 방지 (기존 가드 유지)
@@ -4618,8 +4642,9 @@ def monitor_position(m,
                                     "last_add_ts": time.time(),
                                 })
 
+                        big_buy_msg = "🐋 큰손매수!" if big_buy else ""
                         tg_send_mid(
-                            f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
+                            f"🔥 {m} 상승 확정 → probe ➜ confirm 전환 {big_buy_msg}\n"
                             f"추매 후 평단: {fmt_price(new_entry)}원\n"
                             f"(gain≥{ADD1_MIN_GAIN*100:.1f}%, "
                             f"buy_val={buy_val_ratio*100:.0f}%/cnt={buy_cnt_ratio*100:.0f}%, "
@@ -4906,8 +4931,19 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # === 🎯 TP0/TP1/TP2/TP3 사다리 익절 (소익 확보 + 스탑 잠금) ===
+            # === 🎯 TP_EARLY/TP0/TP1/TP2/TP3 사다리 익절 (소익 확보 + 스탑 잠금) ===
             run_from_entry = (best / entry_price - 1.0)
+
+            # TP_EARLY (+0.2%): 30% 선익절 (승률 극대화, 확실한 수익 확보)
+            # ✅ 신규: 작은 수익이라도 확실하게 챙기기
+            if cur_gain >= 0.002 and not pos_probe.get("tp_early_done", False):
+                ok, _, execd = safe_partial_sell(m, sell_ratio=0.30, reason="TP_EARLY +0.2% 선익절")
+                if ok and execd > 0:
+                    with _POSITION_LOCK:
+                        p = OPEN_POSITIONS.get(m, {}) or {}
+                        p["tp_early_done"] = True
+                        OPEN_POSITIONS[m] = p
+                    tg_send_mid(f"🎯 {m} TP_EARLY(+0.2%) → 30% 선익절 (승률↑)")
 
             # TP0 (+0.6%): 20% 익절 (소익 조기 확보, 러너 보존)
             # ✅ 개선: 30% → 20% (큰 상승 시 수익 극대화)
