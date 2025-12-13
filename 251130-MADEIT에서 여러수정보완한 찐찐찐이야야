@@ -1194,7 +1194,7 @@ def close_auto_position(m, reason=""):
 
             # 🔥 더 눈에 띄는 자동청산 알람 (순손익 강조)
             profit_emoji = "🟢" if net_profit >= 0 else "🔴"
-            tg_send(
+            alarm_ok = tg_send(
                 f"{'='*30}\n"
                 f"{profit_emoji} <b>자동청산 완료</b> {m}\n"
                 f"{'='*30}\n"
@@ -1209,6 +1209,11 @@ def close_auto_position(m, reason=""):
                 f"• 수수료: {total_fees:,.0f}원\n"
                 f"{link_for(m)}"
             )
+            # 🔔 알람 전송 상태 로깅 (디버깅용)
+            if alarm_ok:
+                print(f"[AUTO_ALARM_OK] {m} 자동청산 완료 알람 전송 성공 (사유: {reason})")
+            else:
+                print(f"[AUTO_ALARM_FAIL] ⚠️ {m} 자동청산 완료 알람 전송 실패 (사유: {reason}) - Telegram API 오류 가능성")
         else:
             tg_send_mid(
                 f"⚠️ <b>자동청산 주문 미체결/실패</b> {m}\n"
@@ -1453,7 +1458,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         # 부분청산 금액 계산
         partial_sell_krw = avg_sell_price * executed if avg_sell_price > 0 else 0.0
 
-        tg_send(
+        alarm_ok = tg_send(
             f"🎯 <b>부분 청산</b> {m}\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 체결가: {fmt_price(avg_sell_price)}원\n"
@@ -1462,6 +1467,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"• 체결 수량: {executed:.6f}\n"
             f"• 체결 금액: {partial_sell_krw:,.0f}원\n"
         )
+        # 🔔 알람 전송 상태 로깅 (디버깅용)
+        if alarm_ok:
+            print(f"[PARTIAL_ALARM_OK] {m} 부분청산 알람 전송 성공 (사유: {reason})")
+        else:
+            print(f"[PARTIAL_ALARM_FAIL] ⚠️ {m} 부분청산 알람 전송 실패 (사유: {reason}) - Telegram API 오류 가능성")
 
         return True, msg, executed
 
@@ -5159,9 +5169,12 @@ def monitor_position(m,
                 with _POSITION_LOCK:
                     still_open = m in OPEN_POSITIONS and OPEN_POSITIONS[m].get("volume", 0) > 0
                 if still_open:
+                    print(f"[EXIT_TRIGGER] {m} 자동청산 시작 (사유: {exit_reason})")
                     close_auto_position(m, exit_reason)
+                else:
+                    print(f"[EXIT_SKIP] {m} 포지션 이미 청산됨 (사유: {exit_reason})")
         except Exception as _e:
-            print("[SAFE_EXIT_ERR]", _e)
+            print(f"[SAFE_EXIT_ERR] {m} 자동청산 예외: {_e}")
 
         if AUTO_TRADE and m in OPEN_POSITIONS and not reentry:
             remonitor_until_close(m, entry_price, pre, tight_mode)
