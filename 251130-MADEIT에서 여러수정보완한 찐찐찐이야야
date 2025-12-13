@@ -5570,6 +5570,7 @@ recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
 ALERT_TTL = 1800
+_ALERT_LOCK = threading.Lock()  # ★ 중복 알림 방지용 락
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
     ttl = ttl_sec or max(COOLDOWN, ALERT_TTL)
@@ -6078,9 +6079,12 @@ def main():
                         cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
                         continue
 
-                if m in recent_alerts and time.time(
-                ) - recent_alerts[m] < ALERT_TTL:
-                    continue
+                # ★ 중복 알림 방지 (락으로 원자적 체크+업데이트)
+                with _ALERT_LOCK:
+                    if m in recent_alerts and time.time() - recent_alerts[m] < ALERT_TTL:
+                        continue
+                    # 체크 통과 즉시 마킹 (다른 스레드가 중복 통과 못하게)
+                    recent_alerts[m] = time.time()
 
                 reason = "ign" if pre.get("ign_ok") else (
                     "early" if pre.get("early_ok") else
@@ -6089,7 +6093,6 @@ def main():
                     continue
 
                 last_signal_at[m] = time.time()
-                recent_alerts[m] = time.time()
                 last_price_at_alert[m] = pre['price']
                 last_reason[m] = reason
 
