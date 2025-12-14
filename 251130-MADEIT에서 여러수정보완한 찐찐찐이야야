@@ -4119,9 +4119,10 @@ def final_check_leader(m, pre, tight_mode=False):
                 is_long_body = (body >= 1.10 * atr)  # 0.80→1.10 (더 확실한 장대양봉만)
                 is_upper_wick = (upper_wick >= 0.60 * max(body, 1e-8))  # 0.40→0.60 (꼬리 큰 것만)
 
-                # 꼭지 신호 종합
-                if (is_vwap_hot or is_long_body or is_upper_wick or is_decel):
-                    cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
+                # 꼭지 신호 종합 (2개 이상 동시 충족 시에만 차단)
+                peak_count = sum([is_vwap_hot, is_long_body, is_upper_wick, is_decel])
+                if peak_count >= 2:
+                    cut("PEAK_CHASE", f"{m} anti-peak {peak_count}개 (vwap={is_vwap_hot}, body={is_long_body}, wick={is_upper_wick}, decel={is_decel})")
                     return None
 
             # ★★★ 추격 차단 필터 (친구 조언) - 완화 버전 ★★★
