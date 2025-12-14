@@ -5180,7 +5180,7 @@ def monitor_position(m,
                     if gain_now <= PROBE_BREAKEVEN_EXIT:  # -0.3% 이하면 청산
                         exit_reason = "PROBE_TIMEOUT_CUT"
                         verdict = "probe 타임아웃 손절"
-                        FAILED_TRADE_AT[m] = time.time()  # ★ 실패 기록 (10분 쿨다운)
+                        FAILED_TRADE_AT[m] = {"ts": time.time(), "price": best}  # ★ 실패 기록 (신고가 돌파 시 해제)
                         break
 
                 # ★ 정체 청산: 구조까지 무너졌을 때만 (VWAP/EMA/매수세 동시 확인)
@@ -5397,7 +5397,7 @@ def monitor_position(m,
                         if stall_age >= 10.0:
                             exit_reason = "STALL_FULL_EXIT"
                             verdict = "정체 지속 전량 청산"
-                            FAILED_TRADE_AT[m] = time.time()  # ★ 실패 기록 (10분 쿨다운)
+                            FAILED_TRADE_AT[m] = {"ts": time.time(), "price": best}  # ★ 실패 기록 (신고가 돌파 시 해제)
                             break
 
 
@@ -5866,8 +5866,8 @@ last_reason = {}
 ALERT_TTL = 1800
 
 # ★★★ 실패 거래 쿨다운 (TIMEOUT/STALL 후 재진입 방지)
-FAILED_TRADE_AT = {}  # {market: timestamp}
-FAILURE_COOLDOWN_SEC = 600  # 10분 쿨다운
+FAILED_TRADE_AT = {}  # {market: {"ts": timestamp, "price": exit_price}}
+FAILURE_COOLDOWN_SEC = 600  # 10분 쿨다운 (단, 신고가 돌파하면 해제)
 _ALERT_LOCK = threading.Lock()  # ★ 중복 알림 방지용 락
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
@@ -5908,10 +5908,19 @@ def cooldown_ok(market, price=None, reason=None):
     now = time.time()
     last = last_signal_at.get(market, 0)
 
-    # ★★★ 실패 거래 쿨다운 체크 (TIMEOUT/STALL 후 10분간 재진입 금지)
-    last_fail = FAILED_TRADE_AT.get(market, 0)
-    if (now - last_fail) < FAILURE_COOLDOWN_SEC:
-        return False
+    # ★★★ 실패 거래 쿨다운 체크 (TIMEOUT/STALL 후 10분간 재진입 금지, 단 신고가 돌파 시 해제)
+    fail_info = FAILED_TRADE_AT.get(market)
+    if fail_info:
+        fail_ts = fail_info.get("ts", 0)
+        fail_price = fail_info.get("price", 0)
+        # 10분 이내이고, 현재가가 실패 당시 가격보다 낮으면 차단
+        if (now - fail_ts) < FAILURE_COOLDOWN_SEC:
+            if not price or price <= fail_price * 1.005:  # 0.5% 이상 신고가 돌파해야 해제
+                return False
+            else:
+                # 신고가 돌파! 쿨다운 해제
+                FAILED_TRADE_AT.pop(market, None)
+                print(f"[FAIL_COOLDOWN_CLEAR] {market} 신고가 돌파 ({price:.0f} > {fail_price:.0f}) → 쿨다운 해제")
 
     # ✅ 시간대별 동적 쿨다운 적용
     cooldown = get_cooldown_sec(market)
