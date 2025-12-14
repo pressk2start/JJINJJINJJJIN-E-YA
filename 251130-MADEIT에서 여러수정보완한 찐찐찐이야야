@@ -2054,6 +2054,11 @@ def now_kst():
 def now_kst_str():
     return now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
 
+def near_minute_edge(sec=8):
+    """분봉 경계 체크: 분봉 바뀌는 전후 sec초 이내인지"""
+    s = now_kst().second
+    return (s <= sec) or (s >= 60 - sec)
+
 # =========================
 # 🔥 시간대별 스캔 간격
 # =========================
@@ -4182,6 +4187,26 @@ def final_check_leader(m, pre, tight_mode=False):
 
     # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
+        # ★★★ 분봉 경계 가드: 분봉 바뀌는 전후 8초는 probe 스킵 (휩쏘 방지)
+        if near_minute_edge(8):
+            cut("MINUTE_EDGE", f"{m} 분봉경계 8초 → probe 스킵")
+            return None
+
+        # ★★★ 역추세 probe 차단: -DI 우세 + PSAR 하락이면 probe 안 함
+        c1_probe = get_minutes_candles(1, m, 20)
+        if c1_probe and len(c1_probe) >= 14:
+            adx_probe = adx_di(c1_probe, 14)
+            psar_probe = parabolic_sar(c1_probe)
+            if adx_probe and psar_probe:
+                plus_di = adx_probe.get("plus_di", 0)
+                minus_di = adx_probe.get("minus_di", 0)
+                adx_val = adx_probe.get("adx", 0)
+                is_downtrend = not psar_probe.get("is_uptrend", True)
+                # ADX >= 18 & -DI가 +DI보다 3 이상 우위 & PSAR 하락 → 역추세
+                if adx_val >= 18 and (minus_di - plus_di) >= 3 and is_downtrend:
+                    cut("PROBE_COUNTERTREND", f"{m} -DI우위({minus_di:.0f}>{plus_di:.0f}) & PSAR↓ → 역추세 probe 차단")
+                    return None
+
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
