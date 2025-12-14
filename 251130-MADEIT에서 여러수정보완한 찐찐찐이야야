@@ -4093,6 +4093,43 @@ def final_check_leader(m, pre, tight_mode=False):
                     cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
                     return None
 
+            # ★★★ 추격 차단 필터 (친구 조언) ★★★
+            # (1) EMA5 괴리 과다 차단: |가격-EMA5| >= 1.2%
+            ema5_val = ema_last([c["trade_price"] for c in c1_now], 5)
+            if ema5_val and ema5_val > 0:
+                ema5_gap = abs(cur_price / ema5_val - 1.0)
+                if ema5_gap >= 0.012:  # 1.2% 이상 괴리
+                    cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.2% → 추격 차단")
+                    return None
+
+            # (2) 연속 양봉 과열 차단: 5봉 이상 연속 양봉
+            green_streak = 0
+            for c in reversed(c1_now[-7:]):
+                if c["trade_price"] > c["opening_price"]:
+                    green_streak += 1
+                else:
+                    break
+            if green_streak >= 5:
+                cut("LATE_CHASE_STREAK", f"{m} 연속 양봉 {green_streak}개 >= 5 → 소진 구간")
+                return None
+
+            # (3) 거래량 피크 후 감소 차단: 최근 5봉 중 피크 대비 현재 60% 미만
+            recent_vols = [c["candle_acc_trade_volume"] for c in c1_now[-5:]]
+            if len(recent_vols) >= 3:
+                peak_vol = max(recent_vols[:-1]) if len(recent_vols) > 1 else recent_vols[0]
+                cur_vol = recent_vols[-1]
+                if peak_vol > 0 and cur_vol < peak_vol * 0.6:
+                    cut("LATE_CHASE_VOL", f"{m} 거래량 피크 후 감소 ({cur_vol/peak_vol*100:.0f}% < 60%) → 추격 차단")
+                    return None
+
+            # (4) 거래량 급증 후 3분 이내만 진입 허용 (피크 봉 위치 체크)
+            if len(recent_vols) >= 4:
+                peak_idx = recent_vols.index(max(recent_vols))  # 피크 봉 인덱스 (0=가장 과거, -1=현재)
+                bars_since_peak = len(recent_vols) - 1 - peak_idx
+                if bars_since_peak >= 3:  # 피크가 3봉 이상 전이면 늦음
+                    cut("LATE_CHASE_TIME", f"{m} 거래량 피크가 {bars_since_peak}봉 전 → 3분 초과 추격 차단")
+                    return None
+
     # === ★★ CONFIRM 음봉/상단꼬리 추가 필터 (confirm 전용 안전장치) ===
     if pre.get("entry_mode") == "confirm":
         c1_check = get_minutes_candles(1, m, 3)
@@ -6284,12 +6321,33 @@ def main():
                 # 동적 손절가
                 dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
 
+                # ★ 추가 체크 정보 계산 (디버깅용)
+                try:
+                    cur_p = pre['price']
+                    ema5_chk = ema_last([c["trade_price"] for c in c1], 5) if len(c1) >= 5 else None
+                    ema5_gap_pct = ((cur_p / ema5_chk - 1) * 100) if ema5_chk else 0
+                    green_cnt = 0
+                    for c in reversed(c1[-7:]):
+                        if c["trade_price"] > c["opening_price"]:
+                            green_cnt += 1
+                        else:
+                            break
+                    recent_vols = [c["candle_acc_trade_volume"] for c in c1[-5:]]
+                    peak_bars_ago = 0
+                    if len(recent_vols) >= 2:
+                        peak_idx = recent_vols.index(max(recent_vols))
+                        peak_bars_ago = len(recent_vols) - 1 - peak_idx
+                    chk_info = f"EMA5+{ema5_gap_pct:.1f}% | 양봉{green_cnt}연 | 피크{peak_bars_ago}봉전"
+                except Exception:
+                    chk_info = ""
+
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
                     f"💵 <b>현재가</b> {fmt_price(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
                     f"🧯 손절가: {fmt_price(dyn_stop)}원 (동적SL {eff_sl_pct*100:.2f}%)\n"
+                    f"🔍 체크: {chk_info}\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
 
