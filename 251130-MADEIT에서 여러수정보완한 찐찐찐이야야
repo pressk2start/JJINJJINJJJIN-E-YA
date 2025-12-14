@@ -632,8 +632,8 @@ def final_price_guard(m, initial_price, max_drift=0.018):
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
-            print(f"[GUARD] {m} 티커 조회 실패 → 가드 스킵")
-            return True, initial_price
+            print(f"[GUARD] {m} 티커 조회 실패 → 진입 차단 (fail-closed)")
+            return False, initial_price
 
         current_price = js[0].get("trade_price", initial_price)
         drift = (current_price / initial_price - 1.0)
@@ -1198,6 +1198,7 @@ def add_auto_position(m, cur_price, override_krw=None):
                 msg = f"[AUTO_ADD] {m} 추매 체결 0 → 무시"
                 print(msg)
                 tg_send(f"⚠️ {msg}")
+                _clear_adding()
                 return False, None
 
         except requests.HTTPError as e:
