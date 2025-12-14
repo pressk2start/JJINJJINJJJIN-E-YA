@@ -757,7 +757,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         if len(c1m) >= 4:
             vol_recent = sum(c["candle_acc_trade_volume"] for c in c1m[-2:]) / 2  # 최근 2봉 평균
             vol_prev = sum(c["candle_acc_trade_volume"] for c in c1m[-4:-2]) / 2  # 직전 2봉 평균
-            vol_declining = (vol_recent < vol_prev * 0.7)  # 30% 이상 감소
+            vol_declining = (vol_recent < vol_prev * 0.5)  # 50% 이상 감소로 완화 (2차 급등 허용)
         else:
             vol_declining = False
 
@@ -781,13 +781,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         adx_entry = None  # ★ 크리티컬: 예외 시 명시적 초기화 (NameError 방지)
 
     # ★ 초강추세 판정 (거래량둔화도 우회할 정도로 강한 추세)
-    # ADX > 30 & +DI 우위 >= 12 → "거래량 잠깐 줄어도 괜찮은" 수준
+    # ADX > 25 & +DI 우위 >= 8 → 완화 (2차 급등 잡기 위해)
     super_trend_boost = False
     if adx_entry:
         adx_val = adx_entry.get("adx", 0)
         plus_di = adx_entry.get("plus_di", 0)
         minus_di = adx_entry.get("minus_di", 0)
-        super_trend_boost = (adx_val > 30 and (plus_di - minus_di) >= 12)
+        super_trend_boost = (adx_val > 25 and (plus_di - minus_di) >= 8)  # 30→25, 12→8 완화
         if super_trend_boost and vol_declining:
             print(f"[SUPER_TREND] {m} ADX={adx_val:.1f}, +DI-DI={plus_di-minus_di:.1f} → 거래량둔화 우회")
 
