@@ -656,7 +656,7 @@ def final_price_guard(m, initial_price, max_drift=0.018):
 
     except Exception as e:
         print(f"[GUARD_ERR] {m}: {e}")
-        return True, initial_price
+        return False, initial_price  # ★ fail-closed: 네트워크 오류 시 진입 차단 (추격 방지)
 
 # =========================
 # 🔥 자동 매수 진입
@@ -1088,11 +1088,18 @@ def add_auto_position(m, cur_price, override_krw=None):
                 pos2["adding"] = False
         return False, None
 
+    # ★ adding 플래그 해제 헬퍼 (조기 리턴 시 반드시 호출)
+    def _clear_adding():
+        with _POSITION_LOCK:
+            p = OPEN_POSITIONS.get(m)
+            if p: p["adding"] = False
+
     # ★ 잔고 사용 전역 락 (동시성 경합 방지)
     with _FUNDS_LOCK:
         accounts = get_account_info()
         if not accounts:
             print("[AUTO_ADD] 계좌 조회 실패")
+            _clear_adding()
             return False, None
 
         krw_bal = 0.0
@@ -1111,6 +1118,7 @@ def add_auto_position(m, cur_price, override_krw=None):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
                 LAST_EXIT_AT[m] = time.time()
+            _clear_adding()
             return False, None
 
         # ★ 헤드룸 적용: 수수료+여유 0.2% 차감 (0.7→0.2 찌꺼기 최소화)
@@ -1119,6 +1127,7 @@ def add_auto_position(m, cur_price, override_krw=None):
 
         if usable_krw < 6000:
             print(f"[AUTO_ADD] 가용 KRW 부족({usable_krw:,.0f}) → 추매 스킵")
+            _clear_adding()
             return False, None
 
         entry_price_old = pos["entry_price"]
@@ -1145,6 +1154,7 @@ def add_auto_position(m, cur_price, override_krw=None):
         # ★ 최소 금액 5100원 (수수료 헤드룸 포함)
         if krw_to_use < 5100:
             print(f"[AUTO_ADD] 주문 금액 {krw_to_use:,.0f}원 < 5,100원 → 스킵")
+            _clear_adding()
             return False, None
 
         krw_to_use = int(krw_to_use)
@@ -4527,10 +4537,11 @@ def postcheck_6s(m, pre):
 # =========================
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
+    cap = DYN_SL_MAX * 0.9  # 상한 캡
     if not atr or atr <= 0:
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT
 
-    pct = min(max((atr / max(entry_price, 1)) * ATR_MULT, DYN_SL_MIN), DYN_SL_MAX * 0.9)
+    pct = min(max((atr / max(entry_price, 1)) * ATR_MULT, DYN_SL_MIN), cap)
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
@@ -4539,6 +4550,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
+
+    # ★ 최종 재클램프 (곱셈 후 상한 초과 방지)
+    pct = min(max(pct, DYN_SL_MIN), cap)
 
     return entry_price * (1 - pct), pct
 
