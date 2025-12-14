@@ -3560,7 +3560,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         bb = bollinger_bands(c1, period=20, std_mult=2.0)
         if bb:
             bb_width = bb["bandwidth"]
-            if bb_width < 0.02:  # 폭 2% 미만 → 횡보장
+            if bb_width < 0.025:  # 폭 2.5% 미만 → 횡보장 (2%→2.5% 강화, 이평수렴 차단)
                 return None  # 진입 스킵
 
     # ★★★ 하락 추세 진입 차단: 종가가 EMA5 아래면 스킵 ★★★
