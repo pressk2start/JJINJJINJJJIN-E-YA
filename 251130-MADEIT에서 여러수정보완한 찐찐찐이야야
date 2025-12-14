@@ -6021,6 +6021,8 @@ def main():
             shard = mkts_all[start:end]
             if len(shard) < SHARD_SIZE:
                 shard += mkts_all[:(SHARD_SIZE - len(shard))]
+            # ★ 중복 제거 (shard 채우기에서 같은 코인이 두 번 들어갈 수 있음)
+            shard = list(dict.fromkeys(shard))
             _cursor = (end) % len(mkts_all)
 
             obc = fetch_orderbook_cache(shard)
