@@ -4154,13 +4154,13 @@ def final_check_leader(m, pre, tight_mode=False):
             #         cut("LATE_CHASE_VOL", f"{m} 거래량 피크 후 감소 → 추격 차단")
             #         return None
 
-            # (4) 거래량 급증 후 5분 이내만 진입 허용 (3분→5분 완화)
-            recent_vols = [c["candle_acc_trade_volume"] for c in c1_now[-6:]]  # 6봉으로 확장
-            if len(recent_vols) >= 5:
+            # (4) 거래량 급증 후 7분 이내만 진입 허용 (5분→7분 완화)
+            recent_vols = [c["candle_acc_trade_volume"] for c in c1_now[-8:]]  # 8봉으로 확장
+            if len(recent_vols) >= 6:
                 peak_idx = recent_vols.index(max(recent_vols))
                 bars_since_peak = len(recent_vols) - 1 - peak_idx
-                if bars_since_peak >= 5:  # 피크가 5봉 이상 전이면 늦음
-                    cut("LATE_CHASE_TIME", f"{m} 거래량 피크가 {bars_since_peak}봉 전 → 5분 초과 추격 차단")
+                if bars_since_peak >= 7:  # 피크가 7봉 이상 전이면 늦음
+                    cut("LATE_CHASE_TIME", f"{m} 거래량 피크가 {bars_since_peak}봉 전 → 7분 초과 추격 차단")
                     return None
 
     # === ★★ CONFIRM 음봉/상단꼬리 추가 필터 (confirm 전용 안전장치) ===
