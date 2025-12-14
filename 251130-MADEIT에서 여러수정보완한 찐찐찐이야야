@@ -4207,17 +4207,6 @@ def final_check_leader(m, pre, tight_mode=False):
                     cut("PROBE_COUNTERTREND", f"{m} -DI우위({minus_di:.0f}>{plus_di:.0f}) & PSAR↓ → 역추세 probe 차단")
                     return None
 
-            # ★★★ 연속양봉 소진 필터: 4개 이상 연속 양봉이면 probe 스킵 (LAYER 케이스)
-            green_count = 0
-            for c in reversed(c1_probe[-6:]):
-                if c["trade_price"] > c["opening_price"]:
-                    green_count += 1
-                else:
-                    break
-            if green_count >= 4:
-                cut("PROBE_GREEN_STREAK", f"{m} 연속양봉 {green_count}개 → 소진구간 probe 스킵")
-                return None
-
             # ★★★ 거래량 클라이맥스 필터: 최근 20봉 중 최대 거래량 + 위꼬리면 probe 스킵
             last_c = c1_probe[-1]
             vol_list = [c["candle_acc_trade_volume"] for c in c1_probe[-20:]]
