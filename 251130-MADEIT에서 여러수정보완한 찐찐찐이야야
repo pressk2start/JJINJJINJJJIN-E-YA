@@ -1352,6 +1352,33 @@ def close_auto_position(m, reason=""):
     except Exception as e:
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+
+        # ★★★ 크리티컬: 400 에러 시 실제 잔량 확인 후 포지션 정리 ★★★
+        # "잔량 없는데 매도 시도" → 400 Bad Request → 무한 반복 방지
+        try:
+            accounts_err = get_account_info()
+            if accounts_err:
+                currency = m.split("-")[1] if "-" in m else ""
+                actual_vol_err = 0.0
+                for acc in accounts_err:
+                    if acc.get("currency") == currency:
+                        actual_vol_err = float(acc.get("balance", "0"))
+                        break
+
+                # 실제 잔량이 최소주문금액(5000원) 미만이면 포지션 완전 정리
+                cur_price_err = cur_price if cur_price > 0 else 1.0
+                dust_krw_err = actual_vol_err * cur_price_err
+
+                if dust_krw_err < 5000:
+                    print(f"[AUTO_ERR_CLEANUP] {m} 실제 잔량 {actual_vol_err:.8f} ({dust_krw_err:.0f}원) < 5000원 → 포지션 강제 정리")
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                        LAST_EXIT_AT[m] = time.time()
+                    tg_send_mid(f"🧹 {m} 잔량 부족으로 포지션 강제 정리 (실잔량: {dust_krw_err:.0f}원)")
+                    return  # 더 이상 재시도 안 함
+        except Exception as e2:
+            print(f"[AUTO_ERR_CLEANUP_FAIL] {m}: {e2}")
+
         # 🔒 실패 시 closing 해제 (재시도 가능하게)
         with _POSITION_LOCK:
             pos = OPEN_POSITIONS.get(m)
@@ -1561,6 +1588,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         calc_remaining = max(current_volume - executed, 0.0)
         remaining_volume = actual_remaining if actual_remaining > 0 else calc_remaining
         print(f"[PARTIAL_SELL] {m} 잔량: calc={calc_remaining:.8f}, actual={actual_remaining:.8f}, use={remaining_volume:.8f}")
+
+        # ★★★ 크리티컬: 잔량이 최소주문금액(5000원) 미만이면 완전 종료 처리 ★★★
+        # 이 체크 없으면 "팔 수 없는 찌꺼기" 포지션이 남아서 400 에러 반복
+        remaining_krw = remaining_volume * current_price if current_price > 0 else 0
+        if remaining_volume > 0 and remaining_krw < 5000:
+            print(f"[PARTIAL_SELL_DUST] {m} 잔량 {remaining_volume:.8f} ({remaining_krw:.0f}원) < 5000원 → 완전 종료 처리")
+            remaining_volume = 0  # 강제로 완전 종료
 
         if remaining_volume <= 0:
             with _POSITION_LOCK:                                 # ✅ 완전 종료
