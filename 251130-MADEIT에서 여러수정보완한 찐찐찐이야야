@@ -792,13 +792,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
             if bb_range > 0:
                 bb_percent_b = (current_price - bb["lower"]) / bb_range
 
-        # ★★★ 극단 과매수: BB %b > 0.95면 무조건 차단 (꼭대기 추격 방지) ★★★
-        if bb_percent_b > 0.95:
-            print(f"[EXTREME_OVERBOUGHT] {m} BB %b={bb_percent_b:.2f} > 0.95 → 꼭대기 추격 차단")
+        # ★★★ 극단 과매수: BB %b > 0.95 + 강추세 아니면 차단 ★★★
+        # (강추세=trend_boost면 밴드워크 가능 → 허용)
+        if bb_percent_b > 0.95 and not trend_boost:
+            print(f"[EXTREME_OVERBOUGHT] {m} BB %b={bb_percent_b:.2f} > 0.95 (약추세) → 꼭대기 추격 차단")
             tg_send_mid(f"🔥 {m} 극단 과매수(BB%b={bb_percent_b:.2f}) → 진입 차단")
             with _PENDING_LOCK:
                 PENDING_ENTRY.discard(m)
             return
+        elif bb_percent_b > 0.95 and trend_boost:
+            print(f"[BAND_WALK] {m} BB %b={bb_percent_b:.2f} but 강추세 → 밴드워크 허용")
 
         # ATR 대비 이격 체크
         atr_entry = atr14_from_candles(c1m, 14) if len(c1m) >= 14 else None
