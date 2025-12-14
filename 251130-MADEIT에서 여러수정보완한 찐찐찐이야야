@@ -1309,8 +1309,9 @@ def close_auto_position(m, reason=""):
         OPEN_POSITIONS[m] = pos
         LAST_EXIT_ATTEMPT[m] = now
 
-    # ★ 찌꺼기 방지: 실제 계좌 보유량 재조회 (부동소수점 오차 제거)
+    # ★ 찌꺼기 방지: 실제 계좌 보유량 + 평균매수가 재조회 (업비트 API 기준)
     actual_vol = 0.0
+    real_avg_buy_price = 0.0  # ★ 업비트 실제 평단
     try:
         accounts = get_account_info()
         if accounts:
@@ -1318,6 +1319,7 @@ def close_auto_position(m, reason=""):
             for acc in accounts:
                 if acc.get("currency") == currency:
                     actual_vol = float(acc.get("balance", "0"))
+                    real_avg_buy_price = float(acc.get("avg_buy_price", "0"))  # ★ 실제 평단
                     break
     except Exception as e:
         print(f"[AUTO] {m} 계좌 조회 실패: {e}")
@@ -1335,7 +1337,11 @@ def close_auto_position(m, reason=""):
             OPEN_POSITIONS.pop(m, None)
         return
 
-    entry_price = float(pos.get("entry_price", 0.0)) or 0.0
+    # ★ 평단: 업비트 실제 평단 우선, 없으면 포지션 기록 사용
+    pos_entry_price = float(pos.get("entry_price", 0.0)) or 0.0
+    entry_price = real_avg_buy_price if real_avg_buy_price > 0 else pos_entry_price
+    if real_avg_buy_price > 0 and abs(real_avg_buy_price - pos_entry_price) / max(pos_entry_price, 1) > 0.001:
+        print(f"[AUTO] {m} 평단 보정: 기록={pos_entry_price:.2f} → 실제={real_avg_buy_price:.2f}")
 
     # 현재가(청산 전 기준) 조회 - 공용 엔드포인트 사용 (서명 오버헤드 제거)
     try:
@@ -1624,8 +1630,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
     sell_volume = current_volume * sell_ratio
 
-    # ★ 부분청산 가드: 실제 잔량 재조회 및 과매도 방지 (금융사고 방지)
+    # ★ 부분청산 가드: 실제 잔량 + 평균매수가 재조회 (업비트 API 기준)
     actual_available = 0.0
+    real_avg_buy_price = 0.0  # ★ 업비트 실제 평단
     try:
         accounts = get_account_info()
         if accounts:
@@ -1633,6 +1640,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             for acc in accounts:
                 if acc.get("currency") == currency:
                     actual_available = float(acc.get("balance", "0"))
+                    real_avg_buy_price = float(acc.get("avg_buy_price", "0"))  # ★ 실제 평단
                     break
     except Exception as e:
         print(f"[PARTIAL_SELL] {m} 실제 잔량 조회 실패: {e}")
@@ -1739,21 +1747,44 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
-        # 부분청산 금액 계산
+        # ★★★ 부분청산 손익 계산 (업비트 실제 평단 기준) ★★★
         partial_sell_krw = avg_sell_price * executed if avg_sell_price > 0 else 0.0
+        partial_buy_krw = real_avg_buy_price * executed if real_avg_buy_price > 0 else 0.0
 
+        # 수익률 계산 (실제 평단 기준)
+        if real_avg_buy_price > 0:
+            partial_ret_pct = (avg_sell_price / real_avg_buy_price - 1) * 100
+        else:
+            partial_ret_pct = 0.0
+
+        # 수수료 계산 (매수+매도 0.05% × 2)
+        partial_fee = (partial_buy_krw + partial_sell_krw) * FEE_RATE
+
+        # 순손익 계산
+        partial_profit = partial_sell_krw - partial_buy_krw - partial_fee
+        partial_ret_after_fee = ((partial_sell_krw - partial_fee) / max(partial_buy_krw, 1) - 1) * 100 if partial_buy_krw > 0 else 0
+
+        # ★ 자동청산과 동일한 형식으로 알람
+        profit_emoji = "🟢" if partial_profit >= 0 else "🔴"
         alarm_ok = tg_send(
-            f"🎯 <b>부분 청산</b> {m}\n"
-            f"• 사유: {reason or '부분청산'}\n"
-            f"• 체결가: {fmt_price(avg_sell_price)}원\n"
-            f"• 잔여 수량: {remaining_volume:.6f}\n"
+            f"{'─'*25}\n"
+            f"{profit_emoji} <b>부분 청산</b> {m}\n"
+            f"{'─'*25}\n"
+            f"💰 <b>순손익: {partial_profit:+,.0f}원 ({partial_ret_after_fee:+.2f}%)</b>\n"
             f"\n"
-            f"• 체결 수량: {executed:.6f}\n"
-            f"• 체결 금액: {partial_sell_krw:,.0f}원\n"
+            f"• 사유: {reason or '부분청산'}\n"
+            f"• 매수평단: {fmt_price(real_avg_buy_price)}원\n"
+            f"• 실매도가: {fmt_price(avg_sell_price)}원\n"
+            f"• 체결수량: {executed:.6f}\n"
+            f"• 매수금액: {partial_buy_krw:,.0f}원\n"
+            f"• 청산금액: {partial_sell_krw:,.0f}원\n"
+            f"• 수수료: {partial_fee:,.0f}원\n"
+            f"• 잔여수량: {remaining_volume:.6f}\n"
+            f"{link_for(m)}"
         )
         # 🔔 알람 전송 상태 로깅 (디버깅용)
         if alarm_ok:
-            print(f"[PARTIAL_ALARM_OK] {m} 부분청산 알람 전송 성공 (사유: {reason})")
+            print(f"[PARTIAL_ALARM_OK] {m} 부분청산 알람 전송 성공 (사유: {reason}, 손익: {partial_profit:+,.0f}원)")
         else:
             print(f"[PARTIAL_ALARM_FAIL] ⚠️ {m} 부분청산 알람 전송 실패 (사유: {reason}) - Telegram API 오류 가능성")
 
