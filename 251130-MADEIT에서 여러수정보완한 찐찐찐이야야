@@ -1941,11 +1941,11 @@ TICKS_BUY_RATIO = 0.58  # 0.56 → 0.58 (초입 품질 향상)
 # 위험 관리 (스프레드)
 MAX_SPREAD_BASE = 0.70  # 단위: %, 0.70 = 0.70% (일반 신호)
 MAX_SPREAD_FAST = 1.00  # 단위: %, 1.00 = 1.00% (메가 브레이크아웃)
-MIN_DEPTH_KRW = 4_000_000  # 6M → 4M (FAKE_PUMP 완화 - 신호 확보)
+MIN_DEPTH_KRW = 3_000_000  # 4M → 3M (FAKE_PUMP 추가 완화 - 소형 알트 허용)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
-MIN_REAL_TRADES = 7  # 10 → 7 (FAKE_PUMP 완화 - 신호 확보)
+MIN_REAL_TRADES = 5  # 7 → 5 (FAKE_PUMP 추가 완화 - 신호 확보)
 MAX_FADE_RATIO = 0.70
 
 # 손절/모니터링
