@@ -792,6 +792,14 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
             if bb_range > 0:
                 bb_percent_b = (current_price - bb["lower"]) / bb_range
 
+        # ★★★ 극단 과매수: BB %b > 0.95면 무조건 차단 (꼭대기 추격 방지) ★★★
+        if bb_percent_b > 0.95:
+            print(f"[EXTREME_OVERBOUGHT] {m} BB %b={bb_percent_b:.2f} > 0.95 → 꼭대기 추격 차단")
+            tg_send_mid(f"🔥 {m} 극단 과매수(BB%b={bb_percent_b:.2f}) → 진입 차단")
+            with _PENDING_LOCK:
+                PENDING_ENTRY.discard(m)
+            return
+
         # ATR 대비 이격 체크
         atr_entry = atr14_from_candles(c1m, 14) if len(c1m) >= 14 else None
         atr_gap_ratio = (current_price - ema10_now) / atr_entry if (atr_entry and ema10_now and atr_entry > 0) else 0
