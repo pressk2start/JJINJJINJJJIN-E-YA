@@ -4207,6 +4207,29 @@ def final_check_leader(m, pre, tight_mode=False):
                     cut("PROBE_COUNTERTREND", f"{m} -DI우위({minus_di:.0f}>{plus_di:.0f}) & PSAR↓ → 역추세 probe 차단")
                     return None
 
+            # ★★★ 연속양봉 소진 필터: 4개 이상 연속 양봉이면 probe 스킵 (LAYER 케이스)
+            green_count = 0
+            for c in reversed(c1_probe[-6:]):
+                if c["trade_price"] > c["opening_price"]:
+                    green_count += 1
+                else:
+                    break
+            if green_count >= 4:
+                cut("PROBE_GREEN_STREAK", f"{m} 연속양봉 {green_count}개 → 소진구간 probe 스킵")
+                return None
+
+            # ★★★ 거래량 클라이맥스 필터: 최근 20봉 중 최대 거래량 + 위꼬리면 probe 스킵
+            last_c = c1_probe[-1]
+            vol_list = [c["candle_acc_trade_volume"] for c in c1_probe[-20:]]
+            max_vol = max(vol_list) if vol_list else 0
+            last_vol = last_c["candle_acc_trade_volume"]
+            upper_wick = last_c["high_price"] - max(last_c["trade_price"], last_c["opening_price"])
+            body_size = abs(last_c["trade_price"] - last_c["opening_price"])
+            # 최대 거래량의 80% 이상 + 위꼬리가 몸통보다 크면 클라이맥스
+            if last_vol >= max_vol * 0.8 and upper_wick > body_size * 0.5 and body_size > 0:
+                cut("PROBE_VOL_CLIMAX", f"{m} 거래량 클라이맥스 + 위꼬리 → probe 스킵")
+                return None
+
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
