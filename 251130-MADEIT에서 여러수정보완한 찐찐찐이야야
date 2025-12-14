@@ -395,6 +395,55 @@ def upbit_private_get(path, params=None, timeout=7):
                 raise
             time.sleep(0.25 * (2 ** attempt))
 
+def upbit_private_delete(path, params=None, timeout=7):
+    """DELETE 요청 (주문 취소용)"""
+    url = f"https://api.upbit.com{path}"
+    items = list(params.items()) if isinstance(params, dict) else (params or [])
+    for attempt in range(3):
+        headers = _make_auth_headers(items)
+        try:
+            _throttle()
+            with _session_lock:
+                r = SESSION.delete(url, headers=headers, params=items, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(0.25 * (2 ** attempt))
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body_txt = getattr(e.response, "text", "")
+            print(f"[UPBIT_DELETE_HTTPERROR] {path} {e} body={body_txt}")
+            if status == 401:
+                tg_send(f"❌ Upbit 401(DELETE) {path}\n{body_txt[:800]}")
+            if attempt == 2:
+                return None  # 취소 실패해도 매도는 진행
+            time.sleep(0.25 * (2 ** attempt))
+        except requests.RequestException as e:
+            print(f"[UPBIT_DELETE_REQERR] {path} {e}")
+            if attempt == 2:
+                return None
+            time.sleep(0.25 * (2 ** attempt))
+
+def cancel_open_orders(market: str):
+    """해당 마켓의 대기 중인 주문 모두 취소 (매도 전 잔금 잠김 방지)"""
+    try:
+        orders = upbit_private_get("/v1/orders", {"market": market, "state": "wait"})
+        if not orders:
+            return 0
+        cancelled = 0
+        for order in orders:
+            uuid = order.get("uuid")
+            if uuid:
+                result = upbit_private_delete("/v1/order", {"uuid": uuid})
+                if result:
+                    cancelled += 1
+                    print(f"[CANCEL_ORDER] {market} 대기주문 취소: {uuid}")
+        return cancelled
+    except Exception as e:
+        print(f"[CANCEL_ORDER_ERR] {market} {e}")
+        return 0
+
 def fmt_volume_for_api(x: float, dp: int = 8) -> str:
     """
     API 전송용 volume 포맷 (지수표기/반올림 방지)
@@ -1306,18 +1355,46 @@ def close_auto_position(m, reason=""):
     # ★ 최소 주문금액 체크 (5,000원 미만 시 거절 방지)
     estimated_order_krw = cur_price * vol
     if estimated_order_krw < 5000:
-        print(f"[AUTO] {m} 청산 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 → 주문 스킵")
-        tg_send_mid(f"⚠️ {m} 청산 불가: 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 (최소주문금액)")
-        # closing 플래그 해제
-        with _POSITION_LOCK:
-            pos = OPEN_POSITIONS.get(m)
-            if pos:
-                pos["closing"] = False
-        return
+        # ★★★ 실제 API 잔량 확인 후 유령 포지션 정리 ★★★
+        coin = m.replace("KRW-", "")
+        actual_vol = 0.0
+        try:
+            balances = upbit_private_get("/v1/accounts") or []
+            for b in balances:
+                if b.get("currency") == coin:
+                    actual_vol = float(b.get("balance", 0))
+                    break
+        except Exception as e:
+            print(f"[CLOSE] {m} 잔량 조회 실패: {e}")
+
+        actual_krw = actual_vol * cur_price
+        if actual_krw < 500:
+            # 실제 잔량이 500원 미만 → 유령 포지션 정리
+            print(f"[CLOSE_DUST] {m} 실제잔량 {actual_krw:.0f}원 < 500원 → 유령포지션 정리")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+                LAST_EXIT_AT[m] = time.time()
+            tg_send_mid(f"🧹 {m} 유령포지션 정리 (잔량 {actual_krw:.0f}원)")
+            return
+        else:
+            # 진짜 잔량은 있지만 5000원 미만 → 스킵
+            print(f"[AUTO] {m} 청산 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 → 주문 스킵")
+            tg_send_mid(f"⚠️ {m} 청산 불가: 예상금액 {estimated_order_krw:,.0f}원 < 5,000원 (최소주문금액)")
+            # closing 플래그 해제
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m)
+                if pos:
+                    pos["closing"] = False
+            return
 
     exit_price_used = cur_price  # 실제 체결가 성공 시 교체
     executed_vol = 0.0           # 실제 체결 수량
     sell_ok = False
+
+    # ★★★ 매도 전 대기주문 취소 (잔금 잠김 400에러 방지) ★★★
+    cancelled = cancel_open_orders(m)
+    if cancelled > 0:
+        print(f"[CLOSE] {m} 대기주문 {cancelled}건 취소 완료")
 
     try:
         res = place_market_sell(m, vol)
