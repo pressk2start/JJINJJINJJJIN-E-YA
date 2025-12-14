@@ -4102,15 +4102,16 @@ def final_check_leader(m, pre, tight_mode=False):
                     cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.2% → 추격 차단")
                     return None
 
-            # (2) 연속 양봉 과열 차단: 5봉 이상 연속 양봉
+            # (2) 연속 양봉 과열 차단: 5봉 이상 연속 양봉 + 모멘텀 둔화 시에만
+            # (강추세에서 연속 양봉은 정상이므로, 둔화 없으면 허용)
             green_streak = 0
             for c in reversed(c1_now[-7:]):
                 if c["trade_price"] > c["opening_price"]:
                     green_streak += 1
                 else:
                     break
-            if green_streak >= 5:
-                cut("LATE_CHASE_STREAK", f"{m} 연속 양봉 {green_streak}개 >= 5 → 소진 구간")
+            if green_streak >= 5 and is_decel:  # 연속 양봉 + 감속 시에만 차단
+                cut("LATE_CHASE_STREAK", f"{m} 연속 양봉 {green_streak}개 + 모멘텀 둔화 → 소진 구간")
                 return None
 
             # (3) 거래량 피크 후 감소 차단: 최근 5봉 중 피크 대비 현재 60% 미만
