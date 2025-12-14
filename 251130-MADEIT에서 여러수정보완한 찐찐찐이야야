@@ -5180,6 +5180,7 @@ def monitor_position(m,
                     if gain_now <= PROBE_BREAKEVEN_EXIT:  # -0.3% 이하면 청산
                         exit_reason = "PROBE_TIMEOUT_CUT"
                         verdict = "probe 타임아웃 손절"
+                        FAILED_TRADE_AT[m] = time.time()  # ★ 실패 기록 (10분 쿨다운)
                         break
 
                 # ★ 정체 청산: 구조까지 무너졌을 때만 (VWAP/EMA/매수세 동시 확인)
@@ -5396,6 +5397,7 @@ def monitor_position(m,
                         if stall_age >= 10.0:
                             exit_reason = "STALL_FULL_EXIT"
                             verdict = "정체 지속 전량 청산"
+                            FAILED_TRADE_AT[m] = time.time()  # ★ 실패 기록 (10분 쿨다운)
                             break
 
 
@@ -5862,6 +5864,10 @@ recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
 ALERT_TTL = 1800
+
+# ★★★ 실패 거래 쿨다운 (TIMEOUT/STALL 후 재진입 방지)
+FAILED_TRADE_AT = {}  # {market: timestamp}
+FAILURE_COOLDOWN_SEC = 600  # 10분 쿨다운
 _ALERT_LOCK = threading.Lock()  # ★ 중복 알림 방지용 락
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
@@ -5901,6 +5907,11 @@ def get_cooldown_sec(market: str) -> int:
 def cooldown_ok(market, price=None, reason=None):
     now = time.time()
     last = last_signal_at.get(market, 0)
+
+    # ★★★ 실패 거래 쿨다운 체크 (TIMEOUT/STALL 후 10분간 재진입 금지)
+    last_fail = FAILED_TRADE_AT.get(market, 0)
+    if (now - last_fail) < FAILURE_COOLDOWN_SEC:
+        return False
 
     # ✅ 시간대별 동적 쿨다운 적용
     cooldown = get_cooldown_sec(market)
