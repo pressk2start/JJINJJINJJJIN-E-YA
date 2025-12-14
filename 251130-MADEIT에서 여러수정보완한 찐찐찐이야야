@@ -6069,6 +6069,12 @@ def main():
                             trigger_type = "C_TREND"
 
                         if trigger_type:
+                            # ★ 중복 방지: recent_alerts 체크 (기존 로직과 충돌 방지)
+                            with _ALERT_LOCK:
+                                if m in recent_alerts and time.time() - recent_alerts[m] < ALERT_TTL:
+                                    continue
+                                recent_alerts[m] = time.time()
+
                             # 프로브 2.0 상태 추가
                             probe_v2_add_state(m, trigger_type)
 
