@@ -1024,10 +1024,22 @@ def add_auto_position(m, cur_price, override_krw=None):
             return False, None
 
         krw_bal = 0.0
+        actual_coin_vol = 0.0
+        currency = m.split("-")[1] if "-" in m else ""
         for a in accounts:
             if a.get("currency") == "KRW":
                 krw_bal = float(a.get("balance", "0"))
-                break
+            elif a.get("currency") == currency:
+                actual_coin_vol = float(a.get("balance", "0"))
+
+        # ★★★ 유령 포지션 방지: 실제 코인 잔량 체크 (추매 전 필수)
+        actual_coin_krw = actual_coin_vol * cur_price
+        if actual_coin_krw < 5000:
+            print(f"[AUTO_ADD_GHOST] {m} 실제 잔량 {actual_coin_vol:.8f} ({actual_coin_krw:.0f}원) < 5000원 → 유령포지션 정리")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+                LAST_EXIT_AT[m] = time.time()
+            return False, None
 
         # ★ 헤드룸 적용: 수수료+여유 0.2% 차감 (0.7→0.2 찌꺼기 최소화)
         SAFE_HEADROOM = 0.002
