@@ -4966,7 +4966,9 @@ def monitor_position(m,
             with _POSITION_LOCK:
                 pos = (OPEN_POSITIONS.get(m) or {}).copy()  # ✅ 안전 읽기
 
-            if pos.get("entry_mode") == "probe":
+            # ★★★ 진입 후 60초 이내 추매 금지 (고점 추격 추매 방지)
+            time_since_entry = time.time() - start_ts
+            if pos.get("entry_mode") == "probe" and time_since_entry >= 60:
                 # ★ v2: 현재시각 기준 + 금액가중 buy ratio (밤사이 손실 방지)
                 t15_now = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
                 t30_now = micro_tape_stats_from_ticks_v2(ticks, 30, use_now_anchor=True, winsor_p=0.95)
