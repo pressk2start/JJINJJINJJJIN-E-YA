@@ -5210,11 +5210,12 @@ def monitor_position(m,
                     verdict = f"스캘프 손절 (gain={gain_from_entry*100:.2f}%)"
                     break
 
-                # ⏰ 스캘프 타임아웃: 30초 내 목표 미달성 시 본전 근처면 청산
-                if alive_sec >= 30 and -0.002 <= gain_from_entry <= 0.002:
-                    exit_reason = "SCALP_TIMEOUT"
-                    verdict = f"스캘프 타임아웃 본전청산 (gain={gain_from_entry*100:.2f}%)"
-                    break
+                # ⏰ 스캘프 타임아웃: ★ 제거 - 시간만으로 손절 금지 (친구 조언)
+                # 30초는 너무 짧음. 가격 기반 손절만 사용.
+                # if alive_sec >= 30 and -0.002 <= gain_from_entry <= 0.002:
+                #     exit_reason = "SCALP_TIMEOUT"
+                #     verdict = f"스캘프 타임아웃 본전청산 (gain={gain_from_entry*100:.2f}%)"
+                #     break
 
                 # 스캘프 모드에서는 복잡한 상단추적 로직 스킵
                 continue
@@ -5355,12 +5356,22 @@ def monitor_position(m,
                     tg_send_mid(f"🔻 {m} {verdict}")
                     break
 
-            # (2) 시간 스탑 (재가속 실패)
-            if alive_sec >= 90 and t15["krw_per_sec"] < t30["krw_per_sec"]:
-                exit_reason = "TIME_STOP"
-                verdict = f"재가속 실패 시간 스탑 (90초+, t15={t15['krw_per_sec']:.0f} < t30={t30['krw_per_sec']:.0f})"
-                tg_send_mid(f"⏱️ {m} {verdict}")
-                break
+            # (2) 시간 스탑 (재가속 실패) - ★ 180초로 완화 + 구조 이탈 확인
+            if alive_sec >= 180 and t15["krw_per_sec"] < t30["krw_per_sec"]:
+                # ★ 추가 조건: 가격도 EMA5 아래여야 손절 (구조 이탈 확인)
+                try:
+                    c1m_ts = get_minutes_candles(1, m, 10)
+                    ema5_ts = ema_last([c["trade_price"] for c in c1m_ts], 5) if c1m_ts else None
+                    if ema5_ts and curp >= ema5_ts:
+                        # EMA5 위에 있으면 아직 구조 유지 → 스킵
+                        pass
+                    else:
+                        exit_reason = "TIME_STOP"
+                        verdict = f"재가속 실패 시간 스탑 (180초+, t15={t15['krw_per_sec']:.0f} < t30={t30['krw_per_sec']:.0f}, EMA5 이탈)"
+                        tg_send_mid(f"⏱️ {m} {verdict}")
+                        break
+                except Exception:
+                    pass  # 에러 시 손절 스킵
 
             # (3) VWAP 과열→복귀 익절 (상단 회수)
             try:
