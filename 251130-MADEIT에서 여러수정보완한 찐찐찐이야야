@@ -596,15 +596,71 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     return max(qty, 0.0)
 
 
+# === 시장가 미지원 마켓 캐시 (403 not_supported_ord_type 대응) ===
+MARKET_NO_PRICE = {}  # {market: expire_timestamp}
+
+def get_best_ask(market):
+    """최우선 매도호가 조회"""
+    try:
+        ob = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": market})
+        if ob and ob[0].get("orderbook_units"):
+            return ob[0]["orderbook_units"][0]["ask_price"]
+    except Exception:
+        pass
+    return None
+
+
 def place_market_buy(market, krw_amount):
-    """KRW 기준 시장가 매수 (ord_type=price)"""
+    """KRW 기준 시장가 매수 (ord_type=price), 403시 지정가 폴백"""
+
+    # ★ 시장가 미지원 마켓 캐시 체크 → 바로 지정가로
+    if MARKET_NO_PRICE.get(market, 0) > time.time():
+        ask = get_best_ask(market)
+        if ask:
+            vol = (krw_amount * (1 - FEE_SIDE) * 0.998) / ask
+            body = [
+                ("market", market),
+                ("side", "bid"),
+                ("ord_type", "limit"),
+                ("price", str(ask)),
+                ("volume", fmt_volume_for_api(vol)),
+            ]
+            print(f"[MARKET_BUY_LIMIT] {market} 시장가 미지원 캐시 → 지정가 {ask}")
+            return upbit_private_post("/v1/orders", body)
+
+    # 일반 시장가 시도
     body = [
         ("market", market),
         ("side", "bid"),
         ("ord_type", "price"),
         ("price", str(int(krw_amount))),
     ]
-    return upbit_private_post("/v1/orders", body)
+    try:
+        return upbit_private_post("/v1/orders", body)
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        body_txt = getattr(e.response, "text", "")
+
+        # ★ 403 + not_supported_ord_type → 지정가 폴백
+        if status == 403 and "not_supported_ord_type" in body_txt:
+            MARKET_NO_PRICE[market] = time.time() + 900  # 15분 캐시
+            print(f"[MARKET_BUY_FALLBACK] {market} 시장가 403 → 지정가 폴백 (15분 캐시)")
+            tg_send_mid(f"⚠️ {market} 시장가 미지원 → 지정가 전환")
+
+            ask = get_best_ask(market)
+            if ask:
+                vol = (krw_amount * (1 - FEE_SIDE) * 0.998) / ask
+                body_limit = [
+                    ("market", market),
+                    ("side", "bid"),
+                    ("ord_type", "limit"),
+                    ("price", str(ask)),
+                    ("volume", fmt_volume_for_api(vol)),
+                ]
+                return upbit_private_post("/v1/orders", body_limit)
+
+        # 다른 에러는 그대로 raise
+        raise
 
 
 def place_market_sell(market, volume):
