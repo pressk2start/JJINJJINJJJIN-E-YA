@@ -66,8 +66,7 @@ TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN = 0.005  # 최소 트레일 간격 (0.5%, 1.0→0.5%, 더 타이트하게)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
-FEE_SIDE = 0.0005       # 한쪽 0.05% (매수 또는 매도)
-FEE_RATE = FEE_SIDE * 2 # 왕복 0.1% (퍼센트 계산용)
+FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
@@ -596,136 +595,26 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     return max(qty, 0.0)
 
 
-# === 시장가 미지원 마켓 캐시 (403 not_supported_ord_type 대응) ===
-MARKET_NO_PRICE = {}  # {market: expire_timestamp}
-
-def get_best_ask(market):
-    """최우선 매도호가 조회"""
-    try:
-        ob = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": market})
-        if ob and ob[0].get("orderbook_units"):
-            return ob[0]["orderbook_units"][0]["ask_price"]
-    except Exception:
-        pass
-    return None
-
-
 def place_market_buy(market, krw_amount):
-    """KRW 기준 시장가 매수 (ord_type=price), 403시 지정가 폴백"""
-
-    # ★ 시장가 미지원 마켓 캐시 체크 → 바로 지정가로
-    if MARKET_NO_PRICE.get(market, 0) > time.time():
-        ask = get_best_ask(market)
-        if ask:
-            vol = (krw_amount * (1 - FEE_SIDE) * 0.998) / ask
-            body = [
-                ("market", market),
-                ("side", "bid"),
-                ("ord_type", "limit"),
-                ("price", str(ask)),
-                ("volume", fmt_volume_for_api(vol)),
-            ]
-            print(f"[MARKET_BUY_LIMIT] {market} 시장가 미지원 캐시 → 지정가 {ask}")
-            return upbit_private_post("/v1/orders", body)
-
-    # 일반 시장가 시도
+    """KRW 기준 시장가 매수 (ord_type=price)"""
     body = [
         ("market", market),
         ("side", "bid"),
         ("ord_type", "price"),
         ("price", str(int(krw_amount))),
     ]
-    try:
-        return upbit_private_post("/v1/orders", body)
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        body_txt = getattr(e.response, "text", "")
-
-        # ★ 403 + not_supported_ord_type → 지정가 폴백
-        if status == 403 and "not_supported_ord_type" in body_txt:
-            MARKET_NO_PRICE[market] = time.time() + 900  # 15분 캐시
-            print(f"[MARKET_BUY_FALLBACK] {market} 시장가 403 → 지정가 폴백 (15분 캐시)")
-            tg_send_mid(f"⚠️ {market} 시장가 미지원 → 지정가 전환")
-
-            ask = get_best_ask(market)
-            if ask:
-                vol = (krw_amount * (1 - FEE_SIDE) * 0.998) / ask
-                body_limit = [
-                    ("market", market),
-                    ("side", "bid"),
-                    ("ord_type", "limit"),
-                    ("price", str(ask)),
-                    ("volume", fmt_volume_for_api(vol)),
-                ]
-                return upbit_private_post("/v1/orders", body_limit)
-
-        # 다른 에러는 그대로 raise
-        raise
-
-
-# === 시장가 매도 미지원 캐시 ===
-MARKET_NO_MARKET_SELL = {}  # {market: expire_ts}
-
-def get_best_bid(market):
-    """최우선 매수호가 조회"""
-    try:
-        ob = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": market})
-        if ob and ob[0].get("orderbook_units"):
-            return ob[0]["orderbook_units"][0]["bid_price"]
-    except Exception:
-        pass
-    return None
+    return upbit_private_post("/v1/orders", body)
 
 
 def place_market_sell(market, volume):
-    """수량 기준 시장가 매도, 403시 지정가(최우선 bid) 폴백"""
-
-    # ★ 시장가 매도 미지원 캐시 체크 → 바로 지정가로
-    if MARKET_NO_MARKET_SELL.get(market, 0) > time.time():
-        bid = get_best_bid(market)
-        if bid:
-            body = [
-                ("market", market),
-                ("side", "ask"),
-                ("ord_type", "limit"),
-                ("price", str(bid)),
-                ("volume", fmt_volume_for_api(volume)),
-            ]
-            print(f"[MARKET_SELL_LIMIT] {market} 시장가 미지원 캐시 → 지정가 {bid}")
-            return upbit_private_post("/v1/orders", body)
-
-    # 일반 시장가 시도
+    """수량 기준 시장가 매도 (지수표기 방지)"""
     body = [
         ("market", market),
         ("side", "ask"),
         ("ord_type", "market"),
-        ("volume", fmt_volume_for_api(volume)),
+        ("volume", fmt_volume_for_api(volume)),  # ★ 지수표기/반올림 방지
     ]
-    try:
-        return upbit_private_post("/v1/orders", body)
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        txt = getattr(e.response, "text", "")
-
-        # ★ 403 + not_supported_ord_type → 지정가 폴백
-        if status == 403 and "not_supported_ord_type" in txt:
-            MARKET_NO_MARKET_SELL[market] = time.time() + 900  # 15분 캐시
-            print(f"[MARKET_SELL_FALLBACK] {market} 시장가 403 → 지정가 폴백 (15분 캐시)")
-            tg_send_mid(f"⚠️ {market} 시장가 매도 미지원 → 지정가 전환")
-
-            bid = get_best_bid(market)
-            if bid:
-                body_limit = [
-                    ("market", market),
-                    ("side", "ask"),
-                    ("ord_type", "limit"),
-                    ("price", str(bid)),
-                    ("volume", fmt_volume_for_api(volume)),
-                ]
-                return upbit_private_post("/v1/orders", body_limit)
-
-        # 다른 에러는 그대로 raise
-        raise
+    return upbit_private_post("/v1/orders", body)
 
 def final_price_guard(m, initial_price, max_drift=0.018):
     """
@@ -1555,8 +1444,8 @@ def close_auto_position(m, reason=""):
 
 
         if sell_ok:
-            # 🔥 순손익 계산 (수수료 반영) - ★ FEE_SIDE 사용 (버그 수정: 이중차감 방지)
-            total_fees = (est_entry_value + est_exit_value) * FEE_SIDE  # 매수0.05% + 매도0.05%
+            # 🔥 순손익 계산 (수수료 반영)
+            total_fees = (est_entry_value + est_exit_value) * FEE_RATE
             net_profit = pl_value - total_fees
 
             # 🔥 더 눈에 띄는 자동청산 알람 (순손익 강조)
@@ -1782,9 +1671,6 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         print(f"[PARTIAL_SELL_CHECK_ERR] {m} 가격 조회 실패: {e}")
         # 조회 실패 시에도 진행 (보수적)
 
-    # ★ 대기주문 취소 → 잔고잠김 방지 (close_auto_position과 동일)
-    cancel_open_orders(m)
-
     try:
         res = place_market_sell(m, sell_volume)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
@@ -1871,8 +1757,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         else:
             partial_ret_pct = 0.0
 
-        # 수수료 계산 - ★ FEE_SIDE 사용 (버그 수정: 이중차감 방지)
-        partial_fee = (partial_buy_krw + partial_sell_krw) * FEE_SIDE  # 매수0.05% + 매도0.05%
+        # 수수료 계산 (매수+매도 0.05% × 2)
+        partial_fee = (partial_buy_krw + partial_sell_krw) * FEE_RATE
 
         # 순손익 계산
         partial_profit = partial_sell_krw - partial_buy_krw - partial_fee
@@ -3804,50 +3690,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         if ema5_val and cur_close < ema5_val * 0.998:  # EMA5보다 0.2% 이상 아래면 스킵
             return None
 
-    # ★★★ 강한 하락추세 롱 금지 (GRS 같은 역추세 probe 차단) ★★★
-    # 3가지 조건 중 2개 이상 충족해야 롱 진입 허용
-    # 1) 종가 > MA20  2) RSI > 45  3) +DI > -DI
-    if len(c1) >= 20:
-        cur_close = c1[-1]["trade_price"]
-        closes = [c["trade_price"] for c in c1]
-        ema20_val = ema_last(closes, 20)
-
-        # RSI 계산 (간단 버전)
-        rsi_val = None
-        if len(c1) >= 14:
-            gains, losses = [], []
-            for i in range(-14, 0):
-                diff = c1[i]["trade_price"] - c1[i-1]["trade_price"]
-                if diff > 0:
-                    gains.append(diff)
-                else:
-                    losses.append(abs(diff))
-            avg_gain = sum(gains) / 14 if gains else 0
-            avg_loss = sum(losses) / 14 if losses else 0.0001
-            rs = avg_gain / avg_loss if avg_loss > 0 else 100
-            rsi_val = 100 - (100 / (1 + rs))
-
-        # DI 계산
-        adx_data = adx_di(c1, period=14) if len(c1) >= 14 else None
-        plus_di = adx_data.get("plus_di", 0) if adx_data else 0
-        minus_di = adx_data.get("minus_di", 0) if adx_data else 0
-        adx_val = adx_data.get("adx", 0) if adx_data else 0
-
-        # 조건 체크
-        cond_above_ma20 = (ema20_val and cur_close > ema20_val)
-        cond_rsi_ok = (rsi_val and rsi_val > 45)
-        cond_di_ok = (plus_di > minus_di)
-
-        bullish_count = sum([cond_above_ma20, cond_rsi_ok, cond_di_ok])
-
-        # ★ ADX >= 25 AND -DI >= +DI + 5면 롱 완전 금지 (강한 하락추세)
-        if adx_val >= 25 and (minus_di - plus_di) >= 5:
-            return None
-
-        # ★ 2개 미만이면 롱 금지 (역추세 probe 차단)
-        if bullish_count < 2:
-            return None
-
     # === 동일 종목 중복 진입 방지 (probe 모드는 25초로 단축, 일반은 90초) ===
     cooldown_after_exit = 25 if ALWAYS_PROBE_FIRST else 90
     now_ts = time.time()
@@ -4282,24 +4124,36 @@ def final_check_leader(m, pre, tight_mode=False):
                     cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
                     return None
 
-            # ★★★ 추격 차단 필터 (친구 조언) - 완화 버전 ★★★
-            # (1) EMA5 괴리 과다 차단: |가격-EMA5| >= 1.5% (1.2→1.5 완화)
+            # ★★★ 추격 차단 필터 (친구 조언 강화) ★★★
+            # (1) EMA5 괴리 과다 차단: |가격-EMA5| >= 1.0% (쫓아붙기 방지)
             ema5_val = ema_last([c["trade_price"] for c in c1_now], 5)
             if ema5_val and ema5_val > 0:
                 ema5_gap = abs(cur_price / ema5_val - 1.0)
-                if ema5_gap >= 0.015:  # 1.5% 이상 괴리
-                    cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.5% → 추격 차단")
+                if ema5_gap >= 0.010:  # 1.0% 이상 괴리 → 차단 (1.5→1.0 강화)
+                    cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.0% → 추격 차단")
                     return None
 
-            # (2) 연속 양봉 과열 차단: 5봉 이상 연속 양봉 + 모멘텀 둔화 시에만
-            # (강추세에서 연속 양봉은 정상이므로, 둔화 없으면 허용)
+            # (2) 연속 양봉 과열 차단 (강화)
+            # - 3개 이상 연속 양봉 + 상단 볼밴 밖 → 무조건 차단
+            # - 5개 이상 연속 양봉 + 모멘텀 둔화 → 차단
             green_streak = 0
             for c in reversed(c1_now[-7:]):
                 if c["trade_price"] > c["opening_price"]:
                     green_streak += 1
                 else:
                     break
-            if green_streak >= 5 and is_decel:  # 연속 양봉 + 감속 시에만 차단
+
+            # BB 상단 체크
+            bb_data = bb_from_candles_1m(c1_now, 20) if len(c1_now) >= 20 else None
+            bb_upper = bb_data["upper"] if bb_data else (cur_price * 1.02)
+            outside_upper_bb = (cur_price > bb_upper)
+
+            # 3연속 양봉 + 볼밴 상단 밖 → 절대 금지 (고점 추격)
+            if green_streak >= 3 and outside_upper_bb:
+                cut("LATE_CHASE_BB_OUT", f"{m} 연속 {green_streak}양봉 + 볼밴 상단 밖 → 고점 추격 금지")
+                return None
+
+            if green_streak >= 5 and is_decel:  # 5연속 양봉 + 감속 시 차단
                 cut("LATE_CHASE_STREAK", f"{m} 연속 양봉 {green_streak}개 + 모멘텀 둔화 → 소진 구간")
                 return None
 
@@ -4346,63 +4200,6 @@ def final_check_leader(m, pre, tight_mode=False):
 
     # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
-        # ★★★ 음봉 거래량 폭발 필터: 매도세 우위 상황에서 probe 금지 ★★★
-        c1_probe_check = get_minutes_candles(1, m, 20)
-        if c1_probe_check and len(c1_probe_check) >= 5:
-            latest = c1_probe_check[-1]
-            cp = latest["trade_price"]
-            op = latest["opening_price"]
-            hp = latest["high_price"]
-            lp = latest["low_price"]
-            cur_vol = latest.get("candle_acc_trade_volume", 0)
-
-            # 캔들 위치: (Close-Low)/(High-Low), 0=최저점, 1=최고점
-            candle_range = hp - lp
-            candle_pos = (cp - lp) / candle_range if candle_range > 0 else 0.5
-
-            # 거래량 Z-score 계산 (최근 20봉 기준)
-            vols = [c.get("candle_acc_trade_volume", 0) for c in c1_probe_check[-20:]]
-            avg_vol = sum(vols) / len(vols) if vols else 1
-            std_vol = (sum((v - avg_vol)**2 for v in vols) / len(vols))**0.5 if vols else 1
-            vol_zscore = (cur_vol - avg_vol) / std_vol if std_vol > 0 else 0
-
-            # ★ 음봉 거래량 폭발 차단: 캔들위치 <= 0.35 + 거래량 Z >= 1.5 → 매도세 우위
-            is_bearish_spike = (candle_pos <= 0.35 and vol_zscore >= 1.5)
-
-            # ★ 음봉 + 위꼬리 차단 (confirm과 동일)
-            is_red = (cp < op)
-            uw = hp - max(cp, op)
-            body = abs(cp - op)
-            has_big_wick = (body > 0 and uw > body * 0.8)  # 위꼬리가 몸통의 80% 이상
-
-            if is_bearish_spike:
-                cut("PROBE_BEARISH_SPIKE", f"{m} 음봉 거래량 폭발 (pos={candle_pos:.2f}, vol_z={vol_zscore:.1f}) → probe 차단")
-                return None
-
-            if is_red and has_big_wick:
-                cut("PROBE_RED_WICK", f"{m} 음봉+위꼬리 (wick/body={uw/body:.1f}) → probe 차단")
-                return None
-
-            # ★★★ 상단 볼린저 추격 차단: 연속 양봉 + BB 상단 근처면 probe 금지 ★★★
-            # (친구 조언: 상단밴드 접촉 + 연속 3봉 양봉이면 대기)
-            bb_probe = bollinger_bands(c1_probe_check, period=20, std_mult=2.0)
-            if bb_probe and bb_probe.get("upper"):
-                upper_bb = bb_probe["upper"]
-                price_bb_ratio = cp / upper_bb if upper_bb > 0 else 0
-
-                # 연속 양봉 카운트
-                green_count = 0
-                for c in reversed(c1_probe_check[-5:]):
-                    if c["trade_price"] > c["opening_price"]:
-                        green_count += 1
-                    else:
-                        break
-
-                # 가격이 상단 BB의 99% 이상 + 연속 양봉 3개 이상 → 과열 추격 차단
-                if price_bb_ratio >= 0.99 and green_count >= 3:
-                    cut("PROBE_UPPER_BB_CHASE", f"{m} 상단BB 추격 (BB비율={price_bb_ratio:.3f}, 연속양봉={green_count}) → probe 차단")
-                    return None
-
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
@@ -4411,13 +4208,9 @@ def final_check_leader(m, pre, tight_mode=False):
         volume_surge = pre.get("volume_surge", 0.0)
         turn = t.get("krw") / max(ob.get("depth_krw"), 1)
 
-        # ★ 거래량 폭발 시 매수비 강화: surge > 1.5x면 매수비 55% 이상 요구 (친구 조언)
-        buy_ratio = t.get("buy_ratio", 0)
-        min_buy_ratio = 0.55 if volume_surge >= 1.5 else 0.53
-
         # ★ 진입 조건 완화: 초입 빠르게 포착 (고점 물림 방지)
         if (t.get("n",0) >= 3 and                          # 3개 이상 틱 (4→3 완화)
-            buy_ratio >= min_buy_ratio and                # 매수비 조건 (거래량폭발 시 강화)
+            t.get("buy_ratio",0) >= 0.53 and              # 매수비 53% 이상 (0.57→0.53 완화)
             t.get("krw_per_sec",0) >= 10_000 and          # 거래속도 10,000원/초 이상 (14K→10K 완화)
             ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
             ob.get("spread",99) <= 1.2 and                # 스프레드 1.2% (✅ 크리티컬: 2.2→1.2 슬리피지 방지)
@@ -5759,59 +5552,58 @@ def monitor_position(m,
             # (1) 모멘텀 둔화 강제 익절 (+1R 이상 찍었을 때만)
             if run_from_entry >= eff_sl_pct:  # 최소 +1R 찍은 뒤에만
                 if t15["krw_per_sec"] < 0.75 * max(t30["krw_per_sec"], 1) and t15.get("buy_value_ratio", 0) < 0.52:
-                    # ★★★ 강추세 예외: 구조가 건재하면 TAPE_SLOWDOWN 무시 ★★★
-                    # (친구 조언: EMA20 위 + PSAR 아래 + +DI 우위면 유지)
+                    # ★★★ 강추세 예외: 구조 유지 시 TAPE_SLOWDOWN 스킵 (친구 조언) ★★★
+                    # 조건: 5EMA 위 / PSAR 상승 / +DI > -DI 중 2개 이상 → 강추세
+                    skip_slowdown = False
                     try:
-                        c1m_sd = get_minutes_candles(1, m, 20)
+                        c1m_sd = get_minutes_candles(1, m, 30)
                         if c1m_sd and len(c1m_sd) >= 20:
-                            closes_sd = [c["trade_price"] for c in c1m_sd]
-                            ema20_sd = ema_last(closes_sd, 20)
-                            psar_sd = parabolic_sar(c1m_sd)
-                            adx_sd = adx_di(c1m_sd, 14)
+                            # 5EMA 위 체크
+                            ema5_sd = ema_last([c["trade_price"] for c in c1m_sd], 5)
+                            above_ema5 = (ema5_sd and curp > ema5_sd)
 
-                            # 강추세 조건 체크
-                            above_ema20 = (ema20_sd and curp > ema20_sd)
+                            # PSAR 상승 체크
+                            psar_sd = calc_psar_new(c1m_sd)
                             psar_bullish = (psar_sd and psar_sd.get("is_uptrend", False))
+
+                            # +DI > -DI 체크
+                            adx_sd = calc_adx_14(c1m_sd)
                             di_bullish = (adx_sd and adx_sd.get("plus_di", 0) > adx_sd.get("minus_di", 0))
 
-                            # 3개 중 2개 이상 충족 시 강추세 → 유지
-                            strong_trend = sum([above_ema20, psar_bullish, di_bullish]) >= 2
+                            # 2/3 이상이면 강추세
+                            strong_trend = sum([above_ema5, psar_bullish, di_bullish]) >= 2
                             if strong_trend:
-                                print(f"[TAPE_SLOWDOWN_SKIP] {m} 강추세 유지 (EMA20={above_ema20}, PSAR={psar_bullish}, DI={di_bullish}) → 청산 스킵")
-                                pass  # 청산하지 않고 계속 홀드
-                            else:
-                                exit_reason = "TAPE_SLOWDOWN_EXIT"
-                                verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
-                                tg_send_mid(f"🔻 {m} {verdict}")
-                                break
-                        else:
-                            exit_reason = "TAPE_SLOWDOWN_EXIT"
-                            verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
-                            tg_send_mid(f"🔻 {m} {verdict}")
-                            break
+                                skip_slowdown = True
+                                print(f"[TAPE_SLOWDOWN_SKIP] {m} 강추세 유지 (EMA5:{above_ema5}, PSAR:{psar_bullish}, DI:{di_bullish}) → 청산 스킵")
                     except Exception as e:
-                        print(f"[TAPE_SLOWDOWN_ERR] {m}: {e}")
+                        print(f"[STRONG_TREND_CHECK_ERR] {m}: {e}")
+
+                    if not skip_slowdown:
                         exit_reason = "TAPE_SLOWDOWN_EXIT"
                         verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
                         tg_send_mid(f"🔻 {m} {verdict}")
                         break
 
-            # (2) 시간 스탑 (재가속 실패) - ★ 180초로 완화 + 구조 이탈 확인
+            # (2) 시간 스탑 (재가속 실패) - ★ 180초 + 구조 이탈 + 0.3R 미달 확인
+            # 친구 조언: "2~3캔들 내 +0.3R 못 가면 정리(모멘텀 약함)"
+            min_profit_threshold = 0.3 * eff_sl_pct  # +0.3R
             if alive_sec >= 180 and t15["krw_per_sec"] < t30["krw_per_sec"]:
-                # ★ 추가 조건: 가격도 EMA5 아래여야 손절 (구조 이탈 확인)
-                try:
-                    c1m_ts = get_minutes_candles(1, m, 10)
-                    ema5_ts = ema_last([c["trade_price"] for c in c1m_ts], 5) if c1m_ts else None
-                    if ema5_ts and curp >= ema5_ts:
-                        # EMA5 위에 있으면 아직 구조 유지 → 스킵
-                        pass
-                    else:
-                        exit_reason = "TIME_STOP"
-                        verdict = f"재가속 실패 시간 스탑 (180초+, t15={t15['krw_per_sec']:.0f} < t30={t30['krw_per_sec']:.0f}, EMA5 이탈)"
-                        tg_send_mid(f"⏱️ {m} {verdict}")
-                        break
-                except Exception:
-                    pass  # 에러 시 손절 스킵
+                # ★ 조건 1: 최대 수익이 +0.3R도 못 찍었으면 모멘텀 약함
+                # ★ 조건 2: 가격이 EMA5 아래여야 구조 이탈 확인
+                if run_from_entry < min_profit_threshold:
+                    try:
+                        c1m_ts = get_minutes_candles(1, m, 10)
+                        ema5_ts = ema_last([c["trade_price"] for c in c1m_ts], 5) if c1m_ts else None
+                        if ema5_ts and curp >= ema5_ts:
+                            # EMA5 위에 있으면 아직 구조 유지 → 스킵
+                            pass
+                        else:
+                            exit_reason = "TIME_STOP"
+                            verdict = f"재가속 실패 시간 스탑 (180초+, +0.3R 미달, EMA5 이탈)"
+                            tg_send_mid(f"⏱️ {m} {verdict}")
+                            break
+                    except Exception:
+                        pass  # 에러 시 손절 스킵
 
             # (3) VWAP 과열→복귀 익절 (상단 회수)
             try:
