@@ -5625,10 +5625,42 @@ def monitor_position(m,
             # (1) 모멘텀 둔화 강제 익절 (+1R 이상 찍었을 때만)
             if run_from_entry >= eff_sl_pct:  # 최소 +1R 찍은 뒤에만
                 if t15["krw_per_sec"] < 0.75 * max(t30["krw_per_sec"], 1) and t15.get("buy_value_ratio", 0) < 0.52:
-                    exit_reason = "TAPE_SLOWDOWN_EXIT"
-                    verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
-                    tg_send_mid(f"🔻 {m} {verdict}")
-                    break
+                    # ★★★ 강추세 예외: 구조가 건재하면 TAPE_SLOWDOWN 무시 ★★★
+                    # (친구 조언: EMA20 위 + PSAR 아래 + +DI 우위면 유지)
+                    try:
+                        c1m_sd = get_minutes_candles(1, m, 20)
+                        if c1m_sd and len(c1m_sd) >= 20:
+                            closes_sd = [c["trade_price"] for c in c1m_sd]
+                            ema20_sd = ema_last(closes_sd, 20)
+                            psar_sd = parabolic_sar(c1m_sd)
+                            adx_sd = adx_di(c1m_sd, 14)
+
+                            # 강추세 조건 체크
+                            above_ema20 = (ema20_sd and curp > ema20_sd)
+                            psar_bullish = (psar_sd and psar_sd.get("is_uptrend", False))
+                            di_bullish = (adx_sd and adx_sd.get("plus_di", 0) > adx_sd.get("minus_di", 0))
+
+                            # 3개 중 2개 이상 충족 시 강추세 → 유지
+                            strong_trend = sum([above_ema20, psar_bullish, di_bullish]) >= 2
+                            if strong_trend:
+                                print(f"[TAPE_SLOWDOWN_SKIP] {m} 강추세 유지 (EMA20={above_ema20}, PSAR={psar_bullish}, DI={di_bullish}) → 청산 스킵")
+                                pass  # 청산하지 않고 계속 홀드
+                            else:
+                                exit_reason = "TAPE_SLOWDOWN_EXIT"
+                                verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
+                                tg_send_mid(f"🔻 {m} {verdict}")
+                                break
+                        else:
+                            exit_reason = "TAPE_SLOWDOWN_EXIT"
+                            verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
+                            tg_send_mid(f"🔻 {m} {verdict}")
+                            break
+                    except Exception as e:
+                        print(f"[TAPE_SLOWDOWN_ERR] {m}: {e}")
+                        exit_reason = "TAPE_SLOWDOWN_EXIT"
+                        verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
+                        tg_send_mid(f"🔻 {m} {verdict}")
+                        break
 
             # (2) 시간 스탑 (재가속 실패) - ★ 180초로 완화 + 구조 이탈 확인
             if alive_sec >= 180 and t15["krw_per_sec"] < t30["krw_per_sec"]:
