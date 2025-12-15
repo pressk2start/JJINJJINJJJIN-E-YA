@@ -204,7 +204,7 @@ PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # 추매 간격 적절히 유지 (10 → 15초)
 
 # === 초입 빈도 증가 설정 ===
-ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
+ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "0") == "1"  # 기본 OFF (확신 신호만 진입), 환경변수로 켜기 가능
 PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "0") == "1"  # 가벼운 조건 probe 신호 (횡보 방지: OFF)
 PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.55"))  # probe-lite 최소 매수비 (보수적 조정: 0.50 → 0.55)
 PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "12000"))  # probe-lite 최소 거래속도 (보수적 조정: 8000 → 12000)
@@ -4144,9 +4144,9 @@ def final_check_leader(m, pre, tight_mode=False):
                     break
 
             # BB 상단 체크
-            bb_data = bb_from_candles_1m(c1_now, 20) if len(c1_now) >= 20 else None
+            bb_data = bollinger_bands(c1_now, period=20) if len(c1_now) >= 20 else None
             bb_upper = bb_data["upper"] if bb_data else (cur_price * 1.02)
-            outside_upper_bb = (cur_price > bb_upper)
+            outside_upper_bb = (cur_price > bb_upper * 1.001)  # 0.1% 여유
 
             # 3연속 양봉 + 볼밴 상단 밖 → 절대 금지 (고점 추격)
             if green_streak >= 3 and outside_upper_bb:
