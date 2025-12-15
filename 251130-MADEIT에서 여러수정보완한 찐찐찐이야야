@@ -1022,6 +1022,72 @@ MEGA_VOL_Z = 2.8  # 2.2 -> 2.8
 MEGA_ABS_KRW = 4_000_000  # 2.0M -> 4.0M
 
 # =========================
+# 🎯 리스크 스코어 설정 (AND → 가중합)
+# =========================
+USE_RISK_SCORE = True
+RISK_SCORE_THRESHOLD = 50  # 이 점수 이상이면 진입
+
+# 가중치 (합계 100)
+SCORE_WEIGHTS = {
+    "buy_ratio": 28,      # 매수비
+    "spread": 20,         # 스프레드 (낮을수록 좋음)
+    "turn": 18,           # 회전율
+    "imbalance": 17,      # 오더북 임밸런스
+    "fresh": 10,          # 틱 신선도
+    "volume_surge": 7,    # 거래량 급증
+}
+
+def calc_orderbook_imbalance(ob):
+    """
+    1~3호가 가중 평균 임밸런스 계산
+    - 1호가 가중치 3, 2호가 2, 3호가 1
+    - 반환값: -1.0 ~ +1.0 (양수=매수우세)
+    """
+    try:
+        units = ob["raw"]["orderbook_units"][:3]
+        bid_weighted = sum(u["bid_size"] * u["bid_price"] * (3-i) for i, u in enumerate(units))
+        ask_weighted = sum(u["ask_size"] * u["ask_price"] * (3-i) for i, u in enumerate(units))
+        total = bid_weighted + ask_weighted
+        if total <= 0:
+            return 0.0
+        imbalance = (bid_weighted - ask_weighted) / total
+        return max(-1.0, min(1.0, imbalance))
+    except:
+        return 0.0
+
+def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
+    """
+    리스크 스코어 계산 (0~100)
+    - 각 피처를 정규화해서 가중합
+    """
+    score = 0.0
+
+    # 매수비: 0.50~0.70 → 0~100
+    buy_norm = max(0, min(1, (buy_ratio - 0.50) / 0.20))
+    score += SCORE_WEIGHTS["buy_ratio"] * buy_norm
+
+    # 스프레드: 0.0~1.0% → 100~0 (낮을수록 좋음)
+    spread_norm = max(0, min(1, 1.0 - spread / 1.0))
+    score += SCORE_WEIGHTS["spread"] * spread_norm
+
+    # 회전율: 0~0.05 → 0~100
+    turn_norm = max(0, min(1, turn / 0.05))
+    score += SCORE_WEIGHTS["turn"] * turn_norm
+
+    # 임밸런스: -0.3~+0.3 → 0~100
+    imb_norm = max(0, min(1, (imbalance + 0.3) / 0.6))
+    score += SCORE_WEIGHTS["imbalance"] * imb_norm
+
+    # 틱 신선도: bool → 0 or 100
+    score += SCORE_WEIGHTS["fresh"] * (1.0 if fresh_ok else 0.0)
+
+    # 거래량 급증: 1.0~2.5 → 0~100
+    surge_norm = max(0, min(1, (volume_surge - 1.0) / 1.5))
+    score += SCORE_WEIGHTS["volume_surge"] * surge_norm
+
+    return round(score, 1)
+
+# =========================
 # 세션/요청(네트워크 안정화)
 # =========================
 from urllib3.util.retry import Retry
@@ -1700,7 +1766,8 @@ CUT_COUNTER = {
         "BUY_WEAK", "BUY_WEAK_MANYT", "FRESH_FAIL", "BIDASK_WEAK",
         "IGNITION_OK", "BOT_PINGPONG", "BOT_WASH", "BOTACC_OK", "WICK_SPIKE",
         "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
-        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS"
+        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
+        "SCORE_LOW", "SPREAD_EXTREME", "PROBE_TICK", "NO_SIGNAL"
     ]
 }
 
@@ -2014,48 +2081,83 @@ def final_check_leader(m, pre, tight_mode=False):
     t = pre["tape"]
     ob = pre["ob"]
     ticks = pre["ticks"]
-    MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
-    if tight_mode:
-        MIN_TURNOVER_LOCAL += 0.003
-    if 0 <= now_kst().hour < 6:
-        MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
-    MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)  # ★ 추가
 
-    TICKS_BUY_RATIO_LOCAL = max(
-        0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
-    TICKS_BUY_RATIO_LOCAL = max(0.54,
-                                TICKS_BUY_RATIO_LOCAL - 0.015 * r)  # ★ 추가
-
+    # === 최소 조건 (이건 AND로 유지) ===
     if t["n"] < MIN_TICKS_COUNT:
         cut("TICKS_LOW", f"{m} {t['n']}")
         return None
+
+    # 스프레드 극단값 필터 (2% 이상은 무조건 제외)
+    if ob["spread"] > 2.0:
+        cut("SPREAD_EXTREME", f"{m} spread {ob['spread']:.2f}%")
+        return None
+
+    # === 리스크 스코어 계산 ===
     turn = t["krw"] / max(ob["depth_krw"], 1)
-    if turn < MIN_TURNOVER_LOCAL:
-        cut("TURN_LOW", f"{m} turn {turn:.3f}")
-        return None
-    if t["buy_ratio"] < TICKS_BUY_RATIO_LOCAL:
-        cut("BUY_WEAK", f"{m} buy {t['buy_ratio']:.2f}")
-        return None
-    if t["n"] >= 10 and t["buy_ratio"] < 0.63:
-        cut("BUY_WEAK_MANYT", f"{m} weak many")
-        return None
-    if not last_two_ticks_fresh(ticks):
-        cut("FRESH_FAIL", f"{m} stale")
-        return None
+    imbalance = calc_orderbook_imbalance(ob)
+    fresh_ok = last_two_ticks_fresh(ticks)
+    volume_surge = pre.get("volume_surge", 1.0)
 
-    th = get_dynamic_thresholds()
-    raw_ob = ob["raw"]["orderbook_units"][:3]
-    bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
-    ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
-    if bid_sum / max(ask_sum, 1) < th["bidask_min"]:
-        cut("BIDASK_WEAK", f"{m} bidask weak")
-        return None
+    if USE_RISK_SCORE:
+        score = calc_risk_score(
+            buy_ratio=t["buy_ratio"],
+            spread=ob["spread"],
+            turn=turn,
+            imbalance=imbalance,
+            fresh_ok=fresh_ok,
+            volume_surge=volume_surge
+        )
 
-    max_spread = MAX_SPREAD_FAST if t.get("rate",
-                                          0) >= 0.7 else MAX_SPREAD_BASE
-    if ob["spread"] > max_spread:
-        cut("SPREAD_HIGH", f"{m} spread {ob['spread']:.2f}%")
-        return None
+        # tight_mode면 임계값 상향
+        threshold = RISK_SCORE_THRESHOLD + (5 if tight_mode else 0)
+        # 야간엔 약간 완화
+        if 0 <= now_kst().hour < 6:
+            threshold -= 3
+        # 장세 완화 노브 반영
+        threshold -= int(2 * r)
+
+        if score < threshold:
+            cut("SCORE_LOW", f"{m} score={score:.1f} < {threshold}")
+            return None
+
+        # 스코어 통과 시 로그
+        print(f"[SCORE_OK] {m} score={score:.1f} (buy={t['buy_ratio']:.2f}, spread={ob['spread']:.2f}, turn={turn:.3f}, imb={imbalance:.2f})")
+
+    else:
+        # === 기존 AND 로직 (USE_RISK_SCORE=False 시 폴백) ===
+        MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
+        if tight_mode:
+            MIN_TURNOVER_LOCAL += 0.003
+        if 0 <= now_kst().hour < 6:
+            MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
+        MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)
+
+        TICKS_BUY_RATIO_LOCAL = max(0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
+        TICKS_BUY_RATIO_LOCAL = max(0.54, TICKS_BUY_RATIO_LOCAL - 0.015 * r)
+
+        if turn < MIN_TURNOVER_LOCAL:
+            cut("TURN_LOW", f"{m} turn {turn:.3f}")
+            return None
+        if t["buy_ratio"] < TICKS_BUY_RATIO_LOCAL:
+            cut("BUY_WEAK", f"{m} buy {t['buy_ratio']:.2f}")
+            return None
+        if t["n"] >= 10 and t["buy_ratio"] < 0.63:
+            cut("BUY_WEAK_MANYT", f"{m} weak many")
+            return None
+        if not fresh_ok:
+            cut("FRESH_FAIL", f"{m} stale")
+            return None
+        th = get_dynamic_thresholds()
+        raw_ob = ob["raw"]["orderbook_units"][:3]
+        bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
+        ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
+        if bid_sum / max(ask_sum, 1) < th["bidask_min"]:
+            cut("BIDASK_WEAK", f"{m} bidask weak")
+            return None
+        max_spread = MAX_SPREAD_FAST if t.get("rate", 0) >= 0.7 else MAX_SPREAD_BASE
+        if ob["spread"] > max_spread:
+            cut("SPREAD_HIGH", f"{m} spread {ob['spread']:.2f}%")
+            return None
 
     price_change = pre.get("change", 0.0)
 
@@ -2067,7 +2169,9 @@ def final_check_leader(m, pre, tight_mode=False):
         "buy": round(t["buy_ratio"] * 100, 1),
         "n": t["n"],
         "spread": round(ob["spread"], 2),
-        "turn": round((t['krw'] / max(ob['depth_krw'], 1)) * 100, 2)
+        "turn": round(turn * 100, 2),
+        "imbalance": round(imbalance, 3),
+        "score": score if USE_RISK_SCORE else 0
     }
 
 
@@ -3196,11 +3300,16 @@ def main():
                 # 동적 손절가
                 dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
 
+                # 스코어/임밸런스 표시
+                score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
+                imb_str = f"호가비 {payload.get('imbalance', 0):+.2f}" if payload.get('imbalance') else ""
+
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
                     f"💵 <b>현재가</b> {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
+                    f"🎯 {score_str} | {imb_str}\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
