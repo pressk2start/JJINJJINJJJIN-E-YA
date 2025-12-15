@@ -4269,6 +4269,26 @@ def final_check_leader(m, pre, tight_mode=False):
                 cut("PROBE_RED_WICK", f"{m} 음봉+위꼬리 (wick/body={uw/body:.1f}) → probe 차단")
                 return None
 
+            # ★★★ 상단 볼린저 추격 차단: 연속 양봉 + BB 상단 근처면 probe 금지 ★★★
+            # (친구 조언: 상단밴드 접촉 + 연속 3봉 양봉이면 대기)
+            bb_probe = bollinger_bands(c1_probe_check, period=20, std_mult=2.0)
+            if bb_probe and bb_probe.get("upper"):
+                upper_bb = bb_probe["upper"]
+                price_bb_ratio = cp / upper_bb if upper_bb > 0 else 0
+
+                # 연속 양봉 카운트
+                green_count = 0
+                for c in reversed(c1_probe_check[-5:]):
+                    if c["trade_price"] > c["opening_price"]:
+                        green_count += 1
+                    else:
+                        break
+
+                # 가격이 상단 BB의 99% 이상 + 연속 양봉 3개 이상 → 과열 추격 차단
+                if price_bb_ratio >= 0.99 and green_count >= 3:
+                    cut("PROBE_UPPER_BB_CHASE", f"{m} 상단BB 추격 (BB비율={price_bb_ratio:.3f}, 연속양봉={green_count}) → probe 차단")
+                    return None
+
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
