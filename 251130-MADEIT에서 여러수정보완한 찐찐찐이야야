@@ -66,7 +66,8 @@ TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN = 0.005  # 최소 트레일 간격 (0.5%, 1.0→0.5%, 더 타이트하게)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
-FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
+FEE_SIDE = 0.0005       # 한쪽 0.05% (매수 또는 매도)
+FEE_RATE = FEE_SIDE * 2 # 왕복 0.1% (퍼센트 계산용)
 
 # === 하이브리드 모드 전역 설정 ===
 USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
@@ -1444,8 +1445,8 @@ def close_auto_position(m, reason=""):
 
 
         if sell_ok:
-            # 🔥 순손익 계산 (수수료 반영)
-            total_fees = (est_entry_value + est_exit_value) * FEE_RATE
+            # 🔥 순손익 계산 (수수료 반영) - ★ FEE_SIDE 사용 (버그 수정: 이중차감 방지)
+            total_fees = (est_entry_value + est_exit_value) * FEE_SIDE  # 매수0.05% + 매도0.05%
             net_profit = pl_value - total_fees
 
             # 🔥 더 눈에 띄는 자동청산 알람 (순손익 강조)
@@ -1757,8 +1758,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         else:
             partial_ret_pct = 0.0
 
-        # 수수료 계산 (매수+매도 0.05% × 2)
-        partial_fee = (partial_buy_krw + partial_sell_krw) * FEE_RATE
+        # 수수료 계산 - ★ FEE_SIDE 사용 (버그 수정: 이중차감 방지)
+        partial_fee = (partial_buy_krw + partial_sell_krw) * FEE_SIDE  # 매수0.05% + 매도0.05%
 
         # 순손익 계산
         partial_profit = partial_sell_krw - partial_buy_krw - partial_fee
