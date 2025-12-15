@@ -663,15 +663,69 @@ def place_market_buy(market, krw_amount):
         raise
 
 
+# === 시장가 매도 미지원 캐시 ===
+MARKET_NO_MARKET_SELL = {}  # {market: expire_ts}
+
+def get_best_bid(market):
+    """최우선 매수호가 조회"""
+    try:
+        ob = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": market})
+        if ob and ob[0].get("orderbook_units"):
+            return ob[0]["orderbook_units"][0]["bid_price"]
+    except Exception:
+        pass
+    return None
+
+
 def place_market_sell(market, volume):
-    """수량 기준 시장가 매도 (지수표기 방지)"""
+    """수량 기준 시장가 매도, 403시 지정가(최우선 bid) 폴백"""
+
+    # ★ 시장가 매도 미지원 캐시 체크 → 바로 지정가로
+    if MARKET_NO_MARKET_SELL.get(market, 0) > time.time():
+        bid = get_best_bid(market)
+        if bid:
+            body = [
+                ("market", market),
+                ("side", "ask"),
+                ("ord_type", "limit"),
+                ("price", str(bid)),
+                ("volume", fmt_volume_for_api(volume)),
+            ]
+            print(f"[MARKET_SELL_LIMIT] {market} 시장가 미지원 캐시 → 지정가 {bid}")
+            return upbit_private_post("/v1/orders", body)
+
+    # 일반 시장가 시도
     body = [
         ("market", market),
         ("side", "ask"),
         ("ord_type", "market"),
-        ("volume", fmt_volume_for_api(volume)),  # ★ 지수표기/반올림 방지
+        ("volume", fmt_volume_for_api(volume)),
     ]
-    return upbit_private_post("/v1/orders", body)
+    try:
+        return upbit_private_post("/v1/orders", body)
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        txt = getattr(e.response, "text", "")
+
+        # ★ 403 + not_supported_ord_type → 지정가 폴백
+        if status == 403 and "not_supported_ord_type" in txt:
+            MARKET_NO_MARKET_SELL[market] = time.time() + 900  # 15분 캐시
+            print(f"[MARKET_SELL_FALLBACK] {market} 시장가 403 → 지정가 폴백 (15분 캐시)")
+            tg_send_mid(f"⚠️ {market} 시장가 매도 미지원 → 지정가 전환")
+
+            bid = get_best_bid(market)
+            if bid:
+                body_limit = [
+                    ("market", market),
+                    ("side", "ask"),
+                    ("ord_type", "limit"),
+                    ("price", str(bid)),
+                    ("volume", fmt_volume_for_api(volume)),
+                ]
+                return upbit_private_post("/v1/orders", body_limit)
+
+        # 다른 에러는 그대로 raise
+        raise
 
 def final_price_guard(m, initial_price, max_drift=0.018):
     """
@@ -1727,6 +1781,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     except Exception as e:
         print(f"[PARTIAL_SELL_CHECK_ERR] {m} 가격 조회 실패: {e}")
         # 조회 실패 시에도 진행 (보수적)
+
+    # ★ 대기주문 취소 → 잔고잠김 방지 (close_auto_position과 동일)
+    cancel_open_orders(m)
 
     try:
         res = place_market_sell(m, sell_volume)
