@@ -188,7 +188,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "300")) # 프로브 관찰 시간 (✅ 180→300초, 구조 기반 손절로 전환)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "180")) # 프로브 관찰 시간 (✅ 개선: 120→180초, 횡보 후 급등 포착)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.003"))  # 프로브 손절선 (-0.3%, 손실 축소)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "1"))                    # 추매 최대 회수 (리스크 축소: 2→1회)
 
@@ -204,7 +204,7 @@ PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "15"))  # 추매 간격 적절히 유지 (10 → 15초)
 
 # === 초입 빈도 증가 설정 ===
-ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "0") == "1"  # 기본 OFF (확신 신호만 진입), 환경변수로 켜기 가능
+ALWAYS_PROBE_FIRST = os.getenv("ALWAYS_PROBE_FIRST", "1") == "1"  # 첫 진입 무조건 probe (7000원)
 PROBE_LITE_ON = os.getenv("PROBE_LITE_ON", "0") == "1"  # 가벼운 조건 probe 신호 (횡보 방지: OFF)
 PROBE_LITE_MIN_BUY = float(os.getenv("PROBE_LITE_MIN_BUY", "0.55"))  # probe-lite 최소 매수비 (보수적 조정: 0.50 → 0.55)
 PROBE_LITE_MIN_KRWPSEC = int(os.getenv("PROBE_LITE_MIN_KRWPSEC", "12000"))  # probe-lite 최소 거래속도 (보수적 조정: 8000 → 12000)
@@ -757,7 +757,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         if len(c1m) >= 4:
             vol_recent = sum(c["candle_acc_trade_volume"] for c in c1m[-2:]) / 2  # 최근 2봉 평균
             vol_prev = sum(c["candle_acc_trade_volume"] for c in c1m[-4:-2]) / 2  # 직전 2봉 평균
-            vol_declining = (vol_recent < vol_prev * 0.7)  # 30% 이상 감소
+            vol_declining = (vol_recent < vol_prev * 0.5)  # 50% 이상 감소로 완화 (2차 급등 허용)
         else:
             vol_declining = False
 
@@ -781,13 +781,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct, *, override_krw=None):
         adx_entry = None  # ★ 크리티컬: 예외 시 명시적 초기화 (NameError 방지)
 
     # ★ 초강추세 판정 (거래량둔화도 우회할 정도로 강한 추세)
-    # ADX > 30 & +DI 우위 >= 12 → "거래량 잠깐 줄어도 괜찮은" 수준
+    # ADX > 25 & +DI 우위 >= 8 → 완화 (2차 급등 잡기 위해)
     super_trend_boost = False
     if adx_entry:
         adx_val = adx_entry.get("adx", 0)
         plus_di = adx_entry.get("plus_di", 0)
         minus_di = adx_entry.get("minus_di", 0)
-        super_trend_boost = (adx_val > 30 and (plus_di - minus_di) >= 12)
+        super_trend_boost = (adx_val > 25 and (plus_di - minus_di) >= 8)  # 30→25, 12→8 완화
         if super_trend_boost and vol_declining:
             print(f"[SUPER_TREND] {m} ADX={adx_val:.1f}, +DI-DI={plus_di-minus_di:.1f} → 거래량둔화 우회")
 
@@ -1930,11 +1930,11 @@ TICKS_BUY_RATIO = 0.58  # 0.56 → 0.58 (초입 품질 향상)
 # 위험 관리 (스프레드)
 MAX_SPREAD_BASE = 0.70  # 단위: %, 0.70 = 0.70% (일반 신호)
 MAX_SPREAD_FAST = 1.00  # 단위: %, 1.00 = 1.00% (메가 브레이크아웃)
-MIN_DEPTH_KRW = 6_000_000  # 12M → 6M (소형 알트 허용, 무알람 해결)
+MIN_DEPTH_KRW = 4_000_000  # 6M → 4M (FAKE_PUMP 완화 - 신호 확보)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
-MIN_REAL_TRADES = 10
+MIN_REAL_TRADES = 7  # 10 → 7 (FAKE_PUMP 완화 - 신호 확보)
 MAX_FADE_RATIO = 0.70
 
 # 손절/모니터링
@@ -2053,6 +2053,11 @@ def now_kst():
 
 def now_kst_str():
     return now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
+
+def near_minute_edge(sec=8):
+    """분봉 경계 체크: 분봉 바뀌는 전후 sec초 이내인지"""
+    s = now_kst().second
+    return (s <= sec) or (s >= 60 - sec)
 
 # =========================
 # 🔥 시간대별 스캔 간격
@@ -3679,7 +3684,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         bb = bollinger_bands(c1, period=20, std_mult=2.0)
         if bb:
             bb_width = bb["bandwidth"]
-            if bb_width < 0.025:  # 폭 2.5% 미만 → 횡보장 (2%→2.5% 강화, 이평수렴 차단)
+            if bb_width < 0.030:  # 폭 3% 미만 → 횡보장 (2.5%→3% 강화)
                 return None  # 진입 스킵
 
     # ★★★ 하락 추세 진입 차단: 종가가 EMA5 아래면 스킵 ★★★
@@ -4119,41 +4124,30 @@ def final_check_leader(m, pre, tight_mode=False):
                 is_long_body = (body >= 1.10 * atr)  # 0.80→1.10 (더 확실한 장대양봉만)
                 is_upper_wick = (upper_wick >= 0.60 * max(body, 1e-8))  # 0.40→0.60 (꼬리 큰 것만)
 
-                # 꼭지 신호 종합
-                if (is_vwap_hot or is_long_body or is_upper_wick or is_decel):
-                    cut("PEAK_CHASE", f"{m} anti-peak (vgap={vgap:.3f}, body/atr={body/atr:.2f}, wick={is_upper_wick}, decel={is_decel})")
+                # 꼭지 신호 종합 (2개 이상 동시 충족 시에만 차단)
+                peak_count = sum([is_vwap_hot, is_long_body, is_upper_wick, is_decel])
+                if peak_count >= 2:
+                    cut("PEAK_CHASE", f"{m} anti-peak {peak_count}개 (vwap={is_vwap_hot}, body={is_long_body}, wick={is_upper_wick}, decel={is_decel})")
                     return None
 
-            # ★★★ 추격 차단 필터 (친구 조언 강화) ★★★
-            # (1) EMA5 괴리 과다 차단: |가격-EMA5| >= 1.0% (쫓아붙기 방지)
+            # ★★★ 추격 차단 필터 (친구 조언) - 완화 버전 ★★★
+            # (1) EMA5 괴리 과다 차단: |가격-EMA5| >= 1.5% (1.2→1.5 완화)
             ema5_val = ema_last([c["trade_price"] for c in c1_now], 5)
             if ema5_val and ema5_val > 0:
                 ema5_gap = abs(cur_price / ema5_val - 1.0)
-                if ema5_gap >= 0.010:  # 1.0% 이상 괴리 → 차단 (1.5→1.0 강화)
-                    cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.0% → 추격 차단")
+                if ema5_gap >= 0.015:  # 1.5% 이상 괴리
+                    cut("LATE_CHASE_EMA5", f"{m} EMA5 괴리 {ema5_gap*100:.2f}% >= 1.5% → 추격 차단")
                     return None
 
-            # (2) 연속 양봉 과열 차단 (강화)
-            # - 3개 이상 연속 양봉 + 상단 볼밴 밖 → 무조건 차단
-            # - 5개 이상 연속 양봉 + 모멘텀 둔화 → 차단
+            # (2) 연속 양봉 과열 차단: 5봉 이상 연속 양봉 + 모멘텀 둔화 시에만
+            # (강추세에서 연속 양봉은 정상이므로, 둔화 없으면 허용)
             green_streak = 0
             for c in reversed(c1_now[-7:]):
                 if c["trade_price"] > c["opening_price"]:
                     green_streak += 1
                 else:
                     break
-
-            # BB 상단 체크
-            bb_data = bollinger_bands(c1_now, period=20) if len(c1_now) >= 20 else None
-            bb_upper = bb_data["upper"] if bb_data else (cur_price * 1.02)
-            outside_upper_bb = (cur_price > bb_upper * 1.001)  # 0.1% 여유
-
-            # 3연속 양봉 + 볼밴 상단 밖 → 절대 금지 (고점 추격)
-            if green_streak >= 3 and outside_upper_bb:
-                cut("LATE_CHASE_BB_OUT", f"{m} 연속 {green_streak}양봉 + 볼밴 상단 밖 → 고점 추격 금지")
-                return None
-
-            if green_streak >= 5 and is_decel:  # 5연속 양봉 + 감속 시 차단
+            if green_streak >= 5 and is_decel:  # 연속 양봉 + 감속 시에만 차단
                 cut("LATE_CHASE_STREAK", f"{m} 연속 양봉 {green_streak}개 + 모멘텀 둔화 → 소진 구간")
                 return None
 
@@ -4166,14 +4160,7 @@ def final_check_leader(m, pre, tight_mode=False):
             #         cut("LATE_CHASE_VOL", f"{m} 거래량 피크 후 감소 → 추격 차단")
             #         return None
 
-            # (4) 거래량 급증 후 5분 이내만 진입 허용 (3분→5분 완화)
-            recent_vols = [c["candle_acc_trade_volume"] for c in c1_now[-6:]]  # 6봉으로 확장
-            if len(recent_vols) >= 5:
-                peak_idx = recent_vols.index(max(recent_vols))
-                bars_since_peak = len(recent_vols) - 1 - peak_idx
-                if bars_since_peak >= 5:  # 피크가 5봉 이상 전이면 늦음
-                    cut("LATE_CHASE_TIME", f"{m} 거래량 피크가 {bars_since_peak}봉 전 → 5분 초과 추격 차단")
-                    return None
+            # (4) LATE_CHASE_TIME 삭제 - 2차 급등 놓칠 수 있어서 제거
 
     # === ★★ CONFIRM 음봉/상단꼬리 추가 필터 (confirm 전용 안전장치) ===
     if pre.get("entry_mode") == "confirm":
@@ -4200,6 +4187,26 @@ def final_check_leader(m, pre, tight_mode=False):
 
     # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
+        # ★★★ 분봉 경계 가드: 분봉 바뀌는 전후 8초는 probe 스킵 (휩쏘 방지)
+        if near_minute_edge(8):
+            cut("MINUTE_EDGE", f"{m} 분봉경계 8초 → probe 스킵")
+            return None
+
+        # ★★★ 역추세 probe 차단: -DI 우세 + PSAR 하락이면 probe 안 함
+        c1_probe = get_minutes_candles(1, m, 20)
+        if c1_probe and len(c1_probe) >= 14:
+            adx_probe = adx_di(c1_probe, 14)
+            psar_probe = parabolic_sar(c1_probe)
+            if adx_probe and psar_probe:
+                plus_di = adx_probe.get("plus_di", 0)
+                minus_di = adx_probe.get("minus_di", 0)
+                adx_val = adx_probe.get("adx", 0)
+                is_downtrend = not psar_probe.get("is_uptrend", True)
+                # ADX >= 18 & -DI가 +DI보다 3 이상 우위 & PSAR 하락 → 역추세
+                if adx_val >= 18 and (minus_di - plus_di) >= 3 and is_downtrend:
+                    cut("PROBE_COUNTERTREND", f"{m} -DI우위({minus_di:.0f}>{plus_di:.0f}) & PSAR↓ → 역추세 probe 차단")
+                    return None
+
         t = pre.get("tape", {"n":0,"buy_ratio":0,"krw":0})
         ob = pre.get("ob", {"depth_krw":0,"spread":99})
 
@@ -4208,14 +4215,13 @@ def final_check_leader(m, pre, tight_mode=False):
         volume_surge = pre.get("volume_surge", 0.0)
         turn = t.get("krw") / max(ob.get("depth_krw"), 1)
 
-        # ★★★ 초입 포착 강화 (친구 조언: 2-3분 빠른 진입) ★★★
-        # 움직임이 "시작"될 때 들어가야 함 (확인 후가 아님)
-        if (t.get("n",0) >= 2 and                          # 2개 이상 틱 (3→2 완화)
-            t.get("buy_ratio",0) >= 0.50 and              # 매수비 50% 이상 (0.53→0.50 완화)
-            t.get("krw_per_sec",0) >= 6_000 and           # 거래속도 6,000원/초 (10K→6K 완화)
+        # ★ 진입 조건 완화: 초입 빠르게 포착 (고점 물림 방지)
+        if (t.get("n",0) >= 3 and                          # 3개 이상 틱 (4→3 완화)
+            t.get("buy_ratio",0) >= 0.53 and              # 매수비 53% 이상 (0.57→0.53 완화)
+            t.get("krw_per_sec",0) >= 10_000 and          # 거래속도 10,000원/초 이상 (14K→10K 완화)
             ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
-            ob.get("spread",99) <= 1.2 and                # 스프레드 1.2%
-            abs(price_change) >= 0.0010):                 # 최소 0.10% 가격 변동 (0.15→0.10 완화)
+            ob.get("spread",99) <= 1.2 and                # 스프레드 1.2% (✅ 크리티컬: 2.2→1.2 슬리피지 방지)
+            abs(price_change) >= 0.0015):                 # ★ 최소 0.15% 가격 변동 (0.3→0.15 완화)
 
             return {
                 "price": pre["price"],
@@ -5142,30 +5148,6 @@ def monitor_position(m,
 
             # === PROBE 타임아웃 + 정체 청산: 충분히 관찰 후 판단 ===
             if pos_probe.get("entry_mode") == "probe":
-                # ★★★ 구조 기반 손절 (친구 조언): 직전 저점 이탈 + 거래량 급감 ★★★
-                try:
-                    c1m_struct = get_minutes_candles(1, m, 5)
-                    if c1m_struct and len(c1m_struct) >= 3:
-                        # 진입 후 저점 (최근 3봉 중 최저)
-                        recent_low = min(c["low_price"] for c in c1m_struct[-3:])
-                        # 진입 후 고점
-                        recent_high = max(c["high_price"] for c in c1m_struct[-3:])
-                        # 고가 갱신 실패: 현재가가 고점 대비 0.3% 이상 하락
-                        high_fail = (curp < recent_high * 0.997)
-                        # 저점 이탈: 현재가가 최근 저점 아래
-                        low_break = (curp < recent_low)
-                        # 거래량 급감 체크
-                        t15_struct = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
-                        vol_collapse = (t15_struct.get("krw_per_sec", 0) < 5000)
-
-                        if low_break and high_fail and vol_collapse and alive_sec >= 60:
-                            exit_reason = "STRUCTURE_BREAK"
-                            verdict = f"구조 이탈 손절 (저점 {recent_low:.2f} 이탈 + 고가 갱신 실패 + 거래량 급감)"
-                            tg_send_mid(f"📉 {m} {verdict}")
-                            break
-                except Exception as e:
-                    print(f"[STRUCTURE_CHECK_ERR] {m}: {e}")
-
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     gain_now = (curp / entry_price - 1.0)
                     # 본절 근처 또는 손실이면 정리
@@ -5577,58 +5559,27 @@ def monitor_position(m,
             # (1) 모멘텀 둔화 강제 익절 (+1R 이상 찍었을 때만)
             if run_from_entry >= eff_sl_pct:  # 최소 +1R 찍은 뒤에만
                 if t15["krw_per_sec"] < 0.75 * max(t30["krw_per_sec"], 1) and t15.get("buy_value_ratio", 0) < 0.52:
-                    # ★★★ 강추세 예외: 구조 유지 시 TAPE_SLOWDOWN 스킵 (친구 조언) ★★★
-                    # 조건: 5EMA 위 / PSAR 상승 / +DI > -DI 중 2개 이상 → 강추세
-                    skip_slowdown = False
-                    try:
-                        c1m_sd = get_minutes_candles(1, m, 30)
-                        if c1m_sd and len(c1m_sd) >= 20:
-                            # 5EMA 위 체크
-                            ema5_sd = ema_last([c["trade_price"] for c in c1m_sd], 5)
-                            above_ema5 = (ema5_sd and curp > ema5_sd)
+                    exit_reason = "TAPE_SLOWDOWN_EXIT"
+                    verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
+                    tg_send_mid(f"🔻 {m} {verdict}")
+                    break
 
-                            # PSAR 상승 체크
-                            psar_sd = calc_psar_new(c1m_sd)
-                            psar_bullish = (psar_sd and psar_sd.get("is_uptrend", False))
-
-                            # +DI > -DI 체크
-                            adx_sd = calc_adx_14(c1m_sd)
-                            di_bullish = (adx_sd and adx_sd.get("plus_di", 0) > adx_sd.get("minus_di", 0))
-
-                            # 2/3 이상이면 강추세
-                            strong_trend = sum([above_ema5, psar_bullish, di_bullish]) >= 2
-                            if strong_trend:
-                                skip_slowdown = True
-                                print(f"[TAPE_SLOWDOWN_SKIP] {m} 강추세 유지 (EMA5:{above_ema5}, PSAR:{psar_bullish}, DI:{di_bullish}) → 청산 스킵")
-                    except Exception as e:
-                        print(f"[STRONG_TREND_CHECK_ERR] {m}: {e}")
-
-                    if not skip_slowdown:
-                        exit_reason = "TAPE_SLOWDOWN_EXIT"
-                        verdict = f"모멘텀 둔화 익절 (t15={t15['krw_per_sec']:.0f}, buy={t15.get('buy_value_ratio',0)*100:.0f}%)"
-                        tg_send_mid(f"🔻 {m} {verdict}")
-                        break
-
-            # (2) 시간 스탑 (재가속 실패) - ★ 180초 + 구조 이탈 + 0.3R 미달 확인
-            # 친구 조언: "2~3캔들 내 +0.3R 못 가면 정리(모멘텀 약함)"
-            min_profit_threshold = 0.3 * eff_sl_pct  # +0.3R
+            # (2) 시간 스탑 (재가속 실패) - ★ 180초로 완화 + 구조 이탈 확인
             if alive_sec >= 180 and t15["krw_per_sec"] < t30["krw_per_sec"]:
-                # ★ 조건 1: 최대 수익이 +0.3R도 못 찍었으면 모멘텀 약함
-                # ★ 조건 2: 가격이 EMA5 아래여야 구조 이탈 확인
-                if run_from_entry < min_profit_threshold:
-                    try:
-                        c1m_ts = get_minutes_candles(1, m, 10)
-                        ema5_ts = ema_last([c["trade_price"] for c in c1m_ts], 5) if c1m_ts else None
-                        if ema5_ts and curp >= ema5_ts:
-                            # EMA5 위에 있으면 아직 구조 유지 → 스킵
-                            pass
-                        else:
-                            exit_reason = "TIME_STOP"
-                            verdict = f"재가속 실패 시간 스탑 (180초+, +0.3R 미달, EMA5 이탈)"
-                            tg_send_mid(f"⏱️ {m} {verdict}")
-                            break
-                    except Exception:
-                        pass  # 에러 시 손절 스킵
+                # ★ 추가 조건: 가격도 EMA5 아래여야 손절 (구조 이탈 확인)
+                try:
+                    c1m_ts = get_minutes_candles(1, m, 10)
+                    ema5_ts = ema_last([c["trade_price"] for c in c1m_ts], 5) if c1m_ts else None
+                    if ema5_ts and curp >= ema5_ts:
+                        # EMA5 위에 있으면 아직 구조 유지 → 스킵
+                        pass
+                    else:
+                        exit_reason = "TIME_STOP"
+                        verdict = f"재가속 실패 시간 스탑 (180초+, t15={t15['krw_per_sec']:.0f} < t30={t30['krw_per_sec']:.0f}, EMA5 이탈)"
+                        tg_send_mid(f"⏱️ {m} {verdict}")
+                        break
+                except Exception:
+                    pass  # 에러 시 손절 스킵
 
             # (3) VWAP 과열→복귀 익절 (상단 회수)
             try:
@@ -5669,12 +5620,12 @@ def monitor_position(m,
                 verdict = "VOLUME_DROP_EXIT"
                 break
 
-            # ③ 전량익절: 고점대비 하락 임계치(동적) - ★ 완화 (일찍 청산 방지)
-            dyn_drop_thr = 0.013  # 기본 1.3% (1.0→1.3 완화)
+            # ③ 전량익절: 고점대비 하락 임계치(동적) - ★ 완화 (흔들림 방지)
+            dyn_drop_thr = 0.018  # 기본 1.8% (1.3→1.8 완화)
             if t15["krw_per_sec"] >= 25000 and t15["buy_ratio"] >= 0.60:
-                dyn_drop_thr = 0.018   # 강추세: 더 여유 (1.6→1.8 완화)
+                dyn_drop_thr = 0.025   # 강추세: 더 여유 (1.8→2.5 완화)
             elif t15["krw_per_sec"] <= 12000 or t15["buy_ratio"] < 0.52:
-                dyn_drop_thr = 0.010   # 둔화: 더 타이트 (0.8→1.0 완화)
+                dyn_drop_thr = 0.013   # 둔화: 더 타이트 (1.0→1.3 완화)
 
             # ← 임계치 산정과 판정을 분리
             if drop_from_high >= dyn_drop_thr:
