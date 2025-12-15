@@ -3234,18 +3234,13 @@ def probe_v2_trigger_trend(candles):
             (adx_result["plus_di"] - adx_result["minus_di"]) >= 5):
         return False
 
-    # OBV 신고점
+    # OBV 체크 완화: 증가 추세가 아니어도 감소하지 않으면 OK (숨고르기 허용)
     obv_current = obv_from_candles(candles[-30:])
-    if obv_current is None:
-        return False
-
-    # 간단 체크: 최근 OBV가 증가 추세인지
     obv_prev = obv_from_candles(candles[-30:-1])
-    if obv_prev is None:
-        return False
-
-    if obv_current <= obv_prev:
-        return False
+    if obv_current is not None and obv_prev is not None:
+        # ★ 완화: OBV가 5% 이상 감소한 경우만 차단 (기존: 감소 시 무조건 차단)
+        if obv_current < obv_prev * 0.95:
+            return False
 
     return True
 
@@ -3982,13 +3977,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("VOL_LOW", f"{m} vol {int(current_volume)}")
         return None
 
-    # 거래 증가율 체크
+    # 거래 증가율 체크 (완화: 추세장 대응)
     past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c["candle_acc_trade_price"] > 0]
     if not meets_volume_surge(current_volume, past_volumes) and not mega:
         ticks_tmp = get_recent_ticks(m, 100)
         t15_tmp = micro_tape_stats_from_ticks(ticks_tmp, 15)
         t45_tmp = micro_tape_stats_from_ticks(ticks_tmp, 45)
-        if not (t15_tmp["krw_per_sec"] >= max(55_000, 1.15 * t45_tmp["krw_per_sec"])):
+        # ★ 완화: 55K→40K, 1.15x→1.10x (추세장에서 거래량 폭발 없어도 진입 허용)
+        if not (t15_tmp["krw_per_sec"] >= max(40_000, 1.10 * t45_tmp["krw_per_sec"])):
             cut("SURGE_LOW", f"{m} vol_surge_fail")
             return None
 
@@ -4007,9 +4003,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     tape_stats = {k: micro_tape_stats_from_ticks(ticks, k) for k in [10, 15, 30, 45]}
     closes_1m = [x["trade_price"] for x in c1]
     ema5 = ema_last(closes_1m, 5) if closes_1m else None
+    ema10 = ema_last(closes_1m, 10) if len(closes_1m) >= 10 else None
+    ema20 = ema_last(closes_1m, 20) if len(closes_1m) >= 20 else None
     dist_ema5 = (cur["trade_price"] / ema5 - 1.0) if ema5 else 0.0
     t10, t15, t30, t45 = tape_stats[10], tape_stats[15], tape_stats[30], tape_stats[45]
     last_upticks_ok = uptick_streak_from_ticks(ticks, need=2)
+
+    # ★★★ EMA 정렬 추세 감지 (5>10>20 + 종가>20MA + DI양호) ★★★
+    ema_trend_ok = False
+    if ema5 and ema10 and ema20:
+        ema_aligned = (ema5 > ema10 > ema20)
+        price_above_ema20 = (cur["trade_price"] > ema20)
+        adx_check = adx_di(c1, 14) if len(c1) >= 14 else None
+        di_ok = (adx_check and adx_check.get("adx", 0) >= 18 and
+                 (adx_check.get("plus_di", 0) - adx_check.get("minus_di", 0)) >= 3)
+        ema_trend_ok = (ema_aligned and price_above_ema20 and di_ok)
 
     # === 점화/브레이크아웃 계열 ===
     ign_ok, ign_reason = ignition_trigger_ok(m, c1, ticks, ob)
@@ -4030,10 +4038,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
 
     # Early 조건: 그라인드형 포착 위해 완화
+    # ★ 추세 코인 허용: price_change 제한 완화 (2% → 5%)
     early_conds = [
         vgap >= max(th["vwap_gap"] - 0.0003, EARLY_MIN_VWAP_GAP),
         vgap <= EARLY_MAX_VWAP_GAP,
-        price_change <= 0.020,
+        price_change <= 0.050,  # 2% → 5% 완화 (추세 코인도 진입 허용)
         (ema5 is None) or (dist_ema5 <= EARLY_MAX_EMA5_GAP),
         twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.53),  # 0.55 → 0.53 (그라인드 대응)
         twin["krw_per_sec"] >= max(flow_floor, 16000),  # 절대 하한 16000
@@ -4046,13 +4055,15 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     early_ok = all(early_conds)
 
     # === Confirm (확정 진입 판단) ===
+    # ★ ema_trend_ok 추가: EMA 5>10>20 정렬 + DI 양호하면 confirm 허용 (친구 조언)
     confirm_ok = (
-        ign_ok or botacc_ok or mega or two_green_and_break
+        ign_ok or botacc_ok or mega or two_green_and_break or ema_trend_ok
         or (early_ok and twin["buy_ratio"] >= 0.60 and uptick_streak_from_ticks(ticks, need=3))  # 0.58 → 0.60
     )
 
     # === Probe/Confirm 결과 ===
-    if not (early_ok or confirm_ok):
+    # ★ ema_trend_ok도 probe 진입 허용 (추세 코인 포착)
+    if not (early_ok or confirm_ok or ema_trend_ok):
         cut("NO_SIGNAL", f"{m} no entry cond")
         return None
 
