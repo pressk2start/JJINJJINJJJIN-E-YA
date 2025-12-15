@@ -3695,7 +3695,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         bb = bollinger_bands(c1, period=20, std_mult=2.0)
         if bb:
             bb_width = bb["bandwidth"]
-            if bb_width < 0.030:  # 폭 3% 미만 → 횡보장 (2.5%→3% 강화)
+            if bb_width < 0.020:  # 폭 2% 미만 → 횡보장 (3%→2% 완화 - 신호 확보)
                 return None  # 진입 스킵
 
     # ★★★ 하락 추세 진입 차단: 종가가 EMA5 아래면 스킵 ★★★
@@ -4198,10 +4198,7 @@ def final_check_leader(m, pre, tight_mode=False):
 
     # 프로브는 소액 테스트 진입: 양질의 초입 신호만 포착 (적절한 필터링)
     if pre.get("entry_mode") == "probe":
-        # ★★★ 분봉 경계 가드: 분봉 바뀌는 전후 8초는 probe 스킵 (휩쏘 방지)
-        if near_minute_edge(8):
-            cut("MINUTE_EDGE", f"{m} 분봉경계 8초 → probe 스킵")
-            return None
+        # (MINUTE_EDGE 필터 제거됨 - 신호 부족으로 인해 완화)
 
         # ★★★ 역추세 probe 차단: -DI 우세 + PSAR 하락이면 probe 안 함
         c1_probe = get_minutes_candles(1, m, 20)
@@ -5882,7 +5879,7 @@ ALERT_TTL = 1800
 
 # ★★★ 실패 거래 쿨다운 (TIMEOUT/STALL 후 재진입 방지)
 FAILED_TRADE_AT = {}  # {market: {"ts": timestamp, "price": exit_price}}
-FAILURE_COOLDOWN_SEC = 600  # 10분 쿨다운 (단, 신고가 돌파하면 해제)
+FAILURE_COOLDOWN_SEC = 420  # 7분 쿨다운 (10분→7분 완화, 신고가 돌파 시 해제)
 _ALERT_LOCK = threading.Lock()  # ★ 중복 알림 방지용 락
 
 def cleanup_expired_last_signals(ttl_sec: int = None):
