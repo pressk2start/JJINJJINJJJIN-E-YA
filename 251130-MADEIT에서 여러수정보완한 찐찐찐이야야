@@ -188,7 +188,7 @@ USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # === 염탐(probe) 금액/타임아웃/추매 횟수 ===
 PROBE_KRW = int(os.getenv("PROBE_KRW", "7000"))              # 프로브 초기 진입 금액 (소액 테스트)
-PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "180")) # 프로브 관찰 시간 (✅ 개선: 120→180초, 횡보 후 급등 포착)
+PROBE_TIMEOUT_SEC = int(os.getenv("PROBE_TIMEOUT_SEC", "300")) # 프로브 관찰 시간 (✅ 180→300초, 구조 기반 손절로 전환)
 PROBE_BREAKEVEN_EXIT = float(os.getenv("PROBE_BREAKEVEN_EXIT", "-0.003"))  # 프로브 손절선 (-0.3%, 손실 축소)
 MAX_ADDS = int(os.getenv("MAX_ADDS", "1"))                    # 추매 최대 회수 (리스크 축소: 2→1회)
 
@@ -4208,13 +4208,14 @@ def final_check_leader(m, pre, tight_mode=False):
         volume_surge = pre.get("volume_surge", 0.0)
         turn = t.get("krw") / max(ob.get("depth_krw"), 1)
 
-        # ★ 진입 조건 완화: 초입 빠르게 포착 (고점 물림 방지)
-        if (t.get("n",0) >= 3 and                          # 3개 이상 틱 (4→3 완화)
-            t.get("buy_ratio",0) >= 0.53 and              # 매수비 53% 이상 (0.57→0.53 완화)
-            t.get("krw_per_sec",0) >= 10_000 and          # 거래속도 10,000원/초 이상 (14K→10K 완화)
+        # ★★★ 초입 포착 강화 (친구 조언: 2-3분 빠른 진입) ★★★
+        # 움직임이 "시작"될 때 들어가야 함 (확인 후가 아님)
+        if (t.get("n",0) >= 2 and                          # 2개 이상 틱 (3→2 완화)
+            t.get("buy_ratio",0) >= 0.50 and              # 매수비 50% 이상 (0.53→0.50 완화)
+            t.get("krw_per_sec",0) >= 6_000 and           # 거래속도 6,000원/초 (10K→6K 완화)
             ob.get("depth_krw",0) >= 3_000_000 and        # 깊이 300만원 (유동성 확보)
-            ob.get("spread",99) <= 1.2 and                # 스프레드 1.2% (✅ 크리티컬: 2.2→1.2 슬리피지 방지)
-            abs(price_change) >= 0.0015):                 # ★ 최소 0.15% 가격 변동 (0.3→0.15 완화)
+            ob.get("spread",99) <= 1.2 and                # 스프레드 1.2%
+            abs(price_change) >= 0.0010):                 # 최소 0.10% 가격 변동 (0.15→0.10 완화)
 
             return {
                 "price": pre["price"],
@@ -5141,6 +5142,30 @@ def monitor_position(m,
 
             # === PROBE 타임아웃 + 정체 청산: 충분히 관찰 후 판단 ===
             if pos_probe.get("entry_mode") == "probe":
+                # ★★★ 구조 기반 손절 (친구 조언): 직전 저점 이탈 + 거래량 급감 ★★★
+                try:
+                    c1m_struct = get_minutes_candles(1, m, 5)
+                    if c1m_struct and len(c1m_struct) >= 3:
+                        # 진입 후 저점 (최근 3봉 중 최저)
+                        recent_low = min(c["low_price"] for c in c1m_struct[-3:])
+                        # 진입 후 고점
+                        recent_high = max(c["high_price"] for c in c1m_struct[-3:])
+                        # 고가 갱신 실패: 현재가가 고점 대비 0.3% 이상 하락
+                        high_fail = (curp < recent_high * 0.997)
+                        # 저점 이탈: 현재가가 최근 저점 아래
+                        low_break = (curp < recent_low)
+                        # 거래량 급감 체크
+                        t15_struct = micro_tape_stats_from_ticks_v2(ticks, 15, use_now_anchor=True, winsor_p=0.95)
+                        vol_collapse = (t15_struct.get("krw_per_sec", 0) < 5000)
+
+                        if low_break and high_fail and vol_collapse and alive_sec >= 60:
+                            exit_reason = "STRUCTURE_BREAK"
+                            verdict = f"구조 이탈 손절 (저점 {recent_low:.2f} 이탈 + 고가 갱신 실패 + 거래량 급감)"
+                            tg_send_mid(f"📉 {m} {verdict}")
+                            break
+                except Exception as e:
+                    print(f"[STRUCTURE_CHECK_ERR] {m}: {e}")
+
                 if alive_sec >= PROBE_TIMEOUT_SEC:
                     gain_now = (curp / entry_price - 1.0)
                     # 본절 근처 또는 손실이면 정리
