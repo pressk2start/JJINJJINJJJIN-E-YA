@@ -508,9 +508,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     tg_send(
         f"{mode_emoji} <b>자동매수 체결 ({entry_mode})</b> {m}\n"
         f"• 신호가: {signal_price:,.0f}원\n"
-        f"• 체결가: {avg_price:,.0f}원\n"
+        f"• 체결가(평단): {avg_price:,.0f}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}% 비중)\n"
+        f"• 주문금액: {krw_to_use:,.0f}원\n"
         f"• 수량: {volume_filled:.6f}\n"
         f"• 손절가: {stop_price:,.0f}원\n"
         f"{link_for(m)}"
@@ -783,6 +783,7 @@ def close_auto_position(m, reason=""):
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
 
         tg_send(
+            f"==============================\n"
             f"{result_emoji} <b>자동청산 완료</b> {m}{added_str}\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason}\n"
@@ -791,8 +792,8 @@ def close_auto_position(m, reason=""):
             f"• 체결수량: {vol:.6f}\n"
             f"• 총투자금액: {total_invested:,.0f}원{added_str}\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
-            f"{link_for(m)}"
+            f"{link_for(m)}\n"
+            f"=============================="
         )
 
     except Exception as e:
@@ -3176,10 +3177,12 @@ def monitor_position(m,
                         OPEN_POSITIONS[m]["volume"] = remaining_volume - partial_volume
 
                 tg_send_mid(
+                    f"==============================\n"
                     f"⚡ <b>{m}</b> 부분익절 (60%)\n"
                     f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원\n"
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW\n"
-                    f"📌 잔량 40%는 -0.25% 하락시 자동청산"
+                    f"📌 잔량 40%는 -0.25% 하락시 자동청산\n"
+                    f"=============================="
                 )
                 remaining_volume = remaining_volume - partial_volume
                 verdict = "PARTIAL_EXIT"
