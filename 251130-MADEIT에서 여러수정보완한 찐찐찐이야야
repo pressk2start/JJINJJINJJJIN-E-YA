@@ -392,34 +392,31 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     초입·공격모드 대응 자동 매수 진입
     """
-    print(f"[DEBUG] open_auto_position 시작: {m}")  # 디버그
+    # 디버그 정보 수집
+    debug_info = [f"🔍 <b>진입 체크</b> {m}"]
 
     if not AUTO_TRADE:
-        print(f"[DEBUG] {m} ❌ AUTO_TRADE=False")
         tg_send_mid(f"⚠️ {m} AUTO_TRADE=False → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ AUTO_TRADE 통과")
+    debug_info.append("✓ AUTO_TRADE")
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        print(f"[DEBUG] {m} ❌ API 키 없음")
         tg_send_mid(f"⚠️ {m} API 키 미설정 → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ API키 통과")
+    debug_info.append("✓ API키")
 
     # 이미 포지션 있으면 스킵
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
-            print(f"[DEBUG] {m} ❌ 이미 포지션 보유")
             tg_send_mid(f"⚠️ {m} 이미 포지션 보유 → 진입 스킵")
             return
-    print(f"[DEBUG] {m} ✓ 포지션 없음 통과")
+    debug_info.append("✓ 미보유")
 
     signal_price = pre.get("price")
     if not signal_price:
-        print(f"[DEBUG] {m} ❌ 신호가격 없음")
         tg_send_mid(f"⚠️ {m} 신호가격 없음 → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ 신호가격 {signal_price:,.0f}원")
+    debug_info.append(f"✓ 신호가 {signal_price:,.0f}")
 
     # === 하이브리드 진입모드 반영 ===
     entry_mode = pre.get("entry_mode", "confirm")
@@ -433,14 +430,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     else:
         entry_fraction = 1.0
         mode_emoji = "🤖"
-    print(f"[DEBUG] {m} entry_mode={entry_mode}, fraction={entry_fraction}")
 
     # ★ 공격모드일 경우 가격 가드 완화
     max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
 
     ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
     if not ok_guard:
-        print(f"[DEBUG] {m} ❌ 가격가드 실패 (신호가:{signal_price}, 현재가:{current_price})")
         tg_send(
             f"⚠️ <b>진입 취소</b> {m}\n"
             f"• 신호가: {signal_price:,.0f}원\n"
@@ -449,15 +444,14 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             f"• 사유: 가격 급등 (초입 추격 위험)"
         )
         return
-    print(f"[DEBUG] {m} ✓ 가격가드 통과 (현재가:{current_price:,.0f})")
+    debug_info.append(f"✓ 가격가드 (현재가 {current_price:,.0f})")
 
     # === 계좌 & 주문금액 계산 ===
     accounts = get_account_info()
     if not accounts:
-        print(f"[DEBUG] {m} ❌ 계좌조회 실패")
         tg_send_mid(f"⚠️ {m} 계좌 조회 실패 → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ 계좌조회 성공")
+    debug_info.append("✓ 계좌조회")
 
     krw_bal = 0.0
     for a in accounts:
@@ -466,10 +460,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             break
 
     if krw_bal < 6000:
-        print(f"[DEBUG] {m} ❌ 잔고부족 ({krw_bal:,.0f})")
         tg_send_mid(f"⚠️ {m} 잔고 부족 ({krw_bal:,.0f}원) → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ 잔고 {krw_bal:,.0f}원")
+    debug_info.append(f"✓ 잔고 {krw_bal:,.0f}")
 
     entry_price = current_price
     stop_price = dyn_stop
@@ -480,7 +473,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # === 하이브리드 진입 구조 ===
     risk_to_use = adaptive_risk * SEED_RISK_FRACTION if USE_PYRAMIDING else adaptive_risk
     risk_to_use *= entry_fraction  # probe는 리스크 축소 반영
-    print(f"[DEBUG] {m} adaptive_risk={adaptive_risk}, risk_to_use={risk_to_use}")
 
     base_qty = calc_position_size(
         entry_price,
@@ -490,12 +482,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     )
 
     krw_to_use = base_qty * entry_price
-    print(f"[DEBUG] {m} base_qty={base_qty}, krw_to_use={krw_to_use:,.0f}")
     if krw_to_use < 5000:
-        print(f"[DEBUG] {m} ❌ 주문금액 미달 ({krw_to_use:,.0f})")
         tg_send_mid(f"⚠️ {m} 주문금액 미달 ({krw_to_use:,.0f}원) → 진입 스킵")
         return
-    print(f"[DEBUG] {m} ✓ 주문금액 통과 → 매수 시도!")
+    debug_info.append(f"✓ 주문금액 {krw_to_use:,.0f}")
+
+    # 모든 체크 통과 → 디버그 출력 후 매수
+    tg_send_mid(" | ".join(debug_info) + " → 매수!")
 
     krw_to_use = int(krw_to_use)
 
