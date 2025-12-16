@@ -380,7 +380,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
             print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
-            tg_send_mid(f"⛔ {m} 이미 포지션 보유중 → 진입 스킵")
             return
 
     signal_price = pre.get("price")
@@ -429,7 +428,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if krw_bal < 6000:
         print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
-        tg_send_mid(f"⛔ {m} KRW 부족 ({krw_bal:,.0f}원) → 진입 스킵")
         return
 
     entry_price = current_price
@@ -452,7 +450,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     krw_to_use = base_qty * entry_price
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        tg_send_mid(f"⛔ {m} 주문금액 {krw_to_use:,.0f}원 (최소 5천원) → 진입 스킵")
         return
 
     krw_to_use = int(krw_to_use)
