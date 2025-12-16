@@ -391,41 +391,31 @@ def final_price_guard(m, initial_price, max_drift=0.012):
 def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     초입·공격모드 대응 자동 매수 진입
+    반환: (opened: bool, reason: str)
     """
-    # 디버그 정보 수집
-    debug_info = [f"🔍 <b>진입 체크</b> {m}"]
-
     if not AUTO_TRADE:
-        tg_send_mid(f"⚠️ {m} AUTO_TRADE=False → 진입 스킵")
-        return
-    debug_info.append("✓ AUTO_TRADE")
+        return (False, "AUTO_TRADE=False")
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        tg_send_mid(f"⚠️ {m} API 키 미설정 → 진입 스킵")
-        return
-    debug_info.append("✓ API키")
+        return (False, "API 키 미설정")
 
     # 이미 포지션 있으면 스킵
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
-            tg_send_mid(f"⚠️ {m} 이미 포지션 보유 → 진입 스킵")
-            return
-    debug_info.append("✓ 미보유")
+            return (False, "이미 포지션 보유")
 
     signal_price = pre.get("price")
     if not signal_price:
-        tg_send_mid(f"⚠️ {m} 신호가격 없음 → 진입 스킵")
-        return
-    debug_info.append(f"✓ 신호가 {signal_price:,.0f}")
+        return (False, "신호가격 없음")
 
     # === 하이브리드 진입모드 반영 ===
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.1   # 전체 리스크의 35%만 사용 (탐색용)
+        entry_fraction = 0.1
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
-        entry_fraction = 1.0    # 전체 금액 (확정 진입)
+        entry_fraction = 1.0
         mode_emoji = "🔥"
     else:
         entry_fraction = 1.0
@@ -436,22 +426,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
     if not ok_guard:
-        tg_send(
-            f"⚠️ <b>진입 취소</b> {m}\n"
-            f"• 신호가: {signal_price:,.0f}원\n"
-            f"• 현재가: {current_price:,.0f}원\n"
-            f"• 상승률: {((current_price / signal_price - 1) * 100):.2f}%\n"
-            f"• 사유: 가격 급등 (초입 추격 위험)"
-        )
-        return
-    debug_info.append(f"✓ 가격가드 (현재가 {current_price:,.0f})")
+        drift_pct = (current_price / signal_price - 1.0) * 100.0
+        return (False, f"가격급등 +{drift_pct:.2f}%")
 
     # === 계좌 & 주문금액 계산 ===
     accounts = get_account_info()
     if not accounts:
-        tg_send_mid(f"⚠️ {m} 계좌 조회 실패 → 진입 스킵")
-        return
-    debug_info.append("✓ 계좌조회")
+        return (False, "계좌 조회 실패")
 
     krw_bal = 0.0
     for a in accounts:
@@ -460,9 +441,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             break
 
     if krw_bal < 6000:
-        tg_send_mid(f"⚠️ {m} 잔고 부족 ({krw_bal:,.0f}원) → 진입 스킵")
-        return
-    debug_info.append(f"✓ 잔고 {krw_bal:,.0f}")
+        return (False, f"잔고 부족 {krw_bal:,.0f}원")
 
     entry_price = current_price
     stop_price = dyn_stop
@@ -472,7 +451,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     # === 하이브리드 진입 구조 ===
     risk_to_use = adaptive_risk * SEED_RISK_FRACTION if USE_PYRAMIDING else adaptive_risk
-    risk_to_use *= entry_fraction  # probe는 리스크 축소 반영
+    risk_to_use *= entry_fraction
 
     base_qty = calc_position_size(
         entry_price,
@@ -483,22 +462,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     krw_to_use = base_qty * entry_price
     if krw_to_use < 5000:
-        tg_send_mid(f"⚠️ {m} 주문금액 미달 ({krw_to_use:,.0f}원) → 진입 스킵")
-        return
-    debug_info.append(f"✓ 주문금액 {krw_to_use:,.0f}")
-
-    # 모든 체크 통과 → 디버그 출력 후 매수
-    tg_send_mid(" | ".join(debug_info) + " → 매수!")
+        return (False, f"주문금액 미달 {krw_to_use:,.0f}원")
 
     krw_to_use = int(krw_to_use)
 
     # === 매수 ===
     try:
         res = place_market_buy(m, krw_to_use)
-        print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))  # ★추가
+        print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
         oid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(oid, timeout_sec=6) if oid else None
-        print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))  # ★추가
+        print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))
 
         if od:
             volume_filled = float(od.get("executed_volume") or "0")
@@ -506,10 +480,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             volume_filled = 0.0
 
         if volume_filled <= 0:
-            msg = f"[AUTO] {m} 자동매수 체결 0 → 포지션 생성 안 함"
-            print(msg)
-            tg_send(f"⚠️ {msg}")
-            return
+            return (False, "체결 0")
 
         # 평균가 계산
         trades = od.get("trades") or []
@@ -518,12 +489,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             total_vol = sum(float(tr["volume"]) for tr in trades)
             avg_price = total_krw / total_vol if total_vol > 0 else entry_price
         else:
-            avg_price = float(entry_price)  # 명시적 float
+            avg_price = float(entry_price)
 
     except Exception as e:
         print("[AUTO BUY ERR]", e)
-        tg_send(f"⚠️ 매수 실패 {m}\n{e}")
-        return
+        return (False, f"매수 실패: {e}")
 
     # === 포지션 저장 ===
     total_invested = avg_price * volume_filled  # 총 투자금액 (추매시 누적됨)
@@ -576,6 +546,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
+
+    return (True, "")  # 성공
+
 
 def add_auto_position(m, cur_price):
     """
@@ -1058,6 +1031,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 # 얼럿 정책
 # =========================
 SILENT_MIDDLE_ALERTS = False  # True면 중간 알람 콘솔만, False면 텔레그램도
+SHOW_POST_SIGNAL_REASON = True  # 초입 신호 후 스킵 사유 한 줄 출력
 
 
 def tg_send_mid(t):
@@ -3339,7 +3313,9 @@ def monitor_position(m,
             # ⑦ 추세 회복 재진입 (눌림 후 재상승) - 부분익절 안 했을때만
             if not partial_done and drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                open_auto_position(m, pre, base_stop, eff_sl_pct)
+                opened, why = open_auto_position(m, pre, base_stop, eff_sl_pct)
+                if SHOW_POST_SIGNAL_REASON and not opened and why:
+                    tg_send_mid(f"❌ {m} 재진입 스킵 · {why}")
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
@@ -3866,7 +3842,9 @@ def main():
 
                     # --- 🔥 자동매수 진입 ---
                     try:
-                        open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                        opened, why = open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                        if SHOW_POST_SIGNAL_REASON and not opened and why:
+                            tg_send_mid(f"❌ {m} 자동매수 스킵 · {why}")
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
                         tg_send_mid(f"⚠️ {m} 자동매수 오류 → {e}")
