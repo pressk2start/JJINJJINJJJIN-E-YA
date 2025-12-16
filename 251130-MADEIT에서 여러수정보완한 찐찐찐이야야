@@ -759,16 +759,22 @@ def close_auto_position(m, reason=""):
             except Exception as _e:
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
+        result_emoji = "🟢" if ret_pct > 0 else "🔴"
+        fee_total = (est_entry_value + est_exit_value) * 0.0005  # 수수료 추정 (0.05%)
+
         tg_send(
-            f"💥 <b>자동청산</b> {m}\n"
+            f"====================================\n"
+            f"{result_emoji} <b>자동청산 완료</b> {m}\n"
+            f"====================================\n"
+            f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason}\n"
-            f"• 수량: {vol:.6f}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
-            f"• 실매도가(평균): {exit_price_used:,.0f}원\n"
-            f"• 매수금액(추정): {est_entry_value:,.0f}원\n"
-            f"• 청산금액(추정): {est_exit_value:,.0f}원\n"
-            f"• 실현손익(추정): {pl_value:,.0f}원\n"
-            f"• 수익률: {ret_pct:+.2f}%\n"
+            f"• 실매도가: {exit_price_used:,.0f}원\n"
+            f"• 체결수량: {vol:.6f}\n"
+            f"• 매수금액: {est_entry_value:,.0f}원\n"
+            f"• 청산금액: {est_exit_value:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원\n"
+            f"====================================\n"
             f"{link_for(m)}"
         )
 
@@ -798,6 +804,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             print(msg)
             return False, msg, 0.0
         current_volume = pos["volume"]
+        entry_price = pos.get("entry_price", 0)
 
     sell_volume = current_volume * sell_ratio
     if sell_volume <= 0:
@@ -831,6 +838,30 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         remaining_volume = max(current_volume - executed, 0.0)
 
+        # 실제 체결가 계산
+        exit_price_used = 0.0
+        if od:
+            trades = od.get("trades") or []
+            total_krw = 0.0
+            total_vol = 0.0
+            for tr in trades:
+                try:
+                    p = float(tr.get("price", "0"))
+                    v = float(tr.get("volume", "0"))
+                except Exception:
+                    continue
+                total_krw += p * v
+                total_vol += v
+            if total_vol > 0:
+                exit_price_used = total_krw / total_vol
+
+        # 손익 계산
+        est_entry_value = entry_price * executed
+        est_exit_value = exit_price_used * executed if exit_price_used > 0 else 0
+        pl_value = est_exit_value - est_entry_value
+        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
+        fee_total = (est_entry_value + est_exit_value) * 0.0005
+
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
@@ -841,12 +872,21 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
+        result_emoji = "🟢" if ret_pct > 0 else "🔴"
         tg_send(
-            f"🎯 <b>부분 청산</b> {m}\n"
+            f"====================================\n"
+            f"{result_emoji} <b>부분 청산</b> {m}\n"
+            f"====================================\n"
+            f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
-            f"• 매도 비율: {sell_ratio*100:.0f}%\n"
-            f"• 체결 수량: {executed:.6f}\n"
-            f"• 잔여 수량: {remaining_volume:.6f}\n"
+            f"• 매수평단: {entry_price:,.0f}원\n"
+            f"• 실매도가: {exit_price_used:,.0f}원\n"
+            f"• 체결수량: {executed:.6f}\n"
+            f"• 매수금액: {est_entry_value:,.0f}원\n"
+            f"• 청산금액: {est_exit_value:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원\n"
+            f"• 잔여수량: {remaining_volume:.6f}\n"
+            f"===================================="
         )
 
         return True, msg, executed
