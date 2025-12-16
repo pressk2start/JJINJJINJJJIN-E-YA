@@ -1259,19 +1259,28 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 rows = list(reader)
 
             # 마지막 해당 마켓 찾아서 업데이트
+            updated = False
             for i in range(len(rows) - 1, -1, -1):
                 if rows[i]["market"] == market and not rows[i].get("exit_price"):
                     rows[i]["exit_price"] = str(exit_price)
                     rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
                     rows[i]["result"] = "win" if pnl_pct > 0 else "lose"
                     rows[i]["hold_sec"] = str(int(hold_sec))
+                    updated = True
                     break
+
+            if not updated:
+                print(f"[TRADE_LOG_UPDATE] {market} 업데이트할 row 없음 (이미 청산됨 또는 진입기록 없음)")
 
             # 다시 쓰기
             with open(TRADE_LOG_PATH, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
                 w.writeheader()
                 w.writerows(rows)
+
+            # 진단 로그
+            total_done = sum(1 for r in rows if r.get("result") in ("win", "lose"))
+            print(f"[TRADE_LOG_UPDATE] {market} 청산기록 {'완료' if updated else '실패'}, 총완료건={total_done}")
         except Exception as e:
             print(f"[TRADE_LOG_UPDATE_ERR] {e}")
 
