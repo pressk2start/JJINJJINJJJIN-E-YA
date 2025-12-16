@@ -3810,7 +3810,7 @@ def main():
 
                     # --- 🔥 자동매수 진입 ---
                     try:
-                        open_auto_position(m, pre, base_stop, eff_sl_pct)
+                        open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
 
