@@ -919,17 +919,20 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         print(msg)
 
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
+        result_type = "부분익절" if ret_pct > 0 else "부분손절"
         tg_send(
             f"==============================\n"
-            f"{result_emoji} <b>부분 청산</b> {m}\n"
+            f"{result_emoji} <b>{result_type}</b> {m}\n"
+            f"==============================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
-            f"• 사유: {reason or '부분청산'}\n"
+            f"• 사유: {reason or result_type}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
             f"• 실매도가: {exit_price_used:,.0f}원\n"
             f"• 체결수량: {executed:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
             f"• 잔여수량: {remaining_volume:.6f}\n"
+            f"{link_for(m)}\n"
             f"=============================="
         )
 
@@ -3214,9 +3217,12 @@ def monitor_position(m,
                         OPEN_POSITIONS[m]["partial_price"] = curp
                         OPEN_POSITIONS[m]["volume"] = remaining_volume - partial_volume
 
+                partial_emoji = "🟢" if realized_gain > 0 else "🔴"
+                partial_type = "부분익절" if realized_gain > 0 else "부분손절"
                 tg_send_mid(
                     f"==============================\n"
-                    f"⚡ <b>{m}</b> 부분익절 (60%)\n"
+                    f"{partial_emoji} <b>{partial_type}</b> {m} (60%)\n"
+                    f"==============================\n"
                     f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원\n"
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW\n"
                     f"📌 잔량 40%는 -0.25% 하락시 자동청산\n"
