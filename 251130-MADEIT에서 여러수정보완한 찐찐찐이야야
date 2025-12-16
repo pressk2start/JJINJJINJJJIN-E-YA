@@ -2073,29 +2073,11 @@ CUT_COUNTER = {
 }
 
 
-# 진입 차단 사유 한글 매핑 (텔레그램 알림용)
-CUT_REASON_KR = {
-    "SPREAD_HIGH": "스프레드 과다",
-    "VOL_LOW": "거래량 부족",
-    "SURGE_LOW": "거래량둔화",
-    "PRICE_LOW": "가격변동 미달",
-    "NO_SIGNAL": "진입조건 미충족",
-    "TICKS_LOW": "틱 데이터 부족",
-    "SCORE_LOW": "리스크스코어 미달",
-}
-
 def cut(reason, detail):
     CUT_COUNTER[reason] = CUT_COUNTER.get(reason, 0) + 1
     if DEBUG_CUT:
         now_str = now_kst().strftime("%H:%M:%S")
         print(f"[FILTER][{now_str}] {reason:<16} | {detail}")
-
-    # 주요 차단 사유만 텔레그램 알림
-    if reason in CUT_REASON_KR:
-        # detail에서 종목코드 추출 (첫 단어)
-        market = detail.split()[0] if detail else "?"
-        kr_reason = CUT_REASON_KR[reason]
-        tg_send_mid(f"🚫 {market} {kr_reason} → 진입 차단")
 
 
 def cut_summary():
