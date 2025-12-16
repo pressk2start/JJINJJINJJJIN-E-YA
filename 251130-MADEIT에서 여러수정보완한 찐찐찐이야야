@@ -326,6 +326,29 @@ def place_market_sell(market, volume):
     }
     return upbit_private_post("/v1/orders", body)
 
+
+def get_actual_balance(market):
+    """실제 보유량 조회 (찌꺼기 방지용)"""
+    try:
+        currency = market.replace("KRW-", "")
+        accounts = get_account_info()
+        for a in accounts:
+            if a.get("currency") == currency:
+                return float(a.get("balance", "0"))
+        return 0.0
+    except:
+        return 0.0
+
+
+def sell_all(market):
+    """실제 보유량 전량 매도 (찌꺼기 방지)"""
+    actual = get_actual_balance(market)
+    if actual <= 0:
+        print(f"[SELL_ALL] {market} 보유량 없음")
+        return None
+    print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
+    return place_market_sell(market, actual)
+
 def final_price_guard(m, initial_price, max_drift=0.012):
     """
     주문 직전 가격 재확인
@@ -3182,7 +3205,7 @@ def monitor_position(m,
             # ① 급락 즉시 손절 (-1.5%)
             if cur_gain <= -0.015:
                 if AUTO_TRADE:
-                    place_market_sell(m, remaining_volume)
+                    sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3200,7 +3223,7 @@ def monitor_position(m,
                 drop_from_partial = (partial_price - curp) / partial_price
                 if drop_from_partial >= 0.0025:  # 0.4% → 0.25%로 타이트
                     if AUTO_TRADE:
-                        place_market_sell(m, remaining_volume)
+                        sell_all(m)  # 찌꺼기 방지
                     tg_send_mid(f"⚡ {m} 부분익절가 대비 -0.25% → 잔량 청산")
                     # 🧠 학습 데이터 기록
                     if AUTO_LEARN_ENABLED:
@@ -3248,7 +3271,7 @@ def monitor_position(m,
             # ④ 전량익절: 고점 대비 -0.5%면 바로 전량 (0.8% → 0.5%로 타이트)
             elif not partial_done and drop_from_high >= 0.005:
                 if AUTO_TRADE:
-                    place_market_sell(m, remaining_volume)
+                    sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3274,7 +3297,7 @@ def monitor_position(m,
 
             if curp <= profit_lock:
                 if AUTO_TRADE:
-                    place_market_sell(m, remaining_volume)
+                    sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"💎 {m} 이익락(피크기준) 발동 → 청산")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3292,7 +3315,7 @@ def monitor_position(m,
             trail_stop = max(trail_stop, best * (1.0 - trail_band))
             if curp <= trail_stop:
                 if AUTO_TRADE:
-                    place_market_sell(m, remaining_volume)
+                    sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"📉 {m} 트레일(피크-0.45%) 터치 → 청산")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
