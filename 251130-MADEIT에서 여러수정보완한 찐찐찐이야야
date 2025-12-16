@@ -370,10 +370,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     초입·공격모드 대응 자동 매수 진입
     """
     if not AUTO_TRADE:
+        tg_send_mid(f"⚠️ {m} AUTO_TRADE=False → 진입 스킵")
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
         print("[AUTO] API 키 미설정 → 자동매수 스킵")
+        tg_send_mid(f"⚠️ {m} API 키 미설정 → 진입 스킵")
         return
 
     # 이미 포지션 있으면 스킵
@@ -386,6 +388,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     signal_price = pre.get("price")
     if not signal_price:
         print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
+        tg_send_mid(f"⚠️ {m} 신호가격 없음 → 진입 스킵")
         return
 
     # === 하이브리드 진입모드 반영 ===
@@ -419,6 +422,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     accounts = get_account_info()
     if not accounts:
         print("[AUTO] 계좌 조회 실패 → 스킵")
+        tg_send_mid(f"⚠️ {m} 계좌 조회 실패 → 진입 스킵")
         return
 
     krw_bal = 0.0
@@ -3825,6 +3829,7 @@ def main():
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
+                        tg_send_mid(f"⚠️ {m} 자동매수 오류 → {e}")
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     try:
