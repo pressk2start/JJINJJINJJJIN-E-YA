@@ -825,6 +825,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     - partial_done 플래그로 1회만 부분청산/부분익절 허용
     반환: (성공여부:bool, 메시지:str, 체결량:float)
     """
+    if not AUTO_TRADE:
+        msg = f"[REMONITOR] {m} 부분청산 스킵(AUTO_TRADE=0)"
+        print(msg)
+        return False, msg, 0.0
+
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
         if not pos or pos.get("volume", 0) <= 0:
