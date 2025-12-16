@@ -783,9 +783,7 @@ def close_auto_position(m, reason=""):
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
 
         tg_send(
-            f"====================================\n"
             f"{result_emoji} <b>자동청산 완료</b> {m}{added_str}\n"
-            f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
@@ -794,7 +792,6 @@ def close_auto_position(m, reason=""):
             f"• 총투자금액: {total_invested:,.0f}원{added_str}\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
             f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
-            f"====================================\n"
             f"{link_for(m)}"
         )
 
@@ -903,9 +900,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
         tg_send(
-            f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
-            f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
@@ -914,8 +909,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
             f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
-            f"• 잔여수량: {remaining_volume:.6f}\n"
-            f"===================================="
+            f"• 잔여수량: {remaining_volume:.6f}"
         )
 
         return True, msg, executed
@@ -3570,13 +3564,10 @@ def main():
                             if abs(learn_result['changes'][k]) >= 0.1
                         ])
                         tg_send(
-                            f"====================================\n"
                             f"🧠 <b>자동학습 완료</b>\n"
-                            f"====================================\n"
                             f"📊 분석: {learn_result['sample_size']}건 ({learn_result['wins']}승/{learn_result['loses']}패)\n"
                             f"📈 승률: {learn_result['win_rate']}%\n\n"
-                            f"<b>가중치 변경:</b>\n{changes_str if changes_str else '  (변화 없음)'}\n"
-                            f"===================================="
+                            f"<b>가중치 변경:</b>\n{changes_str if changes_str else '  (변화 없음)'}"
                         )
                     elif learn_result and "status" in learn_result:
                         # 학습 실패/대기 - 상태 알림
