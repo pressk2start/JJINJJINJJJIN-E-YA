@@ -695,6 +695,21 @@ def close_auto_position(m, reason=""):
     tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
 
     vol = pos.get("volume", 0)
+
+    # 🔥 실제 업비트 잔고 조회 (찌꺼기 방지)
+    try:
+        accounts = get_account_info()
+        currency = m.replace("KRW-", "")
+        for acc in accounts:
+            if acc.get("currency") == currency:
+                real_balance = float(acc.get("balance", 0))
+                if real_balance > vol:
+                    print(f"[AUTO] {m} 실잔고({real_balance:.8f}) > 추적수량({vol:.8f}) → 실잔고로 매도")
+                    vol = real_balance
+                break
+    except Exception as e:
+        print(f"[AUTO] 잔고 조회 실패, 추적수량으로 매도: {e}")
+
     if vol <= 0:
         print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
         with _POSITION_LOCK:
