@@ -99,7 +99,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_N = 2
         TRAIL_ARM_GAIN = 0.012
         TRAIL_ATR_MULT = 1.10
-        TRAIL_DISTANCE_MIN = 0.015
+        TRAIL_DISTANCE_MIN = 0.010
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.60
         CTX_EXIT_THRESHOLD = 3  # 컨텍스트 역전 민감
@@ -241,7 +241,7 @@ def _make_auth_headers(query: dict = None):
         m.update(q)
         payload['query_hash'] = m.hexdigest()
         payload['query_hash_alg'] = 'SHA512'
-    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY)
+    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
     return {"Authorization": f"Bearer {jwt_token}"}
 
 
@@ -326,13 +326,12 @@ def place_market_sell(market, volume):
     }
     return upbit_private_post("/v1/orders", body)
 
-def final_price_guard(m, initial_price, max_drift=0.07):
+def final_price_guard(m, initial_price, max_drift=0.012):
     """
     주문 직전 가격 재확인
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 1.8%)
-    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
-      '추격 진입'으로 소액/피라미딩 기반 진입 허용
+    - max_drift: 신호가 대비 허용 상승률
+      기본 1.2%, AGGRESSIVE_MODE=True면 2.5%까지 소액 추격 허용
     """
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
@@ -3233,7 +3232,7 @@ def monitor_position(m,
             # ⑦ 추세 회복 재진입 (눌림 후 재상승) - 부분익절 안 했을때만
             if not partial_done and drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                open_auto_position(m, pre, base_stop, eff_sl_pct)
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
@@ -3760,7 +3759,7 @@ def main():
 
                     # --- 🔥 자동매수 진입 ---
                     try:
-                        open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                        open_auto_position(m, pre, base_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
 
