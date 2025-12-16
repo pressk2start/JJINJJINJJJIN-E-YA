@@ -433,6 +433,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_price = current_price
     stop_price = dyn_stop
 
+    # === RR비율 체크 (손익비) ===
+    risk_pct = (entry_price - stop_price) / entry_price if entry_price > 0 else 0
+    target_pct = 0.01  # 목표 1%
+    rr_ratio = target_pct / risk_pct if risk_pct > 0 else 0
+
+    # probe는 RR 0.5 이상, confirm은 RR 0.8 이상
+    min_rr = 0.5 if entry_mode == "probe" else 0.8
+    if rr_ratio < min_rr and rr_ratio > 0:
+        tg_send_mid(f"⚠️ {m} RR비율 {rr_ratio:.2f} 불리 → 진입 스킵 ({entry_mode})")
+        return
+
     # ✅ 최근 승률 기반 동적 리스크
     adaptive_risk = get_adaptive_risk()
 
