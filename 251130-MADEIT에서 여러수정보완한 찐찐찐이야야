@@ -923,7 +923,6 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         tg_send(
             f"==============================\n"
             f"{result_emoji} <b>{result_type}</b> {m}\n"
-            f"==============================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or result_type}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
@@ -3222,7 +3221,6 @@ def monitor_position(m,
                 tg_send_mid(
                     f"==============================\n"
                     f"{partial_emoji} <b>{partial_type}</b> {m} (60%)\n"
-                    f"==============================\n"
                     f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원\n"
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW\n"
                     f"📌 잔량 40%는 -0.25% 하락시 자동청산\n"
