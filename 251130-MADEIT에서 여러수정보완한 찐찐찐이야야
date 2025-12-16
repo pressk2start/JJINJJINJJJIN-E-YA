@@ -1274,26 +1274,40 @@ def analyze_and_update_weights():
         new_weights["fresh"] = 7.0  # 신선도는 고정
 
         # 기존 가중치와 블렌딩 (급격한 변화 방지)
+        old_weights = dict(SCORE_WEIGHTS)
         blended = {}
+        changes = {}
         for k in SCORE_WEIGHTS:
             old_w = SCORE_WEIGHTS.get(k, 10)
             new_w = new_weights.get(k, old_w)
             blended[k] = round(old_w * 0.6 + new_w * 0.4, 1)  # 60% 기존, 40% 신규
+            changes[k] = round(blended[k] - old_w, 1)
+
+        win_rate = round(len(wins) / len(df) * 100, 1)
+        sample_size = len(df)
 
         # 저장
         with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
             json.dump({
                 "weights": blended,
                 "updated_at": now_kst_str(),
-                "sample_size": len(df),
-                "win_rate": round(len(wins) / len(df) * 100, 1),
+                "sample_size": sample_size,
+                "win_rate": win_rate,
                 "raw_importance": importance
             }, f, ensure_ascii=False, indent=2)
 
         print(f"[AUTO_LEARN] 가중치 업데이트 완료: {blended}")
-        print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {len(wins)/len(df)*100:.1f}%")
+        print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {win_rate}%")
 
-        return blended
+        return {
+            "weights": blended,
+            "old_weights": old_weights,
+            "changes": changes,
+            "win_rate": win_rate,
+            "wins": len(wins),
+            "loses": len(loses),
+            "sample_size": sample_size
+        }
 
     except ImportError:
         print("[AUTO_LEARN] pandas 미설치 - 수동 분석 필요")
@@ -3464,10 +3478,24 @@ def main():
             if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 3600:
                 _last_learn_ts = time.time()
                 try:
-                    new_weights = analyze_and_update_weights()
-                    if new_weights:
-                        SCORE_WEIGHTS.update(new_weights)
-                        tg_send(f"🧠 자동학습 완료\n새 가중치: {new_weights}")
+                    learn_result = analyze_and_update_weights()
+                    if learn_result:
+                        SCORE_WEIGHTS.update(learn_result["weights"])
+                        # 변화량 표시 (+ / - 로)
+                        changes_str = "\n".join([
+                            f"  {k}: {learn_result['old_weights'][k]} → {learn_result['weights'][k]} ({learn_result['changes'][k]:+.1f})"
+                            for k in learn_result['changes']
+                            if abs(learn_result['changes'][k]) >= 0.1
+                        ])
+                        tg_send(
+                            f"====================================\n"
+                            f"🧠 <b>자동학습 완료</b>\n"
+                            f"====================================\n"
+                            f"📊 분석: {learn_result['sample_size']}건 ({learn_result['wins']}승/{learn_result['loses']}패)\n"
+                            f"📈 승률: {learn_result['win_rate']}%\n\n"
+                            f"<b>가중치 변경:</b>\n{changes_str if changes_str else '  (변화 없음)'}\n"
+                            f"===================================="
+                        )
                 except Exception as e:
                     print(f"[AUTO_LEARN_MAIN_ERR] {e}")
 
