@@ -3145,21 +3145,24 @@ def monitor_position(m,
                 verdict = "HARD_STOP"
                 break
 
-            # ② 부분익절 후 잔량 빠른 청산 (0.4% 추가 하락시)
+            # ② 부분익절 후 잔량 빠른 청산 (0.25% 추가 하락시) - 더 타이트하게
             if partial_done and partial_price > 0:
                 drop_from_partial = (partial_price - curp) / partial_price
-                if drop_from_partial >= 0.004:  # 부분익절가 대비 0.4% 하락
+                if drop_from_partial >= 0.0025:  # 0.4% → 0.25%로 타이트
                     place_market_sell(m, remaining_volume)
-                    tg_send_mid(f"⚡ {m} 부분익절 후 추가하락 → 잔량 청산")
+                    tg_send_mid(f"⚡ {m} 부분익절가 대비 -0.25% → 잔량 청산")
                     # 포지션 제거 (중복 청산 방지)
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
                     verdict = "PARTIAL_REMAIN_EXIT"
                     break
 
-            # ③ 조기익절: 고점 대비 -0.3% & 거래량감속 (60% 매도)
-            if not partial_done and drop_from_high >= 0.003 and vdrop_trigger:
-                partial_volume = remaining_volume * 0.6  # 50% → 60%로 상향
+            # ③ 조기익절: 고점 대비 -0.2% 또는 -0.15%+매수세 약화 (60% 매도)
+            early_drop = (drop_from_high >= 0.002) or (
+                drop_from_high >= 0.0015 and t15["buy_ratio"] < 0.56
+            )
+            if not partial_done and early_drop:
+                partial_volume = remaining_volume * 0.6
                 place_market_sell(m, partial_volume)
 
                 realized_gain = (curp / entry_price - 1.0) * 100
@@ -3176,13 +3179,13 @@ def monitor_position(m,
                     f"⚡ <b>{m}</b> 부분익절 (60%)\n"
                     f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원\n"
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW\n"
-                    f"📌 잔량 40%는 +0.4% 하락시 자동청산"
+                    f"📌 잔량 40%는 -0.25% 하락시 자동청산"
                 )
                 remaining_volume = remaining_volume - partial_volume
                 verdict = "PARTIAL_EXIT"
 
-            # ④ 전량익절: 고점 대비 -0.8% 이상 (1.0% → 0.8%로 타이트하게)
-            elif not partial_done and drop_from_high >= 0.008:
+            # ④ 전량익절: 고점 대비 -0.5%면 바로 전량 (0.8% → 0.5%로 타이트)
+            elif not partial_done and drop_from_high >= 0.005:
                 place_market_sell(m, remaining_volume)
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 # 포지션 제거 (중복 청산 방지)
@@ -3191,29 +3194,32 @@ def monitor_position(m,
                 verdict = "FULL_EXIT"
                 break
 
-            # ⑤ 이익락 (Profit Lock)
-            if cur_gain >= 0.015:
-                profit_lock = curp * 0.992
-            elif cur_gain >= 0.010:
-                profit_lock = curp * 0.994
+            # ⑤ 이익락 (피크 기준 Profit Lock) - 현재가 대신 피크 기준
+            if best > 0:
+                if cur_gain >= 0.015:      # +1.5% 이상 수익
+                    profit_lock = best * 0.996   # 피크 -0.4%
+                elif cur_gain >= 0.010:    # +1.0% 이상 수익
+                    profit_lock = best * 0.995   # 피크 -0.5%
+                else:
+                    profit_lock = max(base_stop, best * 0.994)  # 피크 -0.6%
             else:
                 profit_lock = base_stop
 
             if curp <= profit_lock:
                 place_market_sell(m, remaining_volume)
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
+                tg_send_mid(f"💎 {m} 이익락(피크기준) 발동 → 청산")
                 # 포지션 제거 (중복 청산 방지)
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑥ 트레일링 스탑 (고점 대비 0.5%)
-            if trail_armed and curp > best:
-                trail_stop = max(trail_stop, curp * 0.995)
-            if trail_armed and curp <= trail_stop:
+            # ⑥ 트레일링 스탑 (피크 기준 -0.45%) - 더 촘촘하게
+            trail_band = 0.0045
+            trail_stop = max(trail_stop, best * (1.0 - trail_band))
+            if curp <= trail_stop:
                 place_market_sell(m, remaining_volume)
-                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
+                tg_send_mid(f"📉 {m} 트레일(피크-0.45%) 터치 → 청산")
                 # 포지션 제거 (중복 청산 방지)
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
@@ -3221,7 +3227,7 @@ def monitor_position(m,
                 break
 
             # ⑦ 추세 회복 재진입 (눌림 후 재상승) - 부분익절 안 했을때만
-            if not partial_done and drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
+            if not partial_done and drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 open_auto_position(m, pre, dyn_stop, eff_sl_pct)
         
