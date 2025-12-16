@@ -3158,7 +3158,8 @@ def monitor_position(m,
 
             # ① 급락 즉시 손절 (-1.5%)
             if cur_gain <= -0.015:
-                place_market_sell(m, remaining_volume)
+                if AUTO_TRADE:
+                    place_market_sell(m, remaining_volume)
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3175,7 +3176,8 @@ def monitor_position(m,
             if partial_done and partial_price > 0:
                 drop_from_partial = (partial_price - curp) / partial_price
                 if drop_from_partial >= 0.0025:  # 0.4% → 0.25%로 타이트
-                    place_market_sell(m, remaining_volume)
+                    if AUTO_TRADE:
+                        place_market_sell(m, remaining_volume)
                     tg_send_mid(f"⚡ {m} 부분익절가 대비 -0.25% → 잔량 청산")
                     # 🧠 학습 데이터 기록
                     if AUTO_LEARN_ENABLED:
@@ -3194,7 +3196,8 @@ def monitor_position(m,
             )
             if not partial_done and early_drop:
                 partial_volume = remaining_volume * 0.6
-                place_market_sell(m, partial_volume)
+                if AUTO_TRADE:
+                    place_market_sell(m, partial_volume)
 
                 realized_gain = (curp / entry_price - 1.0) * 100
                 realized_krw = partial_volume * curp
@@ -3219,7 +3222,8 @@ def monitor_position(m,
 
             # ④ 전량익절: 고점 대비 -0.5%면 바로 전량 (0.8% → 0.5%로 타이트)
             elif not partial_done and drop_from_high >= 0.005:
-                place_market_sell(m, remaining_volume)
+                if AUTO_TRADE:
+                    place_market_sell(m, remaining_volume)
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3244,7 +3248,8 @@ def monitor_position(m,
                 profit_lock = base_stop
 
             if curp <= profit_lock:
-                place_market_sell(m, remaining_volume)
+                if AUTO_TRADE:
+                    place_market_sell(m, remaining_volume)
                 tg_send_mid(f"💎 {m} 이익락(피크기준) 발동 → 청산")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
@@ -3261,7 +3266,8 @@ def monitor_position(m,
             trail_band = 0.0045
             trail_stop = max(trail_stop, best * (1.0 - trail_band))
             if curp <= trail_stop:
-                place_market_sell(m, remaining_volume)
+                if AUTO_TRADE:
+                    place_market_sell(m, remaining_volume)
                 tg_send_mid(f"📉 {m} 트레일(피크-0.45%) 터치 → 청산")
                 # 🧠 학습 데이터 기록
                 if AUTO_LEARN_ENABLED:
