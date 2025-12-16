@@ -901,6 +901,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
         tg_send(
+            f"==============================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
@@ -909,8 +910,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"• 체결수량: {executed:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
-            f"• 잔여수량: {remaining_volume:.6f}"
+            f"• 잔여수량: {remaining_volume:.6f}\n"
+            f"=============================="
         )
 
         return True, msg, executed
