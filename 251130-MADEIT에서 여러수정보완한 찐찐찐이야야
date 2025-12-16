@@ -497,7 +497,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "sl_pct": eff_sl_pct,
             "state": "open",
             "last_add_ts": 0.0,
-            "entry_mode": pre.get("entry_mode", "confirm"),  # ★ 추가
+            "entry_mode": pre.get("entry_mode", "confirm"),
+            "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
         }
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
@@ -512,6 +513,30 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         f"• 손절가: {stop_price:,.0f}원\n"
         f"{link_for(m)}"
     )
+
+    # === 🧠 피처 로깅 (자동 학습용) ===
+    if AUTO_LEARN_ENABLED:
+        try:
+            ob = pre.get("ob", {})
+            t = pre.get("tape", {})
+            imbalance = calc_orderbook_imbalance(ob) if ob else 0
+            turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
+
+            log_trade_features({
+                "ts": now_kst_str(),
+                "market": m,
+                "entry_price": avg_price,
+                "buy_ratio": t.get("buy_ratio", 0),
+                "spread": ob.get("spread", 0),
+                "turn": turn,
+                "imbalance": imbalance,
+                "volume_surge": pre.get("volume_surge", 1.0),
+                "fresh": 1 if last_two_ticks_fresh(pre.get("ticks", [])) else 0,
+                "score": pre.get("score", 0),
+                "entry_mode": entry_mode,
+            })
+        except Exception as e:
+            print(f"[FEATURE_LOG_ERR] {e}")
 
 def add_auto_position(m, cur_price):
     """
@@ -725,6 +750,14 @@ def close_auto_position(m, reason=""):
             record_trade(m, ret_pct)
         except Exception as _e:
             print("[TRADE_RECORD_ERR]", _e)
+
+        # 🧠 자동 학습용 결과 업데이트
+        if AUTO_LEARN_ENABLED:
+            try:
+                hold_sec = time.time() - pos.get("entry_ts", time.time())
+                update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec)
+            except Exception as _e:
+                print(f"[FEATURE_UPDATE_ERR] {_e}")
 
         tg_send(
             f"💥 <b>자동청산</b> {m}\n"
@@ -1086,6 +1119,168 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
     score += SCORE_WEIGHTS["volume_surge"] * surge_norm
 
     return round(score, 1)
+
+# =========================
+# 🧠 자동 가중치 학습 시스템
+# =========================
+TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
+WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
+AUTO_LEARN_ENABLED = True
+AUTO_LEARN_MIN_TRADES = 50  # 최소 거래 수
+_trade_log_lock = threading.Lock()
+
+FEATURE_FIELDS = [
+    "ts", "market", "entry_price", "exit_price",
+    "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
+    "fresh", "score", "entry_mode",
+    "pnl_pct", "result", "hold_sec"
+]
+
+def log_trade_features(entry_data: dict, exit_data: dict = None):
+    """
+    거래 피처 로깅 (진입 시 호출, 청산 시 업데이트)
+    """
+    with _trade_log_lock:
+        new_file = not os.path.exists(TRADE_LOG_PATH)
+        with open(TRADE_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
+            if new_file:
+                w.writeheader()
+            row = {k: entry_data.get(k, "") for k in FEATURE_FIELDS}
+            if exit_data:
+                row.update(exit_data)
+            w.writerow(row)
+
+def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float):
+    """
+    청산 시 결과 업데이트 (마지막 해당 마켓 row 찾아서 업데이트)
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return
+
+    with _trade_log_lock:
+        try:
+            rows = []
+            with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            # 마지막 해당 마켓 찾아서 업데이트
+            for i in range(len(rows) - 1, -1, -1):
+                if rows[i]["market"] == market and not rows[i].get("exit_price"):
+                    rows[i]["exit_price"] = str(exit_price)
+                    rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
+                    rows[i]["result"] = "win" if pnl_pct > 0 else "lose"
+                    rows[i]["hold_sec"] = str(int(hold_sec))
+                    break
+
+            # 다시 쓰기
+            with open(TRADE_LOG_PATH, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        except Exception as e:
+            print(f"[TRADE_LOG_UPDATE_ERR] {e}")
+
+def analyze_and_update_weights():
+    """
+    거래 로그 분석 후 가중치 자동 업데이트
+    - 승리/패배 그룹 간 피처 차이로 중요도 계산
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        print("[AUTO_LEARN] 거래 로그 없음")
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        # 결과가 있는 것만
+        df = df[df["result"].isin(["win", "lose"])]
+
+        if len(df) < AUTO_LEARN_MIN_TRADES:
+            print(f"[AUTO_LEARN] 데이터 부족 ({len(df)}/{AUTO_LEARN_MIN_TRADES})")
+            return None
+
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+
+        if len(wins) < 5 or len(loses) < 5:
+            print(f"[AUTO_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
+            return None
+
+        # 피처별 중요도 계산
+        features = ["buy_ratio", "spread", "turn", "imbalance", "volume_surge"]
+        importance = {}
+
+        for f in features:
+            try:
+                win_avg = pd.to_numeric(wins[f], errors='coerce').mean()
+                lose_avg = pd.to_numeric(loses[f], errors='coerce').mean()
+                std = pd.to_numeric(df[f], errors='coerce').std()
+                if std > 0:
+                    importance[f] = abs(win_avg - lose_avg) / std
+                else:
+                    importance[f] = 0.1
+            except:
+                importance[f] = 0.1
+
+        # 정규화 (합계 93, fresh 7은 고정)
+        total = sum(importance.values())
+        if total <= 0:
+            return None
+
+        new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
+        new_weights["fresh"] = 7.0  # 신선도는 고정
+
+        # 기존 가중치와 블렌딩 (급격한 변화 방지)
+        blended = {}
+        for k in SCORE_WEIGHTS:
+            old_w = SCORE_WEIGHTS.get(k, 10)
+            new_w = new_weights.get(k, old_w)
+            blended[k] = round(old_w * 0.6 + new_w * 0.4, 1)  # 60% 기존, 40% 신규
+
+        # 저장
+        with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "weights": blended,
+                "updated_at": now_kst_str(),
+                "sample_size": len(df),
+                "win_rate": round(len(wins) / len(df) * 100, 1),
+                "raw_importance": importance
+            }, f, ensure_ascii=False, indent=2)
+
+        print(f"[AUTO_LEARN] 가중치 업데이트 완료: {blended}")
+        print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {len(wins)/len(df)*100:.1f}%")
+
+        return blended
+
+    except ImportError:
+        print("[AUTO_LEARN] pandas 미설치 - 수동 분석 필요")
+        return None
+    except Exception as e:
+        print(f"[AUTO_LEARN_ERR] {e}")
+        return None
+
+def load_learned_weights():
+    """
+    저장된 가중치 파일 로드 (없으면 기본값 유지)
+    """
+    global SCORE_WEIGHTS
+    if not os.path.exists(WEIGHTS_PATH):
+        print("[WEIGHTS] 학습된 가중치 없음 - 기본값 사용")
+        return
+
+    try:
+        with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "weights" in data:
+            SCORE_WEIGHTS.update(data["weights"])
+            print(f"[WEIGHTS] 학습된 가중치 로드: {SCORE_WEIGHTS}")
+            print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
+    except Exception as e:
+        print(f"[WEIGHTS_LOAD_ERR] {e}")
 
 # =========================
 # 세션/요청(네트워크 안정화)
@@ -3206,18 +3401,35 @@ def fetch_orderbook_cache(mkts):
 # =========================
 SHARD_SIZE = TOP_N
 _cursor = 0
+_last_learn_ts = 0  # 마지막 학습 시각
 
 
 def main():
-    global _cursor
+    global _cursor, _last_learn_ts
+
+    # 🧠 시작 시 학습된 가중치 로드
+    if AUTO_LEARN_ENABLED:
+        load_learned_weights()
+
     tg_send(
-        f"🚀 대장초입 헌터 v3.2.7 (Conservative-Balanced) 시작 | TOP {TOP_N} | {now_kst_str()}"
+        f"🚀 대장초입 헌터 v3.2.7+Score (자동학습) 시작 | TOP {TOP_N} | {now_kst_str()}"
     )
 
     while True:
         try:
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
+
+            # 🧠 매 시간마다 자동 학습 실행
+            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 3600:
+                _last_learn_ts = time.time()
+                try:
+                    new_weights = analyze_and_update_weights()
+                    if new_weights:
+                        SCORE_WEIGHTS.update(new_weights)
+                        tg_send(f"🧠 자동학습 완료\n새 가중치: {new_weights}")
+                except Exception as e:
+                    print(f"[AUTO_LEARN_MAIN_ERR] {e}")
 
             for k in list(CUT_COUNTER.keys()):
                 CUT_COUNTER[k] = 0
