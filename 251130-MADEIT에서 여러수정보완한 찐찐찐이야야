@@ -374,20 +374,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
         print("[AUTO] API 키 미설정 → 자동매수 스킵")
-        tg_send_mid(f"❌ {m} 진입 스킵: API 키 미설정")
         return
 
     # 이미 포지션 있으면 스킵
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
             print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
-            tg_send_mid(f"❌ {m} 진입 스킵: 이미 포지션 보유중")
             return
 
     signal_price = pre.get("price")
     if not signal_price:
         print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
-        tg_send_mid(f"❌ {m} 진입 스킵: 가격 정보 없음")
         return
 
     # === 하이브리드 진입모드 반영 ===
@@ -421,7 +418,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     accounts = get_account_info()
     if not accounts:
         print("[AUTO] 계좌 조회 실패 → 스킵")
-        tg_send_mid(f"❌ {m} 진입 스킵: 계좌 조회 실패")
         return
 
     krw_bal = 0.0
@@ -432,7 +428,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if krw_bal < 6000:
         print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
-        tg_send_mid(f"❌ {m} 진입 스킵: KRW 부족 ({krw_bal:,.0f}원)")
         return
 
     entry_price = current_price
@@ -455,7 +450,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     krw_to_use = base_qty * entry_price
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        tg_send_mid(f"❌ {m} 진입 스킵: 주문금액 {krw_to_use:,.0f}원 (최소 5천원)")
         return
 
     krw_to_use = int(krw_to_use)
