@@ -489,6 +489,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # === 포지션 저장 ===
+    total_invested = avg_price * volume_filled  # 총 투자금액 (추매시 누적됨)
     with _POSITION_LOCK:
         OPEN_POSITIONS[m] = {
             "entry_price": avg_price,
@@ -499,6 +500,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "last_add_ts": 0.0,
             "entry_mode": pre.get("entry_mode", "confirm"),
             "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
+            "total_invested": total_invested,  # 💰 총 투자금액 (추매 포함)
         }
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
@@ -642,22 +644,30 @@ def add_auto_position(m, cur_price):
         if not pos:
             return False, None
         old_vol = pos.get("volume", 0.0)
+        old_invested = pos.get("total_invested", entry_price_old * old_vol)  # 기존 투자금액
         new_vol = old_vol + volume_filled
         if new_vol <= 0:
             return False, None
         new_entry_price = (entry_price_old * old_vol + avg_price_add * volume_filled) / new_vol
+
+        add_invested = avg_price_add * volume_filled  # 이번 추매 금액
+        total_invested = old_invested + add_invested  # 총 투자금액
 
         pos["entry_price"] = new_entry_price
         pos["volume"] = new_vol
         pos["added"] = True
         pos["last_add_ts"] = time.time()
         pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
+        pos["total_invested"] = total_invested  # 총 투자금액 저장
 
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
         f"• 추가 체결가: {avg_price_add:,.0f}원\n"
         f"• 추가 수량: {volume_filled:.6f}\n"
+        f"• 추가 금액: {add_invested:,.0f}원\n"
+        f"────────────────\n"
         f"• 총 수량: {new_vol:.6f}\n"
+        f"• 총 투자금액: {total_invested:,.0f}원\n"
         f"• 새로운 평단: {new_entry_price:,.0f}원\n"
         f"{link_for(m)}"
     )
@@ -739,11 +749,22 @@ def close_auto_position(m, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
-        # 실제 체결가 기준으로 다시 계산
+        # 실제 체결가 기준으로 다시 계산 (추매 포함, 수수료 반영)
         est_exit_value = exit_price_used * vol
-        pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price -
-                   1.0) * 100.0 if entry_price > 0 else 0.0
+        total_invested = pos.get("total_invested", entry_price * vol)  # 추매 포함 총 투자금액
+
+        # 수수료 계산 (매수 0.05% + 매도 0.05%)
+        fee_buy = total_invested * 0.0005
+        fee_sell = est_exit_value * 0.0005
+        fee_total = fee_buy + fee_sell
+
+        # 순손익 = 청산금액 - 총투자금액 - 수수료
+        pl_value = est_exit_value - total_invested - fee_total
+        # 수익률 = 순손익 / 총투자금액 * 100
+        ret_pct = (pl_value / total_invested * 100.0) if total_invested > 0 else 0.0
+
+        # 추매 여부 표시
+        added_str = " (추매포함)" if pos.get("added") else ""
 
         # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
         try:
@@ -760,20 +781,19 @@ def close_auto_position(m, reason=""):
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
-        fee_total = (est_entry_value + est_exit_value) * 0.0005  # 수수료 추정 (0.05%)
 
         tg_send(
             f"====================================\n"
-            f"{result_emoji} <b>자동청산 완료</b> {m}\n"
+            f"{result_emoji} <b>자동청산 완료</b> {m}{added_str}\n"
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason}\n"
             f"• 매수평단: {entry_price:,.0f}원\n"
             f"• 실매도가: {exit_price_used:,.0f}원\n"
             f"• 체결수량: {vol:.6f}\n"
-            f"• 매수금액: {est_entry_value:,.0f}원\n"
+            f"• 총투자금액: {total_invested:,.0f}원{added_str}\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
             f"====================================\n"
             f"{link_for(m)}"
         )
@@ -855,18 +875,27 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
-        # 손익 계산
+        # 손익 계산 (수수료 반영)
         est_entry_value = entry_price * executed
         est_exit_value = exit_price_used * executed if exit_price_used > 0 else 0
-        pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
-        fee_total = (est_entry_value + est_exit_value) * 0.0005
+
+        # 수수료 계산 (매수 0.05% + 매도 0.05%)
+        fee_buy = est_entry_value * 0.0005
+        fee_sell = est_exit_value * 0.0005
+        fee_total = fee_buy + fee_sell
+
+        # 순손익 = 청산금액 - 매수금액 - 수수료
+        pl_value = est_exit_value - est_entry_value - fee_total
+        ret_pct = (pl_value / est_entry_value * 100.0) if est_entry_value > 0 else 0.0
 
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
                 pos2["volume"] = remaining_volume
                 pos2["partial_done"] = True
+                # 남은 투자금액 업데이트
+                old_total_invested = pos2.get("total_invested", entry_price * current_volume)
+                pos2["total_invested"] = old_total_invested - est_entry_value
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
@@ -884,7 +913,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"• 체결수량: {executed:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원 (매수+매도)\n"
             f"• 잔여수량: {remaining_volume:.6f}\n"
             f"===================================="
         )
@@ -3114,7 +3143,7 @@ def monitor_position(m,
 
             # ① 급락 즉시 손절 (-1.5%)
             if cur_gain <= -0.015:
-                sell_market(m, remaining_volume)
+                place_market_sell(m, remaining_volume)
                 tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
                 verdict = "HARD_STOP"
                 break
@@ -3123,7 +3152,7 @@ def monitor_position(m,
             if partial_done and partial_price > 0:
                 drop_from_partial = (partial_price - curp) / partial_price
                 if drop_from_partial >= 0.004:  # 부분익절가 대비 0.4% 하락
-                    sell_market(m, remaining_volume)
+                    place_market_sell(m, remaining_volume)
                     tg_send_mid(f"⚡ {m} 부분익절 후 추가하락 → 잔량 청산")
                     verdict = "PARTIAL_REMAIN_EXIT"
                     break
@@ -3131,7 +3160,7 @@ def monitor_position(m,
             # ③ 조기익절: 고점 대비 -0.3% & 거래량감속 (60% 매도)
             if not partial_done and drop_from_high >= 0.003 and vdrop_trigger:
                 partial_volume = remaining_volume * 0.6  # 50% → 60%로 상향
-                sell_market(m, partial_volume)
+                place_market_sell(m, partial_volume)
 
                 realized_gain = (curp / entry_price - 1.0) * 100
                 realized_krw = partial_volume * curp
@@ -3154,7 +3183,7 @@ def monitor_position(m,
 
             # ④ 전량익절: 고점 대비 -0.8% 이상 (1.0% → 0.8%로 타이트하게)
             elif not partial_done and drop_from_high >= 0.008:
-                sell_market(m, remaining_volume)
+                place_market_sell(m, remaining_volume)
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
                 break
@@ -3168,7 +3197,7 @@ def monitor_position(m,
                 profit_lock = base_stop
 
             if curp <= profit_lock:
-                sell_market(m, remaining_volume)
+                place_market_sell(m, remaining_volume)
                 tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
                 verdict = "PROFIT_LOCK"
                 break
@@ -3177,7 +3206,7 @@ def monitor_position(m,
             if trail_armed and curp > best:
                 trail_stop = max(trail_stop, curp * 0.995)
             if trail_armed and curp <= trail_stop:
-                sell_market(m, remaining_volume)
+                place_market_sell(m, remaining_volume)
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
                 verdict = "TRAIL_EXIT"
                 break
