@@ -1257,7 +1257,7 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
 AUTO_LEARN_ENABLED = True
-AUTO_LEARN_MIN_TRADES = 15  # 최소 거래 수 (50→15로 축소, 빠른 피드백)
+AUTO_LEARN_MIN_TRADES = 32  # 다음 거래 완료 시 학습 시작
 _trade_log_lock = threading.Lock()
 
 FEATURE_FIELDS = [
