@@ -690,7 +690,7 @@ def add_auto_position(m, cur_price):
 # =========================
 def close_auto_position(m, reason=""):
     """
-    손절/청산 시 자동 매도
+    손절/청산 시 자동 매도 (찌꺼기 방지 포함)
     """
     if not AUTO_TRADE:
         print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
@@ -704,9 +704,12 @@ def close_auto_position(m, reason=""):
         tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
         return
 
-    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={pos.get('volume',0):.6f})")
+    # 실제 보유량 조회 (찌꺼기 방지)
+    actual_vol = get_actual_balance(m)
+    vol = actual_vol if actual_vol > 0 else pos.get("volume", 0)
 
-    vol = pos.get("volume", 0)
+    tg_send_mid(f"💣 {m} 자동청산 시도 (reason={reason}, vol={vol:.6f})")
+
     if vol <= 0:
         print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
         with _POSITION_LOCK:
@@ -3255,8 +3258,7 @@ def monitor_position(m,
             # ① 급락 즉시 손절 (동적 파라미터 사용)
             dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.012)
             if cur_gain <= dyn_hard:
-                sell_all(m)  # 찌꺼기 방지
-                tg_send_mid(f"🩸 {m} 급락 {dyn_hard*100:.1f}% 컷")
+                close_auto_position(m, f"급락 {dyn_hard*100:.1f}% 컷")
                 verdict = "HARD_STOP"
                 break
 
@@ -3280,8 +3282,7 @@ def monitor_position(m,
 
             # ③ 전량익절: 고점 대비 하락 (동적 파라미터)
             elif drop_from_high >= dyn_full:
-                sell_all(m)  # 찌꺼기 방지
-                tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
+                close_auto_position(m, f"고점대비 {drop_from_high*100:.2f}% 하락 전량익절")
                 verdict = "FULL_EXIT"
                 break
 
@@ -3297,8 +3298,7 @@ def monitor_position(m,
                 profit_lock = base_stop
 
             if curp <= profit_lock:
-                sell_all(m)  # 찌꺼기 방지
-                tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
+                close_auto_position(m, f"이익락 발동 ({fmt6(profit_lock)}원)")
                 verdict = "PROFIT_LOCK"
                 break
 
@@ -3307,8 +3307,7 @@ def monitor_position(m,
             if trail_armed and curp > best:
                 trail_stop = max(trail_stop, curp * (1 - dyn_trail))
             if trail_armed and curp <= trail_stop:
-                sell_all(m)  # 찌꺼기 방지
-                tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
+                close_auto_position(m, f"트레일링 스탑({fmt6(trail_stop)}) 터치")
                 verdict = "TRAIL_EXIT"
                 break
 
