@@ -50,10 +50,10 @@ TRAIL_DISTANCE_MIN = 0.004  # 최소 트레일 간격(0.4%)
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
-# === 하이브리드 모드 전역 설정 ===
-USE_5M_CONTEXT = False        # 5분 컨텍스트 비활성화
+# === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
+USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
 POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
-EARLY_FLOW_MIN_KRWPSEC = 22_000  # 초기 거래속도 완화
+EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -264,10 +264,11 @@ def upbit_private_post(path, body=None, timeout=7):
     return r.json()
 
 
-def get_order_result(uuid_str, timeout_sec=6.0):
+def get_order_result(uuid_str, timeout_sec=10.0):
     """
     주문 uuid 로 최종 체결 결과 조회
-    - done / cancel / watch 상태가 되거나 timeout 될 때까지 polling
+    - done / cancel / wait 상태가 되거나 timeout 될 때까지 polling
+    ✅ 타임아웃 6초→10초, 상태값 watch→wait 오타 수정
     """
     deadline = time.time() + timeout_sec
     last = None
@@ -276,7 +277,7 @@ def get_order_result(uuid_str, timeout_sec=6.0):
             od = upbit_private_get("/v1/order", {"uuid": uuid_str})
             last = od
             state = od.get("state")
-            if state in ("done", "cancel", "watch"):
+            if state in ("done", "cancel", "wait"):
                 break
         except Exception as e:
             last = None
@@ -413,7 +414,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.1   # 전체 리스크의 35%만 사용 (탐색용)
+        entry_fraction = 0.30   # ✅ 30%로 상향 (최소주문금액 미달 방지)
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
         entry_fraction = 1.0    # 전체 금액 (확정 진입)
@@ -718,9 +719,9 @@ def close_auto_position(m, reason=""):
 
     entry_price = pos.get("entry_price", 0)
 
-    # 현재가(청산 전 기준) 조회
+    # 현재가(청산 전 기준) 조회 - ✅ 퍼블릭 API 사용
     try:
-        cur_js = upbit_private_get("/v1/ticker", {"markets": m})
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         cur_price = cur_js[0].get("trade_price",
                                   entry_price) if cur_js else entry_price
     except Exception:
@@ -1056,7 +1057,7 @@ MONITOR_MAX = 180
 IGN_BREAK_LOOKBACK = 12
 IGN_MIN_BODY = 0.006
 IGN_MIN_BUY = 0.60
-USE_5M_CONTEXT = True
+# USE_5M_CONTEXT 상단에서 일원화 (중복 제거)
 
 # Bot-aware
 BOT_PINGPONG_MAX_BAND = 0.0015
@@ -1077,7 +1078,7 @@ EARLY_MIN_VWAP_GAP = 0.0005
 EARLY_MIN_BUY = 0.50
 EARLY_MIN_TURN = 0.012
 EARLY_MIN_TICKS = 2
-EARLY_FLOW_MIN_KRWPSEC = 26_000  # 45k -> 38k
+# EARLY_FLOW_MIN_KRWPSEC 상단에서 일원화 (중복 제거)
 EARLY_MAX_VWAP_GAP = 0.018  # 1분봉가-VWAP 최대 괴리 (1.8%) 허용
 EARLY_MAX_EMA5_GAP = 0.022
 
@@ -1190,7 +1191,8 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
 AUTO_LEARN_ENABLED = True
-AUTO_LEARN_MIN_TRADES = 25  # 최소 거래 수 (빠른 학습 적용)
+AUTO_LEARN_APPLY = os.getenv("AUTO_LEARN_APPLY", "0") == "1"  # ✅ 적용 보류 (shadow mode)
+AUTO_LEARN_MIN_TRADES = 60  # ✅ 25→60 (노이즈 방지)
 _trade_log_lock = threading.Lock()
 
 FEATURE_FIELDS = [
@@ -1313,6 +1315,9 @@ def analyze_and_update_weights():
             "buy_ratio": 28, "spread": 15, "turn": 22,
             "imbalance": 18, "volume_surge": 10, "fresh": 7
         }
+        # ✅ 페일세이프 하드 바운드 (절대 벗어나면 안 되는 값)
+        HARD_MIN = {"buy_ratio": 22, "turn": 18, "imbalance": 12}
+        HARD_MAX = {"spread": 25, "volume_surge": 18}
         MAX_DEVIATION = 0.15  # 초기값 대비 최대 ±15%까지만 변화 허용
 
         for k in SCORE_WEIGHTS:
@@ -1326,6 +1331,13 @@ def analyze_and_update_weights():
             init_w = INITIAL_WEIGHTS.get(k, 10)
             min_bound = init_w * (1 - MAX_DEVIATION)
             max_bound = init_w * (1 + MAX_DEVIATION)
+
+            # ✅ 하드 바운드 추가 적용
+            if k in HARD_MIN:
+                min_bound = max(min_bound, HARD_MIN[k])
+            if k in HARD_MAX:
+                max_bound = min(max_bound, HARD_MAX[k])
+
             blended[k] = round(max(min_bound, min(max_bound, candidate)), 1)
 
             changes[k] = round(blended[k] - old_w, 1)
@@ -3126,6 +3138,8 @@ def monitor_position(m,
                 continue
             curp = cur_js[0].get("trade_price", last_price)
             last_price = curp
+            # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
+            new_high = curp > best
             best = max(best, curp)
             worst = min(worst, curp)
 
@@ -3267,18 +3281,10 @@ def monitor_position(m,
             dyn_full = DYNAMIC_EXIT_PARAMS.get("full_drop", 0.004)
 
             if drop_from_high >= dyn_partial and vdrop_trigger:
-                partial_volume = entry_volume * 0.6  # 60% 먼저 털기
-                sell_market(m, partial_volume)
-
-                realized_gain = (curp / entry_price - 1.0) * 100
-                realized_krw = partial_volume * curp
-
-                tg_send_mid(
-                    f"⚡ <b>{m}</b> 부분익절 (60%)<br>"
-                    f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
-                    f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
-                )
-                verdict = "PARTIAL_EXIT"
+                # ✅ safe_partial_sell 사용 (sell_market 미정의 버그 수정)
+                ok, _, executed = safe_partial_sell(m, sell_ratio=0.6, reason="거래둔화+고점이탈")
+                if ok and executed > 0:
+                    verdict = "PARTIAL_EXIT"
 
             # ③ 전량익절: 고점 대비 하락 (동적 파라미터)
             elif drop_from_high >= dyn_full:
@@ -3286,25 +3292,23 @@ def monitor_position(m,
                 verdict = "FULL_EXIT"
                 break
 
-            # ④ 이익락 (Profit Lock) - 동적 파라미터
+            # ④ 이익락 (Profit Lock) - ✅ 고점 기준으로 변경 (안정적 수익 보호)
             dyn_lock = DYNAMIC_EXIT_PARAMS.get("profit_lock_tight", 0.996)
-            if cur_gain >= 0.012:
-                profit_lock = curp * dyn_lock
-            elif cur_gain >= 0.008:
-                profit_lock = curp * (dyn_lock + 0.001)
-            elif cur_gain >= 0.005:
-                profit_lock = curp * (dyn_lock + 0.002)
+            lock_drop = max(0.003, 1 - dyn_lock)  # 0.4~0.5% 정도
+            # 고점 대비 수익 보호 (cur_gain >= 0.5% 이상일 때만)
+            if cur_gain >= 0.005:
+                profit_lock = max(base_stop, best * (1 - lock_drop))
             else:
                 profit_lock = base_stop
 
-            if curp <= profit_lock:
-                close_auto_position(m, f"이익락 발동 ({fmt6(profit_lock)}원)")
+            if curp <= profit_lock and cur_gain >= 0.005:
+                close_auto_position(m, f"이익락 발동 (고점기준 {fmt6(profit_lock)}원)")
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑤ 트레일링 스탑 (동적 파라미터)
+            # ⑤ 트레일링 스탑 (동적 파라미터) - new_high로 래칫 조임
             dyn_trail = DYNAMIC_EXIT_PARAMS.get("trail_pct", 0.0025)
-            if trail_armed and curp > best:
+            if trail_armed and new_high:
                 trail_stop = max(trail_stop, curp * (1 - dyn_trail))
             if trail_armed and curp <= trail_stop:
                 close_auto_position(m, f"트레일링 스탑({fmt6(trail_stop)}) 터치")
@@ -3314,7 +3318,10 @@ def monitor_position(m,
             # ⑥ 추세 회복 재진입 (눌림 후 재상승) ← 더 빨리 감지
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                open_auto_position(m, pre, dyn_stop, eff_sl_pct)
+                # ✅ dyn_stop 미정의 버그 수정: 즉시 계산
+                c1_for_re = get_minutes_candles(1, m, 20)
+                new_stop, new_sl = dynamic_stop_loss(curp, c1_for_re, signal_type="early")
+                open_auto_position(m, pre, new_stop, new_sl)
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
@@ -3643,13 +3650,18 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🧠 30분마다 자동 학습 실행 (더 빠른 피드백)
-            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 1800:
+            # 🧠 3시간마다 자동 학습 실행 (✅ 30분→3시간, 노이즈 방지)
+            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 10800:
                 _last_learn_ts = time.time()
                 try:
                     learn_result = analyze_and_update_weights()
                     if learn_result:
-                        SCORE_WEIGHTS.update(learn_result["weights"])
+                        # ✅ AUTO_LEARN_APPLY=True 일 때만 실제 적용
+                        if AUTO_LEARN_APPLY:
+                            SCORE_WEIGHTS.update(learn_result["weights"])
+                            apply_status = "✅ 적용됨"
+                        else:
+                            apply_status = "⏸️ 적용보류(shadow)"
                         # 변화량 표시 (+ / - 로)
                         changes_str = "\n".join([
                             f"  {k}: {learn_result['old_weights'][k]} → {learn_result['weights'][k]} ({learn_result['changes'][k]:+.1f})"
@@ -3658,7 +3670,7 @@ def main():
                         ])
                         tg_send(
                             f"====================================\n"
-                            f"🧠 <b>자동학습 완료</b>\n"
+                            f"🧠 <b>자동학습 완료</b> {apply_status}\n"
                             f"====================================\n"
                             f"📊 분석: {learn_result['sample_size']}건 ({learn_result['wins']}승/{learn_result['loses']}패)\n"
                             f"📈 승률: {learn_result['win_rate']}%\n\n"
