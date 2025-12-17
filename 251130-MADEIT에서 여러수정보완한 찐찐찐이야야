@@ -929,13 +929,40 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     """
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
+    🔧 FIX: 장기 보유 타임아웃 추가 (부분청산 후 정체 방지)
     """
     CYCLE_SEC = 300
     cycle = 0
 
+    # 🔧 장기 보유 타임아웃 설정
+    STALE_AFTER_PARTIAL_SEC = 2 * 3600   # 부분청산 후 2시간
+    STALE_MAX_HOLD_SEC = 4 * 3600        # 최대 보유 4시간
+
     while True:
         cycle += 1
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
+
+        # 🔧 FIX: 장기 보유 타임아웃 체크
+        with _POSITION_LOCK:
+            pos = OPEN_POSITIONS.get(m)
+        if pos:
+            entry_ts = pos.get("entry_ts", time.time())
+            hold_sec = time.time() - entry_ts
+            partial_done = pos.get("partial_done", False)
+
+            # 부분청산 후 2시간 이상 → 강제 청산
+            if partial_done and hold_sec >= STALE_AFTER_PARTIAL_SEC:
+                reason = f"장기보유 타임아웃 (부분청산 후 {hold_sec/3600:.1f}h)"
+                print(f"[REMONITOR] {m} {reason} → 강제 청산")
+                close_auto_position(m, reason)
+                return True
+
+            # 전체 4시간 이상 → 강제 청산
+            if hold_sec >= STALE_MAX_HOLD_SEC:
+                reason = f"장기보유 타임아웃 (총 {hold_sec/3600:.1f}h)"
+                print(f"[REMONITOR] {m} {reason} → 강제 청산")
+                close_auto_position(m, reason)
+                return True
 
         verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
             monitor_position(
