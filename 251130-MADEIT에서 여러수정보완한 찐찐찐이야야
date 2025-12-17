@@ -241,7 +241,10 @@ def _make_auth_headers(query: dict = None):
         m.update(q)
         payload['query_hash'] = m.hexdigest()
         payload['query_hash_alg'] = 'SHA512'
-    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY)
+    # 🔧 FIX: 알고리즘 지정 + PyJWT v1/v2 호환 디코딩
+    jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
+    if isinstance(jwt_token, bytes):  # PyJWT v1 대비
+        jwt_token = jwt_token.decode("utf-8")
     return {"Authorization": f"Bearer {jwt_token}"}
 
 
@@ -267,8 +270,8 @@ def upbit_private_post(path, body=None, timeout=7):
 def get_order_result(uuid_str, timeout_sec=10.0):
     """
     주문 uuid 로 최종 체결 결과 조회
-    - done / cancel / wait 상태가 되거나 timeout 될 때까지 polling
-    ✅ 타임아웃 6초→10초, 상태값 watch→wait 오타 수정
+    - done / cancel 상태가 되거나 timeout 될 때까지 polling
+    🔧 FIX: wait에서 종료하면 체결 전에 끊김 → done/cancel만 종료
     """
     deadline = time.time() + timeout_sec
     last = None
@@ -277,7 +280,8 @@ def get_order_result(uuid_str, timeout_sec=10.0):
             od = upbit_private_get("/v1/order", {"uuid": uuid_str})
             last = od
             state = od.get("state")
-            if state in ("done", "cancel", "wait"):
+            # 🔧 FIX: done/cancel에서만 종료, wait는 계속 대기
+            if state in ("done", "cancel"):
                 break
         except Exception as e:
             last = None
@@ -2369,10 +2373,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
         if sudden_burst and fresh:
             cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
+            # 🔧 FIX: tape 누락 → KeyError 방지
+            tape = micro_tape_stats_from_ticks(ticks_now, 15)
             pre = {
                 "price": ticks_now[0]["trade_price"],
                 "ob": obc.get(m),
                 "ticks": ticks_now,
+                "tape": tape,  # ← 추가 (final_check_leader에서 필요)
                 "entry_mode": "probe",
                 "early_ok": True,
             }
