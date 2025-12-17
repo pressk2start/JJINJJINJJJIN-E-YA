@@ -42,10 +42,10 @@ HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
-# 트레일링 손절(이익발생 후만 무장)
-TRAIL_ARM_GAIN = 0.012  # +1.2% 이익 시 트레일링 활성화
-TRAIL_ATR_MULT = 1.15  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN = 0.010  # 최소 트레일 간격(1.0%)
+# 트레일링 손절(이익발생 후만 무장) - 타이트 세팅
+TRAIL_ARM_GAIN = 0.008  # +0.8% 이익 시 트레일링 활성화 (빠르게)
+TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭 (더 타이트)
+TRAIL_DISTANCE_MIN = 0.004  # 최소 트레일 간격(0.4%)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -93,16 +93,16 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 5
-        HARD_STOP_DD = 0.015
-        EXIT_DEBOUNCE_SEC = 6
+        WARMUP_SEC = 3  # 더 빠른 반응
+        HARD_STOP_DD = 0.012  # -1.2% 손절
+        EXIT_DEBOUNCE_SEC = 4
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ARM_GAIN = 0.012
-        TRAIL_ATR_MULT = 1.10
-        TRAIL_DISTANCE_MIN = 0.015
-        SPIKE_RECOVERY_WINDOW = 3
-        SPIKE_RECOVERY_MIN_BUY = 0.60
-        CTX_EXIT_THRESHOLD = 3  # 컨텍스트 역전 민감
+        TRAIL_ARM_GAIN = 0.006  # +0.6%에서 트레일링 시작
+        TRAIL_ATR_MULT = 0.9
+        TRAIL_DISTANCE_MIN = 0.003  # 0.3% 간격
+        SPIKE_RECOVERY_WINDOW = 2
+        SPIKE_RECOVERY_MIN_BUY = 0.65
+        CTX_EXIT_THRESHOLD = 2  # 컨텍스트 역전 더 민감
 
     else:  # balanced (현재 값에 근접)
         WARMUP_SEC = 12
@@ -1166,7 +1166,7 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
 AUTO_LEARN_ENABLED = True
-AUTO_LEARN_MIN_TRADES = 50  # 최소 거래 수
+AUTO_LEARN_MIN_TRADES = 25  # 최소 거래 수 (빠른 학습 적용)
 _trade_log_lock = threading.Lock()
 
 FEATURE_FIELDS = [
@@ -1315,6 +1315,104 @@ def analyze_and_update_weights():
     except Exception as e:
         print(f"[AUTO_LEARN_ERR] {e}")
         return None
+
+# =========================
+# 🧠 매도 파라미터 자동 튜닝
+# =========================
+EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
+
+# 현재 매도 파라미터 (동적 조절됨)
+DYNAMIC_EXIT_PARAMS = {
+    "hard_stop": -0.012,       # 급락 손절
+    "partial_drop": 0.0015,    # 조기익절 고점대비 하락률
+    "full_drop": 0.004,        # 전량익절 고점대비 하락률
+    "profit_lock_tight": 0.996, # 이익락 타이트 배수
+    "trail_pct": 0.0025,       # 트레일링 %
+}
+
+def analyze_and_tune_exits():
+    """
+    최근 거래 분석 → 매도 파라미터 자동 튜닝
+    - 손절이 너무 많으면 → 손절 기준 완화
+    - 익절 후 더 올랐으면 → 익절 기준 완화
+    - 익절 후 더 떨어졌으면 → 익절 기준 유지/강화
+    """
+    global DYNAMIC_EXIT_PARAMS
+
+    if not os.path.exists(TRADE_LOG_PATH):
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+        df = df[df["result"].isin(["win", "lose"])]
+
+        if len(df) < 15:
+            return None
+
+        # 최근 20건만 분석
+        recent = df.tail(20)
+
+        wins = len(recent[recent["result"] == "win"])
+        loses = len(recent[recent["result"] == "lose"])
+        win_rate = wins / len(recent)
+
+        # 평균 손익
+        avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
+
+        old_params = dict(DYNAMIC_EXIT_PARAMS)
+
+        # === 튜닝 로직 ===
+        if win_rate < 0.4:
+            # 승률 낮음 → 손절 기준 약간 완화, 익절 더 빠르게
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(-0.015, DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.001)
+            DYNAMIC_EXIT_PARAMS["partial_drop"] = max(0.001, DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.0003)
+        elif win_rate > 0.6:
+            # 승률 높음 → 손절 타이트, 익절은 좀 더 여유
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(-0.010, DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.001)
+            DYNAMIC_EXIT_PARAMS["partial_drop"] = min(0.003, DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.0003)
+
+        if avg_pnl < -0.005:
+            # 평균 손실 → 익절 더 빠르게
+            DYNAMIC_EXIT_PARAMS["full_drop"] = max(0.003, DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0005)
+            DYNAMIC_EXIT_PARAMS["profit_lock_tight"] = min(0.998, DYNAMIC_EXIT_PARAMS["profit_lock_tight"] + 0.001)
+        elif avg_pnl > 0.005:
+            # 평균 이익 → 약간 여유
+            DYNAMIC_EXIT_PARAMS["full_drop"] = min(0.006, DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0005)
+
+        # 저장
+        with open(EXIT_PARAMS_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "params": DYNAMIC_EXIT_PARAMS,
+                "updated_at": now_kst_str(),
+                "win_rate": round(win_rate * 100, 1),
+                "avg_pnl": round(avg_pnl * 100, 3),
+                "sample": len(recent)
+            }, f, ensure_ascii=False, indent=2)
+
+        return {
+            "old_params": old_params,
+            "new_params": DYNAMIC_EXIT_PARAMS,
+            "win_rate": round(win_rate * 100, 1),
+            "avg_pnl": round(avg_pnl * 100, 3)
+        }
+
+    except Exception as e:
+        print(f"[EXIT_TUNE_ERR] {e}")
+        return None
+
+def load_exit_params():
+    """저장된 매도 파라미터 로드"""
+    global DYNAMIC_EXIT_PARAMS
+    if os.path.exists(EXIT_PARAMS_PATH):
+        try:
+            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "params" in data:
+                DYNAMIC_EXIT_PARAMS.update(data["params"])
+                print(f"[EXIT_PARAMS] 로드 완료: 승률 {data.get('win_rate')}%, 평균손익 {data.get('avg_pnl')}%")
+        except Exception as e:
+            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
 
 def load_learned_weights():
     """
@@ -3092,40 +3190,47 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             drop_from_high = (best - curp) / best
 
-            # ① 급락 즉시 손절 (-1.5%)
-            if cur_gain <= -0.015:
+            # ① 급락 즉시 손절 (동적 파라미터 사용)
+            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.012)
+            if cur_gain <= dyn_hard:
                 sell_market(m, entry_volume)
-                tg_send_mid(f"🩸 {m} 급락 -1.5% 컷")
+                tg_send_mid(f"🩸 {m} 급락 {dyn_hard*100:.1f}% 컷")
                 verdict = "HARD_STOP"
                 break
 
-            # ② 조기익절: 고점 대비 -0.3% & 거래량감속
-            if drop_from_high >= 0.003 and vdrop_trigger:
-                partial_volume = entry_volume * 0.5
+            # ② 조기익절: 고점 대비 하락 & 거래량감속 (동적 파라미터)
+            dyn_partial = DYNAMIC_EXIT_PARAMS.get("partial_drop", 0.0015)
+            dyn_full = DYNAMIC_EXIT_PARAMS.get("full_drop", 0.004)
+
+            if drop_from_high >= dyn_partial and vdrop_trigger:
+                partial_volume = entry_volume * 0.6  # 60% 먼저 털기
                 sell_market(m, partial_volume)
 
                 realized_gain = (curp / entry_price - 1.0) * 100
                 realized_krw = partial_volume * curp
 
                 tg_send_mid(
-                    f"⚡ <b>{m}</b> 부분익절 (50%)<br>"
+                    f"⚡ <b>{m}</b> 부분익절 (60%)<br>"
                     f"💵 평단 {entry_price:,.0f}원 → 체결가 {curp:,.0f}원<br>"
                     f"📈 실현손익 {realized_gain:+.2f}% | 💰 청산금액 {realized_krw:,.0f} KRW"
                 )
                 verdict = "PARTIAL_EXIT"
 
-            # ③ 전량익절: 고점 대비 -1.0% 이상
-            elif drop_from_high >= 0.010:
+            # ③ 전량익절: 고점 대비 하락 (동적 파라미터)
+            elif drop_from_high >= dyn_full:
                 sell_market(m, entry_volume)
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
                 break
 
-            # ④ 이익락 (Profit Lock)
-            if cur_gain >= 0.015:
-                profit_lock = curp * 0.992
-            elif cur_gain >= 0.010:
-                profit_lock = curp * 0.994
+            # ④ 이익락 (Profit Lock) - 동적 파라미터
+            dyn_lock = DYNAMIC_EXIT_PARAMS.get("profit_lock_tight", 0.996)
+            if cur_gain >= 0.012:
+                profit_lock = curp * dyn_lock
+            elif cur_gain >= 0.008:
+                profit_lock = curp * (dyn_lock + 0.001)
+            elif cur_gain >= 0.005:
+                profit_lock = curp * (dyn_lock + 0.002)
             else:
                 profit_lock = base_stop
 
@@ -3135,17 +3240,18 @@ def monitor_position(m,
                 verdict = "PROFIT_LOCK"
                 break
 
-            # ⑤ 트레일링 스탑 (고점 대비 0.5%)
+            # ⑤ 트레일링 스탑 (동적 파라미터)
+            dyn_trail = DYNAMIC_EXIT_PARAMS.get("trail_pct", 0.0025)
             if trail_armed and curp > best:
-                trail_stop = max(trail_stop, curp * 0.995)
+                trail_stop = max(trail_stop, curp * (1 - dyn_trail))
             if trail_armed and curp <= trail_stop:
                 sell_market(m, entry_volume)
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
                 verdict = "TRAIL_EXIT"
                 break
 
-            # ⑥ 추세 회복 재진입 (눌림 후 재상승)
-            if drop_from_high >= 0.008 and uptick_streak_from_ticks(ticks, need=3):
+            # ⑥ 추세 회복 재진입 (눌림 후 재상승) ← 더 빨리 감지
+            if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 open_auto_position(m, pre, dyn_stop, eff_sl_pct)
         
@@ -3461,12 +3567,14 @@ _last_learn_ts = 0  # 마지막 학습 시각
 def main():
     global _cursor, _last_learn_ts
 
-    # 🧠 시작 시 학습된 가중치 로드
+    # 🧠 시작 시 학습된 가중치 & 매도 파라미터 로드
     if AUTO_LEARN_ENABLED:
         load_learned_weights()
+        load_exit_params()
 
     tg_send(
-        f"🚀 대장초입 헌터 v3.2.7+Score (자동학습) 시작 | TOP {TOP_N} | {now_kst_str()}"
+        f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
+        f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
     )
 
     while True:
@@ -3474,8 +3582,8 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🧠 매 시간마다 자동 학습 실행
-            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 3600:
+            # 🧠 30분마다 자동 학습 실행 (더 빠른 피드백)
+            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 1800:
                 _last_learn_ts = time.time()
                 try:
                     learn_result = analyze_and_update_weights()
@@ -3495,6 +3603,16 @@ def main():
                             f"📈 승률: {learn_result['win_rate']}%\n\n"
                             f"<b>가중치 변경:</b>\n{changes_str if changes_str else '  (변화 없음)'}\n"
                             f"===================================="
+                        )
+
+                    # 🔧 매도 파라미터도 자동 튜닝
+                    exit_tune = analyze_and_tune_exits()
+                    if exit_tune:
+                        tg_send_mid(
+                            f"⚙️ 매도파라미터 튜닝 (승률 {exit_tune['win_rate']}%, 평균 {exit_tune['avg_pnl']:+.2f}%)\n"
+                            f"• 손절: {exit_tune['new_params']['hard_stop']*100:.1f}%\n"
+                            f"• 부분익절: 고점-{exit_tune['new_params']['partial_drop']*100:.2f}%\n"
+                            f"• 전량익절: 고점-{exit_tune['new_params']['full_drop']*100:.2f}%"
                         )
                 except Exception as e:
                     print(f"[AUTO_LEARN_MAIN_ERR] {e}")
