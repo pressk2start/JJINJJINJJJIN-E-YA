@@ -3316,14 +3316,19 @@ def monitor_position(m,
             dyn_partial = DYNAMIC_EXIT_PARAMS.get("partial_drop", 0.0015)
             dyn_full = DYNAMIC_EXIT_PARAMS.get("full_drop", 0.004)
 
-            if drop_from_high >= dyn_partial and vdrop_trigger:
-                # ✅ safe_partial_sell 사용 (sell_market 미정의 버그 수정)
+            # 🔧 FIX: partial_done 체크 → 부분청산 이미 했으면 ②스킵하고 ③으로
+            with _POSITION_LOCK:
+                pos_check = OPEN_POSITIONS.get(m, {})
+                already_partial = pos_check.get("partial_done", False)
+
+            if not already_partial and drop_from_high >= dyn_partial and vdrop_trigger:
+                # 부분청산 시도 (partial_done=False일 때만)
                 ok, _, executed = safe_partial_sell(m, sell_ratio=0.6, reason="거래둔화+고점이탈")
                 if ok and executed > 0:
                     verdict = "PARTIAL_EXIT"
 
-            # ③ 전량익절: 고점 대비 하락 (동적 파라미터)
-            elif drop_from_high >= dyn_full:
+            # ③ 전량익절: 고점 대비 하락 (부분청산 후에도 체크됨)
+            if drop_from_high >= dyn_full:
                 close_auto_position(m, f"고점대비 {drop_from_high*100:.2f}% 하락 전량익절")
                 verdict = "FULL_EXIT"
                 break
