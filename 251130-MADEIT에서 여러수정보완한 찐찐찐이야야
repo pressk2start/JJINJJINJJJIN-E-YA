@@ -326,6 +326,27 @@ def place_market_sell(market, volume):
     }
     return upbit_private_post("/v1/orders", body)
 
+def get_actual_balance(market):
+    """실제 보유량 조회 (찌꺼기 방지용)"""
+    try:
+        currency = market.replace("KRW-", "")
+        accounts = get_account_info()
+        for a in accounts:
+            if a.get("currency") == currency:
+                return float(a.get("balance", "0"))
+        return 0.0
+    except:
+        return 0.0
+
+def sell_all(market):
+    """실제 보유량 전량 매도 (1원 찌꺼기 방지)"""
+    actual = get_actual_balance(market)
+    if actual <= 0:
+        print(f"[SELL_ALL] {market} 보유량 없음")
+        return None
+    print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
+    return place_market_sell(market, actual)
+
 def final_price_guard(m, initial_price, max_drift=0.07):
     """
     주문 직전 가격 재확인
@@ -1273,13 +1294,13 @@ def analyze_and_update_weights():
         new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
         new_weights["fresh"] = 7.0  # 신선도는 고정
 
-        # 🛡️ 승률 30% 미만이면 학습 신뢰도 낮음 → 스킵
+        # 🛡️ 승률 35% 미만이면 학습 신뢰도 낮음 → 스킵
         win_rate = round(len(wins) / len(df) * 100, 1)
-        if win_rate < 30:
-            print(f"[AUTO_LEARN] 승률 {win_rate}% < 30% → 신뢰도 낮아 학습 스킵")
+        if win_rate < 35:
+            print(f"[AUTO_LEARN] 승률 {win_rate}% < 35% → 신뢰도 낮아 학습 스킵")
             return None
 
-        # 기존 가중치와 블렌딩 (매우 보수적: 90% 기존, 10% 신규)
+        # 기존 가중치와 블렌딩 (극도로 보수적: 97% 기존, 3% 신규)
         old_weights = dict(SCORE_WEIGHTS)
         blended = {}
         changes = {}
@@ -1289,16 +1310,16 @@ def analyze_and_update_weights():
             "buy_ratio": 28, "spread": 15, "turn": 22,
             "imbalance": 18, "volume_surge": 10, "fresh": 7
         }
-        MAX_DEVIATION = 0.4  # 초기값 대비 최대 ±40%까지만 변화 허용
+        MAX_DEVIATION = 0.15  # 초기값 대비 최대 ±15%까지만 변화 허용
 
         for k in SCORE_WEIGHTS:
             old_w = SCORE_WEIGHTS.get(k, 10)
             new_w = new_weights.get(k, old_w)
 
-            # 90% 기존 + 10% 신규 (매우 보수적)
-            candidate = round(old_w * 0.9 + new_w * 0.1, 1)
+            # 97% 기존 + 3% 신규 (극도로 보수적)
+            candidate = round(old_w * 0.97 + new_w * 0.03, 1)
 
-            # 초기값 대비 ±40% 범위 제한
+            # 초기값 대비 ±15% 범위 제한
             init_w = INITIAL_WEIGHTS.get(k, 10)
             min_bound = init_w * (1 - MAX_DEVIATION)
             max_bound = init_w * (1 + MAX_DEVIATION)
@@ -1382,44 +1403,44 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
-        # 🛡️ 승률 25% 미만이면 튜닝 스킵 (노이즈 방지)
-        if win_rate < 0.25:
-            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 25% → 튜닝 스킵")
+        # 🛡️ 승률 35% 미만이면 튜닝 스킵 (노이즈 방지)
+        if win_rate < 0.35:
+            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 35% → 튜닝 스킵")
             return None
 
         old_params = dict(DYNAMIC_EXIT_PARAMS)
 
-        # === 튜닝 로직 (보수적: 작은 스텝) ===
-        # 초기값 기준 범위 제한
+        # === 튜닝 로직 (극도로 보수적: 미세 스텝) ===
+        # 초기값 기준 범위 제한 (매우 좁게)
         BOUNDS = {
-            "hard_stop": (-0.015, -0.010),      # -1.5% ~ -1.0%
-            "partial_drop": (0.001, 0.003),     # 0.1% ~ 0.3%
-            "full_drop": (0.003, 0.006),        # 0.3% ~ 0.6%
-            "profit_lock_tight": (0.995, 0.998), # 0.5% ~ 0.2% 손실허용
-            "trail_pct": (0.002, 0.004),        # 0.2% ~ 0.4%
+            "hard_stop": (-0.013, -0.011),      # -1.3% ~ -1.1% (좁은 범위)
+            "partial_drop": (0.0012, 0.002),    # 0.12% ~ 0.2%
+            "full_drop": (0.0035, 0.005),       # 0.35% ~ 0.5%
+            "profit_lock_tight": (0.9955, 0.997), # 좁은 범위
+            "trail_pct": (0.002, 0.003),        # 0.2% ~ 0.3%
         }
 
         if win_rate < 0.4:
-            # 승률 낮음 → 아주 작은 조정만 (0.0003 스텝)
+            # 승률 낮음 → 극미세 조정 (0.0001 스텝)
             DYNAMIC_EXIT_PARAMS["hard_stop"] = max(BOUNDS["hard_stop"][0],
-                DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.0003)
+                DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.0001)
             DYNAMIC_EXIT_PARAMS["partial_drop"] = max(BOUNDS["partial_drop"][0],
-                DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.0001)
+                DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.00005)
         elif win_rate > 0.6:
-            # 승률 높음 → 아주 작은 조정만
+            # 승률 높음 → 극미세 조정
             DYNAMIC_EXIT_PARAMS["hard_stop"] = min(BOUNDS["hard_stop"][1],
-                DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.0003)
+                DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.0001)
             DYNAMIC_EXIT_PARAMS["partial_drop"] = min(BOUNDS["partial_drop"][1],
-                DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.0001)
+                DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.00005)
 
         if avg_pnl < -0.005:
-            # 평균 손실 → 작은 조정
+            # 평균 손실 → 극미세 조정
             DYNAMIC_EXIT_PARAMS["full_drop"] = max(BOUNDS["full_drop"][0],
-                DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0002)
+                DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0001)
         elif avg_pnl > 0.005:
-            # 평균 이익 → 작은 조정
+            # 평균 이익 → 극미세 조정
             DYNAMIC_EXIT_PARAMS["full_drop"] = min(BOUNDS["full_drop"][1],
-                DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0002)
+                DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0001)
 
         # 저장
         with open(EXIT_PARAMS_PATH, "w", encoding="utf-8") as f:
@@ -3234,7 +3255,7 @@ def monitor_position(m,
             # ① 급락 즉시 손절 (동적 파라미터 사용)
             dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.012)
             if cur_gain <= dyn_hard:
-                sell_market(m, entry_volume)
+                sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"🩸 {m} 급락 {dyn_hard*100:.1f}% 컷")
                 verdict = "HARD_STOP"
                 break
@@ -3259,7 +3280,7 @@ def monitor_position(m,
 
             # ③ 전량익절: 고점 대비 하락 (동적 파라미터)
             elif drop_from_high >= dyn_full:
-                sell_market(m, entry_volume)
+                sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"🚨 {m} 고점대비 {drop_from_high*100:.2f}% 하락 → 전량익절")
                 verdict = "FULL_EXIT"
                 break
@@ -3276,7 +3297,7 @@ def monitor_position(m,
                 profit_lock = base_stop
 
             if curp <= profit_lock:
-                sell_market(m, entry_volume)
+                sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"💎 {m} 이익락 발동 ({fmt6(profit_lock)}원) → 청산")
                 verdict = "PROFIT_LOCK"
                 break
@@ -3286,7 +3307,7 @@ def monitor_position(m,
             if trail_armed and curp > best:
                 trail_stop = max(trail_stop, curp * (1 - dyn_trail))
             if trail_armed and curp <= trail_stop:
-                sell_market(m, entry_volume)
+                sell_all(m)  # 찌꺼기 방지
                 tg_send_mid(f"📉 {m} 트레일링 스탑({fmt6(trail_stop)}) 터치 → 청산")
                 verdict = "TRAIL_EXIT"
                 break
