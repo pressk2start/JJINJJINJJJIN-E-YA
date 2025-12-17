@@ -752,7 +752,8 @@ def close_auto_position(m, reason=""):
         else:
             od = None
 
-        # 실제 체결가 계산
+        # 실제 체결량/체결가 계산
+        executed = 0.0
         if od:
             trades = od.get("trades") or []
             total_krw = 0.0
@@ -765,8 +766,34 @@ def close_auto_position(m, reason=""):
                     continue
                 total_krw += p * v
                 total_vol += v
+            executed = total_vol
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
+
+        # 🔧 FIX #1: 미체결 시 포지션 유지
+        if executed <= 0:
+            print(f"[AUTO] {m} 청산 미체결 → 포지션 유지")
+            tg_send(f"⚠️ <b>자동청산 미체결</b> {m}\n사유: 체결량 0 / 포지션 유지")
+            return
+
+        # 🔧 FIX #1: 부분체결 시 잔여량으로 업데이트
+        if executed < vol - 1e-10:
+            remaining = max(vol - executed, 0.0)
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["volume"] = remaining
+                    pos2["last_exit_ts"] = time.time()
+                    OPEN_POSITIONS[m] = pos2
+            print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f}")
+            tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
+            # 부분체결도 손익 계산은 함 (executed 기준)
+            vol = executed  # 아래 손익 계산용
+
+        # 🔧 FIX #1: 전량체결 시에만 포지션 제거
+        else:
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
 
         # 실제 체결가 기준으로 다시 계산
         est_exit_value = exit_price_used * vol
@@ -810,9 +837,8 @@ def close_auto_position(m, reason=""):
     except Exception as e:
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
-
-    with _POSITION_LOCK:
-        OPEN_POSITIONS.pop(m, None)
+        # 🔧 FIX #1: 실패 시 포지션 절대 제거 안 함 (트래킹 유지)
+        return
 
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
@@ -1412,13 +1438,13 @@ def analyze_and_update_weights():
 # =========================
 EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 
-# 현재 매도 파라미터 - 🔧 손절 타이트하게 리셋
+# 현재 매도 파라미터 - 🔧 현실적 조정 (너무 타이트하면 빈번한 부분익절 발생)
 DYNAMIC_EXIT_PARAMS = {
-    "hard_stop": -0.010,       # 🔧 급락 손절 -1.2%→-1.0%
-    "partial_drop": 0.0012,    # 🔧 조기익절 0.15%→0.12%
-    "full_drop": 0.003,        # 🔧 전량익절 0.4%→0.3%
-    "profit_lock_tight": 0.997, # 이익락 타이트 배수
-    "trail_pct": 0.002,        # 🔧 트레일링 0.25%→0.2%
+    "hard_stop": -0.010,       # 급락 손절 -1.0%
+    "partial_drop": 0.002,     # 🔧 조기익절 0.12%→0.2% (권고: 0.18~0.22%)
+    "full_drop": 0.005,        # 🔧 전량익절 0.3%→0.5% (권고: 0.45~0.6%)
+    "profit_lock_tight": 0.997, # 이익락 타이트 배수 (고점-0.3%)
+    "trail_pct": 0.0025,       # 🔧 트레일링 0.2%→0.25%
 }
 
 def analyze_and_tune_exits():
@@ -3182,8 +3208,10 @@ def monitor_position(m,
             # === 1) 웜업 구간: 소폭 되돌림 무시 (단, 급락은 즉시 컷)
             alive_sec = time.time() - start_ts
             dd_now = (curp / best - 1.0)
+            # 🔧 FIX #3: 손절 기준 통일 (DYNAMIC_EXIT_PARAMS 사용)
+            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.010)
             if alive_sec < WARMUP_SEC:
-                if (curp / entry_price - 1.0) <= -HARD_STOP_DD:
+                if (curp / entry_price - 1.0) <= dyn_hard:
                     verdict = "급락 즉시 손절"
                     outcome_extra = f"(DD {dd_now*100:.2f}%)"
                     break  # 청산은 finally에서 한 번만
@@ -3359,10 +3387,19 @@ def monitor_position(m,
             # ⑥ 추세 회복 재진입 (눌림 후 재상승) ← 더 빨리 감지
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                # ✅ dyn_stop 미정의 버그 수정: 즉시 계산
                 c1_for_re = get_minutes_candles(1, m, 20)
                 new_stop, new_sl = dynamic_stop_loss(curp, c1_for_re, signal_type="early")
-                open_auto_position(m, pre, new_stop, new_sl)
+                # 🔧 FIX #2: 현재가/현재틱으로 fresh pre 구성 (추격가드 오작동 방지)
+                ticks_now = get_recent_ticks(m, 80)
+                pre2 = {
+                    "price": curp,
+                    "ob": pre.get("ob", {}),
+                    "ticks": ticks_now,
+                    "tape": micro_tape_stats_from_ticks(ticks_now or [], 15),
+                    "entry_mode": "confirm",
+                    "early_ok": True,
+                }
+                open_auto_position(m, pre2, new_stop, new_sl)
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
