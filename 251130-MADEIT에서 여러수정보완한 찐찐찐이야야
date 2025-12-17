@@ -1273,17 +1273,39 @@ def analyze_and_update_weights():
         new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
         new_weights["fresh"] = 7.0  # 신선도는 고정
 
-        # 기존 가중치와 블렌딩 (급격한 변화 방지)
+        # 🛡️ 승률 30% 미만이면 학습 신뢰도 낮음 → 스킵
+        win_rate = round(len(wins) / len(df) * 100, 1)
+        if win_rate < 30:
+            print(f"[AUTO_LEARN] 승률 {win_rate}% < 30% → 신뢰도 낮아 학습 스킵")
+            return None
+
+        # 기존 가중치와 블렌딩 (매우 보수적: 90% 기존, 10% 신규)
         old_weights = dict(SCORE_WEIGHTS)
         blended = {}
         changes = {}
+
+        # 초기 가중치 기준값 (너무 벗어나지 않도록)
+        INITIAL_WEIGHTS = {
+            "buy_ratio": 28, "spread": 15, "turn": 22,
+            "imbalance": 18, "volume_surge": 10, "fresh": 7
+        }
+        MAX_DEVIATION = 0.4  # 초기값 대비 최대 ±40%까지만 변화 허용
+
         for k in SCORE_WEIGHTS:
             old_w = SCORE_WEIGHTS.get(k, 10)
             new_w = new_weights.get(k, old_w)
-            blended[k] = round(old_w * 0.6 + new_w * 0.4, 1)  # 60% 기존, 40% 신규
+
+            # 90% 기존 + 10% 신규 (매우 보수적)
+            candidate = round(old_w * 0.9 + new_w * 0.1, 1)
+
+            # 초기값 대비 ±40% 범위 제한
+            init_w = INITIAL_WEIGHTS.get(k, 10)
+            min_bound = init_w * (1 - MAX_DEVIATION)
+            max_bound = init_w * (1 + MAX_DEVIATION)
+            blended[k] = round(max(min_bound, min(max_bound, candidate)), 1)
+
             changes[k] = round(blended[k] - old_w, 1)
 
-        win_rate = round(len(wins) / len(df) * 100, 1)
         sample_size = len(df)
 
         # 저장
@@ -1360,25 +1382,44 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
+        # 🛡️ 승률 25% 미만이면 튜닝 스킵 (노이즈 방지)
+        if win_rate < 0.25:
+            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 25% → 튜닝 스킵")
+            return None
+
         old_params = dict(DYNAMIC_EXIT_PARAMS)
 
-        # === 튜닝 로직 ===
+        # === 튜닝 로직 (보수적: 작은 스텝) ===
+        # 초기값 기준 범위 제한
+        BOUNDS = {
+            "hard_stop": (-0.015, -0.010),      # -1.5% ~ -1.0%
+            "partial_drop": (0.001, 0.003),     # 0.1% ~ 0.3%
+            "full_drop": (0.003, 0.006),        # 0.3% ~ 0.6%
+            "profit_lock_tight": (0.995, 0.998), # 0.5% ~ 0.2% 손실허용
+            "trail_pct": (0.002, 0.004),        # 0.2% ~ 0.4%
+        }
+
         if win_rate < 0.4:
-            # 승률 낮음 → 손절 기준 약간 완화, 익절 더 빠르게
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(-0.015, DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.001)
-            DYNAMIC_EXIT_PARAMS["partial_drop"] = max(0.001, DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.0003)
+            # 승률 낮음 → 아주 작은 조정만 (0.0003 스텝)
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(BOUNDS["hard_stop"][0],
+                DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.0003)
+            DYNAMIC_EXIT_PARAMS["partial_drop"] = max(BOUNDS["partial_drop"][0],
+                DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.0001)
         elif win_rate > 0.6:
-            # 승률 높음 → 손절 타이트, 익절은 좀 더 여유
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(-0.010, DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.001)
-            DYNAMIC_EXIT_PARAMS["partial_drop"] = min(0.003, DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.0003)
+            # 승률 높음 → 아주 작은 조정만
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(BOUNDS["hard_stop"][1],
+                DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.0003)
+            DYNAMIC_EXIT_PARAMS["partial_drop"] = min(BOUNDS["partial_drop"][1],
+                DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.0001)
 
         if avg_pnl < -0.005:
-            # 평균 손실 → 익절 더 빠르게
-            DYNAMIC_EXIT_PARAMS["full_drop"] = max(0.003, DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0005)
-            DYNAMIC_EXIT_PARAMS["profit_lock_tight"] = min(0.998, DYNAMIC_EXIT_PARAMS["profit_lock_tight"] + 0.001)
+            # 평균 손실 → 작은 조정
+            DYNAMIC_EXIT_PARAMS["full_drop"] = max(BOUNDS["full_drop"][0],
+                DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0002)
         elif avg_pnl > 0.005:
-            # 평균 이익 → 약간 여유
-            DYNAMIC_EXIT_PARAMS["full_drop"] = min(0.006, DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0005)
+            # 평균 이익 → 작은 조정
+            DYNAMIC_EXIT_PARAMS["full_drop"] = min(BOUNDS["full_drop"][1],
+                DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0002)
 
         # 저장
         with open(EXIT_PARAMS_PATH, "w", encoding="utf-8") as f:
