@@ -1254,7 +1254,7 @@ MEGA_ABS_KRW = 4_000_000  # 2.0M -> 4.0M
 # 🎯 리스크 스코어 설정 (AND → 가중합)
 # =========================
 USE_RISK_SCORE = True
-RISK_SCORE_THRESHOLD = 45  # 🔧 테스트: 50 → 45 (신호 확인용)
+RISK_SCORE_THRESHOLD = 50  # 진입 기준 점수
 
 # 가중치 (합계 100) - 🔧 초기값 고정 (자동학습 리셋)
 SCORE_WEIGHTS = {
