@@ -37,7 +37,8 @@ COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 0  # 🔧 시간 조건 제거 - 진입 직후부터 손절 즉시 적용
+WARMUP_SEC = 5  # 진입 후 5초 웜업
+WARMUP_STOP = -0.003  # 🔧 웜업 중 -0.3% 손절 (노이즈 허용 + 빠른 손절)
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
@@ -985,35 +986,11 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     CYCLE_SEC = 300
     cycle = 0
 
-    # 🔧 장기 보유 타임아웃 설정 (현실적 조정)
-    STALE_AFTER_PARTIAL_SEC = 10 * 60   # 부분청산 후 10분
-    STALE_MAX_HOLD_SEC = 30 * 60        # 최대 보유 30분
+    # 🔧 시간 기반 타임아웃 제거 - 가격 조건으로만 매도
 
     while True:
         cycle += 1
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
-
-        # 🔧 FIX: 장기 보유 타임아웃 체크
-        with _POSITION_LOCK:
-            pos = OPEN_POSITIONS.get(m)
-        if pos:
-            entry_ts = pos.get("entry_ts", time.time())
-            hold_sec = time.time() - entry_ts
-            partial_done = pos.get("partial_done", False)
-
-            # 부분청산 후 2시간 이상 → 강제 청산
-            if partial_done and hold_sec >= STALE_AFTER_PARTIAL_SEC:
-                reason = f"장기보유 타임아웃 (부분청산 후 {hold_sec/3600:.1f}h)"
-                print(f"[REMONITOR] {m} {reason} → 강제 청산")
-                close_auto_position(m, reason)
-                return True
-
-            # 전체 4시간 이상 → 강제 청산
-            if hold_sec >= STALE_MAX_HOLD_SEC:
-                reason = f"장기보유 타임아웃 (총 {hold_sec/3600:.1f}h)"
-                print(f"[REMONITOR] {m} {reason} → 강제 청산")
-                close_auto_position(m, reason)
-                return True
 
         verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
             monitor_position(
@@ -3235,10 +3212,10 @@ def monitor_position(m,
             dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008)  # -0.8% 타이트
 
             if alive_sec < WARMUP_SEC:
-                if cur_gain <= dyn_hard:
-                    verdict = "급락 즉시 손절"
-                    outcome_extra = f"(DD {dd_now*100:.2f}%)"
-                    break  # 청산은 finally에서 한 번만
+                if cur_gain <= WARMUP_STOP:  # 🔧 웜업 중 -0.3% 손절
+                    verdict = "웜업 손절"
+                    outcome_extra = f"({cur_gain*100:.2f}%)"
+                    break
                 # 웜업 중엔 소프트 스탑 미적용
                 continue
 
