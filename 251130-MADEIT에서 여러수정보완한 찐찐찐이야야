@@ -1382,11 +1382,8 @@ def analyze_and_update_weights():
         new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
         new_weights["fresh"] = 7.0  # 신선도는 고정
 
-        # 🛡️ 승률 45% 미만이면 학습 신뢰도 낮음 → 스킵 (더 엄격)
+        # 승률 계산 (조건 없이 학습, 블렌딩이 보수적이라 안전)
         win_rate = round(len(wins) / len(df) * 100, 1)
-        if win_rate < 45:
-            print(f"[AUTO_LEARN] 승률 {win_rate}% < 45% → 신뢰도 낮아 학습 스킵")
-            return None
 
         # 기존 가중치와 블렌딩 (🔧 초보수적: 99% 기존, 1% 신규)
         old_weights = dict(SCORE_WEIGHTS)
@@ -1524,25 +1521,19 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
-        # 🛡️ 승률 45% 미만이면 튜닝 스킵 (🔧 더 엄격)
-        if win_rate < 0.45:
-            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 45% → 튜닝 스킵")
-            return None
-
         old_params = dict(DYNAMIC_EXIT_PARAMS)
 
-        # === 튜닝 로직 (🔧 초보수적: hard_stop만 미세 조정) ===
-        # 새 체크포인트 방식에서는 hard_stop만 사용
-        HARD_STOP_BOUNDS = (-0.011, -0.007)  # -1.1% ~ -0.7% (좁은 범위)
+        # === 튜닝 로직 (승률 기반 미세 조정) ===
+        HARD_STOP_BOUNDS = (-0.011, -0.006)  # -1.1% ~ -0.6% 범위
 
         # 승률에 따라 극미세 조정 (0.0001 = 0.01% 단위)
-        if win_rate < 0.45:
-            # 승률 낮음 → 손절 살짝 완화 (손실 줄이기)
-            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009) - 0.0001
+        if win_rate < 0.40:
+            # 승률 낮음 → 손절 살짝 완화
+            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008) - 0.0001
             DYNAMIC_EXIT_PARAMS["hard_stop"] = max(HARD_STOP_BOUNDS[0], new_hard)
-        elif win_rate > 0.55 and avg_pnl > 0.002:
-            # 승률 높고 평균 수익 있음 → 손절 살짝 타이트 (수익 보호)
-            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009) + 0.0001
+        elif win_rate > 0.50:
+            # 승률 높음 → 손절 살짝 타이트
+            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008) + 0.0001
             DYNAMIC_EXIT_PARAMS["hard_stop"] = min(HARD_STOP_BOUNDS[1], new_hard)
 
         # 저장
