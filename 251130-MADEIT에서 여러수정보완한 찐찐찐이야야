@@ -166,8 +166,8 @@ print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # === 공격 모드 / 피라미딩 설정 ===
 AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 
-# 소액 선진입 + 추매 구조
-USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
+# 소액 선진입 + 추매 구조 (🔧 기본 OFF - 승률 회복 후 켜기)
+USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "0") == "1"
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
@@ -306,7 +306,7 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     """
     risk_krw = total_equity * risk_pct
     per_unit_loss = max(entry_price - stop_price,
-                        entry_price * 0.01)  # 최소 1% 방어
+                        entry_price * 0.004)  # 🔧 최소 0.4% 방어 (실제 스탑 기준 우선)
     qty = risk_krw / per_unit_loss
     return max(qty, 0)
 
@@ -371,11 +371,11 @@ def sell_all(market):
     print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
     return place_market_sell(market, actual, price_hint=cur_price)
 
-def final_price_guard(m, initial_price, max_drift=0.07):
+def final_price_guard(m, initial_price, max_drift=0.008):
     """
     주문 직전 가격 재확인
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 1.8%)
+    - max_drift: 신호가 대비 허용 상승률 (기본 0.8%)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
@@ -1536,7 +1536,7 @@ def is_strong_momentum(ticks, ob):
 
         return (
             t15["buy_ratio"] >= 0.57 and      # 매수비 57% 이상
-            t15["krw_per_sec"] >= 20000 and   # 거래속도 2만원/초 이상
+            t15["krw_per_sec"] >= 18000 and   # 🔧 거래속도 1.8만원/초 (완화)
             imb >= 0.02 and                    # 호가 매수우세
             fresh                              # 연속 상승틱 2개 이상
         )
@@ -1600,7 +1600,7 @@ def analyze_and_tune_exits():
             }, f, ensure_ascii=False, indent=2)
 
         return {
-            "old_params": old_params,
+            "old_params": {"dyn_sl_max": old_sl_max},
             "new_params": DYNAMIC_EXIT_PARAMS,
             "win_rate": round(win_rate * 100, 1),
             "avg_pnl": round(avg_pnl * 100, 3)
@@ -3438,23 +3438,13 @@ def monitor_position(m,
                     verdict = "STRONG_TRAIL_EXIT"
                     break
 
-            # ④ 추세 회복 재진입 (눌림 후 재상승)
+            # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
             drop_from_high = (best - curp) / best if best > 0 else 0
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
-                tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
-                c1_for_re = get_minutes_candles(1, m, 20)
-                new_stop, new_sl = dynamic_stop_loss(curp, c1_for_re, signal_type="early")
-                # 🔧 FIX #2: 현재가/현재틱으로 fresh pre 구성 (추격가드 오작동 방지)
-                ticks_now = get_recent_ticks(m, 80)
-                pre2 = {
-                    "price": curp,
-                    "ob": pre.get("ob", {}),
-                    "ticks": ticks_now,
-                    "tape": micro_tape_stats_from_ticks(ticks_now or [], 15),
-                    "entry_mode": "confirm",
-                    "early_ok": True,
-                }
-                open_auto_position(m, pre2, new_stop, new_sl)
+                if trail_armed:
+                    # 재진입 대신 트레일 간격 타이트하게 강화
+                    trail_stop = max(trail_stop, curp * (1.0 - max(TRAIL_DISTANCE_MIN * 0.8, 0.0025)))
+                    tg_send_mid(f"🔧 {m} 재상승 감지 → 트레일 강화")
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
