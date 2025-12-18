@@ -421,7 +421,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         print("[AUTO] API 키 미설정 → 자동매수 스킵")
         return
 
-    # 이미 포지션 있으면 스킵
+    # 🔧 FIX: 중복 진입 방지 (atomic check)
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
             print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
@@ -2427,15 +2427,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
-    # === 동일 종목 중복 진입 방지 (최근 진입 후 2분간 무시) ===
+    # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
     if pos:
-        last_add_ts = pos.get("last_add_ts", 0)
-        last_exit_ts = pos.get("last_exit_ts", 0)
-        # 최근 120초(2분) 내 진입 or 청산 기록이 있으면 스킵
-        if time.time() - max(last_add_ts, last_exit_ts) < 120:
-            return None
+        # 🔧 FIX: 포지션 보유중이면 무조건 스킵 (재진입은 monitor_position에서 처리)
+        return None
 
     # === 틱 기반 초봉(10초) 선행 진입 시그널 ===
     ticks_now = get_recent_ticks(m, 80)
