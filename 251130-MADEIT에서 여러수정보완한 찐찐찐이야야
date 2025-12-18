@@ -1463,94 +1463,37 @@ def analyze_and_update_weights():
 # =========================
 EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 
-# 현재 매도 파라미터 - 🔧 손절 빠르게 + 기본익절 얇게
+# 현재 매도 파라미터 - 🔧 손절 빠르게
 DYNAMIC_EXIT_PARAMS = {
-    "hard_stop": -0.009,       # 🔧 급락 손절 -1.0%→-0.9% (더 빠른 손절)
-    "partial_drop": 0.0012,    # 🔧 조기익절 0.2%→0.12% (얇은 기본)
-    "full_drop": 0.0035,       # 🔧 전량익절 0.5%→0.35% (얇은 기본)
-    "profit_lock_tight": 0.9975, # 이익락 타이트 (고점-0.25%)
-    "trail_pct": 0.0022,       # 🔧 트레일링 0.25%→0.22% (더 타이트)
+    "hard_stop": -0.009,       # 급락 손절 -0.9%
 }
 
 # =========================
-# 🎯 동적 TP 블렌딩 (얇은 기본 ↔ 두꺼운 상승여력)
+# 🎯 얇은 수익 체크포인트 방식 (심플)
 # =========================
-def _lerp(a, b, x):
-    """선형 보간: x∈[0,1]"""
-    return a + (b - a) * max(0.0, min(1.0, x))
+# 수수료 0.1% (매수0.05% + 매도0.05%) 제외 후 순수익 0.2% = 총수익 0.3%
+THIN_PROFIT_CHECKPOINT = 0.003   # +0.3% 도달 시 강세 체크
+STRONG_TRAIL_DROP = 0.002        # 강세 시 고점 대비 -0.2% 하락하면 매도
 
-THIN_TP = {  # 기본 얇게: 빨리 챙김
-    "partial_drop": 0.0012,      # 고점대비 -0.12%면 부분익절
-    "full_drop": 0.0035,         # 고점대비 -0.35%면 전량익절
-    "profit_lock_tight": 0.9975, # 이익락 타이트(고점-0.25%)
-    "trail_pct": 0.0022,         # 트레일 -0.22%
-}
-
-THICK_TP = {  # 여력 높음: 오래 보유
-    "partial_drop": 0.0022,      # -0.22%
-    "full_drop": 0.0065,         # -0.65%
-    "profit_lock_tight": 0.9955, # 락 완화(고점-0.45%)
-    "trail_pct": 0.0030,         # 트레일 -0.30%
-}
-
-def blend_tp_params(alpha: float) -> dict:
-    """alpha=0(얇게) ~ 1(두껍게) 사이로 TP 파라미터 블렌딩"""
-    return {
-        "partial_drop": _lerp(THIN_TP["partial_drop"], THICK_TP["partial_drop"], alpha),
-        "full_drop": _lerp(THIN_TP["full_drop"], THICK_TP["full_drop"], alpha),
-        "profit_lock_tight": _lerp(THIN_TP["profit_lock_tight"], THICK_TP["profit_lock_tight"], alpha),
-        "trail_pct": _lerp(THIN_TP["trail_pct"], THICK_TP["trail_pct"], alpha),
-    }
-
-def calc_upside_alpha(pre: dict, c1: list, ticks: list) -> float:
+def is_strong_momentum(ticks, ob):
     """
-    상승여력 0~1: 높을수록 TP를 두껍게 가져감
-    - 점화/메가 신호, 매수비, 회전율, 호가 임밸런스, BTC 모멘텀 종합
+    체크포인트 도달 시점에 강세 여부 판단
+    - 강세면 홀딩 (트레일링 모드)
+    - 약세면 즉시 매도 (얇은 수익 확정)
     """
     try:
-        ob = pre.get("ob", {})
         t15 = micro_tape_stats_from_ticks(ticks or [], 15)
-        turn = t15["krw"] / max(ob.get("depth_krw", 1), 1)
         imb = calc_orderbook_imbalance(ob) if ob else 0.0
-        curp = c1[-1]["trade_price"] if c1 else 0
-        vwap = vwap_from_candles_1m(c1, 20) if c1 else 0
-        vgap = (curp / max(vwap, 1) - 1) if vwap else 0.0
+        fresh = uptick_streak_from_ticks(ticks, need=2) if ticks else False
 
-        b5 = 0.0
-        try:
-            b5 = btc_5m_change()
-        except:
-            pass
-
-        score = 0.0
-
-        # 강한 시그널 가중
-        if pre.get("mega_ok"):
-            score += 3.0
-        elif pre.get("ign_ok"):
-            score += 2.0
-
-        # 테이프/회전율 (0.55~0.65 → 0~2점)
-        score += max(0.0, min(1.0, (t15["buy_ratio"] - 0.55) / 0.10)) * 2.0
-        # 회전율 (1.8%~3.8% → 0~2점)
-        score += max(0.0, min(1.0, (turn - 0.018) / 0.020)) * 2.0
-        # 임밸런스 (0.03~0.13 → 0~1.5점)
-        score += max(0.0, min(1.0, (imb - 0.03) / 0.10)) * 1.5
-        # VWAP 상방 (0~0.5점)
-        if vgap > 0:
-            score += min(0.5, vgap / 0.005 * 0.5)
-        # 계단식 상승 보너스
-        if c1 and ticks and grind_break_ok(c1, ticks):
-            score += 1.0
-        # BTC 5분 모멘텀 (+0.4% 이상)
-        if b5 >= 0.004:
-            score += 0.5
-
-        # 0~1 정규화 (7점 이상 = 강세)
-        alpha = max(0.0, min(1.0, score / 7.0))
-        return alpha
+        return (
+            t15["buy_ratio"] >= 0.57 and      # 매수비 57% 이상
+            t15["krw_per_sec"] >= 20000 and   # 거래속도 2만원/초 이상
+            imb >= 0.02 and                    # 호가 매수우세
+            fresh                              # 연속 상승틱 2개 이상
+        )
     except:
-        return 0.0
+        return False
 
 def analyze_and_tune_exits():
     """
@@ -3274,10 +3217,10 @@ def monitor_position(m,
     verdict = None
     outcome_extra = ""
 
-    # === 🎯 상승여력 기반 동적 TP 계산 ===
-    ticks0 = get_recent_ticks(m, 100)
-    alpha = calc_upside_alpha(pre, c1, ticks0)  # 0~1 (높을수록 두꺼운 TP)
-    tp = blend_tp_params(alpha)  # 동적 블렌딩된 TP 파라미터
+    # === 🎯 얇은 수익 체크포인트 상태 ===
+    checkpoint_reached = False   # 얇은 수익(0.3%) 도달 여부
+    strong_mode = False          # 강세 확인 후 트레일링 모드
+    strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
@@ -3438,68 +3381,49 @@ def monitor_position(m,
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
             effective_stop = max(base_stop, trail_stop if trail_armed else 0.0)
 
-            # === 🔥 심플매도 로직 (익절 우선 + 이익락 + 거래량감속) ===
-            t15 = micro_tape_stats_from_ticks(ticks, 15)
-            t30 = micro_tape_stats_from_ticks(ticks, 30)
-            avg_ref = (t15["krw_per_sec"] + t30["krw_per_sec"]) / 2
-            drop_ratio = t15["krw_per_sec"] / max(t30["krw_per_sec"], 1)
-            vdrop_trigger = drop_ratio < 0.65 and t15["buy_ratio"] < 0.55
-
+            # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
-            drop_from_high = (best - curp) / best
+            ob_now = pre.get("ob", {})
 
-            # ① 급락 즉시 손절 (동적 파라미터 사용)
-            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.012)
+            # ① 급락 즉시 손절
+            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009)
             if cur_gain <= dyn_hard:
                 close_auto_position(m, f"급락 {dyn_hard*100:.1f}% 컷")
                 verdict = "HARD_STOP"
                 break
 
-            # ② 조기익절: 고점 대비 하락 & 거래량감속 (🎯 동적 TP 블렌딩)
-            dyn_partial = tp["partial_drop"]  # alpha에 따라 0.12%~0.22%
-            dyn_full = tp["full_drop"]        # alpha에 따라 0.35%~0.65%
+            # ② 얇은 수익 체크포인트 (+0.3%) 도달 시 강세 판단
+            if not checkpoint_reached and cur_gain >= THIN_PROFIT_CHECKPOINT:
+                checkpoint_reached = True
+                # 강세 여부 체크
+                if is_strong_momentum(ticks, ob_now):
+                    # 강세 → 트레일링 모드 진입
+                    strong_mode = True
+                    strong_peak = curp
+                    tg_send_mid(f"💪 {m} 강세 확인 → 홀딩 (현재 +{cur_gain*100:.2f}%)")
+                else:
+                    # 약세 → 즉시 매도 (얇은 수익 확정)
+                    close_auto_position(m, f"얇은 익절 확정 (+{cur_gain*100:.2f}%)")
+                    verdict = "THIN_PROFIT"
+                    break
 
-            # 🔧 FIX: partial_done 체크 → 부분청산 이미 했으면 ②스킵하고 ③으로
-            with _POSITION_LOCK:
-                pos_check = OPEN_POSITIONS.get(m, {})
-                already_partial = pos_check.get("partial_done", False)
+            # ③ 강세 모드: 고점 추적 + 고점 대비 -0.2% 하락 시 매도
+            if strong_mode:
+                # 고점 갱신
+                if curp > strong_peak:
+                    strong_peak = curp
 
-            if not already_partial and drop_from_high >= dyn_partial and vdrop_trigger:
-                # 부분청산 시도 (partial_done=False일 때만)
-                ok, _, executed = safe_partial_sell(m, sell_ratio=0.6, reason="거래둔화+고점이탈")
-                if ok and executed > 0:
-                    verdict = "PARTIAL_EXIT"
+                # 고점 대비 하락률 계산
+                drop_from_strong_peak = (strong_peak - curp) / strong_peak
 
-            # ③ 전량익절: 고점 대비 하락 (부분청산 후에도 체크됨)
-            if drop_from_high >= dyn_full:
-                close_auto_position(m, f"고점대비 {drop_from_high*100:.2f}% 하락 전량익절")
-                verdict = "FULL_EXIT"
-                break
+                if drop_from_strong_peak >= STRONG_TRAIL_DROP:
+                    final_gain = (curp / entry_price - 1.0)
+                    close_auto_position(m, f"강세 트레일링 익절 (고점대비 -{drop_from_strong_peak*100:.2f}%, 수익 +{final_gain*100:.2f}%)")
+                    verdict = "STRONG_TRAIL_EXIT"
+                    break
 
-            # ④ 이익락 (Profit Lock) - 🎯 동적 TP 블렌딩
-            dyn_lock = tp["profit_lock_tight"]  # alpha에 따라 0.9975~0.9955
-            lock_drop = max(0.003, 1 - dyn_lock)
-            # 고점 대비 수익 보호 (cur_gain >= 0.5% 이상일 때만)
-            if cur_gain >= 0.005:
-                profit_lock = max(base_stop, best * (1 - lock_drop))
-            else:
-                profit_lock = base_stop
-
-            if curp <= profit_lock and cur_gain >= 0.005:
-                close_auto_position(m, f"이익락 발동 (고점기준 {fmt6(profit_lock)}원)")
-                verdict = "PROFIT_LOCK"
-                break
-
-            # ⑤ 트레일링 스탑 (🎯 동적 TP 블렌딩) - new_high로 래칫 조임
-            dyn_trail = tp["trail_pct"]  # alpha에 따라 0.22%~0.30%
-            if trail_armed and new_high:
-                trail_stop = max(trail_stop, curp * (1 - dyn_trail))
-            if trail_armed and curp <= trail_stop:
-                close_auto_position(m, f"트레일링 스탑({fmt6(trail_stop)}) 터치")
-                verdict = "TRAIL_EXIT"
-                break
-
-            # ⑥ 추세 회복 재진입 (눌림 후 재상승) ← 더 빨리 감지
+            # ④ 추세 회복 재진입 (눌림 후 재상승)
+            drop_from_high = (best - curp) / best if best > 0 else 0
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 tg_send_mid(f"🔄 {m} 눌림 후 재상승 감지 → 재진입")
                 c1_for_re = get_minutes_candles(1, m, 20)
