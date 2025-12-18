@@ -505,11 +505,19 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     )
 
     krw_to_use = base_qty * entry_price
-    if krw_to_use < 5000:
-        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        with _POSITION_LOCK:
-            OPEN_POSITIONS.pop(m, None)  # pending 취소
-        return
+
+    # 🔧 probe는 최소 7000원, confirm은 5000원
+    min_order_krw = 7000 if entry_mode == "probe" else 5000
+    if krw_to_use < min_order_krw:
+        # probe인데 금액 부족하면 7000원으로 강제 설정
+        if entry_mode == "probe" and krw_bal >= 7000:
+            krw_to_use = 7000
+            print(f"[AUTO] probe 최소금액 적용: {krw_to_use:,.0f}원")
+        else:
+            print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → 스킵")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)  # pending 취소
+            return
 
     krw_to_use = int(krw_to_use)
 
