@@ -38,7 +38,7 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 진입 후 5초 웜업
-WARMUP_STOP = -0.003  # 🔧 웜업 중 -0.3% 손절 (노이즈 허용 + 빠른 손절)
+WARMUP_STOP = -0.002  # 🔧 웜업 중 -0.2% 손절
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
@@ -948,6 +948,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             if pos2:
                 pos2["volume"] = remaining_volume
                 pos2["partial_done"] = True
+                pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
+                pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
@@ -991,6 +993,38 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     while True:
         cycle += 1
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
+
+        # 🔧 부분청산 후 추가 하락 체크
+        with _POSITION_LOCK:
+            pos = OPEN_POSITIONS.get(m)
+        if pos and pos.get("partial_done"):
+            partial_price = pos.get("partial_price", 0)
+            partial_type = pos.get("partial_type", "loss")
+
+            # 현재가 조회
+            try:
+                cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+                cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+            except:
+                cur_price = 0
+
+            if cur_price > 0 and partial_price > 0:
+                if partial_type == "profit":
+                    # 익절 부분청산 후: -0.2% 추가 하락 OR 진입가 이하 → 청산
+                    drop_from_partial = (partial_price - cur_price) / partial_price
+                    if cur_price <= entry_price or drop_from_partial >= PARTIAL_EXIT_PROFIT_DROP:
+                        reason = f"부분익절 후 추가하락 ({drop_from_partial*100:.2f}%)"
+                        print(f"[REMONITOR] {m} {reason} → 나머지 청산")
+                        close_auto_position(m, reason)
+                        return True
+                else:
+                    # 손절 부분청산 후: -0.1% 추가 하락 → 청산
+                    drop_from_partial = (partial_price - cur_price) / partial_price
+                    if drop_from_partial >= PARTIAL_EXIT_LOSS_DROP:
+                        reason = f"부분손절 후 추가하락 ({drop_from_partial*100:.2f}%)"
+                        print(f"[REMONITOR] {m} {reason} → 나머지 청산")
+                        close_auto_position(m, reason)
+                        return True
 
         verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
             monitor_position(
@@ -1436,10 +1470,14 @@ def analyze_and_update_weights():
 # =========================
 EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 
-# 현재 매도 파라미터 - 타이트
+# 현재 매도 파라미터 - 초타이트
 DYNAMIC_EXIT_PARAMS = {
-    "hard_stop": -0.008,       # 급락 손절 -0.8% (타이트)
+    "hard_stop": -0.003,       # 급락 손절 -0.3%
 }
+
+# 부분청산 후 추가 손절 설정
+PARTIAL_EXIT_PROFIT_DROP = 0.002   # 익절 부분청산 후 -0.2% 추가 하락 시 청산
+PARTIAL_EXIT_LOSS_DROP = 0.001     # 손절 부분청산 후 -0.1% 추가 하락 시 청산
 
 # =========================
 # 🎯 얇은 수익 체크포인트 방식 (심플)
