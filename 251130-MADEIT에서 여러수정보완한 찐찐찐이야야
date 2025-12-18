@@ -1240,8 +1240,8 @@ POSTCHECK_MAX_DD = 0.018
 ATR_PERIOD = 14
 ATR_EMA_PERIOD = 20
 ATR_MULT = 0.30           # 🔧 0.65 → 0.30 (더 타이트)
-DYN_SL_MIN = 0.002        # 🔧 0.4% → 0.2% 최소 손절
-DYN_SL_MAX = 0.004        # 🔧 1.0% → 0.4% 최대 손절
+DYN_SL_MIN = 0.003        # 🔧 0.3% 최소 손절
+DYN_SL_MAX = 0.005        # 🔧 0.5% 최대 손절
 
 # 메가 브레이크아웃 (우회 엄격화)
 ULTRA_RELAX_ON_MEGA = True
