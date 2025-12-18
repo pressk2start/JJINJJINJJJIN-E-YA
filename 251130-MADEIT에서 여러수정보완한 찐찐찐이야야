@@ -321,13 +321,25 @@ def place_market_buy(market, krw_amount):
     return upbit_private_post("/v1/orders", body)
 
 
-def place_market_sell(market, volume):
-    """수량 기준 시장가 매도"""
+def place_market_sell(market, volume, price_hint=None):
+    """
+    수량 기준 시장가 매도
+    🔧 FIX: 수량 정밀도 보정 + 최소주문금액 체크
+    """
+    # 수량 정밀도 보정 (8자리까지, 업비트 표준)
+    volume = round(float(volume), 8)
+
+    # 최소 주문금액 체크 (5,000원)
+    if price_hint:
+        est_value = volume * price_hint
+        if est_value < 5000:
+            raise ValueError(f"최소주문금액 미달: {est_value:.0f}원 < 5000원")
+
     body = {
         "market": market,
         "side": "ask",
         "ord_type": "market",
-        "volume": str(volume)
+        "volume": f"{volume:.8f}"  # 소수점 8자리 고정
     }
     return upbit_private_post("/v1/orders", body)
 
@@ -349,8 +361,14 @@ def sell_all(market):
     if actual <= 0:
         print(f"[SELL_ALL] {market} 보유량 없음")
         return None
+    # 🔧 현재가 조회
+    try:
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
+        cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+    except Exception:
+        cur_price = None
     print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
-    return place_market_sell(market, actual)
+    return place_market_sell(market, actual, price_hint=cur_price)
 
 def final_price_guard(m, initial_price, max_drift=0.07):
     """
@@ -745,7 +763,7 @@ def close_auto_position(m, reason=""):
     exit_price_used = cur_price  # 실제 체결가 성공 시 교체
 
     try:
-        res = place_market_sell(m, vol)
+        res = place_market_sell(m, vol, price_hint=cur_price)  # 🔧 가격 힌트 전달
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         if order_uuid:
             od = get_order_result(order_uuid, timeout_sec=6.0)
@@ -867,8 +885,15 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         print(msg)
         return False, msg, 0.0
 
+    # 🔧 현재가 조회 (최소주문금액 체크용)
     try:
-        res = place_market_sell(m, sell_volume)
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        cur_price = cur_js[0].get("trade_price", entry_price) if cur_js else entry_price
+    except Exception:
+        cur_price = entry_price
+
+    try:
+        res = place_market_sell(m, sell_volume, price_hint=cur_price)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid,
                               timeout_sec=6.0) if order_uuid else None
