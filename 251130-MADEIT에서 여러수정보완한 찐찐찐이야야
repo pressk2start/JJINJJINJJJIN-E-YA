@@ -166,8 +166,8 @@ print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # === 공격 모드 / 피라미딩 설정 ===
 AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 
-# 소액 선진입 + 추매 구조 (🔧 기본 OFF - 승률 회복 후 켜기)
-USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "0") == "1"
+# 소액 선진입 + 추매 구조 (소액 프로브가 더 안정적)
+USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
@@ -422,15 +422,19 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         print("[AUTO] API 키 미설정 → 자동매수 스킵")
         return
 
-    # 🔧 FIX: 중복 진입 방지 (atomic check)
+    # 🔧 FIX: 중복 진입 방지 (pending 상태로 원자화)
     with _POSITION_LOCK:
         if m in OPEN_POSITIONS:
             print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
             return
+        # ✅ 예약 플래그로 다른 스레드 진입 차단
+        OPEN_POSITIONS[m] = {"state": "pending"}
 
     signal_price = pre.get("price")
     if not signal_price:
         print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     # === 하이브리드 진입모드 반영 ===
@@ -458,12 +462,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             f"• 상승률: {((current_price / signal_price - 1) * 100):.2f}%\n"
             f"• 사유: 가격 급등 (초입 추격 위험)"
         )
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     # === 계좌 & 주문금액 계산 ===
     accounts = get_account_info()
     if not accounts:
         print("[AUTO] 계좌 조회 실패 → 스킵")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     krw_bal = 0.0
@@ -474,6 +482,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if krw_bal < 6000:
         print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     entry_price = current_price
@@ -496,6 +506,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     krw_to_use = base_qty * entry_price
     if krw_to_use < 5000:
         print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     krw_to_use = int(krw_to_use)
@@ -503,34 +515,48 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # === 매수 ===
     try:
         res = place_market_buy(m, krw_to_use)
-        print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))  # ★추가
+        print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
         oid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(oid, timeout_sec=6) if oid else None
-        print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))  # ★추가
+        print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))
 
         if od:
             volume_filled = float(od.get("executed_volume") or "0")
         else:
             volume_filled = 0.0
 
+        # 🔧 좀비포지션 방지: 체결 0이면 실제 잔고 확인
         if volume_filled <= 0:
-            msg = f"[AUTO] {m} 자동매수 체결 0 → 포지션 생성 안 함"
-            print(msg)
-            tg_send(f"⚠️ {msg}")
-            return
+            actual = get_actual_balance(m)
+            if actual > 0:
+                # 늦게 체결됨 → 잔고로 포지션 생성
+                volume_filled = actual
+                avg_price = entry_price  # 추정가
+                print(f"[AUTO] {m} 잔고 확인으로 포지션 복구: {actual:.6f}")
+            else:
+                # 진짜 미체결 → pending 취소
+                msg = f"[AUTO] {m} 자동매수 체결 0 → 포지션 생성 안 함"
+                print(msg)
+                tg_send(f"⚠️ {msg}")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)  # pending 취소
+                return
 
-        # 평균가 계산
-        trades = od.get("trades") or []
-        if trades:
-            total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
-            total_vol = sum(float(tr["volume"]) for tr in trades)
-            avg_price = total_krw / total_vol if total_vol > 0 else entry_price
-        else:
-            avg_price = float(entry_price)  # 명시적 float
+        # 평균가 계산 (체결 정보가 있으면)
+        if 'avg_price' not in locals():
+            trades = od.get("trades") or [] if od else []
+            if trades:
+                total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
+                total_vol = sum(float(tr["volume"]) for tr in trades)
+                avg_price = total_krw / total_vol if total_vol > 0 else entry_price
+            else:
+                avg_price = float(entry_price)
 
     except Exception as e:
         print("[AUTO BUY ERR]", e)
         tg_send(f"⚠️ 매수 실패 {m}\n{e}")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
     # === 포지션 저장 ===
@@ -814,7 +840,8 @@ def close_auto_position(m, reason=""):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
 
-        # 실제 체결가 기준으로 다시 계산
+        # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
+        est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
         est_exit_value = exit_price_used * vol
         pl_value = est_exit_value - est_entry_value
         ret_pct = (exit_price_used / entry_price -
