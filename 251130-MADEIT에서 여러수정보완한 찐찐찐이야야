@@ -892,7 +892,15 @@ def close_auto_position(m, reason=""):
     except Exception as e:
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
-        # 🔧 FIX #1: 실패 시 포지션 절대 제거 안 함 (트래킹 유지)
+
+        # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
+        if "400" in str(e) or "Bad Request" in str(e):
+            actual_check = get_actual_balance(m)
+            if actual_check <= 0:
+                print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
+                tg_send_mid(f"🗑️ {m} 좀비 포지션 제거 (실제 잔고 0)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
         return
 
 
