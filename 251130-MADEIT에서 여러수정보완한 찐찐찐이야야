@@ -3984,8 +3984,11 @@ def main():
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     try:
+                        # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
+                        with _POSITION_LOCK:
+                            actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", pre["price"])
                         monitor_position(m,
-                                         pre["price"],
+                                         actual_entry,
                                          pre,
                                          tight_mode=tight_mode)
                     except Exception as e:
