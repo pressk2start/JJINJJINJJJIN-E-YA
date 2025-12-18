@@ -2765,7 +2765,7 @@ def final_check_leader(m, pre, tight_mode=False):
     return {
         "price": pre["price"],
         "chg": round(price_change * 100, 2),
-        "current_volume": int(pre["current_volume"]),
+        "current_volume": int(pre.get("current_volume", 0)),
         "volume_surge": round(pre.get("volume_surge", 0.0), 2),
         "buy": round(t["buy_ratio"] * 100, 1),
         "n": t["n"],
