@@ -583,8 +583,33 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
 
+    # 진입 사유 한 줄 생성 (디테일 포함)
+    kd = pre.get("killer_details", {})
+    checks = kd.get("checks", {})
+    score = pre.get("score", 0)
+    vol_b = kd.get('vol_base', 0)
+    vol_s = kd.get('vol_surge', 1)
+    buy_r = kd.get('buy_ratio', 0)
+    turn_r = kd.get('turn', 0)
+    imb = kd.get('imbalance', 0)
+
+    # 각 조건 ✅/❌ 표시
+    c1 = "✅" if checks.get("거래대금 1억+") else "❌"
+    c2 = "✅" if checks.get("거래량 2배+") else "❌"
+    c3 = "✅" if checks.get("매수비 70%+") else "❌"
+    c4 = "✅" if checks.get("회전율 3%+") else "❌"
+    c5 = "✅" if checks.get("체결강도 0.3+") else "❌"
+
+    detail_str = f"점수{score:.0f} 대금{vol_b/1e8:.1f}억{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
+
+    if entry_mode == "confirm":
+        entry_reason = f"킬러충족 ({detail_str})"
+    else:
+        entry_reason = f"탐색 ({detail_str})"
+
     tg_send(
         f"{mode_emoji} <b>자동매수 체결 ({entry_mode})</b> {m}\n"
+        f"• 사유: {entry_reason}\n"
         f"• 신호가: {signal_price:,.0f}원\n"
         f"• 체결가: {avg_price:,.0f}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
@@ -618,7 +643,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
 
-def add_auto_position(m, cur_price):
+def add_auto_position(m, cur_price, reason=""):
     """
     이미 seed 포지션이 있을 때, 강한 추세에서 1회 추매(add) 수행
     - ADD_RISK_FRACTION 비율만큼 RISK_PER_TRADE를 다시 사용
@@ -733,12 +758,13 @@ def add_auto_position(m, cur_price):
         pos["last_add_ts"] = time.time()
         pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
 
+    gain_from_old = (avg_price_add / entry_price_old - 1) * 100 if entry_price_old > 0 else 0
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
-        f"• 추가 체결가: {avg_price_add:,.0f}원\n"
-        f"• 추가 수량: {volume_filled:.6f}\n"
-        f"• 총 수량: {new_vol:.6f}\n"
-        f"• 새로운 평단: {new_entry_price:,.0f}원\n"
+        f"• 사유: {reason or '추세강화'}\n"
+        f"• 기존평단: {entry_price_old:,.0f}원 → 신규평단: {new_entry_price:,.0f}원\n"
+        f"• 추가 체결가: {avg_price_add:,.0f}원 (평단대비 {gain_from_old:+.2f}%)\n"
+        f"• 추가 수량: {volume_filled:.6f} / 총 수량: {new_vol:.6f}\n"
         f"{link_for(m)}"
     )
 
@@ -1067,7 +1093,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                     # 익절 부분청산 후: -0.2% 추가 하락 OR 진입가 이하 → 청산
                     drop_from_partial = (partial_price - cur_price) / partial_price
                     if cur_price <= entry_price or drop_from_partial >= PARTIAL_EXIT_PROFIT_DROP:
-                        reason = f"부분익절 후 추가하락 ({drop_from_partial*100:.2f}%)"
+                        reason = f"부분익절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
                         close_auto_position(m, reason)
                         return True
@@ -1075,7 +1101,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                     # 손절 부분청산 후: -0.1% 추가 하락 → 청산
                     drop_from_partial = (partial_price - cur_price) / partial_price
                     if drop_from_partial >= PARTIAL_EXIT_LOSS_DROP:
-                        reason = f"부분손절 후 추가하락 ({drop_from_partial*100:.2f}%)"
+                        reason = f"부분손절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
                         close_auto_position(m, reason)
                         return True
@@ -1104,12 +1130,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
         elif ret_pct is not None and ret_pct >= 2.5:
             should_close = True
-            reason = f"수익실현 {ret_pct:.2f}%"
+            reason = f"수익실현 진입 후 +{ret_pct:.2f}% 달성 전량청산"
 
         elif ret_pct is not None and ret_pct >= 1.5:
             # 중간 구간: 30% 부분 수익실현 후 계속 보유
             ok, msg, executed = safe_partial_sell(
-                m, sell_ratio=0.3, reason=f"부분 수익실현 {ret_pct:.2f}%")
+                m, sell_ratio=0.3, reason=f"진입 후 +{ret_pct:.2f}% 수익 달성 30% 부분익절")
             if ok and executed > 0:
                 print(msg)
             # 부분익절 후에는 계속 재모니터링
@@ -1123,7 +1149,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action == "부분 청산(50%) 권고":
             ok, msg, executed = safe_partial_sell(m,
                                                   sell_ratio=0.5,
-                                                  reason="끝알람 부분청산 50%")
+                                                  reason="모니터링 종료 시점 50% 부분청산")
             if ok and executed > 0:
                 print(msg)
             continue
@@ -3001,9 +3027,10 @@ def postcheck_6s(m, pre):
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
     if not atr or atr <= 0:
-        return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT
+        return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
 
-    pct = min(max((atr / max(entry_price, 1)) * ATR_MULT, DYN_SL_MIN), DYN_SL_MAX * 0.9)
+    base_pct = (atr / max(entry_price, 1)) * ATR_MULT
+    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX * 0.9)
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
@@ -3013,7 +3040,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
 
-    return entry_price * (1 - pct), pct
+    # ATR 상세 (텔레그램용)
+    atr_info = f"ATR{atr:.0f}x{ATR_MULT}={base_pct*100:.2f}%"
+    return entry_price * (1 - pct), pct, atr_info
 
 # =========================
 # 컨텍스트 기반 청산 점수
@@ -3263,7 +3292,7 @@ def monitor_position(m,
                      horizon=None,
                      reentry=False):
     c1 = get_minutes_candles(1, m, 20)
-    base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1)
+    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1)
 
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
@@ -3376,7 +3405,8 @@ def monitor_position(m,
                 )
 
                 if gain_now >= 0.012 and strong_flow:
-                    ok_add, new_entry = add_auto_position(m, curp)
+                    add_reason = f"상승확정 (수익+{float(gain_now)*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} 초당{t15_now['krw_per_sec']/1000:.0f}K)"
+                    ok_add, new_entry = add_auto_position(m, curp, add_reason)
                     if ok_add and new_entry:
                         # 진입모드 승격
                         with _POSITION_LOCK:
@@ -3393,7 +3423,7 @@ def monitor_position(m,
 
                         # 동적 손절 재계산
                         c1_for_sl = get_minutes_candles(1, m, 20)
-                        base_stop, eff_sl_pct = dynamic_stop_loss(new_entry, c1_for_sl)
+                        base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
             if (not trail_armed) and gain_from_entry >= TRAIL_ARM_GAIN:
@@ -3435,16 +3465,12 @@ def monitor_position(m,
                     cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
 
                     if pos and (not already_added) and cooldown_ok:
-                        ok_add, new_entry = add_auto_position(m, curp)
+                        add_reason = f"재상승EMA (수익+{gain_from_entry*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} EMA3>EMA8)"
+                        ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
                             c1_for_sl = get_minutes_candles(1, m, 20)
-                            base_stop, eff_sl_pct = dynamic_stop_loss(entry_price, c1_for_sl)
-                            tg_send_mid(
-                                f"➕ <b>{m}</b> 재상승 감지 → 추매 체결<br>"
-                                f"💵 새 평단 {entry_price:,.0f}원<br>"
-                                f"🧯 손절 {base_stop:,.0f}원 ({eff_sl_pct*100:.2f}%)"
-                            )
+                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
 
             # 트레일 업데이트(이익 확대 시에만 상향)
             if trail_armed and curp > best:
@@ -3463,9 +3489,10 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             ob_now = pre.get("ob", {})
 
-            # ① 동적 손절 (ATR 기반, 0.2%~0.4%)
+            # ① 동적 손절 (ATR 기반, 0.3%~0.5%)
             if cur_gain <= -eff_sl_pct:
-                close_auto_position(m, f"동적손절 -{eff_sl_pct*100:.1f}% 컷")
+                atr_detail = f", {atr_info}" if atr_info else ""
+                close_auto_position(m, f"동적손절 손실-{abs(cur_gain)*100:.2f}% 도달 (기준-{eff_sl_pct*100:.2f}%{atr_detail})")
                 verdict = "DYN_STOP"
                 break
 
@@ -3477,10 +3504,10 @@ def monitor_position(m,
                     # 강세 → 트레일링 모드 진입
                     strong_mode = True
                     strong_peak = curp
-                    tg_send_mid(f"💪 {m} 강세 확인 → 홀딩")
+                    tg_send_mid(f"💪 {m} 진입 후 +{cur_gain*100:.2f}% 강세확인 → 홀딩")
                 else:
                     # 약세 → 즉시 매도
-                    close_auto_position(m, "체크포인트 익절")
+                    close_auto_position(m, f"체크포인트 익절 진입 후 +{cur_gain*100:.2f}% 수익에서 약세판정")
                     verdict = "THIN_PROFIT"
                     break
 
@@ -3495,7 +3522,8 @@ def monitor_position(m,
 
                 if drop_from_strong_peak >= STRONG_TRAIL_DROP:
                     final_gain = (curp / entry_price - 1.0)
-                    close_auto_position(m, f"강세 트레일링 익절 (고점대비 -{drop_from_strong_peak*100:.2f}%, 수익 +{final_gain*100:.2f}%)")
+                    peak_gain = (strong_peak / entry_price - 1.0)
+                    close_auto_position(m, f"트레일링 익절 진입 후 +{final_gain*100:.2f}% 수익 (최고+{peak_gain*100:.2f}%에서 -{drop_from_strong_peak*100:.1f}% 하락)")
                     verdict = "STRONG_TRAIL_EXIT"
                     break
 
@@ -3931,7 +3959,7 @@ def main():
                 last_reason[m] = reason
 
                 # 동적 손절가
-                dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
+                dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(pre['price'], c1)
 
                 # 스코어/임밸런스 표시
                 score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
