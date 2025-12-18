@@ -1272,11 +1272,10 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 # =========================
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
-# 🔧 자동학습 비활성화 (초기값으로 리셋 후 비활성)
-# AWS에서 rm trade_features.csv learned_weights.json learned_exit_params.json 실행 권장
-AUTO_LEARN_ENABLED = False  # 🔧 자동학습 OFF (당분간 수동 운영)
-AUTO_LEARN_APPLY = False    # 적용도 OFF
-AUTO_LEARN_MIN_TRADES = 60
+# 🔧 자동학습 ON (초보수적 설정)
+AUTO_LEARN_ENABLED = True   # 학습 활성화
+AUTO_LEARN_APPLY = True     # 학습 결과 적용
+AUTO_LEARN_MIN_TRADES = 100 # 🔧 60→100건 (충분한 샘플 확보)
 _trade_log_lock = threading.Lock()
 
 FEATURE_FIELDS = [
@@ -1383,13 +1382,13 @@ def analyze_and_update_weights():
         new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
         new_weights["fresh"] = 7.0  # 신선도는 고정
 
-        # 🛡️ 승률 35% 미만이면 학습 신뢰도 낮음 → 스킵
+        # 🛡️ 승률 45% 미만이면 학습 신뢰도 낮음 → 스킵 (더 엄격)
         win_rate = round(len(wins) / len(df) * 100, 1)
-        if win_rate < 35:
-            print(f"[AUTO_LEARN] 승률 {win_rate}% < 35% → 신뢰도 낮아 학습 스킵")
+        if win_rate < 45:
+            print(f"[AUTO_LEARN] 승률 {win_rate}% < 45% → 신뢰도 낮아 학습 스킵")
             return None
 
-        # 기존 가중치와 블렌딩 (극도로 보수적: 97% 기존, 3% 신규)
+        # 기존 가중치와 블렌딩 (🔧 초보수적: 99% 기존, 1% 신규)
         old_weights = dict(SCORE_WEIGHTS)
         blended = {}
         changes = {}
@@ -1400,16 +1399,16 @@ def analyze_and_update_weights():
             "imbalance": 18, "volume_surge": 10, "fresh": 7
         }
         # ✅ 페일세이프 하드 바운드 (절대 벗어나면 안 되는 값)
-        HARD_MIN = {"buy_ratio": 22, "turn": 18, "imbalance": 12}
-        HARD_MAX = {"spread": 25, "volume_surge": 18}
-        MAX_DEVIATION = 0.15  # 초기값 대비 최대 ±15%까지만 변화 허용
+        HARD_MIN = {"buy_ratio": 24, "turn": 19, "imbalance": 14}  # 🔧 더 보수적
+        HARD_MAX = {"spread": 20, "volume_surge": 14}              # 🔧 더 보수적
+        MAX_DEVIATION = 0.08  # 🔧 15%→8% (초기값 대비 최대 ±8%까지만 변화 허용)
 
         for k in SCORE_WEIGHTS:
             old_w = SCORE_WEIGHTS.get(k, 10)
             new_w = new_weights.get(k, old_w)
 
-            # 97% 기존 + 3% 신규 (극도로 보수적)
-            candidate = round(old_w * 0.97 + new_w * 0.03, 1)
+            # 🔧 99% 기존 + 1% 신규 (초보수적)
+            candidate = round(old_w * 0.99 + new_w * 0.01, 1)
 
             # 초기값 대비 ±15% 범위 제한
             init_w = INITIAL_WEIGHTS.get(k, 10)
@@ -1525,44 +1524,26 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
-        # 🛡️ 승률 35% 미만이면 튜닝 스킵 (노이즈 방지)
-        if win_rate < 0.35:
-            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 35% → 튜닝 스킵")
+        # 🛡️ 승률 45% 미만이면 튜닝 스킵 (🔧 더 엄격)
+        if win_rate < 0.45:
+            print(f"[EXIT_TUNE] 승률 {win_rate*100:.0f}% < 45% → 튜닝 스킵")
             return None
 
         old_params = dict(DYNAMIC_EXIT_PARAMS)
 
-        # === 튜닝 로직 (극도로 보수적: 미세 스텝) ===
-        # 초기값 기준 범위 제한 (매우 좁게)
-        BOUNDS = {
-            "hard_stop": (-0.013, -0.011),      # -1.3% ~ -1.1% (좁은 범위)
-            "partial_drop": (0.0012, 0.002),    # 0.12% ~ 0.2%
-            "full_drop": (0.0035, 0.005),       # 0.35% ~ 0.5%
-            "profit_lock_tight": (0.9955, 0.997), # 좁은 범위
-            "trail_pct": (0.002, 0.003),        # 0.2% ~ 0.3%
-        }
+        # === 튜닝 로직 (🔧 초보수적: hard_stop만 미세 조정) ===
+        # 새 체크포인트 방식에서는 hard_stop만 사용
+        HARD_STOP_BOUNDS = (-0.011, -0.007)  # -1.1% ~ -0.7% (좁은 범위)
 
-        if win_rate < 0.4:
-            # 승률 낮음 → 극미세 조정 (0.0001 스텝)
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(BOUNDS["hard_stop"][0],
-                DYNAMIC_EXIT_PARAMS["hard_stop"] - 0.0001)
-            DYNAMIC_EXIT_PARAMS["partial_drop"] = max(BOUNDS["partial_drop"][0],
-                DYNAMIC_EXIT_PARAMS["partial_drop"] - 0.00005)
-        elif win_rate > 0.6:
-            # 승률 높음 → 극미세 조정
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(BOUNDS["hard_stop"][1],
-                DYNAMIC_EXIT_PARAMS["hard_stop"] + 0.0001)
-            DYNAMIC_EXIT_PARAMS["partial_drop"] = min(BOUNDS["partial_drop"][1],
-                DYNAMIC_EXIT_PARAMS["partial_drop"] + 0.00005)
-
-        if avg_pnl < -0.005:
-            # 평균 손실 → 극미세 조정
-            DYNAMIC_EXIT_PARAMS["full_drop"] = max(BOUNDS["full_drop"][0],
-                DYNAMIC_EXIT_PARAMS["full_drop"] - 0.0001)
-        elif avg_pnl > 0.005:
-            # 평균 이익 → 극미세 조정
-            DYNAMIC_EXIT_PARAMS["full_drop"] = min(BOUNDS["full_drop"][1],
-                DYNAMIC_EXIT_PARAMS["full_drop"] + 0.0001)
+        # 승률에 따라 극미세 조정 (0.0001 = 0.01% 단위)
+        if win_rate < 0.45:
+            # 승률 낮음 → 손절 살짝 완화 (손실 줄이기)
+            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009) - 0.0001
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(HARD_STOP_BOUNDS[0], new_hard)
+        elif win_rate > 0.55 and avg_pnl > 0.002:
+            # 승률 높고 평균 수익 있음 → 손절 살짝 타이트 (수익 보호)
+            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009) + 0.0001
+            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(HARD_STOP_BOUNDS[1], new_hard)
 
         # 저장
         with open(EXIT_PARAMS_PATH, "w", encoding="utf-8") as f:
