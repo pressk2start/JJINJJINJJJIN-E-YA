@@ -150,12 +150,14 @@ from urllib.parse import urlencode
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 
-print(
-    "[UPBIT_KEYS] access_len=",
-    len(UPBIT_ACCESS_KEY),
-    "secret_len=",
-    len(UPBIT_SECRET_KEY),
-)
+# 🔧 보안: 키 길이 로깅은 디버그 모드에서만
+if os.getenv("DEBUG_KEYS") == "1":
+    print(
+        "[UPBIT_KEYS] access_len=",
+        len(UPBIT_ACCESS_KEY),
+        "secret_len=",
+        len(UPBIT_SECRET_KEY),
+    )
 
 # AUTO_TRADE = 1 이면 실제 주문, 0이면 알림 + 모니터링만
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
@@ -904,6 +906,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
             return False, msg, 0.0
+        # 🔧 FIX: 미체결 쿨다운 체크 (반복 주문 방지)
+        if pos.get("partial_cool_until", 0) > time.time():
+            msg = f"[REMONITOR] {m} 부분청산 쿨다운 중 → 스킵"
+            print(msg)
+            return False, msg, 0.0
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
@@ -936,12 +943,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         if executed <= 0:
             msg = f"[PARTIAL_SELL_ERR] {m}: executed_volume=0 (요청 {sell_volume:.6f})"
             print(msg)
+            # 🔧 FIX: 미체결 시 30초 쿨다운 (반복 주문 방지)
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["partial_cool_until"] = time.time() + 30
             # ❗ 부분청산 신호는 계속 오는데 실제 매도가 안 되는 경우를 눈에 보이게
             tg_send_mid(f"⚠️ <b>부분청산 주문 실패</b> {m}\n"
                         f"• 요청 비율: {sell_ratio*100:.0f}%\n"
                         f"• 요청 수량: {sell_volume:.6f}\n"
                         f"• 체결 수량: 0 (실패)\n"
-                        f"→ 최소 주문금액 부족 / 주문거절 가능성")
+                        f"→ 최소 주문금액 부족 / 주문거절 가능성\n"
+                        f"→ 30초 쿨다운 적용됨")
             return False, msg, 0.0
 
         remaining_volume = max(current_volume - executed, 0.0)
@@ -1216,8 +1229,8 @@ REARM_PRICE_GAP = 0.009
 REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
-# 포스트체크(허수 2차)
-POSTCHECK_ENABLED = False
+# 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
+# POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
