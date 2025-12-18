@@ -3883,18 +3883,18 @@ def main():
                 if not pre: continue
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
-                # 🔧 FIX: probe를 기본으로, 아주 강할 때만 confirm
+                # 🔧 킬러 조건: 확실한 신호일 때만 풀진입
                 buy_ratio = pre["tape"]["buy_ratio"]
-                turn = pre["tape"]["krw"] / max(pre["ob"]["depth_krw"], 1)
+                volume_surge = pre.get("volume_surge", 1.0)
 
-                # 아주 강한 신호만 confirm (매수비 60%+, 회전율 2.5%+)
-                if buy_ratio >= 0.60 and turn >= 0.025:
+                # 킬러 조건 (하나라도 충족 시 confirm)
+                killer_volume = volume_surge >= 3.0      # 거래량 3배 폭발
+                killer_buy = buy_ratio >= 0.75           # 매수비 75% 압도적
+
+                if killer_volume or killer_buy:
                     pre["entry_mode"] = "confirm"
-                # 나머지는 probe (소액 진입)
-                elif buy_ratio >= 0.50 and turn >= 0.015:
-                    pre["entry_mode"] = "probe"
                 else:
-                    continue
+                    pre["entry_mode"] = "probe"
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
