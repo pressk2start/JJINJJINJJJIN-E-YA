@@ -3883,16 +3883,26 @@ def main():
                 if not pre: continue
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
-                # 🔧 킬러 조건: 확실한 신호일 때만 풀진입
+                # 🔧 킬러 조건: 모든 조건 충족 시에만 풀진입
                 buy_ratio = pre["tape"]["buy_ratio"]
                 volume_surge = pre.get("volume_surge", 1.0)
+                current_vol = pre.get("current_volume", 0)
+                turn = pre["tape"]["turn"]
+                imbalance = pre["tape"]["imbalance"]
 
-                # 킬러 조건 (하나라도 충족 시 confirm)
-                killer_volume = volume_surge >= 3.0      # 거래량 3배 폭발
-                killer_buy = buy_ratio >= 0.75           # 매수비 75% 압도적
+                # 킬러 조건 (모두 충족 시 confirm)
+                killer_vol_base = current_vol >= 100_000_000  # 최근 거래대금 1억 이상
+                killer_vol_surge = volume_surge >= 2.0        # 거래량 2배 이상
+                killer_buy = buy_ratio >= 0.70                # 매수비 70% 이상
+                killer_turn = turn >= 0.03                    # 회전율 3% 이상
+                killer_imb = imbalance >= 0.3                 # 체결강도 0.3 이상
 
-                if killer_volume or killer_buy:
+                all_killer = (killer_vol_base and killer_vol_surge and
+                              killer_buy and killer_turn and killer_imb)
+
+                if all_killer:
                     pre["entry_mode"] = "confirm"
+                    print(f"[CONFIRM] {m} 킬러조건 충족: 거래대금={current_vol/1e8:.1f}억, 배수={volume_surge:.1f}x, 매수비={buy_ratio:.0%}, 회전율={turn:.1%}, 임밸={imbalance:.2f}")
                 else:
                     pre["entry_mode"] = "probe"
 
