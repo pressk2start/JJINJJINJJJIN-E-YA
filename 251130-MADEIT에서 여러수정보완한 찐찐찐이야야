@@ -3883,10 +3883,14 @@ def main():
                 if not pre: continue
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
+                # 🔧 FIX: probe를 기본으로, 아주 강할 때만 confirm
                 buy_ratio = pre["tape"]["buy_ratio"]
                 turn = pre["tape"]["krw"] / max(pre["ob"]["depth_krw"], 1)
-                if buy_ratio >= 0.55 and turn >= 0.018:
+
+                # 아주 강한 신호만 confirm (매수비 60%+, 회전율 2.5%+)
+                if buy_ratio >= 0.60 and turn >= 0.025:
                     pre["entry_mode"] = "confirm"
+                # 나머지는 probe (소액 진입)
                 elif buy_ratio >= 0.50 and turn >= 0.015:
                     pre["entry_mode"] = "probe"
                 else:
