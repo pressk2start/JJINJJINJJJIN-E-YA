@@ -1198,12 +1198,12 @@ POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
 POSTCHECK_MAX_DD = 0.018
 
-# 동적 손절(ATR) - 타이트
+# 동적 손절(ATR) - 초타이트 (하드스탑 대체)
 ATR_PERIOD = 14
 ATR_EMA_PERIOD = 20
-ATR_MULT = 0.65           # 타이트
-DYN_SL_MIN = 0.004        # 0.4% 최소 손절
-DYN_SL_MAX = 0.010        # 1.0% 최대 손절
+ATR_MULT = 0.30           # 🔧 0.65 → 0.30 (더 타이트)
+DYN_SL_MIN = 0.002        # 🔧 0.4% → 0.2% 최소 손절
+DYN_SL_MAX = 0.004        # 🔧 1.0% → 0.4% 최대 손절
 
 # 메가 브레이크아웃 (우회 엄격화)
 ULTRA_RELAX_ON_MEGA = True
@@ -1470,10 +1470,8 @@ def analyze_and_update_weights():
 # =========================
 EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 
-# 현재 매도 파라미터 - 초타이트
-DYNAMIC_EXIT_PARAMS = {
-    "hard_stop": -0.003,       # 급락 손절 -0.3%
-}
+# 🔧 hard_stop 제거 → 동적손절(ATR)로 대체 (DYN_SL_MIN~DYN_SL_MAX)
+DYNAMIC_EXIT_PARAMS = {}
 
 # 부분청산 후 추가 손절 설정
 PARTIAL_EXIT_PROFIT_DROP = 0.002   # 익절 부분청산 후 -0.2% 추가 하락 시 청산
@@ -1536,20 +1534,21 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
-        old_params = dict(DYNAMIC_EXIT_PARAMS)
+        global DYN_SL_MAX
+        old_sl_max = DYN_SL_MAX
 
-        # === 튜닝 로직 (승률 기반 미세 조정) ===
-        HARD_STOP_BOUNDS = (-0.011, -0.006)  # -1.1% ~ -0.6% 범위
+        # === 튜닝 로직 (승률 기반 동적손절 미세 조정) ===
+        DYN_SL_BOUNDS = (0.002, 0.006)  # 0.2% ~ 0.6% 범위
 
         # 승률에 따라 극미세 조정 (0.0001 = 0.01% 단위)
         if win_rate < 0.40:
-            # 승률 낮음 → 손절 살짝 완화
-            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008) - 0.0001
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = max(HARD_STOP_BOUNDS[0], new_hard)
+            # 승률 낮음 → 손절 살짝 완화 (DYN_SL_MAX 올리기)
+            DYN_SL_MAX = min(DYN_SL_BOUNDS[1], DYN_SL_MAX + 0.0001)
         elif win_rate > 0.50:
-            # 승률 높음 → 손절 살짝 타이트
-            new_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008) + 0.0001
-            DYNAMIC_EXIT_PARAMS["hard_stop"] = min(HARD_STOP_BOUNDS[1], new_hard)
+            # 승률 높음 → 손절 살짝 타이트 (DYN_SL_MAX 낮추기)
+            DYN_SL_MAX = max(DYN_SL_BOUNDS[0], DYN_SL_MAX - 0.0001)
+
+        DYNAMIC_EXIT_PARAMS["dyn_sl_max"] = DYN_SL_MAX
 
         # 저장
         with open(EXIT_PARAMS_PATH, "w", encoding="utf-8") as f:
@@ -3246,11 +3245,9 @@ def monitor_position(m,
             alive_sec = time.time() - start_ts
             dd_now = (curp / best - 1.0)
             cur_gain = (curp / entry_price - 1.0)
-            # 🔧 손절 기준 (DYNAMIC_EXIT_PARAMS 사용)
-            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.008)  # -0.8% 타이트
 
             if alive_sec < WARMUP_SEC:
-                if cur_gain <= WARMUP_STOP:  # 🔧 웜업 중 -0.3% 손절
+                if cur_gain <= WARMUP_STOP:  # 🔧 웜업 중 -0.2% 손절
                     verdict = "웜업 손절"
                     outcome_extra = f"({cur_gain*100:.2f}%)"
                     break
@@ -3366,11 +3363,10 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             ob_now = pre.get("ob", {})
 
-            # ① 급락 즉시 손절
-            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009)
-            if cur_gain <= dyn_hard:
-                close_auto_position(m, f"급락 {dyn_hard*100:.1f}% 컷")
-                verdict = "HARD_STOP"
+            # ① 동적 손절 (ATR 기반, 0.2%~0.4%)
+            if cur_gain <= -eff_sl_pct:
+                close_auto_position(m, f"동적손절 -{eff_sl_pct*100:.1f}% 컷")
+                verdict = "DYN_STOP"
                 break
 
             # ② 얇은 수익 체크포인트 (+0.3%) 도달 시 강세 판단
@@ -3781,9 +3777,7 @@ def main():
                     if exit_tune:
                         tg_send_mid(
                             f"⚙️ 매도파라미터 튜닝 (승률 {exit_tune['win_rate']}%, 평균 {exit_tune['avg_pnl']:+.2f}%)\n"
-                            f"• 손절: {exit_tune['new_params']['hard_stop']*100:.1f}%\n"
-                            f"• 부분익절: 고점-{exit_tune['new_params']['partial_drop']*100:.2f}%\n"
-                            f"• 전량익절: 고점-{exit_tune['new_params']['full_drop']*100:.2f}%"
+                            f"• 동적손절 최대: {exit_tune['new_params'].get('dyn_sl_max', DYN_SL_MAX)*100:.2f}%"
                         )
                 except Exception as e:
                     print(f"[AUTO_LEARN_MAIN_ERR] {e}")
