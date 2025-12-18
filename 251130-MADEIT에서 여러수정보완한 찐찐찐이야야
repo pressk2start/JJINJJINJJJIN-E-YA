@@ -3366,10 +3366,10 @@ def monitor_position(m,
                     # 강세 → 트레일링 모드 진입
                     strong_mode = True
                     strong_peak = curp
-                    tg_send_mid(f"💪 {m} 강세 확인 → 홀딩 (현재 +{cur_gain*100:.2f}%)")
+                    tg_send_mid(f"💪 {m} 강세 확인 → 홀딩")
                 else:
-                    # 약세 → 즉시 매도 (얇은 수익 확정)
-                    close_auto_position(m, f"얇은 익절 확정 (+{cur_gain*100:.2f}%)")
+                    # 약세 → 즉시 매도
+                    close_auto_position(m, "체크포인트 익절")
                     verdict = "THIN_PROFIT"
                     break
 
