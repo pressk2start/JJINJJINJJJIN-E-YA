@@ -143,8 +143,7 @@ print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 # =========================
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
 # =========================
-import uuid, hashlib
-import jwt
+# import uuid, hashlib, jwt  # 상단(8-11줄)에서 이미 import됨
 from urllib.parse import urlencode
 
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
@@ -1691,10 +1690,17 @@ from requests.adapters import HTTPAdapter
 
 def _new_session():
     s = requests.Session()
-    retry = Retry(total=3,
-                  backoff_factor=0.3,
-                  status_forcelist=[429, 500, 502, 503, 504],
-                  allowed_methods=frozenset(["GET", "POST"]))
+    # 🔧 urllib3 버전 호환성 (1.26+ = allowed_methods, 구버전 = method_whitelist)
+    retry_kwargs = dict(
+        total=3,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    try:
+        retry = Retry(allowed_methods=frozenset(["GET", "POST"]), **retry_kwargs)
+    except TypeError:
+        # urllib3 < 1.26 fallback
+        retry = Retry(method_whitelist=frozenset(["GET", "POST"]), **retry_kwargs)
     adapter = HTTPAdapter(pool_connections=256,
                           pool_maxsize=256,
                           max_retries=retry)
