@@ -906,11 +906,6 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
             return False, msg, 0.0
-        # 🔧 FIX: 미체결 쿨다운 체크 (반복 주문 방지)
-        if pos.get("partial_cool_until", 0) > time.time():
-            msg = f"[REMONITOR] {m} 부분청산 쿨다운 중 → 스킵"
-            print(msg)
-            return False, msg, 0.0
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
@@ -926,6 +921,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         cur_price = cur_js[0].get("trade_price", entry_price) if cur_js else entry_price
     except Exception:
         cur_price = entry_price
+
+    # 🔧 FIX: 최소주문금액(5000원) 사전검증
+    MIN_ORDER_KRW = 5000
+    sell_krw = sell_volume * cur_price
+    remaining_volume = current_volume - sell_volume
+    remaining_krw = remaining_volume * cur_price
+
+    # 매도금액 또는 잔여금액이 5000원 미만이면 → 전량청산으로 전환
+    if sell_krw < MIN_ORDER_KRW or remaining_krw < MIN_ORDER_KRW:
+        print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
+        sell_volume = current_volume  # 전량으로 변경
+        # partial_done은 설정하지 않음 (전량청산이므로 포지션 종료됨)
 
     try:
         res = place_market_sell(m, sell_volume, price_hint=cur_price)
@@ -943,18 +950,10 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         if executed <= 0:
             msg = f"[PARTIAL_SELL_ERR] {m}: executed_volume=0 (요청 {sell_volume:.6f})"
             print(msg)
-            # 🔧 FIX: 미체결 시 30초 쿨다운 (반복 주문 방지)
-            with _POSITION_LOCK:
-                pos2 = OPEN_POSITIONS.get(m)
-                if pos2:
-                    pos2["partial_cool_until"] = time.time() + 30
-            # ❗ 부분청산 신호는 계속 오는데 실제 매도가 안 되는 경우를 눈에 보이게
             tg_send_mid(f"⚠️ <b>부분청산 주문 실패</b> {m}\n"
                         f"• 요청 비율: {sell_ratio*100:.0f}%\n"
                         f"• 요청 수량: {sell_volume:.6f}\n"
-                        f"• 체결 수량: 0 (실패)\n"
-                        f"→ 최소 주문금액 부족 / 주문거절 가능성\n"
-                        f"→ 30초 쿨다운 적용됨")
+                        f"• 체결 수량: 0 (실패)")
             return False, msg, 0.0
 
         remaining_volume = max(current_volume - executed, 0.0)
