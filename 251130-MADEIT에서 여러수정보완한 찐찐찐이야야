@@ -37,7 +37,7 @@ COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 5  # 진입 후 초기 노이즈 허용 구간
+WARMUP_SEC = 0  # 🔧 시간 조건 제거 - 진입 직후부터 손절 즉시 적용
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
