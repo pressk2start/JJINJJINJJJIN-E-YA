@@ -1187,12 +1187,12 @@ POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
 POSTCHECK_MAX_DD = 0.018
 
-# 동적 손절(ATR) - 🔧 손절 더 타이트하게 조정
+# 동적 손절(ATR) - 완화
 ATR_PERIOD = 14
 ATR_EMA_PERIOD = 20
-ATR_MULT = 0.70           # 🔧 0.75→0.70 (손절 더 타이트)
-DYN_SL_MIN = 0.005        # 🔧 0.8%→0.5% (최소 손절 타이트)
-DYN_SL_MAX = 0.012        # 🔧 1.5%→1.2% (최대 손절 제한)
+ATR_MULT = 0.80           # 완화
+DYN_SL_MIN = 0.008        # 0.8% 최소 손절
+DYN_SL_MAX = 0.018        # 1.8% 최대 손절
 
 # 메가 브레이크아웃 (우회 엄격화)
 ULTRA_RELAX_ON_MEGA = True
@@ -1462,9 +1462,9 @@ def analyze_and_update_weights():
 # =========================
 EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 
-# 현재 매도 파라미터 - 🔧 손절 빠르게
+# 현재 매도 파라미터
 DYNAMIC_EXIT_PARAMS = {
-    "hard_stop": -0.009,       # 급락 손절 -0.9%
+    "hard_stop": -0.012,       # 급락 손절 -1.2% (완화)
 }
 
 # =========================
@@ -3240,14 +3240,8 @@ def monitor_position(m,
             alive_sec = time.time() - start_ts
             dd_now = (curp / best - 1.0)
             cur_gain = (curp / entry_price - 1.0)
-            # 🔧 손절 기준 통일 (DYNAMIC_EXIT_PARAMS 사용)
-            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.009)
-
-            # ⛔ 진입 60초 내 micro-stop: -0.45% 이탈이면 즉시 손절
-            if alive_sec <= 60 and cur_gain <= -0.0045:
-                close_auto_position(m, "micro-stop(60초·-0.45%)")
-                verdict = "MICRO_STOP"
-                break
+            # 🔧 손절 기준 (DYNAMIC_EXIT_PARAMS 사용)
+            dyn_hard = DYNAMIC_EXIT_PARAMS.get("hard_stop", -0.012)  # -1.2%로 완화
 
             if alive_sec < WARMUP_SEC:
                 if cur_gain <= dyn_hard:
