@@ -1317,10 +1317,14 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
 
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float):
     """
-    청산 시 결과 업데이트 (마지막 해당 마켓 row 찾아서 업데이트)
+    청산 시 결과 업데이트 + 건수 기반 학습 트리거
     """
+    global _trade_count_since_learn, _lose_streak
+
     if not os.path.exists(TRADE_LOG_PATH):
         return
+
+    is_win = pnl_pct > 0
 
     with _trade_log_lock:
         try:
@@ -1334,7 +1338,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 if rows[i]["market"] == market and not rows[i].get("exit_price"):
                     rows[i]["exit_price"] = str(exit_price)
                     rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
-                    rows[i]["result"] = "win" if pnl_pct > 0 else "lose"
+                    rows[i]["result"] = "win" if is_win else "lose"
                     rows[i]["hold_sec"] = str(int(hold_sec))
                     break
 
@@ -1345,6 +1349,37 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 w.writerows(rows)
         except Exception as e:
             print(f"[TRADE_LOG_UPDATE_ERR] {e}")
+
+    # 🔧 건수 기반 학습 트리거 (매수만 학습)
+    if AUTO_LEARN_ENABLED:
+        _trade_count_since_learn += 1
+
+        if is_win:
+            _lose_streak = 0  # 승리 시 연패 리셋
+        else:
+            _lose_streak += 1  # 패배 시 연패 증가
+
+        # 학습 조건: 10건마다 OR 연속 3패
+        should_learn = (
+            _trade_count_since_learn >= AUTO_LEARN_INTERVAL or
+            _lose_streak >= AUTO_LEARN_STREAK_TRIGGER
+        )
+
+        if should_learn:
+            trigger_reason = f"연속 {_lose_streak}패" if _lose_streak >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
+            print(f"[AUTO_LEARN] 학습 트리거: {trigger_reason}")
+            _trade_count_since_learn = 0  # 리셋
+
+            try:
+                learn_result = analyze_and_update_weights()
+                if learn_result and AUTO_LEARN_APPLY:
+                    SCORE_WEIGHTS.update(learn_result["weights"])
+                    tg_send_mid(
+                        f"🧠 자동학습 ({trigger_reason})\n"
+                        f"📊 승률: {learn_result['win_rate']}% ({learn_result['wins']}승/{learn_result['loses']}패)"
+                    )
+            except Exception as e:
+                print(f"[AUTO_LEARN_ERR] {e}")
 
 def analyze_and_update_weights():
     """
@@ -3748,43 +3783,9 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🧠 3시간마다 자동 학습 실행 (✅ 30분→3시간, 노이즈 방지)
-            if AUTO_LEARN_ENABLED and (time.time() - _last_learn_ts) >= 10800:
-                _last_learn_ts = time.time()
-                try:
-                    learn_result = analyze_and_update_weights()
-                    if learn_result:
-                        # ✅ AUTO_LEARN_APPLY=True 일 때만 실제 적용
-                        if AUTO_LEARN_APPLY:
-                            SCORE_WEIGHTS.update(learn_result["weights"])
-                            apply_status = "✅ 적용됨"
-                        else:
-                            apply_status = "⏸️ 적용보류(shadow)"
-                        # 변화량 표시 (+ / - 로)
-                        changes_str = "\n".join([
-                            f"  {k}: {learn_result['old_weights'][k]} → {learn_result['weights'][k]} ({learn_result['changes'][k]:+.1f})"
-                            for k in learn_result['changes']
-                            if abs(learn_result['changes'][k]) >= 0.1
-                        ])
-                        tg_send(
-                            f"====================================\n"
-                            f"🧠 <b>자동학습 완료</b> {apply_status}\n"
-                            f"====================================\n"
-                            f"📊 분석: {learn_result['sample_size']}건 ({learn_result['wins']}승/{learn_result['loses']}패)\n"
-                            f"📈 승률: {learn_result['win_rate']}%\n\n"
-                            f"<b>가중치 변경:</b>\n{changes_str if changes_str else '  (변화 없음)'}\n"
-                            f"===================================="
-                        )
-
-                    # 🔧 매도 파라미터도 자동 튜닝
-                    exit_tune = analyze_and_tune_exits()
-                    if exit_tune:
-                        tg_send_mid(
-                            f"⚙️ 매도파라미터 튜닝 (승률 {exit_tune['win_rate']}%, 평균 {exit_tune['avg_pnl']:+.2f}%)\n"
-                            f"• 동적손절 최대: {exit_tune['new_params'].get('dyn_sl_max', DYN_SL_MAX)*100:.2f}%"
-                        )
-                except Exception as e:
-                    print(f"[AUTO_LEARN_MAIN_ERR] {e}")
+            # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
+            # (10건마다 또는 연속 3패 시 즉시 학습)
+            # 매도 파라미터는 고정 (매수만 학습)
 
             for k in list(CUT_COUNTER.keys()):
                 CUT_COUNTER[k] = 0
