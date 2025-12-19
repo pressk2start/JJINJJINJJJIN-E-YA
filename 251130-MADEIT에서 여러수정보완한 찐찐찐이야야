@@ -626,13 +626,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         mode_label = "탐색진입"
         entry_reason = f"탐색 ({detail_str})"
 
+    # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
+    actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
+
     tg_send(
         f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
         f"• 사유: {entry_reason}\n"
         f"• 신호가: {signal_price:,.0f}원\n"
         f"• 체결가: {avg_price:,.0f}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}%)\n"
+        f"• 주문금액: {krw_to_use:,.0f}원 ({actual_pct:.1f}%)\n"
         f"• 수량: {volume_filled:.6f}\n"
         f"• 손절가: {stop_price:,.0f}원\n"
         f"{link_for(m)}"
@@ -3522,7 +3525,7 @@ def monitor_position(m,
             # ① 동적 손절 (ATR 기반, 0.3%~0.5%)
             if cur_gain <= -eff_sl_pct:
                 atr_detail = f", {atr_info}" if atr_info else ""
-                close_auto_position(m, f"동적손절 손실-{abs(cur_gain)*100:.2f}% 도달 (기준-{eff_sl_pct*100:.2f}%{atr_detail})")
+                close_auto_position(m, f"동적손절 -{abs(cur_gain)*100:.2f}% (기준 -{eff_sl_pct*100:.2f}% 초과{atr_detail})")
                 verdict = "DYN_STOP"
                 break
 
