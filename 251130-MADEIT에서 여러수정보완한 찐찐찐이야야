@@ -3989,6 +3989,9 @@ def main():
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
+                # 🔧 FIX: score를 pre에 복사 (자동매수 알람에서 사용)
+                pre["score"] = payload.get("score", 0)
+
                 # === 6초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
