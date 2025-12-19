@@ -1488,10 +1488,26 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 learn_result = analyze_and_update_weights()
                 if learn_result and AUTO_LEARN_APPLY:
                     SCORE_WEIGHTS.update(learn_result["weights"])
-                    tg_send_mid(
-                        f"🧠 자동학습 ({trigger_reason})\n"
-                        f"📊 승률: {learn_result['win_rate']}% ({learn_result['wins']}승/{learn_result['loses']}패)"
+
+                    # 🔧 가중치 변화 상세 표시
+                    changes = learn_result.get("changes", {})
+                    change_strs = []
+                    for k, v in changes.items():
+                        if v != 0:
+                            sign = "+" if v > 0 else ""
+                            change_strs.append(f"{k}:{sign}{v}")
+                    change_detail = " | ".join(change_strs) if change_strs else "변화없음"
+
+                    tg_send(
+                        f"🧠 <b>자동학습 완료</b> ({trigger_reason})\n"
+                        f"📊 승률: {learn_result['win_rate']}% ({learn_result['wins']}승/{learn_result['loses']}패)\n"
+                        f"📈 샘플: {learn_result.get('sample_size', 0)}건\n"
+                        f"⚙️ 가중치 변화: {change_detail}\n"
+                        f"🎯 현재 가중치: 매수비{learn_result['weights'].get('buy_ratio', 0)} 회전{learn_result['weights'].get('turn', 0)} 임밸{learn_result['weights'].get('imbalance', 0)}"
                     )
+                elif learn_result is None:
+                    # 학습 실패 시에도 알림
+                    tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
             except Exception as e:
                 print(f"[AUTO_LEARN_ERR] {e}")
 
