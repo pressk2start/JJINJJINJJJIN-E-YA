@@ -4017,25 +4017,12 @@ def main():
                 score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
                 imb_str = f"호가비 {payload.get('imbalance', 0):+.2f}" if payload.get('imbalance') else ""
 
-                # 🔧 진입모드 + 킬러조건 상세 표시
-                entry_mode = pre.get("entry_mode", "probe")
-                mode_tag = "🔥확정" if entry_mode == "confirm" else "🧭탐색"
-                kd = pre.get("killer_details", {})
-                checks = kd.get("checks", {})
-                c1k = "✅" if checks.get("거래대금 1억+") else "❌"
-                c2k = "✅" if checks.get("거래량 2배+") else "❌"
-                c3k = "✅" if checks.get("매수비 70%+") else "❌"
-                c4k = "✅" if checks.get("회전율 3%+") else "❌"
-                c5k = "✅" if checks.get("체결강도 0.3+") else "❌"
-                killer_str = f"대금{c1k} 배수{c2k} 매수{c3k} 회전{c4k} 임밸{c5k}"
-
                 txt = (
-                    f"⚡ <b>초입 신호 [{mode_tag}]</b> {m} <code>#{reason}</code>\n"
+                    f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
                     f"🎯 {score_str} | {imb_str}\n"
-                    f"📋 킬러: {killer_str}\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
