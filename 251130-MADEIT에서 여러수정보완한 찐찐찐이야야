@@ -458,7 +458,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     entry_mode = pre.get("entry_mode", "confirm")
 
     if entry_mode == "probe":
-        entry_fraction = 0.30   # ✅ 30%로 상향 (최소주문금액 미달 방지)
+        entry_fraction = 0.10   # 🔧 10%로 축소 (소액 탐색)
         mode_emoji = "🧭"
     elif entry_mode == "confirm":
         entry_fraction = 1.0    # 전체 금액 (확정 진입)
@@ -618,18 +618,21 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     detail_str = f"점수{score:.0f} 대금{vol_b/1e8:.1f}억{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
+    # 🔧 진입 모드별 라벨
     if entry_mode == "confirm":
+        mode_label = "확정진입"
         entry_reason = f"킬러충족 ({detail_str})"
     else:
+        mode_label = "탐색진입"
         entry_reason = f"탐색 ({detail_str})"
 
     tg_send(
-        f"{mode_emoji} <b>자동매수 체결 ({entry_mode})</b> {m}\n"
+        f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
         f"• 사유: {entry_reason}\n"
         f"• 신호가: {signal_price:,.0f}원\n"
         f"• 체결가: {avg_price:,.0f}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}% 비중)\n"
+        f"• 주문금액: {krw_to_use:,.0f}원 ({entry_fraction*100:.0f}%)\n"
         f"• 수량: {volume_filled:.6f}\n"
         f"• 손절가: {stop_price:,.0f}원\n"
         f"{link_for(m)}"
