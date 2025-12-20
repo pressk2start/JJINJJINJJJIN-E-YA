@@ -616,7 +616,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     c4 = "✅" if checks.get("회전율 3%+") else "❌"
     c5 = "✅" if checks.get("체결강도 0.3+") else "❌"
 
-    detail_str = f"점수{score:.0f} 대금{vol_b/1e8:.1f}억{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
+    # 🔧 대금 소수점 2자리로 표시 (0.05억 등)
+    detail_str = f"점수{score:.0f} 대금{vol_b/1e8:.2f}억{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
     # 🔧 진입 모드별 라벨
     if entry_mode == "confirm":
@@ -3937,6 +3938,8 @@ def main():
             shard = mkts_all[start:end]
             if len(shard) < SHARD_SIZE:
                 shard += mkts_all[:(SHARD_SIZE - len(shard))]
+            # 🔧 FIX: shard 중복 제거 (wrap-around 시 중복 방지)
+            shard = list(dict.fromkeys(shard))
             _cursor = (end) % len(mkts_all)
 
             obc = fetch_orderbook_cache(shard)
