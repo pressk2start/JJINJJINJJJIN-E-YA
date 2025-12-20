@@ -479,8 +479,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if not ok_guard:
         tg_send(
             f"⚠️ <b>진입 취소</b> {m}\n"
-            f"• 신호가: {signal_price:,.0f}원\n"
-            f"• 현재가: {current_price:,.0f}원\n"
+            f"• 신호가: {fmt6(signal_price)}원\n"
+            f"• 현재가: {fmt6(current_price)}원\n"
             f"• 상승률: {((current_price / signal_price - 1) * 100):.2f}%\n"
             f"• 사유: 가격 급등 (초입 추격 위험)"
         )
@@ -647,12 +647,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
         f"• 사유: {entry_reason}\n"
         f"• 경로: {path_str}\n"
-        f"• 신호가: {signal_price:,.0f}원\n"
-        f"• 체결가: {avg_price:,.0f}원\n"
+        f"• 신호가: {fmt6(signal_price)}원\n"
+        f"• 체결가: {fmt6(avg_price)}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
         f"• 주문금액: {krw_to_use:,.0f}원 ({actual_pct:.1f}%)\n"
         f"• 수량: {volume_filled:.6f}\n"
-        f"• 손절가: {stop_price:,.0f}원\n"
+        f"• 손절가: {fmt6(stop_price)}원\n"
         f"{link_for(m)}"
     )
 
@@ -813,8 +813,8 @@ def add_auto_position(m, cur_price, reason=""):
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
         f"• 사유: {reason or '추세강화'}\n"
-        f"• 기존평단: {entry_price_old:,.0f}원 → 신규평단: {new_entry_price:,.0f}원\n"
-        f"• 추가 체결가: {avg_price_add:,.0f}원 (평단대비 {gain_from_old:+.2f}%)\n"
+        f"• 기존평단: {fmt6(entry_price_old)}원 → 신규평단: {fmt6(new_entry_price)}원\n"
+        f"• 추가 체결가: {fmt6(avg_price_add)}원 (평단대비 {gain_from_old:+.2f}%)\n"
         f"• 추가 수량: {volume_filled:.6f} / 총 수량: {new_vol:.6f}\n"
         f"{link_for(m)}"
     )
@@ -956,8 +956,8 @@ def close_auto_position(m, reason=""):
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason}\n"
-            f"• 매수평단: {entry_price:,.0f}원\n"
-            f"• 실매도가: {exit_price_used:,.0f}원\n"
+            f"• 매수평단: {fmt6(entry_price)}원\n"
+            f"• 실매도가: {fmt6(exit_price_used)}원\n"
             f"• 체결수량: {vol:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
@@ -1099,8 +1099,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
-            f"• 매수평단: {entry_price:,.0f}원\n"
-            f"• 실매도가: {exit_price_used:,.0f}원\n"
+            f"• 매수평단: {fmt6(entry_price)}원\n"
+            f"• 실매도가: {fmt6(exit_price_used)}원\n"
             f"• 체결수량: {executed:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
