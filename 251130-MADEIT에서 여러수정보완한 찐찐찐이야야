@@ -2051,6 +2051,42 @@ def final_check_leader(m, pre, tight_mode=False):
         cut("BIDASK_WEAK", f"{m} bidask weak")
         return None
 
+    # ========================================
+    # ★★★ 신규 필터: 성공/실패 패턴 기반 필터링 ★★★
+    # ========================================
+    buy_ratio = t["buy_ratio"]  # 0.0 ~ 1.0 (매수비)
+    turn_pct = turn * 100       # 회전율 % (이미 turn = t["krw"] / depth_krw 계산됨)
+
+    # 임밸 계산: (bid - ask) / (bid + ask), 정규화하여 0~1 범위
+    imbalance_raw = (bid_sum - ask_sum) / max(bid_sum + ask_sum, 1)  # -1 ~ +1
+    imbalance = (imbalance_raw + 1) / 2  # 0 ~ 1로 정규화
+
+    # --- 프리시전 포켓 체크 (예외 허용 조건) ---
+    # P1: 임밸 >= 0.80 AND 매수비 >= 63.5% → 강진입 후보
+    is_precision_pocket = (imbalance >= 0.80 and buy_ratio >= 0.635)
+
+    # --- 하드컷 조건 ---
+    # 1) 매수비 == 100% → 다운그레이드/컷 (가장 흔한 실패 패턴, 성공률 30%)
+    if abs(buy_ratio - 1.0) < 1e-6:
+        # 프리시전 포켓이면 예외적으로 통과 (probe로 진입)
+        if not is_precision_pocket:
+            cut("BUYRATIO_100PCT", f"{m} buy=100% (high fail pattern)")
+            return None
+        # 포켓이면 통과하되 경고 로그
+        # (pre["entry_mode"]는 호출자에서 처리)
+
+    # 2) 임밸 < 0.25 → 컷 (성공률 36%)
+    if imbalance < 0.25:
+        cut("IMBAL_LOW", f"{m} imbal {imbalance:.2f} < 0.25")
+        return None
+
+    # 3) 회전 >= 48% → 컷 (펌핑/휩쏘 위험), 단 프리시전 포켓이면 예외
+    if turn_pct >= 48.0:
+        if not is_precision_pocket:
+            cut("TURN_OVERHEAT", f"{m} turn {turn_pct:.1f}% >= 48%")
+            return None
+    # ========================================
+
     max_spread = MAX_SPREAD_FAST if t.get("rate",
                                           0) >= 0.7 else MAX_SPREAD_BASE
     if ob["spread"] > max_spread:
@@ -2067,7 +2103,9 @@ def final_check_leader(m, pre, tight_mode=False):
         "buy": round(t["buy_ratio"] * 100, 1),
         "n": t["n"],
         "spread": round(ob["spread"], 2),
-        "turn": round((t['krw'] / max(ob['depth_krw'], 1)) * 100, 2)
+        "turn": round(turn_pct, 2),
+        "imbalance": round(imbalance, 3),
+        "is_precision_pocket": is_precision_pocket
     }
 
 
@@ -3172,6 +3210,11 @@ def main():
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
+                # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
+                # 조건: 임밸 >= 0.80 AND 매수비 >= 63.5% (정밀도 ~82%)
+                if payload.get("is_precision_pocket"):
+                    pre["entry_mode"] = "confirm"  # probe → confirm 승격
+
                 # === 6초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
@@ -3196,11 +3239,15 @@ def main():
                 # 동적 손절가
                 dyn_stop, eff_sl_pct = dynamic_stop_loss(pre['price'], c1)
 
+                # 프리시전 포켓 표시
+                pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
+                imbal_val = payload.get("imbalance", 0)
+
                 txt = (
-                    f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>\n"
+                    f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 <b>현재가</b> {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
-                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
+                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | 임밸 {imbal_val:.2f}\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
                     f"{link_for(m)}")
