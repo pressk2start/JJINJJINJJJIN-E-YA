@@ -1637,6 +1637,36 @@ def get_path_statistics(last_n: int = 100) -> str:
                 star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
                 lines.append(f"  {icon}{ftype}: {cnt}건 ({wr:.0f}%){star}")
 
+        # 🔥 경로 조합별 승률
+        if all(col in df.columns for col in ["detect_type", "trigger_type", "filter_type"]):
+            lines.append("<b>📍 경로 조합:</b>")
+
+            # 조합 생성
+            combo_stats = {}
+            for _, row in df.iterrows():
+                detect = "⚡" if row.get("detect_type") == "tick_burst" else "📊"
+                trigger = str(row.get("trigger_type", "-"))[:6]  # 길면 자르기
+                ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
+                combo = f"{detect}→{trigger}→{ftype}"
+
+                if combo not in combo_stats:
+                    combo_stats[combo] = {"win": 0, "total": 0}
+                combo_stats[combo]["total"] += 1
+                if row["result"] == "win":
+                    combo_stats[combo]["win"] += 1
+
+            # 승률 순 정렬, 상위 5개만
+            sorted_combos = sorted(combo_stats.items(),
+                                   key=lambda x: (x[1]["win"]/max(x[1]["total"],1), x[1]["total"]),
+                                   reverse=True)
+
+            for combo, stats in sorted_combos[:7]:  # 최대 7개
+                cnt = stats["total"]
+                w = stats["win"]
+                wr = w / cnt * 100 if cnt > 0 else 0
+                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
+                lines.append(f"  {combo}: {cnt}건 ({wr:.0f}%){star}")
+
         # 추천
         lines.append("─" * 20)
 
