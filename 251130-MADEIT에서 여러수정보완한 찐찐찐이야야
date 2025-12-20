@@ -1055,13 +1055,19 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
         fee_total = (est_entry_value + est_exit_value) * 0.0005
 
-        with _POSITION_LOCK:
-            pos2 = OPEN_POSITIONS.get(m)
-            if pos2:
-                pos2["volume"] = remaining_volume
-                pos2["partial_done"] = True
-                pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
-                pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
+        # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
+        if remaining_volume <= 1e-10:
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            print(f"[PARTIAL→FULL_DONE] {m} 전량청산 완료 → 포지션 제거")
+        else:
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["volume"] = remaining_volume
+                    pos2["partial_done"] = True
+                    pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
+                    pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
