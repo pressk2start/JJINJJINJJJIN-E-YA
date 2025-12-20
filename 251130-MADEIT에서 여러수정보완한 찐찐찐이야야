@@ -1548,8 +1548,11 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     if _path_report_count >= PATH_REPORT_INTERVAL:
         _path_report_count = 0
         try:
-            report = get_path_statistics(50)  # 최근 50건 분석
-            tg_send(report)
+            # 경로 통계 + 상세 거래 목록 합쳐서 발송
+            path_report = get_path_statistics(50)  # 최근 50건 경로 분석
+            detail_report = get_recent_trades_detail(10)  # 최근 10건 상세
+            combined = path_report + detail_report
+            tg_send(combined)
         except Exception as e:
             print(f"[PATH_REPORT_ERR] {e}")
 
@@ -1659,6 +1662,91 @@ def get_path_statistics(last_n: int = 100) -> str:
 
     except Exception as e:
         return f"📊 통계 오류: {e}"
+
+def get_recent_trades_detail(last_n: int = 10) -> str:
+    """
+    🔍 최근 거래 상세 목록 (임계치 분석용)
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return ""
+
+    try:
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        if "result" not in df.columns:
+            return ""
+
+        # 청산 완료된 거래만
+        df = df[df["result"].isin(["win", "lose"])].tail(last_n)
+
+        if len(df) == 0:
+            return ""
+
+        lines = [
+            "",
+            f"📋 <b>최근 {len(df)}건 상세</b>",
+            "─" * 20,
+        ]
+
+        for idx, row in df.iterrows():
+            # 기본 정보
+            market = str(row.get("market", "?"))[-6:]  # KRW-XXX에서 XXX만
+            result = row.get("result", "?")
+            pnl = row.get("pnl_pct", 0) or 0
+            icon = "✅" if result == "win" else "❌"
+            pnl_str = f"+{pnl:.2f}%" if pnl > 0 else f"{pnl:.2f}%"
+
+            # 경로
+            detect = "⚡" if row.get("detect_type") == "tick_burst" else "📊"
+            trigger = str(row.get("trigger_type", "-"))[:8]  # 너무 길면 자르기
+            ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
+
+            # 지표들 (소수점 정리)
+            buy_r = row.get("buy_ratio", 0) or 0
+            turn = row.get("turn", 0) or 0
+            imbal = row.get("imbalance", 0) or 0
+            spread = row.get("spread", 0) or 0
+            vol_surge = row.get("volume_surge", 0) or 0
+            score = row.get("score", 0) or 0
+            hold = row.get("hold_sec", 0) or 0
+
+            # 시간 (ts에서 시:분만 추출)
+            ts = str(row.get("ts", ""))
+            time_str = ts[11:16] if len(ts) >= 16 else "?"
+
+            lines.append(
+                f"{icon} {market} {time_str} {pnl_str}\n"
+                f"   {detect}→{trigger}→{ftype}\n"
+                f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
+                f"   배수{vol_surge:.1f}x 점수{score:.0f} {hold:.0f}초"
+            )
+
+        # 임계치 힌트 (승리/패배 평균 비교)
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+
+        if len(wins) >= 2 and len(loses) >= 2:
+            lines.append("─" * 20)
+            lines.append("<b>💡 승/패 평균 비교:</b>")
+
+            for col, name in [("buy_ratio", "매수비"), ("turn", "회전"), ("imbalance", "임밸"),
+                              ("spread", "스프레드"), ("volume_surge", "배수")]:
+                if col in df.columns:
+                    w_avg = wins[col].mean() if col in wins.columns else 0
+                    l_avg = loses[col].mean() if col in loses.columns else 0
+                    if pd.notna(w_avg) and pd.notna(l_avg):
+                        diff = w_avg - l_avg
+                        if col == "buy_ratio":
+                            lines.append(f"  {name}: 승{w_avg:.0%} / 패{l_avg:.0%} (차이 {diff:+.0%})")
+                        elif col in ["turn", "spread"]:
+                            lines.append(f"  {name}: 승{w_avg:.1%} / 패{l_avg:.1%} (차이 {diff:+.1%})")
+                        else:
+                            lines.append(f"  {name}: 승{w_avg:.2f} / 패{l_avg:.2f} (차이 {diff:+.2f})")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"📋 상세 오류: {e}"
 
 def analyze_and_update_weights():
     """
