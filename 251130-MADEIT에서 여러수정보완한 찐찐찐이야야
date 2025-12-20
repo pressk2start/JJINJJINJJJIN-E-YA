@@ -199,6 +199,10 @@ from collections import deque as _deque_for_risk  # 기존 deque와 별도 alias
 
 TRADE_HISTORY = _deque_for_risk(maxlen=30)  # 최근 30개 거래 기록
 
+# 🔧 크리티컬 핫픽스: streak 전역변수 상단 선언 (NameError 방지)
+_lose_streak = 0              # 연속 패배 수
+_win_streak = 0               # 연속 승리 수
+
 
 def record_trade(market: str, pnl_pct: float):
     """
@@ -222,6 +226,7 @@ def get_adaptive_risk() -> float:
     - 🔧 연패 3회 이상: 리스크 0.85배 (방어적)
     - 🔧 연승 3회 이상: 리스크 1.15배 (공격적)
     """
+    global _lose_streak, _win_streak  # 🔧 전역 참조 명시
     base_risk = RISK_PER_TRADE
 
     # 승률 기반 조정
@@ -1369,6 +1374,10 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
     리스크 스코어 계산 (0~100)
     - 각 피처를 정규화해서 가중합
     """
+    # 🔧 안전 패치: 매수비 100% 비정상값 클리핑 (허수/스푸핑 방지)
+    if buy_ratio >= 0.999:
+        buy_ratio = 0.98
+
     score = 0.0
 
     # 매수비: 0.50~0.70 → 0~100
@@ -1409,8 +1418,7 @@ AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
 AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
 _trade_log_lock = threading.Lock()
 _trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
-_lose_streak = 0              # 연속 패배 수
-_win_streak = 0               # 연속 승리 수 (🔧 추가: streak 기반 리스크 조절용)
+# 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
 
 FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
@@ -1687,7 +1695,7 @@ def analyze_and_tune_exits():
     - 익절 후 더 올랐으면 → 익절 기준 완화
     - 익절 후 더 떨어졌으면 → 익절 기준 유지/강화
     """
-    global DYNAMIC_EXIT_PARAMS
+    global DYNAMIC_EXIT_PARAMS, DYN_SL_MAX  # 🔧 DYN_SL_MAX 전역 선언 추가
 
     if not os.path.exists(TRADE_LOG_PATH):
         return None
@@ -1710,7 +1718,6 @@ def analyze_and_tune_exits():
         # 평균 손익
         avg_pnl = pd.to_numeric(recent["pnl_pct"], errors='coerce').mean()
 
-        global DYN_SL_MAX
         old_sl_max = DYN_SL_MAX
 
         # === 튜닝 로직 (승률 기반 동적손절 미세 조정) ===
