@@ -2651,11 +2651,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
             # 🔧 FIX: tape 누락 → KeyError 방지
             tape = micro_tape_stats_from_ticks(ticks_now, 15)
+            # 🔧 FIX: current_volume/volume_surge 누락 → 대금 0.00억 표시 버그 수정
+            cur_vol = c1[-1].get("candle_acc_trade_price", 0) if c1 else 0
+            past_vols = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c.get("candle_acc_trade_price", 0) > 0] if len(c1) >= 3 else []
+            avg_past = statistics.mean(past_vols) if past_vols else max(cur_vol / 8, 1)
+            vol_surge = cur_vol / max(avg_past, 1)
             pre = {
                 "price": ticks_now[0]["trade_price"],
                 "ob": obc.get(m),
                 "ticks": ticks_now,
                 "tape": tape,  # ← 추가 (final_check_leader에서 필요)
+                "current_volume": cur_vol,  # ← 추가 (대금 표시용)
+                "volume_surge": vol_surge,  # ← 추가 (거래증가 표시용)
                 "entry_mode": "probe",
                 "early_ok": True,
             }
