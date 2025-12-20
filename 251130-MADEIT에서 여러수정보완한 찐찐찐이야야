@@ -635,9 +635,18 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
     actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
 
+    # 🔍 3단계 경로 표시 (분석용)
+    detect_type = pre.get("detect_type", "normal")
+    trigger_list = pre.get("trigger_type", [])
+    filter_type = pre.get("filter_type", "기본통과")  # payload에서 복사된 값
+    detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+    trigger_str = "+".join(trigger_list) if trigger_list else "없음"
+    path_str = f"{detect_str}→{trigger_str}→{filter_type}"
+
     tg_send(
         f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
         f"• 사유: {entry_reason}\n"
+        f"• 경로: {path_str}\n"
         f"• 신호가: {signal_price:,.0f}원\n"
         f"• 체결가: {avg_price:,.0f}원\n"
         f"• 슬리피지: {slip_pct*100:+.3f}%\n"
@@ -2668,6 +2677,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 "volume_surge": vol_surge,  # ← 추가 (거래증가 표시용)
                 "entry_mode": "probe",
                 "early_ok": True,
+                "detect_type": "tick_burst",  # ← 1단계: 틱버스트 감지
+                "trigger_type": ["틱버스트"],  # ← 2단계: 틱버스트 트리거
             }
             return pre
 
@@ -2772,6 +2783,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     entry_mode = "confirm" if confirm_ok else "probe"
 
     # === 결과 패키징 ===
+    # 2단계: 트리거 타입 결정
+    trigger_type = []
+    if ign_ok: trigger_type.append("점화")
+    if botacc_ok: trigger_type.append("봇매집")
+    if two_green_and_break: trigger_type.append("연속양봉")
+    if early_ok: trigger_type.append("Early")
+
     pre = {
         "price": cur["trade_price"],
         "change": price_change,
@@ -2786,9 +2804,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "two_green_break": two_green_and_break,
         "early_ok": early_ok,
         "entry_mode": entry_mode,
+        "detect_type": "normal",  # ← 1단계: 일반 감지
+        "trigger_type": trigger_type,  # ← 2단계: 트리거 목록
     }
     if mega:
         pre["mega_ok"] = True
+        pre["trigger_type"].append("메가")
 
     return pre
 
@@ -2908,6 +2929,9 @@ def final_check_leader(m, pre, tight_mode=False):
             return None
     # ========================================
 
+    # 3단계: 필터 타입 결정
+    filter_type = "프리시전" if is_precision_pocket else "기본통과"
+
     return {
         "price": pre["price"],
         "chg": round(price_change * 100, 2),
@@ -2919,7 +2943,8 @@ def final_check_leader(m, pre, tight_mode=False):
         "turn": round(turn_pct, 2),
         "imbalance": round(imbalance, 3),
         "score": score if USE_RISK_SCORE else 0,
-        "is_precision_pocket": is_precision_pocket
+        "is_precision_pocket": is_precision_pocket,
+        "filter_type": filter_type,  # ← 3단계: 기본통과/프리시전
     }
 
 
@@ -4065,8 +4090,9 @@ def main():
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
-                # 🔧 FIX: score를 pre에 복사 (자동매수 알람에서 사용)
+                # 🔧 FIX: score/filter_type을 pre에 복사 (자동매수 알람에서 사용)
                 pre["score"] = payload.get("score", 0)
+                pre["filter_type"] = payload.get("filter_type", "기본통과")
 
                 # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
                 # 조건: 임밸 >= 0.6 AND 매수비 >= 63.5% (정밀도 ~82%)
@@ -4099,17 +4125,26 @@ def main():
 
                 # 스코어/임밸런스 표시
                 score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
-                imb_str = f"호가비 {payload.get('imbalance', 0):+.2f}" if payload.get('imbalance') else ""
+                imb_str = f"임밸 {payload.get('imbalance', 0):.2f}"
                 pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
+
+                # 🔍 3단계 경로 표시 (분석용)
+                detect_type = pre.get("detect_type", "normal")  # 1단계: 틱버스트/일반
+                trigger_list = pre.get("trigger_type", [])  # 2단계: 점화/봇매집/Early 등
+                filter_type = payload.get("filter_type", "기본통과")  # 3단계: 기본통과/프리시전
+
+                detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+                trigger_str = "+".join(trigger_list) if trigger_list else "없음"
+
+                path_str = f"{detect_str} → {trigger_str} → {filter_type}"
 
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
-                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}%\n"
-                    f"🎯 {score_str} | {imb_str}\n"
+                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
-                    f"🧠 근거: {( '점화/5m돌파' if pre.get('ign_ok') else ('초기누적(TWAP)' if pre.get('botacc_ok') else ('메가브레이크아웃' if pre.get('mega_ok') else ('초기흐름(early)' if pre.get('early_ok') else '패턴종합'))) )}\n"
+                    f"🔍 경로: {path_str}\n"
                     f"{link_for(m)}")
 
                 sent = tg_send(txt, retry=2)
