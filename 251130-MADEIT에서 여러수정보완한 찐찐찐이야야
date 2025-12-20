@@ -664,6 +664,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             imbalance = calc_orderbook_imbalance(ob) if ob else 0
             turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
 
+            # 🔍 경로 정보
+            trigger_list = pre.get("trigger_type", [])
             log_trade_features({
                 "ts": now_kst_str(),
                 "market": m,
@@ -676,6 +678,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "fresh": 1 if last_two_ticks_fresh(pre.get("ticks", [])) else 0,
                 "score": pre.get("score", 0),
                 "entry_mode": entry_mode,
+                "detect_type": pre.get("detect_type", "normal"),
+                "trigger_type": "+".join(trigger_list) if trigger_list else "없음",
+                "filter_type": pre.get("filter_type", "기본통과"),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
@@ -1427,12 +1432,15 @@ AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
 AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
 _trade_log_lock = threading.Lock()
 _trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
+_path_report_count = 0  # 🔍 경로 리포트용 카운터 (20건마다 발송)
+PATH_REPORT_INTERVAL = 20  # 경로 리포트 발송 주기
 # 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
 
 FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
     "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
     "fresh", "score", "entry_mode",
+    "detect_type", "trigger_type", "filter_type",  # 🔍 경로 분석용
     "pnl_pct", "result", "hold_sec"
 ]
 
@@ -1453,9 +1461,9 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
 
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float):
     """
-    청산 시 결과 업데이트 + 건수 기반 학습 트리거
+    청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
     """
-    global _trade_count_since_learn, _lose_streak, _win_streak
+    global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
     if not os.path.exists(TRADE_LOG_PATH):
         return
@@ -1534,6 +1542,123 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                     tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
             except Exception as e:
                 print(f"[AUTO_LEARN_ERR] {e}")
+
+    # 🔍 경로 리포트 (20건마다 자동 발송)
+    _path_report_count += 1
+    if _path_report_count >= PATH_REPORT_INTERVAL:
+        _path_report_count = 0
+        try:
+            report = get_path_statistics(50)  # 최근 50건 분석
+            tg_send(report)
+        except Exception as e:
+            print(f"[PATH_REPORT_ERR] {e}")
+
+def get_path_statistics(last_n: int = 100) -> str:
+    """
+    🔍 경로별 승률 통계 생성 (텔레그램 리포트용)
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return "📊 거래 기록 없음"
+
+    try:
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        # result 컬럼이 있고 값이 있는 행만 (청산 완료된 거래)
+        if "result" not in df.columns:
+            return "📊 청산 기록 없음"
+
+        df = df[df["result"].isin(["win", "lose"])].tail(last_n)
+
+        if len(df) < 5:
+            return f"📊 데이터 부족 ({len(df)}건, 최소 5건 필요)"
+
+        total = len(df)
+        wins = len(df[df["result"] == "win"])
+        overall_wr = wins / total * 100 if total > 0 else 0
+
+        lines = [
+            f"📊 <b>경로별 승률 리포트</b> (최근 {total}건)",
+            f"📈 전체 승률: {overall_wr:.1f}% ({wins}승/{total-wins}패)",
+            "─" * 20,
+        ]
+
+        # 1단계: 감지 타입
+        if "detect_type" in df.columns:
+            lines.append("<b>1단계 감지:</b>")
+            for dtype in df["detect_type"].dropna().unique():
+                sub = df[df["detect_type"] == dtype]
+                cnt = len(sub)
+                w = len(sub[sub["result"] == "win"])
+                wr = w / cnt * 100 if cnt > 0 else 0
+                icon = "⚡" if dtype == "tick_burst" else "📊"
+                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
+                lines.append(f"  {icon}{dtype}: {cnt}건 ({wr:.0f}%){star}")
+
+        # 2단계: 트리거 타입
+        if "trigger_type" in df.columns:
+            lines.append("<b>2단계 트리거:</b>")
+            # 트리거는 복합(점화+Early)일 수 있으므로 개별 분석
+            trigger_stats = {}
+            for _, row in df.iterrows():
+                triggers = str(row.get("trigger_type", "")).split("+")
+                for t in triggers:
+                    t = t.strip()
+                    if not t or t == "없음":
+                        continue
+                    if t not in trigger_stats:
+                        trigger_stats[t] = {"win": 0, "total": 0}
+                    trigger_stats[t]["total"] += 1
+                    if row["result"] == "win":
+                        trigger_stats[t]["win"] += 1
+
+            # 승률 순으로 정렬
+            sorted_triggers = sorted(trigger_stats.items(),
+                                     key=lambda x: x[1]["win"]/max(x[1]["total"],1),
+                                     reverse=True)
+            for t, stats in sorted_triggers:
+                cnt = stats["total"]
+                w = stats["win"]
+                wr = w / cnt * 100 if cnt > 0 else 0
+                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
+                lines.append(f"  {t}: {cnt}건 ({wr:.0f}%){star}")
+
+        # 3단계: 필터 타입
+        if "filter_type" in df.columns:
+            lines.append("<b>3단계 필터:</b>")
+            for ftype in df["filter_type"].dropna().unique():
+                sub = df[df["filter_type"] == ftype]
+                cnt = len(sub)
+                w = len(sub[sub["result"] == "win"])
+                wr = w / cnt * 100 if cnt > 0 else 0
+                icon = "🎯" if ftype == "프리시전" else "✓"
+                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
+                lines.append(f"  {icon}{ftype}: {cnt}건 ({wr:.0f}%){star}")
+
+        # 추천
+        lines.append("─" * 20)
+
+        # 가장 나쁜 경로 찾기
+        worst = None
+        worst_wr = 100
+        if "detect_type" in df.columns:
+            for dtype in df["detect_type"].dropna().unique():
+                sub = df[df["detect_type"] == dtype]
+                cnt = len(sub)
+                if cnt >= 3:
+                    wr = len(sub[sub["result"] == "win"]) / cnt * 100
+                    if wr < worst_wr:
+                        worst_wr = wr
+                        worst = f"감지:{dtype}"
+
+        if worst and worst_wr < overall_wr - 5:
+            lines.append(f"💡 검토 필요: {worst} ({worst_wr:.0f}%)")
+        else:
+            lines.append("💡 특별히 나쁜 경로 없음")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"📊 통계 오류: {e}"
 
 def analyze_and_update_weights():
     """
