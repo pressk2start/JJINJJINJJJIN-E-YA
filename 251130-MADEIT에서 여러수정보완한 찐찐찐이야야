@@ -629,7 +629,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     else:
         vol_str = f"{vol_b/1e4:.0f}만"
 
-    detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
+    # 🔧 배수 표시: 1 미만은 소수점 2자리, 이상은 1자리
+    if vol_s < 1.0:
+        surge_str = f"{vol_s:.2f}x"
+    else:
+        surge_str = f"{vol_s:.1f}x"
+
+    detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{surge_str}{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
     # 🔧 진입 모드별 라벨
     if entry_mode == "confirm":
