@@ -1127,6 +1127,17 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"===================================="
         )
 
+        # 🔧 부분청산도 거래 기록에 추가 (경로 리포트 카운트용)
+        if AUTO_LEARN_ENABLED and remaining_volume <= 1e-10:
+            # 전량청산된 경우만 기록 (부분청산 후 전량청산 시)
+            try:
+                with _POSITION_LOCK:
+                    pos_for_ts = OPEN_POSITIONS.get(m, {})
+                hold_sec = time.time() - pos_for_ts.get("entry_ts", time.time())
+                update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec)
+            except Exception as _e:
+                print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
+
         return True, msg, executed
 
     except Exception as e:
