@@ -635,6 +635,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     else:
         surge_str = f"{vol_s:.1f}x"
 
+    # 🔍 DEBUG: 대금/배수 값 확인
+    print(f"[ALERT_DEBUG] {m} vol_b={vol_b}, vol_str={vol_str}, vol_s={vol_s}, surge_str={surge_str}")
+
     detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{surge_str}{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
     # 🔧 진입 모드별 라벨
