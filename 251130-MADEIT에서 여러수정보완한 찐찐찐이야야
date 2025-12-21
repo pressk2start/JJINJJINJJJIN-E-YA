@@ -1432,8 +1432,8 @@ AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
 AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
 _trade_log_lock = threading.Lock()
 _trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
-_path_report_count = 0  # 🔍 경로 리포트용 카운터 (20건마다 발송)
-PATH_REPORT_INTERVAL = 20  # 경로 리포트 발송 주기
+_path_report_count = 0  # 🔍 경로 리포트용 카운터
+PATH_REPORT_INTERVAL = 5  # 🔧 테스트: 5건마다 발송 (정상작동 확인 후 20으로 변경)
 # 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
 
 FEATURE_FIELDS = [
@@ -1465,34 +1465,37 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     """
     global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
-    if not os.path.exists(TRADE_LOG_PATH):
-        return
+    print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
 
     is_win = pnl_pct > 0
+    csv_exists = os.path.exists(TRADE_LOG_PATH)
 
-    with _trade_log_lock:
-        try:
-            rows = []
-            with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
+    if not csv_exists:
+        print(f"[UPDATE_TRADE] {TRADE_LOG_PATH} 파일 없음 (CSV 업데이트 스킵, 리포트는 계속)")
+    else:
+        with _trade_log_lock:
+            try:
+                rows = []
+                with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
 
-            # 마지막 해당 마켓 찾아서 업데이트
-            for i in range(len(rows) - 1, -1, -1):
-                if rows[i]["market"] == market and not rows[i].get("exit_price"):
-                    rows[i]["exit_price"] = str(exit_price)
-                    rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
-                    rows[i]["result"] = "win" if is_win else "lose"
-                    rows[i]["hold_sec"] = str(int(hold_sec))
-                    break
+                # 마지막 해당 마켓 찾아서 업데이트
+                for i in range(len(rows) - 1, -1, -1):
+                    if rows[i]["market"] == market and not rows[i].get("exit_price"):
+                        rows[i]["exit_price"] = str(exit_price)
+                        rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
+                        rows[i]["result"] = "win" if is_win else "lose"
+                        rows[i]["hold_sec"] = str(int(hold_sec))
+                        break
 
-            # 다시 쓰기
-            with open(TRADE_LOG_PATH, "w", newline="", encoding="utf-8") as f:
-                w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
-                w.writeheader()
-                w.writerows(rows)
-        except Exception as e:
-            print(f"[TRADE_LOG_UPDATE_ERR] {e}")
+                # 다시 쓰기
+                with open(TRADE_LOG_PATH, "w", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
+                    w.writeheader()
+                    w.writerows(rows)
+            except Exception as e:
+                print(f"[TRADE_LOG_UPDATE_ERR] {e}")
 
     # 🔧 건수 기반 학습 트리거 (매수만 학습)
     if AUTO_LEARN_ENABLED:
@@ -1545,6 +1548,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
 
     # 🔍 경로 리포트 (20건마다 자동 발송)
     _path_report_count += 1
+    print(f"[PATH_REPORT] 카운트: {_path_report_count}/{PATH_REPORT_INTERVAL}")
     if _path_report_count >= PATH_REPORT_INTERVAL:
         _path_report_count = 0
         try:
@@ -1552,6 +1556,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             path_report = get_path_statistics(50)  # 최근 50건 경로 분석
             detail_report = get_recent_trades_detail(10)  # 최근 10건 상세
             combined = path_report + detail_report
+            print(f"[PATH_REPORT] 리포트 발송 시도")
             tg_send(combined)
         except Exception as e:
             print(f"[PATH_REPORT_ERR] {e}")
