@@ -1582,6 +1582,7 @@ def get_path_statistics(last_n: int = 100) -> str:
         return "📊 거래 기록 없음"
 
     try:
+        import pandas as pd
         df = pd.read_csv(TRADE_LOG_PATH)
 
         # result 컬럼이 있고 값이 있는 행만 (청산 완료된 거래)
@@ -1719,6 +1720,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
         return ""
 
     try:
+        import pandas as pd
         df = pd.read_csv(TRADE_LOG_PATH)
 
         if "result" not in df.columns:
