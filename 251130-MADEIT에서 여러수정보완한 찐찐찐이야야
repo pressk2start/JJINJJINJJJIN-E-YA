@@ -621,8 +621,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     c4 = "✅" if checks.get("회전율 3%+") else "❌"
     c5 = "✅" if checks.get("체결강도 0.3+") else "❌"
 
-    # 🔧 대금 소수점 2자리로 표시 (0.05억 등)
-    detail_str = f"점수{score:.0f} 대금{vol_b/1e8:.2f}억{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
+    # 🔧 대금 표시: 1억 미만은 만원 단위, 이상은 억 단위
+    if vol_b >= 1e8:
+        vol_str = f"{vol_b/1e8:.1f}억"
+    elif vol_b >= 1e6:
+        vol_str = f"{vol_b/1e6:.0f}백만"
+    else:
+        vol_str = f"{vol_b/1e4:.0f}만"
+
+    detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{vol_s:.1f}x{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
     # 🔧 진입 모드별 라벨
     if entry_mode == "confirm":
