@@ -4277,6 +4277,13 @@ def main():
 
     while True:
         try:
+            # 🔧 Health check - watchdog용 파일 업데이트
+            try:
+                with open("/home/ubuntu/bot/health.log", "w") as hf:
+                    hf.write(f"{time.time()}\n")
+            except:
+                pass
+
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
