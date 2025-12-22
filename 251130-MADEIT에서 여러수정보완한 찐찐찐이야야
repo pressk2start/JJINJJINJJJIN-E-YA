@@ -871,6 +871,12 @@ def close_auto_position(m, reason=""):
         print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)
+        # 🔧 FIX: volume 0이어도 리포트 카운트 증가
+        if AUTO_LEARN_ENABLED:
+            try:
+                update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
+            except:
+                pass
         return
 
     entry_price = pos.get("entry_price", 0)
@@ -996,6 +1002,12 @@ def close_auto_position(m, reason=""):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             tg_send_mid(f"🧹 {m} 최소주문금액 미만 → 포지션 제거 (소량 잔여는 보유)")
+            # 🔧 FIX: 리포트 카운트 증가
+            if AUTO_LEARN_ENABLED:
+                try:
+                    update_trade_result(m, 0, 0, 0)
+                except:
+                    pass
             return
 
         # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
@@ -1006,6 +1018,12 @@ def close_auto_position(m, reason=""):
                 tg_send_mid(f"🗑️ {m} 좀비 포지션 제거 (실제 잔고 0)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
+                # 🔧 FIX: 리포트 카운트 증가
+                if AUTO_LEARN_ENABLED:
+                    try:
+                        update_trade_result(m, 0, 0, 0)
+                    except:
+                        pass
         return
 
 
@@ -1158,6 +1176,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             tg_send_mid(f"🧹 {m} 부분청산 실패(최소주문금액) → 포지션 제거 처리")
+            # 🔧 FIX: 리포트 카운트 증가
+            if AUTO_LEARN_ENABLED:
+                try:
+                    update_trade_result(m, 0, 0, 0)
+                except:
+                    pass
         return False, msg, 0.0
 
 
