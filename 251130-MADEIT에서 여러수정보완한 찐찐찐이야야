@@ -2579,6 +2579,57 @@ def micro_tape_stats_from_ticks(ticks, sec):
     }
 
 
+def calc_consecutive_buys(ticks, sec=15):
+    """
+    체결강도: 최근 N초 내 연속 매수 체결 최대 횟수
+    → 5개 이상 연속 매수 = 강한 신호
+    """
+    if not ticks:
+        return 0
+    try:
+        newest_ts = ticks[0]["timestamp"]
+        cutoff = newest_ts - sec * 1000
+    except:
+        return 0
+
+    max_streak = 0
+    current_streak = 0
+    for x in ticks:
+        if x.get("timestamp", 0) < cutoff:
+            break
+        if x.get("ask_bid") == "BID":
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+    return max_streak
+
+
+def calc_avg_krw_per_tick(t_stats):
+    """
+    틱당 평균금액: 총 거래대금 / 틱수
+    → 높을수록 대형 체결 (고래 가능성)
+    """
+    if not t_stats or t_stats.get("n", 0) == 0:
+        return 0
+    return t_stats["krw"] / t_stats["n"]
+
+
+def calc_flow_acceleration(ticks):
+    """
+    체결 가속도: t5s / t15s 비율
+    → 1.5 이상 = 가속 중, 0.7 이하 = 감속 중
+    """
+    if not ticks:
+        return 1.0
+    t5s = micro_tape_stats_from_ticks(ticks, 5)
+    t15s = micro_tape_stats_from_ticks(ticks, 15)
+
+    if t15s["krw_per_sec"] <= 0:
+        return 1.0
+    return t5s["krw_per_sec"] / t15s["krw_per_sec"]
+
+
 # ===== Bot Heuristics =====
 def _pct(a, b):
     try:
@@ -3394,8 +3445,10 @@ DL_FIELDS = [
     "ts", "market", "entry_price", "chg_1m", "chg_5m", "chg_15m", "zscore_1m",
     "vwap_gap", "t15_buy", "t15_n", "t15_rate", "t15_krw", "turn", "spread",
     "depth_krw", "bidask_ratio", "volume_surge", "btc_1m", "btc_5m", "hour",
-    "dow", "two_green_break", "ignition_ok", "early_ok", "uptick_ok", "ret_3m",
-    "ret_10m", "ret_15m", "maxdd_10m", "maxrun_10m", "label_win10",
+    "dow", "two_green_break", "ignition_ok", "early_ok", "uptick_ok",
+    # 🔥 새 지표 추가
+    "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",
+    "ret_3m", "ret_10m", "ret_15m", "maxdd_10m", "maxrun_10m", "label_win10",
     "label_fail10"
 ]
 
@@ -3420,6 +3473,12 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         bidask_ratio = bid_sum / max(ask_sum, 1)
     except:
         bidask_ratio = 0.0
+
+    # 🔥 새 지표 계산
+    ticks = pre.get("ticks", [])
+    cons_buys = calc_consecutive_buys(ticks, 15)
+    avg_krw = calc_avg_krw_per_tick(t15)
+    flow_accel = calc_flow_acceleration(ticks)
 
     row = {
         "ts": now_kst_str(),
@@ -3447,6 +3506,10 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "ignition_ok": 1 if flags.get("ign_ok") else 0,
         "early_ok": 1 if flags.get("early_ok") else 0,
         "uptick_ok": 1 if flags.get("uptick_ok") else 0,
+        # 🔥 새 지표
+        "consecutive_buys": cons_buys,
+        "avg_krw_per_tick": round(avg_krw, 0),
+        "flow_acceleration": round(flow_accel, 2),
         "ret_3m": "",
         "ret_10m": "",
         "ret_15m": "",
@@ -4598,11 +4661,22 @@ def main():
 
                 path_str = f"{detect_str} → {trigger_str} → {filter_type}"
 
+                # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
+                ticks_for_metrics = pre.get("ticks", [])
+                t15_for_avg = micro_tape_stats_from_ticks(ticks_for_metrics, 15)
+                cons_buys = calc_consecutive_buys(ticks_for_metrics, 15)
+                avg_krw = calc_avg_krw_per_tick(t15_for_avg)
+                flow_accel = calc_flow_acceleration(ticks_for_metrics)
+
+                # 가속도 이모지
+                accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "➡️")
+
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
+                    f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🔍 경로: {path_str}\n"
                     f"{link_for(m)}")
