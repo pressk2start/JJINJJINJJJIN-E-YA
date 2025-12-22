@@ -440,17 +440,22 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     # 🔧 FIX: 중복 진입 방지 (pending 상태로 원자화)
     with _POSITION_LOCK:
-        if m in OPEN_POSITIONS:
-            print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
-            return
+        existing = OPEN_POSITIONS.get(m)
+        if existing:
+            # 🔧 FIX: pre_signal 플래그가 있으면 신호 발송 단계에서 만든 pending → 진행 허용
+            if not existing.get("pre_signal"):
+                print(f"[AUTO] 이미 {m} 포지션 보유중 → 신규 진입 스킵")
+                return
         # 🔧 FIX: 총 노출 한도 체크
         active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
         if active_count >= MAX_POSITIONS:
             print(f"[AUTO] 최대 포지션 수 {MAX_POSITIONS}개 도달 → 신규 진입 스킵")
             tg_send_mid(f"⚠️ {m} 신규 진입 대기 (최대 {MAX_POSITIONS}개 포지션 보유 중)")
+            OPEN_POSITIONS.pop(m, None)  # pre_signal pending 제거
             return
-        # ✅ 예약 플래그로 다른 스레드 진입 차단
-        OPEN_POSITIONS[m] = {"state": "pending"}
+        # ✅ 예약 플래그로 다른 스레드 진입 차단 (pre_signal 없으면 새로 설정)
+        if not existing:
+            OPEN_POSITIONS[m] = {"state": "pending"}
 
     signal_price = pre.get("price")
     if not signal_price:
@@ -4562,6 +4567,14 @@ def main():
                 if not cooldown_ok(m, pre['price'], reason=reason):
                     continue
 
+                # 🔧 FIX: 초입 신호 발송 전 중복 진입 차단 (race condition 방지)
+                with _POSITION_LOCK:
+                    if m in OPEN_POSITIONS:
+                        print(f"[SCAN] {m} 이미 포지션/pending 존재 → 스킵")
+                        continue
+                    # 미리 pending 마킹 (다른 스레드 차단)
+                    OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
+
                 last_signal_at[m] = time.time()
                 recent_alerts[m] = time.time()
                 last_price_at_alert[m] = pre['price']
@@ -4658,6 +4671,11 @@ def main():
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
+                        # 🔧 FIX: 자동매수 실패 시 pre_signal pending 정리
+                        with _POSITION_LOCK:
+                            pos = OPEN_POSITIONS.get(m)
+                            if pos and pos.get("pre_signal"):
+                                OPEN_POSITIONS.pop(m, None)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     try:
@@ -4670,6 +4688,12 @@ def main():
                                          tight_mode=tight_mode)
                     except Exception as e:
                         print("[MON_ERR]", e)
+                else:
+                    # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리
+                    with _POSITION_LOCK:
+                        pos = OPEN_POSITIONS.get(m)
+                        if pos and pos.get("pre_signal"):
+                            OPEN_POSITIONS.pop(m, None)
 
             cut_summary()
             if found == 0:
