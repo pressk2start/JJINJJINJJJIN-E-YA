@@ -687,8 +687,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         try:
             ob = pre.get("ob", {})
             t = pre.get("tape", {})
+            ticks = pre.get("ticks", [])
             imbalance = calc_orderbook_imbalance(ob) if ob else 0
             turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
+
+            # 🔥 새 지표 계산
+            cons_buys = calc_consecutive_buys(ticks, 15)
+            t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+            avg_krw = calc_avg_krw_per_tick(t15_stats)
+            flow_accel = calc_flow_acceleration(ticks)
 
             # 🔍 경로 정보
             trigger_list = pre.get("trigger_type", [])
@@ -701,12 +708,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "turn": turn,
                 "imbalance": imbalance,
                 "volume_surge": pre.get("volume_surge", 1.0),
-                "fresh": 1 if last_two_ticks_fresh(pre.get("ticks", [])) else 0,
+                "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
                 "score": pre.get("score", 0),
                 "entry_mode": entry_mode,
                 "detect_type": pre.get("detect_type", "normal"),
                 "trigger_type": "+".join(trigger_list) if trigger_list else "없음",
                 "filter_type": pre.get("filter_type", "기본통과"),
+                # 🔥 새 지표
+                "consecutive_buys": cons_buys,
+                "avg_krw_per_tick": round(avg_krw, 0),
+                "flow_acceleration": round(flow_accel, 2),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
@@ -1514,6 +1525,7 @@ FEATURE_FIELDS = [
     "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
     "fresh", "score", "entry_mode",
     "detect_type", "trigger_type", "filter_type",  # 🔍 경로 분석용
+    "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
     "pnl_pct", "result", "hold_sec"
 ]
 
@@ -1821,15 +1833,23 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             score = row.get("score", 0) or 0
             hold = row.get("hold_sec", 0) or 0
 
+            # 🔥 새 지표
+            cons_buys = row.get("consecutive_buys", 0) or 0
+            avg_krw = row.get("avg_krw_per_tick", 0) or 0
+            flow_accel = row.get("flow_acceleration", 1.0) or 1.0
+
             # 시간 (ts에서 시:분만 추출)
             ts = str(row.get("ts", ""))
             time_str = ts[11:16] if len(ts) >= 16 else "?"
+
+            # 가속도 이모지
+            accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "")
 
             lines.append(
                 f"{icon} {market} {time_str} {pnl_str}\n"
                 f"   {detect}→{trigger}→{ftype}\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
-                f"   배수{vol_surge:.1f}x 점수{score:.0f} {hold:.0f}초"
+                f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -1841,7 +1861,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             lines.append("<b>💡 승/패 평균 비교:</b>")
 
             for col, name in [("buy_ratio", "매수비"), ("turn", "회전"), ("imbalance", "임밸"),
-                              ("spread", "스프레드"), ("volume_surge", "배수")]:
+                              ("spread", "스프레드"), ("volume_surge", "배수"),
+                              ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도")]:
                 if col in df.columns:
                     w_avg = wins[col].mean() if col in wins.columns else 0
                     l_avg = loses[col].mean() if col in loses.columns else 0
@@ -3006,46 +3027,49 @@ def meets_volume_surge(current_volume, past_volumes):
 def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spread=None):
     """
     틱버스트 진입 허용 여부 및 사이징 결정
+    🔧 임계치 완화 (데이터 분석 기반)
     Returns: (allow, size, reason)
         - allow: True/False
         - size: "normal" / "half" / "probe" / None
         - reason: 차단/허용 사유
     """
     # --- 공통 하드컷 ---
-    if tick_count < 5:
-        return False, None, "틱수 부족(<5)"
+    # 🔧 완화: 5 → 3틱
+    if tick_count < 3:
+        return False, None, "틱수 부족(<3)"
 
     if buy_ratio <= 0.05:
         return False, None, "매수비 0% 편향"
 
-    # 스프레드 상대화 (기본 0.20%, 종목 중앙값의 1.5배까지 허용)
-    # 🔧 캡 0.25 → 0.35 (OPEN 0.31% 승자 커버)
-    thr_spread = 0.20
+    # 스프레드 상대화 (기본 0.25%, 종목 중앙값의 1.5배까지 허용)
+    # 🔧 완화: 0.20% → 0.25%, 캡 0.35% → 0.50%
+    thr_spread = 0.25
     if symbol_median_spread is not None and symbol_median_spread > 0:
-        thr_spread = min(0.35, 1.5 * symbol_median_spread)
+        thr_spread = min(0.50, 1.5 * symbol_median_spread)
 
     if spread > thr_spread:
         return False, None, f"스프레드 초과({spread:.2f}%>{thr_spread:.2f}%)"
 
     # 저회전 + 극단 매수 스푸프 차단
-    if turn_pct < 8.0 and buy_ratio >= 0.95:
+    if turn_pct < 5.0 and buy_ratio >= 0.95:
         return False, None, "저회전+극단매수(스푸핑 의심)"
 
     # --- 유동성 레짐 분기 (하드컷 대신 사이징) ---
+    # 🔧 완화: 매수비 기준 낮춤
     if turn_pct >= 8.0:
-        # 고유동: 매수비 완화 (승자 중 0.62~0.70 존재)
-        if buy_ratio < 0.62:
-            return False, None, f"고회전 매수비 부족({buy_ratio:.0%}<62%)"
+        # 고유동: 매수비 완화 (62% → 55%)
+        if buy_ratio < 0.55:
+            return False, None, f"고회전 매수비 부족({buy_ratio:.0%}<55%)"
         size = "normal"
     elif turn_pct >= 3.0:
-        # 중간 유동: 살짝 보수적
-        if buy_ratio < 0.75:
-            return False, None, f"중회전 매수비 부족({buy_ratio:.0%}<75%)"
+        # 중간 유동: (75% → 65%)
+        if buy_ratio < 0.65:
+            return False, None, f"중회전 매수비 부족({buy_ratio:.0%}<65%)"
         size = "half"
     else:
-        # 저유동: 리스크 큼 → 프로브만 허용
-        if buy_ratio < 0.85:
-            return False, None, f"저회전 매수비 부족({buy_ratio:.0%}<85%)"
+        # 저유동: (85% → 75%)
+        if buy_ratio < 0.75:
+            return False, None, f"저회전 매수비 부족({buy_ratio:.0%}<75%)"
         size = "probe"
 
     return True, size, f"통과(회전{turn_pct:.1f}%,매수{buy_ratio:.0%},사이즈={size})"
@@ -3413,6 +3437,17 @@ def final_check_leader(m, pre, tight_mode=False):
         if not is_precision_pocket:
             cut("TURN_OVERHEAT", f"{m} turn {turn_pct:.1f}% >= 48%")
             return None
+
+    # 4) 🔥 매수비 < 55% → 컷 (데이터 분석: 승자 81~93% vs 패자 54~64%)
+    if buy_ratio < 0.55:
+        cut("BUYRATIO_LOW", f"{m} buy={buy_ratio:.0%} < 55%")
+        return None
+
+    # 5) 🔥 배수 >= 5.0x → 컷 (데이터 분석: 승자 0.5~0.9x vs 패자 2~3x, 급등 후 진입 방지)
+    volume_surge = pre.get("volume_surge", 1.0)
+    if volume_surge >= 5.0:
+        cut("SURGE_HIGH", f"{m} surge={volume_surge:.1f}x >= 5.0x")
+        return None
     # ========================================
 
     # 3단계: 필터 타입 결정
