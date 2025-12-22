@@ -2914,6 +2914,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if len(c1) < 3:
         return None
 
+    # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
+    if any(stable in m.upper() for stable in ["USDT", "USDC", "DAI", "TUSD", "BUSD"]):
+        cut("STABLECOIN", f"{m} 스테이블코인 제외")
+        return None
+
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -2936,33 +2941,52 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         fresh = uptick_streak_from_ticks(ticks_now, need=1)
 
         if sudden_burst and fresh:
-            cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
-            # 🔧 FIX: tape 누락 → KeyError 방지
-            tape = micro_tape_stats_from_ticks(ticks_now, 15)
-            # 🔧 FIX: current_volume/volume_surge/change 누락 → 대금 0.00억, 등락 0.0% 표시 버그 수정
-            cur_vol = c1[-1].get("candle_acc_trade_price", 0) if c1 else 0
-            # 🔍 DEBUG: 틱버스트 대금 확인
-            if cur_vol == 0:
-                print(f"[DEBUG_TICK_VOL] {m} candle_acc_trade_price=0! keys={list(c1[-1].keys())[:5] if c1 else 'NO_C1'}")
-            past_vols = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c.get("candle_acc_trade_price", 0) > 0] if len(c1) >= 3 else []
-            avg_past = statistics.mean(past_vols) if past_vols else max(cur_vol / 8, 1)
-            vol_surge = cur_vol / max(avg_past, 1)
-            # 🔧 FIX: price_change 계산 (등락% 표시용)
-            price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1) if len(c1) >= 2 else 0.0
-            pre = {
-                "price": ticks_now[0]["trade_price"],
-                "change": price_change,  # ← 추가 (등락% 표시용)
-                "ob": obc.get(m),
-                "ticks": ticks_now,
-                "tape": tape,  # ← 추가 (final_check_leader에서 필요)
-                "current_volume": cur_vol,  # ← 추가 (대금 표시용)
-                "volume_surge": vol_surge,  # ← 추가 (거래증가 표시용)
-                "entry_mode": "probe",
-                "early_ok": True,
-                "detect_type": "tick_burst",  # ← 1단계: 틱버스트 감지
-                "trigger_type": ["틱버스트"],  # ← 2단계: 틱버스트 트리거
-            }
-            return pre
+            # === 🔧 틱버스트 야간 금지 (01~07시) ===
+            h = now_kst().hour
+            if 1 <= h < 7:
+                cut("TICK_NIGHT", f"{m} 틱버스트 야간(01~07시) 제외")
+                # 틱버스트 스킵하고 일반 경로로 진행
+                pass
+            else:
+                # === 🔧 틱버스트 추가 조건 검증 ===
+                tape = micro_tape_stats_from_ticks(ticks_now, 15)
+                cur_vol = c1[-1].get("candle_acc_trade_price", 0) if c1 else 0
+                past_vols = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c.get("candle_acc_trade_price", 0) > 0] if len(c1) >= 3 else []
+                avg_past = statistics.mean(past_vols) if past_vols else max(cur_vol / 8, 1)
+                vol_surge = cur_vol / max(avg_past, 1)
+
+                ob_tick = obc.get(m)
+                ob_spread = ob_tick.get("spread", 999) if ob_tick else 999
+                ob_depth = ob_tick.get("depth_krw", 1) if ob_tick else 1
+                turn_pct = (tape["krw"] / max(ob_depth, 1)) * 100  # 회전율 %
+
+                # 흐름 게이트: 회전율 >= 8% OR volume_surge >= 1.3
+                flow_ok = (turn_pct >= 8.0) or (vol_surge >= 1.3)
+                # 품질 게이트: 스프레드 <= 0.20% AND 배수 >= 0.7x
+                quality_ok = (ob_spread <= 0.20) and (vol_surge >= 0.7)
+
+                if not (flow_ok and quality_ok):
+                    cut("TICK_FILTER", f"{m} 틱버스트 조건 미달 (회전{turn_pct:.1f}% surge{vol_surge:.2f}x spread{ob_spread:.2f}%)")
+                    # 틱버스트 스킵하고 일반 경로로 진행
+                    pass
+                else:
+                    cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
+                    # 🔧 FIX: price_change 계산 (등락% 표시용)
+                    price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1) if len(c1) >= 2 else 0.0
+                    pre = {
+                        "price": ticks_now[0]["trade_price"],
+                        "change": price_change,  # ← 추가 (등락% 표시용)
+                        "ob": ob_tick,
+                        "ticks": ticks_now,
+                        "tape": tape,  # ← 추가 (final_check_leader에서 필요)
+                        "current_volume": cur_vol,  # ← 추가 (대금 표시용)
+                        "volume_surge": vol_surge,  # ← 추가 (거래증가 표시용)
+                        "entry_mode": "probe",
+                        "early_ok": True,
+                        "detect_type": "tick_burst",  # ← 1단계: 틱버스트 감지
+                        "trigger_type": ["틱버스트"],  # ← 2단계: 틱버스트 트리거
+                    }
+                    return pre
 
     # (이하 기존 detect_leader_stock 코드 계속)
 
@@ -3054,26 +3078,31 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     early_ok = all(early_conds)
 
+    # === 🔧 Early/점화 트리거 비활성화 (성과 0% 기반) ===
+    # 점화(ign_ok)와 Early(early_ok)는 현재 승률이 0%이므로 비활성화
+    ign_ok = False  # 점화 비활성화
+    early_ok = False  # Early 비활성화
+
     # === Confirm (확정 진입 판단) ===
     confirm_ok = (
-        ign_ok or botacc_ok or mega or two_green_and_break
-        or (early_ok and twin["buy_ratio"] >= 0.58 and uptick_streak_from_ticks(ticks, need=3))
+        botacc_ok or mega or two_green_and_break
+        # ign_ok, early_ok 제외됨
     )
 
     # === Probe/Confirm 결과 ===
-    if not (early_ok or confirm_ok):
-        cut("NO_SIGNAL", f"{m} no entry cond")
+    if not confirm_ok:
+        cut("NO_SIGNAL", f"{m} no entry cond (Early/점화 비활성)")
         return None
 
-    entry_mode = "confirm" if confirm_ok else "probe"
+    entry_mode = "confirm"  # Early 없으므로 항상 confirm
 
     # === 결과 패키징 ===
     # 2단계: 트리거 타입 결정
     trigger_type = []
-    if ign_ok: trigger_type.append("점화")
+    # if ign_ok: trigger_type.append("점화")  # 비활성
     if botacc_ok: trigger_type.append("봇매집")
     if two_green_and_break: trigger_type.append("연속양봉")
-    if early_ok: trigger_type.append("Early")
+    # if early_ok: trigger_type.append("Early")  # 비활성
 
     pre = {
         "price": cur["trade_price"],
@@ -3315,11 +3344,18 @@ from collections import deque
 
 
 def postcheck_6s(m, pre):
-    if not POSTCHECK_ENABLED:
+    # 🔧 틱버스트는 항상 포스트체크 적용 (6초 재확인)
+    is_tick_burst = pre.get("detect_type") == "tick_burst"
+
+    if not POSTCHECK_ENABLED and not is_tick_burst:
         return True, "SKIP"
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
+
+    # 🔧 틱버스트용 포스트체크 시작 로그
+    if is_tick_burst:
+        print(f"[TICK_POSTCHECK] {m} 틱버스트 6초 재확인 시작")
 
     # ★★★ 장세/야간 완화 노브
     r = relax_knob()
