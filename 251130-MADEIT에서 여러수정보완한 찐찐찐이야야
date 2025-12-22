@@ -341,13 +341,21 @@ def place_market_buy(market, krw_amount):
 def place_market_sell(market, volume, price_hint=None):
     """
     수량 기준 시장가 매도
-    🔧 FIX: 수량 정밀도 보정 + 최소주문금액 체크
+    🔧 FIX: 수량 정밀도 보정 + 최소주문금액 항상 체크
     """
     # 수량 정밀도 보정 (8자리까지, 업비트 표준)
     volume = round(float(volume), 8)
 
+    # 🔧 FIX: price_hint 없으면 현재가 조회 (최소금액 체크 우회 방지)
+    if price_hint is None:
+        try:
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
+            price_hint = cur_js[0].get("trade_price", 0) if cur_js else 0
+        except Exception:
+            price_hint = 0
+
     # 최소 주문금액 체크 (5,000원)
-    if price_hint:
+    if price_hint and price_hint > 0:
         est_value = volume * price_hint
         if est_value < 5000:
             raise ValueError(f"최소주문금액 미달: {est_value:.0f}원 < 5000원")
