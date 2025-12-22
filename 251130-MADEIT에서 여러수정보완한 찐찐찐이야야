@@ -991,6 +991,13 @@ def close_auto_position(m, reason=""):
         print("[AUTO SELL ERR]", e)
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
+        # 🔧 FIX: 최소주문금액 미만 → 매도 불가 찌꺼기, 메모리 포지션만 정리
+        if "최소주문금액" in str(e) or "5000" in str(e):
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            tg_send_mid(f"🧹 {m} 최소주문금액 미만 → 포지션 제거 (소량 잔여는 보유)")
+            return
+
         # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
         if "400" in str(e) or "Bad Request" in str(e):
             actual_check = get_actual_balance(m)
@@ -1146,6 +1153,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     except Exception as e:
         msg = f"[PARTIAL_SELL_ERR] {m}: {e}"
         print(msg)
+        # 🔧 FIX: 최소주문금액 미만 → 매도 불가 찌꺼기, 메모리 포지션만 정리
+        if "최소주문금액" in str(e) or "5000" in str(e):
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            tg_send_mid(f"🧹 {m} 부분청산 실패(최소주문금액) → 포지션 제거 처리")
         return False, msg, 0.0
 
 
@@ -1761,7 +1773,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             # 기본 정보
             market = str(row.get("market", "?"))[-6:]  # KRW-XXX에서 XXX만
             result = row.get("result", "?")
-            pnl = row.get("pnl_pct", 0) or 0
+            pnl_raw = row.get("pnl_pct", 0) or 0
+            pnl = float(pnl_raw) * 100  # 🔧 FIX: 소수 → 퍼센트 환산
             icon = "✅" if result == "win" else "❌"
             pnl_str = f"+{pnl:.2f}%" if pnl > 0 else f"{pnl:.2f}%"
 
@@ -2926,9 +2939,10 @@ def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spre
         return False, None, "매수비 0% 편향"
 
     # 스프레드 상대화 (기본 0.20%, 종목 중앙값의 1.5배까지 허용)
+    # 🔧 캡 0.25 → 0.35 (OPEN 0.31% 승자 커버)
     thr_spread = 0.20
     if symbol_median_spread is not None and symbol_median_spread > 0:
-        thr_spread = min(0.25, 1.5 * symbol_median_spread)
+        thr_spread = min(0.35, 1.5 * symbol_median_spread)
 
     if spread > thr_spread:
         return False, None, f"스프레드 초과({spread:.2f}%>{thr_spread:.2f}%)"
@@ -3481,13 +3495,14 @@ def postcheck_6s(m, pre):
             continue
 
         # acc에 최신 틱만 중복없이 축적
+        # 🔧 FIX: appendleft → append (ticks[:12]가 이미 최신→과거 순서)
         for x in ticks[:12]:
             key = (x.get("timestamp"), x.get("trade_price"),
                    x.get("trade_volume"))
             if key in seen:
                 continue
             seen.add(key)
-            acc.appendleft(x)  # 최신이 앞
+            acc.append(x)  # ✅ 최신이 index 0 유지
 
         curp = ticks[0].get("trade_price", base_price)
 
