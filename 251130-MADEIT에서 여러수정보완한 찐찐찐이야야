@@ -4705,17 +4705,21 @@ def main():
                     continue
 
                 # 🔧 FIX: 초입 신호 발송 전 중복 진입 차단 (race condition 방지)
+                # recent_alerts도 락 안에서 체크 (더 강력한 중복 방지)
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         print(f"[SCAN] {m} 이미 포지션/pending 존재 → 스킵")
                         continue
+                    # 🔧 추가: 최근 60초 내 알람 발송된 종목도 스킵
+                    if m in recent_alerts and time.time() - recent_alerts[m] < 60:
+                        print(f"[SCAN] {m} 최근 60초 내 알람 발송됨 → 스킵")
+                        continue
                     # 미리 pending 마킹 (다른 스레드 차단)
                     OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
-
-                last_signal_at[m] = time.time()
-                recent_alerts[m] = time.time()
-                last_price_at_alert[m] = pre['price']
-                last_reason[m] = reason
+                    recent_alerts[m] = time.time()  # 🔧 락 안에서 설정
+                    last_signal_at[m] = time.time()
+                    last_price_at_alert[m] = pre['price']
+                    last_reason[m] = reason
 
                 # 동적 손절가
                 dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(pre['price'], c1)
