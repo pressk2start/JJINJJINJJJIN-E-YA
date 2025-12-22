@@ -465,6 +465,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if entry_mode == "probe":
         entry_fraction = 0.10   # 🔧 10%로 축소 (소액 탐색)
         mode_emoji = "🧭"
+    elif entry_mode == "half":
+        entry_fraction = 0.50   # 🔧 50% 사이즈 (중간 회전율)
+        mode_emoji = "⚡"
     elif entry_mode == "confirm":
         entry_fraction = 1.0    # 전체 금액 (확정 진입)
         mode_emoji = "🔥"
@@ -2905,6 +2908,55 @@ def meets_volume_surge(current_volume, past_volumes):
 # =========================
 # 감지 / 검증
 # =========================
+
+# === 🔧 틱버스트 허용 판단 (회전율별 사이징) ===
+def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spread=None):
+    """
+    틱버스트 진입 허용 여부 및 사이징 결정
+    Returns: (allow, size, reason)
+        - allow: True/False
+        - size: "normal" / "half" / "probe" / None
+        - reason: 차단/허용 사유
+    """
+    # --- 공통 하드컷 ---
+    if tick_count < 5:
+        return False, None, "틱수 부족(<5)"
+
+    if buy_ratio <= 0.05:
+        return False, None, "매수비 0% 편향"
+
+    # 스프레드 상대화 (기본 0.20%, 종목 중앙값의 1.5배까지 허용)
+    thr_spread = 0.20
+    if symbol_median_spread is not None and symbol_median_spread > 0:
+        thr_spread = min(0.25, 1.5 * symbol_median_spread)
+
+    if spread > thr_spread:
+        return False, None, f"스프레드 초과({spread:.2f}%>{thr_spread:.2f}%)"
+
+    # 저회전 + 극단 매수 스푸프 차단
+    if turn_pct < 8.0 and buy_ratio >= 0.95:
+        return False, None, "저회전+극단매수(스푸핑 의심)"
+
+    # --- 유동성 레짐 분기 (하드컷 대신 사이징) ---
+    if turn_pct >= 8.0:
+        # 고유동: 매수비 완화 (승자 중 0.62~0.70 존재)
+        if buy_ratio < 0.62:
+            return False, None, f"고회전 매수비 부족({buy_ratio:.0%}<62%)"
+        size = "normal"
+    elif turn_pct >= 3.0:
+        # 중간 유동: 살짝 보수적
+        if buy_ratio < 0.75:
+            return False, None, f"중회전 매수비 부족({buy_ratio:.0%}<75%)"
+        size = "half"
+    else:
+        # 저유동: 리스크 큼 → 프로브만 허용
+        if buy_ratio < 0.85:
+            return False, None, f"저회전 매수비 부족({buy_ratio:.0%}<85%)"
+        size = "probe"
+
+    return True, size, f"통과(회전{turn_pct:.1f}%,매수{buy_ratio:.0%},사이즈={size})"
+
+
 def detect_leader_stock(m, obc, c1, tight_mode=False):
     """
     하이브리드 진입 탐지 엔진:
@@ -2948,7 +3000,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 # 틱버스트 스킵하고 일반 경로로 진행
                 pass
             else:
-                # === 🔧 틱버스트 추가 조건 검증 ===
+                # === 🔧 틱버스트 회전율별 사이징 로직 ===
                 tape = micro_tape_stats_from_ticks(ticks_now, 15)
                 cur_vol = c1[-1].get("candle_acc_trade_price", 0) if c1 else 0
                 past_vols = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c.get("candle_acc_trade_price", 0) > 0] if len(c1) >= 3 else []
@@ -2959,32 +3011,49 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 ob_spread = ob_tick.get("spread", 999) if ob_tick else 999
                 ob_depth = ob_tick.get("depth_krw", 1) if ob_tick else 1
                 turn_pct = (tape["krw"] / max(ob_depth, 1)) * 100  # 회전율 %
+                buy_ratio = t10s["buy_ratio"]
+                tick_count = t10s["n"]
 
-                # 흐름 게이트: 회전율 >= 8% OR volume_surge >= 1.3
-                flow_ok = (turn_pct >= 8.0) or (vol_surge >= 1.3)
-                # 품질 게이트: 스프레드 <= 0.20% AND 배수 >= 0.7x
-                quality_ok = (ob_spread <= 0.20) and (vol_surge >= 0.7)
+                # 🔧 새로운 allow_tick_burst 함수 사용
+                allowed, size_mode, reason = allow_tick_burst(
+                    buy_ratio=buy_ratio,
+                    turn_pct=turn_pct,
+                    tick_count=tick_count,
+                    spread=ob_spread,
+                    symbol_median_spread=None  # TODO: 종목별 중앙값 캐시 필요시 추가
+                )
 
-                if not (flow_ok and quality_ok):
-                    cut("TICK_FILTER", f"{m} 틱버스트 조건 미달 (회전{turn_pct:.1f}% surge{vol_surge:.2f}x spread{ob_spread:.2f}%)")
+                if not allowed:
+                    cut("TICK_FILTER", f"{m} 틱버스트 {reason}")
                     # 틱버스트 스킵하고 일반 경로로 진행
                     pass
                 else:
-                    cut("PROBE_TICK", f"{m} 틱 초입 감지 → probe 신호 (매수비 {t10s['buy_ratio']:.2f})")
+                    cut("PROBE_TICK", f"{m} 틱버스트 {reason}")
                     # 🔧 FIX: price_change 계산 (등락% 표시용)
                     price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1) if len(c1) >= 2 else 0.0
+
+                    # 🔧 사이즈 모드에 따른 entry_mode 설정
+                    if size_mode == "normal":
+                        entry_mode = "confirm"
+                    elif size_mode == "half":
+                        entry_mode = "half"  # 절반 사이즈
+                    else:
+                        entry_mode = "probe"  # 소액 탐색
+
                     pre = {
                         "price": ticks_now[0]["trade_price"],
-                        "change": price_change,  # ← 추가 (등락% 표시용)
+                        "change": price_change,
                         "ob": ob_tick,
                         "ticks": ticks_now,
-                        "tape": tape,  # ← 추가 (final_check_leader에서 필요)
-                        "current_volume": cur_vol,  # ← 추가 (대금 표시용)
-                        "volume_surge": vol_surge,  # ← 추가 (거래증가 표시용)
-                        "entry_mode": "probe",
+                        "tape": tape,
+                        "current_volume": cur_vol,
+                        "volume_surge": vol_surge,
+                        "entry_mode": entry_mode,
+                        "tick_size_mode": size_mode,  # 사이징 정보 저장
                         "early_ok": True,
-                        "detect_type": "tick_burst",  # ← 1단계: 틱버스트 감지
-                        "trigger_type": ["틱버스트"],  # ← 2단계: 틱버스트 트리거
+                        "detect_type": "tick_burst",
+                        "trigger_type": ["틱버스트"],
+                        "allow_precision": False,  # 🔧 틱버스트는 프리시전 비활성화
                     }
                     return pre
 
@@ -3222,7 +3291,16 @@ def final_check_leader(m, pre, tight_mode=False):
     # --- 프리시전 포켓 체크 (예외 허용 조건) ---
     # 조건: 임밸 >= 0.80 AND 매수비 >= 63.5%
     # (정밀도 ~82%, 실제 알람 데이터 분석 기반)
-    is_precision_pocket = (imbalance >= 0.80 and buy_ratio >= 0.635)
+    # 🔧 틱버스트는 프리시전 비활성화 (데이터상 0% 승률)
+    allow_precision = pre.get("allow_precision", True)
+    if pre.get("detect_type") == "tick_burst":
+        allow_precision = False
+
+    is_precision_pocket = (
+        allow_precision
+        and imbalance >= 0.80
+        and buy_ratio >= 0.635
+    )
 
     # --- 하드컷 조건 ---
     # 1) 매수비 == 100% → 컷 (성공률 30%, 가장 흔한 실패 패턴)
