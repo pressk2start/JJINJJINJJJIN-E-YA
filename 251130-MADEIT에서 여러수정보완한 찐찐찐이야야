@@ -1465,7 +1465,7 @@ AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
 _trade_log_lock = threading.Lock()
 _trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
 _path_report_count = 0  # 🔍 경로 리포트용 카운터
-PATH_REPORT_INTERVAL = 5  # 🔧 테스트: 5건마다 발송 (정상작동 확인 후 20으로 변경)
+PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시와 맞춤)
 # 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
 
 FEATURE_FIELDS = [
