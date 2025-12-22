@@ -1956,7 +1956,7 @@ def analyze_and_update_weights():
         # 승률 계산 (조건 없이 학습, 블렌딩이 보수적이라 안전)
         win_rate = round(len(wins) / len(df) * 100, 1)
 
-        # 기존 가중치와 블렌딩 (🔧 초보수적: 99% 기존, 1% 신규)
+        # 기존 가중치와 블렌딩 (🔧 적극적: 90% 기존, 10% 신규)
         old_weights = dict(SCORE_WEIGHTS)
         blended = {}
         changes = {}
@@ -1966,19 +1966,19 @@ def analyze_and_update_weights():
             "buy_ratio": 28, "spread": 15, "turn": 22,
             "imbalance": 18, "volume_surge": 10, "fresh": 7
         }
-        # ✅ 페일세이프 하드 바운드 (절대 벗어나면 안 되는 값)
-        HARD_MIN = {"buy_ratio": 24, "turn": 19, "imbalance": 14}  # 🔧 더 보수적
-        HARD_MAX = {"spread": 20, "volume_surge": 14}              # 🔧 더 보수적
-        MAX_DEVIATION = 0.08  # 🔧 15%→8% (초기값 대비 최대 ±8%까지만 변화 허용)
+        # ✅ 페일세이프 하드 바운드 (🔧 완화: 더 넓은 범위 허용)
+        HARD_MIN = {"buy_ratio": 20, "turn": 15, "imbalance": 10}
+        HARD_MAX = {"spread": 25, "volume_surge": 18}
+        MAX_DEVIATION = 0.25  # 🔧 8%→25% (초기값 대비 최대 ±25%까지 변화 허용)
 
         for k in SCORE_WEIGHTS:
             old_w = SCORE_WEIGHTS.get(k, 10)
             new_w = new_weights.get(k, old_w)
 
-            # 🔧 99% 기존 + 1% 신규 (초보수적)
-            candidate = round(old_w * 0.99 + new_w * 0.01, 1)
+            # 🔧 90% 기존 + 10% 신규 (더 적극적 학습)
+            candidate = round(old_w * 0.90 + new_w * 0.10, 1)
 
-            # 초기값 대비 ±15% 범위 제한
+            # 초기값 대비 ±25% 범위 제한
             init_w = INITIAL_WEIGHTS.get(k, 10)
             min_bound = init_w * (1 - MAX_DEVIATION)
             max_bound = init_w * (1 + MAX_DEVIATION)
