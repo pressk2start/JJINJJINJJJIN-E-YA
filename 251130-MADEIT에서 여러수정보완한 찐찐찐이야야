@@ -1380,12 +1380,12 @@ MIN_DEPTH_KRW = 6_000_000
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 40.0      # 회전율 상한 (%)
 GATE_SPREAD_MAX = 0.20    # 스프레드 상한 (%)
-GATE_ACCEL_MIN = 0.5      # 가속도 하한 (x) - 1.0에서 0.5로 완화
+GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 3.0      # 가속도 상한 (x)
-GATE_BUY_RATIO_MIN = 0.65 # 매수비 하한
+GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 3.5   # accel*surge 상한
-GATE_IMBALANCE_MIN = 0.25 # 호가 임밸런스 하한
+GATE_IMBALANCE_MIN = 0.15 # 호가 임밸런스 하한 - 초기 완화 (0.25→0.15)
 # fresh_ok는 boolean이라 임계치 아님
 
 # 허수 방어
