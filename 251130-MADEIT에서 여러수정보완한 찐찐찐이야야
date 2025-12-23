@@ -1374,6 +1374,20 @@ MAX_SPREAD_BASE = 0.70  # 0.60 -> 0.45
 MAX_SPREAD_FAST = 1.00  # 1.10 -> 0.80
 MIN_DEPTH_KRW = 6_000_000
 
+# ========================================
+# ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
+# ========================================
+GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
+GATE_TURN_MAX = 40.0      # 회전율 상한 (%)
+GATE_SPREAD_MAX = 0.20    # 스프레드 상한 (%)
+GATE_ACCEL_MIN = 0.5      # 가속도 하한 (x) - 1.0에서 0.5로 완화
+GATE_ACCEL_MAX = 3.0      # 가속도 상한 (x)
+GATE_BUY_RATIO_MIN = 0.65 # 매수비 하한
+GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
+GATE_OVERHEAT_MAX = 3.5   # accel*surge 상한
+GATE_IMBALANCE_MIN = 0.25 # 호가 임밸런스 하한
+# fresh_ok는 boolean이라 임계치 아님
+
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
 MIN_REAL_TRADES = 10
@@ -1944,9 +1958,14 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
 
 def analyze_and_update_weights():
     """
-    거래 로그 분석 후 가중치 자동 업데이트
-    - 승리/패배 그룹 간 피처 차이로 중요도 계산
+    🔥 1단계 게이트 임계치 자동 조절
+    - 승리/패배 그룹 간 피처 분포 분석
+    - GATE_* 전역 변수 조절
     """
+    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
+    global GATE_SURGE_MAX, GATE_IMBALANCE_MIN
+
     if not os.path.exists(TRADE_LOG_PATH):
         print("[AUTO_LEARN] 거래 로그 없음")
         return None
@@ -1969,89 +1988,120 @@ def analyze_and_update_weights():
             print(f"[AUTO_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
             return None
 
-        # 피처별 중요도 계산
-        features = ["buy_ratio", "spread", "turn", "imbalance", "volume_surge"]
-        importance = {}
-
-        for f in features:
-            try:
-                win_avg = pd.to_numeric(wins[f], errors='coerce').mean()
-                lose_avg = pd.to_numeric(loses[f], errors='coerce').mean()
-                std = pd.to_numeric(df[f], errors='coerce').std()
-                if std > 0:
-                    importance[f] = abs(win_avg - lose_avg) / std
-                else:
-                    importance[f] = 0.1
-            except:
-                importance[f] = 0.1
-
-        # 정규화 (합계 93, fresh 7은 고정)
-        total = sum(importance.values())
-        if total <= 0:
-            return None
-
-        new_weights = {k: round(v / total * 93, 1) for k, v in importance.items()}
-        new_weights["fresh"] = 7.0  # 신선도는 고정
-
-        # 승률 계산 (조건 없이 학습, 블렌딩이 보수적이라 안전)
         win_rate = round(len(wins) / len(df) * 100, 1)
 
-        # 기존 가중치와 블렌딩 (🔧 적극적: 90% 기존, 10% 신규)
-        old_weights = dict(SCORE_WEIGHTS)
-        blended = {}
+        # 승/패 평균 계산
+        stats = {}
+        for col in ["buy_ratio", "spread", "turn", "imbalance", "volume_surge", "flow_acceleration"]:
+            try:
+                w_avg = pd.to_numeric(wins[col], errors='coerce').mean()
+                l_avg = pd.to_numeric(loses[col], errors='coerce').mean()
+                stats[col] = {"win": w_avg, "lose": l_avg}
+            except:
+                pass
+
+        # 조절 로직 (10% 블렌딩, 하드바운드 적용)
+        BLEND = 0.10
+        old_values = {
+            "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
+            "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
+            "GATE_TURN_MIN": GATE_TURN_MIN,
+            "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
+            "GATE_SURGE_MAX": GATE_SURGE_MAX,
+            "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
+        }
         changes = {}
 
-        # 🔧 하드바운드 = 현재 SCORE_WEIGHTS 기준 ±절대값
-        # 코드에서 SCORE_WEIGHTS 값이 바뀌면 바운드도 자동으로 따라감
-        HARD_BOUND_ABS = {
-            "buy_ratio": 10,      # 28 기준 → 18~38
-            "spread": 8,          # 15 기준 → 7~23
-            "turn": 8,            # 22 기준 → 14~30
-            "imbalance": 8,       # 18 기준 → 10~26
-            "fresh": 3,           # 7 기준 → 4~10
-            "volume_surge": 5,    # 10 기준 → 5~15
+        # 매수비: 승자 > 패자면 상향 (더 엄격)
+        if "buy_ratio" in stats:
+            w, l = stats["buy_ratio"]["win"], stats["buy_ratio"]["lose"]
+            if w > l:  # 승자가 더 높은 매수비
+                target = min(0.80, w * 0.95)  # 승자 평균의 95%
+                new_val = round(GATE_BUY_RATIO_MIN * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.55, min(0.80, new_val))  # 바운드
+                changes["GATE_BUY_RATIO_MIN"] = round(new_val - GATE_BUY_RATIO_MIN, 3)
+                GATE_BUY_RATIO_MIN = new_val
+
+        # 스프레드: 승자 < 패자면 하향 (더 엄격)
+        if "spread" in stats:
+            w, l = stats["spread"]["win"], stats["spread"]["lose"]
+            if w < l:  # 승자가 더 낮은 스프레드
+                target = max(0.08, w * 1.2)  # 승자 평균의 120%
+                new_val = round(GATE_SPREAD_MAX * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.08, min(0.35, new_val))  # 바운드
+                changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
+                GATE_SPREAD_MAX = new_val
+
+        # 회전율: 승자 > 패자면 상향
+        if "turn" in stats:
+            w, l = stats["turn"]["win"], stats["turn"]["lose"]
+            if w > l:
+                target = max(1.0, w * 0.8)
+                new_val = round(GATE_TURN_MIN * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(1.0, min(10.0, new_val))
+                changes["GATE_TURN_MIN"] = round(new_val - GATE_TURN_MIN, 2)
+                GATE_TURN_MIN = new_val
+
+        # 임밸런스: 승자 > 패자면 상향
+        if "imbalance" in stats:
+            w, l = stats["imbalance"]["win"], stats["imbalance"]["lose"]
+            if w > l:
+                target = max(0.20, w * 0.9)
+                new_val = round(GATE_IMBALANCE_MIN * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.15, min(0.50, new_val))
+                changes["GATE_IMBALANCE_MIN"] = round(new_val - GATE_IMBALANCE_MIN, 3)
+                GATE_IMBALANCE_MIN = new_val
+
+        # 급등: 승자 < 패자면 하향 (더 엄격)
+        if "volume_surge" in stats:
+            w, l = stats["volume_surge"]["win"], stats["volume_surge"]["lose"]
+            if w < l:
+                target = max(1.5, w * 1.3)
+                new_val = round(GATE_SURGE_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(1.5, min(6.0, new_val))
+                changes["GATE_SURGE_MAX"] = round(new_val - GATE_SURGE_MAX, 2)
+                GATE_SURGE_MAX = new_val
+
+        # 가속도: 승자 > 패자면 상향
+        if "flow_acceleration" in stats:
+            w, l = stats["flow_acceleration"]["win"], stats["flow_acceleration"]["lose"]
+            if w > l:
+                target = max(0.3, w * 0.7)
+                new_val = round(GATE_ACCEL_MIN * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(0.3, min(1.5, new_val))
+                changes["GATE_ACCEL_MIN"] = round(new_val - GATE_ACCEL_MIN, 2)
+                GATE_ACCEL_MIN = new_val
+
+        new_values = {
+            "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
+            "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
+            "GATE_TURN_MIN": GATE_TURN_MIN,
+            "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
+            "GATE_SURGE_MAX": GATE_SURGE_MAX,
+            "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
         }
-        BLEND_RATIO = 0.10  # 신규 가중치 반영 비율 (10%)
-
-        for k in SCORE_WEIGHTS:
-            old_w = SCORE_WEIGHTS.get(k, 10)
-            new_w = new_weights.get(k, old_w)
-            bound_abs = HARD_BOUND_ABS.get(k, 5)
-
-            # 🔧 90% 기존 + 10% 신규
-            candidate = round(old_w * (1 - BLEND_RATIO) + new_w * BLEND_RATIO, 1)
-
-            # 🔧 하드바운드: 현재값 ± 절대값
-            min_bound = old_w - bound_abs
-            max_bound = old_w + bound_abs
-
-            blended[k] = round(max(min_bound, min(max_bound, candidate)), 1)
-
-            changes[k] = round(blended[k] - old_w, 1)
-
-        sample_size = len(df)
 
         # 저장
         with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
             json.dump({
-                "weights": blended,
+                "gate_thresholds": new_values,
                 "updated_at": now_kst_str(),
-                "sample_size": sample_size,
+                "sample_size": len(df),
                 "win_rate": win_rate,
-                "raw_importance": importance
+                "feature_stats": {k: {"win": round(v["win"], 3), "lose": round(v["lose"], 3)} for k, v in stats.items()}
             }, f, ensure_ascii=False, indent=2)
 
-        print(f"[AUTO_LEARN] 가중치 업데이트 완료: {blended}")
+        print(f"[AUTO_LEARN] 게이트 임계치 업데이트: {new_values}")
         print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {win_rate}%")
 
         return {
-            "weights": blended,
-            "old_weights": old_weights,
+            "thresholds": new_values,
+            "old_values": old_values,
             "changes": changes,
             "win_rate": win_rate,
             "wins": len(wins),
             "loses": len(loses),
-            "sample_size": sample_size
+            "sample_size": len(df)
         }
 
     except ImportError:
@@ -2059,6 +2109,8 @@ def analyze_and_update_weights():
         return None
     except Exception as e:
         print(f"[AUTO_LEARN_ERR] {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # =========================
@@ -3085,54 +3137,65 @@ def meets_volume_surge(current_volume, past_volumes):
 # =========================
 
 # ========================================
-# ★★★ 1단계 게이트 (단일 통합 버전) ★★★
+# ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
-def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio):
+def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok):
     """
-    1단계 진입 게이트: 단일 통합 필터
+    1단계 진입 게이트: 단일 통합 필터 (final_check 통합)
 
-    [리포트 분석 기반]
-    - 매수비 ≥65%: 승자 77-93%, 패자 54-86%
-    - volume_surge <4.0x: 높으면 역상관
-    - 가속도 <3.0x: 과열 차단
-
-    [외부 의견 기반]
-    - 스프레드 ≤0.20%
-    - 회전율 2-40%
-    - 과열 필터: accel*surge >3.5
+    [전역 변수 임계치 사용 - 자동학습 대상]
+    - GATE_TURN_MIN/MAX: 회전율 범위
+    - GATE_SPREAD_MAX: 스프레드 상한
+    - GATE_ACCEL_MIN/MAX: 가속도 범위
+    - GATE_BUY_RATIO_MIN: 매수비 하한
+    - GATE_SURGE_MAX: volume_surge 상한
+    - GATE_OVERHEAT_MAX: accel*surge 상한
+    - GATE_IMBALANCE_MIN: 호가 임밸런스 하한
 
     Returns: (allow, reason)
     """
-    # === 유동성 트랩 컷 ===
-    if turn_pct < 2.0:
-        return False, f"회전율부족(turn {turn_pct:.1f}%<2%)"
-    if turn_pct > 40.0:
-        return False, f"과회전(turn {turn_pct:.1f}%>40%)"
+    # === 신선도 체크 (필수) ===
+    if not fresh_ok:
+        return False, "틱 신선도 부족"
+
+    # === 회전율 컷 ===
+    if turn_pct < GATE_TURN_MIN:
+        return False, f"회전율부족(turn {turn_pct:.1f}%<{GATE_TURN_MIN}%)"
+    if turn_pct > GATE_TURN_MAX:
+        return False, f"과회전(turn {turn_pct:.1f}%>{GATE_TURN_MAX}%)"
 
     # === 스프레드 컷 ===
-    if spread > 0.20:
-        return False, f"스프레드과다(spread {spread:.2f}%>0.20%)"
+    if spread > GATE_SPREAD_MAX:
+        return False, f"스프레드과다(spread {spread:.2f}%>{GATE_SPREAD_MAX}%)"
 
     # === 과열 필터 ===
     overheated = accel * volume_surge
-    if overheated > 3.5:
-        return False, f"과열(accel*surge={overheated:.2f}>3.5)"
+    if overheated > GATE_OVERHEAT_MAX:
+        return False, f"과열(accel*surge={overheated:.2f}>{GATE_OVERHEAT_MAX})"
 
     # === 가속도 컷 ===
-    if accel < 0.2:
-        return False, f"감속중(accel {accel:.2f}x<0.2x)"
-    if accel > 3.0:
-        return False, f"가속과다(accel {accel:.2f}x>3.0x)"
+    if accel < GATE_ACCEL_MIN:
+        return False, f"감속중(accel {accel:.2f}x<{GATE_ACCEL_MIN}x)"
+    if accel > GATE_ACCEL_MAX:
+        return False, f"가속과다(accel {accel:.2f}x>{GATE_ACCEL_MAX}x)"
 
-    # === 매수비 컷 (리포트 핵심) ===
-    if buy_ratio < 0.65:
-        return False, f"매수비부족(buy {buy_ratio:.0%}<65%)"
+    # === 매수비 컷 ===
+    if buy_ratio < GATE_BUY_RATIO_MIN:
+        return False, f"매수비부족(buy {buy_ratio:.0%}<{GATE_BUY_RATIO_MIN:.0%})"
 
-    # === 급등 컷 (리포트: 역상관) ===
-    if volume_surge > 4.0:
-        return False, f"급등과다(surge {volume_surge:.1f}x>4.0x)"
+    # === 매수비 100% 컷 (스푸핑 의심) ===
+    if abs(buy_ratio - 1.0) < 1e-6:
+        return False, "매수비100%(스푸핑의심)"
 
-    return True, f"통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x)"
+    # === 급등 컷 ===
+    if volume_surge > GATE_SURGE_MAX:
+        return False, f"급등과다(surge {volume_surge:.1f}x>{GATE_SURGE_MAX}x)"
+
+    # === 호가 임밸런스 컷 ===
+    if imbalance < GATE_IMBALANCE_MIN:
+        return False, f"호가균형취약(imb {imbalance:.2f}<{GATE_IMBALANCE_MIN})"
+
+    return True, f"통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f})"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -3310,17 +3373,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("NO_SIGNAL", f"{m} no entry cond (Early/점화 비활성)")
         return None
 
-    # 🔥 1단계 게이트 적용 (단일 통합 필터)
+    # 🔥 1단계 게이트 적용 (단일 통합 필터 - final_check 대체)
     vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
+    imbalance = calc_orderbook_imbalance(ob)
+    fresh_ok = last_two_ticks_fresh(ticks)
 
     gate_ok, gate_reason = stage1_gate(
         spread=ob["spread"],
         accel=accel,
         volume_surge=vol_surge,
         turn_pct=turn_pct,
-        buy_ratio=twin["buy_ratio"]
+        buy_ratio=twin["buy_ratio"],
+        imbalance=imbalance,
+        fresh_ok=fresh_ok
     )
     if not gate_ok:
         cut("STAGE1_GATE", f"{m} {gate_reason}")
@@ -3353,6 +3420,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "detect_type": "normal",
         "trigger_type": trigger_type,
         "flow_accel": accel,
+        # 🔥 final_check 대체로 추가된 필드
+        "imbalance": imbalance,
+        "turn_pct": turn_pct,
+        "spread": ob["spread"],
+        "buy_ratio": twin["buy_ratio"],
+        "score": 0,  # 리스크 스코어 폐지
+        "filter_type": "통합게이트",
+        "is_precision_pocket": False,  # 프리시전 포켓 폐지
     }
     if mega:
         pre["mega_ok"] = True
@@ -3361,185 +3436,33 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     return pre
 
 def final_check_leader(m, pre, tight_mode=False):
-    # ★★★ 완화 노브 적용
-    r = relax_knob()
+    """
+    🔧 단순 패스쓰루: stage1_gate에서 모든 필터링 완료
+    호환성을 위해 함수는 유지하되, 바로 payload 반환
+    """
     t = pre["tape"]
     ob = pre["ob"]
-    ticks = pre["ticks"]
 
-    # === 최소 조건 (이건 AND로 유지) ===
+    # 최소 틱수만 체크 (이건 stage1_gate 전에 필요)
     if t["n"] < MIN_TICKS_COUNT:
         cut("TICKS_LOW", f"{m} {t['n']}")
         return None
 
-    # 스프레드 극단값 필터 (2% 이상은 무조건 제외)
-    if ob["spread"] > 2.0:
-        cut("SPREAD_EXTREME", f"{m} spread {ob['spread']:.2f}%")
-        return None
-
-    # === 리스크 스코어 계산 ===
-    turn = t["krw"] / max(ob["depth_krw"], 1)
-    imbalance = calc_orderbook_imbalance(ob)
-    fresh_ok = last_two_ticks_fresh(ticks)
-    volume_surge = pre.get("volume_surge", 1.0)
-
-    if USE_RISK_SCORE:
-        score = calc_risk_score(
-            buy_ratio=t["buy_ratio"],
-            spread=ob["spread"],
-            turn=turn,
-            imbalance=imbalance,
-            fresh_ok=fresh_ok,
-            volume_surge=volume_surge
-        )
-
-        # tight_mode면 임계값 상향
-        threshold = RISK_SCORE_THRESHOLD + (5 if tight_mode else 0)
-        # 야간엔 약간 완화
-        if 0 <= now_kst().hour < 6:
-            threshold -= 3
-        # 장세 완화 노브 반영
-        threshold -= int(2 * r)
-
-        if score < threshold:
-            cut("SCORE_LOW", f"{m} score={score:.1f} < {threshold}")
-            return None
-
-        # 스코어 통과 시 로그
-        print(f"[SCORE_OK] {m} score={score:.1f} (buy={t['buy_ratio']:.2f}, spread={ob['spread']:.2f}, turn={turn:.3f}, imb={imbalance:.2f})")
-
-    else:
-        # === 기존 AND 로직 (USE_RISK_SCORE=False 시 폴백) ===
-        MIN_TURNOVER_LOCAL = max(0.020, _turn_needed(ob.get("depth_krw", 0)))
-        if tight_mode:
-            MIN_TURNOVER_LOCAL += 0.003
-        if 0 <= now_kst().hour < 6:
-            MIN_TURNOVER_LOCAL = max(0.018, MIN_TURNOVER_LOCAL - 0.004)
-        MIN_TURNOVER_LOCAL = max(0.020, MIN_TURNOVER_LOCAL - 0.002 * r)
-
-        TICKS_BUY_RATIO_LOCAL = max(0.56, TICKS_BUY_RATIO + (0.02 if tight_mode else 0.0))
-        TICKS_BUY_RATIO_LOCAL = max(0.54, TICKS_BUY_RATIO_LOCAL - 0.015 * r)
-
-        if turn < MIN_TURNOVER_LOCAL:
-            cut("TURN_LOW", f"{m} turn {turn:.3f}")
-            return None
-        if t["buy_ratio"] < TICKS_BUY_RATIO_LOCAL:
-            cut("BUY_WEAK", f"{m} buy {t['buy_ratio']:.2f}")
-            return None
-        if t["n"] >= 10 and t["buy_ratio"] < 0.63:
-            cut("BUY_WEAK_MANYT", f"{m} weak many")
-            return None
-        if not fresh_ok:
-            cut("FRESH_FAIL", f"{m} stale")
-            return None
-        th = get_dynamic_thresholds()
-        raw_ob = ob["raw"]["orderbook_units"][:3]
-        bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
-        ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
-        if bid_sum / max(ask_sum, 1) < th["bidask_min"]:
-            cut("BIDASK_WEAK", f"{m} bidask weak")
-            return None
-        max_spread = MAX_SPREAD_FAST if t.get("rate", 0) >= 0.7 else MAX_SPREAD_BASE
-        if ob["spread"] > max_spread:
-            cut("SPREAD_HIGH", f"{m} spread {ob['spread']:.2f}%")
-            return None
-
-    price_change = pre.get("change", 0.0)
-    turn_pct = turn * 100  # 회전율 %
-
-    # ========================================
-    # ★★★ 신규 필터: 성공/실패 패턴 기반 필터링 ★★★
-    # ========================================
-    buy_ratio = t["buy_ratio"]
-
-    # --- 프리시전 포켓 체크 (예외 허용 조건) ---
-    # 🔧 조건 강화: 임밸 >= 0.85 AND 매수비 >= 70% AND 가속도 >= 1.2
-    # (더 엄격한 조건으로 예외 허용 범위 축소)
-    # 🔧 틱버스트는 프리시전 비활성화 (데이터상 0% 승률)
-    allow_precision = pre.get("allow_precision", True)
-    if pre.get("detect_type") == "tick_burst":
-        allow_precision = False
-
-    # 가속도 계산 (프리시전 조건용)
-    flow_accel = calc_flow_acceleration(ticks)
-
-    is_precision_pocket = (
-        allow_precision
-        and imbalance >= 0.85       # 0.80 → 0.85 강화
-        and buy_ratio >= 0.70       # 63.5% → 70% 강화
-        and flow_accel >= 1.2       # 가속도 조건 추가
-        and turn_pct >= 15.0        # 🔥 회전율 하한 추가 (스푸핑 방지)
-    )
-
-    # --- 하드컷 조건 ---
-    # 1) 매수비 == 100% → 컷 (성공률 30%, 가장 흔한 실패 패턴)
-    if abs(buy_ratio - 1.0) < 1e-6:
-        if not is_precision_pocket:
-            cut("BUYRATIO_100PCT", f"{m} buy=100% (high fail pattern)")
-            return None
-
-    # 2) 임밸 < 0.25 → 컷 (성공률 36%, 호가 균형 취약)
-    if imbalance < 0.25:
-        cut("IMBAL_LOW", f"{m} imbal {imbalance:.2f} < 0.25")
-        return None
-
-    # 🔥 2-1) 임밸 >= 0.80 → 컷 (승 0.46 vs 패 0.64, 너무 높으면 스푸핑/고점)
-    # 예외: 가속 >= 1.5 AND 회전 >= 15% (실수요 강세)
-    if imbalance >= 0.80:
-        is_real_demand = (flow_accel >= 1.5 and turn_pct >= 15.0)
-        if not is_real_demand:
-            cut("IMBAL_HIGH", f"{m} imbal {imbalance:.2f} >= 0.80 (스푸핑 의심)")
-            return None
-
-    # 3) 회전 >= 48% → 컷 (펌핑/휩쏘 위험), 포켓이면 예외
-    if turn_pct >= 48.0:
-        if not is_precision_pocket:
-            cut("TURN_OVERHEAT", f"{m} turn {turn_pct:.1f}% >= 48%")
-            return None
-
-    # 4) 🔥 매수비 < 65% → 컷 (승 86% vs 패 76%)
-    if buy_ratio < 0.65:
-        cut("BUYRATIO_LOW", f"{m} buy={buy_ratio:.0%} < 65%")
-        return None
-
-    # 5) 🔥 가속도 < 1.0 → 컷 (승 1.77 vs 패 1.63, 가속 없으면 모멘텀 부족)
-    if flow_accel < 1.0:
-        cut("ACCEL_LOW", f"{m} accel={flow_accel:.1f}x < 1.0")
-        return None
-
-    # 6) 🔥 배수 >= 3.5x → 컷, 2.5~3.5x → probe 사이징
-    volume_surge = pre.get("volume_surge", 1.0)
-    surge_sizing = None
-    if volume_surge >= 3.5:
-        cut("SURGE_HIGH", f"{m} surge={volume_surge:.1f}x >= 3.5x")
-        return None
-    elif volume_surge >= 2.5:
-        surge_sizing = "probe"  # 2.5~3.5x는 probe 사이징
-
-    # 7) 🔥 스프레드 > 0.35% → 컷 (승 0.13% vs 패 0.20%)
-    if ob["spread"] > 0.35:
-        cut("SPREAD_HIGH", f"{m} spread={ob['spread']:.2f}% > 0.35%")
-        return None
-    # ========================================
-
-    # 3단계: 필터 타입 결정
-    filter_type = "프리시전" if is_precision_pocket else "기본통과"
-    if surge_sizing:
-        filter_type += f"_{surge_sizing}"  # e.g. "기본통과_probe"
-
+    # 이미 stage1_gate에서 모든 필터링 완료
+    # 기존 호출 코드 호환을 위해 payload 형식으로 반환
     return {
         "price": pre["price"],
-        "chg": round(price_change * 100, 2),
+        "chg": round(pre.get("change", 0) * 100, 2),
         "current_volume": int(pre.get("current_volume", 0)),
         "volume_surge": round(pre.get("volume_surge", 0.0), 2),
-        "buy": round(t["buy_ratio"] * 100, 1),
+        "buy": round(pre.get("buy_ratio", 0) * 100, 1),
         "n": t["n"],
-        "spread": round(ob["spread"], 2),
-        "turn": round(turn_pct, 2),
-        "imbalance": round(imbalance, 3),
-        "score": score if USE_RISK_SCORE else 0,
-        "is_precision_pocket": is_precision_pocket,
-        "filter_type": filter_type,  # ← 3단계: 기본통과/프리시전
+        "spread": round(pre.get("spread", 0), 2),
+        "turn": round(pre.get("turn_pct", 0), 2),
+        "imbalance": round(pre.get("imbalance", 0), 3),
+        "score": 0,
+        "is_precision_pocket": False,
+        "filter_type": "통합게이트",
     }
 
 
