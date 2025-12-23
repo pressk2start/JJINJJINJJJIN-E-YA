@@ -1916,6 +1916,10 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             avg_krw = row.get("avg_krw_per_tick", 0) or 0
             flow_accel = row.get("flow_acceleration", 1.0) or 1.0
 
+            # 🔥 GATE 핵심 지표
+            overheat = row.get("overheat", 0) or 0
+            fresh_age = row.get("fresh_age", 0) or 0
+
             # 시간 (ts에서 시:분만 추출)
             ts = str(row.get("ts", ""))
             time_str = ts[11:16] if len(ts) >= 16 else "?"
@@ -1927,7 +1931,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                 f"{icon} {market} {time_str} {pnl_str}\n"
                 f"   {detect}→{trigger}→{ftype}\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
-                f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}"
+                f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
+                f"   🌡️과열{overheat:.1f} 틱나이{fresh_age:.1f}초"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -1940,7 +1945,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
 
             for col, name in [("buy_ratio", "매수비"), ("turn", "회전"), ("imbalance", "임밸"),
                               ("spread", "스프레드"), ("volume_surge", "배수"),
-                              ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도")]:
+                              ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도"),
+                              ("overheat", "과열"), ("fresh_age", "틱나이")]:
                 if col in df.columns:
                     w_avg = wins[col].mean() if col in wins.columns else 0
                     l_avg = loses[col].mean() if col in loses.columns else 0
@@ -3536,6 +3542,16 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
     avg_krw = calc_avg_krw_per_tick(t15)
     flow_accel = calc_flow_acceleration(ticks)
 
+    # 🔥 GATE 핵심 지표
+    imbalance = pre.get("imbalance", 0.0)
+    overheat = flow_accel * float(payload.get("volume_surge", 1.0))  # accel * surge
+    # 틱 신선도: 마지막 틱 나이 (초)
+    fresh_age = 0.0
+    if ticks:
+        now_ms = int(time.time() * 1000)
+        last_tick_ts = ticks[0].get("timestamp", now_ms)
+        fresh_age = (now_ms - last_tick_ts) / 1000.0
+
     row = {
         "ts": now_kst_str(),
         "market": m,
@@ -3566,6 +3582,10 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "consecutive_buys": cons_buys,
         "avg_krw_per_tick": round(avg_krw, 0),
         "flow_acceleration": round(flow_accel, 2),
+        # 🔥 GATE 핵심 지표
+        "imbalance": round(imbalance, 3),
+        "overheat": round(overheat, 2),
+        "fresh_age": round(fresh_age, 2),
         "ret_3m": "",
         "ret_10m": "",
         "ret_15m": "",
@@ -4891,12 +4911,21 @@ def main():
                 # 가속도 이모지
                 accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "➡️")
 
+                # 🔥 GATE 핵심 지표
+                overheat = flow_accel * float(payload.get("volume_surge", 1.0))
+                fresh_age = 0.0
+                if ticks_for_metrics:
+                    now_ms = int(time.time() * 1000)
+                    last_tick_ts = ticks_for_metrics[0].get("timestamp", now_ms)
+                    fresh_age = (now_ms - last_tick_ts) / 1000.0
+
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
                     f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
                     f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
+                    f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🔍 경로: {path_str}\n"
                     f"{link_for(m)}")
