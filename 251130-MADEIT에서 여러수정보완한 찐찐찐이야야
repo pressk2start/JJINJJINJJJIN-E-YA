@@ -1387,7 +1387,6 @@ GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.15 # 호가 임밸런스 하한 - 초기 완화 (0.25→0.15)
 GATE_FRESH_AGE_MAX = 6.0  # 틱 신선도 상한 (초) - 4.0→6.0 완화
-GATE_VOL_MIN = 300_000    # 거래대금 하한 (원) - detect에서 이동 (450K→300K 완화)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
@@ -2276,7 +2275,7 @@ def load_learned_weights():
     global SCORE_WEIGHTS
     global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
-    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX, GATE_VOL_MIN
+    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
 
     if not os.path.exists(WEIGHTS_PATH):
         print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
@@ -2304,7 +2303,6 @@ def load_learned_weights():
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
             GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
-            GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
             print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
@@ -3202,12 +3200,11 @@ def meets_volume_surge(current_volume, past_volumes):
 # ========================================
 # ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
-def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok, current_volume=0):
+def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok):
     """
     1단계 진입 게이트: 단일 통합 필터 (final_check 통합)
 
     [전역 변수 임계치 사용 - 자동학습 대상]
-    - GATE_VOL_MIN: 거래대금 하한 (detect에서 이동)
     - GATE_TURN_MIN/MAX: 회전율 범위
     - GATE_SPREAD_MAX: 스프레드 상한
     - GATE_ACCEL_MIN/MAX: 가속도 범위
@@ -3218,10 +3215,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
-    # === 거래대금 체크 (detect에서 이동) ===
-    if current_volume < GATE_VOL_MIN:
-        return False, f"거래대금부족(vol {current_volume/1000:.0f}K<{GATE_VOL_MIN/1000:.0f}K)"
-
     # === 신선도 체크 (필수) ===
     if not fresh_ok:
         return False, "틱 신선도 부족"
@@ -3350,16 +3343,19 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     cur, prev = c1[-1], c1[-2]
     price_change = (cur["trade_price"] / max(prev["trade_price"], 1) - 1)
 
-    # 🔧 스프레드 컷 제거 → stage1_gate로 통합
-    # (기존: MAX_SPREAD_BASE=0.70% 체크했으나, GATE_SPREAD_MAX=0.40%로 통합)
+    # 스프레드 컷
+    if ob["spread"] > (MAX_SPREAD_FAST if mega else MAX_SPREAD_BASE):
+        cut("SPREAD_HIGH", f"{m} spread {ob['spread']:.2f}%")
+        return None
 
     # 거래량 조건
     current_volume = cur.get("candle_acc_trade_price", 0)
     # 🔍 DEBUG: 캔들 대금 확인
     if current_volume == 0:
         print(f"[DEBUG_VOL] {m} candle_acc_trade_price=0! cur_keys={list(cur.keys())[:5]}")
-    # 🔧 VOL_LOW 컷 제거 → stage1_gate로 통합
-    # (기존: MIN_VOLUME_KRW=450K 체크했으나, GATE_VOL_MIN으로 통합)
+    if current_volume < MIN_VOLUME_KRW and not mega:
+        cut("VOL_LOW", f"{m} vol {int(current_volume)}")
+        return None
 
     # 거래 증가율 체크
     past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c["candle_acc_trade_price"] > 0]
@@ -3452,8 +3448,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         turn_pct=turn_pct,
         buy_ratio=twin["buy_ratio"],
         imbalance=imbalance,
-        fresh_ok=fresh_ok,
-        current_volume=current_volume
+        fresh_ok=fresh_ok
     )
     if not gate_ok:
         cut("STAGE1_GATE", f"{m} {gate_reason}")
