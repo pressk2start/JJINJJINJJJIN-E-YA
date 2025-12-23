@@ -3381,63 +3381,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("TICKS_LOW", f"{m} no ticks")
         return None
 
-    # === 테이프·EMA 공통 지표 ===
-    tape_stats = {k: micro_tape_stats_from_ticks(ticks, k) for k in [10, 15, 30, 45]}
-    closes_1m = [x["trade_price"] for x in c1]
-    ema5 = ema_last(closes_1m, 5) if closes_1m else None
-    dist_ema5 = (cur["trade_price"] / ema5 - 1.0) if ema5 else 0.0
-    t10, t15, t30, t45 = tape_stats[10], tape_stats[15], tape_stats[30], tape_stats[45]
-    last_upticks_ok = uptick_streak_from_ticks(ticks, need=2)
-
-    # === 점화/브레이크아웃 계열 ===
-    ign_ok, ign_reason = ignition_trigger_ok(m, c1, ticks, ob)
-    tick_break = tick_breakout_ok(m, c1, ticks, ob)
-    ign_ok = ign_ok or tick_break
-
-    botacc_ok, botacc_reason = bot_accum_trigger_ok(m, ticks, ob, c1)
-    two_green_and_break = (
-        sum(1 for c in c1[-3:] if c["trade_price"] > c["opening_price"]) >= 2
-        and c1[-1]["high_price"] > max(c["high_price"] for c in c1[-4:-1])
-    )
-
-    # === Early (Probe) 진입 판단 ===
-    r = relax_knob()
+    # === 테이프 지표 (stage1_gate용) ===
+    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    t45 = micro_tape_stats_from_ticks(ticks, 45)
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
-    vgap = (cur["trade_price"] / max(vwap_from_candles_1m(c1, 20), 1) - 1)
     turn = twin["krw"] / max(ob["depth_krw"], 1)
-    flow_floor = int(EARLY_FLOW_MIN_KRWPSEC * (0.80 if r >= 1.0 else 1.0))
 
-    early_conds = [
-        vgap >= max(th["vwap_gap"] - 0.0003, EARLY_MIN_VWAP_GAP),
-        vgap <= EARLY_MAX_VWAP_GAP,
-        price_change <= 0.020,
-        (ema5 is None) or (dist_ema5 <= EARLY_MAX_EMA5_GAP),
-        twin["buy_ratio"] >= max(EARLY_MIN_BUY, 0.51),
-        twin["krw_per_sec"] >= flow_floor,
-        turn >= max(EARLY_MIN_TURN, 0.015),
-        twin["n"] >= EARLY_MIN_TICKS,
-        last_two_ticks_fresh(ticks),
-    ]
+    # 🔥 시그널 체크 제거 - stage1_gate가 유일한 필터
+    # (봇매집/메가/투그린 등 중복 로직 삭제)
 
-    early_ok = all(early_conds)
-
-    # === 🔧 Early/점화 트리거 비활성화 (성과 0% 기반) ===
-    # 점화(ign_ok)와 Early(early_ok)는 현재 승률이 0%이므로 비활성화
-    ign_ok = False  # 점화 비활성화
-    early_ok = False  # Early 비활성화
-
-    # === Confirm (확정 진입 판단) ===
-    confirm_ok = (
-        botacc_ok or mega or two_green_and_break
-        # ign_ok, early_ok 제외됨
-    )
-
-    # === Probe/Confirm 결과 ===
-    if not confirm_ok:
-        cut("NO_SIGNAL", f"{m} no entry cond (Early/점화 비활성)")
-        return None
-
-    # 🔥 1단계 게이트 적용 (단일 통합 필터 - final_check 대체)
+    # 🔥 1단계 게이트 적용 (단일 통합 필터)
     vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
@@ -3460,16 +3413,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STAGE1_GATE", f"{m} {gate_reason}")
         return None
 
-    entry_mode = "confirm"  # Early 없으므로 항상 confirm
-
     # === 결과 패키징 ===
-    # 2단계: 트리거 타입 결정
-    trigger_type = []
-    # if ign_ok: trigger_type.append("점화")  # 비활성
-    if botacc_ok: trigger_type.append("봇매집")
-    if two_green_and_break: trigger_type.append("연속양봉")
-    # if early_ok: trigger_type.append("Early")  # 비활성
-
     pre = {
         "price": cur["trade_price"],
         "change": price_change,
@@ -3478,27 +3422,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "ob": ob,
         "tape": twin,
         "ticks": ticks,
-        "ema5_gap": dist_ema5,
-        "ign_ok": ign_ok,
-        "botacc_ok": botacc_ok,
-        "two_green_break": two_green_and_break,
-        "early_ok": early_ok,
-        "entry_mode": entry_mode,
-        "detect_type": "normal",
-        "trigger_type": trigger_type,
         "flow_accel": accel,
-        # 🔥 final_check 대체로 추가된 필드
         "imbalance": imbalance,
         "turn_pct": turn_pct,
         "spread": ob["spread"],
         "buy_ratio": twin["buy_ratio"],
-        "score": 0,  # 리스크 스코어 폐지
-        "filter_type": "통합게이트",
-        "is_precision_pocket": False,  # 프리시전 포켓 폐지
+        "mega": mega,
+        "filter_type": "stage1_gate",
     }
-    if mega:
-        pre["mega_ok"] = True
-        pre["trigger_type"].append("메가")
 
     return pre
 
