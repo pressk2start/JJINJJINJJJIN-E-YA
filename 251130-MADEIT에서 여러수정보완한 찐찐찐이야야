@@ -3084,6 +3084,96 @@ def meets_volume_surge(current_volume, past_volumes):
 # 감지 / 검증
 # =========================
 
+# ========================================
+# ★★★ 1단계 게이트 (리포트 분석 + 외부 의견 결합) ★★★
+# ========================================
+def stage1_gate(detect_type, *, spread, accel, volume_surge, turn_pct, buy_ratio, streak=0):
+    """
+    1단계 진입 게이트: 컨텍스트별 임계치 적용
+
+    [결합 기준]
+    - 매수비 필터: 리포트 데이터 기반 (패자 = 낮은 매수비)
+    - 가속도 필터: 외부 의견 (과열 차단)
+    - 스프레드 강화: 외부 의견 (tick_burst 0.15% 타협)
+    - 유동성 트랩 컷: 공통 (turn<1%, spread>0.25%)
+
+    Returns: (allow, reason)
+    """
+    # === 공통 유동성 트랩 컷 (모든 경로) ===
+    if turn_pct < 1.0:
+        return False, f"유동성트랩(turn {turn_pct:.1f}%<1%)"
+    if spread > 0.25:
+        return False, f"스프레드과다(spread {spread:.2f}%>0.25%)"
+
+    # 과열 필터: accel * volume_surge > 3.5
+    overheated = accel * volume_surge
+    if overheated > 3.5:
+        return False, f"과열(accel*surge={overheated:.2f}>3.5)"
+
+    # === 틱버스트 경로 ===
+    if detect_type == "tick_burst":
+        # [결합] 스프레드 0.15% (외부 0.12% + 내 분석 0.25% 중간)
+        if spread > 0.15:
+            return False, f"틱버스트 스프레드({spread:.2f}%>0.15%)"
+
+        # [외부] 가속도 <= 3.0x
+        if accel > 3.0:
+            return False, f"틱버스트 가속도({accel:.2f}x>3.0x)"
+
+        # [내 분석] 회전율 >= 5% (강화된 값 유지)
+        if turn_pct < 5.0:
+            return False, f"틱버스트 회전율({turn_pct:.1f}%<5%)"
+
+        # [내 분석] 매수비 >= 65%
+        if buy_ratio < 0.65:
+            return False, f"틱버스트 매수비({buy_ratio:.0%}<65%)"
+
+        # [외부] volume_surge <= 2.0x (너무 튄 것 경계)
+        if volume_surge > 2.0:
+            return False, f"틱버스트 급등({volume_surge:.1f}x>2.0x)"
+
+        return True, f"틱버스트 통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%})"
+
+    # === 일반(연속양봉) 경로 ===
+    elif detect_type == "normal":
+        # [외부] 스프레드 <= 0.18%
+        if spread > 0.18:
+            return False, f"연속양봉 스프레드({spread:.2f}%>0.18%)"
+
+        # [외부] 가속도 0.2 ~ 2.5x (1.6x에서 완화)
+        if accel < 0.2:
+            return False, f"연속양봉 감속({accel:.2f}x<0.2x)"
+        if accel > 2.5:
+            return False, f"연속양봉 가속과다({accel:.2f}x>2.5x)"
+
+        # [내 분석] 매수비 >= 65% (리포트: 승자 77-93%, 패자 54-86%)
+        if buy_ratio < 0.65:
+            return False, f"연속양봉 매수비({buy_ratio:.0%}<65%)"
+
+        # [내 분석] volume_surge < 4.0x (리포트: 높으면 역상관)
+        if volume_surge > 4.0:
+            return False, f"연속양봉 급등({volume_surge:.1f}x>4.0x)"
+
+        # [외부] 회전율 2-35%
+        if turn_pct < 2.0:
+            return False, f"연속양봉 회전율({turn_pct:.1f}%<2%)"
+        if turn_pct > 35.0:
+            return False, f"연속양봉 과회전({turn_pct:.1f}%>35%)"
+
+        # [외부] 연속양봉 수 4-14개
+        if streak < 4:
+            return False, f"연속양봉 수({streak}<4)"
+        if streak > 14:
+            return False, f"연속양봉 과다({streak}>14)"
+
+        return True, f"연속양봉 통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},st={streak})"
+
+    # === 기타 경로 (봇매집, 메가 등) - probe로 라우팅 ===
+    else:
+        # 기본 필터만 적용 (이미 위에서 통과)
+        return True, f"기타경로 probe(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%)"
+
+
 # === 🔧 틱버스트 허용 판단 (회전율별 사이징) ===
 def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spread=None):
     """
@@ -3187,48 +3277,63 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 buy_ratio = t10s["buy_ratio"]
                 tick_count = t10s["n"]
 
-                # 🔧 새로운 allow_tick_burst 함수 사용
-                allowed, size_mode, reason = allow_tick_burst(
-                    buy_ratio=buy_ratio,
-                    turn_pct=turn_pct,
-                    tick_count=tick_count,
+                # 🔥 NEW: 1단계 게이트 적용 (리포트+외부 의견 결합)
+                accel = calc_flow_acceleration(ticks_now)
+                gate_ok, gate_reason = stage1_gate(
+                    "tick_burst",
                     spread=ob_spread,
-                    symbol_median_spread=None  # TODO: 종목별 중앙값 캐시 필요시 추가
+                    accel=accel,
+                    volume_surge=vol_surge,
+                    turn_pct=turn_pct,
+                    buy_ratio=buy_ratio
                 )
-
-                if not allowed:
-                    cut("TICK_FILTER", f"{m} 틱버스트 {reason}")
+                if not gate_ok:
+                    cut("STAGE1_GATE", f"{m} {gate_reason}")
                     # 틱버스트 스킵하고 일반 경로로 진행
                     pass
                 else:
-                    cut("PROBE_TICK", f"{m} 틱버스트 {reason}")
-                    # 🔧 FIX: price_change 계산 (등락% 표시용)
-                    price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1) if len(c1) >= 2 else 0.0
+                    # 🔧 기존 allow_tick_burst → 사이징 전용으로만 사용
+                    allowed, size_mode, reason = allow_tick_burst(
+                        buy_ratio=buy_ratio,
+                        turn_pct=turn_pct,
+                        tick_count=tick_count,
+                        spread=ob_spread,
+                        symbol_median_spread=None
+                    )
 
-                    # 🔧 사이즈 모드에 따른 entry_mode 설정
-                    if size_mode == "normal":
-                        entry_mode = "confirm"
-                    elif size_mode == "half":
-                        entry_mode = "half"  # 절반 사이즈
+                    if not allowed:
+                        cut("TICK_FILTER", f"{m} 틱버스트 {reason}")
+                        # 틱버스트 스킵하고 일반 경로로 진행
+                        pass
                     else:
-                        entry_mode = "probe"  # 소액 탐색
+                        cut("PROBE_TICK", f"{m} 틱버스트 {reason}")
+                        # 🔧 FIX: price_change 계산 (등락% 표시용)
+                        price_change = (c1[-1]["trade_price"] / max(c1[-2]["trade_price"], 1) - 1) if len(c1) >= 2 else 0.0
 
-                    pre = {
-                        "price": ticks_now[0]["trade_price"],
-                        "change": price_change,
-                        "ob": ob_tick,
-                        "ticks": ticks_now,
-                        "tape": tape,
-                        "current_volume": cur_vol,
-                        "volume_surge": vol_surge,
-                        "entry_mode": entry_mode,
-                        "tick_size_mode": size_mode,  # 사이징 정보 저장
-                        "early_ok": True,
-                        "detect_type": "tick_burst",
-                        "trigger_type": ["틱버스트"],
-                        "allow_precision": False,  # 🔧 틱버스트는 프리시전 비활성화
-                    }
-                    return pre
+                        # 🔧 사이즈 모드에 따른 entry_mode 설정
+                        if size_mode == "normal":
+                            entry_mode = "confirm"
+                        elif size_mode == "half":
+                            entry_mode = "half"  # 절반 사이즈
+                        else:
+                            entry_mode = "probe"  # 소액 탐색
+
+                        pre = {
+                            "price": ticks_now[0]["trade_price"],
+                            "change": price_change,
+                            "ob": ob_tick,
+                            "ticks": ticks_now,
+                            "tape": tape,
+                            "current_volume": cur_vol,
+                            "volume_surge": vol_surge,
+                            "entry_mode": entry_mode,
+                            "tick_size_mode": size_mode,  # 사이징 정보 저장
+                            "early_ok": True,
+                            "detect_type": "tick_burst",
+                            "trigger_type": ["틱버스트"],
+                            "allow_precision": False,  # 🔧 틱버스트는 프리시전 비활성화
+                        }
+                        return pre
 
     # (이하 기존 detect_leader_stock 코드 계속)
 
@@ -3336,6 +3441,42 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("NO_SIGNAL", f"{m} no entry cond (Early/점화 비활성)")
         return None
 
+    # 🔥 NEW: 1단계 게이트 적용 (연속양봉 경로만)
+    vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
+    accel = calc_flow_acceleration(ticks)
+    turn_pct = turn * 100  # decimal → %
+
+    # 연속양봉 수 계산 (최근 캔들 중 양봉 개수)
+    streak = sum(1 for c in c1[-10:] if c["trade_price"] > c["opening_price"])
+
+    if two_green_and_break and not botacc_ok and not mega:
+        # 연속양봉 전용 게이트 (더 엄격)
+        gate_ok, gate_reason = stage1_gate(
+            "normal",
+            spread=ob["spread"],
+            accel=accel,
+            volume_surge=vol_surge,
+            turn_pct=turn_pct,
+            buy_ratio=twin["buy_ratio"],
+            streak=streak
+        )
+        if not gate_ok:
+            cut("STAGE1_GATE", f"{m} 연속양봉 {gate_reason}")
+            return None
+    elif botacc_ok or mega:
+        # 봇매집/메가는 기타 경로로 (공통 필터만)
+        gate_ok, gate_reason = stage1_gate(
+            "other",
+            spread=ob["spread"],
+            accel=accel,
+            volume_surge=vol_surge,
+            turn_pct=turn_pct,
+            buy_ratio=twin["buy_ratio"]
+        )
+        if not gate_ok:
+            cut("STAGE1_GATE", f"{m} 기타 {gate_reason}")
+            return None
+
     entry_mode = "confirm"  # Early 없으므로 항상 confirm
 
     # === 결과 패키징 ===
@@ -3350,7 +3491,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "price": cur["trade_price"],
         "change": price_change,
         "current_volume": current_volume,
-        "volume_surge": (current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)),
+        "volume_surge": vol_surge,
         "ob": ob,
         "tape": twin,
         "ticks": ticks,
@@ -3362,6 +3503,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "entry_mode": entry_mode,
         "detect_type": "normal",  # ← 1단계: 일반 감지
         "trigger_type": trigger_type,  # ← 2단계: 트리거 목록
+        "flow_accel": accel,  # 가속도 저장
+        "streak": streak,  # 연속양봉 수 저장
     }
     if mega:
         pre["mega_ok"] = True
