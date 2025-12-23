@@ -961,14 +961,23 @@ def close_auto_position(m, reason=""):
         # 🔧 FIX #1: 부분체결 시 잔여량으로 업데이트
         if executed < vol - 1e-10:
             remaining = max(vol - executed, 0.0)
+            # ✅ 잔여가 최소주문금액(5000원) 미만이면 메모리에서 제거 (좀비 방지)
+            if exit_price_used * remaining < 5000:
+                remaining = 0.0
             with _POSITION_LOCK:
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
-                    pos2["volume"] = remaining
-                    pos2["last_exit_ts"] = time.time()
-                    OPEN_POSITIONS[m] = pos2
+                    if remaining <= 0:
+                        OPEN_POSITIONS.pop(m, None)
+                    else:
+                        pos2["volume"] = remaining
+                        pos2["last_exit_ts"] = time.time()
+                        OPEN_POSITIONS[m] = pos2
             print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f}")
-            tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
+            if remaining > 0:
+                tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
+            else:
+                tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여 미달 → 정리완료")
             # 부분체결도 손익 계산은 함 (executed 기준)
             vol = executed  # 아래 손익 계산용
 
@@ -2311,6 +2320,9 @@ def upbit_get(url, params=None, timeout=7):
             r.raise_for_status()
             REQ_STATS["ok"] += 1
             _CONSEC_CONN_ERR = 0
+            # ✅ 429 후 점진 회복 (장기 성능 저하 방지)
+            _BUCKET["rate"] = min(4.5, float(_BUCKET.get("rate", 3.0)) + 0.10)
+            _BUCKET["cap"]  = min(6.0, float(_BUCKET.get("cap", 4.0)) + 0.10)
             return r.json()
         except requests.exceptions.Timeout:
             if attempt == 2: return None
