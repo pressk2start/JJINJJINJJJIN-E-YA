@@ -144,7 +144,7 @@ print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
 # =========================
 # import uuid, hashlib, jwt  # 상단(8-11줄)에서 이미 import됨
-from urllib.parse import urlencode
+# from urllib.parse import urlencode  # 상단(6줄)에서 이미 import됨
 
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
@@ -1379,14 +1379,14 @@ MIN_DEPTH_KRW = 6_000_000
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 80.0      # 회전율 상한 (%) - 40→80 완화
-GATE_SPREAD_MAX = 0.20    # 스프레드 상한 (%)
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - 0.20→0.40 완화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 3.0      # 가속도 상한 (x)
 GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.15 # 호가 임밸런스 하한 - 초기 완화 (0.25→0.15)
-GATE_FRESH_AGE_MAX = 4.0  # 틱 신선도 상한 (초) - 자동학습 대상
+GATE_FRESH_AGE_MAX = 6.0  # 틱 신선도 상한 (초) - 4.0→6.0 완화
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
