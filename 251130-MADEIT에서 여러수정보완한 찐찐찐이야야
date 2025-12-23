@@ -1378,13 +1378,13 @@ MIN_DEPTH_KRW = 6_000_000
 # ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 40.0      # 회전율 상한 (%)
+GATE_TURN_MAX = 80.0      # 회전율 상한 (%) - 40→80 완화
 GATE_SPREAD_MAX = 0.20    # 스프레드 상한 (%)
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 3.0      # 가속도 상한 (x)
 GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
-GATE_OVERHEAT_MAX = 3.5   # accel*surge 상한
+GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.15 # 호가 임밸런스 하한 - 초기 완화 (0.25→0.15)
 # fresh_ok는 boolean이라 임계치 아님
 
@@ -2476,7 +2476,7 @@ def uptick_streak_from_ticks(ticks, need=2):
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
 
 
-def last_two_ticks_fresh(ticks, max_age=2.0):
+def last_two_ticks_fresh(ticks, max_age=4.0):  # 2.0→4.0 완화 (학습 데이터 수집용)
     if len(ticks) < 2: return False
     h = now_kst().hour
     if 0 <= h < 6:
