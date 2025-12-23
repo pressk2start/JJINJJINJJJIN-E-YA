@@ -1682,27 +1682,29 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
 
             try:
                 learn_result = analyze_and_update_weights()
-                if learn_result and AUTO_LEARN_APPLY:
-                    SCORE_WEIGHTS.update(learn_result["weights"])
+                if learn_result:
+                    thr = learn_result.get("thresholds", {})
+                    chg = learn_result.get("changes", {})
 
-                    # 🔧 가중치 변화 상세 표시
-                    changes = learn_result.get("changes", {})
-                    change_strs = []
-                    for k, v in changes.items():
-                        if v != 0:
-                            sign = "+" if v > 0 else ""
-                            change_strs.append(f"{k}:{sign}{v}")
-                    change_detail = " | ".join(change_strs) if change_strs else "변화없음"
+                    # analyze_and_update_weights() 안에서 이미 GATE_* 전역을 갱신함
+                    change_detail = " | ".join(
+                        f"{k}:{v:+g}" for k, v in chg.items() if v != 0
+                    ) or "변화없음"
 
                     tg_send(
                         f"🧠 <b>자동학습 완료</b> ({trigger_reason})\n"
                         f"📊 승률: {learn_result['win_rate']}% ({learn_result['wins']}승/{learn_result['loses']}패)\n"
                         f"📈 샘플: {learn_result.get('sample_size', 0)}건\n"
-                        f"⚙️ 가중치 변화: {change_detail}\n"
-                        f"🎯 현재 가중치: 매수비{learn_result['weights'].get('buy_ratio', 0)} 회전{learn_result['weights'].get('turn', 0)} 임밸{learn_result['weights'].get('imbalance', 0)}"
+                        f"🧱 게이트 변화: {change_detail}\n"
+                        f"🎯 현재 임계치: "
+                        f"매수비≥{thr.get('GATE_BUY_RATIO_MIN', GATE_BUY_RATIO_MIN):.0%} "
+                        f"스프레드≤{thr.get('GATE_SPREAD_MAX', GATE_SPREAD_MAX):.2f}% "
+                        f"회전≥{thr.get('GATE_TURN_MIN', GATE_TURN_MIN):.1f}% "
+                        f"임밸≥{thr.get('GATE_IMBALANCE_MIN', GATE_IMBALANCE_MIN):.2f} "
+                        f"급등≤{thr.get('GATE_SURGE_MAX', GATE_SURGE_MAX):.1f}x "
+                        f"가속≥{thr.get('GATE_ACCEL_MIN', GATE_ACCEL_MIN):.2f}x"
                     )
-                elif learn_result is None:
-                    # 학습 실패 시에도 알림
+                else:
                     tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
             except Exception as e:
                 print(f"[AUTO_LEARN_ERR] {e}")
@@ -2233,21 +2235,43 @@ def load_exit_params():
 
 def load_learned_weights():
     """
-    저장된 가중치 파일 로드 (없으면 기본값 유지)
+    저장된 학습 파일 로드
+    - 과거 버전 호환: "weights"가 있으면 SCORE_WEIGHTS 업데이트
+    - 현행: "gate_thresholds"가 있으면 GATE_* 임계치 복원
     """
     global SCORE_WEIGHTS
+    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
+    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN
+
     if not os.path.exists(WEIGHTS_PATH):
-        print("[WEIGHTS] 학습된 가중치 없음 - 기본값 사용")
+        print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
         return
 
     try:
         with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if "weights" in data:
+        # (구버전 호환) 스코어 가중치가 저장돼 있으면 갱신
+        if isinstance(data.get("weights"), dict):
             SCORE_WEIGHTS.update(data["weights"])
             print(f"[WEIGHTS] 학습된 가중치 로드: {SCORE_WEIGHTS}")
-            print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
+
+        # (현행) 게이트 임계치 복원
+        thr = data.get("gate_thresholds")
+        if isinstance(thr, dict):
+            GATE_TURN_MIN      = thr.get("GATE_TURN_MIN",      GATE_TURN_MIN)
+            GATE_TURN_MAX      = thr.get("GATE_TURN_MAX",      GATE_TURN_MAX)
+            GATE_SPREAD_MAX    = thr.get("GATE_SPREAD_MAX",    GATE_SPREAD_MAX)
+            GATE_ACCEL_MIN     = thr.get("GATE_ACCEL_MIN",     GATE_ACCEL_MIN)
+            GATE_ACCEL_MAX     = thr.get("GATE_ACCEL_MAX",     GATE_ACCEL_MAX)
+            GATE_BUY_RATIO_MIN = thr.get("GATE_BUY_RATIO_MIN", GATE_BUY_RATIO_MIN)
+            GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
+            GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
+            GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
+            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
+
+        print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
         print(f"[WEIGHTS_LOAD_ERR] {e}")
 
