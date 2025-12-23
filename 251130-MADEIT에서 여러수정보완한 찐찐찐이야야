@@ -1386,7 +1386,7 @@ GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.15 # 호가 임밸런스 하한 - 초기 완화 (0.25→0.15)
-# fresh_ok는 boolean이라 임계치 아님
+GATE_FRESH_AGE_MAX = 4.0  # 틱 신선도 상한 (초) - 자동학습 대상
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
@@ -1972,7 +1972,7 @@ def analyze_and_update_weights():
     """
     global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
-    global GATE_SURGE_MAX, GATE_IMBALANCE_MIN
+    global GATE_SURGE_MAX, GATE_IMBALANCE_MIN, GATE_OVERHEAT_MAX, GATE_FRESH_AGE_MAX
 
     if not os.path.exists(TRADE_LOG_PATH):
         print("[AUTO_LEARN] 거래 로그 없음")
@@ -2000,7 +2000,7 @@ def analyze_and_update_weights():
 
         # 승/패 평균 계산
         stats = {}
-        for col in ["buy_ratio", "spread", "turn", "imbalance", "volume_surge", "flow_acceleration"]:
+        for col in ["buy_ratio", "spread", "turn", "imbalance", "volume_surge", "flow_acceleration", "overheat", "fresh_age"]:
             try:
                 w_avg = pd.to_numeric(wins[col], errors='coerce').mean()
                 l_avg = pd.to_numeric(loses[col], errors='coerce').mean()
@@ -2017,6 +2017,8 @@ def analyze_and_update_weights():
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
+            "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
+            "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
         }
         changes = {}
 
@@ -2080,6 +2082,26 @@ def analyze_and_update_weights():
                 changes["GATE_ACCEL_MIN"] = round(new_val - GATE_ACCEL_MIN, 2)
                 GATE_ACCEL_MIN = new_val
 
+        # 과열(overheat): 승자 < 패자면 하향 (더 엄격)
+        if "overheat" in stats:
+            w, l = stats["overheat"]["win"], stats["overheat"]["lose"]
+            if w < l:  # 승자가 낮은 과열
+                target = max(2.0, w * 1.3)  # 승자 평균의 130%
+                new_val = round(GATE_OVERHEAT_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(2.0, min(8.0, new_val))  # 바운드
+                changes["GATE_OVERHEAT_MAX"] = round(new_val - GATE_OVERHEAT_MAX, 2)
+                GATE_OVERHEAT_MAX = new_val
+
+        # 틱나이(fresh_age): 승자 < 패자면 하향 (더 엄격)
+        if "fresh_age" in stats:
+            w, l = stats["fresh_age"]["win"], stats["fresh_age"]["lose"]
+            if w < l:  # 승자가 낮은 틱나이 (더 신선)
+                target = max(1.0, w * 1.5)  # 승자 평균의 150%
+                new_val = round(GATE_FRESH_AGE_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(1.0, min(6.0, new_val))  # 바운드
+                changes["GATE_FRESH_AGE_MAX"] = round(new_val - GATE_FRESH_AGE_MAX, 2)
+                GATE_FRESH_AGE_MAX = new_val
+
         new_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
@@ -2087,6 +2109,8 @@ def analyze_and_update_weights():
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
+            "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
+            "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
         }
 
         # 저장
@@ -2248,7 +2272,7 @@ def load_learned_weights():
     global SCORE_WEIGHTS
     global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
-    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN
+    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
 
     if not os.path.exists(WEIGHTS_PATH):
         print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
@@ -2275,6 +2299,7 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
+            GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
             print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
@@ -2482,7 +2507,10 @@ def uptick_streak_from_ticks(ticks, need=2):
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
 
 
-def last_two_ticks_fresh(ticks, max_age=4.0):  # 2.0→4.0 완화 (학습 데이터 수집용)
+def last_two_ticks_fresh(ticks, max_age=None):
+    """틱 신선도 체크 - GATE_FRESH_AGE_MAX 전역 변수 사용"""
+    if max_age is None:
+        max_age = GATE_FRESH_AGE_MAX
     if len(ticks) < 2: return False
     h = now_kst().hour
     if 0 <= h < 6:
