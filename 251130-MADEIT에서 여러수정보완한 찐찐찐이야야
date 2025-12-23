@@ -3054,7 +3054,7 @@ def grind_break_ok(c1, ticks):
 # =========================
 # 컷 로깅
 # =========================
-DEBUG_CUT = True  # 🔍 임시 활성화 - 컷 로그 확인용 (나중에 False로)
+DEBUG_CUT = False  # 컷 로그 비활성화
 CUT_COUNTER = {
     k: 0
     for k in [
