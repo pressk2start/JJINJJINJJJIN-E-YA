@@ -1444,7 +1444,7 @@ SPREAD_TICKS_PAD = 1             # 스프레드 대비 여유틱
 TICK_STOP_DEBOUNCE_SEC = 3       # 디바운스 시간 (초)
 TICK_STOP_DEBOUNCE_N = 2         # 디바운스 횟수
 USE_BID_FOR_STOP = True          # 스탑 판정은 best bid로
-HARD_STOP_DD = 0.012             # 급락 하드스탑 -1.2% (틱스탑과 별개)
+# 🔧 HARD_STOP_DD는 상단 프로파일에서만 설정 (이중정의 제거)
 
 # 메가 브레이크아웃 (우회 엄격화)
 ULTRA_RELAX_ON_MEGA = True
@@ -1487,11 +1487,30 @@ def calc_orderbook_imbalance(ob):
     except:
         return 0.0
 
+def _safe_float(x, default=0.0):
+    """NaN/inf 방지용 안전 변환"""
+    try:
+        if x is None:
+            return default
+        f = float(x)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except:
+        return default
+
 def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
     """
     리스크 스코어 계산 (0~100)
     - 각 피처를 정규화해서 가중합
     """
+    # 🔧 안전 패치: NaN/inf 방지
+    buy_ratio = _safe_float(buy_ratio, 0.5)
+    spread = _safe_float(spread, 0.5)
+    turn = _safe_float(turn, 0.01)
+    imbalance = _safe_float(imbalance, 0.0)
+    volume_surge = _safe_float(volume_surge, 1.0)
+
     # 🔧 안전 패치: 매수비 100% 비정상값 클리핑 (허수/스푸핑 방지)
     if buy_ratio >= 0.999:
         buy_ratio = 0.98
@@ -3446,6 +3465,7 @@ def final_check_leader(m, pre, tight_mode=False):
         and imbalance >= 0.85       # 0.80 → 0.85 강화
         and buy_ratio >= 0.70       # 63.5% → 70% 강화
         and flow_accel >= 1.2       # 가속도 조건 추가
+        and turn_pct >= 15.0        # 🔥 회전율 하한 추가 (스푸핑 방지)
     )
 
     # --- 하드컷 조건 ---
@@ -4796,8 +4816,9 @@ def main():
                 killer_buy = buy_ratio >= 0.70                # 매수비 70% 이상
                 killer_turn = turn >= 0.08                    # 🔥 회전율 8% 이상 (3%→8% 상향)
                 killer_imb = imbalance >= 0.3                 # 체결강도 0.3 이상
-                # 🔥 연속매수 조건 추가
-                cons_buys = pre["tape"].get("consecutive_buys", 0)
+                # 🔥 연속매수 조건 추가 (tape에 없으므로 직접 계산)
+                ticks_for_killer = pre.get("ticks", [])
+                cons_buys = calc_consecutive_buys(ticks_for_killer, 15) if ticks_for_killer else 0
                 killer_consec = cons_buys >= 8                # 연속매수 8회 이상
 
                 all_killer = (killer_vol_base and killer_vol_surge and
