@@ -3052,42 +3052,36 @@ def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spre
         - reason: 차단/허용 사유
     """
     # --- 공통 하드컷 ---
-    # 🔧 완화: 5 → 3틱
-    if tick_count < 3:
-        return False, None, "틱수 부족(<3)"
+    # 🔥 강화: 3 → 4틱
+    if tick_count < 4:
+        return False, None, "틱수 부족(<4)"
 
     if buy_ratio <= 0.05:
         return False, None, "매수비 0% 편향"
 
-    # 스프레드 상대화 (기본 0.25%, 종목 중앙값의 1.5배까지 허용)
-    # 🔧 완화: 0.20% → 0.25%, 캡 0.35% → 0.50%
-    thr_spread = 0.25
-    if symbol_median_spread is not None and symbol_median_spread > 0:
-        thr_spread = min(0.50, 1.5 * symbol_median_spread)
+    # 🔥 강화: 매수비 >= 65% (리포트: 패배 케이스에 낮은 매수비 다수)
+    if buy_ratio < 0.65:
+        return False, None, f"매수비 부족({buy_ratio:.0%}<65%)"
 
+    # 🔥 강화: 회전율 >= 5% (리포트: 패배에 turn 0.1% 케이스)
+    if turn_pct < 5.0:
+        return False, None, f"회전율 부족({turn_pct:.1f}%<5%)"
+
+    # 🔥 강화: 스프레드 <= 0.25% (리포트: 패배에 0.4% 케이스)
+    thr_spread = 0.25
     if spread > thr_spread:
         return False, None, f"스프레드 초과({spread:.2f}%>{thr_spread:.2f}%)"
 
-    # 저회전 + 극단 매수 스푸프 차단
-    if turn_pct < 5.0 and buy_ratio >= 0.95:
-        return False, None, "저회전+극단매수(스푸핑 의심)"
-
     # --- 유동성 레짐 분기 (하드컷 대신 사이징) ---
-    # 🔧 완화: 매수비 기준 낮춤
-    if turn_pct >= 8.0:
-        # 고유동: 매수비 완화 (62% → 55%)
-        if buy_ratio < 0.55:
-            return False, None, f"고회전 매수비 부족({buy_ratio:.0%}<55%)"
+    # 🔥 강화: 사이징 기준 상향
+    if turn_pct >= 10.0 and buy_ratio >= 0.75:
+        # 고유동+고매수비: confirm
         size = "normal"
-    elif turn_pct >= 3.0:
-        # 중간 유동: (75% → 65%)
-        if buy_ratio < 0.65:
-            return False, None, f"중회전 매수비 부족({buy_ratio:.0%}<65%)"
+    elif turn_pct >= 8.0:
+        # 고유동: half
         size = "half"
     else:
-        # 저유동: (85% → 75%)
-        if buy_ratio < 0.75:
-            return False, None, f"저회전 매수비 부족({buy_ratio:.0%}<75%)"
+        # 그 외: probe
         size = "probe"
 
     return True, size, f"통과(회전{turn_pct:.1f}%,매수{buy_ratio:.0%},사이즈={size})"
@@ -3454,18 +3448,31 @@ def final_check_leader(m, pre, tight_mode=False):
         cut("IMBAL_LOW", f"{m} imbal {imbalance:.2f} < 0.25")
         return None
 
+    # 🔥 2-1) 임밸 >= 0.80 → 컷 (승 0.46 vs 패 0.64, 너무 높으면 스푸핑/고점)
+    # 예외: 가속 >= 1.5 AND 회전 >= 15% (실수요 강세)
+    if imbalance >= 0.80:
+        is_real_demand = (flow_accel >= 1.5 and turn_pct >= 15.0)
+        if not is_real_demand:
+            cut("IMBAL_HIGH", f"{m} imbal {imbalance:.2f} >= 0.80 (스푸핑 의심)")
+            return None
+
     # 3) 회전 >= 48% → 컷 (펌핑/휩쏘 위험), 포켓이면 예외
     if turn_pct >= 48.0:
         if not is_precision_pocket:
             cut("TURN_OVERHEAT", f"{m} turn {turn_pct:.1f}% >= 48%")
             return None
 
-    # 4) 🔥 매수비 < 55% → 컷 (데이터 분석: 승자 81~93% vs 패자 54~64%)
-    if buy_ratio < 0.55:
-        cut("BUYRATIO_LOW", f"{m} buy={buy_ratio:.0%} < 55%")
+    # 4) 🔥 매수비 < 65% → 컷 (승 86% vs 패 76%)
+    if buy_ratio < 0.65:
+        cut("BUYRATIO_LOW", f"{m} buy={buy_ratio:.0%} < 65%")
         return None
 
-    # 5) 🔥 배수 >= 3.5x → 컷, 2.5~3.5x → probe 사이징
+    # 5) 🔥 가속도 < 1.0 → 컷 (승 1.77 vs 패 1.63, 가속 없으면 모멘텀 부족)
+    if flow_accel < 1.0:
+        cut("ACCEL_LOW", f"{m} accel={flow_accel:.1f}x < 1.0")
+        return None
+
+    # 6) 🔥 배수 >= 3.5x → 컷, 2.5~3.5x → probe 사이징
     volume_surge = pre.get("volume_surge", 1.0)
     surge_sizing = None
     if volume_surge >= 3.5:
@@ -3473,6 +3480,11 @@ def final_check_leader(m, pre, tight_mode=False):
         return None
     elif volume_surge >= 2.5:
         surge_sizing = "probe"  # 2.5~3.5x는 probe 사이징
+
+    # 7) 🔥 스프레드 > 0.35% → 컷 (승 0.13% vs 패 0.20%)
+    if ob["spread"] > 0.35:
+        cut("SPREAD_HIGH", f"{m} spread={ob['spread']:.2f}% > 0.35%")
+        return None
     # ========================================
 
     # 3단계: 필터 타입 결정
@@ -3627,7 +3639,8 @@ def postcheck_6s(m, pre):
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
     # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    MAX_SURGE = 0.015  # 1.5% 이상이면 고점 추격으로 간주하고 컷
+    # 🔥 틱버스트는 더 보수적으로 (1.0%), 일반 경로는 1.5%
+    MAX_SURGE = 0.010 if is_tick_burst else 0.015
 
     while True:
         now = time.time()
@@ -4642,11 +4655,14 @@ def main():
                 killer_vol_base = current_vol >= 100_000_000  # 최근 거래대금 1억 이상
                 killer_vol_surge = volume_surge >= 2.0        # 거래량 2배 이상
                 killer_buy = buy_ratio >= 0.70                # 매수비 70% 이상
-                killer_turn = turn >= 0.03                    # 회전율 3% 이상
+                killer_turn = turn >= 0.08                    # 🔥 회전율 8% 이상 (3%→8% 상향)
                 killer_imb = imbalance >= 0.3                 # 체결강도 0.3 이상
+                # 🔥 연속매수 조건 추가
+                cons_buys = pre["tape"].get("consecutive_buys", 0)
+                killer_consec = cons_buys >= 8                # 연속매수 8회 이상
 
                 all_killer = (killer_vol_base and killer_vol_surge and
-                              killer_buy and killer_turn and killer_imb)
+                              killer_buy and killer_turn and killer_imb and killer_consec)
 
                 # 킬러 조건 상세 저장 (텔레그램용)
                 pre["killer_details"] = {
@@ -4655,12 +4671,14 @@ def main():
                     "buy_ratio": buy_ratio,
                     "turn": turn,
                     "imbalance": imbalance,
+                    "consecutive_buys": cons_buys,
                     "checks": {
                         "거래대금 1억+": killer_vol_base,
                         "거래량 2배+": killer_vol_surge,
                         "매수비 70%+": killer_buy,
-                        "회전율 3%+": killer_turn,
+                        "회전율 8%+": killer_turn,     # 🔥 3%→8% 상향
                         "체결강도 0.3+": killer_imb,
+                        "연속매수 8+": killer_consec,  # 🔥 신규 추가
                     }
                 }
 
