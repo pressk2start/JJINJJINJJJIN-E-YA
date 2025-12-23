@@ -1434,6 +1434,18 @@ ATR_MULT = 0.30           # 🔧 0.65 → 0.30 (더 타이트)
 DYN_SL_MIN = 0.003        # 🔧 0.3% 최소 손절
 DYN_SL_MAX = 0.005        # 🔧 0.5% 최대 손절
 
+# =========================
+# 🎯 틱 기반 트레일링 스탑 (저가코인 휩쏘 방지)
+# =========================
+STOP_MODE = "ticks"              # "ticks" 또는 "percent"
+MIN_TICK_DIST = 4                # 최소 틱 간격 (4틱)
+ATR_TICKS_MULT = 0.6             # ATR을 틱 수로 환산할 때 계수
+SPREAD_TICKS_PAD = 1             # 스프레드 대비 여유틱
+TICK_STOP_DEBOUNCE_SEC = 3       # 디바운스 시간 (초)
+TICK_STOP_DEBOUNCE_N = 2         # 디바운스 횟수
+USE_BID_FOR_STOP = True          # 스탑 판정은 best bid로
+HARD_STOP_DD = 0.012             # 급락 하드스탑 -1.2% (틱스탑과 별개)
+
 # 메가 브레이크아웃 (우회 엄격화)
 ULTRA_RELAX_ON_MEGA = True
 MEGA_BREAK_MIN_GAP = 0.022  # 1.2% -> 2.0%
@@ -3733,7 +3745,66 @@ def postcheck_6s(m, pre):
     return True, "OK"
 
 # =========================
-# 동적 손절
+# 🎯 틱 기반 손절 헬퍼 함수
+# =========================
+def upbit_tick_size(price: float) -> float:
+    """업비트 KRW 마켓 호가 단위 (보수적: 100~1000원 구간은 1원)"""
+    p = float(price)
+    if p >= 2_000_000: return 1000.0
+    if p >= 1_000_000: return 500.0
+    if p >=   500_000: return 100.0
+    if p >=   100_000: return 50.0
+    if p >=    10_000: return 10.0
+    if p >=     1_000: return 5.0
+    if p >=       100: return 1.0    # 보수적 (일부 종목 0.1원이지만 1원으로)
+    if p >=        10: return 0.1
+    if p >=         1: return 0.01
+    return 0.001
+
+def round_to_tick(px: float, tick: float) -> float:
+    """가격을 틱 단위로 내림"""
+    return math.floor(px / tick) * tick
+
+def ticks_between(a: float, b: float, tick: float) -> int:
+    """두 가격 사이 틱 수"""
+    return int(abs(a - b) / max(tick, 1e-12) + 1e-9)
+
+def compute_tick_distance(cur_price: float, c1: list, ob: dict) -> int:
+    """
+    시장 컨텍스트 기반 필요 틱 간격 계산
+    - 스프레드 틱수 + 여유
+    - ATR 기반 틱수
+    - 최소 틱수
+    """
+    tick = upbit_tick_size(cur_price)
+
+    # 스프레드(절대값) → 틱수
+    spread_ticks = 0
+    try:
+        if ob and "raw" in ob:
+            u0 = ob["raw"]["orderbook_units"][0]
+            ask, bid = float(u0["ask_price"]), float(u0["bid_price"])
+            spread_abs = max(ask - bid, 0.0)
+            spread_ticks = int(math.ceil(spread_abs / max(tick, 1e-12))) if spread_abs > 0 else 0
+    except:
+        pass
+
+    # ATR → 틱수
+    atr_ticks = 0
+    try:
+        atr = atr14_from_candles(c1, 14) if c1 else 0.0
+        if atr and atr > 0:
+            atr_ticks = int(math.ceil((atr * ATR_TICKS_MULT) / max(tick, 1e-12)))
+    except:
+        pass
+
+    # 최대값 사용
+    base_ticks = max(MIN_TICK_DIST, spread_ticks + SPREAD_TICKS_PAD, atr_ticks)
+    return int(base_ticks)
+
+
+# =========================
+# 동적 손절 (% 기반, 틱스탑 백업용)
 # =========================
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
@@ -4053,6 +4124,16 @@ def monitor_position(m,
         pos = OPEN_POSITIONS.get(m, {})
     entry_mode = pos.get("entry_mode", "confirm")
 
+    # === 🎯 틱 기반 트레일링 스탑 상태 ===
+    tick_stop_armed = False
+    tick_sz = upbit_tick_size(entry_price)
+    tick_base = MIN_TICK_DIST  # 초기 틱 간격
+    trail_stop_px = entry_price - tick_base * tick_sz  # 초기 스탑가
+    tick_stop_hits = 0
+    tick_stop_first_seen = 0.0
+    last_ob_fetch = 0.0
+    last_best_bid = None
+
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
@@ -4087,11 +4168,19 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
 
             if alive_sec < WARMUP_SEC:
-                # 🔧 FIX: 웜업 중에도 동적손절 적용 (WARMUP_STOP 대신 eff_sl_pct 사용)
-                if cur_gain <= -eff_sl_pct:
-                    verdict = "웜업 손절"
-                    outcome_extra = f"({cur_gain*100:.2f}%, 동적SL-{eff_sl_pct*100:.2f}%)"
-                    break
+                # 🔧 웜업 중 급락만 하드스탑 (틱/퍼센트 모드 공통)
+                if STOP_MODE == "ticks":
+                    # 틱 모드: 하드스탑만 적용 (틱스탑은 웜업 후 무장)
+                    if HARD_STOP_DD and cur_gain <= -HARD_STOP_DD:
+                        verdict = "웜업 하드스탑"
+                        outcome_extra = f"({cur_gain*100:.2f}%, 하드-{HARD_STOP_DD*100:.1f}%)"
+                        break
+                else:
+                    # 퍼센트 모드: 동적손절 적용
+                    if cur_gain <= -eff_sl_pct:
+                        verdict = "웜업 손절"
+                        outcome_extra = f"({cur_gain*100:.2f}%, 동적SL-{eff_sl_pct*100:.2f}%)"
+                        break
                 # 웜업 중엔 소프트 스탑 미적용
                 continue
 
@@ -4199,12 +4288,62 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             ob_now = pre.get("ob", {})
 
-            # ① 동적 손절 (ATR 기반, 0.3%~0.5%)
-            if cur_gain <= -eff_sl_pct:
-                atr_detail = f", {atr_info}" if atr_info else ""
-                close_auto_position(m, f"동적손절 -{abs(cur_gain)*100:.2f}% (기준 -{eff_sl_pct*100:.2f}% 초과{atr_detail})")
-                verdict = "DYN_STOP"
-                break
+            # === 🎯 틱 기반 트레일링 스탑 ===
+            if STOP_MODE == "ticks":
+                # 1) 오더북에서 best bid 주기적 갱신
+                now_ts = time.time()
+                if USE_BID_FOR_STOP and (now_ts - last_ob_fetch) >= 1.2:
+                    try:
+                        ob_js = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m}, timeout=4)
+                        if ob_js and isinstance(ob_js, list) and len(ob_js) > 0:
+                            u0 = ob_js[0].get("orderbook_units", [{}])[0]
+                            last_best_bid = float(u0.get("bid_price", curp))
+                    except:
+                        last_best_bid = None
+                    last_ob_fetch = now_ts
+
+                # 2) 틱스탑 무장 (웜업 종료 후 또는 약간 수익 시)
+                if not tick_stop_armed and alive_sec >= WARMUP_SEC:
+                    tick_base = compute_tick_distance(curp, c1, ob_now)
+                    tick_stop_armed = True
+                    trail_stop_px = curp - tick_base * tick_sz
+                    print(f"[TICK_STOP] {m} 무장: {tick_base}틱, 스탑={trail_stop_px:.2f}")
+
+                # 3) 신고가 갱신 시 트레일 끌어올리기
+                if tick_stop_armed and new_high:
+                    tick_base = max(tick_base, compute_tick_distance(curp, c1, ob_now))
+                    new_trail = curp - tick_base * tick_sz
+                    trail_stop_px = max(trail_stop_px, round_to_tick(new_trail, tick_sz))
+
+                # 4) 스탑 트리거 판정 (디바운스)
+                ref_price = last_best_bid if (USE_BID_FOR_STOP and last_best_bid) else curp
+                if tick_stop_armed and ref_price <= trail_stop_px:
+                    if tick_stop_hits == 0:
+                        tick_stop_first_seen = time.time()
+                    tick_stop_hits += 1
+                    # 디바운스 조건 충족 시 손절
+                    if (time.time() - tick_stop_first_seen) >= TICK_STOP_DEBOUNCE_SEC and tick_stop_hits >= TICK_STOP_DEBOUNCE_N:
+                        close_auto_position(m, f"틱스탑 {tick_base}틱 (스탑={trail_stop_px:.2f}, ref={ref_price:.2f})")
+                        verdict = "TICK_STOP"
+                        break
+                else:
+                    # 1틱 이상 회복하면 디바운스 리셋
+                    if ref_price >= trail_stop_px + tick_sz:
+                        tick_stop_hits = 0
+
+                # 5) 하드스탑 백업 (급락 시 즉시 컷)
+                if HARD_STOP_DD and cur_gain <= -HARD_STOP_DD:
+                    close_auto_position(m, f"하드스탑 급락 -{abs(cur_gain)*100:.2f}% (기준 -{HARD_STOP_DD*100:.1f}%)")
+                    verdict = "HARD_DROP"
+                    break
+
+            else:
+                # ① 기존 동적 손절 (ATR 기반, 0.3%~0.5%)
+                if cur_gain <= -eff_sl_pct:
+                    atr_detail = f", {atr_info}" if atr_info else ""
+                    close_auto_position(m, f"동적손절 -{abs(cur_gain)*100:.2f}% (기준 -{eff_sl_pct*100:.2f}% 초과{atr_detail})")
+                    verdict = "DYN_STOP"
+                    break
 
             # ② 얇은 수익 체크포인트 (+0.3%) 도달 시 강세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 0.1% 아래로 떨어지면 리셋
