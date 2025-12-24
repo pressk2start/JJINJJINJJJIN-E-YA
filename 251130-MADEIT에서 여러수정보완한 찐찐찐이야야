@@ -141,26 +141,64 @@ for part in _raw_chats.split(","):
 print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 
 # =========================
-# 🔐 프로세스 간 중복 진입 방지 (파일락)
+# 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
+_MEMORY_ENTRY_LOCKS = {}  # 메모리 기반 락 (스레드 간)
+_MEMORY_LOCK = threading.Lock()  # 메모리 락 보호용
+
 def _entry_lock_path(market: str) -> str:
     return f"/tmp/bot_entry_{market.replace('-', '_')}.lock"
 
 def _try_acquire_entry_lock(market: str, ttl_sec: int = 60) -> bool:
-    """락 획득 시도. 성공하면 True, 이미 락 있으면 False"""
+    """락 획득 시도. 성공하면 True, 이미 락 있으면 False
+
+    🔧 FIX: 원자적 파일 생성 (O_CREAT | O_EXCL) + 메모리 락 이중 보호
+    """
+    # 1️⃣ 메모리 락 먼저 체크 (같은 프로세스 내 스레드 간)
+    with _MEMORY_LOCK:
+        if market in _MEMORY_ENTRY_LOCKS:
+            if time.time() - _MEMORY_ENTRY_LOCKS[market] < ttl_sec:
+                return False
+        _MEMORY_ENTRY_LOCKS[market] = time.time()
+
+    # 2️⃣ 파일 락 (프로세스 간)
     path = _entry_lock_path(market)
     try:
+        # 기존 락 파일이 있으면 TTL 체크
         if os.path.exists(path):
             if (time.time() - os.path.getmtime(path)) < ttl_sec:
+                # 메모리 락 롤백
+                with _MEMORY_LOCK:
+                    _MEMORY_ENTRY_LOCKS.pop(market, None)
                 return False
-        with open(path, "w") as f:
-            f.write(str(time.time()))
+            # TTL 만료된 락 파일 제거
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+        # 원자적 파일 생성 시도 (O_CREAT | O_EXCL = 이미 존재하면 실패)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.write(fd, str(time.time()).encode())
+        os.close(fd)
         return True
+    except FileExistsError:
+        # 다른 스레드/프로세스가 먼저 생성함
+        with _MEMORY_LOCK:
+            _MEMORY_ENTRY_LOCKS.pop(market, None)
+        return False
     except Exception:
+        with _MEMORY_LOCK:
+            _MEMORY_ENTRY_LOCKS.pop(market, None)
         return False
 
 def _release_entry_lock(market: str):
-    """락 해제 (파일 삭제)"""
+    """락 해제 (파일 삭제 + 메모리 락 해제)"""
+    # 메모리 락 해제
+    with _MEMORY_LOCK:
+        _MEMORY_ENTRY_LOCKS.pop(market, None)
+
+    # 파일 락 해제
     path = _entry_lock_path(market)
     try:
         if os.path.exists(path):
