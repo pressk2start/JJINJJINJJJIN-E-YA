@@ -3757,7 +3757,8 @@ def meets_volume_surge(current_volume, past_volumes):
 # ========================================
 def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
                  current_volume=0, price_change=0, mega=False,
-                 ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0):
+                 ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
+                 ignition_score=0):
     """
     1단계 진입 게이트: 단일 통합 필터 (final_check 통합)
 
@@ -3777,6 +3778,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     - ema20_breakout: 현재가 > EMA20
     - high_breakout: 현재가 > 최근 12봉 고점
     - vol_vs_ma: 현재 거래량 / 20봉 평균 거래량
+    - ignition_score: 점화 감지 점수 (4요건 중 충족 개수)
 
     Returns: (allow, reason)
     """
@@ -3835,28 +3837,37 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if imbalance < GATE_IMBALANCE_MIN:
         return False, f"호가균형취약(imb {imbalance:.2f}<{GATE_IMBALANCE_MIN})"
 
-    # === 🚀 신규 조건: EMA20 위 + 고점 돌파 (급등 초입 감지) ===
-    # 둘 다 충족하면 강한 신호, 하나만 충족해도 통과 (기존 호환)
+    # === 🚀 신규 조건: EMA20 위 + 고점 돌파 + 점화 감지 (급등 초입 감지) ===
+    # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
     # 강한 신호: EMA20 위 + 고점 돌파 + 거래량 2배
     is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 2.0)
 
-    # 기존 조건만으로도 통과 가능 (하위 호환)
-    # 하지만 EMA20 아래이고 고점 돌파도 아니면 스킵 (신규 필터)
-    if breakout_score == 0 and vol_vs_ma < 2.0:
-        return False, f"돌파조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x)"
+    # 🔥 점화 감지 (4요건 중 3개 이상)
+    is_ignition = (ignition_score >= 3)
 
-    # 통과 reason에 돌파 정보 포함
-    breakout_info = ""
-    if is_strong_breakout:
-        breakout_info = "🚀강한돌파,"
+    # 진입 조건: 돌파조건 1개 이상 OR 거래량 2배 이상 OR 점화 감지
+    # (기본 조건 ALL 통과 후, 아래 중 하나 이상 필요)
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= 2.0) or is_ignition
+
+    if not entry_signal:
+        return False, f"진입조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x,점화:{ignition_score}/4)"
+
+    # 통과 reason에 돌파/점화 정보 포함
+    signal_info = ""
+    if is_ignition:
+        signal_info = f"🔥점화({ignition_score}/4),"
+    elif is_strong_breakout:
+        signal_info = "🚀강한돌파,"
     elif ema20_breakout:
-        breakout_info = "EMA↑,"
+        signal_info = "EMA↑,"
     elif high_breakout:
-        breakout_info = "고점↑,"
+        signal_info = "고점↑,"
+    elif vol_vs_ma >= 2.0:
+        signal_info = f"거래량↑({vol_vs_ma:.1f}x),"
 
-    return True, f"{breakout_info}통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f},MA대비={vol_vs_ma:.1f}x)"
+    return True, f"{signal_info}통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f})"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -3963,80 +3974,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
     turn = twin["krw"] / max(ob["depth_krw"], 1)
 
-    # ========================================
-    # 🚀 Pre-break 선행 진입 체크 (stage1_gate 전에 먼저 실행)
-    # ========================================
-    prebreak_ok, prebreak_reason, running_bar = prebreak_probe_check(ticks, c1, ob, twin)
-    if prebreak_ok:
-        print(f"[PREBREAK] {m} → {prebreak_reason}")
-        # Pre-break 트리거: 선행 진입 payload 반환
-        pre = {
-            "price": running_bar["close"],
-            "change": running_bar["change_from_prev"],
-            "current_volume": running_bar["volume_krw"],
-            "volume_surge": 1.0,  # Pre-break는 surge 계산 전
-            "ob": ob,
-            "tape": twin,
-            "ticks": ticks,
-            "flow_accel": calc_flow_acceleration(ticks),
-            "imbalance": calc_orderbook_imbalance(ob),
-            "turn_pct": turn * 100,
-            "spread": ob["spread"],
-            "buy_ratio": twin["buy_ratio"],
-            "mega": False,
-            "filter_type": "prebreak",
-            "running_bar": running_bar,
-            "prebreak_reason": prebreak_reason,
-            "entry_mode": "probe",  # ✅ 선행진입은 강제 probe (소액 탐색)
-        }
-        return pre
-
-    # ========================================
-    # 🔥 점화 감지 (Ignition Detection) - 급등 초입 0~30초 내 감지
-    # ========================================
-    avg_candle_vol = vol_ma_from_candles(c1, period=20)
-    ignition_ok, ignition_reason, ignition_score = ignition_detected(
-        market=m,
-        ticks=ticks,
-        avg_candle_volume=avg_candle_vol,
-        ob=ob,
-        cooldown_ms=15000
-    )
-
-    if ignition_ok:
-        print(f"[🔥IGNITION] {m} → {ignition_reason} (score={ignition_score})")
-        # 점화 감지 시 최소 기본조건만 체크 후 즉시 진입
-        # (스프레드, 거래대금만 체크)
-        if ob["spread"] <= GATE_SPREAD_MAX and current_volume >= GATE_VOL_MIN:
-            accel = calc_flow_acceleration(ticks)
-            imbalance = calc_orderbook_imbalance(ob)
-            pre = {
-                "price": cur["trade_price"],
-                "change": price_change,
-                "current_volume": current_volume,
-                "volume_surge": current_volume / max(avg_candle_vol, 1),
-                "ob": ob,
-                "tape": twin,
-                "ticks": ticks,
-                "flow_accel": accel,
-                "imbalance": imbalance,
-                "turn_pct": turn * 100,
-                "spread": ob["spread"],
-                "buy_ratio": twin["buy_ratio"],
-                "mega": mega,
-                "filter_type": "ignition",
-                "ignition_reason": ignition_reason,
-                "ignition_score": ignition_score,
-                "entry_mode": "half",  # 점화 감지는 half (50%) 진입
-            }
-            return pre
-        else:
-            cut("IGNITION_BLOCKED", f"{m} 점화감지but스프레드/거래대금미달")
-
-    # 🔥 시그널 체크 제거 - stage1_gate가 유일한 필터
-    # (봇매집/메가/투그린 등 중복 로직 삭제)
-
     # 🔥 1단계 게이트 적용 (단일 통합 필터)
+    # 점화 감지도 stage1_gate 내에서 처리
     vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
@@ -4055,6 +3994,15 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     vol_ma20 = vol_ma_from_candles(c1, period=20)
     vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
 
+    # 🔥 점화 감지 점수 계산 (stage1_gate에 전달)
+    _, ignition_reason, ignition_score = ignition_detected(
+        market=m,
+        ticks=ticks,
+        avg_candle_volume=vol_ma20,
+        ob=ob,
+        cooldown_ms=15000
+    )
+
     gate_ok, gate_reason = stage1_gate(
         spread=ob["spread"],
         accel=accel,
@@ -4069,7 +4017,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 🚀 신규 파라미터
         ema20_breakout=ema20_breakout,
         high_breakout=high_breakout,
-        vol_vs_ma=vol_vs_ma
+        vol_vs_ma=vol_vs_ma,
+        ignition_score=ignition_score
     )
     if not gate_ok:
         cut("STAGE1_GATE", f"{m} {gate_reason}")
@@ -4091,6 +4040,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "buy_ratio": twin["buy_ratio"],
         "mega": mega,
         "filter_type": "stage1_gate",
+        "ignition_score": ignition_score,
+        "gate_reason": gate_reason,
     }
 
     return pre
