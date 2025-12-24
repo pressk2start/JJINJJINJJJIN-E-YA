@@ -420,6 +420,11 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     risk_krw = total_equity * risk_pct
     # 🔧 FIX: DYN_SL_MIN과 일치 (0.3% 최소 손절폭)
     min_sl_pct = 0.003  # DYN_SL_MIN과 동일
+
+    # 🔧 FIX: stop_price가 None이거나 entry_price 이상이면 보정
+    if stop_price is None or stop_price <= 0 or stop_price >= entry_price:
+        stop_price = entry_price * (1 - min_sl_pct)
+
     per_unit_loss = max(entry_price - stop_price,
                         entry_price * min_sl_pct)
     qty = risk_krw / per_unit_loss
@@ -428,11 +433,16 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
 
 def place_market_buy(market, krw_amount):
     """KRW 기준 시장가 매수 (ord_type=price)"""
+    krw_amount = int(krw_amount)
+    # 🔧 FIX: 최소주문금액 가드 (400 에러 방지)
+    if krw_amount < 5000:
+        print(f"[BUY_ERR] {market} 최소주문금액 미달: {krw_amount}원 < 5000원")
+        return None
     body = {
         "market": market,
         "side": "bid",
         "ord_type": "price",
-        "price": str(int(krw_amount))  # 사용할 KRW 금액
+        "price": str(krw_amount)
     }
     return upbit_private_post("/v1/orders", body)
 
@@ -724,15 +734,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if krw_to_use > cap:
             print(f"[IMPACT_CAP] {m} 주문 {krw_to_use:,.0f} > 25% of best-ask {cap:,.0f} → 캡")
             krw_to_use = int(cap)
-            # confirm이면 half로 다운시프트 + 금액 재보정
+            # confirm이면 half로 다운시프트 (금액 이중억제 제거)
             if entry_mode == "confirm":
                 entry_fraction = 0.5
-                # ✅ 다운그레이드가 실제 금액에도 반영되도록 추가 보정
-                half_limit = int(krw_bal * adaptive_risk * 0.5)
-                krw_to_use = int(min(krw_to_use, half_limit))
-                print(f"[IMPACT_CAP] {m} confirm → half & 금액 재보정 {krw_to_use:,.0f}")
+                print(f"[IMPACT_CAP] {m} confirm → half 전환")
 
     krw_to_use = int(krw_to_use)
+
+    # 🔧 FIX: 임팩트캡 후 최소주문금액 재검증
+    min_order_krw = 7000 if entry_mode == "probe" else 5000
+    if krw_to_use < min_order_krw:
+        if entry_mode == "probe" and krw_bal >= 7000:
+            krw_to_use = 7000
+            print(f"[AUTO] probe 최소금액 적용(임팩트캡 후): {krw_to_use:,.0f}원")
+        else:
+            print(f"[AUTO] 임팩트캡 후 주문금액 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → 스킵")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            _release_entry_lock(m)
+            return
 
     # === 매수 ===
     try:
