@@ -2058,6 +2058,12 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             overheat = row.get("overheat", 0) or 0
             fresh_age = row.get("fresh_age", 0) or 0
 
+            # 🚀 초단기 미세필터 지표
+            cv = row.get("cv", 0) or 0
+            pstd = row.get("pstd", 0) or 0
+            best_ask_krw = row.get("best_ask_krw", 0) or 0
+            is_prebreak = row.get("is_prebreak", 0) or 0
+
             # 시간 (ts에서 시:분만 추출)
             ts = str(row.get("ts", ""))
             time_str = ts[11:16] if len(ts) >= 16 else "?"
@@ -2065,12 +2071,18 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             # 가속도 이모지
             accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "")
 
+            # CV 이모지
+            cv_emoji = "🤖" if cv <= 0.45 else ("🔥" if cv >= 1.2 else "")
+            # Pre-break 마크
+            pb_mark = "⚡PB" if is_prebreak else ""
+
             lines.append(
-                f"{icon} {market} {time_str} {pnl_str}\n"
+                f"{icon} {market} {time_str} {pnl_str} {pb_mark}\n"
                 f"   {detect}→{trigger}→{ftype}\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
                 f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
-                f"   🌡️과열{overheat:.1f} 틱나이{fresh_age:.1f}초"
+                f"   🌡️과열{overheat:.1f} 틱나이{fresh_age:.1f}초\n"
+                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd*100:.2f}% 호가{best_ask_krw/1000:.0f}K"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -2084,7 +2096,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             for col, name in [("buy_ratio", "매수비"), ("turn", "회전"), ("imbalance", "임밸"),
                               ("spread", "스프레드"), ("volume_surge", "배수"),
                               ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도"),
-                              ("overheat", "과열"), ("fresh_age", "틱나이")]:
+                              ("overheat", "과열"), ("fresh_age", "틱나이"),
+                              ("cv", "CV"), ("pstd", "pstd")]:
                 if col in df.columns:
                     w_avg = wins[col].mean() if col in wins.columns else 0
                     l_avg = loses[col].mean() if col in loses.columns else 0
