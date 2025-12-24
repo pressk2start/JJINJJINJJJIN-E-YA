@@ -1572,7 +1572,7 @@ GATE_PRICE_MIN = 0.002    # 가격변동 하한 (%) - detect에서 이동
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
 # ========================================
-PREBREAK_ENABLED = True               # Pre-break 활성화
+PREBREAK_ENABLED = False              # Pre-break 비활성화 (stage1_gate로 통합)
 PREBREAK_HIGH_PCT = 0.002             # 고점 대비 0.2% 이내
 PREBREAK_POSTCHECK_SEC = 2            # probe 전용 2초 포스트체크
 PREBREAK_BUY_MIN = 0.60               # 최소 매수비 60%
