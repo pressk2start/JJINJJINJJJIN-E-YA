@@ -854,6 +854,24 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             avg_krw = calc_avg_krw_per_tick(t15_stats)
             flow_accel = calc_flow_acceleration(ticks)
 
+            # 🚀 초단기 미세필터 지표 계산
+            ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
+            cv = ia_stats.get("cv", 0.0)
+            pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+            overheat = flow_accel * float(pre.get("volume_surge", 1.0))
+            # 틱 신선도
+            fresh_age = 0.0
+            if ticks:
+                now_ms = int(time.time() * 1000)
+                last_tick_ts = ticks[0].get("timestamp", now_ms)
+                fresh_age = (now_ms - last_tick_ts) / 1000.0
+            # 베스트호가 깊이
+            try:
+                u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
+                best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+            except Exception:
+                best_ask_krw = 0.0
+
             # 🔍 경로 정보
             trigger_list = pre.get("trigger_type", [])
             log_trade_features({
@@ -875,6 +893,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "consecutive_buys": cons_buys,
                 "avg_krw_per_tick": round(avg_krw, 0),
                 "flow_acceleration": round(flow_accel, 2),
+                # 🚀 초단기 미세필터 지표
+                "overheat": round(overheat, 2),
+                "fresh_age": round(fresh_age, 2),
+                "cv": round(cv, 2),
+                "pstd": round(pstd * 100, 4),  # % 단위
+                "best_ask_krw": int(best_ask_krw),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
@@ -1756,6 +1780,8 @@ FEATURE_FIELDS = [
     "fresh", "score", "entry_mode",
     "detect_type", "trigger_type", "filter_type",  # 🔍 경로 분석용
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
+    # 🔥 GATE 핵심 + 초단기 미세필터 지표
+    "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
     "pnl_pct", "result", "hold_sec"
 ]
 
@@ -3878,6 +3904,8 @@ DL_FIELDS = [
     "dow", "two_green_break", "ignition_ok", "early_ok", "uptick_ok",
     # 🔥 새 지표 추가
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",
+    # 🔥 GATE 핵심 지표 추가
+    "imbalance", "overheat", "fresh_age",
     # 🚀 초단기 미세필터 지표 추가
     "cv", "pstd", "best_ask_krw", "prebreak_band", "is_prebreak",
     "ret_3m", "ret_10m", "ret_15m", "maxdd_10m", "maxrun_10m", "label_win10",
