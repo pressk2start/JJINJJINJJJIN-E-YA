@@ -3827,6 +3827,8 @@ DL_FIELDS = [
     "dow", "two_green_break", "ignition_ok", "early_ok", "uptick_ok",
     # 🔥 새 지표 추가
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",
+    # 🚀 초단기 미세필터 지표 추가
+    "cv", "pstd", "best_ask_krw", "prebreak_band", "is_prebreak",
     "ret_3m", "ret_10m", "ret_15m", "maxdd_10m", "maxrun_10m", "label_win10",
     "label_fail10"
 ]
@@ -3869,6 +3871,19 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         last_tick_ts = ticks[0].get("timestamp", now_ms)
         fresh_age = (now_ms - last_tick_ts) / 1000.0
 
+    # 🚀 초단기 미세필터 지표
+    ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
+    cv = ia_stats.get("cv", 0.0)
+    pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+    prebreak_band = dynamic_prebreak_band(ticks) if ticks else PREBREAK_HIGH_PCT
+    is_prebreak = 1 if pre.get("filter_type") == "prebreak" else 0
+    # 베스트호가 깊이
+    try:
+        u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
+        best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+    except Exception:
+        best_ask_krw = 0.0
+
     row = {
         "ts": now_kst_str(),
         "market": m,
@@ -3899,6 +3914,12 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "consecutive_buys": cons_buys,
         "avg_krw_per_tick": round(avg_krw, 0),
         "flow_acceleration": round(flow_accel, 2),
+        # 🚀 초단기 미세필터 지표
+        "cv": round(cv, 2),
+        "pstd": round(pstd * 100, 4),  # % 단위
+        "best_ask_krw": int(best_ask_krw),
+        "prebreak_band": round(prebreak_band * 100, 2),  # % 단위
+        "is_prebreak": is_prebreak,
         # 🔥 GATE 핵심 지표
         "imbalance": round(imbalance, 3),
         "overheat": round(overheat, 2),
@@ -5276,6 +5297,22 @@ def main():
                     last_tick_ts = ticks_for_metrics[0].get("timestamp", now_ms)
                     fresh_age = (now_ms - last_tick_ts) / 1000.0
 
+                # 🚀 초단기 미세필터 지표 계산
+                ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
+                cv_val = ia_stats.get("cv", 0.0)
+                pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
+                prebreak_band_val = dynamic_prebreak_band(ticks_for_metrics) if ticks_for_metrics else PREBREAK_HIGH_PCT
+                is_prebreak = pre.get("filter_type") == "prebreak"
+                # 베스트호가 깊이
+                try:
+                    u0 = pre.get("ob", {}).get("raw", {}).get("orderbook_units", [])[0]
+                    best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+                except Exception:
+                    best_ask_krw = 0.0
+
+                # CV 이모지 (봇/사람 판단)
+                cv_emoji = "🤖" if cv_val <= 0.45 else ("⚔️" if cv_val >= 1.2 else "")
+
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
@@ -5283,6 +5320,7 @@ def main():
                     f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
                     f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
                     f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
+                    f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
                     f"🔍 경로: {path_str}\n"
                     f"{link_for(m)}")
