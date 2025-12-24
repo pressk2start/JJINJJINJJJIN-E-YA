@@ -423,12 +423,13 @@ def sell_all(market):
     print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
     return place_market_sell(market, actual, price_hint=cur_price)
 
-def final_price_guard(m, initial_price, max_drift=0.008):
+def final_price_guard(m, initial_price, max_drift=None, ticks=None):
     """
-    주문 직전 가격 재확인
+    주문 직전 가격 재확인 (동적 임계치)
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
-    - max_drift: 신호가 대비 허용 상승률 (기본 0.8%)
-    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.5% 구간은
+    - max_drift: 신호가 대비 허용 상승률 (None이면 동적 계산)
+    - ticks: 변동성 계산용 틱 데이터
+    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.2% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
     try:
@@ -440,18 +441,28 @@ def final_price_guard(m, initial_price, max_drift=0.008):
         current_price = js[0].get("trade_price", initial_price)
         drift = (current_price / initial_price - 1.0)
 
-        if drift > max_drift:
+        # 🔧 동적 임계치: 변동성 + 장세 반영
+        if max_drift is None:
+            pstd = price_band_std(ticks or [], sec=10) if ticks else 0.0
+            r = relax_knob()  # 0~1.5
+            base = 0.0075 if not AGGRESSIVE_MODE else 0.010
+            dyn = base + min(0.008, pstd * 0.9) + r * 0.003
+            thr = dyn
+        else:
+            thr = max_drift
+
+        if drift > thr:
             # 평소라면 고점 추격으로 컷
             # 하지만 공격 모드면 일정 구간까지는 허용
-            if AGGRESSIVE_MODE and drift <= (max_drift + 0.015):
+            if AGGRESSIVE_MODE and drift <= (thr + 0.012):
                 print(
-                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% "
-                    f"→ 공격 모드: 추격 진입 허용 (소액/피라미딩 전제)"
+                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+1.2% "
+                    f"→ 공격 모드: 추격 진입 허용"
                 )
                 return True, current_price
 
             # 이 이상은 진짜 너무 튄 거라 컷
-            print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% → 진입 취소")
+            print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% > {thr*100:.2f}% → 진입 취소")
             return False, current_price
 
         return True, current_price
@@ -554,10 +565,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         print(f"[PREBREAK] {m} 포스트체크 통과 → 진입 진행")
 
-    # ★ 공격모드일 경우 가격 가드 완화
-    max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
-
-    ok_guard, current_price = final_price_guard(m, signal_price, max_drift=max_drift)
+    # ★ 동적 가격 가드 (변동성 + 장세 반영)
+    # ticks 전달로 동적 임계치 계산
+    ok_guard, current_price = final_price_guard(m, signal_price, ticks=pre.get("ticks"))
     if not ok_guard:
         tg_send(
             f"⚠️ <b>진입 취소</b> {m}\n"
@@ -625,6 +635,24 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 OPEN_POSITIONS.pop(m, None)  # pending 취소
             _release_entry_lock(m)
             return
+
+    # 🔧 체결충격(impact) 기반 사이징 댐퍼
+    # 베스트호가 25% 초과 사용 시 과도 → 캡
+    try:
+        u0 = pre.get("ob", {}).get("raw", {}).get("orderbook_units", [])[0]
+        best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+    except Exception:
+        best_ask_krw = 0.0
+
+    if best_ask_krw > 0:
+        cap = best_ask_krw * 0.25
+        if krw_to_use > cap:
+            print(f"[IMPACT_CAP] {m} 주문 {krw_to_use:,.0f} > 25% of best-ask {cap:,.0f} → 캡")
+            krw_to_use = int(cap)
+            # confirm이면 half로 다운시프트
+            if entry_mode == "confirm":
+                entry_fraction = 0.5
+                print(f"[IMPACT_CAP] {m} confirm → half 다운그레이드")
 
     krw_to_use = int(krw_to_use)
 
@@ -1769,6 +1797,12 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         else:
             _lose_streak += 1  # 패배 시 연패 증가
             _win_streak = 0    # 🔧 연승 리셋
+
+        # 🔧 연패 3회 시 Pre-break 10분간 중지
+        global _PREBREAK_SUSPEND_UNTIL
+        if _lose_streak >= 3:
+            _PREBREAK_SUSPEND_UNTIL = time.time() + 600  # 10분
+            print(f"[LOSE_STREAK] 연속 {_lose_streak}패 → Pre-break 10분 중지")
 
         # 학습 조건: 10건마다 OR 연속 3패
         should_learn = (
@@ -3021,17 +3055,43 @@ def running_1m_bar(ticks, last_candle=None):
 
 
 # ========================================
+# 🚀 Pre-break 동적 대역 (변동성 기반)
+# ========================================
+_PREBREAK_SUSPEND_UNTIL = 0.0  # 연패 시 일시 중지 타임스탬프
+
+def dynamic_prebreak_band(ticks):
+    """
+    분위기(가격밴드 표준편차, 야간 완화)에 따라 고점 근접 허용폭 자동 조절
+    - 급등/휩쏘 장면에선 더 타이트
+    - 조용하면 살짝 관대
+    """
+    # 10초 가격밴드 표준편차
+    pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+    # 기본 0.20% ± pstd*40% (상한 0.35%)
+    base = PREBREAK_HIGH_PCT  # 0.002
+    band = min(0.0035, base + pstd * 0.40)
+    # 야간 살짝 완화
+    if 0 <= now_kst().hour < 6:
+        band = min(0.0038, band + 0.0004)
+    return band
+
+
+# ========================================
 # 🚀 Pre-break Probe 체크 (고점 근처 선행 진입)
 # ========================================
 def prebreak_probe_check(ticks, candles, ob, tape_stats):
     """
     Pre-break 조건 체크:
-    1. 현재가가 최근 N봉 고점의 0.2% 이내
+    1. 현재가가 최근 N봉 고점의 동적 대역 이내
     2. 테이프 조건 (매수비, 거래속도) 충족
     3. 호가 임밸런스 매수 우위
 
     Returns: (is_prebreak, reason, running_bar)
     """
+    # 🔧 연패 시 Pre-break 일시 중지
+    if time.time() < _PREBREAK_SUSPEND_UNTIL:
+        return False, "prebreak_suspended(lose_streak)", None
+
     if not PREBREAK_ENABLED:
         return False, "prebreak_disabled", None
 
@@ -3056,9 +3116,10 @@ def prebreak_probe_check(ticks, candles, ob, tape_stats):
     # 고점 대비 거리 계산
     dist_from_high = (recent_high - current_price) / recent_high if recent_high > 0 else 1.0
 
-    # 조건 1: 고점 0.2% 이내
-    if dist_from_high > PREBREAK_HIGH_PCT:
-        return False, f"not_near_high({dist_from_high*100:.2f}%>{PREBREAK_HIGH_PCT*100:.1f}%)", running
+    # 🔧 조건 1: 동적 대역 사용 (변동성 기반)
+    dyn_band = dynamic_prebreak_band(ticks)
+    if dist_from_high > dyn_band:
+        return False, f"not_near_high({dist_from_high*100:.2f}%>{dyn_band*100:.2f}%)", running
 
     # 조건 2: 테이프 조건
     if not tape_stats:
@@ -4376,6 +4437,32 @@ def monitor_position(m,
     last_ob_fetch = 0.0
     last_best_bid = None
 
+    # 🔧 CV 기반 틱스탑 디바운스 조정
+    # 봇 느낌(CV 낮음)이면 더 오래 확인, 사람 싸움(CV 높음)이면 빠르게
+    try:
+        init_ticks = get_recent_ticks(m, 100)
+        ia30 = inter_arrival_stats(init_ticks, 30) if init_ticks else {"cv": 1.0}
+        cv = ia30.get("cv", 1.0)
+        debounce_sec = TICK_STOP_DEBOUNCE_SEC
+        debounce_n = TICK_STOP_DEBOUNCE_N
+        if cv <= 0.45:
+            # 봇 가능성 → 더 엄격하게
+            debounce_sec += 1.0
+            debounce_n += 1
+            tick_base = max(tick_base, MIN_TICK_DIST + 2)
+            print(f"[CV_ADJ] {m} cv={cv:.2f} (봇 의심) → debounce↑, tick_base↑")
+        elif cv >= 1.2:
+            # 사람 싸움 → 빠르게 반응
+            debounce_sec = max(1.5, debounce_sec - 0.5)
+            print(f"[CV_ADJ] {m} cv={cv:.2f} (변동성↑) → debounce↓")
+    except Exception:
+        debounce_sec = TICK_STOP_DEBOUNCE_SEC
+        debounce_n = TICK_STOP_DEBOUNCE_N
+
+    # === 🎯 스파이크 반락 퀵컷 상태 ===
+    spike_window = 4.0
+    spike_check_start = time.time()
+
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
@@ -4403,6 +4490,17 @@ def monitor_position(m,
             new_high = curp > best
             best = max(best, curp)
             worst = min(worst, curp)
+
+            # === 🔧 스파이크→즉시 반락 퀵컷 ===
+            # 초단기 들어갔는데 2~4초 만에 스파이크 후 절반 이상 반납하면 즉시 컷
+            if (time.time() - spike_check_start) <= spike_window:
+                gain_now = (curp / entry_price - 1.0)
+                drop_from_peak = (best - curp) / best if best > 0 else 0
+                if gain_now >= 0.007 and drop_from_peak >= 0.004:
+                    # +0.7% 찍고 -0.4% 반락
+                    verdict = "스파이크반락 퀵컷"
+                    outcome_extra = f"(+{gain_now*100:.2f}%→-{drop_from_peak*100:.2f}% from peak)"
+                    break
 
             # === 1) 웜업 구간: 소폭 되돌림 무시 (단, 급락은 즉시 컷)
             alive_sec = time.time() - start_ts
