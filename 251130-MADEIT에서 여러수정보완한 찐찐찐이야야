@@ -773,7 +773,9 @@ def add_auto_position(m, cur_price, reason=""):
     entry_price_old = pos["entry_price"]
     stop_price = pos["stop"]
 
-    add_risk_pct = max(0.0001, RISK_PER_TRADE * ADD_RISK_FRACTION)
+    # 추매도 적응형 리스크 적용 (연패/연승 반영)
+    adaptive = max(0.0001, get_adaptive_risk())
+    add_risk_pct = max(0.0001, adaptive * ADD_RISK_FRACTION)
     qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
     krw_to_use = qty_theoretical * cur_price
 
@@ -3785,7 +3787,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
-    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX * 0.9)
+    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
@@ -4263,7 +4265,8 @@ def monitor_position(m,
             # 💎 브레이크이븐 스텝: +0.4% 도달 시 손절가를 진입가+수수료로 올림
             BREAKEVEN_TRIGGER = 0.004  # +0.4%
             if gain_from_entry >= BREAKEVEN_TRIGGER:
-                breakeven_price = entry_price * (1 + FEE_RATE * 2)  # 수수료 커버
+                # FEE_RATE는 왕복 수수료율(0.1%)이므로 1회만 적용
+                breakeven_price = entry_price * (1 + FEE_RATE)
                 base_stop = max(base_stop, breakeven_price)
 
             # 유효 스탑 = max(기본 동적 SL, 트레일링)
@@ -4312,8 +4315,8 @@ def monitor_position(m,
                         verdict = "TICK_STOP"
                         break
                 else:
-                    # 1틱 이상 회복하면 디바운스 리셋
-                    if ref_price >= trail_stop_px + tick_sz:
+                    # 2틱 이상 회복 또는 1초 경과 시 디바운스 리셋 (휩쏘 재트리거 방지)
+                    if ref_price >= trail_stop_px + tick_sz * 2 or (tick_stop_hits > 0 and (time.time() - tick_stop_first_seen) >= 1.0):
                         tick_stop_hits = 0
 
                 # 5) 하드스탑 백업 (급락 시 즉시 컷)
