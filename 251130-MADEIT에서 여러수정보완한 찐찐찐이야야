@@ -141,6 +141,34 @@ for part in _raw_chats.split(","):
 print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 
 # =========================
+# 🔐 프로세스 간 중복 진입 방지 (파일락)
+# =========================
+def _entry_lock_path(market: str) -> str:
+    return f"/tmp/bot_entry_{market.replace('-', '_')}.lock"
+
+def _try_acquire_entry_lock(market: str, ttl_sec: int = 60) -> bool:
+    """락 획득 시도. 성공하면 True, 이미 락 있으면 False"""
+    path = _entry_lock_path(market)
+    try:
+        if os.path.exists(path):
+            if (time.time() - os.path.getmtime(path)) < ttl_sec:
+                return False
+        with open(path, "w") as f:
+            f.write(str(time.time()))
+        return True
+    except Exception:
+        return False
+
+def _release_entry_lock(market: str):
+    """락 해제 (파일 삭제)"""
+    path = _entry_lock_path(market)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+# =========================
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
 # =========================
 # import uuid, hashlib, jwt  # 상단(8-11줄)에서 이미 import됨
@@ -460,6 +488,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             print(f"[AUTO] 최대 포지션 수 {MAX_POSITIONS}개 도달 → 신규 진입 스킵")
             tg_send_mid(f"⚠️ {m} 신규 진입 대기 (최대 {MAX_POSITIONS}개 포지션 보유 중)")
             OPEN_POSITIONS.pop(m, None)  # pre_signal pending 제거
+            _release_entry_lock(m)
             return
         # ✅ 예약 플래그로 다른 스레드 진입 차단 (pre_signal 없으면 새로 설정)
         if not existing:
@@ -470,6 +499,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         print(f"[AUTO] {m} pre['price'] 없음 → 진입 스킵")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)  # pending 취소
+        _release_entry_lock(m)
         return
 
     # === 하이브리드 진입모드 반영 ===
@@ -502,6 +532,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         )
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)  # pending 취소
+        _release_entry_lock(m)
         return
 
     # === 계좌 & 주문금액 계산 ===
@@ -510,6 +541,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         print("[AUTO] 계좌 조회 실패 → 스킵")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)  # pending 취소
+        _release_entry_lock(m)
         return
 
     krw_bal = 0.0
@@ -522,6 +554,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)  # pending 취소
+        _release_entry_lock(m)
         return
 
     entry_price = current_price
@@ -554,6 +587,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → 스킵")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)  # pending 취소
+            _release_entry_lock(m)
             return
 
     krw_to_use = int(krw_to_use)
@@ -586,6 +620,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 tg_send(f"⚠️ {msg}")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)  # pending 취소
+                _release_entry_lock(m)
                 return
 
         # 평균가 계산 (체결 정보가 있으면)
@@ -603,6 +638,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         tg_send(f"⚠️ 매수 실패 {m}\n{e}")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)  # pending 취소
+        _release_entry_lock(m)
         return
 
     # === 포지션 저장 ===
@@ -729,6 +765,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
+
+    # 🔐 진입 성공 → 락 해제
+    _release_entry_lock(m)
 
 def add_auto_position(m, cur_price, reason=""):
     """
