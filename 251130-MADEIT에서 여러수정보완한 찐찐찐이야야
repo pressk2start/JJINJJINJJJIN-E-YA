@@ -5029,6 +5029,7 @@ def main():
 
             found = 0
             for m in shard:
+              try:  # 🔧 심볼별 예외 격리 (한 심볼 에러가 전체 스캔 중단 방지)
                 c1 = c1_cache.get(m, [])
                 if not c1: continue
 
@@ -5273,6 +5274,15 @@ def main():
                         if pos and pos.get("pre_signal"):
                             OPEN_POSITIONS.pop(m, None)
                     _release_entry_lock(m)
+
+              except Exception as e:
+                # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
+                print(f"[SYMBOL_ERR][{m}] {e}")
+                traceback.print_exc()
+                _release_entry_lock(m)
+                with _POSITION_LOCK:
+                    if OPEN_POSITIONS.get(m, {}).get("state") == "pending":
+                        OPEN_POSITIONS.pop(m, None)
 
             cut_summary()
             if found == 0:
