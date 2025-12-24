@@ -141,6 +141,13 @@ for part in _raw_chats.split(","):
 print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 
 # =========================
+# 🔥 점화 감지 (Ignition Detection) 전역 변수
+# =========================
+_IGNITION_LAST_SIGNAL = {}  # {market: timestamp_ms} 마지막 점화 신호 시각
+_IGNITION_BASELINE_TPS = {}  # {market: tps} 종목별 평시 틱/초
+_IGNITION_LOCK = threading.Lock()
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 _MEMORY_ENTRY_LOCKS = {}  # 메모리 기반 락 (스레드 간)
@@ -3421,6 +3428,137 @@ def prev_high_from_candles(candles, lookback=12, skip_recent=1):
     return max(c.get("high_price", 0) for c in subset)
 
 
+# ========================================
+# 🔥 점화 감지 (Ignition Detection) - 급등 초입 0~30초 내 감지
+# ========================================
+def update_baseline_tps(market: str, ticks, window_sec: int = 300):
+    """
+    평시 틱/초 (baseline TPS) 업데이트
+    - 최근 5분간 틱 데이터로 평균 ticks-per-second 계산
+    - 점화 감지의 상대 임계치 기준으로 사용
+    """
+    if not ticks or len(ticks) < 10:
+        return
+
+    now_ts = ticks[0].get("timestamp", ticks[0].get("ts", 0))
+    cutoff = now_ts - (window_sec * 1000)
+
+    # window_sec 내의 틱만 필터
+    window_ticks = [t for t in ticks if t.get("timestamp", t.get("ts", 0)) >= cutoff]
+
+    if len(window_ticks) < 5:
+        return
+
+    # 틱 수 / 시간(초) = TPS
+    first_ts = window_ticks[-1].get("timestamp", window_ticks[-1].get("ts", 0))
+    last_ts = window_ticks[0].get("timestamp", window_ticks[0].get("ts", 0))
+    duration_sec = max((last_ts - first_ts) / 1000, 1)
+
+    tps = len(window_ticks) / duration_sec
+
+    with _IGNITION_LOCK:
+        # 지수이동평균으로 부드럽게 업데이트
+        old_tps = _IGNITION_BASELINE_TPS.get(market, tps)
+        _IGNITION_BASELINE_TPS[market] = old_tps * 0.8 + tps * 0.2
+
+
+def ignition_detected(
+    market: str,
+    ticks,
+    avg_candle_volume: float,
+    ob=None,
+    cooldown_ms: int = 15000
+) -> tuple:
+    """
+    점화 감지: 급등 시작 0~30초 내 감지
+
+    4요건 중 3개 충족 시 점화:
+    1. 틱 폭주: 최근 10초 틱수 >= 평시의 3배
+    2. 연속 매수: 10초 내 5회 이상 연속 매수
+    3. 가격 임펄스: 0.3% 이상 상승 + 최근 6틱 단조증가
+    4. 거래량 폭발: 10초 거래량 >= 1분평균의 25%
+
+    추가 필터:
+    - 스프레드 안정성 (평시 2배 이하)
+    - 쿨다운 (15초간 재점화 금지)
+
+    Returns: (is_ignition, reason, score)
+    """
+    if not ticks or len(ticks) < 10:
+        return False, "틱부족", 0
+
+    now_ts = ticks[0].get("timestamp", ticks[0].get("ts", int(time.time() * 1000)))
+
+    # ---- 쿨다운 체크 ----
+    with _IGNITION_LOCK:
+        last_signal = _IGNITION_LAST_SIGNAL.get(market, 0)
+        if (now_ts - last_signal) < cooldown_ms:
+            return False, f"쿨다운({(cooldown_ms - (now_ts - last_signal)) / 1000:.1f}초)", 0
+
+    # ---- 최근 10초 윈도우 추출 ----
+    cutoff_10s = now_ts - 10000
+    window = [t for t in ticks if t.get("timestamp", t.get("ts", 0)) >= cutoff_10s]
+
+    if len(window) < 6:
+        return False, "10초윈도우부족", 0
+
+    # ---- 1) 틱 폭주 (상대 임계치) ----
+    with _IGNITION_LOCK:
+        baseline_tps = _IGNITION_BASELINE_TPS.get(market, 0.5)  # 기본값 0.5 tps
+
+    t10 = micro_tape_stats_from_ticks(ticks, 10)
+    # 평시의 3배 이상, 최소 12틱
+    tps_threshold = max(12, 3 * baseline_tps * 10)
+    tps_burst = t10["n"] >= tps_threshold
+
+    # ---- 2) 연속 매수 (10초 윈도우) ----
+    consec_buys = calc_consecutive_buys(window, 10) >= 5
+
+    # ---- 3) 가격 임펄스 (수익률 + 단조증가) ----
+    prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
+    if len(prices) >= 6:
+        ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
+        # 최근 6틱 엄격한 단조증가 (모두 상승)
+        monotone_up = all(b > a for a, b in zip(prices[-6:-1], prices[-5:]))
+        price_impulse = (ret >= 0.003) and monotone_up  # 0.3% 이상 + 연속상승
+    else:
+        ret = 0
+        price_impulse = False
+
+    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 25%) ----
+    vol_burst = t10["krw"] >= 0.25 * avg_candle_volume if avg_candle_volume > 0 else False
+
+    # ---- 스프레드 안정성 필터 (옵션) ----
+    spread_ok = True
+    if ob and ob.get("spread", 0) > 0:
+        # 스프레드가 0.5% 초과하면 불안정으로 판단
+        spread_ok = ob["spread"] <= 0.5
+
+    # ---- 점수 계산 ----
+    score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
+
+    # ---- 점화 판정: 4요건 중 3개 + 스프레드 양호 ----
+    is_ignition = (score >= 3) and spread_ok
+
+    if is_ignition:
+        # 마지막 신호 시각 기록
+        with _IGNITION_LOCK:
+            _IGNITION_LAST_SIGNAL[market] = now_ts
+
+    # 상세 reason 생성
+    details = []
+    details.append(f"틱{'✓' if tps_burst else '✗'}({t10['n']:.0f}>={tps_threshold:.0f})")
+    details.append(f"연매{'✓' if consec_buys else '✗'}")
+    details.append(f"가격{'✓' if price_impulse else '✗'}({ret*100:.2f}%)")
+    details.append(f"거래량{'✓' if vol_burst else '✗'}")
+    if not spread_ok:
+        details.append("스프레드✗")
+
+    reason = ",".join(details)
+
+    return is_ignition, reason, score
+
+
 def atr14_from_candles(candles, period=14):
     if len(candles) < period + 1:
         return None
@@ -3816,6 +3954,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("TICKS_LOW", f"{m} no ticks")
         return None
 
+    # 🔥 평시 TPS 업데이트 (점화 감지용)
+    update_baseline_tps(m, ticks)
+
     # === 테이프 지표 (stage1_gate용) ===
     t15 = micro_tape_stats_from_ticks(ticks, 15)
     t45 = micro_tape_stats_from_ticks(ticks, 45)
@@ -3849,6 +3990,48 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             "entry_mode": "probe",  # ✅ 선행진입은 강제 probe (소액 탐색)
         }
         return pre
+
+    # ========================================
+    # 🔥 점화 감지 (Ignition Detection) - 급등 초입 0~30초 내 감지
+    # ========================================
+    avg_candle_vol = vol_ma_from_candles(c1, period=20)
+    ignition_ok, ignition_reason, ignition_score = ignition_detected(
+        market=m,
+        ticks=ticks,
+        avg_candle_volume=avg_candle_vol,
+        ob=ob,
+        cooldown_ms=15000
+    )
+
+    if ignition_ok:
+        print(f"[🔥IGNITION] {m} → {ignition_reason} (score={ignition_score})")
+        # 점화 감지 시 최소 기본조건만 체크 후 즉시 진입
+        # (스프레드, 거래대금만 체크)
+        if ob["spread"] <= GATE_SPREAD_MAX and current_volume >= GATE_VOL_MIN:
+            accel = calc_flow_acceleration(ticks)
+            imbalance = calc_orderbook_imbalance(ob)
+            pre = {
+                "price": cur["trade_price"],
+                "change": price_change,
+                "current_volume": current_volume,
+                "volume_surge": current_volume / max(avg_candle_vol, 1),
+                "ob": ob,
+                "tape": twin,
+                "ticks": ticks,
+                "flow_accel": accel,
+                "imbalance": imbalance,
+                "turn_pct": turn * 100,
+                "spread": ob["spread"],
+                "buy_ratio": twin["buy_ratio"],
+                "mega": mega,
+                "filter_type": "ignition",
+                "ignition_reason": ignition_reason,
+                "ignition_score": ignition_score,
+                "entry_mode": "half",  # 점화 감지는 half (50%) 진입
+            }
+            return pre
+        else:
+            cut("IGNITION_BLOCKED", f"{m} 점화감지but스프레드/거래대금미달")
 
     # 🔥 시그널 체크 제거 - stage1_gate가 유일한 필터
     # (봇매집/메가/투그린 등 중복 로직 삭제)
