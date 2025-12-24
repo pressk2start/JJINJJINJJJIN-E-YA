@@ -472,8 +472,21 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             OPEN_POSITIONS.pop(m, None)  # pending 취소
         return
 
-    # 🔧 진입모드 단순화: 항상 confirm (probe/half 제거)
-    mode_emoji = "🔥"
+    # === 하이브리드 진입모드 반영 ===
+    entry_mode = pre.get("entry_mode", "confirm")
+
+    if entry_mode == "probe":
+        entry_fraction = 0.10   # 🔧 10%로 축소 (소액 탐색)
+        mode_emoji = "🧭"
+    elif entry_mode == "half":
+        entry_fraction = 0.50   # 🔧 50% 사이즈 (중간 회전율)
+        mode_emoji = "⚡"
+    elif entry_mode == "confirm":
+        entry_fraction = 1.0    # 전체 금액 (확정 진입)
+        mode_emoji = "🔥"
+    else:
+        entry_fraction = 1.0
+        mode_emoji = "🤖"
 
     # ★ 공격모드일 경우 가격 가드 완화
     max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
@@ -517,8 +530,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # ✅ 최근 승률 기반 동적 리스크
     adaptive_risk = get_adaptive_risk()
 
-    # === 리스크 계산 ===
+    # === 하이브리드 진입 구조 ===
     risk_to_use = adaptive_risk * SEED_RISK_FRACTION if USE_PYRAMIDING else adaptive_risk
+    risk_to_use *= entry_fraction  # probe는 리스크 축소 반영
 
     base_qty = calc_position_size(
         entry_price,
@@ -529,12 +543,18 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     krw_to_use = base_qty * entry_price
 
-    # 🔧 최소 주문금액 5000원
-    if krw_to_use < 5000:
-        print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < 5,000원 → 스킵")
-        with _POSITION_LOCK:
-            OPEN_POSITIONS.pop(m, None)
-        return
+    # 🔧 probe는 최소 7000원, confirm은 5000원
+    min_order_krw = 7000 if entry_mode == "probe" else 5000
+    if krw_to_use < min_order_krw:
+        # probe인데 금액 부족하면 7000원으로 강제 설정
+        if entry_mode == "probe" and krw_bal >= 7000:
+            krw_to_use = 7000
+            print(f"[AUTO] probe 최소금액 적용: {krw_to_use:,.0f}원")
+        else:
+            print(f"[AUTO] 주문금액 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → 스킵")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)  # pending 취소
+            return
 
     krw_to_use = int(krw_to_use)
 
@@ -594,7 +614,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "sl_pct": eff_sl_pct,
             "state": "open",
             "last_add_ts": 0.0,
-            "entry_ts": time.time(),
+            "entry_mode": pre.get("entry_mode", "confirm"),
+            "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
         }
 
     slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
@@ -637,11 +658,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{surge_str}{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
 
-    # 🔧 진입 라벨 (probe/half 제거로 단순화)
-    mode_label = "자동매수"
-    entry_reason = f"게이트통과 ({detail_str})"
+    # 🔧 진입 모드별 라벨
+    if entry_mode == "confirm":
+        mode_label = "확정진입"
+        entry_reason = f"킬러충족 ({detail_str})"
+    else:
+        mode_label = "탐색진입"
+        entry_reason = f"탐색 ({detail_str})"
 
-    # 🔧 실제 비율 계산
+    # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
     actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
 
     # 🔍 3단계 경로 표시 (분석용)
@@ -693,6 +718,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "volume_surge": pre.get("volume_surge", 1.0),
                 "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
                 "score": pre.get("score", 0),
+                "entry_mode": entry_mode,
                 "detect_type": pre.get("detect_type", "normal"),
                 "trigger_type": "+".join(trigger_list) if trigger_list else "없음",
                 "filter_type": pre.get("filter_type", "기본통과"),
@@ -817,6 +843,7 @@ def add_auto_position(m, cur_price, reason=""):
         pos["volume"] = new_vol
         pos["added"] = True
         pos["last_add_ts"] = time.time()
+        pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
 
         # 🔧 FIX: 추매 후 손절가 재계산 (평단이 바뀌었으므로)
         try:
@@ -1562,7 +1589,7 @@ PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시
 FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
     "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
-    "fresh", "score",
+    "fresh", "score", "entry_mode",
     "detect_type", "trigger_type", "filter_type",  # 🔍 경로 분석용
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
     "pnl_pct", "result", "hold_sec"
@@ -4050,7 +4077,10 @@ def monitor_position(m,
     strong_mode = False          # 강세 확인 후 트레일링 모드
     strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
 
-    # 🔧 probe 모드 폐지 - 항상 confirm
+    # === 포지션 모드 (probe / confirm) ===
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m, {})
+    entry_mode = pos.get("entry_mode", "confirm")
 
     # === 🎯 틱 기반 트레일링 스탑 상태 ===
     tick_stop_armed = False
@@ -4114,8 +4144,44 @@ def monitor_position(m,
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
+            
+            # === PROBE → CONFIRM 전환 로직 ===
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m, {})
 
-            # 🔧 PROBE → CONFIRM 전환 로직 제거 (probe 모드 폐지)
+            if pos.get("entry_mode") == "probe":
+                # 전환 조건: 일정 수익 이상 + 거래속도 정상 + 매수세 유지
+                t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
+                gain_now = (curp / entry_price - 1.0)
+
+                strong_flow = (
+                    t15_now["buy_ratio"] >= 0.58
+                    and t15_now["krw_per_sec"] >= 18000
+                    and uptick_streak_from_ticks(ticks, need=2)
+                )
+
+                if gain_now >= 0.012 and strong_flow:
+                    add_reason = f"상승확정 (수익+{gain_now*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} 초당{t15_now['krw_per_sec']/1000:.0f}K)"
+                    ok_add, new_entry = add_auto_position(m, curp, add_reason)
+                    if ok_add and new_entry:
+                        # 진입모드 승격
+                        with _POSITION_LOCK:
+                            pos["entry_mode"] = "confirm"
+                            pos["entry_price"] = new_entry
+                            pos["added"] = True
+                            pos["last_add_ts"] = time.time()
+                            OPEN_POSITIONS[m] = pos
+
+                        tg_send_mid(
+                            f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
+                            f"추매 후 평단: {fmt6(new_entry)}원"
+                        )
+
+                        # 동적 손절 재계산
+                        c1_for_sl = get_minutes_candles(1, m, 20)
+                        base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
+                        trail_armed = False  # 새 기준으로 트레일링 리셋
 
             if (not trail_armed) and gain_from_entry >= TRAIL_ARM_GAIN:
                 trail_armed = True
@@ -4335,7 +4401,26 @@ def monitor_position(m,
         if AUTO_TRADE and m in OPEN_POSITIONS and not reentry:
             remonitor_until_close(m, entry_price, pre, tight_mode)
 
-        # 🔧 probe 손절 후 재진입 로직 제거 (probe 모드 폐지)
+        # ===========================================
+        # 3) probe 손절 후 빠른 재진입 허용 로직
+        # ===========================================
+        if AUTO_TRADE and verdict and "손절" in verdict:
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(m)
+                if pos and pos.get("entry_mode") == "probe":
+                    # probe 손절 시 재진입 쿨다운 최소화
+                    REMONITOR_QUICK_COOLDOWN_SEC = 120  # 2분 쿨다운
+                    REMONITOR_WINDOW_MINUTES = 10       # 10분 내 동일 종목 재기회 허용
+
+                    # 최근 종료 시각 기록
+                    pos["last_exit_ts"] = time.time()
+                    OPEN_POSITIONS[m] = pos
+
+                    # 🌀 probe 손절 감지 → 재진입 모드 (알림 비활성화)
+
+                    # 빠른 재모니터링 예약
+                    time.sleep(REMONITOR_QUICK_COOLDOWN_SEC)
+                    remonitor_until_close(m, entry_price, pre, tight_mode)
 
         # 👇 이 return 은 if 바깥에서 항상 실행되게
         return (
@@ -4695,16 +4780,25 @@ def main():
                     }
                 }
 
-                # 🔧 probe/confirm 분기 제거 - 항상 confirm 모드
                 if all_killer:
-                    print(f"[KILLER] {m} 킬러조건 충족: 대금={current_vol/1e8:.1f}억, 배수={volume_surge:.1f}x, 매수비={buy_ratio:.0%}, 회전={turn:.1%}, 임밸={imbalance:.2f}")
+                    pre["entry_mode"] = "confirm"
+                    print(f"[CONFIRM] {m} 킬러조건 충족: 거래대금={current_vol/1e8:.1f}억, 배수={volume_surge:.1f}x, 매수비={buy_ratio:.0%}, 회전율={turn:.1%}, 임밸={imbalance:.2f}")
+                else:
+                    pre["entry_mode"] = "probe"
+                    # 🔍 DEBUG: probe 모드에서도 값 확인
+                    print(f"[PROBE] {m} 대금={current_vol/1e8:.2f}억, 배수={volume_surge:.1f}x, pre.current_volume={pre.get('current_volume', 'MISSING')}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
                 # 🔧 FIX: score/filter_type을 pre에 복사 (자동매수 알람에서 사용)
                 pre["score"] = payload.get("score", 0)
-                pre["filter_type"] = payload.get("filter_type", "stage1_gate")
+                pre["filter_type"] = payload.get("filter_type", "기본통과")
+
+                # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
+                # 조건: 임밸 >= 0.6 AND 매수비 >= 63.5% (정밀도 ~82%)
+                if payload.get("is_precision_pocket"):
+                    pre["entry_mode"] = "confirm"  # probe → confirm 승격
 
                 # === 6초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
