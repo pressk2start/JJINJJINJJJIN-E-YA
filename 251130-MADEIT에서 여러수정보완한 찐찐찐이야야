@@ -213,6 +213,30 @@ def _release_entry_lock(market: str):
     except Exception:
         pass
 
+
+from contextlib import contextmanager
+
+@contextmanager
+def entry_lock(market: str, ttl_sec: int = 60):
+    """엔트리 락 컨텍스트 매니저 - 안전한 락 획득/해제"""
+    got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec)
+    try:
+        yield got
+    finally:
+        if got:
+            _release_entry_lock(market)
+
+
+def get_available_krw(accounts) -> float:
+    """KRW 가용잔고 계산 (locked 반영)"""
+    for a in accounts:
+        if a.get("currency") == "KRW":
+            bal = float(a.get("balance", "0") or 0)
+            locked = float(a.get("locked", "0") or 0)
+            return max(0.0, bal - locked)
+    return 0.0
+
+
 # =========================
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
 # =========================
@@ -394,8 +418,10 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     - total_equity * risk_pct 만큼만 최대 손실 허용
     """
     risk_krw = total_equity * risk_pct
+    # 🔧 FIX: DYN_SL_MIN과 일치 (0.3% 최소 손절폭)
+    min_sl_pct = 0.003  # DYN_SL_MIN과 동일
     per_unit_loss = max(entry_price - stop_price,
-                        entry_price * 0.004)  # 🔧 최소 0.4% 방어 (실제 스탑 기준 우선)
+                        entry_price * min_sl_pct)
     qty = risk_krw / per_unit_loss
     return max(qty, 0)
 
@@ -510,11 +536,18 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% > {thr*100:.2f}% → 진입 취소")
             return False, current_price
 
+        # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
+        down_thr = max(0.006, thr * 0.5)  # 0.6% 또는 상단의 절반
+        if drift < -down_thr:
+            print(f"[GUARD] {m} 가격 급락 {drift*100:.2f}% < -{down_thr*100:.2f}% → 진입 취소")
+            return False, current_price
+
         return True, current_price
 
     except Exception as e:
         print(f"[GUARD_ERR] {m}: {e}")
-        return True, initial_price
+        # 🔧 FIX: 보수적 모드에서는 API 실패 시 진입 취소
+        return (True if AGGRESSIVE_MODE else False), initial_price
 
 # =========================
 # 🔥 자동 매수 진입
@@ -635,11 +668,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _release_entry_lock(m)
         return
 
-    krw_bal = 0.0
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            krw_bal = float(a.get("balance", "0"))
-            break
+    # 🔧 FIX: locked 반영한 가용잔고 계산
+    krw_bal = get_available_krw(accounts)
 
     if krw_bal < 6000:
         print(f"[AUTO] KRW 부족 ({krw_bal:,.0f}) → 스킵")
@@ -943,11 +973,8 @@ def add_auto_position(m, cur_price, reason=""):
         print("[AUTO_ADD] 계좌 조회 실패")
         return False, None
 
-    krw_bal = 0.0
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            krw_bal = float(a.get("balance", "0"))
-            break
+    # 🔧 FIX: locked 반영한 가용잔고 계산
+    krw_bal = get_available_krw(accounts)
 
     if krw_bal < 6000:
         print(f"[AUTO_ADD] KRW 부족({krw_bal:,.0f}) → 추매 스킵")
