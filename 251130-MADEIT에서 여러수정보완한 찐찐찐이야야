@@ -518,6 +518,42 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         entry_fraction = 1.0
         mode_emoji = "🤖"
 
+    # ========================================
+    # 🚀 Pre-break 전용 2초 포스트체크
+    # ========================================
+    filter_type = pre.get("filter_type", "")
+    if filter_type == "prebreak" and PREBREAK_POSTCHECK_SEC > 0:
+        print(f"[PREBREAK] {m} → {PREBREAK_POSTCHECK_SEC}초 포스트체크 시작")
+        time.sleep(PREBREAK_POSTCHECK_SEC)
+
+        # 틱 재조회
+        ticks_recheck = get_recent_ticks(m, 100)
+        if not ticks_recheck:
+            print(f"[PREBREAK] {m} 포스트체크 실패: 틱 없음")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            _release_entry_lock(m)
+            return
+
+        t15_recheck = micro_tape_stats_from_ticks(ticks_recheck, 15)
+
+        # 매수비/거래속도 재확인
+        if t15_recheck["buy_ratio"] < PREBREAK_BUY_MIN * 0.9:  # 10% 여유
+            print(f"[PREBREAK] {m} 포스트체크 실패: 매수비 하락 ({t15_recheck['buy_ratio']:.0%})")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            _release_entry_lock(m)
+            return
+
+        if t15_recheck["krw_per_sec"] < PREBREAK_KRW_PER_SEC_MIN * 0.7:  # 30% 여유
+            print(f"[PREBREAK] {m} 포스트체크 실패: 거래속도 하락 ({t15_recheck['krw_per_sec']/1000:.0f}K)")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            _release_entry_lock(m)
+            return
+
+        print(f"[PREBREAK] {m} 포스트체크 통과 → 진입 진행")
+
     # ★ 공격모드일 경우 가격 가드 완화
     max_drift = 0.012 if not AGGRESSIVE_MODE else 0.025
 
@@ -709,9 +745,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     detect_type = pre.get("detect_type", "normal")
     trigger_list = pre.get("trigger_type", [])
     filter_type = pre.get("filter_type", "기본통과")  # payload에서 복사된 값
-    detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+
+    # 🚀 Pre-break 선행진입 표시
+    if filter_type == "prebreak":
+        detect_str = "🚀선행"
+        filter_display = "고점돌파대기"
+    else:
+        detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+        filter_display = filter_type
+
     trigger_str = "+".join(trigger_list) if trigger_list else "없음"
-    path_str = f"{detect_str}→{trigger_str}→{filter_type}"
+    path_str = f"{detect_str}→{trigger_str}→{filter_display}"
 
     tg_send(
         f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
@@ -1431,6 +1475,16 @@ GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정
 GATE_VOL_MIN = 300_000    # 거래대금 하한 (원) - detect에서 이동
 GATE_SURGE_MIN = 1.2      # 거래량 급등 하한 (x) - detect에서 이동
 GATE_PRICE_MIN = 0.002    # 가격변동 하한 (%) - detect에서 이동
+
+# ========================================
+# 🚀 Pre-break Probe 설정 (선행 진입)
+# ========================================
+PREBREAK_ENABLED = True               # Pre-break 활성화
+PREBREAK_HIGH_PCT = 0.002             # 고점 대비 0.2% 이내
+PREBREAK_POSTCHECK_SEC = 2            # probe 전용 2초 포스트체크
+PREBREAK_BUY_MIN = 0.60               # 최소 매수비 60%
+PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
+PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 허수 방어
 MIN_SUSTAINED_SECONDS = 120
@@ -2892,6 +2946,143 @@ def calc_flow_acceleration(ticks):
     return t5s["krw_per_sec"] / t15s["krw_per_sec"]
 
 
+# ========================================
+# 🚀 러닝 1분봉 (Running 1m Bar) - 종가 확정 전 실시간 계산
+# ========================================
+def running_1m_bar(ticks, last_candle=None):
+    """
+    틱 데이터로 현재 진행 중인 1분봉을 실시간 계산
+    - 종가 확정 전에도 현재 가격/거래량/변동폭 파악 가능
+    - last_candle이 있으면 이전 봉 기준으로 변동률 계산
+
+    Returns: {
+        'open': 시가,
+        'high': 고가,
+        'low': 저가,
+        'close': 현재가 (진행 중),
+        'volume_krw': 거래대금,
+        'tick_count': 틱 수,
+        'buy_ratio': 매수 비율,
+        'change_from_prev': 이전봉 대비 변동률,
+        'range_pct': 진행 중 봉의 변동폭 (high-low)/low
+    }
+    """
+    if not ticks:
+        return None
+
+    now_ms = int(time.time() * 1000)
+    minute_start = (now_ms // 60000) * 60000  # 현재 분의 시작 시점
+
+    # 현재 분 내의 틱만 필터
+    current_ticks = [t for t in ticks if t.get("timestamp", 0) >= minute_start]
+
+    if not current_ticks:
+        # 현재 분 틱이 없으면 최근 10초 틱으로 대체
+        fallback_cutoff = now_ms - 10000
+        current_ticks = [t for t in ticks if t.get("timestamp", 0) >= fallback_cutoff]
+        if not current_ticks:
+            return None
+
+    prices = [t.get("trade_price", 0) for t in current_ticks if t.get("trade_price", 0) > 0]
+    if not prices:
+        return None
+
+    # OHLC 계산 (틱은 최신순 정렬이므로 reverse 필요)
+    prices_chrono = list(reversed(prices))  # 시간순 정렬
+    open_price = prices_chrono[0]
+    high_price = max(prices)
+    low_price = min(prices)
+    close_price = prices_chrono[-1]  # 가장 최근 가격
+
+    # 거래대금/매수비
+    volume_krw = sum(t.get("trade_price", 0) * t.get("trade_volume", 0) for t in current_ticks)
+    buys = sum(1 for t in current_ticks if t.get("ask_bid") == "BID")
+    buy_ratio = buys / len(current_ticks) if current_ticks else 0
+
+    # 이전봉 대비 변동률
+    change_from_prev = 0.0
+    if last_candle and last_candle.get("trade_price", 0) > 0:
+        change_from_prev = close_price / last_candle["trade_price"] - 1
+
+    # 진행 중 봉의 변동폭
+    range_pct = (high_price - low_price) / low_price if low_price > 0 else 0
+
+    return {
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume_krw": volume_krw,
+        "tick_count": len(current_ticks),
+        "buy_ratio": buy_ratio,
+        "change_from_prev": change_from_prev,
+        "range_pct": range_pct,
+    }
+
+
+# ========================================
+# 🚀 Pre-break Probe 체크 (고점 근처 선행 진입)
+# ========================================
+def prebreak_probe_check(ticks, candles, ob, tape_stats):
+    """
+    Pre-break 조건 체크:
+    1. 현재가가 최근 N봉 고점의 0.2% 이내
+    2. 테이프 조건 (매수비, 거래속도) 충족
+    3. 호가 임밸런스 매수 우위
+
+    Returns: (is_prebreak, reason, running_bar)
+    """
+    if not PREBREAK_ENABLED:
+        return False, "prebreak_disabled", None
+
+    if not ticks or not candles or len(candles) < 5:
+        return False, "insufficient_data", None
+
+    # 러닝 1분봉 계산
+    last_candle = candles[-1] if candles else None
+    running = running_1m_bar(ticks, last_candle)
+    if not running:
+        return False, "no_running_bar", None
+
+    current_price = running["close"]
+
+    # 최근 12봉 고점 (약 12분)
+    lookback = min(12, len(candles))
+    recent_high = max(c.get("high_price", c.get("trade_price", 0)) for c in candles[-lookback:])
+
+    # 현재 러닝바 고점도 포함
+    recent_high = max(recent_high, running["high"])
+
+    # 고점 대비 거리 계산
+    dist_from_high = (recent_high - current_price) / recent_high if recent_high > 0 else 1.0
+
+    # 조건 1: 고점 0.2% 이내
+    if dist_from_high > PREBREAK_HIGH_PCT:
+        return False, f"not_near_high({dist_from_high*100:.2f}%>{PREBREAK_HIGH_PCT*100:.1f}%)", running
+
+    # 조건 2: 테이프 조건
+    if not tape_stats:
+        return False, "no_tape", running
+
+    buy_ratio = tape_stats.get("buy_ratio", 0)
+    krw_per_sec = tape_stats.get("krw_per_sec", 0)
+
+    if buy_ratio < PREBREAK_BUY_MIN:
+        return False, f"low_buy_ratio({buy_ratio:.0%}<{PREBREAK_BUY_MIN:.0%})", running
+
+    if krw_per_sec < PREBREAK_KRW_PER_SEC_MIN:
+        return False, f"low_flow({krw_per_sec/1000:.0f}K<{PREBREAK_KRW_PER_SEC_MIN/1000:.0f}K)", running
+
+    # 조건 3: 호가 임밸런스
+    if ob:
+        imbalance = calc_orderbook_imbalance(ob)
+        if imbalance < PREBREAK_IMBALANCE_MIN:
+            return False, f"weak_imbalance({imbalance:.2f}<{PREBREAK_IMBALANCE_MIN:.2f})", running
+
+    # 모든 조건 충족: Pre-break 트리거
+    return True, f"prebreak_ok(dist={dist_from_high*100:.2f}%,buy={buy_ratio:.0%},flow={krw_per_sec/1000:.0f}K)", running
+
+
 # ===== Bot Heuristics =====
 def _pct(a, b):
     try:
@@ -3443,6 +3634,33 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
     turn = twin["krw"] / max(ob["depth_krw"], 1)
 
+    # ========================================
+    # 🚀 Pre-break 선행 진입 체크 (stage1_gate 전에 먼저 실행)
+    # ========================================
+    prebreak_ok, prebreak_reason, running_bar = prebreak_probe_check(ticks, c1, ob, twin)
+    if prebreak_ok:
+        print(f"[PREBREAK] {m} → {prebreak_reason}")
+        # Pre-break 트리거: 선행 진입 payload 반환
+        pre = {
+            "price": running_bar["close"],
+            "change": running_bar["change_from_prev"],
+            "current_volume": running_bar["volume_krw"],
+            "volume_surge": 1.0,  # Pre-break는 surge 계산 전
+            "ob": ob,
+            "tape": twin,
+            "ticks": ticks,
+            "flow_accel": calc_flow_acceleration(ticks),
+            "imbalance": calc_orderbook_imbalance(ob),
+            "turn_pct": turn * 100,
+            "spread": ob["spread"],
+            "buy_ratio": twin["buy_ratio"],
+            "mega": False,
+            "filter_type": "prebreak",
+            "running_bar": running_bar,
+            "prebreak_reason": prebreak_reason,
+        }
+        return pre
+
     # 🔥 시그널 체크 제거 - stage1_gate가 유일한 필터
     # (봇매집/메가/투그린 등 중복 로직 삭제)
 
@@ -3491,18 +3709,27 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
 def final_check_leader(m, pre, tight_mode=False):
     """
-    🔧 단순 패스쓰루: stage1_gate에서 모든 필터링 완료
+    🔧 단순 패스쓰루: stage1_gate/prebreak에서 모든 필터링 완료
     호환성을 위해 함수는 유지하되, 바로 payload 반환
     """
     t = pre["tape"]
     ob = pre["ob"]
 
-    # 최소 틱수만 체크 (이건 stage1_gate 전에 필요)
-    if t["n"] < MIN_TICKS_COUNT:
-        cut("TICKS_LOW", f"{m} {t['n']}")
-        return None
+    # Pre-break는 틱수 체크 스킵 (이미 조건 충족)
+    filter_type = pre.get("filter_type", "stage1_gate")
+    if filter_type != "prebreak":
+        # 최소 틱수만 체크 (이건 stage1_gate 전에 필요)
+        if t["n"] < MIN_TICKS_COUNT:
+            cut("TICKS_LOW", f"{m} {t['n']}")
+            return None
 
-    # 이미 stage1_gate에서 모든 필터링 완료
+    # 필터 타입에 따른 표시
+    if filter_type == "prebreak":
+        display_filter = "🚀선행진입"
+    else:
+        display_filter = "통합게이트"
+
+    # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
     return {
         "price": pre["price"],
@@ -3516,7 +3743,8 @@ def final_check_leader(m, pre, tight_mode=False):
         "imbalance": round(pre.get("imbalance", 0), 3),
         "score": 0,
         "is_precision_pocket": False,
-        "filter_type": "통합게이트",
+        "filter_type": display_filter,
+        "is_prebreak": filter_type == "prebreak",
     }
 
 
