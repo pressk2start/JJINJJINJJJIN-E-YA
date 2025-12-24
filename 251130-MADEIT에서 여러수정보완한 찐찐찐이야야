@@ -3403,6 +3403,24 @@ def ema_last(vals, period):
     return ema_series(vals, period)[-1]
 
 
+def vol_ma_from_candles(candles, period=20):
+    """최근 N봉 거래량 평균 (거래대금 기준)"""
+    if len(candles) < period:
+        return 0
+    vols = [c.get("candle_acc_trade_price", 0) for c in candles[-period:]]
+    return sum(vols) / len(vols) if vols else 0
+
+
+def prev_high_from_candles(candles, lookback=12, skip_recent=1):
+    """최근 N봉 중 고점 (최근 skip_recent봉 제외)"""
+    if len(candles) < lookback + skip_recent:
+        return 0
+    subset = candles[-(lookback + skip_recent):-skip_recent] if skip_recent > 0 else candles[-lookback:]
+    if not subset:
+        return 0
+    return max(c.get("high_price", 0) for c in subset)
+
+
 def atr14_from_candles(candles, period=14):
     if len(candles) < period + 1:
         return None
@@ -3600,7 +3618,8 @@ def meets_volume_surge(current_volume, past_volumes):
 # ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
 def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
-                 current_volume=0, price_change=0, mega=False):
+                 current_volume=0, price_change=0, mega=False,
+                 ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0):
     """
     1단계 진입 게이트: 단일 통합 필터 (final_check 통합)
 
@@ -3616,15 +3635,22 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     - GATE_SURGE_MIN: 거래량급등 하한 (detect에서 이동)
     - GATE_PRICE_MIN: 가격변동 하한 (detect에서 이동)
 
+    [🚀 신규 조건 - 급등 초입 감지 강화]
+    - ema20_breakout: 현재가 > EMA20
+    - high_breakout: 현재가 > 최근 12봉 고점
+    - vol_vs_ma: 현재 거래량 / 20봉 평균 거래량
+
     Returns: (allow, reason)
     """
     # === 거래대금 컷 (detect에서 이동) ===
     if current_volume < GATE_VOL_MIN and not mega:
         return False, f"거래대금부족(vol {current_volume/1000:.0f}K<{GATE_VOL_MIN/1000:.0f}K)"
 
-    # === 거래량 급등 하한 컷 (detect에서 이동) ===
-    if volume_surge < GATE_SURGE_MIN and not mega:
-        return False, f"급등부족(surge {volume_surge:.2f}x<{GATE_SURGE_MIN}x)"
+    # === 🚀 거래량 급등 조건 개선: MA 대비 2배 이상 ===
+    # 기존 surge 조건과 새 vol_vs_ma 조건 중 하나만 충족해도 통과
+    vol_ok = (volume_surge >= GATE_SURGE_MIN) or (vol_vs_ma >= 2.0)
+    if not vol_ok and not mega:
+        return False, f"거래량부족(surge {volume_surge:.2f}x, MA대비 {vol_vs_ma:.1f}x)"
 
     # === 가격변동 하한 컷 (detect에서 이동) ===
     if price_change < GATE_PRICE_MIN and not mega:
@@ -3671,7 +3697,28 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if imbalance < GATE_IMBALANCE_MIN:
         return False, f"호가균형취약(imb {imbalance:.2f}<{GATE_IMBALANCE_MIN})"
 
-    return True, f"통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f})"
+    # === 🚀 신규 조건: EMA20 위 + 고점 돌파 (급등 초입 감지) ===
+    # 둘 다 충족하면 강한 신호, 하나만 충족해도 통과 (기존 호환)
+    breakout_score = int(ema20_breakout) + int(high_breakout)
+
+    # 강한 신호: EMA20 위 + 고점 돌파 + 거래량 2배
+    is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 2.0)
+
+    # 기존 조건만으로도 통과 가능 (하위 호환)
+    # 하지만 EMA20 아래이고 고점 돌파도 아니면 스킵 (신규 필터)
+    if breakout_score == 0 and vol_vs_ma < 2.0:
+        return False, f"돌파조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x)"
+
+    # 통과 reason에 돌파 정보 포함
+    breakout_info = ""
+    if is_strong_breakout:
+        breakout_info = "🚀강한돌파,"
+    elif ema20_breakout:
+        breakout_info = "EMA↑,"
+    elif high_breakout:
+        breakout_info = "고점↑,"
+
+    return True, f"{breakout_info}통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f},MA대비={vol_vs_ma:.1f}x)"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -3813,6 +3860,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     imbalance = calc_orderbook_imbalance(ob)
     fresh_ok = last_two_ticks_fresh(ticks)
 
+    # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
+    cur_price = cur["trade_price"]
+    closes = [x["trade_price"] for x in c1]
+    ema20 = ema_last(closes, 20) if len(closes) >= 20 else None
+    ema20_breakout = (ema20 is not None and cur_price > ema20)
+
+    prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
+    high_breakout = (prev_high > 0 and cur_price > prev_high)
+
+    vol_ma20 = vol_ma_from_candles(c1, period=20)
+    vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
+
     gate_ok, gate_reason = stage1_gate(
         spread=ob["spread"],
         accel=accel,
@@ -3823,7 +3882,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         fresh_ok=fresh_ok,
         current_volume=current_volume,
         price_change=price_change,
-        mega=mega
+        mega=mega,
+        # 🚀 신규 파라미터
+        ema20_breakout=ema20_breakout,
+        high_breakout=high_breakout,
+        vol_vs_ma=vol_vs_ma
     )
     if not gate_ok:
         cut("STAGE1_GATE", f"{m} {gate_reason}")
@@ -4821,16 +4884,28 @@ def monitor_position(m,
                     verdict = "THIN_PROFIT"
                     break
 
-            # ③ 강세 모드: 고점 추적 + 고점 대비 -0.2% 하락 시 매도
+            # ③ 강세 모드: 고점 추적 + 동적 트레일링 (수익률에 따라 폭 확대)
             if strong_mode:
                 # 고점 갱신
                 if curp > strong_peak:
                     strong_peak = curp
 
+                # 🚀 동적 트레일링 폭: 수익률에 따라 확대
+                # +5% 이상 → -3% 허용, +3% 이상 → -2%, +1% 이상 → -1%, 기본 -0.2%
+                peak_gain = (strong_peak / entry_price - 1.0)
+                if peak_gain >= 0.05:
+                    dynamic_trail_drop = 0.03  # 3%
+                elif peak_gain >= 0.03:
+                    dynamic_trail_drop = 0.02  # 2%
+                elif peak_gain >= 0.01:
+                    dynamic_trail_drop = 0.01  # 1%
+                else:
+                    dynamic_trail_drop = STRONG_TRAIL_DROP  # 0.2%
+
                 # 고점 대비 하락률 계산
                 drop_from_strong_peak = (strong_peak - curp) / strong_peak
 
-                if drop_from_strong_peak >= STRONG_TRAIL_DROP:
+                if drop_from_strong_peak >= dynamic_trail_drop:
                     final_gain = (curp / entry_price - 1.0)
                     peak_gain = (strong_peak / entry_price - 1.0)
                     close_auto_position(m, f"트레일링 익절 진입 후 +{final_gain*100:.2f}% 수익 (최고+{peak_gain*100:.2f}%에서 -{drop_from_strong_peak*100:.1f}% 하락)")
