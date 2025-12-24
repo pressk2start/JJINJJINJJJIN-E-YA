@@ -649,10 +649,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if krw_to_use > cap:
             print(f"[IMPACT_CAP] {m} 주문 {krw_to_use:,.0f} > 25% of best-ask {cap:,.0f} → 캡")
             krw_to_use = int(cap)
-            # confirm이면 half로 다운시프트
+            # confirm이면 half로 다운시프트 + 금액 재보정
             if entry_mode == "confirm":
                 entry_fraction = 0.5
-                print(f"[IMPACT_CAP] {m} confirm → half 다운그레이드")
+                # ✅ 다운그레이드가 실제 금액에도 반영되도록 추가 보정
+                half_limit = int(krw_bal * adaptive_risk * 0.5)
+                krw_to_use = int(min(krw_to_use, half_limit))
+                print(f"[IMPACT_CAP] {m} confirm → half & 금액 재보정 {krw_to_use:,.0f}")
 
     krw_to_use = int(krw_to_use)
 
@@ -3719,6 +3722,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             "filter_type": "prebreak",
             "running_bar": running_bar,
             "prebreak_reason": prebreak_reason,
+            "entry_mode": "probe",  # ✅ 선행진입은 강제 probe (소액 탐색)
         }
         return pre
 
