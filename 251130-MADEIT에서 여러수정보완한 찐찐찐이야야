@@ -4886,33 +4886,22 @@ def main():
                     continue
 
                 # 🔧 FIX: 초입 신호 발송 전 중복 진입 차단 (race condition 방지)
-                # 🔥 파일 기반 중복 방지 (프로세스 간 공유)
-                lock_file = f"/tmp/bot_entry_{m.replace('-', '_')}.lock"
-                try:
-                    # 락 파일 존재하고 60초 이내면 스킵
-                    if os.path.exists(lock_file):
-                        lock_age = time.time() - os.path.getmtime(lock_file)
-                        if lock_age < 60:
-                            print(f"[SCAN] {m} 락파일 존재 ({lock_age:.1f}초 전) → 스킵")
-                            continue
-                except:
-                    pass
+                # 🔐 파일락 획득 시도 (프로세스 간 공유)
+                if not _try_acquire_entry_lock(m):
+                    print(f"[LOCK] {m} already locked → skip")
+                    continue
 
                 # recent_alerts도 락 안에서 체크 (더 강력한 중복 방지)
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         print(f"[SCAN] {m} 이미 포지션/pending 존재 → 스킵")
+                        _release_entry_lock(m)
                         continue
                     # 🔧 추가: 최근 60초 내 알람 발송된 종목도 스킵
                     if m in recent_alerts and time.time() - recent_alerts[m] < 60:
                         print(f"[SCAN] {m} 최근 60초 내 알람 발송됨 → 스킵")
+                        _release_entry_lock(m)
                         continue
-                    # 🔥 락 파일 먼저 생성 (다른 프로세스 차단)
-                    try:
-                        with open(lock_file, 'w') as lf:
-                            lf.write(f"{time.time()}\n")
-                    except:
-                        pass
                     # 미리 pending 마킹 (다른 스레드 차단)
                     OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
                     recent_alerts[m] = time.time()  # 🔧 락 안에서 설정
@@ -5031,11 +5020,12 @@ def main():
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         print("[AUTO_OPEN_ERR]", e)
-                        # 🔧 FIX: 자동매수 실패 시 pre_signal pending 정리
+                        # 🔧 FIX: 자동매수 실패 시 pre_signal pending 정리 + 락 해제
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
                             if pos and pos.get("pre_signal"):
                                 OPEN_POSITIONS.pop(m, None)
+                        _release_entry_lock(m)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     try:
@@ -5049,11 +5039,12 @@ def main():
                     except Exception as e:
                         print("[MON_ERR]", e)
                 else:
-                    # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리
+                    # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리 + 락 해제
                     with _POSITION_LOCK:
                         pos = OPEN_POSITIONS.get(m)
                         if pos and pos.get("pre_signal"):
                             OPEN_POSITIONS.pop(m, None)
+                    _release_entry_lock(m)
 
             cut_summary()
             if found == 0:
