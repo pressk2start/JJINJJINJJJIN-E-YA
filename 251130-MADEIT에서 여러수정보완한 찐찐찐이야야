@@ -2617,10 +2617,11 @@ def load_learned_weights():
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
             GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
-            GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
-            GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
-            GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
-            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
+            # 🔧 아래 3개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
+            # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
+            # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
+            # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
+            print(f"[WEIGHTS] 게이트 임계치 로드 (VOL/PRICE는 코드값 우선): {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
