@@ -504,6 +504,41 @@ def sell_all(market):
     print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
     return place_market_sell(market, actual, price_hint=cur_price)
 
+# =========================
+# 컷 로깅 (위치 이동: final_price_guard에서 사용)
+# =========================
+DEBUG_CUT = True  # 컷 로그 활성화
+CUT_COUNTER = {
+    k: 0
+    for k in [
+        "SURGE_LOW", "VOL_LOW", "SPREAD_HIGH", "PRICE_LOW", "ZSC_LOW",
+        "VWAP_GAP_LOW", "UPTICK_FAIL", "FAKE_PUMP", "TICKS_LOW", "TURN_LOW",
+        "BUY_WEAK", "BUY_WEAK_MANYT", "FRESH_FAIL", "BIDASK_WEAK",
+        "IGNITION_OK", "BOT_PINGPONG", "BOT_WASH", "BOTACC_OK", "WICK_SPIKE",
+        "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
+        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
+        "SCORE_LOW", "SPREAD_EXTREME", "PROBE_TICK", "NO_SIGNAL",
+        "STAGE1_GATE", "IGNITION_FAIL", "ENTRY_LOCK_FAIL", "PRICE_GUARD_FAIL"
+    ]
+}
+
+
+def cut(reason, detail):
+    CUT_COUNTER[reason] = CUT_COUNTER.get(reason, 0) + 1
+    if DEBUG_CUT:
+        now_str = now_kst().strftime("%H:%M:%S")
+        print(f"[FILTER][{now_str}] {reason:<16} | {detail}")
+
+
+def cut_summary():
+    parts = [
+        f"{k}:{v}" for k, v in sorted(
+            CUT_COUNTER.items(), key=lambda x: x[1], reverse=True) if v > 0
+    ]
+    if parts:
+        print(f"[CUT_SUMMARY] {' , '.join(parts)}")
+
+
 def final_price_guard(m, initial_price, max_drift=None, ticks=None):
     """
     주문 직전 가격 재확인 (동적 임계치)
@@ -544,12 +579,14 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
 
             # 이 이상은 진짜 너무 튄 거라 컷
             print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% > {thr*100:.2f}% → 진입 취소")
+            cut("PRICE_GUARD_FAIL", f"{m} 급등 {drift*100:.2f}%>{thr*100:.2f}%")
             return False, current_price
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
         down_thr = max(0.006, thr * 0.5)  # 0.6% 또는 상단의 절반
         if drift < -down_thr:
             print(f"[GUARD] {m} 가격 급락 {drift*100:.2f}% < -{down_thr*100:.2f}% → 진입 취소")
+            cut("PRICE_GUARD_FAIL", f"{m} 급락 {drift*100:.2f}%<-{down_thr*100:.2f}%")
             return False, current_price
 
         return True, current_price
@@ -577,6 +614,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     with entry_lock(m, ttl_sec=60) as got_lock:
         if not got_lock:
             print(f"[AUTO] {m} entry_lock 획득 실패 → 진입 스킵")
+            cut("ENTRY_LOCK_FAIL", f"{m}")
             return
 
         # 🔧 pending 상태 원자화 (락 안에서만 조작)
@@ -3630,40 +3668,6 @@ def grind_break_ok(c1, ticks):
     ia = inter_arrival_stats(ticks, 30)
     return (above >= 7 and ema_slope > 0 and t15.get("buy_ratio", 0) >= 0.56
             and ia.get("cv", 9.9) <= 0.95)
-
-
-# =========================
-# 컷 로깅
-# =========================
-DEBUG_CUT = False  # 컷 로그 비활성화
-CUT_COUNTER = {
-    k: 0
-    for k in [
-        "SURGE_LOW", "VOL_LOW", "SPREAD_HIGH", "PRICE_LOW", "ZSC_LOW",
-        "VWAP_GAP_LOW", "UPTICK_FAIL", "FAKE_PUMP", "TICKS_LOW", "TURN_LOW",
-        "BUY_WEAK", "BUY_WEAK_MANYT", "FRESH_FAIL", "BIDASK_WEAK",
-        "IGNITION_OK", "BOT_PINGPONG", "BOT_WASH", "BOTACC_OK", "WICK_SPIKE",
-        "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
-        "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
-        "SCORE_LOW", "SPREAD_EXTREME", "PROBE_TICK", "NO_SIGNAL"
-    ]
-}
-
-
-def cut(reason, detail):
-    CUT_COUNTER[reason] = CUT_COUNTER.get(reason, 0) + 1
-    if DEBUG_CUT:
-        now_str = now_kst().strftime("%H:%M:%S")
-        print(f"[FILTER][{now_str}] {reason:<16} | {detail}")
-
-
-def cut_summary():
-    parts = [
-        f"{k}:{v}" for k, v in sorted(
-            CUT_COUNTER.items(), key=lambda x: x[1], reverse=True) if v > 0
-    ]
-    if parts:
-        print(f"[CUT_SUMMARY] {' , '.join(parts)}")
 
 
 # =========================
