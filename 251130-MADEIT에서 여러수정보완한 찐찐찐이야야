@@ -1647,9 +1647,9 @@ GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.50 # 호가 임밸런스 하한 - 데이터 기반 조정 (승리 0.74~0.87, 패배 0.25~0.50)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
-GATE_VOL_MIN = 200_000    # 🔧 완화: 300K→200K (2억) - 조용한 장에서 기회 확대
-GATE_SURGE_MIN = 1.2      # 거래량 급등 하한 (x) - detect에서 이동
-GATE_PRICE_MIN = 0.001    # 🔧 완화: 0.2%→0.1% - 조용한 장에서 진입 허용
+GATE_VOL_MIN = 200_000    # 🔧 완화: 300K→200K (2억) [12/25 재적용]
+GATE_SURGE_MIN = 1.2      # 거래량 급등 하한 (x)
+GATE_PRICE_MIN = 0.001    # 🔧 완화: 0.2%→0.1% [12/25 재적용]
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
