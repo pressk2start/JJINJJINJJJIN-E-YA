@@ -975,7 +975,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             detect_str = "🚀선행"
             filter_display = "고점돌파대기"
         else:
-            detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+            # 🔥 경로 표시: 점화 > 틱버스트 > 일반
+            if detect_type == "ignition":
+                detect_str = "🔥점화"
+            elif detect_type == "tick_burst":
+                detect_str = "⚡틱버스트"
+            else:
+                detect_str = "📊일반"
             filter_display = filter_type
 
         trigger_str = "+".join(trigger_list) if trigger_list else "없음"
@@ -2128,7 +2134,7 @@ def get_path_statistics(last_n: int = 100) -> str:
                 cnt = len(sub)
                 w = len(sub[sub["result"] == "win"])
                 wr = w / cnt * 100 if cnt > 0 else 0
-                icon = "⚡" if dtype == "tick_burst" else "📊"
+                icon = "🔥" if dtype == "ignition" else ("⚡" if dtype == "tick_burst" else "📊")
                 star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
                 lines.append(f"  {icon}{dtype}: {cnt}건 ({wr:.0f}%){star}")
 
@@ -2179,7 +2185,8 @@ def get_path_statistics(last_n: int = 100) -> str:
             # 조합 생성
             combo_stats = {}
             for _, row in df.iterrows():
-                detect = "⚡" if row.get("detect_type") == "tick_burst" else "📊"
+                dt = row.get("detect_type", "normal")
+                detect = "🔥" if dt == "ignition" else ("⚡" if dt == "tick_burst" else "📊")
                 trigger = str(row.get("trigger_type", "-"))[:6]  # 길면 자르기
                 ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
                 combo = f"{detect}→{trigger}→{ftype}"
@@ -2264,7 +2271,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             pnl_str = f"+{pnl:.2f}%" if pnl > 0 else f"{pnl:.2f}%"
 
             # 경로
-            detect = "⚡" if row.get("detect_type") == "tick_burst" else "📊"
+            dt = row.get("detect_type", "normal")
+            detect = "🔥" if dt == "ignition" else ("⚡" if dt == "tick_burst" else "📊")
             trigger = str(row.get("trigger_type", "-"))[:8]  # 너무 길면 자르기
             ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
 
@@ -3915,8 +3923,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
-    # 🔥 점화 감지 (4요건 중 3개 이상) - 빠른 진입 경로이므로 기준 상향
-    is_ignition = (ignition_score >= 3)
+    # 🔥 점화 감지 (4요건 중 4개 모두) - 빠른 진입 경로이므로 기준 최대
+    is_ignition = (ignition_score >= 4)
 
     # ============================================================
     # 🚀 점화 감지 시 빠른 진입 (1분봉 조건 스킵)
@@ -4180,6 +4188,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
 
     # === 결과 패키징 ===
+    # 🔥 점화 진입 여부 판단 (gate_reason에 "점화" 포함 시)
+    is_ignition_entry = "점화" in gate_reason
+
     pre = {
         "price": cur["trade_price"],
         "change": price_change,
@@ -4197,6 +4208,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "filter_type": "stage1_gate",
         "ignition_score": ignition_score,
         "gate_reason": gate_reason,
+        # 🔥 경로 표시용 (점화 vs 일반)
+        "detect_type": "ignition" if is_ignition_entry else "normal",
+        "trigger_type": [f"{ignition_score}/4충족"] if is_ignition_entry else [],
     }
 
     return pre
@@ -4220,6 +4234,8 @@ def final_check_leader(m, pre, tight_mode=False):
     # 필터 타입에 따른 표시
     if filter_type == "prebreak":
         display_filter = "🚀선행진입"
+    elif pre.get("detect_type") == "ignition":
+        display_filter = "빠른진입"
     else:
         display_filter = "통합게이트"
 
@@ -4388,9 +4404,14 @@ from collections import deque
 def postcheck_6s(m, pre):
     # 🔧 틱버스트는 항상 포스트체크 적용 (6초 재확인)
     is_tick_burst = pre.get("detect_type") == "tick_burst"
+    # 🔥 점화 진입은 포스트체크 바이패스 (이미 4/4 조건 충족)
+    is_ignition = pre.get("detect_type") == "ignition"
 
     if not POSTCHECK_ENABLED and not is_tick_burst:
         return True, "SKIP"
+    # 🔥 점화 진입도 바이패스
+    if is_ignition:
+        return True, "BYPASS_IGNITION"
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
@@ -5677,11 +5698,17 @@ def main():
                 pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
 
                 # 🔍 3단계 경로 표시 (분석용)
-                detect_type = pre.get("detect_type", "normal")  # 1단계: 틱버스트/일반
-                trigger_list = pre.get("trigger_type", [])  # 2단계: 점화/봇매집/Early 등
+                detect_type = pre.get("detect_type", "normal")  # 1단계: 점화/틱버스트/일반
+                trigger_list = pre.get("trigger_type", [])  # 2단계: 점화빠른진입/봇매집/Early 등
                 filter_type = payload.get("filter_type", "기본통과")  # 3단계: 기본통과/프리시전
 
-                detect_str = "⚡틱버스트" if detect_type == "tick_burst" else "📊일반"
+                # 🔥 경로 표시: 점화 > 틱버스트 > 일반
+                if detect_type == "ignition":
+                    detect_str = "🔥점화"
+                elif detect_type == "tick_burst":
+                    detect_str = "⚡틱버스트"
+                else:
+                    detect_str = "📊일반"
                 trigger_str = "+".join(trigger_list) if trigger_list else "없음"
 
                 path_str = f"{detect_str} → {trigger_str} → {filter_type}"
