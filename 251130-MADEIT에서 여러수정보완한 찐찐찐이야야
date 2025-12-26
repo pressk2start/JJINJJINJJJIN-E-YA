@@ -1719,11 +1719,11 @@ REARM_REBREAK_MIN = 0.0028
 # 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
 # POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
-POSTCHECK_MIN_BUY = 0.40    # 🔧 완화: 0.46 → 0.40 (야간 저유동성 대응)
-POSTCHECK_MIN_RATE = 0.10   # 🔧 완화: 0.16 → 0.10 (틱 레이트 낮은 장 대응)
-POSTCHECK_MAX_PSTD = 0.0035 # 🔧 완화: 0.0028 → 0.0035
-POSTCHECK_MAX_CV = 0.85     # 🔧 완화: 0.72 → 0.85
-POSTCHECK_MAX_DD = 0.025    # 🔧 완화: 0.018 → 0.025 (2.5% DD 허용)
+POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
+POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
+POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
+POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
+POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 초타이트 (하드스탑 대체)
 ATR_PERIOD = 14
@@ -4277,11 +4277,11 @@ def postcheck_6s(m, pre):
 
     # ★★★ 장세/야간 완화 노브
     r = relax_knob()
-    pc_min_buy = max(0.38, POSTCHECK_MIN_BUY - 0.05 * r)   # 🔧 완화: 최소값 0.46→0.38
-    pc_min_rate = max(0.08, POSTCHECK_MIN_RATE - 0.09 * r) # 🔧 완화: 최소값 0.14→0.08
-    pc_max_pstd = POSTCHECK_MAX_PSTD + 0.0006 * r          # 🔧 조금 더 관대
-    pc_max_cv = POSTCHECK_MAX_CV + 0.20 * r                # 🔧 완화 폭 증가
-    pc_max_dd = POSTCHECK_MAX_DD + 0.008 * r               # 🔧 DD 완화 폭 증가
+    pc_min_buy = max(0.46, POSTCHECK_MIN_BUY - 0.05 * r)   # 0.48 -> 0.46, 완화폭 살짝↑
+    pc_min_rate = max(0.14, POSTCHECK_MIN_RATE - 0.09 * r) # 0.16 -> 0.14
+    pc_max_pstd = POSTCHECK_MAX_PSTD + 0.0005 * r          # 살짝 더 관대
+    pc_max_cv = POSTCHECK_MAX_CV + 0.18 * r
+    pc_max_dd = POSTCHECK_MAX_DD + 0.005 * r
 
     window = POSTCHECK_WINDOW_SEC
     start = time.time()
@@ -4299,8 +4299,8 @@ def postcheck_6s(m, pre):
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
     # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    # 🔧 완화: 틱버스트도 1.5% 허용 (1.0% → 1.5%)
-    MAX_SURGE = 0.015  # 틱버스트/일반 모두 1.5%
+    # 🔥 틱버스트는 더 보수적으로 (1.0%), 일반 경로는 1.5%
+    MAX_SURGE = 0.010 if is_tick_burst else 0.015
 
     while True:
         now = time.time()
