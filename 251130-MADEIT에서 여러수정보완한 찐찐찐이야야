@@ -2508,6 +2508,11 @@ PARTIAL_EXIT_LOSS_DROP = 0.001     # 손절 부분청산 후 -0.1% 추가 하락
 THIN_PROFIT_CHECKPOINT = 0.002   # +0.2% 도달 시 강세 체크
 STRONG_TRAIL_DROP = 0.002        # 강세 시 고점 대비 -0.2% 하락하면 매도
 
+# 🔧 소프트 본절 가드 (휩쏘 방지)
+BREAKEVEN_BOX = 0.0015           # ±0.15% 박스 내에서는 본절 청산 억제
+SOFT_GUARD_SEC = 30              # 초기 30초간 컨텍스트 청산 조건 강화
+CTX_THRESHOLD_BOOST = 1          # 초기 구간 CTX 임계값 추가분
+
 def is_strong_momentum(ticks, ob):
     """
     체크포인트 도달 시점에 강세 여부 판단 (점수 기반)
@@ -4983,10 +4988,13 @@ def monitor_position(m,
                     trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
-            # 💎 브레이크이븐 스텝: +0.4% 도달 시 손절가를 진입가+수수료로 올림
+            # 💎 브레이크이븐 스텝: +0.4% 도달 시 손절가 정보 갱신 (참고용)
+            # 🔧 NOTE: effective_stop은 현재 청산 트리거에 미사용
+            # 실제 청산은 ATR손절/체크포인트/트레일링에서 처리
             BREAKEVEN_TRIGGER = 0.004  # +0.4%
+            in_breakeven_box = abs(gain_from_entry) <= BREAKEVEN_BOX  # ±0.15% 박스 내
+
             if gain_from_entry >= BREAKEVEN_TRIGGER:
-                # FEE_RATE는 왕복 수수료율(0.1%)이므로 1회만 적용
                 breakeven_price = entry_price * (1 + FEE_RATE)
                 base_stop = max(base_stop, breakeven_price)
 
@@ -5001,10 +5009,13 @@ def monitor_position(m,
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
             # 여기는 트레일링 손절 이후 추가 손절 판정용
 
-            # ② 얇은 수익 체크포인트 (+0.3%) 도달 시 강세 판단
+            # ② 얇은 수익 체크포인트 (+0.2%) 도달 시 강세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 0.1% 아래로 떨어지면 리셋
             if checkpoint_reached and not strong_mode and cur_gain < (THIN_PROFIT_CHECKPOINT * 0.3):
                 checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
+
+            # 🔧 소프트 가드: 초기 30초간 청산 조건 강화
+            in_soft_guard = alive_sec < SOFT_GUARD_SEC
 
             if not checkpoint_reached and cur_gain >= THIN_PROFIT_CHECKPOINT:
                 checkpoint_reached = True
@@ -5015,10 +5026,15 @@ def monitor_position(m,
                     strong_peak = curp
                     tg_send_mid(f"💪 {m} 진입 후 +{cur_gain*100:.2f}% 강세확인 → 홀딩")
                 else:
-                    # 약세 → 즉시 매도
-                    close_auto_position(m, f"체크포인트 익절 진입 후 +{cur_gain*100:.2f}% 수익에서 약세판정")
-                    verdict = "THIN_PROFIT"
-                    break
+                    # 약세 판정이지만 소프트 가드 + 박스 내면 홀딩
+                    if in_soft_guard and in_breakeven_box:
+                        # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
+                        tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
+                    else:
+                        # 약세 → 즉시 매도
+                        close_auto_position(m, f"체크포인트 익절 진입 후 +{cur_gain*100:.2f}% 수익에서 약세판정")
+                        verdict = "THIN_PROFIT"
+                        break
 
             # ③ 강세 모드: 고점 추적 + 동적 트레일링 (수익률에 따라 폭 확대)
             if strong_mode:
