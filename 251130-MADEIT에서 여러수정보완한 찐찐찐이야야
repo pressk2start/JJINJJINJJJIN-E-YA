@@ -557,11 +557,12 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         current_price = js[0].get("trade_price", initial_price)
         drift = (current_price / initial_price - 1.0)
 
-        # 🔧 동적 임계치: 변동성 + 장세 반영
+        # 🔧 동적 임계치: 변동성 + 장세 반영 (완화)
         if max_drift is None:
             pstd = price_band_std(ticks or [], sec=10) if ticks else 0.0
             r = relax_knob()  # 0~1.5
-            base = 0.0075 if not AGGRESSIVE_MODE else 0.010
+            # 🔧 완화: 0.0075/0.010 → 0.012/0.015 (신호 후 가격 변동 허용폭 확대)
+            base = 0.012 if not AGGRESSIVE_MODE else 0.015
             dyn = base + min(0.008, pstd * 0.9) + r * 0.003
             thr = dyn
         else:
@@ -570,7 +571,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         if drift > thr:
             # 평소라면 고점 추격으로 컷
             # 하지만 공격 모드면 일정 구간까지는 허용
-            if AGGRESSIVE_MODE and drift <= (thr + 0.012):
+            # 🔧 완화: +1.2% → +1.5% 추가 허용
+            if AGGRESSIVE_MODE and drift <= (thr + 0.015):
                 print(
                     f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+1.2% "
                     f"→ 공격 모드: 추격 진입 허용"
@@ -582,8 +584,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             cut("PRICE_GUARD_FAIL", f"{m} 급등 {drift*100:.2f}%>{thr*100:.2f}%")
             return False, current_price
 
-        # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
-        down_thr = max(0.006, thr * 0.5)  # 0.6% 또는 상단의 절반
+        # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지) - 완화
+        down_thr = max(0.008, thr * 0.5)  # 🔧 완화: 0.6%→0.8% 또는 상단의 절반
         if drift < -down_thr:
             print(f"[GUARD] {m} 가격 급락 {drift*100:.2f}% < -{down_thr*100:.2f}% → 진입 취소")
             cut("PRICE_GUARD_FAIL", f"{m} 급락 {drift*100:.2f}%<-{down_thr*100:.2f}%")
@@ -1645,11 +1647,11 @@ GATE_ACCEL_MAX = 3.0      # 가속도 상한 (x)
 GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 4.0      # volume_surge 상한 (x)
 GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
-GATE_IMBALANCE_MIN = 0.50 # 호가 임밸런스 하한 - 데이터 기반 조정 (승리 0.74~0.87, 패배 0.25~0.50)
+GATE_IMBALANCE_MIN = 0.35 # 🔧 완화: 0.50→0.35 (진입 기회 확대)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
-GATE_VOL_MIN = 200_000    # 🔧 완화: 300K→200K (2억) [12/25 재적용]
+GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 1.2      # 거래량 급등 하한 (x)
-GATE_PRICE_MIN = 0.001    # 🔧 완화: 0.2%→0.1% [12/25 재적용]
+GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
