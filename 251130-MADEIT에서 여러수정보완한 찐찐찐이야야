@@ -550,7 +550,8 @@ def sell_all(market):
 # =========================
 # 컷 로깅 (위치 이동: final_price_guard에서 사용)
 # =========================
-DEBUG_CUT = True  # 컷 로그 활성화
+DEBUG_CUT = False          # 전체 컷 로그 (True면 모든 컷 출력)
+DEBUG_NEAR_MISS = True     # 초입 신호 왔는데 gate에서 컷된 경우만 출력
 CUT_COUNTER = {
     k: 0
     for k in [
@@ -566,9 +567,10 @@ CUT_COUNTER = {
 }
 
 
-def cut(reason, detail):
+def cut(reason, detail, near_miss=False):
     CUT_COUNTER[reason] = CUT_COUNTER.get(reason, 0) + 1
-    if DEBUG_CUT:
+    # DEBUG_CUT: 전체 로그, DEBUG_NEAR_MISS: 초입 신호 후 컷만
+    if DEBUG_CUT or (DEBUG_NEAR_MISS and near_miss):
         now_str = now_kst().strftime("%H:%M:%S")
         print(f"[FILTER][{now_str}] {reason:<16} | {detail}")
 
@@ -628,14 +630,14 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
 
             # 이 이상은 진짜 너무 튄 거라 컷
             print(f"[GUARD] {m} 가격 급등 {drift*100:.2f}% > {thr*100:.2f}% → 진입 취소")
-            cut("PRICE_GUARD_FAIL", f"{m} 급등 {drift*100:.2f}%>{thr*100:.2f}%")
+            cut("PRICE_GUARD_FAIL", f"{m} 급등 {drift*100:.2f}%>{thr*100:.2f}%", near_miss=True)
             return False, current_price
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
         down_thr = max(0.005, thr * 0.8)  # 🔧 0.5% 또는 상단의 80%
         if drift < -down_thr:
             print(f"[GUARD] {m} 가격 급락 {drift*100:.2f}% < -{down_thr*100:.2f}% → 진입 취소")
-            cut("PRICE_GUARD_FAIL", f"{m} 급락 {drift*100:.2f}%<-{down_thr*100:.2f}%")
+            cut("PRICE_GUARD_FAIL", f"{m} 급락 {drift*100:.2f}%<-{down_thr*100:.2f}%", near_miss=True)
             return False, current_price
 
         return True, current_price
@@ -667,7 +669,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     with entry_lock(m, ttl_sec=90, reentrant=False) as got_lock:  # 🔧 TTL 90초, reentrant=False로 변경
         if not got_lock:
             print(f"[AUTO] {m} entry_lock 획득 실패 → 진입 스킵")
-            cut("ENTRY_LOCK_FAIL", f"{m}")
+            cut("ENTRY_LOCK_FAIL", f"{m}", near_miss=True)
             return
 
         # 🔧 pending 상태 원자화 (락 안에서만 조작)
@@ -4150,7 +4152,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ignition_score=ignition_score
     )
     if not gate_ok:
-        cut("STAGE1_GATE", f"{m} {gate_reason}")
+        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=True)
         return None
 
     # === 결과 패키징 ===
