@@ -605,7 +605,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     초입·공격모드 대응 자동 매수 진입
     """
+    # 🔍 DEBUG: 자동매수 진입 시작 로그
+    print(f"[AUTO_ENTRY] {m} 시작 (AUTO_TRADE={AUTO_TRADE})")
+
     if not AUTO_TRADE:
+        print(f"[AUTO_ENTRY] {m} AUTO_TRADE=False → 스킵 (환경변수 AUTO_TRADE=1 필요)")
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
