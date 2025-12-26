@@ -218,6 +218,27 @@ def _release_entry_lock(market: str):
         pass
 
 
+def cleanup_stale_entry_locks(max_age_sec=300):
+    """오래된 엔트리 락파일 정리 (기본 5분)"""
+    try:
+        nowt = time.time()
+        cleaned = 0
+        for name in os.listdir("/tmp"):
+            if not name.startswith("bot_entry_"):
+                continue
+            path = f"/tmp/{name}"
+            try:
+                if nowt - os.path.getmtime(path) > max_age_sec:
+                    os.remove(path)
+                    cleaned += 1
+            except Exception:
+                pass
+        if cleaned > 0:
+            print(f"[LOCK_CLEAN] {cleaned}개 오래된 락파일 정리됨")
+    except Exception as e:
+        print(f"[LOCK_CLEAN_ERR] {e}")
+
+
 from contextlib import contextmanager
 
 @contextmanager
@@ -5319,6 +5340,46 @@ def start_health_server(port=8080):
             continue
     print("[HEALTH_ERR] 포트 사용 불가 (8080~8084)")
 
+
+def start_watchdogs():
+    """워치독 스레드들 시작: 헬스비트, 세션 리프레시, 락 청소"""
+
+    def heartbeat():
+        """5분마다 상태 로깅 (조용히 죽었는지 확인용)"""
+        while True:
+            try:
+                time.sleep(300)  # 5분
+                req_summary()     # 429/5xx/에러 카운트
+                cut_summary()     # 필터 컷 카운트 요약
+                print(f"[HB] {now_kst_str()} open={len(OPEN_POSITIONS)} "
+                      f"rate={_BUCKET.get('rate', 0):.2f} cap={_BUCKET.get('cap', 0):.2f}")
+            except Exception as e:
+                print(f"[HB_ERR] {e}")
+
+    def session_refresher():
+        """10분마다 세션 리프레시 (커넥션 풀 정리)"""
+        while True:
+            time.sleep(600)  # 10분
+            try:
+                _refresh_session()
+            except Exception as e:
+                print(f"[SESSION_REFRESH_ERR] {e}")
+
+    def lock_cleaner():
+        """10분마다 오래된 락파일 정리"""
+        while True:
+            time.sleep(600)  # 10분
+            try:
+                cleanup_stale_entry_locks(300)  # 5분 이상 된 락 삭제
+            except Exception as e:
+                print(f"[LOCK_CLEANER_ERR] {e}")
+
+    threading.Thread(target=heartbeat, daemon=True, name="Heartbeat").start()
+    threading.Thread(target=session_refresher, daemon=True, name="SessionRefresh").start()
+    threading.Thread(target=lock_cleaner, daemon=True, name="LockCleaner").start()
+    print("🐕 워치독 시작됨 (헬스비트 5분, 세션리프레시 10분, 락청소 10분)")
+
+
 # ===== 오더북 캐시 =====
 def fetch_orderbook_cache(mkts):
     cache = {}
@@ -5716,4 +5777,5 @@ if __name__ == "__main__":
     validate_config()
     bot_start_time = time.time()
     start_health_server()
+    start_watchdogs()  # 🐕 워치독 시작 (헬스비트/세션리프레시/락청소)
     main()

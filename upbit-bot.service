@@ -1,0 +1,52 @@
+# Upbit Trading Bot systemd 서비스 파일
+#
+# 설치 방법:
+# 1. sudo cp upbit-bot.service /etc/systemd/system/
+# 2. sudo systemctl daemon-reload
+# 3. sudo systemctl enable upbit-bot
+# 4. sudo systemctl start upbit-bot
+#
+# 로그 확인:
+# - journalctl -u upbit-bot -f  (실시간)
+# - tail -f /var/log/upbit-bot.log
+#
+# 상태 확인:
+# - sudo systemctl status upbit-bot
+
+[Unit]
+Description=Upbit Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# 🔧 경로 수정 필요: 실제 봇 파일 위치로 변경
+WorkingDirectory=/home/ubuntu/bot
+ExecStart=/usr/bin/python3 /home/ubuntu/bot/251130-MADEIT에서\ 여러수정보완한\ 찐찐찐이야야
+
+# 환경변수 (필요시 수정)
+Environment=PYTHONUNBUFFERED=1
+Environment=AUTO_TRADE=1
+# Environment=UPBIT_ACCESS_KEY=your_key
+# Environment=UPBIT_SECRET_KEY=your_secret
+
+# 자동 재시작 설정
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 리소스 보호 (저사양 인스턴스용)
+LimitNOFILE=4096
+Nice=5
+OOMScoreAdjust=-500
+
+# 로그 파일
+StandardOutput=append:/var/log/upbit-bot.log
+StandardError=append:/var/log/upbit-bot.err
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# Upbit Bot 로그 로테이트 설정
+#
+# 설치 방법:
+# sudo cp upbit-bot.logrotate /etc/logrotate.d/upbit-bot
+
+/var/log/upbit-bot.log /var/log/upbit-bot.err {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 ubuntu ubuntu
+    postrotate
+        systemctl reload upbit-bot > /dev/null 2>&1 || true
+    endscript
+}
