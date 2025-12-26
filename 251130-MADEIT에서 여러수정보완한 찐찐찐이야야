@@ -362,14 +362,11 @@ def _make_auth_headers(query: dict = None):
         'nonce': str(uuid.uuid4()),
     }
     if query:
-        # 🔧 FIX: 키 정렬 + None 제거로 서명 안정화 (401 방지)
-        cleaned = _clean_params(query)
-        if cleaned:
-            q = urlencode(cleaned).encode()
-            m = hashlib.sha512()
-            m.update(q)
-            payload['query_hash'] = m.hexdigest()
-            payload['query_hash_alg'] = 'SHA512'
+        q = urlencode(query).encode()
+        m = hashlib.sha512()
+        m.update(q)
+        payload['query_hash'] = m.hexdigest()
+        payload['query_hash_alg'] = 'SHA512'
     # 🔧 FIX: 알고리즘 지정 + PyJWT v1/v2 호환 디코딩
     jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
     if isinstance(jwt_token, bytes):  # PyJWT v1 대비
