@@ -4132,6 +4132,19 @@ def final_check_leader(m, pre, tight_mode=False):
     else:
         display_filter = "통합게이트"
 
+    # 🔧 FIX: score 계산 복원 (calc_risk_score 호출)
+    buy_ratio = pre.get("buy_ratio", 0.5)
+    spread = pre.get("spread", 0.5)
+    turn = pre.get("turn_pct", 0.01)
+    imbalance = pre.get("imbalance", 0.0)
+    volume_surge = pre.get("volume_surge", 1.0)
+    fresh_ok = pre.get("fresh_ok", True)
+
+    score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
+
+    # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
+    is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
+
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
     return {
@@ -4143,9 +4156,9 @@ def final_check_leader(m, pre, tight_mode=False):
         "n": t["n"],
         "spread": round(pre.get("spread", 0), 2),
         "turn": round(pre.get("turn_pct", 0), 2),
-        "imbalance": round(pre.get("imbalance", 0), 3),
-        "score": 0,
-        "is_precision_pocket": False,
+        "imbalance": round(imbalance, 3),
+        "score": score,
+        "is_precision_pocket": is_precision,
         "filter_type": display_filter,
         "is_prebreak": filter_type == "prebreak",
     }
@@ -4867,33 +4880,16 @@ def monitor_position(m,
                     outcome_extra = f"(+{gain_now*100:.2f}%→-{drop_from_peak*100:.2f}% from peak)"
                     break
 
-            # === 1) 웜업 구간: 소폭 되돌림 무시 (단, 급락은 즉시 컷)
+            # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
             dd_now = (curp / best - 1.0)
             cur_gain = (curp / entry_price - 1.0)
 
-            if alive_sec < WARMUP_SEC:
-                # 🔧 웜업 중 급락만 하드스탑 (틱/퍼센트 모드 공통)
-                if STOP_MODE == "ticks":
-                    # 틱 모드: 하드스탑만 적용 (틱스탑은 웜업 후 무장)
-                    if HARD_STOP_DD and cur_gain <= -HARD_STOP_DD:
-                        verdict = "웜업 하드스탑"
-                        outcome_extra = f"({cur_gain*100:.2f}%, 하드-{HARD_STOP_DD*100:.1f}%)"
-                        break
-                else:
-                    # 퍼센트 모드: 동적손절 (3초 지연 - 미세 흔들림 방지)
-                    WARMUP_DYN_DELAY = 3.0  # 체결 후 3초간 동적손절 보류
-                    if alive_sec >= WARMUP_DYN_DELAY and cur_gain <= -eff_sl_pct:
-                        verdict = "웜업 손절"
-                        outcome_extra = f"({cur_gain*100:.2f}%, 동적SL-{eff_sl_pct*100:.2f}%)"
-                        break
-                    # 3초 내에도 하드스탑은 적용 (급락 방어)
-                    if alive_sec < WARMUP_DYN_DELAY and HARD_STOP_DD and cur_gain <= -HARD_STOP_DD:
-                        verdict = "웜업 하드스탑"
-                        outcome_extra = f"({cur_gain*100:.2f}%, 하드-{HARD_STOP_DD*100:.1f}%)"
-                        break
-                # 웜업 중엔 소프트 스탑 미적용
-                continue
+            # 🔧 웜업 제거: 체결 직후부터 ATR 손절 적용
+            if cur_gain <= -eff_sl_pct:
+                verdict = "ATR손절"
+                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
+                break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
