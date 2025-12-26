@@ -1670,7 +1670,7 @@ GATE_OVERHEAT_MAX = 6.0   # accel*surge 상한 - 3.5→6.0 완화
 GATE_IMBALANCE_MIN = 0.35 # 🔧 완화: 0.50→0.35 (진입 기회 확대)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
-GATE_SURGE_MIN = 0.8      # 🔧 완화: 1.2→0.8 (야간 저유동성 대응)
+GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
@@ -3856,7 +3856,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 🚀 거래량 급등 조건 개선: MA 대비 1.0배 이상 ===
     # 기존 surge 조건과 새 vol_vs_ma 조건 중 하나만 충족해도 통과
-    vol_ok = (volume_surge >= GATE_SURGE_MIN) or (vol_vs_ma >= 1.0)  # 🔧 완화: 1.5→1.0 (야간)
+    vol_ok = (volume_surge >= GATE_SURGE_MIN) or (vol_vs_ma >= 0.5)  # 🔧 완화: 1.0→0.5 (더 공격적)
     if not vol_ok and not mega:
         return False, f"거래량부족(surge {volume_surge:.2f}x, MA대비 {vol_vs_ma:.1f}x)"
 
@@ -3910,14 +3910,14 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
     # 강한 신호: EMA20 위 + 고점 돌파 + 거래량 1.0배
-    is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 1.0)  # 🔧 완화: 1.5→1.0 (야간)
+    is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 0.5)  # 🔧 완화: 1.0→0.5 (더 공격적)
 
     # 🔥 점화 감지 (4요건 중 2개 이상) - 🔧 완화: 3/4→2/4
     is_ignition = (ignition_score >= 2)
 
     # 진입 조건: 돌파조건 1개 이상 OR 거래량 1.0배 이상 OR 점화 감지
     # (기본 조건 ALL 통과 후, 아래 중 하나 이상 필요)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= 1.0) or is_ignition  # 🔧 완화: 1.5→1.0 (야간)
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= 0.5) or is_ignition  # 🔧 완화: 1.0→0.5 (더 공격적)
 
     if not entry_signal:
         return False, f"진입조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x,점화:{ignition_score}/4)"
@@ -3932,7 +3932,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         signal_info = "EMA↑,"
     elif high_breakout:
         signal_info = "고점↑,"
-    elif vol_vs_ma >= 1.5:  # 🔧 완화: 2.0→1.5
+    elif vol_vs_ma >= 0.8:  # 🔧 완화: 1.5→0.8 (더 공격적)
         signal_info = f"거래량↑({vol_vs_ma:.1f}x),"
 
     return True, f"{signal_info}통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f})"
