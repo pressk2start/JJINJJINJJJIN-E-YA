@@ -156,15 +156,19 @@ _MEMORY_LOCK = threading.Lock()  # 메모리 락 보호용
 def _entry_lock_path(market: str) -> str:
     return f"/tmp/bot_entry_{market.replace('-', '_')}.lock"
 
-def _try_acquire_entry_lock(market: str, ttl_sec: int = 60) -> bool:
+def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = False) -> bool:
     """락 획득 시도. 성공하면 True, 이미 락 있으면 False
 
     🔧 FIX: 원자적 파일 생성 (O_CREAT | O_EXCL) + 메모리 락 이중 보호
+    🔧 reentrant=True: 이미 락을 가지고 있으면 True 반환 (재진입 허용)
     """
     # 1️⃣ 메모리 락 먼저 체크 (같은 프로세스 내 스레드 간)
     with _MEMORY_LOCK:
         if market in _MEMORY_ENTRY_LOCKS:
             if time.time() - _MEMORY_ENTRY_LOCKS[market] < ttl_sec:
+                # 🔧 FIX: reentrant 모드면 이미 락을 가지고 있으므로 True 반환
+                if reentrant:
+                    return True
                 return False
         _MEMORY_ENTRY_LOCKS[market] = time.time()
 
@@ -217,13 +221,17 @@ def _release_entry_lock(market: str):
 from contextlib import contextmanager
 
 @contextmanager
-def entry_lock(market: str, ttl_sec: int = 60):
-    """엔트리 락 컨텍스트 매니저 - 안전한 락 획득/해제"""
-    got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec)
+def entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = False):
+    """엔트리 락 컨텍스트 매니저 - 안전한 락 획득/해제
+
+    🔧 reentrant=True: 재진입 모드 (이미 락을 가지고 있으면 True, 해제 안 함)
+    """
+    got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec, reentrant=reentrant)
     try:
         yield got
     finally:
-        if got:
+        # 🔧 FIX: reentrant 모드에서는 락 해제 안 함 (원래 획득한 곳에서 해제)
+        if got and not reentrant:
             _release_entry_lock(market)
 
 
@@ -628,7 +636,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
-    with entry_lock(m, ttl_sec=30) as got_lock:  # 🔧 TTL 60→30초 (락 충돌 완화)
+    with entry_lock(m, ttl_sec=30, reentrant=True) as got_lock:  # 🔧 reentrant=True: 신호 발송 시 이미 락 획득됨
         if not got_lock:
             print(f"[AUTO] {m} entry_lock 획득 실패 → 진입 스킵")
             cut("ENTRY_LOCK_FAIL", f"{m}")
