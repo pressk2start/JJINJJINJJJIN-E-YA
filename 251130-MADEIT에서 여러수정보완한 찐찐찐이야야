@@ -1555,9 +1555,22 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         cycle += 1
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
 
-        # 🔧 부분청산 후 추가 하락 체크
+        # 🔧 유령 포지션 탈출: 실잔고 확인
         with _POSITION_LOCK:
             pos = OPEN_POSITIONS.get(m)
+        if not pos:
+            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
+            return False
+
+        # 실제 거래소 잔고 확인
+        actual = get_actual_balance(m)
+        if actual <= 0:
+            print(f"[REMONITOR] {m} 실잔고 0 → 유령 포지션 정리 후 루프 종료")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            return False
+
+        # 🔧 부분청산 후 추가 하락 체크
         if pos and pos.get("partial_done"):
             partial_price = pos.get("partial_price", 0)
             partial_type = pos.get("partial_type", "loss")
