@@ -353,8 +353,8 @@ def get_adaptive_risk() -> float:
     return base_risk
 
 def _clean_params(d: dict):
-    """None/빈값 제거 + 키 정렬 (서명 안정화)"""
-    return {k: v for k, v in sorted((d or {}).items()) if v is not None and v != ""}
+    """None/빈값만 제거 (원본 키 순서 유지)"""
+    return {k: v for k, v in (d or {}).items() if v is not None and v != ""}
 
 def _make_auth_headers(query: dict = None):
     payload = {
