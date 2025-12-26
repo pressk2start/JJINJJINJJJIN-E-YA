@@ -1745,21 +1745,21 @@ POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
 POSTCHECK_MAX_DD = 0.018
 
-# 동적 손절(ATR) - 초타이트 (하드스탑 대체)
+# 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 ATR_PERIOD = 14
 ATR_EMA_PERIOD = 20
-ATR_MULT = 0.30           # 🔧 0.65 → 0.30 (더 타이트)
-DYN_SL_MIN = 0.003        # 🔧 0.3% 최소 손절
-DYN_SL_MAX = 0.005        # 🔧 0.5% 최대 손절
+ATR_MULT = 0.35           # 🔧 0.30 → 0.35 (약간 완화)
+DYN_SL_MIN = 0.004        # 🔧 0.3% → 0.4% (손절 완화)
+DYN_SL_MAX = 0.006        # 🔧 0.5% → 0.6% (손절 완화)
 
 # =========================
-# 🎯 틱 기반 트레일링 스탑 (저가코인 휩쏘 방지)
+# 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
 # =========================
-STOP_MODE = "ticks"              # "ticks" 또는 "percent"
-MIN_TICK_DIST = 3                # 최소 틱 간격 (3틱)
-ATR_TICKS_MULT = 0.6             # ATR을 틱 수로 환산할 때 계수
-SPREAD_TICKS_PAD = 1             # 스프레드 대비 여유틱
-TICK_STOP_DEBOUNCE_SEC = 3       # 디바운스 시간 (초)
+STOP_MODE = "percent"            # 🔧 "ticks" → "percent" (ATR 기반 단일화)
+MIN_TICK_DIST = 3                # (미사용)
+ATR_TICKS_MULT = 0.6             # (미사용)
+SPREAD_TICKS_PAD = 1             # (미사용)
+TICK_STOP_DEBOUNCE_SEC = 3       # (미사용)
 TICK_STOP_DEBOUNCE_N = 2         # 디바운스 횟수
 USE_BID_FOR_STOP = True          # 스탑 판정은 best bid로
 # 🔧 HARD_STOP_DD는 상단 프로파일에서만 설정 (이중정의 제거)
