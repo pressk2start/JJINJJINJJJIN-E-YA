@@ -557,13 +557,13 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         current_price = js[0].get("trade_price", initial_price)
         drift = (current_price / initial_price - 1.0)
 
-        # 🔧 동적 임계치: 변동성 + 장세 반영 (완화)
+        # 🔧 동적 임계치: 변동성 + 장세 반영 (신호→주문 짧은 구간)
         if max_drift is None:
             pstd = price_band_std(ticks or [], sec=10) if ticks else 0.0
             r = relax_knob()  # 0~1.5
-            # 🔧 완화: 0.0075/0.010 → 0.012/0.015 (신호 후 가격 변동 허용폭 확대)
-            base = 0.012 if not AGGRESSIVE_MODE else 0.015
-            dyn = base + min(0.008, pstd * 0.9) + r * 0.003
+            # 🔧 0.5% 기준 (짧은 순간 0.5% 움직임이면 충분)
+            base = 0.005 if not AGGRESSIVE_MODE else 0.006
+            dyn = base + min(0.004, pstd * 0.5) + r * 0.002
             thr = dyn
         else:
             thr = max_drift
@@ -571,8 +571,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         if drift > thr:
             # 평소라면 고점 추격으로 컷
             # 하지만 공격 모드면 일정 구간까지는 허용
-            # 🔧 완화: +1.2% → +1.5% 추가 허용
-            if AGGRESSIVE_MODE and drift <= (thr + 0.015):
+            # 🔧 0.5% 기준이니 +0.5% 추가 = 총 1% 까지 허용
+            if AGGRESSIVE_MODE and drift <= (thr + 0.005):
                 print(
                     f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+1.2% "
                     f"→ 공격 모드: 추격 진입 허용"
@@ -584,8 +584,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             cut("PRICE_GUARD_FAIL", f"{m} 급등 {drift*100:.2f}%>{thr*100:.2f}%")
             return False, current_price
 
-        # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지) - 완화
-        down_thr = max(0.008, thr * 0.5)  # 🔧 완화: 0.6%→0.8% 또는 상단의 절반
+        # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
+        down_thr = max(0.005, thr * 0.8)  # 🔧 0.5% 또는 상단의 80%
         if drift < -down_thr:
             print(f"[GUARD] {m} 가격 급락 {drift*100:.2f}% < -{down_thr*100:.2f}% → 진입 취소")
             cut("PRICE_GUARD_FAIL", f"{m} 급락 {drift*100:.2f}%<-{down_thr*100:.2f}%")
