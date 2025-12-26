@@ -3927,10 +3927,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if not fresh_ok:
         return False, "틱 신선도 부족"
 
-    # === 회전율 컷 (최소만 체크, 과회전은 제거) ===
+    # === 회전율 컷 ===
     if turn_pct < GATE_TURN_MIN:
         return False, f"회전율부족(turn {turn_pct:.1f}%<{GATE_TURN_MIN}%)"
-    # 과회전 필터 제거 - 회전율 높아도 관심/유동성 신호, 낮아도 해외 추종 가능
+    # 과회전 단독은 OK (관심/유동성 신호)
+    # 과회전 + 스프레드 넓음 = 슬리피지 위험 → 컷
+    if turn_pct > 120 and spread > 0.25:
+        return False, f"과회전+스프레드({turn_pct:.0f}%,{spread:.2f}%)"
 
     # === 스프레드 컷 ===
     if spread > GATE_SPREAD_MAX:
