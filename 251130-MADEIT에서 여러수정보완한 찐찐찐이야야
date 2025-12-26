@@ -10,6 +10,16 @@ import hashlib
 import hmac
 import jwt
 
+# 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
+try:
+    _jwt_ver = getattr(jwt, "__version__", "unknown")
+    assert hasattr(jwt, "encode") and callable(jwt.encode), "jwt.encode 없음"
+    print(f"[JWT] PyJWT v{_jwt_ver} 로드됨")
+except Exception as e:
+    print(f"[JWT_ERR] PyJWT 패키지 문제: {e}")
+    print("[JWT_ERR] pip install PyJWT 로 설치 필요")
+    sys.exit(1)
+
 
 def rnd():
     return random.random()  # ← 이 줄이 4칸(스페이스) 들여쓰기 되어야 함
@@ -654,7 +664,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
-    with entry_lock(m, ttl_sec=30, reentrant=True) as got_lock:  # 🔧 reentrant=True: 신호 발송 시 이미 락 획득됨
+    with entry_lock(m, ttl_sec=90, reentrant=False) as got_lock:  # 🔧 TTL 90초, reentrant=False로 변경
         if not got_lock:
             print(f"[AUTO] {m} entry_lock 획득 실패 → 진입 스킵")
             cut("ENTRY_LOCK_FAIL", f"{m}")
@@ -833,7 +843,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             res = place_market_buy(m, krw_to_use)
             print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
             oid = res.get("uuid") if isinstance(res, dict) else None
-            od = get_order_result(oid, timeout_sec=6) if oid else None
+            od = get_order_result(oid, timeout_sec=12) if oid else None
             print("[AUTO_BUY_ORDER]", json.dumps(od, ensure_ascii=False))
 
             if od:
@@ -1097,7 +1107,7 @@ def add_auto_position(m, cur_price, reason=""):
     try:
         res = place_market_buy(m, krw_to_use)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        od = get_order_result(order_uuid, timeout_sec=6.0) if order_uuid else None
+        od = get_order_result(order_uuid, timeout_sec=12.0) if order_uuid else None
 
         if od:
             try:
@@ -1233,7 +1243,7 @@ def close_auto_position(m, reason=""):
         res = place_market_sell(m, vol, price_hint=cur_price)  # 🔧 가격 힌트 전달
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         if order_uuid:
-            od = get_order_result(order_uuid, timeout_sec=6.0)
+            od = get_order_result(order_uuid, timeout_sec=12.0)
         else:
             od = None
 
@@ -1412,7 +1422,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         res = place_market_sell(m, sell_volume, price_hint=cur_price)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid,
-                              timeout_sec=6.0) if order_uuid else None
+                              timeout_sec=12.0) if order_uuid else None
 
         executed = 0.0
         if od:
