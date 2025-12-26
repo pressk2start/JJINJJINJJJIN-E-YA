@@ -3915,6 +3915,28 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
+    # 🔥 점화 감지 (4요건 중 2개 이상) - 틱 기반 실시간 감지
+    is_ignition = (ignition_score >= 2)
+
+    # ============================================================
+    # 🚀 점화 감지 시 빠른 진입 (1분봉 조건 스킵)
+    # 점화 = 틱 기반 실시간 감지이므로 초입 구간 바로 진입
+    # ============================================================
+    if is_ignition:
+        # 최소 안전 조건만 체크 (스프레드, 신선도, 매수비)
+        if not fresh_ok:
+            return False, "점화감지+틱신선도부족"
+        if spread > GATE_SPREAD_MAX * 1.5:  # 점화 시 스프레드 약간 완화
+            return False, f"점화감지+스프레드과다({spread:.2f}%)"
+        if buy_ratio < 0.45:  # 점화 시 매수비 완화 (기본 50% → 45%)
+            return False, f"점화감지+매수비부족({buy_ratio:.0%})"
+        # 점화 + 최소 조건 충족 → 바로 진입
+        return True, f"🔥점화감지({ignition_score}/4),빠른진입(sp={spread:.2f}%,b={buy_ratio:.0%})"
+
+    # ============================================================
+    # 일반 진입: 기존 하드컷 적용
+    # ============================================================
+
     # === 거래대금 컷 (detect에서 이동) ===
     if current_volume < GATE_VOL_MIN and not mega:
         return False, f"거래대금부족(vol {current_volume/1000:.0f}K<{GATE_VOL_MIN/1000:.0f}K)"
@@ -3978,9 +4000,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 강한 신호: EMA20 위 + 고점 돌파 + 거래량 1.0배
     is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 0.5)  # 🔧 완화: 1.0→0.5 (더 공격적)
-
-    # 🔥 점화 감지 (4요건 중 2개 이상) - 🔧 완화: 3/4→2/4
-    is_ignition = (ignition_score >= 2)
 
     # 진입 조건: 돌파조건 1개 이상 OR 거래량 1.0배 이상 OR 점화 감지
     # (기본 조건 ALL 통과 후, 아래 중 하나 이상 필요)
