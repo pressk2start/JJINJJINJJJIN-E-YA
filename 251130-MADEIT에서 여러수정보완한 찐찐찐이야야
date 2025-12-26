@@ -430,8 +430,8 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     - total_equity * risk_pct 만큼만 최대 손실 허용
     """
     risk_krw = total_equity * risk_pct
-    # 🔧 FIX: DYN_SL_MIN과 일치 (0.3% 최소 손절폭)
-    min_sl_pct = 0.003  # DYN_SL_MIN과 동일
+    # 🔧 FIX: DYN_SL_MIN과 동기화 (과위험 방지)
+    min_sl_pct = DYN_SL_MIN  # 전역 손절폭과 일치
 
     # 🔧 FIX: stop_price가 None이거나 entry_price 이상이면 보정
     if stop_price is None or stop_price <= 0 or stop_price >= entry_price:
@@ -2555,7 +2555,8 @@ def analyze_and_tune_exits():
         old_sl_max = DYN_SL_MAX
 
         # === 튜닝 로직 (승률 기반 동적손절 미세 조정) ===
-        DYN_SL_BOUNDS = (0.002, 0.006)  # 0.2% ~ 0.6% 범위
+        # 🔧 FIX: 하한을 DYN_SL_MIN과 동기화 (역전 방지)
+        DYN_SL_BOUNDS = (DYN_SL_MIN, 0.006)  # DYN_SL_MIN ~ 0.6% 범위
 
         # 승률에 따라 극미세 조정 (0.0001 = 0.01% 단위)
         if win_rate < 0.40:
@@ -2564,6 +2565,9 @@ def analyze_and_tune_exits():
         elif win_rate > 0.50:
             # 승률 높음 → 손절 살짝 타이트 (DYN_SL_MAX 낮추기)
             DYN_SL_MAX = max(DYN_SL_BOUNDS[0], DYN_SL_MAX - 0.0001)
+
+        # 🔧 불변식 보장: MAX는 항상 MIN 이상
+        DYN_SL_MAX = max(DYN_SL_MAX, DYN_SL_MIN)
 
         DYNAMIC_EXIT_PARAMS["dyn_sl_max"] = DYN_SL_MAX
 
@@ -4805,38 +4809,6 @@ def monitor_position(m,
         pos = OPEN_POSITIONS.get(m, {})
     entry_mode = pos.get("entry_mode", "confirm")
 
-    # === 🎯 틱 기반 트레일링 스탑 상태 ===
-    tick_stop_armed = False
-    tick_sz = upbit_tick_size(entry_price)
-    tick_base = MIN_TICK_DIST  # 초기 틱 간격
-    trail_stop_px = entry_price - tick_base * tick_sz  # 초기 스탑가
-    tick_stop_hits = 0
-    tick_stop_first_seen = 0.0
-    last_ob_fetch = 0.0
-    last_best_bid = None
-
-    # 🔧 CV 기반 틱스탑 디바운스 조정
-    # 봇 느낌(CV 낮음)이면 더 오래 확인, 사람 싸움(CV 높음)이면 빠르게
-    try:
-        init_ticks = get_recent_ticks(m, 100)
-        ia30 = inter_arrival_stats(init_ticks, 30) if init_ticks else {"cv": 1.0}
-        cv = ia30.get("cv", 1.0)
-        debounce_sec = TICK_STOP_DEBOUNCE_SEC
-        debounce_n = TICK_STOP_DEBOUNCE_N
-        if cv <= 0.45:
-            # 봇 가능성 → 더 엄격하게
-            debounce_sec += 1.0
-            debounce_n += 1
-            tick_base = max(tick_base, MIN_TICK_DIST + 2)
-            print(f"[CV_ADJ] {m} cv={cv:.2f} (봇 의심) → debounce↑, tick_base↑")
-        elif cv >= 1.2:
-            # 사람 싸움 → 빠르게 반응
-            debounce_sec = max(1.5, debounce_sec - 0.5)
-            print(f"[CV_ADJ] {m} cv={cv:.2f} (변동성↑) → debounce↓")
-    except Exception:
-        debounce_sec = TICK_STOP_DEBOUNCE_SEC
-        debounce_n = TICK_STOP_DEBOUNCE_N
-
     # === 🎯 스파이크 반락 퀵컷 상태 ===
     spike_window = 4.0
     spike_check_start = time.time()
@@ -5002,62 +4974,9 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             ob_now = pre.get("ob", {})
 
-            # === 🎯 틱 기반 트레일링 스탑 ===
-            if STOP_MODE == "ticks":
-                # 1) 오더북에서 best bid 주기적 갱신
-                now_ts = time.time()
-                if USE_BID_FOR_STOP and (now_ts - last_ob_fetch) >= 1.2:
-                    try:
-                        ob_js = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m}, timeout=4)
-                        if ob_js and isinstance(ob_js, list) and len(ob_js) > 0:
-                            u0 = ob_js[0].get("orderbook_units", [{}])[0]
-                            last_best_bid = float(u0.get("bid_price", curp))
-                    except:
-                        last_best_bid = None
-                    last_ob_fetch = now_ts
-
-                # 2) 틱스탑 무장 (웜업 종료 후 또는 약간 수익 시)
-                if not tick_stop_armed and alive_sec >= WARMUP_SEC:
-                    tick_base = compute_tick_distance(curp, c1, ob_now)
-                    tick_stop_armed = True
-                    trail_stop_px = curp - tick_base * tick_sz
-                    print(f"[TICK_STOP] {m} 무장: {tick_base}틱, 스탑={trail_stop_px:.2f}")
-
-                # 3) 신고가 갱신 시 트레일 끌어올리기
-                if tick_stop_armed and new_high:
-                    tick_base = max(tick_base, compute_tick_distance(curp, c1, ob_now))
-                    new_trail = curp - tick_base * tick_sz
-                    trail_stop_px = max(trail_stop_px, round_to_tick(new_trail, tick_sz))
-
-                # 4) 스탑 트리거 판정 (디바운스)
-                ref_price = last_best_bid if (USE_BID_FOR_STOP and last_best_bid) else curp
-                if tick_stop_armed and ref_price <= trail_stop_px:
-                    if tick_stop_hits == 0:
-                        tick_stop_first_seen = time.time()
-                    tick_stop_hits += 1
-                    # 디바운스 조건 충족 시 손절
-                    if (time.time() - tick_stop_first_seen) >= TICK_STOP_DEBOUNCE_SEC and tick_stop_hits >= TICK_STOP_DEBOUNCE_N:
-                        close_auto_position(m, f"틱스탑 {tick_base}틱 (스탑={trail_stop_px:.2f}, ref={ref_price:.2f})")
-                        verdict = "TICK_STOP"
-                        break
-                else:
-                    # 2틱 이상 회복 또는 1초 경과 시 디바운스 리셋 (휩쏘 재트리거 방지)
-                    if ref_price >= trail_stop_px + tick_sz * 2 or (tick_stop_hits > 0 and (time.time() - tick_stop_first_seen) >= 1.0):
-                        tick_stop_hits = 0
-
-                # 5) 하드스탑 백업 (급락 시 즉시 컷)
-                if HARD_STOP_DD and cur_gain <= -HARD_STOP_DD:
-                    close_auto_position(m, f"하드스탑 급락 -{abs(cur_gain)*100:.2f}% (기준 -{HARD_STOP_DD*100:.1f}%)")
-                    verdict = "HARD_DROP"
-                    break
-
-            else:
-                # ① 기존 동적 손절 (ATR 기반, 0.3%~0.5%)
-                if cur_gain <= -eff_sl_pct:
-                    atr_detail = f", {atr_info}" if atr_info else ""
-                    close_auto_position(m, f"동적손절 -{abs(cur_gain)*100:.2f}% (기준 -{eff_sl_pct*100:.2f}% 초과{atr_detail})")
-                    verdict = "DYN_STOP"
-                    break
+            # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
+            # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
+            # 여기는 트레일링 손절 이후 추가 손절 판정용
 
             # ② 얇은 수익 체크포인트 (+0.3%) 도달 시 강세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 0.1% 아래로 떨어지면 리셋
@@ -5755,6 +5674,9 @@ def main():
                                          tight_mode=tight_mode)
                     except Exception as e:
                         print("[MON_ERR]", e)
+                    finally:
+                        # 🔧 FIX: 포지션 모니터링 종료 후 락 해제 (누수 방지)
+                        _release_entry_lock(m)
                 else:
                     # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리 + 락 해제
                     with _POSITION_LOCK:
