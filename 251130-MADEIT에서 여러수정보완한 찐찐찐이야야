@@ -5773,6 +5773,8 @@ def main():
                         print("[LOG_ERR]", e)
 
                     # --- 🔥 자동매수 진입 ---
+                    # 🔧 FIX: 스캔 루프에서 획득한 파일락 해제 (open_auto_position에서 다시 획득)
+                    _release_entry_lock(m)
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
