@@ -344,17 +344,24 @@ def get_adaptive_risk() -> float:
 
     return base_risk
 
+def _clean_params(d: dict):
+    """None/빈값 제거 + 키 정렬 (서명 안정화)"""
+    return {k: v for k, v in sorted((d or {}).items()) if v is not None and v != ""}
+
 def _make_auth_headers(query: dict = None):
     payload = {
         'access_key': UPBIT_ACCESS_KEY,
         'nonce': str(uuid.uuid4()),
     }
     if query:
-        q = urlencode(query).encode()
-        m = hashlib.sha512()
-        m.update(q)
-        payload['query_hash'] = m.hexdigest()
-        payload['query_hash_alg'] = 'SHA512'
+        # 🔧 FIX: 키 정렬 + None 제거로 서명 안정화 (401 방지)
+        cleaned = _clean_params(query)
+        if cleaned:
+            q = urlencode(cleaned).encode()
+            m = hashlib.sha512()
+            m.update(q)
+            payload['query_hash'] = m.hexdigest()
+            payload['query_hash_alg'] = 'SHA512'
     # 🔧 FIX: 알고리즘 지정 + PyJWT v1/v2 호환 디코딩
     jwt_token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
     if isinstance(jwt_token, bytes):  # PyJWT v1 대비
@@ -563,6 +570,10 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             r = relax_knob()  # 0~1.5
             # 🔧 0.5% 기준 (짧은 순간 0.5% 움직임이면 충분)
             base = 0.005 if not AGGRESSIVE_MODE else 0.006
+            # 🔧 야간(0~6시) 추격 허용폭 +0.1% 완화
+            hour = now_kst().hour
+            if 0 <= hour < 6:
+                base += 0.001
             dyn = base + min(0.004, pstd * 0.5) + r * 0.002
             thr = dyn
         else:
@@ -617,7 +628,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
-    with entry_lock(m, ttl_sec=60) as got_lock:
+    with entry_lock(m, ttl_sec=30) as got_lock:  # 🔧 TTL 60→30초 (락 충돌 완화)
         if not got_lock:
             print(f"[AUTO] {m} entry_lock 획득 실패 → 진입 스킵")
             cut("ENTRY_LOCK_FAIL", f"{m}")
