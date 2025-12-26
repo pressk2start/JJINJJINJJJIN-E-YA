@@ -4152,9 +4152,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ignition_score=ignition_score
     )
     if not gate_ok:
-        # 🔧 진짜 초입 신호만 near_miss로 표시 (움직임 있는 종목)
-        is_near_miss = (price_change > 0.001 or vol_surge > 1.5 or ignition_score > 0.5)
-        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=is_near_miss)
+        # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
+        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=False)
         return None
 
     # === 결과 패키징 ===
