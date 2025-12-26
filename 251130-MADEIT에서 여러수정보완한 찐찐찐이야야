@@ -880,10 +880,20 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         except Exception as e:
             print("[AUTO BUY ERR]", e)
-            tg_send(f"⚠️ 매수 실패 {m}\n{e}")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
+            # 🔧 유령 체결 방지: 예외라도 실제 잔고 확인
+            actual = get_actual_balance(m)
+            if actual > 0:
+                # 실제 체결됨 → 포지션 복구
+                print(f"[AUTO] {m} 예외 후 잔고 발견: {actual:.6f} → 포지션 복구")
+                avg_price = current_price  # 정확한 체결가 모르면 현재가 사용
+                volume_filled = actual
+                # 아래 포지션 저장 로직으로 이어감 (return 안 함)
+            else:
+                # 실제 잔고 없음 → 진짜 실패
+                tg_send(f"⚠️ 매수 실패 {m}\n{e}")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
         # === 포지션 저장 ===
         with _POSITION_LOCK:
