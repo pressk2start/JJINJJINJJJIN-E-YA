@@ -938,14 +938,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         consec = kd.get('consecutive_buys', 0)
 
 
-        # 🔧 진입 모드별 라벨 (간소화 + 경로 포함)
+        # 🔧 진입 모드별 라벨 (경로만 표시)
         signal_tag = pre.get("signal_tag", "기본")
         if entry_mode == "confirm":
             mode_label = "확정진입"
-            entry_reason = f"킬러충족 ({signal_tag})"
         else:
             mode_label = "탐색진입"
-            entry_reason = f"탐색 ({signal_tag})"
+        entry_reason = signal_tag  # EMA↑, 점화, 메가 등
 
         # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
         actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
