@@ -3935,28 +3935,24 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 2점 이상
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 2)
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 3점 이상
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
         return False, f"진입조건미달(EMA:{ema20_breakout},고점:{high_breakout}) | {metrics}"
 
     # === 통과 ===
-    # 신호 타입 표시
+    # 신호 타입 표시 (점화 / EMA↑ / 고점↑ / EMA↑+고점↑ / 거래량↑)
     if is_ignition:
         signal_tag = f"🔥점화{ignition_score}"
     elif breakout_score == 2:
-        signal_tag = "🚀강돌파"
+        signal_tag = "EMA↑+고점↑"
     elif ema20_breakout:
         signal_tag = "EMA↑"
     elif high_breakout:
         signal_tag = "고점↑"
-    elif vol_vs_ma >= 0.8:
-        signal_tag = f"거래량↑"
-    elif ignition_score >= 2:
-        signal_tag = f"⚡ign{ignition_score}"
     else:
-        signal_tag = "기본"
+        signal_tag = "거래량↑"
 
     return True, f"{signal_tag} PASS | {metrics}"
 
