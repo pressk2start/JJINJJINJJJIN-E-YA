@@ -974,27 +974,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
         actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
 
-        # 🔍 3단계 경로 표시 (분석용)
-        detect_type = pre.get("detect_type", "normal")
-        trigger_list = pre.get("trigger_type", [])
-        filter_type = pre.get("filter_type", "기본통과")  # payload에서 복사된 값
-
-        # 🚀 Pre-break 선행진입 표시
+        # 🔥 경로 표시: signal_tag 하나로 간소화
+        filter_type = pre.get("filter_type", "stage1_gate")
         if filter_type == "prebreak":
-            detect_str = "🚀선행"
-            filter_display = "고점돌파대기"
+            path_str = "🚀선행진입"
         else:
-            # 🔥 경로 표시: 점화 > 틱버스트 > 일반
-            if detect_type == "ignition":
-                detect_str = "🔥점화"
-            elif detect_type == "tick_burst":
-                detect_str = "⚡틱버스트"
-            else:
-                detect_str = "📊일반"
-            filter_display = filter_type
-
-        trigger_str = "+".join(trigger_list) if trigger_list else "없음"
-        path_str = f"{detect_str}→{trigger_str}→{filter_display}"
+            path_str = pre.get("signal_tag", "기본")
 
         tg_send(
             f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
@@ -1042,8 +1027,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 except Exception:
                     best_ask_krw = 0.0
 
-                # 🔍 경로 정보
-                trigger_list = pre.get("trigger_type", [])
+                # 🔍 경로 정보: signal_tag 하나로 통일
                 log_trade_features({
                     "ts": now_kst_str(),
                     "market": m,
@@ -1056,9 +1040,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
                     "score": pre.get("score", 0),
                     "entry_mode": entry_mode,
-                    "detect_type": pre.get("detect_type", "normal"),
-                    "trigger_type": "+".join(trigger_list) if trigger_list else "없음",
-                    "filter_type": pre.get("filter_type", "기본통과"),
+                    "signal_tag": pre.get("signal_tag", "기본"),
+                    "filter_type": pre.get("filter_type", "stage1_gate"),
                     # 🔥 새 지표
                     "consecutive_buys": cons_buys,
                     "avg_krw_per_tick": round(avg_krw, 0),
@@ -1957,7 +1940,7 @@ FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
     "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
     "fresh", "score", "entry_mode",
-    "detect_type", "trigger_type", "filter_type",  # 🔍 경로 분석용
+    "signal_tag", "filter_type",  # 🔍 경로 분석용 (signal_tag 하나로 통일)
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
     # 🔥 GATE 핵심 + 초단기 미세필터 지표
     "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
@@ -2137,109 +2120,45 @@ def get_path_statistics(last_n: int = 100) -> str:
             "─" * 20,
         ]
 
-        # 1단계: 감지 타입
-        if "detect_type" in df.columns:
-            lines.append("<b>1단계 감지:</b>")
-            for dtype in df["detect_type"].dropna().unique():
-                sub = df[df["detect_type"] == dtype]
-                cnt = len(sub)
-                w = len(sub[sub["result"] == "win"])
-                wr = w / cnt * 100 if cnt > 0 else 0
-                icon = "🔥" if dtype == "ignition" else ("⚡" if dtype == "tick_burst" else "📊")
-                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
-                lines.append(f"  {icon}{dtype}: {cnt}건 ({wr:.0f}%){star}")
-
-        # 2단계: 트리거 타입
-        if "trigger_type" in df.columns:
-            lines.append("<b>2단계 트리거:</b>")
-            # 트리거는 복합(점화+Early)일 수 있으므로 개별 분석
-            trigger_stats = {}
+        # 🔥 진입 경로별 승률 (signal_tag 기준)
+        if "signal_tag" in df.columns:
+            lines.append("<b>📍 진입 경로:</b>")
+            tag_stats = {}
             for _, row in df.iterrows():
-                triggers = str(row.get("trigger_type", "")).split("+")
-                for t in triggers:
-                    t = t.strip()
-                    if not t or t == "없음":
-                        continue
-                    if t not in trigger_stats:
-                        trigger_stats[t] = {"win": 0, "total": 0}
-                    trigger_stats[t]["total"] += 1
-                    if row["result"] == "win":
-                        trigger_stats[t]["win"] += 1
-
-            # 승률 순으로 정렬
-            sorted_triggers = sorted(trigger_stats.items(),
-                                     key=lambda x: x[1]["win"]/max(x[1]["total"],1),
-                                     reverse=True)
-            for t, stats in sorted_triggers:
-                cnt = stats["total"]
-                w = stats["win"]
-                wr = w / cnt * 100 if cnt > 0 else 0
-                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
-                lines.append(f"  {t}: {cnt}건 ({wr:.0f}%){star}")
-
-        # 3단계: 필터 타입
-        if "filter_type" in df.columns:
-            lines.append("<b>3단계 필터:</b>")
-            for ftype in df["filter_type"].dropna().unique():
-                sub = df[df["filter_type"] == ftype]
-                cnt = len(sub)
-                w = len(sub[sub["result"] == "win"])
-                wr = w / cnt * 100 if cnt > 0 else 0
-                icon = "🎯" if ftype == "프리시전" else "✓"
-                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
-                lines.append(f"  {icon}{ftype}: {cnt}건 ({wr:.0f}%){star}")
-
-        # 🔥 경로 조합별 승률
-        if all(col in df.columns for col in ["detect_type", "trigger_type", "filter_type"]):
-            lines.append("<b>📍 경로 조합:</b>")
-
-            # 조합 생성
-            combo_stats = {}
-            for _, row in df.iterrows():
-                dt = row.get("detect_type", "normal")
-                detect = "🔥" if dt == "ignition" else ("⚡" if dt == "tick_burst" else "📊")
-                trigger = str(row.get("trigger_type", "-"))[:6]  # 길면 자르기
-                ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
-                combo = f"{detect}→{trigger}→{ftype}"
-
-                if combo not in combo_stats:
-                    combo_stats[combo] = {"win": 0, "total": 0}
-                combo_stats[combo]["total"] += 1
+                tag = str(row.get("signal_tag", "기본"))
+                if tag not in tag_stats:
+                    tag_stats[tag] = {"win": 0, "total": 0}
+                tag_stats[tag]["total"] += 1
                 if row["result"] == "win":
-                    combo_stats[combo]["win"] += 1
+                    tag_stats[tag]["win"] += 1
 
-            # 승률 순 정렬, 상위 5개만
-            sorted_combos = sorted(combo_stats.items(),
-                                   key=lambda x: (x[1]["win"]/max(x[1]["total"],1), x[1]["total"]),
-                                   reverse=True)
-
-            for combo, stats in sorted_combos[:7]:  # 최대 7개
+            # 승률 순 정렬
+            sorted_tags = sorted(tag_stats.items(),
+                                 key=lambda x: (x[1]["win"]/max(x[1]["total"],1), x[1]["total"]),
+                                 reverse=True)
+            for tag, stats in sorted_tags:
                 cnt = stats["total"]
                 w = stats["win"]
                 wr = w / cnt * 100 if cnt > 0 else 0
                 star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
-                lines.append(f"  {combo}: {cnt}건 ({wr:.0f}%){star}")
+                lines.append(f"  {tag}: {cnt}건 ({wr:.0f}%){star}")
 
-        # 추천
-        lines.append("─" * 20)
-
-        # 가장 나쁜 경로 찾기
-        worst = None
-        worst_wr = 100
-        if "detect_type" in df.columns:
-            for dtype in df["detect_type"].dropna().unique():
-                sub = df[df["detect_type"] == dtype]
-                cnt = len(sub)
+            # 추천: 가장 나쁜 경로 찾기
+            lines.append("─" * 20)
+            worst = None
+            worst_wr = 100
+            for tag, stats in sorted_tags:
+                cnt = stats["total"]
                 if cnt >= 3:
-                    wr = len(sub[sub["result"] == "win"]) / cnt * 100
+                    wr = stats["win"] / cnt * 100
                     if wr < worst_wr:
                         worst_wr = wr
-                        worst = f"감지:{dtype}"
+                        worst = tag
 
-        if worst and worst_wr < overall_wr - 5:
-            lines.append(f"💡 검토 필요: {worst} ({worst_wr:.0f}%)")
-        else:
-            lines.append("💡 특별히 나쁜 경로 없음")
+            if worst and worst_wr < overall_wr - 5:
+                lines.append(f"💡 검토 필요: {worst} ({worst_wr:.0f}%)")
+            else:
+                lines.append("💡 특별히 나쁜 경로 없음")
 
         return "\n".join(lines)
 
@@ -2281,11 +2200,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             icon = "✅" if result == "win" else "❌"
             pnl_str = f"+{pnl:.2f}%" if pnl > 0 else f"{pnl:.2f}%"
 
-            # 경로
-            dt = row.get("detect_type", "normal")
-            detect = "🔥" if dt == "ignition" else ("⚡" if dt == "tick_burst" else "📊")
-            trigger = str(row.get("trigger_type", "-"))[:8]  # 너무 길면 자르기
-            ftype = "🎯" if row.get("filter_type") == "프리시전" else "✓"
+            # 경로: signal_tag 하나로 간소화
+            signal_tag = str(row.get("signal_tag", "기본"))
 
             # 지표들 (소수점 정리)
             buy_r = row.get("buy_ratio", 0) or 0
@@ -2325,7 +2241,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
 
             lines.append(
                 f"{icon} {market} {time_str} {pnl_str} {pb_mark}\n"
-                f"   {detect}→{trigger}→{ftype}\n"
+                f"   경로: {signal_tag}\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
                 f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
                 f"   🌡️과열{overheat:.1f} 틱나이{fresh_age:.1f}초\n"
@@ -4225,8 +4141,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
 
     # === 결과 패키징 ===
-    # 🔥 점화 진입 여부 판단 (gate_reason에 "점화" 포함 시)
-    is_ignition_entry = "점화" in gate_reason
+    # 🔥 signal_tag 추출 (gate_reason: "{signal_tag} PASS | {metrics}")
+    signal_tag = gate_reason.split(" PASS")[0] if " PASS" in gate_reason else "기본"
 
     pre = {
         "price": cur["trade_price"],
@@ -4246,9 +4162,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "filter_type": "stage1_gate",
         "ignition_score": ignition_score,
         "gate_reason": gate_reason,
-        # 🔥 경로 표시용 (점화 vs 일반)
-        "detect_type": "ignition" if is_ignition_entry else "normal",
-        "trigger_type": [f"{ignition_score}/4충족"] if is_ignition_entry else [],
+        # 🔥 경로 표시: signal_tag 하나로 통일 (점화3, EMA↑, 고점↑, 거래량↑ 등)
+        "signal_tag": signal_tag,
         # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
         "shadow_flags": ",".join(shadow_flags) if shadow_flags else "",
         "would_cut": would_cut,
@@ -4276,10 +4191,10 @@ def final_check_leader(m, pre, tight_mode=False):
             cut("TICKS_LOW", f"{m} {t['n']}")
             return None
 
-    # 필터 타입에 따른 표시
+    # 필터 타입에 따른 표시: signal_tag 사용
     if filter_type == "prebreak":
         display_filter = "🚀선행진입"
-    elif pre.get("detect_type") == "ignition":
+    elif "점화" in pre.get("signal_tag", ""):
         display_filter = "빠른진입"
     else:
         display_filter = "통합게이트"
@@ -4448,23 +4363,17 @@ from collections import deque
 
 
 def postcheck_6s(m, pre):
-    # 🔧 틱버스트는 항상 포스트체크 적용 (6초 재확인)
-    is_tick_burst = pre.get("detect_type") == "tick_burst"
-    # 🔥 점화 진입은 포스트체크 바이패스 (이미 4/4 조건 충족)
-    is_ignition = pre.get("detect_type") == "ignition"
+    # 🔥 점화 진입은 포스트체크 바이패스 (signal_tag에 "점화" 포함 시)
+    is_ignition = "점화" in pre.get("signal_tag", "")
 
-    if not POSTCHECK_ENABLED and not is_tick_burst:
+    if not POSTCHECK_ENABLED:
         return True, "SKIP"
-    # 🔥 점화 진입도 바이패스
+    # 🔥 점화 진입은 바이패스
     if is_ignition:
         return True, "BYPASS_IGNITION"
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
-
-    # 🔧 틱버스트용 포스트체크 시작 로그
-    if is_tick_burst:
-        print(f"[TICK_POSTCHECK] {m} 틱버스트 6초 재확인 시작")
 
     # ★★★ 장세/야간 완화 노브
     r = relax_knob()
@@ -5741,21 +5650,12 @@ def main():
                 imb_str = f"임밸 {payload.get('imbalance', 0):.2f}"
                 pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
 
-                # 🔍 3단계 경로 표시 (분석용)
-                detect_type = pre.get("detect_type", "normal")  # 1단계: 점화/틱버스트/일반
-                trigger_list = pre.get("trigger_type", [])  # 2단계: 점화빠른진입/봇매집/Early 등
-                filter_type = payload.get("filter_type", "기본통과")  # 3단계: 기본통과/프리시전
-
-                # 🔥 경로 표시: 점화 > 틱버스트 > 일반
-                if detect_type == "ignition":
-                    detect_str = "🔥점화"
-                elif detect_type == "tick_burst":
-                    detect_str = "⚡틱버스트"
+                # 🔥 경로 표시: signal_tag 하나로 간소화
+                filter_type = pre.get("filter_type", "stage1_gate")
+                if filter_type == "prebreak":
+                    path_str = "🚀선행진입"
                 else:
-                    detect_str = "📊일반"
-                trigger_str = "+".join(trigger_list) if trigger_list else "없음"
-
-                path_str = f"{detect_str} → {trigger_str} → {filter_type}"
+                    path_str = pre.get("signal_tag", "기본")
 
                 # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
                 ticks_for_metrics = pre.get("ticks", [])
