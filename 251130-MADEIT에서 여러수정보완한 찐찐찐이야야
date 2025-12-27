@@ -3943,10 +3943,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     is_ignition = (ignition_score >= 3)
 
     # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
-    # 형식: ign=점화점수 s=surge m=MA대비 c=변동% t=회전% b=매수비 sp=스프레드 i=임밸 a=가속
-    metrics = (f"ign={ignition_score} s={volume_surge:.2f} m={vol_vs_ma:.1f} "
-               f"c={price_change*100:.2f}% t={turn_pct:.1f}% b={buy_ratio:.0%} "
-               f"sp={spread:.2f}% i={imbalance:.2f} a={accel:.1f}")
+    metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
+               f"변동={price_change*100:.2f}% 회전={turn_pct:.1f}% 매수비={buy_ratio:.0%} "
+               f"스프레드={spread:.2f}% 임밸={imbalance:.2f} 가속={accel:.1f}x")
 
     # ============================================================
     # 단일 흐름: 모든 조건 체크 (동적 임계치 사용)
