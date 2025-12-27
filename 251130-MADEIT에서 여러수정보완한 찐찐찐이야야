@@ -3924,7 +3924,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 가격변동 하한 컷 (동적) ===
     if price_change < eff_price_min and not mega:
-        return False, f"변동부족 {price_change*100:.1f}%<{eff_price_min*100:.1f}%"
+        return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
