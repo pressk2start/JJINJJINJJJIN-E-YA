@@ -5687,6 +5687,13 @@ def main():
                 if payload.get("is_precision_pocket"):
                     pre["entry_mode"] = "confirm"  # probe → confirm 승격
 
+                # 🔧 FIX: postcheck 전 중복 체크 (6초 동안 다른 스캔이 같은 코인 잡는 것 방지)
+                with _POSITION_LOCK:
+                    if m in OPEN_POSITIONS:
+                        continue
+                if m in recent_alerts and time.time() - recent_alerts[m] < 30:
+                    continue
+
                 # === 6초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
