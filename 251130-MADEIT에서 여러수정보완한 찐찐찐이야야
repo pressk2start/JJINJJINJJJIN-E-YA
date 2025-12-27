@@ -1952,6 +1952,8 @@ FEATURE_FIELDS = [
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
     # 🔥 GATE 핵심 + 초단기 미세필터 지표
     "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
+    # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
+    "shadow_flags", "would_cut",
     "pnl_pct", "result", "hold_sec"
 ]
 
@@ -4144,6 +4146,30 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     imbalance = calc_orderbook_imbalance(ob)
     fresh_ok = last_two_ticks_fresh(ticks)
 
+    # 🔥 섀도우 모드용 지표 미리 계산
+    ia = inter_arrival_stats(ticks, 30)
+    cv = ia["cv"]
+    pstd10 = price_band_std(ticks, 10)
+    cons_buys = calc_consecutive_buys(ticks, 15)
+    overheat = accel * vol_surge
+    spread = ob.get("spread", 9.9)
+
+    # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
+    # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
+    if twin["buy_ratio"] >= 0.98 and pstd10 <= 0.001 and cv >= 2.5:
+        cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
+        return None
+
+    # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
+    shadow_flags = []
+    if cv > 2.2:
+        shadow_flags.append("CV22")
+    if turn_pct >= 12 and (cons_buys > 18 or overheat > 3):
+        shadow_flags.append("TURNxCONS/HEAT")
+    if accel >= 3.0 and not (imbalance >= 0.40 and spread <= 0.12):
+        shadow_flags.append("ACCEL_WEAK_CTX")
+    would_cut = len(shadow_flags) > 0
+
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
     closes = [x["trade_price"] for x in c1]
@@ -4211,6 +4237,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 🔥 경로 표시용 (점화 vs 일반)
         "detect_type": "ignition" if is_ignition_entry else "normal",
         "trigger_type": [f"{ignition_score}/4충족"] if is_ignition_entry else [],
+        # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
+        "shadow_flags": ",".join(shadow_flags) if shadow_flags else "",
+        "would_cut": would_cut,
+        "cv": cv,
+        "pstd": pstd10,
+        "consecutive_buys": cons_buys,
+        "overheat": overheat,
     }
 
     return pre
