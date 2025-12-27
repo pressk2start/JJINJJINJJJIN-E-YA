@@ -3942,11 +3942,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"진입조건미달(EMA:{ema20_breakout},고점:{high_breakout}) | {metrics}"
 
     # === 통과 ===
-    # 신호 타입 표시 (점화 / EMA↑ / 고점↑ / EMA↑+고점↑ / 거래량↑)
+    # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
     if is_ignition:
-        signal_tag = f"🔥점화{ignition_score}"
+        signal_tag = "🔥점화"
     elif breakout_score == 2:
-        signal_tag = "EMA↑+고점↑"
+        signal_tag = "강돌파 (EMA↑+고점↑)"
     elif ema20_breakout:
         signal_tag = "EMA↑"
     elif high_breakout:
