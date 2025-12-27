@@ -1235,7 +1235,7 @@ def close_auto_position(m, reason=""):
         res = place_market_sell(m, vol, price_hint=cur_price)  # 🔧 가격 힌트 전달
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         if order_uuid:
-            od = get_order_result(order_uuid, timeout_sec=12.0)
+            od = get_order_result(order_uuid, timeout_sec=20.0)  # 🔧 12→20초로 증가
         else:
             od = None
 
@@ -1257,8 +1257,17 @@ def close_auto_position(m, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
-        # 🔧 FIX #1: 미체결 시 포지션 유지
+        # 🔧 FIX #1: 미체결 시 잔고 재확인 후 처리
         if executed <= 0:
+            # 🔧 FIX: 타임아웃 시 잔고 재확인 (늦은 체결 대응)
+            time.sleep(2.0)
+            actual_after = get_actual_balance(m)
+            if actual_after <= 1e-12:
+                # 실잔고 0 = 체결된 것으로 간주
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                tg_send(f"🧹 <b>자동청산 완료(잔고확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
+                return
             print(f"[AUTO] {m} 청산 미체결 → 포지션 유지")
             tg_send(f"⚠️ <b>자동청산 미체결</b> {m}\n사유: 체결량 0 / 포지션 유지")
             return
