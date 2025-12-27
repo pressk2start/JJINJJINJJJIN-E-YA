@@ -3691,13 +3691,14 @@ def ignition_detected(
     # ---- 2) 연속 매수 (10초 윈도우) ----
     consec_buys = calc_consecutive_buys(window, 10) >= 5
 
-    # ---- 3) 가격 임펄스 (수익률 + 단조증가) ----
+    # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
     prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
     if len(prices) >= 6:
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
-        # 최근 6틱 엄격한 단조증가 (모두 상승)
-        monotone_up = all(b > a for a, b in zip(prices[-6:-1], prices[-5:]))
-        price_impulse = (ret >= 0.003) and monotone_up  # 0.3% 이상 + 연속상승
+        # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
+        up_count = sum(1 for a, b in zip(prices[-6:-1], prices[-5:]) if b > a)
+        mostly_up = up_count >= 4
+        price_impulse = (ret >= 0.003) and mostly_up  # 0.3% 이상 + 대부분 상승
     else:
         ret = 0
         price_impulse = False
