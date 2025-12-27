@@ -4902,6 +4902,10 @@ def monitor_position(m,
     strong_mode = False          # 강세 확인 후 트레일링 모드
     strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
 
+    # === 🔥 Plateau 감지용 상태 ===
+    last_peak_ts = time.time()   # 마지막 고점 갱신 시간
+    plateau_partial_done = False # Plateau 부분익절 완료 여부
+
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -4932,6 +4936,8 @@ def monitor_position(m,
             last_price = curp
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
+            if new_high:
+                last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
             best = max(best, curp)
             worst = min(worst, curp)
 
@@ -5132,6 +5138,36 @@ def monitor_position(m,
                     close_auto_position(m, f"Giveback청산 +{cur_gain_now*100:.2f}% (최고+{max_gain*100:.2f}%의 {(1-giveback_ratio)*100:.0f}%만 확보)")
                     verdict = "GIVEBACK_CAP"
                     break
+
+            # === 🔥 (A) 고점 절대 하락 청산 (Peak Giveback) ===
+            # maxrun >= 0.8% 달성 후 고점 대비 0.25% 하락시 즉시 청산
+            PEAK_GIVEBACK_ARM = 0.008    # +0.8% 이상 달성 시 활성화
+            PEAK_GIVEBACK_DROP = 0.0025  # 고점 대비 0.25% 하락 시 청산
+
+            if max_gain >= PEAK_GIVEBACK_ARM:
+                drop_from_peak_abs = max_gain - cur_gain_now  # 절대 하락폭
+                if drop_from_peak_abs >= PEAK_GIVEBACK_DROP:
+                    close_auto_position(m, f"고점되돌림 청산 +{cur_gain_now*100:.2f}% (최고+{max_gain*100:.2f}%에서 -{drop_from_peak_abs*100:.2f}%p 하락)")
+                    verdict = "PEAK_GIVEBACK"
+                    break
+
+            # === 🔥 (B) Plateau + 모멘텀 약화 → 부분익절 ===
+            # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
+            PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
+            PLATEAU_MIN_GAIN = 0.003  # 최소 +0.3% 이상일 때만 적용
+
+            time_since_peak = time.time() - last_peak_ts
+            if (not plateau_partial_done
+                and cur_gain_now >= PLATEAU_MIN_GAIN
+                and time_since_peak >= PLATEAU_SEC):
+
+                decay_flag, decay_info = buy_decay_flag(ticks)
+                if decay_flag:
+                    # 부분익절 실행 (50%)
+                    ok, msg, sold = safe_partial_sell(m, 0.5, f"Plateau부분익절 +{cur_gain_now*100:.2f}% (고점후 {time_since_peak:.0f}초 횡보+매수약화)")
+                    if ok:
+                        plateau_partial_done = True
+                        tg_send_mid(f"📉 {m} Plateau 부분익절 50% | +{cur_gain_now*100:.2f}% | 고점후 {time_since_peak:.0f}초")
 
             # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
             drop_from_high = (best - curp) / best if best > 0 else 0
