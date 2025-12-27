@@ -937,49 +937,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         imb = kd.get('imbalance', 0)
         consec = kd.get('consecutive_buys', 0)
 
-        # 각 조건 ✅/❌ 표시 (고정 키 사용)
-        c1 = "✅" if checks.get("vol_base") else "❌"
-        c2 = "✅" if checks.get("vol_surge") else "❌"
-        c3 = "✅" if checks.get("buy") else "❌"
-        c4 = "✅" if checks.get("turn") else "❌"
-        c5 = "✅" if checks.get("imb") else "❌"
-        c6 = "✅" if checks.get("consec") else "❌"
 
-        # 🔧 대금 표시: 1억 미만은 만원 단위, 이상은 억 단위
-        if vol_b >= 1e8:
-            vol_str = f"{vol_b/1e8:.1f}억"
-        elif vol_b >= 1e6:
-            vol_str = f"{vol_b/1e6:.0f}백만"
-        else:
-            vol_str = f"{vol_b/1e4:.0f}만"
-
-        # 🔧 배수 표시: 값 크기에 따라 정밀도 조절
-        if vol_s >= 1.0:
-            surge_str = f"{vol_s:.1f}x"
-        elif vol_s >= 0.01:
-            surge_str = f"{vol_s:.2f}x"
-        else:
-            surge_str = "<0.01x"  # 0.01 미만은 매우 작음 표시
-
-        # 🔧 임계치 동적 표시
-        thr_vol = thr.get('vol_base', 1e8) / 1e8
-        thr_surge = thr.get('vol_surge', 2.0)
-        thr_buy = thr.get('buy', 0.7)
-        thr_turn = thr.get('turn', 0.08)
-        thr_imb = thr.get('imb', 0.3)
-        thr_consec = thr.get('consec', 8)
-
-        detail_str = (f"대금{vol_str}≥{thr_vol:.0f}억{c1} 배수{surge_str}≥{thr_surge:.0f}x{c2} "
-                      f"매수{buy_r:.0%}≥{thr_buy:.0%}{c3} 회전{turn_r:.0%}≥{thr_turn:.0%}{c4} "
-                      f"임밸{imb:.2f}≥{thr_imb}{c5} 연속{consec}≥{thr_consec}{c6}")
-
-        # 🔧 진입 모드별 라벨
+        # 🔧 진입 모드별 라벨 (간소화)
+        signal_tag = pre.get("signal_tag", "기본")
         if entry_mode == "confirm":
             mode_label = "확정진입"
-            entry_reason = f"킬러충족 ({detail_str})"
+            entry_reason = f"킬러충족"
         else:
             mode_label = "탐색진입"
-            entry_reason = f"탐색 ({detail_str})"
+            entry_reason = f"탐색"
 
         # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
         actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
