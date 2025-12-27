@@ -3867,64 +3867,69 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 점화 여부 (로그용)
     is_ignition = (ignition_score >= 3)
 
+    # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
+    metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
+               f"변동={price_change*100:.2f}% 회전={turn_pct:.1f}% 매수비={buy_ratio:.0%} "
+               f"스프레드={spread:.2f}% 임밸={imbalance:.2f} 가속={accel:.1f}x")
+
     # ============================================================
-    # 단일 흐름: 모든 조건 체크 (컷 사유 + 값 vs 기준만 표시)
+    # 단일 흐름: 모든 조건 체크 (동적 임계치 사용)
     # ============================================================
 
     # === 신선도 체크 (필수 - 완화 없음) ===
     if not fresh_ok:
-        return False, "틱신선도부족"
+        return False, f"틱신선도부족 | {metrics}"
 
     # === 거래대금 컷 ===
     if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"거래대금부족 | {current_volume/1e6:.1f}M (기준≥{GATE_VOL_MIN/1e6:.1f}M)"
+        return False, f"거래대금부족(vol {current_volume/1e6:.1f}M) | {metrics}"
 
     # === 거래량 급등 조건 (동적) ===
     vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
     if not vol_ok and not mega:
-        return False, f"거래량부족 | surge={volume_surge:.2f}x (기준≥{eff_surge_min:.2f}x)"
+        return False, f"거래량부족 | {metrics}"
 
     # === 가격변동 하한 컷 (동적) ===
     if price_change < eff_price_min and not mega:
-        return False, f"변동부족 | {price_change*100:.2f}% (기준≥{eff_price_min*100:.2f}%)"
+        return False, f"변동부족 | {metrics}"
 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
-        return False, f"회전율부족 | {turn_pct:.1f}% (기준≥{eff_turn_min:.1f}%)"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
+        return False, f"회전율부족 | {metrics}"
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
     if turn_pct > 50 and spread > 0.25:
-        return False, f"과회전+스프레드 | 회전={turn_pct:.0f}% 스프레드={spread:.2f}%"
+        return False, f"과회전+스프레드 | {metrics}"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
-        return False, f"스프레드과다 | {spread:.2f}% (기준≤{eff_spread_max:.2f}%)"
+        return False, f"스프레드과다 | {metrics}"
 
     # === 과열 필터 (완화 없음 - 안전장치) ===
     overheated = accel * volume_surge
     if overheated > GATE_OVERHEAT_MAX:
-        return False, f"과열 | {overheated:.1f} (기준≤{GATE_OVERHEAT_MAX})"
+        return False, f"과열 | {metrics}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
-        return False, f"감속중 | {accel:.1f}x (기준≥{eff_accel_min:.1f}x)"
+        return False, f"감속중 | {metrics}"
     if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다 | {accel:.1f}x (기준≤{GATE_ACCEL_MAX}x)"
+        return False, f"가속과다 | {metrics}"
 
     # === 매수비 컷 (동적) ===
     if buy_ratio < eff_buy_min:
-        return False, f"매수비부족 | {buy_ratio:.0%} (기준≥{eff_buy_min:.0%})"
+        return False, f"매수비부족 | {metrics}"
 
     # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
     if abs(buy_ratio - 1.0) < 1e-6:
-        return False, "매수비100%(스푸핑)"
+        return False, f"매수비100%(스푸핑) | {metrics}"
 
     # === 급등 컷 (완화 없음 - 안전장치) ===
     if volume_surge > GATE_SURGE_MAX:
-        return False, f"급등과다 | {volume_surge:.1f}x (기준≤{GATE_SURGE_MAX}x)"
+        return False, f"급등과다 | {metrics}"
 
     # === 호가 임밸런스 컷 (동적) ===
     if imbalance < eff_imb_min:
-        return False, f"호가균형취약 | {imbalance:.2f} (기준≥{eff_imb_min:.2f})"
+        return False, f"호가균형취약 | {metrics}"
 
     # === 진입 신호 체크 (동적) ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
@@ -3949,7 +3954,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         signal_tag = "거래량↑"
 
-    return True, f"{signal_tag} PASS"
+    return True, f"{signal_tag} PASS | {metrics}"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -5575,8 +5580,10 @@ def main():
 
                 if all_killer:
                     pre["entry_mode"] = "confirm"
+                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')}")
                 else:
                     pre["entry_mode"] = "probe"
+                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
