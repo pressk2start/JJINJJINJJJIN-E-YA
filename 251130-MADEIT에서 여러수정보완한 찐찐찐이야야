@@ -5165,6 +5165,19 @@ def monitor_position(m,
                     verdict = "STRONG_TRAIL_EXIT"
                     break
 
+            # ⑤ Giveback Cap: MFE 대비 35% 이상 되돌리면 청산
+            max_gain = (best / entry_price - 1.0)  # MFE 수익률
+            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+            GIVEBACK_CAP = 0.35  # 35% 되돌림 한도
+            MIN_GAIN_FOR_GIVEBACK = 0.003  # 최소 +0.3% 수익 시에만 적용
+
+            if max_gain >= MIN_GAIN_FOR_GIVEBACK and cur_gain_now > 0:
+                giveback_ratio = (max_gain - cur_gain_now) / max_gain
+                if giveback_ratio >= GIVEBACK_CAP:
+                    close_auto_position(m, f"Giveback청산 +{cur_gain_now*100:.2f}% (최고+{max_gain*100:.2f}%의 {(1-giveback_ratio)*100:.0f}%만 확보)")
+                    verdict = "GIVEBACK_CAP"
+                    break
+
             # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
             drop_from_high = (best - curp) / best if best > 0 else 0
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
