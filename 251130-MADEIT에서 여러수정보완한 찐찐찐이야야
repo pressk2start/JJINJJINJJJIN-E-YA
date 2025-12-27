@@ -5140,8 +5140,8 @@ def monitor_position(m,
                     break
 
             # === 🔥 (A) 고점 절대 하락 청산 (Peak Giveback) ===
-            # maxrun >= 0.4% 달성 후 고점 대비 0.2% 하락시 즉시 청산
-            PEAK_GIVEBACK_ARM = 0.004    # +0.4% 이상 달성 시 활성화 (0.8%→0.4% 현실화)
+            # maxrun >= 0.3% 달성 후 고점 대비 0.2% 하락시 즉시 청산
+            PEAK_GIVEBACK_ARM = 0.003    # +0.3% 이상 달성 시 활성화
             PEAK_GIVEBACK_DROP = 0.002   # 고점 대비 0.2% 하락 시 청산 (0.25%→0.2% 민감하게)
 
             if max_gain >= PEAK_GIVEBACK_ARM:
