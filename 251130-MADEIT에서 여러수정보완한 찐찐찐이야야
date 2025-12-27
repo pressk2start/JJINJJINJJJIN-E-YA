@@ -42,7 +42,7 @@ def fmt6(x):
 # 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
 # =========================
 TOP_N = 60
-SCAN_INTERVAL = 6
+SCAN_INTERVAL = 3
 COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
@@ -3644,7 +3644,7 @@ def ignition_detected(
     ticks,
     avg_candle_volume: float,
     ob=None,
-    cooldown_ms: int = 15000
+    cooldown_ms: int = 10000
 ) -> tuple:
     """
     점화 감지: 급등 시작 0~30초 내 감지
@@ -3925,8 +3925,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
-    # 🔥 점화 감지 (4요건 중 4개 모두) - 빠른 진입 경로이므로 기준 최대
-    is_ignition = (ignition_score >= 4)
+    # 🔥 점화 감지 (4요건 중 3개 이상) - ignition_detected()와 일치
+    is_ignition = (ignition_score >= 3)
 
     # ============================================================
     # 🚀 점화 감지 시 빠른 진입 (1분봉 조건 스킵)
