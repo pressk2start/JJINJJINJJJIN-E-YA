@@ -5548,16 +5548,24 @@ def main():
                 turn = pre["tape"]["krw"] / max(ob.get("depth_krw", 1), 1)
                 imbalance = calc_orderbook_imbalance(ob)
 
+                # 킬러 조건 임계치 (한 곳에서 관리)
+                K_VOL_BASE = 100_000_000   # 거래대금 1억
+                K_VOL_SURGE = 2.0          # 서지 2배
+                K_BUY = 0.70               # 매수비 70%
+                K_TURN = 0.08              # 회전율 8%
+                K_IMB = 0.3                # 체결강도 0.3
+                K_CONSEC = 8               # 연속매수 8회
+
                 # 킬러 조건 (모두 충족 시 confirm)
-                killer_vol_base = current_vol >= 100_000_000  # 최근 거래대금 1억 이상
-                killer_vol_surge = volume_surge >= 2.0        # 거래량 2배 이상
-                killer_buy = buy_ratio >= 0.70                # 매수비 70% 이상
-                killer_turn = turn >= 0.08                    # 🔥 회전율 8% 이상 (3%→8% 상향)
-                killer_imb = imbalance >= 0.3                 # 체결강도 0.3 이상
-                # 🔥 연속매수 조건 추가 (tape에 없으므로 직접 계산)
+                killer_vol_base = current_vol >= K_VOL_BASE
+                killer_vol_surge = volume_surge >= K_VOL_SURGE
+                killer_buy = buy_ratio >= K_BUY
+                killer_turn = turn >= K_TURN
+                killer_imb = imbalance >= K_IMB
+                # 연속매수 조건
                 ticks_for_killer = pre.get("ticks", [])
                 cons_buys = calc_consecutive_buys(ticks_for_killer, 15) if ticks_for_killer else 0
-                killer_consec = cons_buys >= 8                # 연속매수 8회 이상
+                killer_consec = cons_buys >= K_CONSEC
 
                 all_killer = (killer_vol_base and killer_vol_surge and
                               killer_buy and killer_turn and killer_imb and killer_consec)
@@ -5571,25 +5579,25 @@ def main():
                     "imbalance": imbalance,
                     "consecutive_buys": cons_buys,
                     "checks": {
-                        "거래대금 1억+": killer_vol_base,
-                        "거래량 2배+": killer_vol_surge,
-                        "매수비 70%+": killer_buy,
-                        "회전율 8%+": killer_turn,     # 🔥 3%→8% 상향
-                        "체결강도 0.3+": killer_imb,
-                        "연속매수 8+": killer_consec,  # 🔥 신규 추가
+                        f"거래대금 {K_VOL_BASE/1e8:.0f}억+": killer_vol_base,
+                        f"거래량 {K_VOL_SURGE:.0f}배+": killer_vol_surge,
+                        f"매수비 {K_BUY:.0%}+": killer_buy,
+                        f"회전율 {K_TURN:.0%}+": killer_turn,
+                        f"체결강도 {K_IMB}+": killer_imb,
+                        f"연속매수 {K_CONSEC}+": killer_consec,
                     }
                 }
 
-                # 킬러 조건 통과값 전체 표시
-                killer_vals = (f"매수{buy_ratio:.0%}≥70 회전{turn:.0%}≥8 연속{cons_buys}≥8 "
-                               f"거래대금{current_vol/1e8:.1f}억≥1 서지{volume_surge:.1f}x≥2 체결강도{imbalance:.2f}≥0.3")
+                # 킬러 조건 통과값 전체 표시 (임계치 자동 반영)
+                killer_vals = (f"매수{buy_ratio:.0%}≥{K_BUY:.0%} 회전{turn:.0%}≥{K_TURN:.0%} 연속{cons_buys}≥{K_CONSEC} "
+                               f"거래대금{current_vol/1e8:.1f}억≥{K_VOL_BASE/1e8:.0f} 서지{volume_surge:.1f}x≥{K_VOL_SURGE:.0f} 체결{imbalance:.2f}≥{K_IMB}")
 
                 if all_killer:
                     pre["entry_mode"] = "confirm"
                     print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
                 else:
                     pre["entry_mode"] = "probe"
-                    # PROBE: 통과값 전체 표시 (실패한 것은 ❌ 표시)
+                    # PROBE: 통과값 전체 표시 (실패한 것은 ✗ 표시)
                     vals = []
                     vals.append(f"{'✓' if killer_buy else '✗'}매수{buy_ratio:.0%}")
                     vals.append(f"{'✓' if killer_turn else '✗'}회전{turn:.0%}")
