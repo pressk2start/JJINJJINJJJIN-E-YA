@@ -5625,7 +5625,7 @@ def main():
                     pre["entry_mode"] = "probe"
                     fail_cnt = sum([not killer_buy, not killer_turn, not killer_consec,
                                     not killer_vol_base, not killer_vol_surge, not killer_imb])
-                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {killer_vals} ({fail_cnt}개 탈락)")
+                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {killer_vals} ({fail_cnt}개 탈락으로 confirm 실패)")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
