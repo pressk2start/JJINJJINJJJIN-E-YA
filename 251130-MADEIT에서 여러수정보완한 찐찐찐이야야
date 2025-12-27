@@ -1339,7 +1339,7 @@ def close_auto_position(m, reason=""):
         if "최소주문금액" in str(e) or "5000" in str(e):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
-            tg_send_mid(f"🧹 {m} 최소주문금액 미만 → 포지션 제거 (소량 잔여는 보유)")
+            tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미만)\n• 소량 잔여는 거래소에 보유")
             # 🔧 FIX: 리포트 카운트 증가
             if AUTO_LEARN_ENABLED:
                 try:
@@ -1353,7 +1353,7 @@ def close_auto_position(m, reason=""):
             actual_check = get_actual_balance(m)
             if actual_check <= 0:
                 print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
-                tg_send_mid(f"🗑️ {m} 좀비 포지션 제거 (실제 잔고 0)")
+                tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 # 🔧 FIX: 리포트 카운트 증가
@@ -1513,7 +1513,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         if "최소주문금액" in str(e) or "5000" in str(e):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
-            tg_send_mid(f"🧹 {m} 부분청산 실패(최소주문금액) → 포지션 제거 처리")
+            tg_send(f"🧹 {m} 부분청산 완료 (최소주문금액 미만)\n• 포지션 정리됨")
             # 🔧 FIX: 리포트 카운트 증가
             if AUTO_LEARN_ENABLED:
                 try:
