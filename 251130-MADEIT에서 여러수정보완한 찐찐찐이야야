@@ -4605,8 +4605,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
 
-    # ATR 상세 (텔레그램용)
-    atr_info = f"ATR{atr:.0f}x{ATR_MULT}={base_pct*100:.2f}%"
+    # ATR 상세 (텔레그램용) - 읽기 쉬운 포맷
+    atr_info = f"ATR {atr:.0f}원×{ATR_MULT}배"
     return entry_price * (1 - pct), pct, atr_info
 
 # =========================
@@ -4942,8 +4942,7 @@ def monitor_position(m,
 
             # 🔧 웜업 제거: 체결 직후부터 ATR 손절 적용
             if cur_gain <= -eff_sl_pct:
-                atr_detail = f", {atr_info}" if atr_info else ""
-                close_auto_position(m, f"ATR손절 -{abs(cur_gain)*100:.2f}% (기준 -{eff_sl_pct*100:.2f}%{atr_detail})")
+                close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% ({atr_info})")
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
