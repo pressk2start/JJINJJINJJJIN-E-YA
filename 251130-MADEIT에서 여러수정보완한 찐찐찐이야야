@@ -5575,11 +5575,8 @@ def main():
 
                 if all_killer:
                     pre["entry_mode"] = "confirm"
-                    print(f"[CONFIRM] {m} 킬러조건 충족: 거래대금={current_vol/1e8:.1f}억, 배수={volume_surge:.1f}x, 매수비={buy_ratio:.0%}, 회전율={turn:.1%}, 임밸={imbalance:.2f}")
                 else:
                     pre["entry_mode"] = "probe"
-                    # 🔍 DEBUG: probe 모드에서도 값 확인
-                    print(f"[PROBE] {m} 대금={current_vol/1e8:.2f}억, 배수={volume_surge:.1f}x, pre.current_volume={pre.get('current_volume', 'MISSING')}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
