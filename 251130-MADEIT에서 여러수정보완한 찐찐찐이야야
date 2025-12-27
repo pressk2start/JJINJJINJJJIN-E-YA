@@ -938,13 +938,30 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         consec = kd.get('consecutive_buys', 0)
 
 
-        # 🔧 진입 모드별 라벨 (경로만 표시)
+        # 🔧 대금/배수 표시 포맷
+        if vol_b >= 1e8:
+            vol_str = f"{vol_b/1e8:.1f}억"
+        elif vol_b >= 1e6:
+            vol_str = f"{vol_b/1e6:.0f}백만"
+        else:
+            vol_str = f"{vol_b/1e4:.0f}만"
+        surge_str = f"{vol_s:.1f}x" if vol_s >= 1.0 else f"{vol_s:.2f}x"
+
+        # 🔧 진입 사유: 값/기준 형태 (체크X 제거)
         signal_tag = pre.get("signal_tag", "기본")
+        thr_buy = thr.get('buy', 0.7)
+        thr_turn = thr.get('turn', 0.08)
+        thr_imb = thr.get('imb', 0.3)
+
+        detail_str = (f"대금{vol_str} 배수{surge_str} "
+                      f"매수{buy_r:.0%}/{thr_buy:.0%} 회전{turn_r:.0%}/{thr_turn:.0%} "
+                      f"임밸{imb:.2f}/{thr_imb}")
+
         if entry_mode == "confirm":
             mode_label = "확정진입"
         else:
             mode_label = "탐색진입"
-        entry_reason = signal_tag  # EMA↑, 점화, 메가 등
+        entry_reason = f"{signal_tag} ({detail_str})"
 
         # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
         actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
