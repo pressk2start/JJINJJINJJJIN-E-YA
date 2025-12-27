@@ -5580,23 +5580,24 @@ def main():
                     }
                 }
 
+                # 킬러 조건 통과값 전체 표시
+                killer_vals = (f"매수{buy_ratio:.0%}≥70 회전{turn:.0%}≥8 연속{cons_buys}≥8 "
+                               f"거래대금{current_vol/1e8:.1f}억≥1 서지{volume_surge:.1f}x≥2 체결강도{imbalance:.2f}≥0.3")
+
                 if all_killer:
                     pre["entry_mode"] = "confirm"
-                    # CONFIRM: 주요값만 간략히 표시
-                    confirm_vals = f"매수{buy_ratio:.0%} 회전{turn:.0%} 연속{cons_buys}"
-                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {confirm_vals}")
+                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
                 else:
                     pre["entry_mode"] = "probe"
-                    # PROBE: 실패한 조건만 표시 (값<기준)
-                    fails = []
-                    if not killer_buy: fails.append(f"매수{buy_ratio:.0%}<70%")
-                    if not killer_turn: fails.append(f"회전{turn:.0%}<8%")
-                    if not killer_consec: fails.append(f"연속{cons_buys}<8")
-                    if not killer_vol_base: fails.append(f"거래대금{current_vol/1e8:.1f}억<1억")
-                    if not killer_vol_surge: fails.append(f"서지{volume_surge:.1f}x<2x")
-                    if not killer_imb: fails.append(f"체결강도{imbalance:.2f}<0.3")
-                    fail_str = " ".join(fails[:3]) if fails else "?"  # 최대 3개만
-                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {fail_str}")
+                    # PROBE: 통과값 전체 표시 (실패한 것은 ❌ 표시)
+                    vals = []
+                    vals.append(f"{'✓' if killer_buy else '✗'}매수{buy_ratio:.0%}")
+                    vals.append(f"{'✓' if killer_turn else '✗'}회전{turn:.0%}")
+                    vals.append(f"{'✓' if killer_consec else '✗'}연속{cons_buys}")
+                    vals.append(f"{'✓' if killer_vol_base else '✗'}거래대금{current_vol/1e8:.1f}억")
+                    vals.append(f"{'✓' if killer_vol_surge else '✗'}서지{volume_surge:.1f}x")
+                    vals.append(f"{'✓' if killer_imb else '✗'}체결{imbalance:.2f}")
+                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {' '.join(vals)}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
