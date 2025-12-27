@@ -3878,58 +3878,58 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 신선도 체크 (필수 - 완화 없음) ===
     if not fresh_ok:
-        return False, f"틱신선도부족 | {metrics}"
+        return False, "틱신선도부족"
 
     # === 거래대금 컷 ===
     if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"거래대금부족(vol {current_volume/1e6:.1f}M) | {metrics}"
+        return False, f"거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M"
 
     # === 거래량 급등 조건 (동적) ===
     vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
     if not vol_ok and not mega:
-        return False, f"거래량부족 | {metrics}"
+        return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x"
 
     # === 가격변동 하한 컷 (동적) ===
     if price_change < eff_price_min and not mega:
-        return False, f"변동부족 | {metrics}"
+        return False, f"변동부족 {price_change*100:.1f}%<{eff_price_min*100:.1f}%"
 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
-        return False, f"회전율부족 | {metrics}"
+        return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
     # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
     if turn_pct > 50 and spread > 0.25:
-        return False, f"과회전+스프레드 | {metrics}"
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
-        return False, f"스프레드과다 | {metrics}"
+        return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
     # === 과열 필터 (완화 없음 - 안전장치) ===
     overheated = accel * volume_surge
     if overheated > GATE_OVERHEAT_MAX:
-        return False, f"과열 | {metrics}"
+        return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
-        return False, f"감속중 | {metrics}"
+        return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
     if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다 | {metrics}"
+        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
 
     # === 매수비 컷 (동적) ===
     if buy_ratio < eff_buy_min:
-        return False, f"매수비부족 | {metrics}"
+        return False, f"매수비부족 {buy_ratio:.0%}<{eff_buy_min:.0%}"
 
     # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
     if abs(buy_ratio - 1.0) < 1e-6:
-        return False, f"매수비100%(스푸핑) | {metrics}"
+        return False, "매수비100%(스푸핑)"
 
     # === 급등 컷 (완화 없음 - 안전장치) ===
     if volume_surge > GATE_SURGE_MAX:
-        return False, f"급등과다 | {metrics}"
+        return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x"
 
     # === 호가 임밸런스 컷 (동적) ===
     if imbalance < eff_imb_min:
-        return False, f"호가균형취약 | {metrics}"
+        return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f}"
 
     # === 진입 신호 체크 (동적) ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
@@ -3939,7 +3939,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
-        return False, f"진입조건미달 | EMA={ema20_breakout} 고점={high_breakout} 거래량={vol_vs_ma:.1f}x"
+        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
 
     # === 통과 ===
     # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
@@ -3954,7 +3954,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         signal_tag = "거래량↑"
 
-    return True, f"{signal_tag} PASS | {metrics}"
+    # 통과 시 주요 지표만 간략 표시
+    pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
+    return True, f"{signal_tag} PASS | {pass_summary}"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -5580,10 +5582,21 @@ def main():
 
                 if all_killer:
                     pre["entry_mode"] = "confirm"
-                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')}")
+                    # CONFIRM: 주요값만 간략히 표시
+                    confirm_vals = f"매수{buy_ratio:.0%} 회전{turn:.0%} 연속{cons_buys}"
+                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {confirm_vals}")
                 else:
                     pre["entry_mode"] = "probe"
-                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')}")
+                    # PROBE: 실패한 조건만 표시 (값<기준)
+                    fails = []
+                    if not killer_buy: fails.append(f"매수{buy_ratio:.0%}<70%")
+                    if not killer_turn: fails.append(f"회전{turn:.0%}<8%")
+                    if not killer_consec: fails.append(f"연속{cons_buys}<8")
+                    if not killer_vol_base: fails.append(f"거래대금{current_vol/1e8:.1f}억<1억")
+                    if not killer_vol_surge: fails.append(f"서지{volume_surge:.1f}x<2x")
+                    if not killer_imb: fails.append(f"체결강도{imbalance:.2f}<0.3")
+                    fail_str = " ".join(fails[:3]) if fails else "?"  # 최대 3개만
+                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {fail_str}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
