@@ -991,6 +991,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         else:
             path_str = pre.get("signal_tag", "기본")
 
+        # ✅ 손절가 None 방지
+        safe_stop_str = fmt6(stop_price) if isinstance(stop_price, (int, float)) and stop_price > 0 else "계산중"
+
         tg_send(
             f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
             f"• 사유: {entry_reason}\n"
@@ -1000,7 +1003,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             f"• 슬리피지: {slip_pct*100:+.3f}%\n"
             f"• 주문금액: {krw_to_use:,.0f}원 ({actual_pct:.1f}%)\n"
             f"• 수량: {volume_filled:.6f}\n"
-            f"• 손절가: {fmt6(stop_price)}원\n"
+            f"• 손절가: {safe_stop_str}원\n"
             f"{link_for(m)}"
         )
 
@@ -4373,6 +4376,8 @@ from collections import deque
 def postcheck_6s(m, pre):
     # 🔥 점화 진입은 포스트체크 바이패스 (signal_tag에 "점화" 포함 시)
     is_ignition = "점화" in pre.get("signal_tag", "")
+    # ✅ FIX: tick-burst 경로 제거에 맞춰 안전 기본값 (NameError 방지)
+    is_tick_burst = "틱버스트" in pre.get("signal_tag", "")
 
     if not POSTCHECK_ENABLED:
         return True, "SKIP"
