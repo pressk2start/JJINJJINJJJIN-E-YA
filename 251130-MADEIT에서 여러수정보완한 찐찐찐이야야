@@ -550,7 +550,7 @@ def sell_all(market):
 # =========================
 # 컷 로깅 (위치 이동: final_price_guard에서 사용)
 # =========================
-DEBUG_CUT = False          # 전체 컷 로그 (True면 모든 컷 출력)
+DEBUG_CUT = True           # 전체 컷 로그 (True면 모든 컷 출력)
 DEBUG_NEAR_MISS = True     # 초입 신호 왔는데 gate에서 컷된 경우만 출력
 CUT_COUNTER = {
     k: 0
