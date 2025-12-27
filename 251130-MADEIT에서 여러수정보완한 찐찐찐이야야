@@ -2258,7 +2258,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
                 f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
                 f"   🌡️과열{overheat:.1f} 틱나이{fresh_age:.1f}초\n"
-                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd*100:.2f}% 호가{best_ask_krw/1000:.0f}K"
+                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}% 호가{best_ask_krw/1000:.0f}K"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -4457,14 +4457,14 @@ def postcheck_6s(m, pre):
             continue
 
         # acc에 최신 틱만 중복없이 축적
-        # 🔧 FIX: appendleft → append (ticks[:12]가 이미 최신→과거 순서)
-        for x in ticks[:12]:
+        # 🔧 FIX: appendleft 사용 - 새 틱을 왼쪽에 추가해야 acc[0]이 최신 유지
+        for x in reversed(ticks[:12]):  # 과거→최신 순으로 반복
             key = (x.get("timestamp"), x.get("trade_price"),
                    x.get("trade_volume"))
             if key in seen:
                 continue
             seen.add(key)
-            acc.append(x)  # ✅ 최신이 index 0 유지
+            acc.appendleft(x)  # ✅ 최신이 index 0 유지
 
         curp = ticks[0].get("trade_price", base_price)
 
