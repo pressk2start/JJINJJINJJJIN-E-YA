@@ -5061,10 +5061,11 @@ def monitor_position(m,
                         # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
                         tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
                     else:
-                        # 약세 → 즉시 매도
-                        close_auto_position(m, f"체크포인트 익절 진입 후 +{cur_gain*100:.2f}% 수익에서 약세판정")
-                        verdict = "THIN_PROFIT"
-                        break
+                        # 🔧 FIX: 약세 → 전량 청산 대신 25% 부분익절 (승률 보정)
+                        ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
+                        if ok:
+                            tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 완료")
+                        # 나머지 75%는 계속 모니터링 (전량 청산 안 함)
 
             # ③ 강세 모드: 고점 추적 + 동적 트레일링 (수익률에 따라 폭 확대)
             if strong_mode:
