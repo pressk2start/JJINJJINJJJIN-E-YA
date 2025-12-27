@@ -4950,10 +4950,6 @@ def monitor_position(m,
         pos = OPEN_POSITIONS.get(m, {})
     entry_mode = pos.get("entry_mode", "confirm")
 
-    # === 🎯 스파이크 반락 퀵컷 상태 ===
-    spike_window = 4.0
-    spike_check_start = time.time()
-
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
@@ -4981,17 +4977,6 @@ def monitor_position(m,
             new_high = curp > best
             best = max(best, curp)
             worst = min(worst, curp)
-
-            # === 🔧 스파이크→즉시 반락 퀵컷 ===
-            # 초단기 들어갔는데 2~4초 만에 스파이크 후 절반 이상 반납하면 즉시 컷
-            if (time.time() - spike_check_start) <= spike_window:
-                gain_now = (curp / entry_price - 1.0)
-                drop_from_peak = (best - curp) / best if best > 0 else 0
-                if gain_now >= 0.007 and drop_from_peak >= 0.004:
-                    # +0.7% 찍고 -0.4% 반락
-                    verdict = "스파이크반락 퀵컷"
-                    outcome_extra = f"(+{gain_now*100:.2f}%→-{drop_from_peak*100:.2f}% from peak)"
-                    break
 
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
