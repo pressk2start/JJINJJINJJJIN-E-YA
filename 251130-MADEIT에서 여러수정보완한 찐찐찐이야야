@@ -5677,8 +5677,8 @@ def main():
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         continue
-                    # 🔧 FIX: recent_alerts도 락 안에서 체크 + 즉시 설정
-                    if m in recent_alerts and time.time() - recent_alerts[m] < 60:
+                    # 🔧 FIX: recent_alerts도 락 안에서 체크 (10초 이내만 차단 - postcheck 동안만)
+                    if m in recent_alerts and time.time() - recent_alerts[m] < 10:
                         continue
                     # 🔧 FIX: postcheck 전에 미리 마킹 (다른 스캔 차단)
                     recent_alerts[m] = time.time()
@@ -5687,7 +5687,9 @@ def main():
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
                     cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
-                    # 🔧 FIX: postcheck 실패 시 recent_alerts는 유지 (쿨다운 역할)
+                    # 🔧 FIX: postcheck 실패 시 recent_alerts 제거 (다음 스캔에서 재시도 가능)
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
                     continue
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
