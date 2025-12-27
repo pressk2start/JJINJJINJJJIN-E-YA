@@ -2867,17 +2867,31 @@ def uptick_streak_from_ticks(ticks, need=2):
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
 
 
-def last_two_ticks_fresh(ticks, max_age=None):
-    """틱 신선도 체크 - GATE_FRESH_AGE_MAX 전역 변수 사용"""
+def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
+    """
+    틱 신선도 체크 - GATE_FRESH_AGE_MAX 전역 변수 사용
+
+    return_age=True: (bool, max_tick_age, effective_max_age) 반환
+    return_age=False: bool만 반환 (기존 호환)
+    """
     if max_age is None:
         max_age = GATE_FRESH_AGE_MAX
-    if len(ticks) < 2: return False
+    if len(ticks) < 2:
+        if return_age:
+            return False, 999.0, max_age
+        return False
     h = now_kst().hour
     if 0 <= h < 6:
         max_age = max_age + 0.8
     now = int(time.time() * 1000)
-    return all(
-        (now - x.get("timestamp", 0)) / 1000.0 <= max_age for x in ticks[:2])
+    # 최근 2틱 중 가장 오래된 틱의 나이 계산
+    tick_ages = [(now - x.get("timestamp", 0)) / 1000.0 for x in ticks[:2]]
+    max_tick_age = max(tick_ages) if tick_ages else 999.0
+    is_fresh = all(age <= max_age for age in tick_ages)
+
+    if return_age:
+        return is_fresh, max_tick_age, max_age
+    return is_fresh
 
 
 def body_ratio(c):
@@ -3838,6 +3852,7 @@ def meets_volume_surge(current_volume, past_volumes):
 # ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
 def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
+                 fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
                  ignition_score=0):
@@ -3858,6 +3873,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     - GATE_VOL_MIN: 거래대금 하한
     - GATE_SURGE_MIN: 거래량급등 하한
     - GATE_PRICE_MIN: 가격변동 하한
+    - GATE_FRESH_AGE_MAX: 틱신선도 상한(초)
+
+    [로그 형식 통일]
+    - 컷 메시지: "항목 현재값<기준값" 또는 "현재값>기준값"
+    - 모든 컷에 현재값과 동적 기준값 표시
 
     Returns: (allow, reason)
     """
@@ -3891,7 +3911,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 신선도 체크 (필수 - 완화 없음) ===
     if not fresh_ok:
-        return False, "틱신선도부족"
+        return False, f"틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초"
 
     # === 거래대금 컷 ===
     if current_volume < GATE_VOL_MIN and not mega:
@@ -4082,7 +4102,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
     imbalance = calc_orderbook_imbalance(ob)
-    fresh_ok = last_two_ticks_fresh(ticks)
+    fresh_ok, fresh_age, fresh_max_age = last_two_ticks_fresh(ticks, return_age=True)
 
     # 🔥 섀도우 모드용 지표 미리 계산
     ia = inter_arrival_stats(ticks, 30)
@@ -4137,6 +4157,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         buy_ratio=twin["buy_ratio"],
         imbalance=imbalance,
         fresh_ok=fresh_ok,
+        fresh_age=fresh_age,
+        fresh_max_age=fresh_max_age,
         current_volume=current_volume,
         price_change=price_change,
         mega=mega,
