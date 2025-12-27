@@ -3904,133 +3904,130 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
                  ignition_score=0):
     """
-    1단계 진입 게이트: 단일 통합 필터 (final_check 통합)
+    1단계 진입 게이트: 단일 통합 필터 (점화 통합)
+
+    [🔥 점화 점수 = 가점/완화 요소]
+    - ignition_score가 높으면 임계치가 동적으로 완화됨
+    - 별도 분기 없이 단일 흐름으로 처리
+    - 학습/튜닝 포인트: GATE_* 변수 하나
 
     [전역 변수 임계치 사용 - 자동학습 대상]
-    - GATE_TURN_MIN/MAX: 회전율 범위
+    - GATE_TURN_MIN: 회전율 하한
     - GATE_SPREAD_MAX: 스프레드 상한
-    - GATE_ACCEL_MIN/MAX: 가속도 범위
+    - GATE_ACCEL_MIN: 가속도 하한
     - GATE_BUY_RATIO_MIN: 매수비 하한
-    - GATE_SURGE_MAX: volume_surge 상한
-    - GATE_OVERHEAT_MAX: accel*surge 상한
     - GATE_IMBALANCE_MIN: 호가 임밸런스 하한
-    - GATE_VOL_MIN: 거래대금 하한 (detect에서 이동)
-    - GATE_SURGE_MIN: 거래량급등 하한 (detect에서 이동)
-    - GATE_PRICE_MIN: 가격변동 하한 (detect에서 이동)
-
-    [🚀 신규 조건 - 급등 초입 감지 강화]
-    - ema20_breakout: 현재가 > EMA20
-    - high_breakout: 현재가 > 최근 12봉 고점
-    - vol_vs_ma: 현재 거래량 / 20봉 평균 거래량
-    - ignition_score: 점화 감지 점수 (4요건 중 충족 개수)
+    - GATE_VOL_MIN: 거래대금 하한
+    - GATE_SURGE_MIN: 거래량급등 하한
+    - GATE_PRICE_MIN: 가격변동 하한
 
     Returns: (allow, reason)
     """
-    # 🔥 점화 감지 (4요건 중 3개 이상) - ignition_detected()와 일치
+    # ============================================================
+    # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
+    # ignition_score: 0~4, 점수당 완화 비율 적용
+    # ============================================================
+    relax = ignition_score * 0.08  # 점수당 8% 완화 (3점이면 24% 완화)
+
+    # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
+    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
+    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
+    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
+    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
+    eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
+    eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
+    eff_spread_max = GATE_SPREAD_MAX * (1 + relax)               # 0.4 → 0.5 (3점)
+    eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
+
+    # 점화 여부 (로그용)
     is_ignition = (ignition_score >= 3)
+    relax_tag = f"[ign{ignition_score}]" if ignition_score > 0 else ""
 
     # ============================================================
-    # 🚀 점화 감지 시 빠른 진입 (1분봉 조건 스킵)
-    # 점화 = 틱 기반 실시간 감지이므로 초입 구간 바로 진입
-    # ============================================================
-    if is_ignition:
-        # 최소 안전 조건만 체크 (스프레드, 신선도, 매수비)
-        if not fresh_ok:
-            return False, "점화감지+틱신선도부족"
-        if spread > GATE_SPREAD_MAX * 1.5:  # 점화 시 스프레드 약간 완화
-            return False, f"점화감지+스프레드과다({spread:.2f}%)"
-        if buy_ratio < 0.45:  # 점화 시 매수비 완화 (기본 50% → 45%)
-            return False, f"점화감지+매수비부족({buy_ratio:.0%})"
-        # 점화 + 최소 조건 충족 → 바로 진입
-        return True, f"🔥점화감지({ignition_score}/4),빠른진입(sp={spread:.2f}%,b={buy_ratio:.0%})"
-
-    # ============================================================
-    # 일반 진입: 기존 하드컷 적용
+    # 단일 흐름: 모든 조건 체크 (동적 임계치 사용)
     # ============================================================
 
-    # === 거래대금 컷 (detect에서 이동) ===
-    if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"거래대금부족(vol {current_volume/1000:.0f}K<{GATE_VOL_MIN/1000:.0f}K)"
-
-    # === 🚀 거래량 급등 조건 개선: MA 대비 1.0배 이상 ===
-    # 기존 surge 조건과 새 vol_vs_ma 조건 중 하나만 충족해도 통과
-    vol_ok = (volume_surge >= GATE_SURGE_MIN) or (vol_vs_ma >= 0.5)  # 🔧 완화: 1.0→0.5 (더 공격적)
-    if not vol_ok and not mega:
-        return False, f"거래량부족(surge {volume_surge:.2f}x, MA대비 {vol_vs_ma:.1f}x)"
-
-    # === 가격변동 하한 컷 (detect에서 이동) ===
-    if price_change < GATE_PRICE_MIN and not mega:
-        return False, f"변동부족(chg {price_change*100:.2f}%<{GATE_PRICE_MIN*100:.1f}%)"
-
-    # === 신선도 체크 (필수) ===
+    # === 신선도 체크 (필수 - 완화 없음) ===
     if not fresh_ok:
-        return False, "틱 신선도 부족"
+        return False, f"{relax_tag}틱신선도부족"
 
-    # === 회전율 컷 ===
-    if turn_pct < GATE_TURN_MIN:
-        return False, f"회전율부족(turn {turn_pct:.1f}%<{GATE_TURN_MIN}%)"
-    # 과회전 단독은 OK (관심/유동성 신호)
-    # 과회전 + 스프레드 넓음 = 슬리피지 위험 → 컷
+    # === 거래대금 컷 ===
+    if current_volume < GATE_VOL_MIN and not mega:
+        return False, f"{relax_tag}거래대금부족(vol {current_volume/1000:.0f}K<{GATE_VOL_MIN/1000:.0f}K)"
+
+    # === 거래량 급등 조건 (동적) ===
+    vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
+    if not vol_ok and not mega:
+        return False, f"{relax_tag}거래량부족(surge {volume_surge:.2f}x<{eff_surge_min:.2f}, MA대비 {vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f})"
+
+    # === 가격변동 하한 컷 (동적) ===
+    if price_change < eff_price_min and not mega:
+        return False, f"{relax_tag}변동부족(chg {price_change*100:.2f}%<{eff_price_min*100:.2f}%)"
+
+    # === 회전율 컷 (동적) ===
+    if turn_pct < eff_turn_min:
+        return False, f"{relax_tag}회전율부족(turn {turn_pct:.1f}%<{eff_turn_min:.1f}%)"
+    # 과회전 + 스프레드 넓음 = 슬리피지 위험
     if turn_pct > 120 and spread > 0.25:
-        return False, f"과회전+스프레드({turn_pct:.0f}%,{spread:.2f}%)"
+        return False, f"{relax_tag}과회전+스프레드({turn_pct:.0f}%,{spread:.2f}%)"
 
-    # === 스프레드 컷 ===
-    if spread > GATE_SPREAD_MAX:
-        return False, f"스프레드과다(spread {spread:.2f}%>{GATE_SPREAD_MAX}%)"
+    # === 스프레드 컷 (동적) ===
+    if spread > eff_spread_max:
+        return False, f"{relax_tag}스프레드과다(spread {spread:.2f}%>{eff_spread_max:.2f}%)"
 
-    # === 과열 필터 ===
+    # === 과열 필터 (완화 없음 - 안전장치) ===
     overheated = accel * volume_surge
     if overheated > GATE_OVERHEAT_MAX:
-        return False, f"과열(accel*surge={overheated:.2f}>{GATE_OVERHEAT_MAX})"
+        return False, f"{relax_tag}과열(accel*surge={overheated:.2f}>{GATE_OVERHEAT_MAX})"
 
-    # === 가속도 컷 ===
-    if accel < GATE_ACCEL_MIN:
-        return False, f"감속중(accel {accel:.2f}x<{GATE_ACCEL_MIN}x)"
+    # === 가속도 컷 (동적) ===
+    if accel < eff_accel_min:
+        return False, f"{relax_tag}감속중(accel {accel:.2f}x<{eff_accel_min:.2f}x)"
     if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다(accel {accel:.2f}x>{GATE_ACCEL_MAX}x)"
+        return False, f"{relax_tag}가속과다(accel {accel:.2f}x>{GATE_ACCEL_MAX}x)"
 
-    # === 매수비 컷 ===
-    if buy_ratio < GATE_BUY_RATIO_MIN:
-        return False, f"매수비부족(buy {buy_ratio:.0%}<{GATE_BUY_RATIO_MIN:.0%})"
+    # === 매수비 컷 (동적) ===
+    if buy_ratio < eff_buy_min:
+        return False, f"{relax_tag}매수비부족(buy {buy_ratio:.0%}<{eff_buy_min:.0%})"
 
-    # === 매수비 100% 컷 (스푸핑 의심) ===
+    # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
     if abs(buy_ratio - 1.0) < 1e-6:
-        return False, "매수비100%(스푸핑의심)"
+        return False, f"{relax_tag}매수비100%(스푸핑의심)"
 
-    # === 급등 컷 ===
+    # === 급등 컷 (완화 없음 - 안전장치) ===
     if volume_surge > GATE_SURGE_MAX:
-        return False, f"급등과다(surge {volume_surge:.1f}x>{GATE_SURGE_MAX}x)"
+        return False, f"{relax_tag}급등과다(surge {volume_surge:.1f}x>{GATE_SURGE_MAX}x)"
 
-    # === 호가 임밸런스 컷 ===
-    if imbalance < GATE_IMBALANCE_MIN:
-        return False, f"호가균형취약(imb {imbalance:.2f}<{GATE_IMBALANCE_MIN})"
+    # === 호가 임밸런스 컷 (동적) ===
+    if imbalance < eff_imb_min:
+        return False, f"{relax_tag}호가균형취약(imb {imbalance:.2f}<{eff_imb_min:.2f})"
 
-    # === 🚀 신규 조건: EMA20 위 + 고점 돌파 + 점화 감지 (급등 초입 감지) ===
+    # === 진입 신호 체크 (동적) ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 강한 신호: EMA20 위 + 고점 돌파 + 거래량 1.0배
-    is_strong_breakout = (ema20_breakout and high_breakout and vol_vs_ma >= 0.5)  # 🔧 완화: 1.0→0.5 (더 공격적)
-
-    # 진입 조건: 돌파조건 1개 이상 OR 거래량 1.0배 이상 OR 점화 감지
-    # (기본 조건 ALL 통과 후, 아래 중 하나 이상 필요)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= 0.5) or is_ignition  # 🔧 완화: 1.0→0.5 (더 공격적)
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 2점 이상
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 2)
 
     if not entry_signal:
-        return False, f"진입조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x,점화:{ignition_score}/4)"
+        return False, f"{relax_tag}진입조건미달(EMA20:{ema20_breakout},고점:{high_breakout},MA대비:{vol_vs_ma:.1f}x,점화:{ignition_score}/4)"
 
-    # 통과 reason에 돌파/점화 정보 포함
-    signal_info = ""
+    # === 통과 ===
+    # 신호 타입 표시
     if is_ignition:
         signal_info = f"🔥점화({ignition_score}/4),"
-    elif is_strong_breakout:
+    elif breakout_score == 2:
         signal_info = "🚀강한돌파,"
     elif ema20_breakout:
         signal_info = "EMA↑,"
     elif high_breakout:
         signal_info = "고점↑,"
-    elif vol_vs_ma >= 0.8:  # 🔧 완화: 1.5→0.8 (더 공격적)
+    elif vol_vs_ma >= 0.8:
         signal_info = f"거래량↑({vol_vs_ma:.1f}x),"
+    elif ignition_score >= 2:
+        signal_info = f"⚡점화{ignition_score},"
+    else:
+        signal_info = ""
 
     return True, f"{signal_info}통과(sp={spread:.2f}%,ac={accel:.1f}x,t={turn_pct:.1f}%,b={buy_ratio:.0%},s={volume_surge:.1f}x,i={imbalance:.2f})"
 
