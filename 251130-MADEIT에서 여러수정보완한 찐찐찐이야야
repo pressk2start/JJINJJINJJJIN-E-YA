@@ -928,19 +928,22 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 진입 사유 한 줄 생성 (디테일 포함)
         kd = pre.get("killer_details", {})
         checks = kd.get("checks", {})
+        thr = kd.get("thresholds", {})  # 임계치
         score = pre.get("score", 0)
         vol_b = kd.get('vol_base', 0)
         vol_s = kd.get('vol_surge', 1)
         buy_r = kd.get('buy_ratio', 0)
         turn_r = kd.get('turn', 0)
         imb = kd.get('imbalance', 0)
+        consec = kd.get('consecutive_buys', 0)
 
-        # 각 조건 ✅/❌ 표시
-        c1 = "✅" if checks.get("거래대금 1억+") else "❌"
-        c2 = "✅" if checks.get("거래량 2배+") else "❌"
-        c3 = "✅" if checks.get("매수비 70%+") else "❌"
-        c4 = "✅" if checks.get("회전율 3%+") else "❌"
-        c5 = "✅" if checks.get("체결강도 0.3+") else "❌"
+        # 각 조건 ✅/❌ 표시 (고정 키 사용)
+        c1 = "✅" if checks.get("vol_base") else "❌"
+        c2 = "✅" if checks.get("vol_surge") else "❌"
+        c3 = "✅" if checks.get("buy") else "❌"
+        c4 = "✅" if checks.get("turn") else "❌"
+        c5 = "✅" if checks.get("imb") else "❌"
+        c6 = "✅" if checks.get("consec") else "❌"
 
         # 🔧 대금 표시: 1억 미만은 만원 단위, 이상은 억 단위
         if vol_b >= 1e8:
@@ -958,10 +961,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         else:
             surge_str = "<0.01x"  # 0.01 미만은 매우 작음 표시
 
-        # 🔍 DEBUG: 대금/배수 값 확인
-        print(f"[ALERT_DEBUG] {m} vol_b={vol_b}, vol_str={vol_str}, vol_s={vol_s}, surge_str={surge_str}")
+        # 🔧 임계치 동적 표시
+        thr_vol = thr.get('vol_base', 1e8) / 1e8
+        thr_surge = thr.get('vol_surge', 2.0)
+        thr_buy = thr.get('buy', 0.7)
+        thr_turn = thr.get('turn', 0.08)
+        thr_imb = thr.get('imb', 0.3)
+        thr_consec = thr.get('consec', 8)
 
-        detail_str = f"점수{score:.0f} 대금{vol_str}{c1} 배수{surge_str}{c2} 매수비{buy_r:.0%}{c3} 회전{turn_r:.1%}{c4} 임밸{imb:.2f}{c5}"
+        detail_str = (f"대금{vol_str}≥{thr_vol:.0f}억{c1} 배수{surge_str}≥{thr_surge:.0f}x{c2} "
+                      f"매수{buy_r:.0%}≥{thr_buy:.0%}{c3} 회전{turn_r:.0%}≥{thr_turn:.0%}{c4} "
+                      f"임밸{imb:.2f}≥{thr_imb}{c5} 연속{consec}≥{thr_consec}{c6}")
 
         # 🔧 진입 모드별 라벨
         if entry_mode == "confirm":
@@ -5570,7 +5580,7 @@ def main():
                 all_killer = (killer_vol_base and killer_vol_surge and
                               killer_buy and killer_turn and killer_imb and killer_consec)
 
-                # 킬러 조건 상세 저장 (텔레그램용)
+                # 킬러 조건 상세 저장 (텔레그램용) - 고정 키 사용
                 pre["killer_details"] = {
                     "vol_base": current_vol,
                     "vol_surge": volume_surge,
@@ -5578,13 +5588,23 @@ def main():
                     "turn": turn,
                     "imbalance": imbalance,
                     "consecutive_buys": cons_buys,
+                    # 임계치 저장 (알람에서 동적 표시용)
+                    "thresholds": {
+                        "vol_base": K_VOL_BASE,
+                        "vol_surge": K_VOL_SURGE,
+                        "buy": K_BUY,
+                        "turn": K_TURN,
+                        "imb": K_IMB,
+                        "consec": K_CONSEC,
+                    },
+                    # 통과 여부 (고정 키)
                     "checks": {
-                        f"거래대금 {K_VOL_BASE/1e8:.0f}억+": killer_vol_base,
-                        f"거래량 {K_VOL_SURGE:.0f}배+": killer_vol_surge,
-                        f"매수비 {K_BUY:.0%}+": killer_buy,
-                        f"회전율 {K_TURN:.0%}+": killer_turn,
-                        f"체결강도 {K_IMB}+": killer_imb,
-                        f"연속매수 {K_CONSEC}+": killer_consec,
+                        "vol_base": killer_vol_base,
+                        "vol_surge": killer_vol_surge,
+                        "buy": killer_buy,
+                        "turn": killer_turn,
+                        "imb": killer_imb,
+                        "consec": killer_consec,
                     }
                 }
 
