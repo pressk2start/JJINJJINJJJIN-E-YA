@@ -42,7 +42,7 @@ def fmt6(x):
 # 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
 # =========================
 TOP_N = 60
-SCAN_INTERVAL = 3
+SCAN_INTERVAL = 6
 COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
