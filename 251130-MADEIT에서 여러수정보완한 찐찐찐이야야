@@ -979,7 +979,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         tg_send(
             f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
             f"• 사유: {entry_reason}\n"
-            f"• 경로: {path_str}\n"
             f"• 신호가: {fmt6(signal_price)}원\n"
             f"• 체결가: {fmt6(avg_price)}원\n"
             f"• 슬리피지: {slip_pct*100:+.3f}%\n"
