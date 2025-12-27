@@ -866,21 +866,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             else:
                 volume_filled = 0.0
 
-            # 🔧 좀비포지션 방지: 체결 0이면 실제 잔고 확인
+            # 🔧 FIX: 체결 0이면 실패 처리 (잔고 fallback 제거 - 이전 잔고 오판 방지)
             if volume_filled <= 0:
-                actual = get_actual_balance(m)
-                if actual > 0:
-                    # 늦게 체결됨 → 잔고로 포지션 생성
-                    volume_filled = actual
-                    avg_price = entry_price  # 추정가
-                    print(f"[AUTO] {m} 잔고 확인으로 포지션 복구: {actual:.6f}")
-                else:
-                    # 진짜 미체결 → pending 취소
-                    signal_skip("체결 0 (주문 실패)")
-                    tg_send(f"⚠️ {m} 자동매수 체결 0 → 포지션 생성 안 함")
-                    with _POSITION_LOCK:
-                        OPEN_POSITIONS.pop(m, None)
-                    return
+                signal_skip("체결 0 (주문 실패)")
+                tg_send(f"⚠️ {m} 자동매수 체결 0 → 포지션 생성 안 함")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
             # 평균가 계산 (체결 정보가 있으면)
             if 'avg_price' not in locals():
@@ -894,21 +886,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         except Exception as e:
             print("[AUTO BUY ERR]", e)
-            # 🔧 유령 체결 방지: 예외라도 실제 잔고 확인
-            actual = get_actual_balance(m)
-            if actual > 0:
-                # 실제 체결됨 → 포지션 복구
-                print(f"[AUTO] {m} 예외 후 잔고 발견: {actual:.6f} → 포지션 복구")
-                avg_price = current_price  # 정확한 체결가 모르면 현재가 사용
-                volume_filled = actual
-                # 아래 포지션 저장 로직으로 이어감 (return 안 함)
-            else:
-                # 실제 잔고 없음 → 진짜 실패
-                signal_skip(f"매수 예외 ({e})")
-                tg_send(f"⚠️ 매수 실패 {m}\n{e}")
-                with _POSITION_LOCK:
-                    OPEN_POSITIONS.pop(m, None)
-                return
+            # 🔧 FIX: 예외 시 실패 처리 (잔고 fallback 제거 - 이전 잔고 오판 방지)
+            signal_skip(f"매수 예외 ({e})")
+            tg_send(f"⚠️ 매수 실패 {m}\n{e}")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            return
 
         # === 포지션 저장 ===
         with _POSITION_LOCK:
