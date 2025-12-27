@@ -5608,24 +5608,24 @@ def main():
                     }
                 }
 
-                # 킬러 조건 통과값 전체 표시 (임계치 자동 반영)
-                killer_vals = (f"매수{buy_ratio:.0%}≥{K_BUY:.0%} 회전{turn:.0%}≥{K_TURN:.0%} 연속{cons_buys}≥{K_CONSEC} "
-                               f"거래대금{current_vol/1e8:.1f}억≥{K_VOL_BASE/1e8:.0f} 서지{volume_surge:.1f}x≥{K_VOL_SURGE:.0f} 체결{imbalance:.2f}≥{K_IMB}")
+                # 킬러 조건 통과값 전체 표시 (통일된 형식: ✓/✗ + 값≥기준)
+                killer_vals = " ".join([
+                    f"{'✓' if killer_buy else '✗'}매수{buy_ratio:.0%}≥{K_BUY:.0%}",
+                    f"{'✓' if killer_turn else '✗'}회전{turn:.0%}≥{K_TURN:.0%}",
+                    f"{'✓' if killer_consec else '✗'}연속{cons_buys}≥{K_CONSEC}",
+                    f"{'✓' if killer_vol_base else '✗'}거래대금{current_vol/1e8:.1f}억≥{K_VOL_BASE/1e8:.0f}",
+                    f"{'✓' if killer_vol_surge else '✗'}서지{volume_surge:.1f}x≥{K_VOL_SURGE:.0f}",
+                    f"{'✓' if killer_imb else '✗'}체결{imbalance:.2f}≥{K_IMB}",
+                ])
 
                 if all_killer:
                     pre["entry_mode"] = "confirm"
                     print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
                 else:
                     pre["entry_mode"] = "probe"
-                    # PROBE: 통과값 전체 표시 (실패한 것은 ✗ 표시)
-                    vals = []
-                    vals.append(f"{'✓' if killer_buy else '✗'}매수{buy_ratio:.0%}")
-                    vals.append(f"{'✓' if killer_turn else '✗'}회전{turn:.0%}")
-                    vals.append(f"{'✓' if killer_consec else '✗'}연속{cons_buys}")
-                    vals.append(f"{'✓' if killer_vol_base else '✗'}거래대금{current_vol/1e8:.1f}억")
-                    vals.append(f"{'✓' if killer_vol_surge else '✗'}서지{volume_surge:.1f}x")
-                    vals.append(f"{'✓' if killer_imb else '✗'}체결{imbalance:.2f}")
-                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {' '.join(vals)}")
+                    fail_cnt = sum([not killer_buy, not killer_turn, not killer_consec,
+                                    not killer_vol_base, not killer_vol_surge, not killer_imb])
+                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {killer_vals} ({fail_cnt}개 탈락)")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
