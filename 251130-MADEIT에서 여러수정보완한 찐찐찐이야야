@@ -5673,22 +5673,24 @@ def main():
                 if payload.get("is_precision_pocket"):
                     pre["entry_mode"] = "confirm"  # probe → confirm 승격
 
-                # 🔧 FIX: postcheck 전 중복 체크 (6초 동안 다른 스캔이 같은 코인 잡는 것 방지)
+                # 🔧 FIX: postcheck 전 중복 체크 + 즉시 마킹 (6초 동안 다른 스캔 차단)
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         continue
-                if m in recent_alerts and time.time() - recent_alerts[m] < 30:
-                    continue
+                    # 🔧 FIX: recent_alerts도 락 안에서 체크 + 즉시 설정
+                    if m in recent_alerts and time.time() - recent_alerts[m] < 60:
+                        continue
+                    # 🔧 FIX: postcheck 전에 미리 마킹 (다른 스캔 차단)
+                    recent_alerts[m] = time.time()
 
                 # === 6초 포스트체크 ===
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
                     cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
+                    # 🔧 FIX: postcheck 실패 시 recent_alerts는 유지 (쿨다운 역할)
                     continue
 
-                if m in recent_alerts and time.time(
-                ) - recent_alerts[m] < ALERT_TTL:
-                    continue
+                # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
                 reason = "ign" if pre.get("ign_ok") else (
                     "early" if pre.get("early_ok") else
@@ -5702,20 +5704,15 @@ def main():
                     print(f"[LOCK] {m} already locked → skip")
                     continue
 
-                # recent_alerts도 락 안에서 체크 (더 강력한 중복 방지)
+                # 🔧 FIX: 파일락 획득 후 OPEN_POSITIONS만 재확인 (recent_alerts는 이미 위에서 마킹됨)
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
                         print(f"[SCAN] {m} 이미 포지션/pending 존재 → 스킵")
                         _release_entry_lock(m)
                         continue
-                    # 🔧 추가: 최근 60초 내 알람 발송된 종목도 스킵
-                    if m in recent_alerts and time.time() - recent_alerts[m] < 60:
-                        print(f"[SCAN] {m} 최근 60초 내 알람 발송됨 → 스킵")
-                        _release_entry_lock(m)
-                        continue
                     # 미리 pending 마킹 (다른 스레드 차단)
                     OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
-                    recent_alerts[m] = time.time()  # 🔧 락 안에서 설정
+                    # recent_alerts는 postcheck 전에 이미 설정됨 (line 5684)
                     last_signal_at[m] = time.time()
                     last_price_at_alert[m] = pre['price']
                     last_reason[m] = reason
