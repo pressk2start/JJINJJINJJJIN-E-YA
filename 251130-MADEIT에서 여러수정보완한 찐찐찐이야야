@@ -1186,7 +1186,7 @@ def close_auto_position(m, reason=""):
 
     if not pos:
         print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
-        tg_send_mid(f"⚠️ {m} 청산 시도했는데 OPEN_POSITIONS에 포지션 없음")
+        tg_send(f"⚠️ {m} 청산 시도 → 포지션 없음 (이미 정리됨)\n• 사유: {reason}")
         return
 
     # 실제 보유량 조회 (찌꺼기 방지)
@@ -1199,7 +1199,8 @@ def close_auto_position(m, reason=""):
         print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)
-        # 🔧 FIX: volume 0이어도 리포트 카운트 증가
+        # 🔧 FIX: volume 0이어도 알람 + 리포트 카운트 증가
+        tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
         if AUTO_LEARN_ENABLED:
             try:
                 update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
@@ -1547,6 +1548,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         actual = get_actual_balance(m)
         if actual <= 0:
             print(f"[REMONITOR] {m} 실잔고 0 → 유령 포지션 정리 후 루프 종료")
+            # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
+            entry_price_for_msg = pos.get("entry_price", 0)
+            tg_send(f"⚠️ {m} 포지션 정리 (실잔고 0 확인)\n• 매수가: {fmt6(entry_price_for_msg)}원\n• 외부 청산 또는 이미 정리됨")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             return False
