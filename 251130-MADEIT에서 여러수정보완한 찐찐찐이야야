@@ -460,6 +460,10 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
     손절가 기준으로 포지션 크기 계산
     - total_equity * risk_pct 만큼만 최대 손실 허용
     """
+    # 🔧 CRITICAL: 비정상 entry_price 가드 (분모 0 방지)
+    if entry_price is None or entry_price <= 0:
+        return 0.0
+
     risk_krw = total_equity * risk_pct
     # 🔧 FIX: DYN_SL_MIN과 동기화 (과위험 방지)
     min_sl_pct = DYN_SL_MIN  # 전역 손절폭과 일치
@@ -470,8 +474,13 @@ def calc_position_size(entry_price, stop_price, total_equity, risk_pct):
 
     per_unit_loss = max(entry_price - stop_price,
                         entry_price * min_sl_pct)
+
+    # 🔧 CRITICAL: 분모 안전 가드
+    if per_unit_loss <= 0:
+        return 0.0
+
     qty = risk_krw / per_unit_loss
-    return max(qty, 0)
+    return max(qty, 0.0)
 
 
 def place_market_buy(market, krw_amount):
@@ -3971,8 +3980,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 | {metrics}"
-    # 과회전 + 스프레드 넓음 = 슬리피지 위험
-    if turn_pct > 120 and spread > 0.25:
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
+    if turn_pct > 50 and spread > 0.25:
         return False, f"과회전+스프레드 | {metrics}"
 
     # === 스프레드 컷 (동적) ===
@@ -4232,6 +4241,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "turn_pct": turn_pct,
         "spread": ob["spread"],
         "buy_ratio": twin["buy_ratio"],
+        "fresh_ok": fresh_ok,  # 🔧 CRITICAL: fresh_ok 전달 (스코어 계산용)
         "mega": mega,
         "filter_type": "stage1_gate",
         "ignition_score": ignition_score,
@@ -4277,7 +4287,8 @@ def final_check_leader(m, pre, tight_mode=False):
     # 🔧 FIX: score 계산 복원 (calc_risk_score 호출)
     buy_ratio = pre.get("buy_ratio", 0.5)
     spread = pre.get("spread", 0.5)
-    turn = pre.get("turn_pct", 0.01)
+    # 🔧 CRITICAL: turn 단위 보정 (퍼센트 → 소수)
+    turn = (pre.get("turn_pct", 1.0) or 1.0) / 100.0
     imbalance = pre.get("imbalance", 0.0)
     volume_surge = pre.get("volume_surge", 1.0)
     fresh_ok = pre.get("fresh_ok", True)
