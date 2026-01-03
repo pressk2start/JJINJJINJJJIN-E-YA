@@ -1783,11 +1783,6 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         should_close = False
         reason = verdict or action or "모니터링 종료"
 
-        # 🔧 FIX: TRAIL_STOP은 monitor_position에서 이미 청산 완료 → 바로 종료
-        if verdict == "TRAIL_STOP":
-            print(f"[REMONITOR] {m} TRAIL_STOP 감지 → 이미 청산됨, 루프 종료")
-            return True
-
         # 1) 급락 / 손절 권고
         if verdict and ("급락" in verdict or "손절" in verdict):
             should_close = True
@@ -1895,10 +1890,10 @@ GATE_TURN_MAX = 80.0      # 회전율 상한 (%) - 40→80 완화
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - 0.20→0.40 완화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기 (3.0→100.0)
-GATE_BUY_RATIO_MIN = 0.58 # 매수비 하한 - 데이터 기반 상향 (0.55→0.58)
+GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
-GATE_IMBALANCE_MIN = 0.55 # 🔧 데이터 기반 상향: 임밸<0.35 실패↑ (0.50→0.55)
+GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
@@ -4460,37 +4455,6 @@ def final_check_leader(m, pre, tight_mode=False):
     fresh_ok = pre.get("fresh_ok", True)
 
     score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
-
-    # ========== 🚨 위험 패턴 진입 차단 (데이터 기반) ==========
-    # 분석 결과: 특정 조합에서 성공률 33~38%로 매우 낮음
-    ignition_score = pre.get("ignition_score", 0)
-    turn_pct_val = pre.get("turn_pct", 1.0) or 1.0
-
-    # 점화 신호가 강하면 (4점 이상) 위험 패턴 체크 bypass
-    if ignition_score < 4:
-        # 위험패턴 1: 매수비≥99% + 임밸≤0.35 + 회전<15% → 성공률 ~33%
-        is_risky_1 = (
-            buy_ratio >= 0.99 and
-            imbalance <= 0.35 and
-            turn_pct_val < 15
-        )
-        if is_risky_1:
-            cut("RISKY_PATTERN", f"{m} 매수비100%+임밸≤0.35+회전<15%")
-            return None
-
-        # 위험패턴 2: 임밸 0.1~0.35 + 매수비≥95% → 성공률 ~38%
-        is_risky_2 = (
-            0.1 <= imbalance <= 0.35 and
-            buy_ratio >= 0.95
-        )
-        if is_risky_2:
-            cut("RISKY_PATTERN", f"{m} 임밸{imbalance:.2f}(0.1~0.35)+매수비≥95%")
-            return None
-
-    # 추가 필터: 임밸 < 0.20 무조건 컷 (점화 4점 이상 예외)
-    if imbalance < 0.20 and ignition_score < 4:
-        cut("LOW_IMBAL", f"{m} 임밸 {imbalance:.2f} < 0.20")
-        return None
 
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
