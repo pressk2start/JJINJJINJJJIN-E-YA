@@ -54,14 +54,14 @@ EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
-PROFIT_CHECKPOINT = 0.003  # +0.3% (수수료 0.1% 커버 + 최소 익절 확보)
+PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
 
-# 🔧 횡보 탈출 로직 제거됨 (ATR + 트레일링으로 대체)
-# SIDEWAYS_TIMEOUT = 60  # 삭제됨
+# 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
+SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
 
 # 트레일링 손절 설정
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN = 0.0015  # 최소 트레일 간격 0.15% (수수료 커버용)
+TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -326,9 +326,9 @@ OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
 
-# 🔧 유령 포지션 동기화 (시작 시 1회만 실행)
+# 🔧 유령 포지션 동기화
 _LAST_ORPHAN_SYNC = 0
-# ORPHAN_SYNC_INTERVAL = 30  # 삭제됨 - 시작 시 1회만 실행
+ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
 
@@ -573,24 +573,19 @@ def sell_all(market):
         return None
 
 
-def sync_orphan_positions(first_run=False):
+def sync_orphan_positions():
     """
-    🔧 유령 포지션 동기화 (봇 시작 시 1회만 실행)
-
-    [실행 조건]
-    - 봇 시작 시 최초 1회만 실행 (main 루프에서 반복 호출 제거됨)
-    - 업비트에 잔고가 있지만 OPEN_POSITIONS에 없는 포지션만 감지
-
-    [보호 로직]
-    - 자동매수 후 모니터링 중인 포지션 (probe/confirm)은 절대 건드리지 않음
-    - OPEN_POSITIONS에 이미 있는 포지션은 스킵
-    - orphan 모드로 감지된 포지션만 청산 가능
-
-    [파라미터]
-    - first_run: True면 오탐 방지 체크 스킵 (봇 시작 시에는 자동매수 없었으므로)
+    🔧 유령 포지션 동기화
+    - 업비트에 잔고가 있지만 OPEN_POSITIONS에 없는 포지션 감지
+    - 감지된 포지션을 OPEN_POSITIONS에 추가하고 모니터링 시작
+    - 세션 내 1회만 처리 (반복 알림 방지)
     """
-    global _PREV_SYNC_MARKETS
-    # 🔧 30초 주기 체크 제거됨 - main()에서 시작 시 1회만 호출
+    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS
+
+    now = time.time()
+    if now - _LAST_ORPHAN_SYNC < ORPHAN_SYNC_INTERVAL:
+        return  # 아직 동기화 시간 안됨
+    _LAST_ORPHAN_SYNC = now
 
     try:
         accounts = get_account_info()
@@ -625,8 +620,8 @@ def sync_orphan_positions(first_run=False):
                     continue  # 이미 추적 중
 
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
-            # 단, first_run=True면 스킵 안함 (봇 시작 시에는 자동매수 없었으므로 오탐 없음)
-            if not first_run and market not in _PREV_SYNC_MARKETS:
+            # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
+            if market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
@@ -654,7 +649,7 @@ def sync_orphan_positions(first_run=False):
                     "entry_price": avg_buy_price,
                     "volume": balance,
                     "entry_mode": "orphan",  # 유령 포지션 표시
-                    "ts": time.time(),       # 현재 epoch 시간
+                    "ts": now,
                     "orphan_detected": True,
                 }
 
@@ -732,8 +727,7 @@ CUT_COUNTER = {
         "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
         "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
         "SCORE_LOW", "SPREAD_EXTREME", "PROBE_TICK", "NO_SIGNAL",
-        "STAGE1_GATE", "IGNITION_FAIL", "ENTRY_LOCK_FAIL", "PRICE_GUARD_FAIL",
-        "TICK_INSUFFICIENT"
+        "STAGE1_GATE", "IGNITION_FAIL", "ENTRY_LOCK_FAIL", "PRICE_GUARD_FAIL"
     ]
 }
 
@@ -761,7 +755,7 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
     - max_drift: 신호가 대비 허용 상승률 (None이면 동적 계산)
     - ticks: 변동성 계산용 틱 데이터
-    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+0.5% 구간은
+    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.2% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
     try:
@@ -793,7 +787,10 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             # 하지만 공격 모드면 일정 구간까지는 허용
             # 🔧 0.5% 기준이니 +0.5% 추가 = 총 1% 까지 허용
             if AGGRESSIVE_MODE and drift <= (thr + 0.005):
-                print(f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+0.5% → 공격 모드: 추격 진입 허용")
+                print(
+                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+1.2% "
+                    f"→ 공격 모드: 추격 진입 허용"
+                )
                 return True, current_price
 
             # 이 이상은 진짜 너무 튄 거라 컷 (signal_skip에서 로그 처리)
@@ -838,7 +835,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
     # 🔧 FIX: reentrant=False (호출 전 락 해제됨 → 여기서 획득/해제 완결)
-    with entry_lock(m, ttl_sec=150, reentrant=False) as got_lock:
+    with entry_lock(m, ttl_sec=90, reentrant=False) as got_lock:
         if not got_lock:
             signal_skip("entry_lock 획득 실패")
             return
@@ -1170,7 +1167,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     "market": m,
                     "entry_price": avg_price,
                     "buy_ratio": t.get("buy_ratio", 0),
-                    "tick_count": t.get("n", 0),  # 🔍 매수비 검증용 틱 수
                     "spread": ob.get("spread", 0),
                     "turn": turn,
                     "imbalance": imbalance,
@@ -1978,8 +1974,8 @@ POSTCHECK_MAX_DD = 0.018
 ATR_PERIOD = 14
 ATR_EMA_PERIOD = 20
 ATR_MULT = 0.35           # 🔧 0.30 → 0.35 (약간 완화)
-DYN_SL_MIN = 0.0035       # 🔧 0.35% (수수료 커버 + 타이트)
-DYN_SL_MAX = 0.005        # 🔧 0.5% (손절 상한)
+DYN_SL_MIN = 0.004        # 🔧 0.3% → 0.4% (손절 완화)
+DYN_SL_MAX = 0.006        # 🔧 0.5% → 0.6% (손절 완화)
 
 # =========================
 # 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
@@ -2109,7 +2105,7 @@ PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시
 
 FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
-    "buy_ratio", "tick_count", "spread", "turn", "imbalance", "volume_surge",
+    "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
     "fresh", "score", "entry_mode",
     "signal_tag", "filter_type",  # 🔍 경로 분석용 (signal_tag 하나로 통일)
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
@@ -3555,24 +3551,21 @@ def _pct(a, b):
 
 
 def inter_arrival_stats(ticks, sec=30):
-    """틱 도착 간격 통계 (CV: 변동계수)
-    - 틱 부족시 cv=-1, insufficient=True 반환
-    """
-    if not ticks: return {"cv": -1, "count": 0, "insufficient": True}
+    if not ticks: return {"cv": 9.9, "count": 0}
     try:
         newest_ts = ticks[0]["timestamp"]
     except:
-        return {"cv": -1, "count": 0, "insufficient": True}
+        return {"cv": 9.9, "count": 0}
     cutoff = newest_ts - sec * 1000
     ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
     ts = sorted(ts)
-    if len(ts) < 4: return {"cv": -1, "count": len(ts), "insufficient": True}
+    if len(ts) < 4: return {"cv": 9.9, "count": len(ts)}
     gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
     mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": -1, "count": len(ts), "insufficient": True}
+    if mu <= 0: return {"cv": 9.9, "count": len(ts)}
     var = sum((g - mu)**2 for g in gaps) / len(gaps)
     cv = (var**0.5) / mu
-    return {"cv": cv, "count": len(ts), "insufficient": False}
+    return {"cv": cv, "count": len(ts)}
 
 
 def price_band_std(ticks, sec=30):
@@ -4321,10 +4314,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🔧 데이터 기반 필터: 연속매수, CV (승률 분석 결과)
     if cons_buys > GATE_CONSEC_MAX:
         cut("CONSEC_HIGH", f"{m} 연속매수{cons_buys}>{GATE_CONSEC_MAX} (추격매수 위험)")
-        return None
-    # 🔧 틱부족 컷 (cv < 0 = insufficient)
-    if cv < 0:
-        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV 계산불가")
         return None
     if cv > GATE_CV_MAX:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
@@ -5130,20 +5119,21 @@ def monitor_position(m,
     verdict = None
     outcome_extra = ""
 
-    # === 🎯 약세 스캘핑/Plateau 로직 제거됨 ===
-    # 트레일링 손절이 구간별 익절을 대체
-    # checkpoint_reached = False   # 제거됨
-    # strong_mode = False          # 제거됨
-    # strong_peak = entry_price    # 제거됨
-    # last_peak_ts = time.time()   # 제거됨
-    # plateau_partial_done = False # 제거됨
+    # === 🎯 얇은 수익 체크포인트 상태 ===
+    checkpoint_reached = False   # 얇은 수익(0.3%) 도달 여부
+    strong_mode = False          # 강세 확인 후 트레일링 모드
+    strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
 
-    # === 🔧 횡보 탈출 삭제됨 (ATR + 트레일링으로 대체) ===
-    # sideways_peak = 0.0  # 삭제됨
+    # === 🔥 Plateau 감지용 상태 ===
+    last_peak_ts = time.time()   # 마지막 고점 갱신 시간
+    plateau_partial_done = False # Plateau 부분익절 완료 여부
 
-    # === 🔥 실패 브레이크아웃 감지 상태 (제거됨 - ATR/횡보탈출/트레일링으로 대체) ===
-    # breakout_reached = False     # +0.15% 이상 돌파 여부
-    # breakout_ts = 0.0            # 돌파 시점 타임스탬프
+    # === 🔧 횡보 탈출 미니트레일 상태 ===
+    sideways_peak = 0.0          # 60초 이후 고점 추적
+
+    # === 🔥 실패 브레이크아웃 감지 상태 ===
+    breakout_reached = False     # +0.15% 이상 돌파 여부
+    breakout_ts = 0.0            # 돌파 시점 타임스탬프
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
@@ -5175,7 +5165,8 @@ def monitor_position(m,
             last_price = curp
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
-            # Plateau 로직 제거됨 → last_peak_ts 갱신 불필요
+            if new_high:
+                last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
             best = max(best, curp)
             worst = min(worst, curp)
 
@@ -5191,12 +5182,36 @@ def monitor_position(m,
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
 
-            # === 🔥 실패 브레이크아웃 로직 제거됨 ===
-            # ATR 손절 + 트레일링 손절로 대체
-            # (불필요한 조기 청산 방지)
+            # === 🔥 실패 브레이크아웃 즉시 탈출 ===
+            # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
+            BREAKOUT_THRESHOLD = 0.0015  # +0.15%
+            BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
 
-            # === 🔧 횡보 탈출 로직 삭제됨 ===
-            # ATR + 트레일링이 커버 (수수료 0.1% 고려하여 임계치 조정됨)
+            if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
+                breakout_reached = True
+                breakout_ts = time.time()
+
+            if breakout_reached and cur_gain <= 0:
+                time_since_breakout = time.time() - breakout_ts
+                if time_since_breakout <= BREAKOUT_FAIL_SEC:
+                    close_auto_position(m, f"실패돌파 | +{BREAKOUT_THRESHOLD*100:.2f}%→{cur_gain*100:.2f}% ({time_since_breakout:.1f}초)")
+                    verdict = "실패돌파"
+                    outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
+                    break
+
+            # === 🔧 횡보 탈출 로직 (미니트레일링) ===
+            # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
+            if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
+                # 고점 갱신
+                sideways_peak = max(sideways_peak, cur_gain)
+
+                # 청산 조건: 고점에서 0.03% 하락
+                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
+                if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
+                    close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
+                    verdict = "횡보탈출"
+                    outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
+                    break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
@@ -5316,18 +5331,59 @@ def monitor_position(m,
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
             # 여기는 트레일링 손절 이후 추가 손절 판정용
 
-            # === 🔥 약세 스캘핑 로직 제거됨 ===
-            # 트레일링 손절이 구간별 익절을 대체
-            # (강세/약세 판정 삭제, 부분익절 삭제)
+            # ② 체크포인트 도달 시 강세/약세 판단
+            # 🔧 FIX: 체크포인트 재평가 - 가격이 30% 아래로 떨어지면 리셋
+            if checkpoint_reached and cur_gain < (PROFIT_CHECKPOINT * 0.3):
+                checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
+
+            # 🔧 소프트 가드: 초기 30초간 청산 조건 강화
+            in_soft_guard = alive_sec < SOFT_GUARD_SEC
+
+            if not checkpoint_reached and cur_gain >= PROFIT_CHECKPOINT:
+                checkpoint_reached = True
+                # 🔧 [변경] 강세/약세 판단 → 약세만 25% 부분익절, 강세는 트레일링에 맡김
+                if is_strong_momentum(ticks, ob_now):
+                    # 강세 → 트레일링이 알아서 처리 (강세모드 동적트레일 제거됨)
+                    tg_send_mid(f"💪 {m} +{cur_gain*100:.2f}% 강세 → 트레일링 유지")
+                else:
+                    # 약세 판정이지만 소프트 가드 + 박스 내면 홀딩
+                    if in_soft_guard and in_breakeven_box:
+                        # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
+                        tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
+                    else:
+                        # 약세 → 25% 부분익절 (나머지 75%는 트레일링/ATR손절)
+                        ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
+                        if ok:
+                            tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 완료")
+
+            # 🔧 [제거됨] 강세모드 동적 트레일링 → 일반 트레일링(0.2% 간격)으로 대체
 
             # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
             # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
             max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
             cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
 
-            # === 🔥 Plateau 로직 제거됨 ===
-            # 트레일링 손절이 구간별 익절을 대체
-            # (고점 횡보 부분익절 삭제 → 트레일링으로 일원화)
+            # === 🔥 (B) Plateau + 모멘텀 약화 → 부분익절 + 본절상향 ===
+            # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
+            PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
+            # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
+            BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
+
+            time_since_peak = time.time() - last_peak_ts
+            if (not plateau_partial_done
+                and cur_gain_now >= PROFIT_CHECKPOINT
+                and time_since_peak >= PLATEAU_SEC):
+
+                decay_flag, decay_info = buy_decay_flag(ticks)
+                if decay_flag:
+                    # 부분익절 실행 (50%)
+                    ok, msg, sold = safe_partial_sell(m, 0.5, f"Plateau부분익절 +{cur_gain_now*100:.2f}% (고점후 {time_since_peak:.0f}초 횡보+매수약화)")
+                    if ok:
+                        plateau_partial_done = True
+                        # 🔥 본절 상향: 남은 50%는 최소한 손해 안 보게
+                        be_stop = entry_price * (1.0 + BE_OFFSET)
+                        base_stop = max(base_stop, be_stop)
+                        tg_send_mid(f"📉 {m} Plateau 부분익절 50% | +{cur_gain_now*100:.2f}% | 손절선→본절({BE_OFFSET*100:.2f}%) 상향")
 
             # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
             drop_from_high = (best - curp) / best if best > 0 else 0
@@ -5706,8 +5762,10 @@ def main():
         f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
     )
 
-    # 🔧 시작 시 유령 포지션 즉시 동기화 (first_run=True: 오탐 방지 체크 스킵)
-    sync_orphan_positions(first_run=True)
+    # 🔧 시작 시 유령 포지션 즉시 동기화
+    global _LAST_ORPHAN_SYNC
+    _LAST_ORPHAN_SYNC = 0  # 강제 리셋
+    sync_orphan_positions()
 
     while True:
         try:
@@ -5721,9 +5779,8 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🔧 유령 포지션 동기화: 최초 1회만 실행 (main 시작 시)
-            # → 자동매수 모니터링 중인 포지션 청산 방지
-            # sync_orphan_positions()  # 제거됨
+            # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
+            sync_orphan_positions()
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
@@ -5760,16 +5817,12 @@ def main():
                     exe.submit(get_minutes_candles, 1, m, 20): m
                     for m in shard
                 }
-                try:
-                    for f in as_completed(futures, timeout=15):  # 🔧 15초 timeout 추가 (무한대기 방지)
-                        m = futures[f]
-                        try:
-                            c1_cache[m] = f.result() or []
-                        except:
-                            c1_cache[m] = []
-                except TimeoutError:
-                    # timeout 발생 시 미완료 심볼은 빈 캐시로 처리 (다음 사이클에서 재시도)
-                    print(f"[WARN] ThreadPool timeout - 일부 캔들 조회 스킵")
+                for f in as_completed(futures):
+                    m = futures[f]
+                    try:
+                        c1_cache[m] = f.result() or []
+                    except:
+                        c1_cache[m] = []
 
             found = 0
             for m in shard:
