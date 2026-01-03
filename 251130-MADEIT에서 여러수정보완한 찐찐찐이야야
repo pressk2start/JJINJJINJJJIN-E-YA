@@ -5142,10 +5142,6 @@ def monitor_position(m,
     # === 🔧 횡보 탈출 미니트레일 상태 ===
     sideways_peak = 0.0          # 60초 이후 고점 추적
 
-    # === 🔥 실패 브레이크아웃 감지 상태 ===
-    breakout_reached = False     # +0.15% 이상 돌파 여부
-    breakout_ts = 0.0            # 돌파 시점 타임스탬프
-
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -5192,23 +5188,6 @@ def monitor_position(m,
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
-
-            # === 🔥 실패 브레이크아웃 즉시 탈출 ===
-            # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
-            BREAKOUT_THRESHOLD = 0.0015  # +0.15%
-            BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
-
-            if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
-                breakout_reached = True
-                breakout_ts = time.time()
-
-            if breakout_reached and cur_gain <= 0:
-                time_since_breakout = time.time() - breakout_ts
-                if time_since_breakout <= BREAKOUT_FAIL_SEC:
-                    close_auto_position(m, f"실패돌파 | +{BREAKOUT_THRESHOLD*100:.2f}%→{cur_gain*100:.2f}% ({time_since_breakout:.1f}초)")
-                    verdict = "실패돌파"
-                    outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
-                    break
 
             # === 🔧 횡보 탈출 로직 (미니트레일링) ===
             # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
