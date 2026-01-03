@@ -57,7 +57,7 @@ EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
 
 # 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
-SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
+SIDEWAYS_TIMEOUT = 90       # 횡보 판정 시간 (초) - 이후 고점 추적 시작 (기존 60→90)
 
 # 트레일링 손절 설정
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
@@ -5190,13 +5190,13 @@ def monitor_position(m,
                 break
 
             # === 🔧 횡보 탈출 로직 (미니트레일링) ===
-            # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
+            # 90초 이후 + trail_armed=False → 고점 추적, 고점-0.1% 하락 시 청산
             if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
                 # 고점 갱신
                 sideways_peak = max(sideways_peak, cur_gain)
 
-                # 청산 조건: 고점에서 0.03% 하락
-                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
+                # 청산 조건: 고점에서 0.1% 하락 (기존 0.03%→0.1% 완화)
+                SIDEWAYS_TRAIL_DROP = 0.001  # 0.1%
                 if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     verdict = "횡보탈출"
