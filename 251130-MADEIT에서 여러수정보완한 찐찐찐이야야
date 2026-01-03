@@ -3573,14 +3573,17 @@ def inter_arrival_stats(ticks, sec=30):
 
 
 def price_band_std(ticks, sec=30):
-    if not ticks: return 9.9
+    """가격 변동폭 표준편차 (pstd)
+    - 틱 부족시 -1 반환 (9.9 대신)
+    """
+    if not ticks: return -1
     try:
         newest_ts = ticks[0]["timestamp"]
     except:
-        return 9.9
+        return -1
     cutoff = newest_ts - sec * 1000
     ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
-    if len(ps) < 3: return 9.9
+    if len(ps) < 3: return -1
     m = sum(ps) / len(ps)
     var = sum((p - m)**2 for p in ps) / len(ps)
     std = (var**0.5) / max(m, 1)
@@ -4319,9 +4322,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if cons_buys > GATE_CONSEC_MAX:
         cut("CONSEC_HIGH", f"{m} 연속매수{cons_buys}>{GATE_CONSEC_MAX} (추격매수 위험)")
         return None
-    # 🔧 틱부족 컷 (cv < 0 = insufficient)
-    if cv < 0:
-        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV 계산불가")
+    # 🔧 틱부족 컷 (cv < 0 또는 pstd < 0 = insufficient)
+    if cv < 0 or pstd10 < 0:
+        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV/pstd 계산불가")
         return None
     if cv > GATE_CV_MAX:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
@@ -5787,8 +5790,8 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
-            sync_orphan_positions()
+            # 🔧 유령 포지션 동기화: 시작 시 1회만 실행 (메인루프 호출 제거)
+            # sync_orphan_positions()  # 자동매수 직후 오인 방지
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
