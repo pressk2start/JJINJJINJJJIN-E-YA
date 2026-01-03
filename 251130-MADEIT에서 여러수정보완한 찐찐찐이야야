@@ -732,7 +732,8 @@ CUT_COUNTER = {
         "ATR_OVERSHOOT", "EMA15M_DOWN", "BUY_DECAY", "EARLY_OK",
         "EARLY_LIGHT_FAIL", "PEAK_CHASE", "POSTCHECK_DROP", "MEGA_PASS",
         "SCORE_LOW", "SPREAD_EXTREME", "PROBE_TICK", "NO_SIGNAL",
-        "STAGE1_GATE", "IGNITION_FAIL", "ENTRY_LOCK_FAIL", "PRICE_GUARD_FAIL"
+        "STAGE1_GATE", "IGNITION_FAIL", "ENTRY_LOCK_FAIL", "PRICE_GUARD_FAIL",
+        "TICK_INSUFFICIENT"
     ]
 }
 
@@ -3554,21 +3555,24 @@ def _pct(a, b):
 
 
 def inter_arrival_stats(ticks, sec=30):
-    if not ticks: return {"cv": 9.9, "count": 0}
+    """틱 도착 간격 통계 (CV: 변동계수)
+    - 틱 부족시 cv=-1, insufficient=True 반환
+    """
+    if not ticks: return {"cv": -1, "count": 0, "insufficient": True}
     try:
         newest_ts = ticks[0]["timestamp"]
     except:
-        return {"cv": 9.9, "count": 0}
+        return {"cv": -1, "count": 0, "insufficient": True}
     cutoff = newest_ts - sec * 1000
     ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
     ts = sorted(ts)
-    if len(ts) < 4: return {"cv": 9.9, "count": len(ts)}
+    if len(ts) < 4: return {"cv": -1, "count": len(ts), "insufficient": True}
     gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
     mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": 9.9, "count": len(ts)}
+    if mu <= 0: return {"cv": -1, "count": len(ts), "insufficient": True}
     var = sum((g - mu)**2 for g in gaps) / len(gaps)
     cv = (var**0.5) / mu
-    return {"cv": cv, "count": len(ts)}
+    return {"cv": cv, "count": len(ts), "insufficient": False}
 
 
 def price_band_std(ticks, sec=30):
@@ -4317,6 +4321,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🔧 데이터 기반 필터: 연속매수, CV (승률 분석 결과)
     if cons_buys > GATE_CONSEC_MAX:
         cut("CONSEC_HIGH", f"{m} 연속매수{cons_buys}>{GATE_CONSEC_MAX} (추격매수 위험)")
+        return None
+    # 🔧 틱부족 컷 (cv < 0 = insufficient)
+    if cv < 0:
+        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV 계산불가")
         return None
     if cv > GATE_CV_MAX:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
