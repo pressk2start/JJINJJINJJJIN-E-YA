@@ -5128,11 +5128,8 @@ def monitor_position(m,
     outcome_extra = ""
 
     # === 🎯 구간별 트레일링 (Tiered Trailing) ===
-    # trail_armed 제거 → 진입 직후부터 트레일링 활성화
+    # 진입 직후부터 활성화, 수익 구간별 트레일링 폭 자동 조정
     trail_stop = entry_price * 0.999  # 초기값: 진입가 -0.1%
-
-    # === 🔥 Plateau 감지용 상태 (PROBE→CONFIRM용으로 유지) ===
-    last_peak_ts = time.time()   # 마지막 고점 갱신 시간
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
@@ -5164,8 +5161,6 @@ def monitor_position(m,
             last_price = curp
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
-            if new_high:
-                last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
             best = max(best, curp)
             worst = min(worst, curp)
 
