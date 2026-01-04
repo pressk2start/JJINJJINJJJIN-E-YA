@@ -47,8 +47,8 @@ COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 5  # 진입 후 5초 웜업
-WARMUP_STOP = -0.002  # 🔧 웜업 중 -0.2% 손절
+WARMUP_SEC = 8  # 진입 후 8초 웜업 (5→8 완화, 초반 흔들림 허용)
+WARMUP_STOP = -0.003  # 🔧 웜업 중 -0.3% 손절 (-0.2%→-0.3% 완화)
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
@@ -66,7 +66,7 @@ FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
-POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
+POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (허수 제거)
 EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
 
 # --- 환경변수(.env 지원) ---
@@ -301,7 +301,7 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.003"))  # 계좌의 0.3% �
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
 # === 공격 모드 / 피라미딩 설정 ===
-AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
+AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "0") == "1"  # 🔧 기본 OFF (수비적)
 
 # 소액 선진입 + 추매 구조 (소액 프로브가 더 안정적)
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
@@ -1872,8 +1872,8 @@ MIN_DEPTH_KRW = 6_000_000
 # ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 80.0      # 회전율 상한 (%) - 40→80 완화
-GATE_SPREAD_MAX = 0.15    # 스프레드 상한 (%) - 0.40→0.15 강화
+GATE_TURN_MAX = 35.0      # 회전율 상한 (%) - 80→35 강화 (과열 추격 방지)
+GATE_SPREAD_MAX = 0.12    # 스프레드 상한 (%) - 0.15→0.12 강화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기 (3.0→100.0)
 GATE_BUY_RATIO_MIN = 0.62 # 매수비 하한 - 0.55→0.62 강화
@@ -1953,10 +1953,10 @@ REARM_REBREAK_MIN = 0.0028
 # 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
 # POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
-POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
+POSTCHECK_MIN_BUY = 0.54  # 0.46→0.54 강화 (매수비 낮으면 캔슬)
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
-POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
-POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
+POSTCHECK_MAX_PSTD = 0.0012  # 0.0028→0.0012 강화 (변동성 상한)
+POSTCHECK_MAX_CV = 0.65  # 0.72→0.65 강화 (틱 간격 요동 상한)
 POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
@@ -4107,9 +4107,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
-    if turn_pct > 50 and spread > 0.25:
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
+    # 🔧 과열 추격 방지: 회전 30%↑면 스프레드 0.10%도 과다
+    if (turn_pct > 30 and spread > 0.10) or (turn_pct > 40 and spread > 0.08):
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}% 스프{spread:.2f}%"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
@@ -4146,8 +4146,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
+    # 🔧 진입 조건 강화: 거래량 단독은 조건부만 허용
+    # 돌파 또는 점화 기반 진입
+    base_break = (breakout_score >= 1) or (ignition_score >= 4)
+    # 거래량만 기반: 저회전·촘촘한 스프레드·매수비 70%+일 때만 허용 (허수 차단)
+    vol_only_ok = (vol_vs_ma >= eff_vol_vs_ma and turn_pct < 20 and spread <= 0.08 and buy_ratio >= 0.70)
+    entry_signal = base_break or vol_only_ok
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
@@ -4317,6 +4321,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if cv > GATE_CV_MAX:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
+    # 🔧 과회전 구간은 pstd까지 타이트하게 제한 (고변동+과열 = 위험)
+    if turn_pct > 30 and pstd10 > 0.0005:  # 0.05%
+        cut("PSTD_HIGH_TURN", f"{m} pstd{pstd10*100:.3f}% turn{turn_pct:.1f}%")
+        return None
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
@@ -4455,13 +4463,13 @@ def final_check_leader(m, pre, tight_mode=False):
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
 
-    # === 🔥 스코어 기반 진입모드 자동 매핑 ===
-    # score < 55: probe (소액 탐색) → 추격 진입 방지
-    # score 55~70: half (절반)
-    # score >= 70: confirm (풀 사이즈)
-    if score < 55:
+    # === 🔥 스코어 기반 진입모드 자동 매핑 (보수화) ===
+    # score < 60: probe (소액 탐색) → 추격 진입 방지
+    # score 60~75: half (절반)
+    # score >= 75: confirm (풀 사이즈)
+    if score < 60:
         entry_mode = "probe"
-    elif score < 70:
+    elif score < 75:
         entry_mode = "half"
     else:
         entry_mode = "confirm"
