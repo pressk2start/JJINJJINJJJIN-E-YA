@@ -4314,15 +4314,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if cons_buys > GATE_CONSEC_MAX:
         cut("CONSEC_HIGH", f"{m} 연속매수{cons_buys}>{GATE_CONSEC_MAX} (추격매수 위험)")
         return None
-    # 🔧 틱부족 컷 (cv < 0 또는 pstd < 0 = insufficient)
-    if cv < 0 or pstd10 < 0:
-        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV/pstd 계산불가")
-        return None
-    if cv > GATE_CV_MAX:
+    # 🔧 틱부족 시 체크 스킵 (차단 → 허용으로 변경)
+    tick_sufficient = (cv >= 0 and pstd10 >= 0)
+    if not tick_sufficient:
+        print(f"[TICK_SKIP] {m} 틱부족(count={ia.get('count', 0)}) → CV/pstd 체크 스킵")
+    # CV 체크 (틱 충분할 때만)
+    if tick_sufficient and cv > GATE_CV_MAX:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
-    # 🔧 과회전 구간은 pstd까지 타이트하게 제한 (고변동+과열 = 위험)
-    if turn_pct > 30 and pstd10 > 0.0005:  # 0.05%
+    # 🔧 과회전 구간은 pstd까지 타이트하게 제한 (틱 충분할 때만)
+    if tick_sufficient and turn_pct > 30 and pstd10 > 0.0005:  # 0.05%
         cut("PSTD_HIGH_TURN", f"{m} pstd{pstd10*100:.3f}% turn{turn_pct:.1f}%")
         return None
 
