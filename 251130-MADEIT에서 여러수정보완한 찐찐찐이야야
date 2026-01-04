@@ -5131,6 +5131,9 @@ def monitor_position(m,
     # 진입 직후부터 활성화, 수익 구간별 트레일링 폭 자동 조정
     trail_stop = entry_price * 0.999  # 초기값: 진입가 -0.1%
 
+    # === 🔥 50% 부분청산 상태 ===
+    partial_done = False  # 부분청산 완료 여부 (1회만)
+
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -5178,6 +5181,35 @@ def monitor_position(m,
 
             # === 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화 ===
             gain_from_entry = (curp / entry_price - 1.0)
+
+            # === 🔥 50% 부분청산 조건 체크 (1회만) ===
+            if not partial_done and alive_sec >= 30:
+                t15_now = micro_tape_stats_from_ticks(ticks, 15)
+                buy_ratio = t15_now.get("buy_ratio", 0.5)
+                krw_per_sec = t15_now.get("krw_per_sec", 0)
+                tick_count = t15_now.get("n", 0)
+
+                # 부분청산 조건들
+                weak_buying = (buy_ratio < 0.55 and tick_count >= 6)  # 매수세 약화
+                slowing_momentum = (gain_from_entry >= 0.015 and krw_per_sec < 15000)  # 수익 중 거래 둔화
+                ambiguous_zone = (-0.008 < gain_from_entry < 0.008 and krw_per_sec < 12000)  # 애매한 구간 + 둔화
+
+                partial_reason = None
+                if weak_buying:
+                    partial_reason = f"매수세약화 (매수비{buy_ratio*100:.1f}% 틱{tick_count})"
+                elif slowing_momentum:
+                    partial_reason = f"거래둔화 (+{gain_from_entry*100:.2f}% 속도{krw_per_sec/1000:.1f}K)"
+                elif ambiguous_zone:
+                    partial_reason = f"횡보구간 ({gain_from_entry*100:+.2f}% 속도{krw_per_sec/1000:.1f}K)"
+
+                if partial_reason:
+                    ok, msg, sold = safe_partial_sell(m, 0.5, f"50%부분청산 | {partial_reason}")
+                    if ok and sold > 0:
+                        partial_done = True
+                        # 본절 상향: 남은 50%는 손해 안 보게
+                        be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
+                        trail_stop = max(trail_stop, be_stop)
+                        tg_send_mid(f"📉 {m} 50% 부분청산 | {partial_reason} | 트레일→본절 상향")
 
             # 수익 구간별 트레일링 폭 결정
             if gain_from_entry >= 0.01:      # +1.0% 이상
