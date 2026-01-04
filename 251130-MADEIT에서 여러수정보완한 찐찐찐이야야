@@ -5174,7 +5174,7 @@ def monitor_position(m,
             gain_from_entry = (curp / entry_price - 1.0)
 
             # === 🔥 50% 부분청산 조건 체크 (1회만, 본절 이상일 때만) ===
-            min_gain_for_partial = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = +0.15%
+            min_gain_for_partial = FEE_RATE  # 본절 = 수수료 0.1%
             if not partial_done and alive_sec >= 30 and gain_from_entry >= min_gain_for_partial:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
                 buy_ratio = t15_now.get("buy_ratio", 0.5)
