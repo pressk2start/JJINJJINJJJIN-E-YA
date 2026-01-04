@@ -5199,19 +5199,19 @@ def monitor_position(m,
                     if ok and sold > 0:
                         partial_done = True
                         # 본절 상향: 남은 50%는 손해 안 보게
-                        be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
+                        be_stop = entry_price * (1.0 + FEE_RATE)
                         trail_stop = max(trail_stop, be_stop)
                         tg_send_mid(f"📉 {m} 50% 부분청산 | {partial_reason} | 트레일→본절 상향")
 
-            # 수익 구간별 트레일링 폭 결정
-            if gain_from_entry >= 0.01:      # +1.0% 이상
-                trail_dist = 0.003           # 0.3% (루즈하게)
-            elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
-                trail_dist = 0.002           # 0.2%
-            elif gain_from_entry >= 0.002:   # +0.2% ~ +0.5%
-                trail_dist = 0.0015          # 0.15%
-            else:                            # 0% ~ +0.2%
-                trail_dist = 0.001           # 0.1% (타이트하게)
+            # 수익 구간별 트레일링 폭 결정 (소익 타이트, 대익 여유)
+            if gain_from_entry >= 0.005:     # +0.5% 이상
+                trail_dist = 0.0018          # 0.18% (여유 - 더 큰 상승 기회)
+            elif gain_from_entry >= 0.003:   # +0.3% ~ +0.5%
+                trail_dist = 0.0012          # 0.12% (수익 보호)
+            elif gain_from_entry >= 0.001:   # +0.1% ~ +0.3% (본절~소익)
+                trail_dist = 0.0008          # 0.08% (타이트 - 작은 수익 확보)
+            else:                            # ~+0.1% (본절 전)
+                trail_dist = 0.0025          # 0.25% (본절 도달 기회)
 
             # 고점 갱신시 트레일스탑 상향
             if new_high:
