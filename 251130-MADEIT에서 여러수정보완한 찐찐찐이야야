@@ -1722,9 +1722,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         with _POSITION_LOCK:
             pos = OPEN_POSITIONS.get(m)
         if not pos:
-            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
-            # 🔧 FIX: 포지션 없음 알람 추가
-            tg_send(f"⚠️ {m} 포지션 정리됨 (OPEN_POSITIONS에서 제거됨)")
+            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료 (정상 청산 완료)")
+            # 🔧 FIX: 정상 청산 후에는 알림 불필요 (이미 청산 알람 발송됨)
             return False
 
         # 실제 거래소 잔고 확인
