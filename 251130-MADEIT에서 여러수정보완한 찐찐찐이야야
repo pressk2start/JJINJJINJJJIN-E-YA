@@ -1872,16 +1872,16 @@ MIN_DEPTH_KRW = 6_000_000
 # ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 35.0      # 회전율 상한 (%) - 80→35 강화 (과열 추격 방지)
+GATE_TURN_MAX = 50.0      # 회전율 상한 (%) - 35→50 완화 (알람 확보)
 GATE_SPREAD_MAX = 0.12    # 스프레드 상한 (%) - 0.15→0.12 강화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기 (3.0→100.0)
-GATE_BUY_RATIO_MIN = 0.62 # 매수비 하한 - 0.55→0.62 강화
+GATE_BUY_RATIO_MIN = 0.58 # 매수비 하한 - 0.62→0.58 완화
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
 GATE_IMBALANCE_MIN = 0.55 # 임밸런스 하한 - 0.50→0.55 강화
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
-GATE_CV_MAX = 1.6         # CV 상한 - 2.0→1.6 강화
+GATE_CV_MAX = 1.8         # CV 상한 - 1.6→1.8 완화
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
@@ -1955,8 +1955,8 @@ REARM_REBREAK_MIN = 0.0028
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.54  # 0.46→0.54 강화 (매수비 낮으면 캔슬)
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
-POSTCHECK_MAX_PSTD = 0.0012  # 0.0028→0.0012 강화 (변동성 상한)
-POSTCHECK_MAX_CV = 0.65  # 0.72→0.65 강화 (틱 간격 요동 상한)
+POSTCHECK_MAX_PSTD = 0.0020  # 0.0012→0.0020 완화 (알람 확보)
+POSTCHECK_MAX_CV = 0.70  # 0.65→0.70 완화
 POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
@@ -4067,7 +4067,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
-    eff_vol_vs_ma = max(0.6, 0.9 * (1 - relax * 0.3))             # 🔧 0.9x→0.6x (허수 차단 강화)
+    eff_vol_vs_ma = max(0.4, 0.7 * (1 - relax * 0.3))             # 🔧 0.6→0.4, 0.9→0.7 완화
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
