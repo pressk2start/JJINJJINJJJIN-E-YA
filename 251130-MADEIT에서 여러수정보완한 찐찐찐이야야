@@ -1882,7 +1882,7 @@ GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
 GATE_IMBALANCE_MIN = 0.55 # 임밸런스 하한 - 0.50→0.55 강화
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 1.8         # CV 상한 - 1.6→1.8 완화
-GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
+GATE_FRESH_AGE_MAX = 15.0  # 틱 신선도 상한 (초) - 2.0→15.0 대폭 완화 (조용한 시장 대응)
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
@@ -2825,8 +2825,8 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
-            GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
-            # 🔧 아래 3개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
+            # 🔧 아래 4개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
+            # GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
             # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
             # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
             # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
