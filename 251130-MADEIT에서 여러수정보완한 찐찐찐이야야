@@ -77,7 +77,7 @@ except Exception:
     pass
 
 # ==== Exit Profile (gentle/ balanced / strict) ====
-EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
+EXIT_PROFILE = os.getenv("EXIT_PROFILE", "balanced").lower()  # 🔧 strict→balanced (웜업 8초 유지)
 
 
 def _apply_exit_profile():
@@ -4067,7 +4067,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
-    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
+    eff_vol_vs_ma = max(0.6, 0.9 * (1 - relax * 0.3))             # 🔧 0.9x→0.6x (허수 차단 강화)
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
