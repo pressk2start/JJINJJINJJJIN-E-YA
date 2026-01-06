@@ -4242,6 +4242,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if imbalance < imb_min_check:
         return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
+    # === 🔧 배수(vol_vs_ma) 하한 컷 (20건 분석: 0.1x~0.2x 전패) ===
+    if vol_vs_ma < 0.3 and not mega:
+        return False, f"배수부족 {vol_vs_ma:.1f}x<0.3x"
+
     # === 진입 신호 체크 (정리됨: 수렴돌파 + 점화만) ===
     # 🔧 데이터 분석 결과: EMA돌파/고점돌파/거래량MA는 너무 늦음 → 제거
     # - 고점돌파: 10%만 해당 (상승 후 발생)
