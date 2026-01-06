@@ -22,7 +22,8 @@ date_str = "2026-01-06"
 time_str = "10:09"
 
 dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
-to_time = (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+# 업비트 API는 KST 기준, 형식 맞춰야 함
+to_time = (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
 print(f"조회: KRW-{ticker}, to={to_time}, count=40")
 candles = get_candles(ticker, to_time, 40)
