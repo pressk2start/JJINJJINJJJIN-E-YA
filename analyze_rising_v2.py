@@ -67,16 +67,19 @@ def analyze_pre_entry_pattern(ticker, date_str, time_str):
 
     candles = list(reversed(candles))  # 오래된 것부터
 
-    # 진입 시점 찾기
+    # 진입 시점 찾기 (가장 가까운 시간)
+    target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
     entry_idx = None
+    min_diff = 999999
     for i, c in enumerate(candles):
-        c_time = c["candle_date_time_kst"][:16]
-        target_time = f"{date_str} {time_str}"
-        if c_time.replace("T", " ") == target_time:
+        c_time_str = c["candle_date_time_kst"][:19]
+        c_dt = datetime.fromisoformat(c_time_str)
+        diff = abs((c_dt - target_dt).total_seconds())
+        if diff < min_diff:
+            min_diff = diff
             entry_idx = i
-            break
 
-    if entry_idx is None or entry_idx < 30:
+    if entry_idx is None or entry_idx < 30 or min_diff > 120:
         return None
 
     # 진입 전 30개 캔들
