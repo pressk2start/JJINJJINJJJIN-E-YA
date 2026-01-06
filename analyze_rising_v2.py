@@ -56,12 +56,12 @@ def calc_ema(prices, period):
 
 def analyze_pre_entry_pattern(ticker, date_str, time_str):
     """진입 전 30개 캔들 패턴 분석"""
-    dt_str = f"{date_str}T{time_str}:00+09:00"
-    dt = datetime.fromisoformat(dt_str)
-    to_time = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
 
     # 진입 시점 포함 35개 캔들 (앞 30개 + 진입봉 + 뒤 4개)
-    candles = get_candles(ticker, (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S"), 40)
+    # 업비트 API는 KST 기준
+    to_time = (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    candles = get_candles(ticker, to_time, 40)
     if not candles or len(candles) < 35:
         return None
 
