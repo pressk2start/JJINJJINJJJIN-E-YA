@@ -5286,9 +5286,11 @@ def monitor_position(m,
             # 트레일링 손절 트리거 (트레일링 활성화 상태일 때만)
             if trail_dist is not None and curp < trail_stop:
                 drop_pct = (best - curp) / best * 100
-                close_auto_position(m, f"트레일링익절 +{gain_from_entry*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
+                # 🔧 수익률 표시 정리: 양수면 익절, 음수면 손절
+                exit_type = "트레일링익절" if gain_from_entry >= 0 else "트레일링손절"
+                close_auto_position(m, f"{exit_type} {gain_from_entry*100:+.2f}% (고점{peak_gain*100:+.2f}%에서 -{drop_pct:.2f}% 하락)")
                 verdict = "TRAIL_STOP"
-                outcome_extra = f"(고점+{peak_gain*100:.2f}%→+{gain_from_entry*100:.2f}%)"
+                outcome_extra = f"(고점{peak_gain*100:+.2f}%→{gain_from_entry*100:+.2f}%)"
                 break
             
             # === PROBE → CONFIRM 전환 로직 ===
