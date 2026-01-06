@@ -4039,13 +4039,68 @@ def meets_volume_surge(current_volume, past_volumes):
 # =========================
 
 # ========================================
+# 🆕 수렴돌파 감지 (Consolidation Breakout)
+# ========================================
+def detect_consolidation_breakout(candles_1m, min_candles=5):
+    """
+    수렴돌파 패턴 감지 - 데이터 분석 기반 진입 신호
+
+    조건:
+    1. 최근 5봉 횡보 범위 < 1.5%
+    2. 저점 상승 2회 이상 (Higher Lows)
+    3. 현재봉 양봉
+
+    Returns: (detected: bool, score: int, reason: str)
+    - score: 0~3 (조건 충족 개수)
+    """
+    if not candles_1m or len(candles_1m) < min_candles:
+        return False, 0, "캔들부족"
+
+    # 최근 5개 캔들 (오래된순 정렬 가정)
+    recent = candles_1m[-min_candles:]
+
+    highs = [c["high_price"] for c in recent]
+    lows = [c["low_price"] for c in recent]
+
+    # 현재봉 (마지막)
+    cur = recent[-1]
+    cur_is_bullish = cur["trade_price"] > cur["opening_price"]
+
+    # 1. 횡보 범위 체크 (5봉 고저 범위)
+    range_high = max(highs)
+    range_low = min(lows)
+    consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
+    tight_consolidation = consolidation_pct < 1.5  # 1.5% 미만
+
+    # 2. 저점 상승 패턴 (Higher Lows)
+    higher_lows_count = 0
+    for i in range(1, len(lows)):
+        if lows[i] >= lows[i-1]:
+            higher_lows_count += 1
+    has_higher_lows = higher_lows_count >= 2  # 최소 2회
+
+    # 3. 현재봉 양봉
+    is_bullish = cur_is_bullish
+
+    # 점수 계산
+    score = int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
+
+    # 3개 조건 모두 충족시 감지
+    detected = tight_consolidation and has_higher_lows and is_bullish
+
+    reason = f"수렴{consolidation_pct:.1f}% 저점↑{higher_lows_count}회 {'양봉' if is_bullish else '음봉'}"
+
+    return detected, score, reason
+
+
+# ========================================
 # ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
 def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0):
+                 ignition_score=0, candles_1m=None):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4158,15 +4213,22 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
+    # 🆕 수렴돌파 감지 (횡보 + 저점상승 + 양봉)
+    consol_detected, consol_score, consol_reason = False, 0, ""
+    if candles_1m:
+        consol_detected, consol_score, consol_reason = detect_consolidation_breakout(candles_1m)
+
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 OR 🆕수렴돌파
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4) or consol_detected
 
     if not entry_signal:
-        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
+        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 수렴={consol_score}/3"
 
     # === 통과 ===
-    # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
-    if is_ignition:
+    # 신호 타입 표시 (수렴돌파 / 점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
+    if consol_detected:
+        signal_tag = f"📊수렴돌파 ({consol_reason})"
+    elif is_ignition:
         signal_tag = "🔥점화"
     elif breakout_score == 2:
         signal_tag = "강돌파 (EMA↑+고점↑)"
@@ -4372,7 +4434,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ema20_breakout=ema20_breakout,
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
-        ignition_score=ignition_score
+        ignition_score=ignition_score,
+        candles_1m=c1  # 🆕 수렴돌파 감지용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
