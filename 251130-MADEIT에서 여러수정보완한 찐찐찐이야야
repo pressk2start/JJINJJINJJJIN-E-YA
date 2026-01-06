@@ -4044,18 +4044,19 @@ def meets_volume_surge(current_volume, past_volumes):
 def detect_consolidation_breakout(candles_1m, min_candles=5):
     """
     수렴돌파 패턴 감지 - 20개 상승케이스 데이터 분석 기반
+    🔧 초입 탐지 개선: 4/5 조건 충족시 감지 (너무 엄격하면 초입 놓침)
 
     [분석 결과 기반 조건]
-    1. 5봉 범위 < 0.9% (70% 케이스)
-    2. 저점 상승 3회 이상 (95% 케이스)
-    3. 현재봉 양봉 (100% 케이스)
-    4. 🆕 가격이 범위 상단 70% 이상 (가짜 돌파 필터)
-    5. 🆕 진입봉 거래량 > 직전평균 1.2배 (돌파 확인)
+    1. 5봉 범위 < 1.2% (70% 케이스, 0.9%→1.2% 완화)
+    2. 저점 상승 2회 이상 (3회→2회 완화, 50% 이상)
+    3. 현재봉 양봉 (필수)
+    4. 🆕 가격이 범위 상단 60% 이상 (70%→60% 완화)
+    5. 🆕 진입봉 거래량 >= 직전평균 (1.2배→1.0배 완화)
 
     Returns: (detected: bool, score: int, reason: str)
     """
     if not candles_1m or len(candles_1m) < min_candles:
-        return False, 0, "캔들부족"
+        return False, 0, "캔들부족", ""
 
     # 최근 5개 캔들 (오래된순 정렬 가정)
     recent = candles_1m[-min_candles:]
@@ -4067,40 +4068,43 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
 
-    # 1. 횡보 범위 체크 (5봉 고저 범위) - 0.9% 미만
+    # 1. 횡보 범위 체크 (5봉 고저 범위) - 1.2% 미만
     range_high = max(highs)
     range_low = min(lows)
     consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
-    tight_consolidation = consolidation_pct < 0.9
+    tight_consolidation = consolidation_pct < 1.2  # 🔧 0.9% → 1.2% 완화
 
-    # 2. 저점 상승 패턴 (Higher Lows) - 4번 비교 중 3회 이상
+    # 2. 저점 상승 패턴 (Higher Lows) - 4번 비교 중 2회 이상
     higher_lows_count = 0
     for i in range(1, len(lows)):
         if lows[i] >= lows[i-1]:
             higher_lows_count += 1
-    has_higher_lows = higher_lows_count >= 3  # 3회 이상
+    has_higher_lows = higher_lows_count >= 2  # 🔧 3회 → 2회 완화
 
-    # 3. 현재봉 양봉
+    # 3. 현재봉 양봉 (필수)
     is_bullish = cur_is_bullish
 
-    # 4. 🆕 가격이 범위 상단 근처 (상위 70% 이상)
+    # 4. 🆕 가격이 범위 상단 근처 (상위 60% 이상)
     cur_price = cur["trade_price"]
     price_range = range_high - range_low
     price_position = (cur_price - range_low) / price_range if price_range > 0 else 0
-    near_high = price_position >= 0.7
+    near_high = price_position >= 0.6  # 🔧 70% → 60% 완화
 
-    # 5. 🆕 진입봉 거래량 확인 (직전 4봉 평균의 1.2배 이상)
+    # 5. 🆕 진입봉 거래량 확인 (직전 4봉 평균 이상)
     cur_vol = cur.get("candle_acc_trade_volume", 0)
     prev_vols = [c.get("candle_acc_trade_volume", 0) for c in recent[:-1]]
     prev_avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
-    vol_confirm = cur_vol > prev_avg_vol * 1.2 if prev_avg_vol > 0 else True
+    vol_confirm = cur_vol >= prev_avg_vol if prev_avg_vol > 0 else True  # 🔧 1.2배 → 1.0배 완화
 
     # 점수 계산 (0~5)
     score = (int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
              + int(near_high) + int(vol_confirm))
 
-    # 5개 조건 모두 충족시 감지
-    detected = tight_consolidation and has_higher_lows and is_bullish and near_high and vol_confirm
+    # 🔧 4/5 조건 충족시 감지 (양봉 필수)
+    # - 양봉은 필수 (돌파 방향 확인)
+    # - 나머지 4개 중 3개 충족 (4/5 = 80%)
+    other_conditions = int(tight_consolidation) + int(has_higher_lows) + int(near_high) + int(vol_confirm)
+    detected = is_bullish and other_conditions >= 3
 
     # 🔧 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"  # 리포트용 단순 경로명
@@ -4236,8 +4240,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
     # === 🔧 배수(vol_vs_ma) 하한 컷 (20건 분석: 0.1x~0.2x 전패) ===
-    if vol_vs_ma < 0.3 and not mega:
-        return False, f"배수부족 {vol_vs_ma:.1f}x<0.3x"
+    # 📊 수렴돌파는 자체 거래량 확인(직전4봉 1.2배)이 있으므로 0.15x만 차단
+    vol_ma_min = 0.15 if consol_detected else 0.3
+    if vol_vs_ma < vol_ma_min and not mega:
+        return False, f"배수부족 {vol_vs_ma:.1f}x<{vol_ma_min}x"
 
     # === 진입 신호 체크 (정리됨: 수렴돌파 + 점화만) ===
     # 🔧 데이터 분석 결과: EMA돌파/고점돌파/거래량MA는 너무 늦음 → 제거
