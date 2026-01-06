@@ -59,8 +59,8 @@ def analyze_pre_entry_pattern(ticker, date_str, time_str):
     dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
 
     # 진입 시점 포함 35개 캔들 (앞 30개 + 진입봉 + 뒤 4개)
-    # 업비트 API는 KST 기준
-    to_time = (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    # 업비트 API는 KST 기준, +09:00 필수
+    to_time = (dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S") + "+09:00"
     candles = get_candles(ticker, to_time, 40)
     if not candles or len(candles) < 35:
         return None
