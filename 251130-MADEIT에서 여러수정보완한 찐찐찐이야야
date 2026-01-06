@@ -54,11 +54,12 @@ EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화
-# 수익 구간별 트레일링 폭:
-#   0% ~ +0.2%: 0.1% (타이트)
-#   +0.2% ~ +0.5%: 0.15%
+# 수익 구간별 트레일링 폭 (🔧 저구간 타이트하게 조정):
+#   0% ~ +0.15%: 0.05% (매우 타이트 - 대부분 여기서 끝남)
+#   +0.15% ~ +0.3%: 0.08%
+#   +0.3% ~ +0.5%: 0.12%
 #   +0.5% ~ +1.0%: 0.2%
-#   +1.0% 이상: 0.3% (루즈)
+#   +1.0% 이상: 0.3% (루즈 - 큰 상승 시 여유)
 # → 횡보탈출/얇은수익/Plateau 로직 통합 제거됨
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
@@ -4213,30 +4214,24 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if imbalance < imb_min_check:
         return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
-    # === 진입 신호 체크 ===
-    # 돌파 점수: EMA20 돌파 + 고점 돌파
-    breakout_score = int(ema20_breakout) + int(high_breakout)
+    # === 진입 신호 체크 (정리됨: 수렴돌파 + 점화만) ===
+    # 🔧 데이터 분석 결과: EMA돌파/고점돌파/거래량MA는 너무 늦음 → 제거
+    # - 고점돌파: 10%만 해당 (상승 후 발생)
+    # - 거래량급등: 15%만 해당 (상승 후 발생)
+    # - 수렴돌파: 70% 타이트횡보 + 95% 저점상승 + 100% 양봉 (상승 전 발생)
 
-    # 진입 조건: 돌파 OR vol_vs_ma OR 점화 OR 📊수렴돌파
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4) or consol_detected
+    # 진입 조건: 📊수렴돌파 OR 🔥점화 (2가지만)
+    entry_signal = consol_detected or (ignition_score >= 4)
 
     if not entry_signal:
-        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 수렴={consol_score}/3"
+        return False, f"진입조건미달 수렴={consol_score}/3 점화={ignition_score}/4"
 
     # === 통과 ===
-    # 신호 타입 표시 (수렴돌파 / 점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
+    # 신호 타입 표시 (수렴돌파 / 점화)
     if consol_detected:
         signal_tag = f"📊수렴돌파 ({consol_reason})"
-    elif is_ignition:
-        signal_tag = "🔥점화"
-    elif breakout_score == 2:
-        signal_tag = "강돌파 (EMA↑+고점↑)"
-    elif ema20_breakout:
-        signal_tag = "EMA↑"
-    elif high_breakout:
-        signal_tag = "고점↑"
     else:
-        signal_tag = "거래량↑"
+        signal_tag = "🔥점화"
 
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
@@ -5249,14 +5244,17 @@ def monitor_position(m,
             gain_from_entry = (curp / entry_price - 1.0)
 
             # 수익 구간별 트레일링 폭 결정
+            # 🔧 저구간 타이트하게 조정 (대부분 +0.3% 미만에서 끝남)
             if gain_from_entry >= 0.01:      # +1.0% 이상
-                trail_dist = 0.003           # 0.3% (루즈하게)
+                trail_dist = 0.003           # 0.3% (루즈 - 큰 상승 여유)
             elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
                 trail_dist = 0.002           # 0.2%
-            elif gain_from_entry >= 0.002:   # +0.2% ~ +0.5%
-                trail_dist = 0.0015          # 0.15%
-            else:                            # 0% ~ +0.2%
-                trail_dist = 0.001           # 0.1% (타이트하게)
+            elif gain_from_entry >= 0.003:   # +0.3% ~ +0.5%
+                trail_dist = 0.0012          # 0.12%
+            elif gain_from_entry >= 0.0015:  # +0.15% ~ +0.3%
+                trail_dist = 0.0008          # 0.08%
+            else:                            # 0% ~ +0.15%
+                trail_dist = 0.0005          # 0.05% (매우 타이트)
 
             # 고점 갱신시 트레일스탑 상향
             if new_high:
