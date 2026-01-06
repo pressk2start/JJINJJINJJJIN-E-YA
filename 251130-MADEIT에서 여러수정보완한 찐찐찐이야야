@@ -4036,6 +4036,57 @@ def meets_volume_surge(current_volume, past_volumes):
 # 감지 / 검증
 # =========================
 
+def detect_consolidation_breakout(candles_1m, min_candles=5):
+    """
+    수렴돌파 패턴 감지 - 20개 상승케이스 데이터 분석 기반
+
+    [분석 결과 기반 조건]
+    1. 5봉 범위 < 0.9% (70% 케이스)
+    2. 저점 상승 3회 이상 (95% 케이스)
+    3. 현재봉 양봉 (100% 케이스)
+
+    Returns: (detected: bool, score: int, reason: str)
+    """
+    if not candles_1m or len(candles_1m) < min_candles:
+        return False, 0, "캔들부족"
+
+    # 최근 5개 캔들 (오래된순 정렬 가정)
+    recent = candles_1m[-min_candles:]
+
+    highs = [c["high_price"] for c in recent]
+    lows = [c["low_price"] for c in recent]
+
+    # 현재봉 (마지막)
+    cur = recent[-1]
+    cur_is_bullish = cur["trade_price"] > cur["opening_price"]
+
+    # 1. 횡보 범위 체크 (5봉 고저 범위) - 0.9% 미만
+    range_high = max(highs)
+    range_low = min(lows)
+    consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
+    tight_consolidation = consolidation_pct < 0.9
+
+    # 2. 저점 상승 패턴 (Higher Lows) - 4번 비교 중 3회 이상
+    higher_lows_count = 0
+    for i in range(1, len(lows)):
+        if lows[i] >= lows[i-1]:
+            higher_lows_count += 1
+    has_higher_lows = higher_lows_count >= 3  # 3회 이상
+
+    # 3. 현재봉 양봉
+    is_bullish = cur_is_bullish
+
+    # 점수 계산 (0~3)
+    score = int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
+
+    # 3개 조건 모두 충족시 감지
+    detected = tight_consolidation and has_higher_lows and is_bullish
+
+    reason = f"수렴{consolidation_pct:.2f}% 저점↑{higher_lows_count}회 {'양봉' if is_bullish else '음봉'}"
+
+    return detected, score, reason
+
+
 # ========================================
 # ★★★ 1단계 게이트 (단일 통합 - final_check 대체) ★★★
 # ========================================
@@ -4043,7 +4094,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0):
+                 ignition_score=0, candles_1m=None):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4101,27 +4152,34 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if not fresh_ok:
         return False, f"틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초"
 
-    # === 거래대금 컷 ===
-    if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M"
+    # === 📊 수렴돌파 조기 감지 (거래량/가격변동 필터 우회용) ===
+    consol_detected, consol_score, consol_reason = False, 0, ""
+    if candles_1m:
+        consol_detected, consol_score, consol_reason = detect_consolidation_breakout(candles_1m)
 
-    # === 거래량 급등 조건 (동적) ===
+    # === 거래대금 컷 (수렴돌파는 50% 완화) ===
+    vol_min_check = GATE_VOL_MIN * 0.5 if consol_detected else GATE_VOL_MIN
+    if current_volume < vol_min_check and not mega:
+        return False, f"거래대금부족 {current_volume/1e6:.0f}M<{vol_min_check/1e6:.0f}M"
+
+    # === 거래량 급등 조건 (📊 수렴돌파는 우회) ===
     vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
-    if not vol_ok and not mega:
+    if not vol_ok and not mega and not consol_detected:
         return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x"
 
-    # === 가격변동 하한 컷 (동적) ===
-    if price_change < eff_price_min and not mega:
+    # === 가격변동 하한 컷 (📊 수렴돌파는 우회) ===
+    if price_change < eff_price_min and not mega and not consol_detected:
         return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
 
-    # === 회전율 컷 (동적) ===
-    if turn_pct < eff_turn_min:
-        return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
+    # === 회전율 컷 (📊 수렴돌파는 70% 완화) ===
+    turn_min_check = eff_turn_min * 0.3 if consol_detected else eff_turn_min
+    if turn_pct < turn_min_check:
+        return False, f"회전율부족 {turn_pct:.1f}%<{turn_min_check:.1f}%"
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
     if turn_pct > 50 and spread > 0.25:
         return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
 
-    # === 스프레드 컷 (동적) ===
+    # === 스프레드 컷 (유지 - 슬리피지 방지) ===
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
@@ -4130,15 +4188,17 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if overheated > GATE_OVERHEAT_MAX:
         return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
 
-    # === 가속도 컷 (동적) ===
-    if accel < eff_accel_min:
-        return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
-    if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
+    # === 가속도 컷 (📊 수렴돌파는 우회 - 조용한 구간) ===
+    if not consol_detected:
+        if accel < eff_accel_min:
+            return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
+        if accel > GATE_ACCEL_MAX:
+            return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
 
-    # === 매수비 컷 (동적) ===
-    if buy_ratio < eff_buy_min:
-        return False, f"매수비부족 {buy_ratio:.0%}<{eff_buy_min:.0%}"
+    # === 매수비 컷 (📊 수렴돌파는 50% 이상만) ===
+    buy_min_check = 0.50 if consol_detected else eff_buy_min
+    if buy_ratio < buy_min_check:
+        return False, f"매수비부족 {buy_ratio:.0%}<{buy_min_check:.0%}"
 
     # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
     if abs(buy_ratio - 1.0) < 1e-6:
@@ -4148,23 +4208,26 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if volume_surge > GATE_SURGE_MAX:
         return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x"
 
-    # === 호가 임밸런스 컷 (동적) ===
-    if imbalance < eff_imb_min:
-        return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f}"
+    # === 호가 임밸런스 컷 (📊 수렴돌파는 0.05 이상만) ===
+    imb_min_check = 0.05 if consol_detected else eff_imb_min
+    if imbalance < imb_min_check:
+        return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
-    # === 진입 신호 체크 (동적) ===
+    # === 진입 신호 체크 ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
+    # 진입 조건: 돌파 OR vol_vs_ma OR 점화 OR 📊수렴돌파
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4) or consol_detected
 
     if not entry_signal:
-        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
+        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 수렴={consol_score}/3"
 
     # === 통과 ===
-    # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
-    if is_ignition:
+    # 신호 타입 표시 (수렴돌파 / 점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
+    if consol_detected:
+        signal_tag = f"📊수렴돌파 ({consol_reason})"
+    elif is_ignition:
         signal_tag = "🔥점화"
     elif breakout_score == 2:
         signal_tag = "강돌파 (EMA↑+고점↑)"
@@ -4370,7 +4433,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ema20_breakout=ema20_breakout,
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
-        ignition_score=ignition_score
+        ignition_score=ignition_score,
+        candles_1m=c1  # 📊 수렴돌파 감지용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
