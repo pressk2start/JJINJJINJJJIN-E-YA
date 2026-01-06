@@ -1458,9 +1458,12 @@ def close_auto_position(m, reason=""):
         # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
         est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
         est_exit_value = exit_price_used * vol
-        pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price -
-                   1.0) * 100.0 if entry_price > 0 else 0.0
+        fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
+
+        # 🔧 수수료 포함 순손익 계산
+        pl_value = est_exit_value - est_entry_value - fee_total
+        ret_pct_raw = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+        ret_pct = ret_pct_raw - (FEE_RATE * 100.0)  # 수수료 차감한 실제 수익률
 
         # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
         try:
@@ -1478,8 +1481,15 @@ def close_auto_position(m, reason=""):
             except Exception as _e:
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
+        # 🔧 수수료 포함 기준으로 익절/손절 판단
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
-        fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
+        exit_label = "익절" if ret_pct > 0 else "손절"
+
+        # 🔧 사유에 수익률이 있으면 실제 체결가+수수료 기준으로 재계산
+        display_reason = reason
+        if "트레일링" in reason or "ATR" in reason:
+            # 기존 수익률 표시를 실제 수수료 포함 수익률로 교체
+            display_reason = f"트레일링{exit_label} {ret_pct:+.2f}% (체결가 기준, 수수료 포함)"
 
         # 🔧 DEBUG: 청산 알람 발송 직전 로그
         print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
@@ -1489,7 +1499,7 @@ def close_auto_position(m, reason=""):
             f"{result_emoji} <b>자동청산 완료</b> {m}\n"
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
-            f"• 사유: {reason}\n"
+            f"• 사유: {display_reason}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
             f"• 체결수량: {vol:.6f}\n"
@@ -1622,12 +1632,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
-        # 손익 계산
+        # 손익 계산 (🔧 수수료 포함)
         est_entry_value = entry_price * executed
         est_exit_value = exit_price_used * executed if exit_price_used > 0 else 0
-        pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
         fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
+        pl_value = est_exit_value - est_entry_value - fee_total  # 🔧 수수료 차감
+        ret_pct_raw = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
+        ret_pct = ret_pct_raw - (FEE_RATE * 100.0)  # 🔧 수수료 차감한 실제 수익률
 
         # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
         # 🔧 FIX: pop 전에 entry_ts, added 백업 (hold_sec 0 버그 방지)
@@ -1647,16 +1658,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     pos2["volume"] = remaining_volume
                     pos2["partial_done"] = True
                     pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
-                    pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
+                    pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"  # 🔧 수수료 포함 기준
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
+        # 🔧 수수료 포함 기준으로 익절/손절 판단
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
+        exit_label = "익절" if ret_pct > 0 else "손절"
         tg_send(
             f"====================================\n"
-            f"{result_emoji} <b>부분 청산</b> {m}\n"
+            f"{result_emoji} <b>부분 {exit_label}</b> {m}\n"
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
