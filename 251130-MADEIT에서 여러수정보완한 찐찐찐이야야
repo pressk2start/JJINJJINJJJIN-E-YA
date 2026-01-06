@@ -4109,9 +4109,11 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     # 5개 조건 모두 충족시 감지
     detected = tight_consolidation and has_higher_lows and is_bullish and near_high and vol_confirm
 
-    reason = f"수렴{consolidation_pct:.2f}% 저점↑{higher_lows_count} 위치{price_position*100:.0f}% 거래량{'↑' if vol_confirm else '→'}"
+    # 🔧 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
+    reason = "수렴돌파"  # 리포트용 단순 경로명
+    detail = f"수렴{consolidation_pct:.1f}% 저점↑{higher_lows_count}회 양봉"  # 알림용 상세정보
 
-    return detected, score, reason
+    return detected, score, reason, detail
 
 
 # ========================================
@@ -4180,9 +4182,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초"
 
     # === 📊 수렴돌파 조기 감지 (거래량/가격변동 필터 우회용) ===
-    consol_detected, consol_score, consol_reason = False, 0, ""
+    consol_detected, consol_score, consol_reason, consol_detail = False, 0, "", ""
     if candles_1m:
-        consol_detected, consol_score, consol_reason = detect_consolidation_breakout(candles_1m)
+        consol_detected, consol_score, consol_reason, consol_detail = detect_consolidation_breakout(candles_1m)
 
     # === 거래대금 컷 (수렴돌파는 50% 완화) ===
     vol_min_check = GATE_VOL_MIN * 0.5 if consol_detected else GATE_VOL_MIN
@@ -4253,15 +4255,17 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"진입조건미달 수렴={consol_score}/5 점화={ignition_score}/4"
 
     # === 통과 ===
-    # 신호 타입 표시 (수렴돌파 / 점화)
+    # 🔧 신호 타입: 리포트 집계용 단순 경로명 + 알림용 상세정보 분리
     if consol_detected:
-        signal_tag = f"📊수렴돌파 ({consol_reason})"
+        signal_tag = f"📊{consol_reason}"  # 리포트용: "📊수렴돌파"
+        detail_info = f"({consol_detail})"  # 알림용 상세: "(수렴0.3% 저점↑3회 양봉)"
     else:
         signal_tag = "🔥점화"
+        detail_info = ""
 
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
-    return True, f"{signal_tag} PASS | {pass_summary}"
+    return True, f"{signal_tag} PASS {detail_info}| {pass_summary}"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
