@@ -618,13 +618,11 @@ def sync_orphan_positions():
                 if market in OPEN_POSITIONS:
                     continue  # 이미 추적 중
 
-            # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
-            # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
-            if market not in _PREV_SYNC_MARKETS:
-                print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
-                continue
+            # 🔧 변경: "다음 사이클 대기" 제거 → 발견 즉시 트레일링 모니터링 시작
+            # - 더 오르면 트레일링으로 수익 확보
+            # - 떨어지면 트레일링으로 손실 제한
 
-            # 🔥 유령 포지션 발견! (2사이클 연속 존재 + OPEN_POSITIONS에 없음)
+            # 🔥 유령 포지션 발견! (OPEN_POSITIONS에 없는 잔고)
             print(f"[ORPHAN] {market} 유령 포지션 발견! 잔고={balance:.4f} 평단={avg_buy_price:.2f}")
 
             # 현재가 조회
