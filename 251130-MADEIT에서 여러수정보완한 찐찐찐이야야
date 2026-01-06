@@ -1483,13 +1483,6 @@ def close_auto_position(m, reason=""):
 
         # 🔧 수수료 포함 기준으로 익절/손절 판단
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
-        exit_label = "익절" if ret_pct > 0 else "손절"
-
-        # 🔧 사유에 수익률이 있으면 실제 체결가+수수료 기준으로 재계산
-        display_reason = reason
-        if "트레일링" in reason or "ATR" in reason:
-            # 기존 수익률 표시를 실제 수수료 포함 수익률로 교체
-            display_reason = f"트레일링{exit_label} {ret_pct:+.2f}% (체결가 기준, 수수료 포함)"
 
         # 🔧 DEBUG: 청산 알람 발송 직전 로그
         print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
@@ -1499,7 +1492,7 @@ def close_auto_position(m, reason=""):
             f"{result_emoji} <b>자동청산 완료</b> {m}\n"
             f"====================================\n"
             f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
-            f"• 사유: {display_reason}\n"
+            f"• 사유: {reason}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
             f"• 체결수량: {vol:.6f}\n"
