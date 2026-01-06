@@ -5257,14 +5257,9 @@ def monitor_position(m,
             gain_from_entry = (curp / entry_price - 1.0)
             peak_gain = (best / entry_price - 1.0)  # 고점 수익률
 
-            # 🔧 BEP(손익분기점 ~0.12%) 이전에는 트레일링 비활성화
-            # → 수수료도 못 건지는 미미한 익절 방지, ATR 손절만 의존
-            BEP_THRESHOLD = 0.0012  # +0.12% (수수료 0.1% + 여유)
-
-            if peak_gain < BEP_THRESHOLD:
-                # 아직 고점이 BEP 미달 → 트레일링 적용 안함 (ATR 손절만)
-                trail_dist = None
-            elif gain_from_entry >= 0.01:      # +1.0% 이상
+            # 수익 구간별 트레일링 폭 결정
+            # 🔧 BEP(+0.12%) 이전: 느슨한 0.1% 트레일링 (작은 등락에 안 걸림)
+            if gain_from_entry >= 0.01:      # +1.0% 이상
                 trail_dist = 0.003           # 0.3% (루즈 - 큰 상승 여유)
             elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
                 trail_dist = 0.002           # 0.2%
@@ -5272,19 +5267,18 @@ def monitor_position(m,
                 trail_dist = 0.0012          # 0.12%
             elif gain_from_entry >= 0.0015:  # +0.15% ~ +0.3%
                 trail_dist = 0.0008          # 0.08%
-            else:                            # BEP ~ +0.15%
-                trail_dist = 0.0006          # 0.06% (BEP 이상이면 최소한 본전은 지키도록)
+            elif gain_from_entry >= 0.0012:  # +0.12%(BEP) ~ +0.15%
+                trail_dist = 0.0006          # 0.06%
+            else:                            # 0% ~ +0.12% (BEP 미만)
+                trail_dist = 0.001           # 0.1% (느슨 - 작은 등락 무시)
 
-            # 고점 갱신시 트레일스탑 상향 (트레일링 활성화 상태일 때만)
-            if trail_dist is not None and new_high:
+            # 고점 갱신시 트레일스탑 상향
+            if new_high:
                 new_trail = curp * (1.0 - trail_dist)
-                # 🔧 트레일스탑은 최소한 BEP(손익분기점) 이상 유지
-                bep_price = entry_price * (1.0 + BEP_THRESHOLD * 0.5)  # +0.06% 수준
-                new_trail = max(new_trail, bep_price)
                 trail_stop = max(trail_stop, new_trail)
 
-            # 트레일링 손절 트리거 (트레일링 활성화 상태일 때만)
-            if trail_dist is not None and curp < trail_stop:
+            # 트레일링 청산 트리거
+            if curp < trail_stop:
                 drop_pct = (best - curp) / best * 100
                 # 🔧 수익률 표시 정리: 양수면 익절, 음수면 손절
                 exit_type = "트레일링익절" if gain_from_entry >= 0 else "트레일링손절"
