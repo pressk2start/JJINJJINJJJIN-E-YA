@@ -47,26 +47,28 @@ COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 8  # 진입 후 8초 웜업 (5→8 완화, 초반 흔들림 허용)
-WARMUP_STOP = -0.003  # 🔧 웜업 중 -0.3% 손절 (-0.2%→-0.3% 완화)
+WARMUP_SEC = 5  # 진입 후 5초 웜업
+WARMUP_STOP = -0.002  # 🔧 웜업 중 -0.2% 손절
 HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
-# 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화
-# 수익 구간별 트레일링 폭:
-#   0% ~ +0.2%: 0.1% (타이트)
-#   +0.2% ~ +0.5%: 0.15%
-#   +0.5% ~ +1.0%: 0.2%
-#   +1.0% 이상: 0.3% (루즈)
-# → 횡보탈출/얇은수익/Plateau 로직 통합 제거됨
+# 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
+PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
+
+# 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
+SIDEWAYS_TIMEOUT = 90       # 횡보 판정 시간 (초) - 이후 고점 추적 시작 (기존 60→90)
+
+# 트레일링 손절 설정
+TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
+TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
 
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
-POSTCHECK_ENABLED = True      # 초입 단계 포스트체크 활성화 (허수 제거)
+POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
 EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
 
 # --- 환경변수(.env 지원) ---
@@ -77,7 +79,7 @@ except Exception:
     pass
 
 # ==== Exit Profile (gentle/ balanced / strict) ====
-EXIT_PROFILE = os.getenv("EXIT_PROFILE", "balanced").lower()  # 🔧 strict→balanced (웜업 8초 유지)
+EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
 
 
 def _apply_exit_profile():
@@ -301,7 +303,7 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.003"))  # 계좌의 0.3% �
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
 # === 공격 모드 / 피라미딩 설정 ===
-AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "0") == "1"  # 🔧 기본 OFF (수비적)
+AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 
 # 소액 선진입 + 추매 구조 (소액 프로브가 더 안정적)
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
@@ -1722,8 +1724,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         with _POSITION_LOCK:
             pos = OPEN_POSITIONS.get(m)
         if not pos:
-            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료 (정상 청산 완료)")
-            # 🔧 FIX: 정상 청산 후에는 알림 불필요 (이미 청산 알람 발송됨)
+            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
+            # 🔧 FIX: 포지션 없음 알람 추가
+            tg_send(f"⚠️ {m} 포지션 정리됨 (OPEN_POSITIONS에서 제거됨)")
             return False
 
         # 실제 거래소 잔고 확인
@@ -1806,11 +1809,20 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif verdict and verdict.startswith("청산 권고("):
             continue
 
-        # 5) 유지 권고 → 계속 재모니터링
+        # 5) 부분 청산(50%) 권고 → 실제 50% 매도 후 계속 재모니터링
+        elif action == "부분 청산(50%) 권고":
+            ok, msg, executed = safe_partial_sell(m,
+                                                  sell_ratio=0.5,
+                                                  reason="모니터링 종료 시점 50% 부분청산")
+            if ok and executed > 0:
+                print(msg)
+            continue
+
+        # 6) 유지 권고 → 계속 재모니터링
         elif action == "유지 권고":
             continue
 
-        # 6) 그냥 시간 만료면 → 다시 한 번 사이클
+        # 7) 그냥 시간 만료면 → 다시 한 번 사이클
         elif verdict == "시간 만료(모니터링 종료)":
             continue
 
@@ -1872,17 +1884,17 @@ MIN_DEPTH_KRW = 6_000_000
 # ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 50.0      # 회전율 상한 (%) - 35→50 완화 (알람 확보)
-GATE_SPREAD_MAX = 0.12    # 스프레드 상한 (%) - 0.15→0.12 강화
+GATE_TURN_MAX = 80.0      # 회전율 상한 (%) - 40→80 완화
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - 0.20→0.40 완화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기 (3.0→100.0)
-GATE_BUY_RATIO_MIN = 0.58 # 매수비 하한 - 0.62→0.58 완화
+GATE_BUY_RATIO_MIN = 0.55 # 매수비 하한 - 초기 완화 (0.65→0.55)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
-GATE_IMBALANCE_MIN = 0.55 # 임밸런스 하한 - 0.50→0.55 강화
+GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
-GATE_CV_MAX = 1.8         # CV 상한 - 1.6→1.8 완화
-GATE_FRESH_AGE_MAX = 15.0  # 틱 신선도 상한 (초) - 2.0→15.0 대폭 완화 (조용한 시장 대응)
+GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
+GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
@@ -1953,10 +1965,10 @@ REARM_REBREAK_MIN = 0.0028
 # 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
 # POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
-POSTCHECK_MIN_BUY = 0.54  # 0.46→0.54 강화 (매수비 낮으면 캔슬)
+POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
-POSTCHECK_MAX_PSTD = 0.0020  # 0.0012→0.0020 완화 (알람 확보)
-POSTCHECK_MAX_CV = 0.70  # 0.65→0.70 완화
+POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
+POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
 POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
@@ -2825,8 +2837,8 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
-            # 🔧 아래 4개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
-            # GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
+            GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
+            # 🔧 아래 3개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
             # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
             # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
             # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
@@ -4067,7 +4079,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
-    eff_vol_vs_ma = max(0.4, 0.7 * (1 - relax * 0.3))             # 🔧 0.6→0.4, 0.9→0.7 완화
+    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
@@ -4107,9 +4119,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
-    # 🔧 과열 추격 방지: 회전 30%↑면 스프레드 0.10%도 과다
-    if (turn_pct > 30 and spread > 0.10) or (turn_pct > 40 and spread > 0.08):
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}% 스프{spread:.2f}%"
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
+    if turn_pct > 50 and spread > 0.25:
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
@@ -4146,12 +4158,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 🔧 진입 조건 강화: 거래량 단독은 조건부만 허용
-    # 돌파 또는 점화 기반 진입
-    base_break = (breakout_score >= 1) or (ignition_score >= 4)
-    # 거래량만 기반: 저회전·촘촘한 스프레드·매수비 70%+일 때만 허용 (허수 차단)
-    vol_only_ok = (vol_vs_ma >= eff_vol_vs_ma and turn_pct < 20 and spread <= 0.08 and buy_ratio >= 0.70)
-    entry_signal = base_break or vol_only_ok
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
@@ -4314,17 +4322,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if cons_buys > GATE_CONSEC_MAX:
         cut("CONSEC_HIGH", f"{m} 연속매수{cons_buys}>{GATE_CONSEC_MAX} (추격매수 위험)")
         return None
-    # 🔧 틱부족 시 체크 스킵 (차단 → 허용으로 변경)
-    tick_sufficient = (cv >= 0 and pstd10 >= 0)
-    if not tick_sufficient:
-        print(f"[TICK_SKIP] {m} 틱부족(count={ia.get('count', 0)}) → CV/pstd 체크 스킵")
-    # CV 체크 (틱 충분할 때만)
-    if tick_sufficient and cv > GATE_CV_MAX:
-        cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
+    # 🔧 틱부족 컷 (cv < 0 또는 pstd < 0 = insufficient)
+    if cv < 0 or pstd10 < 0:
+        cut("TICK_INSUFFICIENT", f"{m} 틱부족(count={ia.get('count', 0)}) → CV/pstd 계산불가")
         return None
-    # 🔧 과회전 구간은 pstd까지 타이트하게 제한 (틱 충분할 때만)
-    if tick_sufficient and turn_pct > 30 and pstd10 > 0.0005:  # 0.05%
-        cut("PSTD_HIGH_TURN", f"{m} pstd{pstd10*100:.3f}% turn{turn_pct:.1f}%")
+    if cv > GATE_CV_MAX:
+        cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
@@ -4464,13 +4467,13 @@ def final_check_leader(m, pre, tight_mode=False):
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
 
-    # === 🔥 스코어 기반 진입모드 자동 매핑 (보수화) ===
-    # score < 60: probe (소액 탐색) → 추격 진입 방지
-    # score 60~75: half (절반)
-    # score >= 75: confirm (풀 사이즈)
-    if score < 60:
+    # === 🔥 스코어 기반 진입모드 자동 매핑 ===
+    # score < 55: probe (소액 탐색) → 추격 진입 방지
+    # score 55~70: half (절반)
+    # score >= 70: confirm (풀 사이즈)
+    if score < 55:
         entry_mode = "probe"
-    elif score < 75:
+    elif score < 70:
         entry_mode = "half"
     else:
         entry_mode = "confirm"
@@ -5104,7 +5107,8 @@ def monitor_position(m,
     ctx_first_seen_ts = 0.0
     ctx_hits = 0
 
-    # trail_armed 제거됨 → 구간별 트레일링으로 통합 (진입부터 활성화)
+    trail_armed = False
+    trail_stop = 0.0
 
     # 스파이크/그레이스 기존 로직 재활용
     consecutive_failures = 0
@@ -5126,12 +5130,17 @@ def monitor_position(m,
     verdict = None
     outcome_extra = ""
 
-    # === 🎯 구간별 트레일링 (Tiered Trailing) ===
-    # 진입 직후부터 활성화, 수익 구간별 트레일링 폭 자동 조정
-    trail_stop = entry_price * 0.999  # 초기값: 진입가 -0.1%
+    # === 🎯 얇은 수익 체크포인트 상태 ===
+    checkpoint_reached = False   # 얇은 수익(0.3%) 도달 여부
+    strong_mode = False          # 강세 확인 후 트레일링 모드
+    strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
 
-    # === 🔥 50% 부분청산 상태 ===
-    partial_done = False  # 부분청산 완료 여부 (1회만)
+    # === 🔥 Plateau 감지용 상태 ===
+    last_peak_ts = time.time()   # 마지막 고점 갱신 시간
+    plateau_partial_done = False # Plateau 부분익절 완료 여부
+
+    # === 🔧 횡보 탈출 미니트레일 상태 ===
+    sideways_peak = 0.0          # 60초 이후 고점 추적
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
@@ -5163,6 +5172,8 @@ def monitor_position(m,
             last_price = curp
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
+            if new_high:
+                last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
             best = max(best, curp)
             worst = min(worst, curp)
 
@@ -5178,62 +5189,22 @@ def monitor_position(m,
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
 
-            # === 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화 ===
+            # === 🔧 횡보 탈출 로직 (미니트레일링) ===
+            # 90초 이후 + trail_armed=False → 고점 추적, 고점-0.1% 하락 시 청산
+            if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
+                # 고점 갱신
+                sideways_peak = max(sideways_peak, cur_gain)
+
+                # 청산 조건: 고점에서 0.1% 하락 (기존 0.03%→0.1% 완화)
+                SIDEWAYS_TRAIL_DROP = 0.001  # 0.1%
+                if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
+                    close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
+                    verdict = "횡보탈출"
+                    outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
+                    break
+
+            # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
-
-            # === 🔥 50% 부분청산 조건 체크 (1회만, 본절 이상일 때만) ===
-            min_gain_for_partial = FEE_RATE  # 본절 = 수수료 0.1%
-            if not partial_done and alive_sec >= 30 and gain_from_entry >= min_gain_for_partial:
-                t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                buy_ratio = t15_now.get("buy_ratio", 0.5)
-                krw_per_sec = t15_now.get("krw_per_sec", 0)
-                tick_count = t15_now.get("n", 0)
-
-                # 부분청산 조건들 (본절 이상 확보된 상태에서만 체크)
-                weak_buying = (buy_ratio < 0.55 and tick_count >= 6)  # 매수세 약화
-                slowing_momentum = (gain_from_entry >= 0.015 and krw_per_sec < 15000)  # 큰 수익 중 거래 둔화
-                small_profit_slowdown = (gain_from_entry < 0.01 and krw_per_sec < 12000)  # 작은 수익 + 둔화
-
-                partial_reason = None
-                if weak_buying:
-                    partial_reason = f"매수세약화 (매수비{buy_ratio*100:.1f}% 틱{tick_count})"
-                elif slowing_momentum:
-                    partial_reason = f"거래둔화 (+{gain_from_entry*100:.2f}% 속도{krw_per_sec/1000:.1f}K)"
-                elif small_profit_slowdown:
-                    partial_reason = f"소폭수익둔화 (+{gain_from_entry*100:.2f}% 속도{krw_per_sec/1000:.1f}K)"
-
-                if partial_reason:
-                    ok, msg, sold = safe_partial_sell(m, 0.5, f"50%부분청산 | {partial_reason}")
-                    if ok and sold > 0:
-                        partial_done = True
-                        # 본절 상향: 남은 50%는 손해 안 보게
-                        be_stop = entry_price * (1.0 + FEE_RATE)
-                        trail_stop = max(trail_stop, be_stop)
-                        tg_send_mid(f"📉 {m} 50% 부분청산 | {partial_reason} | 트레일→본절 상향")
-
-            # 수익 구간별 트레일링 폭 결정 (소익 타이트, 대익 여유)
-            if gain_from_entry >= 0.005:     # +0.5% 이상
-                trail_dist = 0.0018          # 0.18% (여유 - 더 큰 상승 기회)
-            elif gain_from_entry >= 0.003:   # +0.3% ~ +0.5%
-                trail_dist = 0.0012          # 0.12% (수익 보호)
-            elif gain_from_entry >= 0.001:   # +0.1% ~ +0.3% (본절~소익)
-                trail_dist = 0.0008          # 0.08% (타이트 - 작은 수익 확보)
-            else:                            # ~+0.1% (본절 전)
-                trail_dist = 0.0025          # 0.25% (본절 도달 기회)
-
-            # 고점 갱신시 트레일스탑 상향
-            if new_high:
-                new_trail = curp * (1.0 - trail_dist)
-                trail_stop = max(trail_stop, new_trail)
-
-            # 트레일링 손절 트리거
-            if curp < trail_stop:
-                peak_gain = (best / entry_price - 1.0)
-                drop_pct = (best - curp) / best * 100
-                close_auto_position(m, f"트레일링손절 +{gain_from_entry*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
-                verdict = "TRAIL_STOP"
-                outcome_extra = f"(고점+{peak_gain*100:.2f}%→+{gain_from_entry*100:.2f}%)"
-                break
             
             # === PROBE → CONFIRM 전환 로직 ===
             with _POSITION_LOCK:
@@ -5268,10 +5239,21 @@ def monitor_position(m,
                             f"추매 후 평단: {fmt6(new_entry)}원"
                         )
 
-                        # 동적 손절 재계산 + 트레일스탑 리셋
+                        # 동적 손절 재계산
                         c1_for_sl = get_minutes_candles(1, m, 20)
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
-                        trail_stop = new_entry * 0.999  # 새 평단 기준으로 트레일 리셋
+                        trail_armed = False  # 새 기준으로 트레일링 리셋
+
+            if (not trail_armed) and gain_from_entry >= PROFIT_CHECKPOINT:
+                trail_armed = True
+                # 초기 트레일: ATR 기준 혹은 최소거리
+                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                if atr and atr > 0:
+                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                                     (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                else:
+                    trail_dist = TRAIL_DISTANCE_MIN
+                trail_stop = curp * (1.0 - trail_dist)
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
             if USE_PYRAMIDING and AUTO_TRADE:
@@ -5308,8 +5290,98 @@ def monitor_position(m,
                             c1_for_sl = get_minutes_candles(1, m, 20)
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
 
-            # === 🔧 [통합됨] 횡보탈출/얇은수익/Plateau 제거 → 구간별 트레일링으로 통합 ===
-            # 위의 Tiered Trailing이 모든 청산 시나리오를 커버함
+            # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
+            if trail_armed and new_high:
+                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                if atr and atr > 0:
+                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                                     (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                else:
+                    trail_dist = TRAIL_DISTANCE_MIN
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+
+            # 🔧 [신규] 트레일링 손절 실제 청산 트리거
+            if trail_armed and curp < trail_stop:
+                trail_gain = (curp / entry_price - 1.0)
+                peak_gain = (best / entry_price - 1.0)
+                drop_pct = (best - curp) / best * 100
+                close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
+                verdict = "TRAIL_STOP"
+                break
+
+            # 🔧 [제거됨] 브레이크이븐 → 트레일링 0.4% 발동으로 대체
+            # 트레일링이 +0.4%에서 발동되면 트레일스탑이 자동으로 본절 이상이 됨
+            in_breakeven_box = abs(gain_from_entry) <= BREAKEVEN_BOX  # ±0.15% 박스 내 (다른 곳에서 사용)
+
+            # === 🔥 심플 체크포인트 매도 로직 ===
+            cur_gain = (curp / entry_price - 1.0)
+            ob_now = pre.get("ob", {})
+
+            # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
+            # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
+            # 여기는 트레일링 손절 이후 추가 손절 판정용
+
+            # ② 체크포인트 도달 시 강세/약세 판단
+            # 🔧 FIX: 체크포인트 재평가 - 가격이 30% 아래로 떨어지면 리셋
+            if checkpoint_reached and cur_gain < (PROFIT_CHECKPOINT * 0.3):
+                checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
+
+            # 🔧 소프트 가드: 초기 30초간 청산 조건 강화
+            in_soft_guard = alive_sec < SOFT_GUARD_SEC
+
+            if not checkpoint_reached and cur_gain >= PROFIT_CHECKPOINT:
+                checkpoint_reached = True
+                # 🔧 [변경] 강세/약세 판단 → 약세만 25% 부분익절, 강세는 트레일링에 맡김
+                if is_strong_momentum(ticks, ob_now):
+                    # 강세 → 트레일링이 알아서 처리 (강세모드 동적트레일 제거됨)
+                    tg_send_mid(f"💪 {m} +{cur_gain*100:.2f}% 강세 → 트레일링 유지")
+                else:
+                    # 약세 판정이지만 소프트 가드 + 박스 내면 홀딩
+                    if in_soft_guard and in_breakeven_box:
+                        # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
+                        tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
+                    else:
+                        # 약세 → 25% 부분익절 (나머지 75%는 트레일링/ATR손절)
+                        ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
+                        if ok:
+                            tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 완료")
+
+            # 🔧 [제거됨] 강세모드 동적 트레일링 → 일반 트레일링(0.2% 간격)으로 대체
+
+            # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
+            # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
+            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
+            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+
+            # === 🔥 (B) Plateau + 모멘텀 약화 → 부분익절 + 본절상향 ===
+            # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
+            PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
+            # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
+            BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
+
+            time_since_peak = time.time() - last_peak_ts
+            if (not plateau_partial_done
+                and cur_gain_now >= PROFIT_CHECKPOINT
+                and time_since_peak >= PLATEAU_SEC):
+
+                decay_flag, decay_info = buy_decay_flag(ticks)
+                if decay_flag:
+                    # 부분익절 실행 (50%)
+                    ok, msg, sold = safe_partial_sell(m, 0.5, f"Plateau부분익절 +{cur_gain_now*100:.2f}% (고점후 {time_since_peak:.0f}초 횡보+매수약화)")
+                    if ok:
+                        plateau_partial_done = True
+                        # 🔥 본절 상향: 남은 50%는 최소한 손해 안 보게
+                        be_stop = entry_price * (1.0 + BE_OFFSET)
+                        base_stop = max(base_stop, be_stop)
+                        tg_send_mid(f"📉 {m} Plateau 부분익절 50% | +{cur_gain_now*100:.2f}% | 손절선→본절({BE_OFFSET*100:.2f}%) 상향")
+
+            # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
+            drop_from_high = (best - curp) / best if best > 0 else 0
+            if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
+                if trail_armed:
+                    # 재진입 대신 트레일 간격 타이트하게 강화
+                    trail_stop = max(trail_stop, curp * (1.0 - max(TRAIL_DISTANCE_MIN * 0.8, 0.0025)))
+                    tg_send_mid(f"🔧 {m} 재상승 감지 → 트레일 강화")
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
