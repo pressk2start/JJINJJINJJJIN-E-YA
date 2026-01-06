@@ -1810,7 +1810,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action == "부분 청산(50%) 권고":
             ok, msg, executed = safe_partial_sell(m,
                                                   sell_ratio=0.5,
-                                                  reason="모니터링 종료 시점 50% 부분청산")
+                                                  reason=f"재모니터링{cycle}사이클 부분청산({rationale})")
             if ok and executed > 0:
                 print(msg)
             continue
@@ -5253,12 +5253,18 @@ def monitor_position(m,
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
 
-            # === 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화 ===
+            # === 🎯 구간별 트레일링 (Tiered Trailing) ===
             gain_from_entry = (curp / entry_price - 1.0)
+            peak_gain = (best / entry_price - 1.0)  # 고점 수익률
 
-            # 수익 구간별 트레일링 폭 결정
-            # 🔧 저구간 타이트하게 조정 (대부분 +0.3% 미만에서 끝남)
-            if gain_from_entry >= 0.01:      # +1.0% 이상
+            # 🔧 BEP(손익분기점 ~0.12%) 이전에는 트레일링 비활성화
+            # → 수수료도 못 건지는 미미한 익절 방지, ATR 손절만 의존
+            BEP_THRESHOLD = 0.0012  # +0.12% (수수료 0.1% + 여유)
+
+            if peak_gain < BEP_THRESHOLD:
+                # 아직 고점이 BEP 미달 → 트레일링 적용 안함 (ATR 손절만)
+                trail_dist = None
+            elif gain_from_entry >= 0.01:      # +1.0% 이상
                 trail_dist = 0.003           # 0.3% (루즈 - 큰 상승 여유)
             elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
                 trail_dist = 0.002           # 0.2%
@@ -5266,19 +5272,21 @@ def monitor_position(m,
                 trail_dist = 0.0012          # 0.12%
             elif gain_from_entry >= 0.0015:  # +0.15% ~ +0.3%
                 trail_dist = 0.0008          # 0.08%
-            else:                            # 0% ~ +0.15%
-                trail_dist = 0.0005          # 0.05% (매우 타이트)
+            else:                            # BEP ~ +0.15%
+                trail_dist = 0.0006          # 0.06% (BEP 이상이면 최소한 본전은 지키도록)
 
-            # 고점 갱신시 트레일스탑 상향
-            if new_high:
+            # 고점 갱신시 트레일스탑 상향 (트레일링 활성화 상태일 때만)
+            if trail_dist is not None and new_high:
                 new_trail = curp * (1.0 - trail_dist)
+                # 🔧 트레일스탑은 최소한 BEP(손익분기점) 이상 유지
+                bep_price = entry_price * (1.0 + BEP_THRESHOLD * 0.5)  # +0.06% 수준
+                new_trail = max(new_trail, bep_price)
                 trail_stop = max(trail_stop, new_trail)
 
-            # 트레일링 손절 트리거
-            if curp < trail_stop:
-                peak_gain = (best / entry_price - 1.0)
+            # 트레일링 손절 트리거 (트레일링 활성화 상태일 때만)
+            if trail_dist is not None and curp < trail_stop:
                 drop_pct = (best - curp) / best * 100
-                close_auto_position(m, f"트레일링손절 +{gain_from_entry*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
+                close_auto_position(m, f"트레일링익절 +{gain_from_entry*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
                 verdict = "TRAIL_STOP"
                 outcome_extra = f"(고점+{peak_gain*100:.2f}%→+{gain_from_entry*100:.2f}%)"
                 break
