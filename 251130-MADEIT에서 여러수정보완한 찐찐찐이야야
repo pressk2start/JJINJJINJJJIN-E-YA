@@ -4043,6 +4043,8 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     1. 5봉 범위 < 0.9% (70% 케이스)
     2. 저점 상승 3회 이상 (95% 케이스)
     3. 현재봉 양봉 (100% 케이스)
+    4. 🆕 가격이 범위 상단 70% 이상 (가짜 돌파 필터)
+    5. 🆕 진입봉 거래량 > 직전평균 1.2배 (돌파 확인)
 
     Returns: (detected: bool, score: int, reason: str)
     """
@@ -4075,13 +4077,26 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     # 3. 현재봉 양봉
     is_bullish = cur_is_bullish
 
-    # 점수 계산 (0~3)
-    score = int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
+    # 4. 🆕 가격이 범위 상단 근처 (상위 70% 이상)
+    cur_price = cur["trade_price"]
+    price_range = range_high - range_low
+    price_position = (cur_price - range_low) / price_range if price_range > 0 else 0
+    near_high = price_position >= 0.7
 
-    # 3개 조건 모두 충족시 감지
-    detected = tight_consolidation and has_higher_lows and is_bullish
+    # 5. 🆕 진입봉 거래량 확인 (직전 4봉 평균의 1.2배 이상)
+    cur_vol = cur.get("candle_acc_trade_volume", 0)
+    prev_vols = [c.get("candle_acc_trade_volume", 0) for c in recent[:-1]]
+    prev_avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
+    vol_confirm = cur_vol > prev_avg_vol * 1.2 if prev_avg_vol > 0 else True
 
-    reason = f"수렴{consolidation_pct:.2f}% 저점↑{higher_lows_count}회 {'양봉' if is_bullish else '음봉'}"
+    # 점수 계산 (0~5)
+    score = (int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
+             + int(near_high) + int(vol_confirm))
+
+    # 5개 조건 모두 충족시 감지
+    detected = tight_consolidation and has_higher_lows and is_bullish and near_high and vol_confirm
+
+    reason = f"수렴{consolidation_pct:.2f}% 저점↑{higher_lows_count} 위치{price_position*100:.0f}% 거래량{'↑' if vol_confirm else '→'}"
 
     return detected, score, reason
 
@@ -4222,7 +4237,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     entry_signal = consol_detected or (ignition_score >= 4)
 
     if not entry_signal:
-        return False, f"진입조건미달 수렴={consol_score}/3 점화={ignition_score}/4"
+        return False, f"진입조건미달 수렴={consol_score}/5 점화={ignition_score}/4"
 
     # === 통과 ===
     # 신호 타입 표시 (수렴돌파 / 점화)
