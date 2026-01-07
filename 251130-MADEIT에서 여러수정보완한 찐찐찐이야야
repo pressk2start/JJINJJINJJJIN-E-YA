@@ -4089,18 +4089,18 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     price_position = (cur_price - range_low) / price_range if price_range > 0 else 0
     near_high = price_position >= 0.6
 
-    # 5. 🔥 진입봉 거래량 확인 (직전 4봉 평균의 5배 이상) - 핵심!
+    # 5. 🔥 진입봉 거래량 확인 (직전 4봉 평균의 3배 이상) - 핵심!
     cur_vol = cur.get("candle_acc_trade_volume", 0)
     prev_vols = [c.get("candle_acc_trade_volume", 0) for c in recent[:-1]]
     prev_avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
     vol_ratio = cur_vol / prev_avg_vol if prev_avg_vol > 0 else 0
-    vol_confirm = vol_ratio >= 5.0  # 🔥 1.2배 → 5배 강화
+    vol_confirm = vol_ratio >= 3.0  # 🔥 5배 → 3배 완화 (중앙값 4.99x 기준)
 
     # 점수 계산 (0~4)
     score = (int(tight_consolidation) + int(is_bullish)
              + int(near_high) + int(vol_confirm))
 
-    # 필수: 양봉 + 거래량 5배, 추가: 범위/위치
+    # 필수: 양봉 + 거래량 3배, 추가: 범위/위치
     detected = is_bullish and vol_confirm and (tight_consolidation or near_high)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
