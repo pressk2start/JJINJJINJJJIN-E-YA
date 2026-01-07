@@ -4043,14 +4043,14 @@ def meets_volume_surge(current_volume, past_volumes):
 
 def detect_consolidation_breakout(candles_1m, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 20개 상승케이스 데이터 분석 기반
+    수렴돌파 패턴 감지 - 성공/실패 비교 분석 기반 (23성공 vs 7실패)
 
-    [분석 결과 기반 조건]
-    1. 5봉 범위 < 0.9% (70% 케이스)
-    2. 저점 상승 3회 이상 (95% 케이스)
-    3. 현재봉 양봉 (100% 케이스)
-    4. 가격이 범위 상단 70% 이상
-    5. 진입봉 거래량 > 직전평균 1.2배
+    [핵심 차이점 기반 조건]
+    1. 5봉 범위 < 1.5% (완화: 성공도 다양한 범위)
+    2. 저점 상승: 제거 (실패가 오히려 더 높았음 3.4 > 2.8)
+    3. 현재봉 양봉 (필수)
+    4. 가격이 범위 상단 60% 이상
+    5. 🔥 진입봉 거래량 > 직전평균 5배 (핵심! 성공 14.4x vs 실패 0.87x)
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
@@ -4067,44 +4067,45 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
 
-    # 1. 횡보 범위 체크 (5봉 고저 범위) - 0.9% 미만
+    # 1. 횡보 범위 체크 (5봉 고저 범위) - 1.5% 미만 (완화)
     range_high = max(highs)
     range_low = min(lows)
     consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
-    tight_consolidation = consolidation_pct < 0.9
+    tight_consolidation = consolidation_pct < 1.5
 
-    # 2. 저점 상승 패턴 (Higher Lows) - 4번 비교 중 3회 이상
+    # 2. 저점 상승 패턴 - 참고용으로만 계산 (조건에서 제외)
     higher_lows_count = 0
     for i in range(1, len(lows)):
         if lows[i] >= lows[i-1]:
             higher_lows_count += 1
-    has_higher_lows = higher_lows_count >= 3
+    # has_higher_lows = higher_lows_count >= 3  # 제거: 실패가 더 높았음
 
-    # 3. 현재봉 양봉
+    # 3. 현재봉 양봉 (필수)
     is_bullish = cur_is_bullish
 
-    # 4. 가격이 범위 상단 근처 (상위 70% 이상)
+    # 4. 가격이 범위 상단 근처 (상위 60% 이상)
     cur_price = cur["trade_price"]
     price_range = range_high - range_low
     price_position = (cur_price - range_low) / price_range if price_range > 0 else 0
-    near_high = price_position >= 0.7
+    near_high = price_position >= 0.6
 
-    # 5. 진입봉 거래량 확인 (직전 4봉 평균의 1.2배 이상)
+    # 5. 🔥 진입봉 거래량 확인 (직전 4봉 평균의 5배 이상) - 핵심!
     cur_vol = cur.get("candle_acc_trade_volume", 0)
     prev_vols = [c.get("candle_acc_trade_volume", 0) for c in recent[:-1]]
     prev_avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
-    vol_confirm = cur_vol > prev_avg_vol * 1.2 if prev_avg_vol > 0 else True
+    vol_ratio = cur_vol / prev_avg_vol if prev_avg_vol > 0 else 0
+    vol_confirm = vol_ratio >= 5.0  # 🔥 1.2배 → 5배 강화
 
-    # 점수 계산 (0~5)
-    score = (int(tight_consolidation) + int(has_higher_lows) + int(is_bullish)
+    # 점수 계산 (0~4)
+    score = (int(tight_consolidation) + int(is_bullish)
              + int(near_high) + int(vol_confirm))
 
-    # 5개 조건 모두 충족시 감지
-    detected = tight_consolidation and has_higher_lows and is_bullish and near_high and vol_confirm
+    # 필수: 양봉 + 거래량 5배, 추가: 범위/위치
+    detected = is_bullish and vol_confirm and (tight_consolidation or near_high)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
-    detail = f"수렴{consolidation_pct:.1f}% 저점↑{higher_lows_count}회 양봉"
+    detail = f"수렴{consolidation_pct:.1f}% 거래량{vol_ratio:.1f}x 양봉"
 
     return detected, score, reason, detail
 
