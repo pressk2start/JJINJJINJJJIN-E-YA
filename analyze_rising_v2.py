@@ -3,34 +3,41 @@
 상승 차트 분석 스크립트 v2
 - 상승 시작 전 30개 캔들 패턴 분석
 - 진입 신호가 될 수 있는 선행 지표 탐색
+- 성공/실패 케이스 비교 분석
 """
 import requests
 import time
 from datetime import datetime, timedelta
 import statistics
 
-# 분석할 케이스들 (종목, 날짜, 시간)
+# 분석할 케이스들 (종목, 날짜, 시간, 성공여부)
+# success=True: 상승 성공, success=False: 실패
 CASES = [
-    ("TOSHI", "2026-01-06", "10:09"),
-    ("BORA", "2026-01-06", "09:05"),
-    ("PLUME", "2026-01-06", "10:29"),
-    ("QTUM", "2026-01-06", "09:02"),
-    ("DOOD", "2026-01-06", "10:11"),
-    ("SUI", "2026-01-06", "09:00"),
-    ("ONT", "2026-01-06", "09:03"),
-    ("VIRTUAL", "2026-01-05", "10:24"),
-    ("BSV", "2026-01-05", "09:51"),
-    ("PEPE", "2026-01-04", "17:08"),
-    ("BTT", "2026-01-06", "09:01"),
-    ("SHIB", "2026-01-06", "01:10"),
-    ("STORJ", "2026-01-05", "21:32"),
-    ("XRP", "2026-01-05", "23:29"),
-    ("BTC", "2026-01-05", "08:59"),
-    ("ETH", "2026-01-05", "08:59"),
-    ("VIRTUAL", "2026-01-03", "12:30"),
-    ("ORCA", "2026-01-05", "09:01"),
-    ("GRS", "2026-01-03", "14:42"),
-    ("MMT", "2026-01-05", "19:52"),
+    # === 성공 케이스 (기존 20개) ===
+    ("TOSHI", "2026-01-06", "10:09", True),
+    ("BORA", "2026-01-06", "09:05", True),
+    ("PLUME", "2026-01-06", "10:29", True),
+    ("QTUM", "2026-01-06", "09:02", True),
+    ("DOOD", "2026-01-06", "10:11", True),
+    ("SUI", "2026-01-06", "09:00", True),
+    ("ONT", "2026-01-06", "09:03", True),
+    ("VIRTUAL", "2026-01-05", "10:24", True),
+    ("BSV", "2026-01-05", "09:51", True),
+    ("PEPE", "2026-01-04", "17:08", True),
+    ("BTT", "2026-01-06", "09:01", True),
+    ("SHIB", "2026-01-06", "01:10", True),
+    ("STORJ", "2026-01-05", "21:32", True),
+    ("XRP", "2026-01-05", "23:29", True),
+    ("BTC", "2026-01-05", "08:59", True),
+    ("ETH", "2026-01-05", "08:59", True),
+    ("VIRTUAL", "2026-01-03", "12:30", True),
+    ("ORCA", "2026-01-05", "09:01", True),
+    ("GRS", "2026-01-03", "14:42", True),
+    ("MMT", "2026-01-05", "19:52", True),
+    # === 1/7 추가 성공 케이스 ===
+    ("BOUNTY", "2026-01-07", "09:06", True),
+    ("MOC", "2026-01-07", "09:08", True),
+    ("FCT2", "2026-01-07", "09:07", True),
 ]
 
 def get_candles(market, to_time, count=50):
@@ -213,19 +220,28 @@ def analyze_pre_entry_pattern(ticker, date_str, time_str):
 
 def main():
     print("=" * 70)
-    print("📊 상승 전 30봉 패턴 분석 (v2)")
+    print("📊 상승 전 30봉 패턴 분석 (v2) - 성공/실패 비교")
     print("=" * 70)
 
-    results = []
-    for ticker, date_str, time_str in CASES:
-        print(f"분석 중: {ticker} @ {date_str} {time_str}...", end=" ")
+    success_results = []
+    fail_results = []
+
+    for ticker, date_str, time_str, is_success in CASES:
+        label = "✅" if is_success else "❌"
+        print(f"분석 중: {label} {ticker} @ {date_str} {time_str}...", end=" ")
         result = analyze_pre_entry_pattern(ticker, date_str, time_str)
         if result:
-            results.append(result)
+            result["is_success"] = is_success
+            if is_success:
+                success_results.append(result)
+            else:
+                fail_results.append(result)
             print("✓")
         else:
             print("✗")
         time.sleep(0.15)
+
+    results = success_results + fail_results
 
     if not results:
         print("분석 결과 없음")
@@ -321,13 +337,64 @@ def main():
 
     # 개별 상세
     print("\n[개별 케이스 상세]")
-    print("-" * 90)
-    print(f"{'종목':8s} | {'변동축소':8s} | {'5봉범위':8s} | {'가격위치':8s} | {'저점↑':6s} | {'진입봉':6s}")
-    print("-" * 90)
+    print("-" * 100)
+    print(f"{'결과':4s} | {'종목':8s} | {'변동축소':8s} | {'5봉범위':8s} | {'가격위치':8s} | {'저점↑':6s} | {'진입봉':6s}")
+    print("-" * 100)
     for r in results:
-        print(f"{r['ticker']:8s} | {r['volatility_squeeze']:7.2f}x | {r['consolidation_range_5']:7.2f}% | "
+        status = "✅" if r.get('is_success', True) else "❌"
+        print(f"{status:4s} | {r['ticker']:8s} | {r['volatility_squeeze']:7.2f}x | {r['consolidation_range_5']:7.2f}% | "
               f"{r['price_position_30']:7.1f}% | {r['higher_lows_count']:5d}회 | "
               f"{'양봉' if r['entry_is_bullish'] else '음봉':6s}")
+
+    # === 성공 vs 실패 비교 분석 ===
+    if success_results and fail_results:
+        print("\n")
+        print("=" * 70)
+        print("⚖️ 성공 vs 실패 비교 분석")
+        print("=" * 70)
+
+        compare_metrics = [
+            ("volatility_squeeze", "변동성 축소율"),
+            ("consolidation_range_5", "5봉 횡보 범위"),
+            ("price_position_30", "30봉 내 가격위치"),
+            ("higher_lows_count", "저점상승 횟수"),
+            ("higher_highs_count", "고점상승 횟수"),
+            ("vol_trend_ratio", "거래량 추세"),
+            ("entry_vol_vs_avg", "진입봉 거래량/평균"),
+            ("vs_prev_close", "직전봉 대비 변화"),
+            ("vs_ema20", "EMA20 대비"),
+        ]
+
+        print(f"\n{'지표':20s} | {'성공 평균':12s} | {'실패 평균':12s} | {'차이':10s}")
+        print("-" * 60)
+
+        for key, label in compare_metrics:
+            s_vals = [r[key] for r in success_results if key in r and r[key] is not None]
+            f_vals = [r[key] for r in fail_results if key in r and r[key] is not None]
+            if s_vals and f_vals:
+                s_avg = statistics.mean(s_vals)
+                f_avg = statistics.mean(f_vals)
+                diff = s_avg - f_avg
+                diff_str = f"+{diff:.2f}" if diff > 0 else f"{diff:.2f}"
+                print(f"{label:20s} | {s_avg:12.2f} | {f_avg:12.2f} | {diff_str:10s}")
+
+        # 핵심 차이점 요약
+        print("\n💡 핵심 차이점:")
+
+        # 5봉 범위
+        s_consol = [r["consolidation_range_5"] for r in success_results]
+        f_consol = [r["consolidation_range_5"] for r in fail_results]
+        print(f"  - 5봉 범위: 성공 {statistics.mean(s_consol):.2f}% vs 실패 {statistics.mean(f_consol):.2f}%")
+
+        # 저점 상승
+        s_hl = [r["higher_lows_count"] for r in success_results]
+        f_hl = [r["higher_lows_count"] for r in fail_results]
+        print(f"  - 저점상승: 성공 {statistics.mean(s_hl):.1f}회 vs 실패 {statistics.mean(f_hl):.1f}회")
+
+        # 진입봉 거래량
+        s_vol = [r["entry_vol_vs_avg"] for r in success_results]
+        f_vol = [r["entry_vol_vs_avg"] for r in fail_results]
+        print(f"  - 진입봉 거래량: 성공 {statistics.mean(s_vol):.1f}x vs 실패 {statistics.mean(f_vol):.1f}x")
 
 if __name__ == "__main__":
     main()
