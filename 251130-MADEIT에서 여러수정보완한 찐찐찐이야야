@@ -4074,12 +4074,12 @@ def calc_ema_list(prices, period):
         ema = (price - ema) * multiplier + ema
     return ema
 
-def detect_consolidation_breakout(candles_1m, min_candles=5):
+def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
     수렴돌파 패턴 감지 - 딥 분석 v3 기반 (25성공 vs 9실패)
 
     [핵심 판별 지표 - 판별력 순]
-    1. RSI >= 55 (5분봉 RSI 성공79 vs 실패45, 판별력 1.67)
+    1. 5분봉 RSI >= 55 (성공79 vs 실패45, 판별력 1.67) ★최고
     2. EMA정배열: EMA10 > EMA20 (성공0.18% vs 실패-0.11%, 판별력 1.08)
     3. 거래량추세 >= 1.5x (성공2.35 vs 실패0.54, 판별력 0.71)
     4. 현재봉 양봉 (필수)
@@ -4089,9 +4089,16 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     if not candles_1m or len(candles_1m) < 20:
         return False, 0, "캔들부족", ""
 
-    # 최근 20개 캔들 사용 (RSI, EMA 계산용)
-    recent = candles_1m[-20:]
+    # === 5분봉 RSI 계산 (핵심 지표!) ===
+    rsi_5m = None
+    if candles_5m and len(candles_5m) >= 15:
+        closes_5m = [c["trade_price"] for c in candles_5m[-15:]]
+        rsi_5m = calc_rsi(closes_5m, 14)
 
+    rsi_ok = rsi_5m is not None and rsi_5m >= 55  # 성공 79 vs 실패 45
+
+    # 1분봉 데이터
+    recent = candles_1m[-20:]
     closes = [c["trade_price"] for c in recent]
     volumes = [c.get("candle_acc_trade_volume", 0) for c in recent]
 
@@ -4099,42 +4106,29 @@ def detect_consolidation_breakout(candles_1m, min_candles=5):
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
 
-    # === 1. RSI 계산 (14봉) ===
-    rsi = calc_rsi(closes, 14)
-    rsi_ok = rsi is not None and rsi >= 55  # 성공 79 vs 실패 45 → 중간값 62, 여유두고 55
-
-    # === 2. EMA 정배열 (EMA10 > EMA20) ===
+    # === EMA 정배열 (EMA10 > EMA20) - 1분봉 기준 ===
     ema10 = calc_ema_list(closes, 10)
     ema20 = calc_ema_list(closes, 20)
     ema_ok = ema10 is not None and ema20 is not None and ema10 > ema20
 
-    # === 3. 거래량 추세 (최근 5봉 vs 이전 15봉) ===
+    # === 거래량 추세 (최근 5봉 vs 이전 15봉) ===
     recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
     vol_trend_ok = vol_trend >= 1.5  # 성공 2.35 vs 실패 0.54
 
-    # === 4. 현재봉 양봉 (필수) ===
+    # === 현재봉 양봉 (필수) ===
     is_bullish = cur_is_bullish
-
-    # === 5봉 범위 (보조) ===
-    last5 = candles_1m[-5:] if len(candles_1m) >= 5 else candles_1m
-    highs = [c["high_price"] for c in last5]
-    lows = [c["low_price"] for c in last5]
-    range_high = max(highs)
-    range_low = min(lows)
-    consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
 
     # 점수 계산 (0~4)
     score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish)
 
-    # 감지 조건: 양봉 필수 + (RSI OR EMA정배열) + 거래량추세
-    # 핵심: RSI와 EMA 중 하나는 충족해야 함
+    # 감지 조건: 양봉 필수 + (5분봉RSI OR EMA정배열) + 거래량추세
     detected = is_bullish and (rsi_ok or ema_ok) and vol_trend_ok
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
-    rsi_str = f"RSI{rsi:.0f}" if rsi else "RSI?"
+    rsi_str = f"RSI5m{rsi_5m:.0f}" if rsi_5m else "RSI?"
     ema_str = "EMA정배열" if ema_ok else "EMA역배열"
     detail = f"{rsi_str} {ema_str} 거래량{vol_trend:.1f}x"
 
@@ -4148,7 +4142,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0, candles_1m=None):
+                 ignition_score=0, candles_1m=None, candles_5m=None):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4209,7 +4203,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 📊 수렴돌파 조기 감지 (거래량/가격변동 필터 우회용) ===
     consol_detected, consol_score, consol_reason, consol_detail = False, 0, "", ""
     if candles_1m:
-        consol_detected, consol_score, consol_reason, consol_detail = detect_consolidation_breakout(candles_1m)
+        consol_detected, consol_score, consol_reason, consol_detail = detect_consolidation_breakout(candles_1m, candles_5m)
 
     # === 거래대금 컷 (수렴돌파는 50% 완화) ===
     vol_min_check = GATE_VOL_MIN * 0.5 if consol_detected else GATE_VOL_MIN
@@ -4334,7 +4328,7 @@ def allow_tick_burst(buy_ratio, turn_pct, tick_count, spread, symbol_median_spre
     return True, size, f"통과(회전{turn_pct:.1f}%,매수{buy_ratio:.0%},사이즈={size})"
 
 
-def detect_leader_stock(m, obc, c1, tight_mode=False):
+def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
     """
     하이브리드 진입 탐지 엔진:
       - Probe(소액): 완화된 early 흐름 감지 → 초기 염탐 진입
@@ -4484,7 +4478,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
         ignition_score=ignition_score,
-        candles_1m=c1  # 📊 수렴돌파 감지용
+        candles_1m=c1,  # 📊 수렴돌파 감지용
+        candles_5m=c5   # 📊 5분봉 RSI 계산용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
@@ -5823,26 +5818,38 @@ def main():
             obc = fetch_orderbook_cache(shard)
 
             c1_cache = {}
+            c5_cache = {}  # 📊 5분봉 캐시 (RSI 계산용)
             use_workers = min(PARALLEL_WORKERS, len(shard))
             with ThreadPoolExecutor(max_workers=use_workers) as exe:
-                futures = {
-                    exe.submit(get_minutes_candles, 1, m, 20): m
+                # 1분봉 + 5분봉 병렬 조회
+                futures_1m = {
+                    exe.submit(get_minutes_candles, 1, m, 20): ("1m", m)
                     for m in shard
                 }
-                for f in as_completed(futures):
-                    m = futures[f]
+                futures_5m = {
+                    exe.submit(get_minutes_candles, 5, m, 20): ("5m", m)
+                    for m in shard
+                }
+                all_futures = {**futures_1m, **futures_5m}
+                for f in as_completed(all_futures):
+                    tf, m = all_futures[f]
                     try:
-                        c1_cache[m] = f.result() or []
+                        result = f.result() or []
                     except:
-                        c1_cache[m] = []
+                        result = []
+                    if tf == "1m":
+                        c1_cache[m] = result
+                    else:
+                        c5_cache[m] = result
 
             found = 0
             for m in shard:
               try:  # 🔧 심볼별 예외 격리 (한 심볼 에러가 전체 스캔 중단 방지)
                 c1 = c1_cache.get(m, [])
+                c5 = c5_cache.get(m, [])  # 📊 5분봉 (RSI 계산용)
                 if not c1: continue
 
-                pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
+                pre = detect_leader_stock(m, obc, c1, c5=c5, tight_mode=tight_mode)
                 if not pre: continue
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
