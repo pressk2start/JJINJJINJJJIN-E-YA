@@ -4123,8 +4123,9 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # 점수 계산 (0~4)
     score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish)
 
-    # 감지 조건: 양봉 필수 + (5분봉RSI OR EMA정배열) + 거래량추세
-    detected = is_bullish and (rsi_ok or ema_ok) and vol_trend_ok
+    # 감지 조건: 양봉 필수 + RSI필수 + (EMA OR 거래량)
+    # RSI가 판별력 1.67로 최고 → 필수, 나머지는 보조 확인
+    detected = is_bullish and rsi_ok and (ema_ok or vol_trend_ok)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
