@@ -4041,71 +4041,102 @@ def meets_volume_surge(current_volume, past_volumes):
 # 감지 / 검증
 # =========================
 
+def calc_rsi(prices, period=14):
+    """RSI 계산"""
+    if len(prices) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+    if len(gains) < period:
+        return None
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def calc_ema_list(prices, period):
+    """EMA 계산"""
+    if len(prices) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
 def detect_consolidation_breakout(candles_1m, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 성공/실패 비교 분석 기반 (23성공 vs 7실패)
+    수렴돌파 패턴 감지 - 딥 분석 v3 기반 (25성공 vs 9실패)
 
-    [핵심 차이점 기반 조건]
-    1. 5봉 범위 < 1.5% (완화: 성공도 다양한 범위)
-    2. 저점 상승: 제거 (실패가 오히려 더 높았음 3.4 > 2.8)
-    3. 현재봉 양봉 (필수)
-    4. 가격이 범위 상단 60% 이상
-    5. 🔥 진입봉 거래량 > 직전평균 5배 (핵심! 성공 14.4x vs 실패 0.87x)
+    [핵심 판별 지표 - 판별력 순]
+    1. RSI >= 55 (5분봉 RSI 성공79 vs 실패45, 판별력 1.67)
+    2. EMA정배열: EMA10 > EMA20 (성공0.18% vs 실패-0.11%, 판별력 1.08)
+    3. 거래량추세 >= 1.5x (성공2.35 vs 실패0.54, 판별력 0.71)
+    4. 현재봉 양봉 (필수)
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
-    if not candles_1m or len(candles_1m) < min_candles:
+    if not candles_1m or len(candles_1m) < 20:
         return False, 0, "캔들부족", ""
 
-    # 최근 5개 캔들 (오래된순 정렬 가정)
-    recent = candles_1m[-min_candles:]
+    # 최근 20개 캔들 사용 (RSI, EMA 계산용)
+    recent = candles_1m[-20:]
 
-    highs = [c["high_price"] for c in recent]
-    lows = [c["low_price"] for c in recent]
+    closes = [c["trade_price"] for c in recent]
+    volumes = [c.get("candle_acc_trade_volume", 0) for c in recent]
 
     # 현재봉 (마지막)
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
 
-    # 1. 횡보 범위 체크 (5봉 고저 범위) - 1.5% 미만 (완화)
+    # === 1. RSI 계산 (14봉) ===
+    rsi = calc_rsi(closes, 14)
+    rsi_ok = rsi is not None and rsi >= 55  # 성공 79 vs 실패 45 → 중간값 62, 여유두고 55
+
+    # === 2. EMA 정배열 (EMA10 > EMA20) ===
+    ema10 = calc_ema_list(closes, 10)
+    ema20 = calc_ema_list(closes, 20)
+    ema_ok = ema10 is not None and ema20 is not None and ema10 > ema20
+
+    # === 3. 거래량 추세 (최근 5봉 vs 이전 15봉) ===
+    recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
+    prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
+    vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
+    vol_trend_ok = vol_trend >= 1.5  # 성공 2.35 vs 실패 0.54
+
+    # === 4. 현재봉 양봉 (필수) ===
+    is_bullish = cur_is_bullish
+
+    # === 5봉 범위 (보조) ===
+    last5 = candles_1m[-5:] if len(candles_1m) >= 5 else candles_1m
+    highs = [c["high_price"] for c in last5]
+    lows = [c["low_price"] for c in last5]
     range_high = max(highs)
     range_low = min(lows)
     consolidation_pct = (range_high - range_low) / range_low * 100 if range_low > 0 else 999
-    tight_consolidation = consolidation_pct < 1.5
-
-    # 2. 저점 상승 패턴 - 참고용으로만 계산 (조건에서 제외)
-    higher_lows_count = 0
-    for i in range(1, len(lows)):
-        if lows[i] >= lows[i-1]:
-            higher_lows_count += 1
-    # has_higher_lows = higher_lows_count >= 3  # 제거: 실패가 더 높았음
-
-    # 3. 현재봉 양봉 (필수)
-    is_bullish = cur_is_bullish
-
-    # 4. 가격이 범위 상단 근처 (상위 60% 이상)
-    cur_price = cur["trade_price"]
-    price_range = range_high - range_low
-    price_position = (cur_price - range_low) / price_range if price_range > 0 else 0
-    near_high = price_position >= 0.6
-
-    # 5. 🔥 진입봉 거래량 확인 (직전 4봉 평균의 1.5배 이상)
-    cur_vol = cur.get("candle_acc_trade_volume", 0)
-    prev_vols = [c.get("candle_acc_trade_volume", 0) for c in recent[:-1]]
-    prev_avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
-    vol_ratio = cur_vol / prev_avg_vol if prev_avg_vol > 0 else 0
-    vol_confirm = vol_ratio >= 1.5  # 3배 → 1.5배 완화 (실패 0.87x와 구분)
 
     # 점수 계산 (0~4)
-    score = (int(tight_consolidation) + int(is_bullish)
-             + int(near_high) + int(vol_confirm))
+    score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish)
 
-    # 필수: 양봉 + 거래량 3배, 추가: 범위/위치
-    detected = is_bullish and vol_confirm and (tight_consolidation or near_high)
+    # 감지 조건: 양봉 필수 + (RSI OR EMA정배열) + 거래량추세
+    # 핵심: RSI와 EMA 중 하나는 충족해야 함
+    detected = is_bullish and (rsi_ok or ema_ok) and vol_trend_ok
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
-    detail = f"수렴{consolidation_pct:.1f}% 거래량{vol_ratio:.1f}x 양봉"
+    rsi_str = f"RSI{rsi:.0f}" if rsi else "RSI?"
+    ema_str = "EMA정배열" if ema_ok else "EMA역배열"
+    detail = f"{rsi_str} {ema_str} 거래량{vol_trend:.1f}x"
 
     return detected, score, reason, detail
 
