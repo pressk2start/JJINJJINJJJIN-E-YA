@@ -4076,19 +4076,16 @@ def calc_ema_list(prices, period):
 
 def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 딥 분석 v4 기반 (29성공 vs 30실패)
+    수렴돌파 패턴 감지 - 딥 분석 v5 (성공 최대화 전략)
 
-    🔧 알람 빈도 증가를 위해 조건 완화 (2026-01-08)
+    🎯 목표: 성공 케이스 최대한 잡기 (93%+), 실패는 20% 이하
 
-    [필수 조건]
+    [필수 조건 - 모두 AND]
     1. 양봉 (필수)
-    2. 5분봉 RSI >= 58 (판별력 1.28 - 가장 높음)
+    2. 5분봉 RSI >= 52 (느슨하게 - 성공 97% 통과)
+    3. 5분봉추세 >= 0.1% (느슨하게 - 실패 필터)
 
-    [보조 조건 - 하나만 충족하면 됨 (OR)]
-    - 5분봉추세 >= 0.5% (판별력 0.75)
-    - Williams %R <= -41 (판별력 0.75)
-    - BB위치(5분봉) >= 55% (판별력 0.69)
-    - 가격/EMA20 >= 0.4% (판별력 0.54)
+    예상: 성공 27/29건(93%), 실패 6/30건(20%)
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
@@ -4098,8 +4095,8 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # === 5분봉 지표 계산 ===
     rsi_5m = None
     trend_5m = 0
-    bb_pos_5m = 50  # 볼린저밴드 위치 (0~100)
-    williams_r = -50  # Williams %R (-100 ~ 0)
+    bb_pos_5m = 50
+    williams_r = -50
 
     if candles_5m and len(candles_5m) >= 20:
         closes_5m = [c["trade_price"] for c in candles_5m[-20:]]
@@ -4115,7 +4112,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
             prev_avg = sum(closes_5m[-10:-5]) / 5
             trend_5m = (recent_avg / prev_avg - 1) * 100 if prev_avg > 0 else 0
 
-        # 볼린저밴드 위치 계산 (20봉 기준)
+        # 볼린저밴드 위치 (모니터링용)
         if len(closes_5m) >= 20:
             import math
             sma = sum(closes_5m[-20:]) / 20
@@ -4127,7 +4124,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
                 cur_price = closes_5m[-1]
                 bb_pos_5m = (cur_price - bb_lower) / (bb_upper - bb_lower) * 100 if bb_upper > bb_lower else 50
 
-        # Williams %R 계산 (14봉 기준) - 성공 -50 vs 실패 -31.73
+        # Williams %R (모니터링용)
         if len(highs_5m) >= 14 and len(lows_5m) >= 14:
             highest_high = max(highs_5m)
             lowest_low = min(lows_5m)
@@ -4144,42 +4141,42 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
     cur_price = cur["trade_price"]
 
-    # === 가격/EMA20 계산 ===
+    # === 가격/EMA20 (모니터링용) ===
     ema20 = calc_ema_list(closes, 20)
     price_vs_ema20 = (cur_price / ema20 - 1) * 100 if ema20 and ema20 > 0 else 0
 
-    # === EMA 정배열 (EMA10 > EMA20) - 1분봉 기준 ===
+    # === EMA 정배열 (모니터링용) ===
     ema10 = calc_ema_list(closes, 10)
     ema_ok = ema10 is not None and ema20 is not None and ema10 > ema20
 
-    # === 거래량 추세 (최근 5봉 vs 이전 15봉) ===
+    # === 거래량 추세 (모니터링용) ===
     recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
-    vol_trend_ok = vol_trend >= 1.5
 
-    # === 조건 판정 ===
+    # === 조건 판정 (단순화!) ===
     is_bullish = cur_is_bullish
 
-    # 필수: RSI >= 58 (판별력 1.28)
-    rsi_ok = rsi_5m is not None and rsi_5m >= 58
+    # 🎯 핵심 조건 2개만! (성공 최대화)
+    rsi_ok = rsi_5m is not None and rsi_5m >= 52      # 느슨하게
+    trend_ok = trend_5m >= 0.1                         # 느슨하게
 
-    # 보조 OR 조건들
-    trend_5m_ok = trend_5m >= 0.5       # 판별력 0.75
-    williams_ok = williams_r <= -41     # 판별력 0.75 (성공이 더 낮음 = 과매수 아님)
-    bb_pos_ok = bb_pos_5m >= 55         # 판별력 0.69
-    ema20_ok = price_vs_ema20 >= 0.4    # 판별력 0.54
+    # 점수 계산 (모니터링용 - 보조지표 포함)
+    score = sum([
+        int(rsi_ok),
+        int(trend_ok),
+        int(williams_r <= -41),
+        int(bb_pos_5m >= 55),
+        int(price_vs_ema20 >= 0.4),
+        int(ema_ok),
+        int(vol_trend >= 1.5),
+        int(is_bullish)
+    ])
 
-    # 보조 조건 중 하나라도 만족
-    secondary_ok = trend_5m_ok or williams_ok or bb_pos_ok or ema20_ok
+    # 🎯 감지 조건: 양봉 + RSI>=52 + 추세>=0.1%
+    detected = is_bullish and rsi_ok and trend_ok
 
-    # 점수 계산 (디버깅/모니터링용)
-    score = int(rsi_ok) + int(trend_5m_ok) + int(williams_ok) + int(bb_pos_ok) + int(ema20_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish)
-
-    # 🎯 감지 조건: 양봉 + RSI>=58 + (추세>=0.5% OR WR<=-41 OR BB>=55% OR EMA20>=0.4%)
-    detected = is_bullish and rsi_ok and secondary_ok
-
-    # 상세정보 (알림용)
+    # 상세정보 (알림용 - 모든 지표 표시)
     reason = "수렴돌파"
     rsi_str = f"RSI5m{rsi_5m:.0f}" if rsi_5m else "RSI?"
     ema_str = "EMA정배열" if ema_ok else "EMA역배열"
