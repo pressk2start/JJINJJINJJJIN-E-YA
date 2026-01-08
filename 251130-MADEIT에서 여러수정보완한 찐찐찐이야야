@@ -4076,12 +4076,12 @@ def calc_ema_list(prices, period):
 
 def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 딥 분석 v3 기반 (27성공 vs 30실패, 중앙값 기준)
+    수렴돌파 패턴 감지 - 딥 분석 v3 기반 (29성공 vs 30실패, 중앙값 기준)
 
     [핵심 판별 지표 - 판별력 순]
-    1. 5분봉 RSI >= 67 (성공 중앙79 vs 실패 중앙55, 판별력 1.39) ★최고
-    2. 5분봉추세 >= 0.95% (성공 중앙1.75% vs 실패 중앙0.14%, 판별력 0.78) ★신규
-    3. 진입봉등락 >= 0.6% (성공0.97% vs 실패0.23%)
+    1. 5분봉 RSI >= 65 (성공 중앙74 vs 실패 중앙56, 판별력 0.99)
+    2. 5분봉추세 >= 0.87% (성공 중앙1.61% vs 실패 중앙0.14%, 판별력 0.85)
+    3. 진입봉등락 >= 0.3% (성공 중앙0.46% vs 실패 중앙0.15%, 판별력 0.62)
     4. EMA정배열 OR 거래량1.5x (보조)
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
@@ -4102,8 +4102,8 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
             prev_avg = sum(closes_5m[-10:-5]) / 5
             trend_5m = (recent_avg / prev_avg - 1) * 100 if prev_avg > 0 else 0
 
-    rsi_ok = rsi_5m is not None and rsi_5m >= 67  # 성공 중앙79 vs 실패 중앙55
-    trend_5m_ok = trend_5m >= 0.95  # 성공 중앙1.75% vs 실패 중앙0.14%
+    rsi_ok = rsi_5m is not None and rsi_5m >= 65  # 성공 중앙74 vs 실패 중앙56
+    trend_5m_ok = trend_5m >= 0.87  # 성공 중앙1.61% vs 실패 중앙0.14%
 
     # 1분봉 데이터
     recent = candles_1m[-20:]
@@ -4114,9 +4114,9 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
 
-    # === 진입봉 등락률 (성공 0.97% vs 실패 0.23%, 판별력 1.23) ===
+    # === 진입봉 등락률 (성공 중앙0.46% vs 실패 중앙0.15%, 판별력 0.62) ===
     cur_change = (cur["trade_price"] / cur["opening_price"] - 1) * 100 if cur["opening_price"] > 0 else 0
-    cur_change_ok = cur_change >= 0.6  # 권장 0.6% 이상
+    cur_change_ok = cur_change >= 0.3  # 권장 0.3% 이상
 
     # === EMA 정배열 (EMA10 > EMA20) - 1분봉 기준 ===
     ema10 = calc_ema_list(closes, 10)
@@ -4127,7 +4127,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
-    vol_trend_ok = vol_trend >= 1.5  # 성공 2.35 vs 실패 0.54
+    vol_trend_ok = vol_trend >= 1.5  # 성공 2.10 vs 실패 0.78
 
     # === 현재봉 양봉 (필수) ===
     is_bullish = cur_is_bullish
@@ -4135,8 +4135,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # 점수 계산 (0~6)
     score = int(rsi_ok) + int(trend_5m_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish) + int(cur_change_ok)
 
-    # 감지 조건: 양봉 + RSI>=67 + 5분봉추세>=0.95% + 진입봉등락>=0.6% + (EMA OR 거래량)
-    # 분석 결과(중앙값 기준): RSI(1.39) > 5분봉추세(0.78) > ...
+    # 감지 조건: 양봉 + RSI>=65 + 5분봉추세>=0.87% + 진입봉등락>=0.3% + (EMA OR 거래량)
     detected = is_bullish and rsi_ok and trend_5m_ok and cur_change_ok and (ema_ok or vol_trend_ok)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
