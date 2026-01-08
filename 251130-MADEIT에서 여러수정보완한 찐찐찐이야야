@@ -4095,7 +4095,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
         closes_5m = [c["trade_price"] for c in candles_5m[-15:]]
         rsi_5m = calc_rsi(closes_5m, 14)
 
-    rsi_ok = rsi_5m is not None and rsi_5m >= 55  # 성공 79 vs 실패 45
+    rsi_ok = rsi_5m is not None and rsi_5m >= 67  # 성공 81 vs 실패 53, 권장 67+
 
     # 1분봉 데이터
     recent = candles_1m[-20:]
@@ -4105,6 +4105,10 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # 현재봉 (마지막)
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
+
+    # === 진입봉 등락률 (성공 0.97% vs 실패 0.23%, 판별력 1.23) ===
+    cur_change = (cur["trade_price"] / cur["opening_price"] - 1) * 100 if cur["opening_price"] > 0 else 0
+    cur_change_ok = cur_change >= 0.6  # 권장 0.6% 이상
 
     # === EMA 정배열 (EMA10 > EMA20) - 1분봉 기준 ===
     ema10 = calc_ema_list(closes, 10)
@@ -4120,18 +4124,18 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # === 현재봉 양봉 (필수) ===
     is_bullish = cur_is_bullish
 
-    # 점수 계산 (0~4)
-    score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish)
+    # 점수 계산 (0~5)
+    score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish) + int(cur_change_ok)
 
-    # 감지 조건: 양봉 필수 + RSI필수 + (EMA OR 거래량)
-    # RSI가 판별력 1.67로 최고 → 필수, 나머지는 보조 확인
-    detected = is_bullish and rsi_ok and (ema_ok or vol_trend_ok)
+    # 감지 조건: 양봉 + RSI>=67 + 진입봉등락>=0.6% + (EMA OR 거래량)
+    # 분석 결과: RSI(1.59) > 진입봉등락(1.23) > EMA/거래량
+    detected = is_bullish and rsi_ok and cur_change_ok and (ema_ok or vol_trend_ok)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
     rsi_str = f"RSI5m{rsi_5m:.0f}" if rsi_5m else "RSI?"
     ema_str = "EMA정배열" if ema_ok else "EMA역배열"
-    detail = f"{rsi_str} {ema_str} 거래량{vol_trend:.1f}x"
+    detail = f"{rsi_str} 등락{cur_change:.2f}% {ema_str} 거래량{vol_trend:.1f}x"
 
     return detected, score, reason, detail
 
@@ -4169,6 +4173,15 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
+    # ============================================================
+    # 🌙 밤 시간대 진입 차단 (20-06시, 성공률 11%)
+    # 분석 결과: 아침 78% vs 밤 11% → 밤 진입 금지
+    # ============================================================
+    h = now_kst().hour
+    is_night = (h >= 20) or (h < 6)  # 20시~06시
+    if is_night:
+        return False, f"🌙밤시간대차단 {h}시 (20-06시 성공률11%)"
+
     # ============================================================
     # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
     # ignition_score: 0~4, 점수당 완화 비율 적용
