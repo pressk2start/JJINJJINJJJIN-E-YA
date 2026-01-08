@@ -5345,21 +5345,25 @@ def monitor_position(m,
             peak_gain = (best / entry_price - 1.0)  # 고점 수익률
 
             # 수익 구간별 트레일링 폭 결정
-            # 🔧 v3 데이터 기반: 고수익 구간 대폭 완화 (눌림 40%가 3%+)
+            # 🔧 v4: 수익 보호 + 적절한 눌림 허용
+            # 핵심: trail_dist가 gain을 초과하지 않도록 설계
             if gain_from_entry >= 0.05:      # +5.0% 이상
-                trail_dist = 0.04            # 4.0% (큰 상승 시 눌림 허용)
+                trail_dist = 0.03            # 3.0% → 최소 +2% 수익 보호
             elif gain_from_entry >= 0.02:    # +2.0% ~ +5.0%
-                trail_dist = 0.025           # 2.5%
+                trail_dist = 0.015           # 1.5% → 최소 +0.5% 수익 보호
             elif gain_from_entry >= 0.01:    # +1.0% ~ +2.0%
-                trail_dist = 0.015           # 1.5%
+                trail_dist = 0.008           # 0.8% → 최소 +0.2% 수익 보호
             elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
-                trail_dist = 0.005           # 0.5%
+                trail_dist = 0.004           # 0.4% → 최소 +0.1% 수익 보호
             else:                            # 0% ~ +0.5% (BEP 구간)
                 trail_dist = 0.003           # 0.3% (손절 방어)
 
             # 고점 갱신시 트레일스탑 상향
             if new_high:
                 new_trail = curp * (1.0 - trail_dist)
+                # 🔒 수익 보호: 최소한 진입가 + 0.1% 이상 유지
+                min_floor = entry_price * 1.001
+                new_trail = max(new_trail, min_floor)
                 trail_stop = max(trail_stop, new_trail)
 
             # 트레일링 청산 트리거
