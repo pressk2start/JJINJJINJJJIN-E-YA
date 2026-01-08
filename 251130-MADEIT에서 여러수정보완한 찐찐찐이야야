@@ -1898,7 +1898,7 @@ GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
-GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
+GATE_VOL_MIN = 30_000     # 🔧 대폭완화: 100K→30K (3천만) - 중소형코인 포함
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
@@ -4217,73 +4217,73 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if candles_1m:
         consol_detected, consol_score, consol_reason, consol_detail = detect_consolidation_breakout(candles_1m, candles_5m)
 
-    # === 거래대금 컷 (수렴돌파는 50% 완화) ===
-    vol_min_check = GATE_VOL_MIN * 0.5 if consol_detected else GATE_VOL_MIN
+    # === 거래대금 컷 (3천만으로 완화 - 중소형 코인도 포함) ===
+    vol_min_check = GATE_VOL_MIN * 0.3 if consol_detected else GATE_VOL_MIN  # 수렴돌파는 30%로 완화
     if current_volume < vol_min_check and not mega:
         return False, f"거래대금부족 {current_volume/1e6:.0f}M<{vol_min_check/1e6:.0f}M"
 
-    # === 거래량 급등 조건 (📊 수렴돌파는 우회) ===
-    vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
-    if not vol_ok and not mega and not consol_detected:
-        return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x"
+    # ============================================================
+    # 🔧 예측 필터 비활성화 (데이터 분석 기반으로 대체)
+    # 아래 필터들은 주석 처리 - 값은 계속 수집되고 알림에 표시됨
+    # ============================================================
 
-    # === 가격변동 하한 컷 (📊 수렴돌파는 우회) ===
-    if price_change < eff_price_min and not mega and not consol_detected:
-        return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
+    # === [비활성화] 거래량 급등 조건 ===
+    # vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
+    # if not vol_ok and not mega and not consol_detected:
+    #     return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x"
 
-    # === 회전율 컷 (📊 수렴돌파는 70% 완화) ===
-    turn_min_check = eff_turn_min * 0.3 if consol_detected else eff_turn_min
-    if turn_pct < turn_min_check:
-        return False, f"회전율부족 {turn_pct:.1f}%<{turn_min_check:.1f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
-    if turn_pct > 50 and spread > 0.25:
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
+    # === [비활성화] 가격변동 하한 컷 ===
+    # if price_change < eff_price_min and not mega and not consol_detected:
+    #     return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
 
-    # === 스프레드 컷 (유지 - 슬리피지 방지) ===
+    # === [비활성화] 회전율 컷 ===
+    # turn_min_check = eff_turn_min * 0.3 if consol_detected else eff_turn_min
+    # if turn_pct < turn_min_check:
+    #     return False, f"회전율부족 {turn_pct:.1f}%<{turn_min_check:.1f}%"
+
+    # === [비활성화] 과회전+스프레드 ===
+    # if turn_pct > 50 and spread > 0.25:
+    #     return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
+
+    # === 스프레드 컷 (유지 - 슬리피지 방지 안전장치) ===
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
-    # === 과열 필터 (완화 없음 - 안전장치) ===
-    overheated = accel * volume_surge
-    if overheated > GATE_OVERHEAT_MAX:
-        return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
+    # === [비활성화] 과열 필터 ===
+    # overheated = accel * volume_surge
+    # if overheated > GATE_OVERHEAT_MAX:
+    #     return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
 
-    # === 가속도 컷 (📊 수렴돌파는 우회 - 조용한 구간) ===
-    if not consol_detected:
-        if accel < eff_accel_min:
-            return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
-        if accel > GATE_ACCEL_MAX:
-            return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
+    # === [비활성화] 가속도 컷 ===
+    # if not consol_detected:
+    #     if accel < eff_accel_min:
+    #         return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
+    #     if accel > GATE_ACCEL_MAX:
+    #         return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
 
-    # === 매수비 컷 (📊 수렴돌파는 50% 이상만) ===
-    buy_min_check = 0.50 if consol_detected else eff_buy_min
-    if buy_ratio < buy_min_check:
-        return False, f"매수비부족 {buy_ratio:.0%}<{buy_min_check:.0%}"
+    # === [비활성화] 매수비 컷 ===
+    # buy_min_check = 0.50 if consol_detected else eff_buy_min
+    # if buy_ratio < buy_min_check:
+    #     return False, f"매수비부족 {buy_ratio:.0%}<{buy_min_check:.0%}"
 
-    # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
+    # === 매수비 100% 컷 (유지 - 스푸핑 의심 안전장치) ===
     if abs(buy_ratio - 1.0) < 1e-6:
         return False, "매수비100%(스푸핑)"
 
-    # === 급등 컷 (완화 없음 - 안전장치) ===
-    if volume_surge > GATE_SURGE_MAX:
-        return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x"
+    # === [비활성화] 급등 컷 ===
+    # if volume_surge > GATE_SURGE_MAX:
+    #     return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x"
 
-    # === 호가 임밸런스 컷 (📊 수렴돌파는 0.05 이상만) ===
-    imb_min_check = 0.05 if consol_detected else eff_imb_min
-    if imbalance < imb_min_check:
-        return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
+    # === [비활성화] 호가 임밸런스 컷 ===
+    # imb_min_check = 0.05 if consol_detected else eff_imb_min
+    # if imbalance < imb_min_check:
+    #     return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
-    # === 진입 신호 체크 (정리됨: 수렴돌파 + 점화만) ===
-    # 🔧 데이터 분석 결과: EMA돌파/고점돌파/거래량MA는 너무 늦음 → 제거
-    # - 고점돌파: 10%만 해당 (상승 후 발생)
-    # - 거래량급등: 15%만 해당 (상승 후 발생)
-    # - 수렴돌파: 70% 타이트횡보 + 95% 저점상승 + 100% 양봉 (상승 전 발생)
-
-    # 진입 조건: 📊수렴돌파 OR 🔥점화 (2가지만)
-    entry_signal = consol_detected or (ignition_score >= 4)
+    # === 진입 신호 체크 (수렴돌파만 - 점화도 비활성화) ===
+    entry_signal = consol_detected  # 점화 경로 비활성화: or (ignition_score >= 4)
 
     if not entry_signal:
-        return False, f"진입조건미달 수렴={consol_score}/5 점화={ignition_score}/4"
+        return False, f"진입조건미달 수렴={consol_score}/6 점화={ignition_score}/4"
 
     # === 통과 ===
     # 🔧 신호 타입: 리포트 집계용 단순 경로명 + 알림용 상세정보 분리
