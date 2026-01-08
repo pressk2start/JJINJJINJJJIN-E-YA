@@ -217,6 +217,196 @@ def calc_obv_trend(closes, volumes, period=10):
         return (recent_obv[-1] - recent_obv[0]) / abs(recent_obv[0]) if recent_obv[0] != 0 else 1
     return (recent_obv[-1] - recent_obv[0]) / abs(recent_obv[0]) if recent_obv[0] != 0 else -1
 
+def calc_cci(highs, lows, closes, period=20):
+    """CCI (Commodity Channel Index) 계산"""
+    if len(closes) < period:
+        return None
+
+    # Typical Price = (High + Low + Close) / 3
+    tp = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
+
+    # SMA of TP
+    tp_sma = sum(tp[-period:]) / period
+
+    # Mean Deviation
+    mean_dev = sum(abs(tp[-period:][i] - tp_sma) for i in range(period)) / period
+
+    if mean_dev == 0:
+        return 0
+
+    # CCI = (TP - SMA) / (0.015 * Mean Deviation)
+    cci = (tp[-1] - tp_sma) / (0.015 * mean_dev)
+    return cci
+
+def calc_williams_r(highs, lows, closes, period=14):
+    """Williams %R 계산"""
+    if len(closes) < period:
+        return None
+
+    highest_high = max(highs[-period:])
+    lowest_low = min(lows[-period:])
+
+    if highest_high == lowest_low:
+        return -50
+
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    wr = (highest_high - closes[-1]) / (highest_high - lowest_low) * -100
+    return wr
+
+def calc_adx(highs, lows, closes, period=14):
+    """ADX (Average Directional Index) 계산 - 추세 강도"""
+    if len(closes) < period + 1:
+        return None
+
+    # True Range, +DM, -DM 계산
+    tr_list = []
+    plus_dm_list = []
+    minus_dm_list = []
+
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1])
+        )
+        tr_list.append(tr)
+
+        up_move = highs[i] - highs[i-1]
+        down_move = lows[i-1] - lows[i]
+
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
+
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+
+    if len(tr_list) < period:
+        return None
+
+    # Smoothed averages
+    atr = sum(tr_list[-period:]) / period
+    plus_di = (sum(plus_dm_list[-period:]) / period) / atr * 100 if atr > 0 else 0
+    minus_di = (sum(minus_dm_list[-period:]) / period) / atr * 100 if atr > 0 else 0
+
+    # DX
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+
+    return dx  # 간단히 DX 반환 (ADX는 DX의 이동평균)
+
+def calc_mfi(highs, lows, closes, volumes, period=14):
+    """MFI (Money Flow Index) - 거래량 가중 RSI"""
+    if len(closes) < period + 1:
+        return None
+
+    # Typical Price
+    tp = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
+
+    positive_mf = 0
+    negative_mf = 0
+
+    for i in range(-period, 0):
+        money_flow = tp[i] * volumes[i]
+        if tp[i] > tp[i-1]:
+            positive_mf += money_flow
+        else:
+            negative_mf += money_flow
+
+    if negative_mf == 0:
+        return 100
+
+    money_ratio = positive_mf / negative_mf
+    mfi = 100 - (100 / (1 + money_ratio))
+    return mfi
+
+def calc_momentum(closes, period=10):
+    """모멘텀 계산"""
+    if len(closes) < period + 1:
+        return None
+
+    # Momentum = Current Close - Close n periods ago
+    momentum = (closes[-1] - closes[-period-1]) / closes[-period-1] * 100
+    return momentum
+
+def calc_roc(closes, period=10):
+    """ROC (Rate of Change) 계산"""
+    if len(closes) < period + 1:
+        return None
+
+    # ROC = ((Current - Previous) / Previous) * 100
+    roc = (closes[-1] - closes[-period-1]) / closes[-period-1] * 100
+    return roc
+
+def calc_disparity(closes, period=20):
+    """이격도 계산 (가격이 이평선에서 얼마나 벗어났는지)"""
+    if len(closes) < period:
+        return None
+
+    ma = sum(closes[-period:]) / period
+    disparity = (closes[-1] / ma) * 100
+    return disparity
+
+def detect_candle_pattern(opens, highs, lows, closes):
+    """캔들 패턴 감지"""
+    if len(closes) < 3:
+        return {"doji": False, "hammer": False, "engulfing": False, "three_soldiers": False}
+
+    result = {
+        "doji": False,
+        "hammer": False,
+        "engulfing": False,
+        "three_soldiers": False
+    }
+
+    # 마지막 캔들 분석
+    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    body = abs(c - o)
+    upper_shadow = h - max(o, c)
+    lower_shadow = min(o, c) - l
+    total_range = h - l
+
+    if total_range > 0:
+        # 도지: 몸통이 매우 작음
+        if body / total_range < 0.1:
+            result["doji"] = True
+
+        # 망치: 긴 아래꼬리, 작은 위꼬리, 작은 몸통 (상승 신호)
+        if lower_shadow > body * 2 and upper_shadow < body * 0.5:
+            result["hammer"] = True
+
+    # 장악형(Engulfing): 이전 캔들을 완전히 감싸는 큰 양봉
+    if len(closes) >= 2:
+        prev_o, prev_c = opens[-2], closes[-2]
+        curr_o, curr_c = opens[-1], closes[-1]
+
+        # 상승 장악형: 이전 음봉 + 현재 양봉이 이전을 완전히 감쌈
+        if prev_c < prev_o and curr_c > curr_o:  # 이전 음봉, 현재 양봉
+            if curr_o <= prev_c and curr_c >= prev_o:  # 완전히 감싸기
+                result["engulfing"] = True
+
+    # 삼병(Three Soldiers): 연속 3개의 상승 양봉
+    if len(closes) >= 3:
+        three_bullish = all(
+            closes[-i] > opens[-i] and closes[-i] > closes[-i-1]
+            for i in range(1, 4)
+        )
+        result["three_soldiers"] = three_bullish
+
+    return result
+
+def calc_price_acceleration(closes, period=5):
+    """가격 가속도 (2차 미분)"""
+    if len(closes) < period * 2 + 1:
+        return None
+
+    # 1차 미분 (속도)
+    v1 = (sum(closes[-period:]) / period) - (sum(closes[-period*2:-period]) / period)
+    v0 = (sum(closes[-period*2:-period]) / period) - (sum(closes[-period*3:-period*2]) / period) if len(closes) >= period * 3 else v1
+
+    # 2차 미분 (가속도) - 속도의 변화
+    base = sum(closes[-period*2:-period]) / period
+    acceleration = (v1 - v0) / base * 100 if base > 0 else 0
+    return acceleration
+
 def analyze_deep(ticker, date_str, time_str):
     """딥 분석"""
     dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
@@ -349,6 +539,50 @@ def analyze_deep(ticker, date_str, time_str):
     obv_trend = calc_obv_trend(closes, volumes)
     result["obv_trend"] = obv_trend if obv_trend else 0
 
+    # ==========================================
+    # 추가 기술적 지표 (1분봉)
+    # ==========================================
+
+    # CCI (Commodity Channel Index)
+    cci = calc_cci(highs, lows, closes)
+    result["cci"] = cci if cci else 0
+
+    # Williams %R
+    williams_r = calc_williams_r(highs, lows, closes)
+    result["williams_r"] = williams_r if williams_r else -50
+
+    # ADX (추세 강도)
+    adx = calc_adx(highs, lows, closes)
+    result["adx"] = adx if adx else 0
+
+    # MFI (Money Flow Index)
+    mfi = calc_mfi(highs, lows, closes, volumes)
+    result["mfi"] = mfi if mfi else 50
+
+    # Momentum (10봉)
+    momentum = calc_momentum(closes, 10)
+    result["momentum_10"] = momentum if momentum else 0
+
+    # ROC (Rate of Change)
+    roc = calc_roc(closes, 10)
+    result["roc_10"] = roc if roc else 0
+
+    # 이격도 (20봉 이평 대비)
+    disparity = calc_disparity(closes, 20)
+    result["disparity_20"] = disparity if disparity else 100
+
+    # 가격 가속도
+    acceleration = calc_price_acceleration(closes, 5)
+    result["price_accel"] = acceleration if acceleration else 0
+
+    # 캔들 패턴
+    opens = [c["opening_price"] for c in pre_candles]
+    patterns = detect_candle_pattern(opens, highs, lows, closes)
+    result["pattern_doji"] = 1 if patterns["doji"] else 0
+    result["pattern_hammer"] = 1 if patterns["hammer"] else 0
+    result["pattern_engulfing"] = 1 if patterns["engulfing"] else 0
+    result["pattern_3soldiers"] = 1 if patterns["three_soldiers"] else 0
+
     # EMA 관계
     ema_5 = calc_ema(closes, 5)
     ema_10 = calc_ema(closes, 10)
@@ -458,9 +692,25 @@ def main():
         ("stoch_k", "스토캐스틱K"),
         ("atr", "ATR(%)"),
         ("obv_trend", "OBV추세"),
+        # 추가 지표
+        ("cci", "CCI"),
+        ("williams_r", "Williams %R"),
+        ("adx", "ADX(추세강도)"),
+        ("mfi", "MFI"),
+        ("momentum_10", "모멘텀(10)"),
+        ("roc_10", "ROC(10)"),
+        ("disparity_20", "이격도(20)"),
+        ("price_accel", "가격가속도"),
+        # 캔들패턴
+        ("pattern_doji", "도지패턴"),
+        ("pattern_hammer", "망치패턴"),
+        ("pattern_engulfing", "장악형패턴"),
+        ("pattern_3soldiers", "삼병패턴"),
+        # EMA
         ("ema_5_10", "EMA5/10(%)"),
         ("ema_10_20", "EMA10/20(%)"),
         ("price_vs_ema20", "가격/EMA20(%)"),
+        # 5분봉
         ("rsi_5m", "RSI(5분봉)"),
         ("trend_5m", "5분봉추세(%)"),
         ("bb_pos_5m", "BB위치(5분봉)"),
