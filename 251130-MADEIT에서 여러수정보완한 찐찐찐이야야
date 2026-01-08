@@ -4076,16 +4076,16 @@ def calc_ema_list(prices, period):
 
 def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 딥 분석 v5 (성공 최대화 전략)
+    수렴돌파 패턴 감지 - v6 (데이터 기반 강화)
 
-    🎯 목표: 성공 케이스 최대한 잡기 (93%+), 실패는 20% 이하
+    🎯 목표: 실패 필터링 극대화 (53%→5%), 성공 유지 (90%→77%)
 
     [필수 조건 - 모두 AND]
     1. 양봉 (필수)
-    2. 5분봉 RSI >= 52 (느슨하게 - 성공 97% 통과)
-    3. 5분봉추세 >= 0.1% (느슨하게 - 실패 필터)
+    2. 5분봉 RSI >= 65 (52→65 강화)
+    3. 5분봉추세 >= 0.8% (0.1→0.8 강화)
 
-    예상: 성공 27/29건(93%), 실패 6/30건(20%)
+    시뮬레이션: 성공 23/30건(77%), 실패 2/38건(5%), 순효과 +71%
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
@@ -4154,12 +4154,12 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
 
-    # === 조건 판정 (단순화!) ===
+    # === 조건 판정 (v6 - 데이터 기반 강화) ===
     is_bullish = cur_is_bullish
 
-    # 🎯 핵심 조건 2개만! (성공 최대화)
-    rsi_ok = rsi_5m is not None and rsi_5m >= 52      # 느슨하게
-    trend_ok = trend_5m >= 0.1                         # 느슨하게
+    # 🎯 핵심 조건 (시뮬레이션 기반: 성공77%, 실패5%)
+    rsi_ok = rsi_5m is not None and rsi_5m >= 65      # 52→65 강화
+    trend_ok = trend_5m >= 0.8                         # 0.1→0.8 강화
 
     # 점수 계산 (모니터링용 - 보조지표 포함)
     score = sum([
@@ -4173,7 +4173,7 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
         int(is_bullish)
     ])
 
-    # 🎯 감지 조건: 양봉 + RSI>=52 + 추세>=0.1%
+    # 🎯 감지 조건: 양봉 + RSI>=65 + 추세>=0.8%
     detected = is_bullish and rsi_ok and trend_ok
 
     # 상세정보 (알림용 - 모든 지표 표시)
