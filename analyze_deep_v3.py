@@ -464,8 +464,8 @@ def main():
         ("bb_pos_5m", "BB위치(5분봉)"),
     ]
 
-    print(f"\n{'지표':<20} | {'성공 평균':>12} | {'실패 평균':>12} | {'차이':>10} | {'판별력':>8}")
-    print("-" * 75)
+    print(f"\n{'지표':<20} | {'성공(평균/중앙)':>18} | {'실패(평균/중앙)':>18} | {'판별력':>8}")
+    print("-" * 80)
 
     discriminators = []  # 판별력 있는 지표 저장
 
@@ -476,25 +476,30 @@ def main():
         if s_vals and f_vals:
             s_avg = statistics.mean(s_vals)
             f_avg = statistics.mean(f_vals)
+            s_med = statistics.median(s_vals)
+            f_med = statistics.median(f_vals)
             diff = s_avg - f_avg
+            diff_med = s_med - f_med
 
-            # 판별력 계산 (차이 / 표준편차)
+            # 판별력 계산 (중앙값 기준으로도 계산)
             try:
                 all_vals = s_vals + f_vals
                 std = statistics.stdev(all_vals) if len(all_vals) > 1 else 1
                 discriminant = abs(diff) / std if std > 0 else 0
+                discriminant_med = abs(diff_med) / std if std > 0 else 0
             except:
                 discriminant = 0
+                discriminant_med = 0
 
-            diff_str = f"+{diff:.2f}" if diff > 0 else f"{diff:.2f}"
-            disc_str = f"{discriminant:.2f}"
+            # 더 보수적인 판별력 사용 (평균과 중앙값 중 낮은 것)
+            final_disc = min(discriminant, discriminant_med)
 
             # 판별력 0.5 이상이면 ★ 표시
-            star = "★" if discriminant >= 0.5 else ""
-            print(f"{label:<20} | {s_avg:>12.2f} | {f_avg:>12.2f} | {diff_str:>10} | {disc_str:>6} {star}")
+            star = "★" if final_disc >= 0.5 else ""
+            print(f"{label:<20} | {s_avg:>7.2f}/{s_med:>7.2f} | {f_avg:>7.2f}/{f_med:>7.2f} | {final_disc:>6.2f} {star}")
 
-            if discriminant >= 0.5:
-                discriminators.append((label, s_avg, f_avg, diff, discriminant))
+            if final_disc >= 0.5:
+                discriminators.append((label, s_avg, s_med, f_avg, f_med, diff, final_disc))
 
     # ==========================================
     # 핵심 판별 지표
@@ -504,11 +509,13 @@ def main():
     print("🎯 핵심 판별 지표 (판별력 0.5 이상)")
     print("=" * 80)
 
-    discriminators.sort(key=lambda x: x[4], reverse=True)
+    discriminators.sort(key=lambda x: x[6], reverse=True)
 
-    for label, s_avg, f_avg, diff, disc in discriminators:
+    for label, s_avg, s_med, f_avg, f_med, diff, disc in discriminators:
         direction = "성공이 높음" if diff > 0 else "실패가 높음"
-        print(f"  ★ {label}: 성공 {s_avg:.2f} vs 실패 {f_avg:.2f} ({direction}, 판별력 {disc:.2f})")
+        print(f"  ★ {label}:")
+        print(f"      평균: 성공 {s_avg:.2f} vs 실패 {f_avg:.2f}")
+        print(f"      중앙: 성공 {s_med:.2f} vs 실패 {f_med:.2f} ({direction}, 판별력 {disc:.2f})")
 
     # ==========================================
     # 시간대별 분석
@@ -543,14 +550,14 @@ def main():
     print("=" * 80)
 
     if discriminators:
-        print("\n핵심 판별 지표 기반 조건:")
-        for label, s_avg, f_avg, diff, disc in discriminators[:5]:  # 상위 5개
-            # 성공과 실패의 중간값을 임계치로 제안
-            threshold = (s_avg + f_avg) / 2
+        print("\n핵심 판별 지표 기반 조건 (중앙값 기준):")
+        for label, s_avg, s_med, f_avg, f_med, diff, disc in discriminators[:5]:  # 상위 5개
+            # 성공과 실패의 중앙값 중간을 임계치로 제안
+            threshold = (s_med + f_med) / 2
             if diff > 0:
-                print(f"  - {label} >= {threshold:.2f} (성공 평균 {s_avg:.2f})")
+                print(f"  - {label} >= {threshold:.2f} (성공 중앙값 {s_med:.2f}, 실패 중앙값 {f_med:.2f})")
             else:
-                print(f"  - {label} <= {threshold:.2f} (성공 평균 {s_avg:.2f})")
+                print(f"  - {label} <= {threshold:.2f} (성공 중앙값 {s_med:.2f}, 실패 중앙값 {f_med:.2f})")
 
 if __name__ == "__main__":
     main()
