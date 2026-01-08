@@ -4076,13 +4076,13 @@ def calc_ema_list(prices, period):
 
 def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
-    수렴돌파 패턴 감지 - 딥 분석 v3 기반 (25성공 vs 9실패)
+    수렴돌파 패턴 감지 - 딥 분석 v3 기반 (27성공 vs 30실패, 중앙값 기준)
 
     [핵심 판별 지표 - 판별력 순]
-    1. 5분봉 RSI >= 55 (성공79 vs 실패45, 판별력 1.67) ★최고
-    2. EMA정배열: EMA10 > EMA20 (성공0.18% vs 실패-0.11%, 판별력 1.08)
-    3. 거래량추세 >= 1.5x (성공2.35 vs 실패0.54, 판별력 0.71)
-    4. 현재봉 양봉 (필수)
+    1. 5분봉 RSI >= 67 (성공 중앙79 vs 실패 중앙55, 판별력 1.39) ★최고
+    2. 5분봉추세 >= 0.95% (성공 중앙1.75% vs 실패 중앙0.14%, 판별력 0.78) ★신규
+    3. 진입봉등락 >= 0.6% (성공0.97% vs 실패0.23%)
+    4. EMA정배열 OR 거래량1.5x (보조)
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
@@ -4091,11 +4091,19 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
 
     # === 5분봉 RSI 계산 (핵심 지표!) ===
     rsi_5m = None
+    trend_5m = 0
     if candles_5m and len(candles_5m) >= 15:
         closes_5m = [c["trade_price"] for c in candles_5m[-15:]]
         rsi_5m = calc_rsi(closes_5m, 14)
 
-    rsi_ok = rsi_5m is not None and rsi_5m >= 67  # 성공 81 vs 실패 53, 권장 67+
+        # === 5분봉추세 계산 (최근5개 vs 이전5개) ===
+        if len(closes_5m) >= 10:
+            recent_avg = sum(closes_5m[-5:]) / 5
+            prev_avg = sum(closes_5m[-10:-5]) / 5
+            trend_5m = (recent_avg / prev_avg - 1) * 100 if prev_avg > 0 else 0
+
+    rsi_ok = rsi_5m is not None and rsi_5m >= 67  # 성공 중앙79 vs 실패 중앙55
+    trend_5m_ok = trend_5m >= 0.95  # 성공 중앙1.75% vs 실패 중앙0.14%
 
     # 1분봉 데이터
     recent = candles_1m[-20:]
@@ -4124,18 +4132,18 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # === 현재봉 양봉 (필수) ===
     is_bullish = cur_is_bullish
 
-    # 점수 계산 (0~5)
-    score = int(rsi_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish) + int(cur_change_ok)
+    # 점수 계산 (0~6)
+    score = int(rsi_ok) + int(trend_5m_ok) + int(ema_ok) + int(vol_trend_ok) + int(is_bullish) + int(cur_change_ok)
 
-    # 감지 조건: 양봉 + RSI>=67 + 진입봉등락>=0.6% + (EMA OR 거래량)
-    # 분석 결과: RSI(1.59) > 진입봉등락(1.23) > EMA/거래량
-    detected = is_bullish and rsi_ok and cur_change_ok and (ema_ok or vol_trend_ok)
+    # 감지 조건: 양봉 + RSI>=67 + 5분봉추세>=0.95% + 진입봉등락>=0.6% + (EMA OR 거래량)
+    # 분석 결과(중앙값 기준): RSI(1.39) > 5분봉추세(0.78) > ...
+    detected = is_bullish and rsi_ok and trend_5m_ok and cur_change_ok and (ema_ok or vol_trend_ok)
 
     # 경로명 단순화 (리포트 집계용) + 상세정보 별도 반환
     reason = "수렴돌파"
     rsi_str = f"RSI5m{rsi_5m:.0f}" if rsi_5m else "RSI?"
     ema_str = "EMA정배열" if ema_ok else "EMA역배열"
-    detail = f"{rsi_str} 등락{cur_change:.2f}% {ema_str} 거래량{vol_trend:.1f}x"
+    detail = f"{rsi_str} 추세{trend_5m:.2f}% 등락{cur_change:.2f}% {ema_str} 거래량{vol_trend:.1f}x"
 
     return detected, score, reason, detail
 
