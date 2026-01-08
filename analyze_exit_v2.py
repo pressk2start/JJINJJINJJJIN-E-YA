@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-트레일링 분석 v2 - 중간 하락/회복 패턴 분석
-- 고점→최종하락 뿐 아니라 중간 눌림/회복 패턴 분석
-- 어느 트레일링 폭에서 조기 청산되는지 확인
-- 최적 트레일링 폭 제안
+트레일링 분석 v2 - 수정본
+- 중간 눌림/회복 패턴 정확히 추적
+- 트레일링 폭별 조기 청산 시뮬레이션
 """
 import requests
 import time
@@ -113,11 +112,7 @@ def get_candles(market, to_time, count=50, unit=1):
         return []
 
 def analyze_price_path(ticker, date_str, time_str, minutes=30):
-    """
-    진입 후 가격 경로 상세 분석
-    - 각 분봉에서 고점 대비 하락폭 추적
-    - 중간 눌림 후 회복 패턴 분석
-    """
+    """진입 후 가격 경로 분석"""
     dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
     to_time = (dt + timedelta(minutes=minutes + 5)).strftime("%Y-%m-%dT%H:%M:%S") + "+09:00"
 
@@ -144,87 +139,99 @@ def analyze_price_path(ticker, date_str, time_str, minutes=30):
     if len(post_candles) < 3:
         return None
 
-    # === 가격 경로 분석 ===
-    running_high = entry_price  # 현재까지 최고가
-    max_gain = 0  # 최대 수익률
-    max_drawdown = 0  # 최대 손실률 (진입가 대비)
+    # === 가격 경로 추적 ===
+    prices = []  # 각 분봉의 (고점, 저점, 종가) 수익률
+    running_high = entry_price
+    max_gain = 0
+    max_drawdown = 0
 
-    # 중간 눌림 기록: (고점수익률, 눌림폭, 회복여부)
-    pullbacks = []
-    current_pullback_start = None
-    current_pullback_high = None
-
-    # 트레일링 시뮬레이션: 각 폭에서 청산 시점
-    trail_stops = {}
-    for trail_pct in [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0]:
-        trail_stops[trail_pct] = {"triggered": False, "minute": None, "gain": None}
+    # 모든 눌림(고점 대비 하락) 기록
+    all_drawdowns_from_peak = []  # 고점 대비 하락폭 (%)
 
     for i, c in enumerate(post_candles):
         high = c["high_price"]
         low = c["low_price"]
         close = c["trade_price"]
 
-        # 고점 갱신
-        if high > running_high:
-            # 눌림에서 회복
-            if current_pullback_start is not None:
-                pullback_depth = (current_pullback_high - running_high) / current_pullback_high * 100
-                pullbacks.append({
-                    "start_minute": current_pullback_start,
-                    "end_minute": i,
-                    "peak_gain": (current_pullback_high / entry_price - 1) * 100,
-                    "pullback_depth": pullback_depth,
-                    "recovered": True
-                })
-                current_pullback_start = None
-
-            running_high = high
-
-        # 현재 수익률
+        # 수익률 계산
         gain_high = (high / entry_price - 1) * 100
         gain_low = (low / entry_price - 1) * 100
+        gain_close = (close / entry_price - 1) * 100
 
+        prices.append({
+            "minute": i,
+            "high": gain_high,
+            "low": gain_low,
+            "close": gain_close
+        })
+
+        # 최대 수익/손실
         max_gain = max(max_gain, gain_high)
         max_drawdown = min(max_drawdown, gain_low)
 
-        # 고점 대비 하락 (눌림 시작)
-        drop_from_high = (running_high - low) / running_high * 100
-        if drop_from_high > 0.1 and current_pullback_start is None:
-            current_pullback_start = i
-            current_pullback_high = running_high
+        # 고점 갱신
+        if high > running_high:
+            running_high = high
 
-        # 트레일링 시뮬레이션
-        for trail_pct, status in trail_stops.items():
-            if not status["triggered"]:
-                trail_price = running_high * (1 - trail_pct / 100)
-                if low <= trail_price:
-                    status["triggered"] = True
-                    status["minute"] = i
-                    # 트레일링 청산 시점의 수익률 (진입가 대비)
-                    status["gain"] = (trail_price / entry_price - 1) * 100
+        # 현재 고점 대비 하락폭 기록
+        if running_high > entry_price:
+            drop_from_peak = (running_high - low) / running_high * 100
+            if drop_from_peak > 0.05:  # 0.05% 이상 하락만 기록
+                all_drawdowns_from_peak.append(drop_from_peak)
 
-    # 마지막 눌림 (회복 안 됨)
-    if current_pullback_start is not None:
-        pullback_depth = (running_high - post_candles[-1]["low_price"]) / running_high * 100
-        pullbacks.append({
-            "start_minute": current_pullback_start,
-            "end_minute": len(post_candles) - 1,
-            "peak_gain": (running_high / entry_price - 1) * 100,
-            "pullback_depth": pullback_depth,
-            "recovered": False
-        })
+    # 최종 고점 대비 최종 가격 하락폭
+    final_price = post_candles[-1]["trade_price"]
+    final_drop_from_peak = (running_high - final_price) / running_high * 100 if running_high > entry_price else 0
 
     return {
         "max_gain": max_gain,
         "max_drawdown": max_drawdown,
-        "final_gain": (post_candles[-1]["trade_price"] / entry_price - 1) * 100,
-        "pullbacks": pullbacks,
-        "trail_stops": trail_stops,
+        "final_gain": (final_price / entry_price - 1) * 100,
+        "peak_price": running_high,
+        "entry_price": entry_price,
+        "final_drop_from_peak": final_drop_from_peak,
+        "all_drawdowns": all_drawdowns_from_peak,
+        "prices": prices,
+    }
+
+def simulate_trailing(result, trail_pct):
+    """특정 트레일링 폭으로 시뮬레이션"""
+    entry_price = result["entry_price"]
+    prices = result["prices"]
+
+    running_high = entry_price
+    trail_stop = 0
+
+    for p in prices:
+        # 고점에서의 실제 가격 계산
+        high_price = entry_price * (1 + p["high"] / 100)
+        low_price = entry_price * (1 + p["low"] / 100)
+
+        # 고점 갱신
+        if high_price > running_high:
+            running_high = high_price
+            trail_stop = running_high * (1 - trail_pct / 100)
+
+        # 트레일링 스탑 트리거
+        if trail_stop > 0 and low_price <= trail_stop:
+            exit_gain = (trail_stop / entry_price - 1) * 100
+            return {
+                "triggered": True,
+                "minute": p["minute"],
+                "exit_gain": exit_gain,
+                "missed_gain": result["max_gain"] - exit_gain
+            }
+
+    return {
+        "triggered": False,
+        "minute": None,
+        "exit_gain": result["final_gain"],
+        "missed_gain": result["max_gain"] - result["final_gain"]
     }
 
 def main():
     print("=" * 80)
-    print("트레일링 분석 v2 - 중간 눌림/회복 패턴")
+    print("트레일링 분석 v2 - 수정본")
     print("=" * 80)
 
     success_results = []
@@ -241,93 +248,116 @@ def main():
                 fail_results.append(result)
 
             tag = "성공" if is_success else "실패"
-            pullback_cnt = len(result["pullbacks"])
             print(f"  [{tag}] {ticker} {time_str}: 최대+{result['max_gain']:.2f}% "
-                  f"눌림{pullback_cnt}회")
+                  f"고점후-{result['final_drop_from_peak']:.2f}%")
 
     print(f"\n수집 완료: 성공 {len(success_results)}건, 실패 {len(fail_results)}건")
 
-    # === 성공 케이스 눌림 분석 ===
+    # === 성공 케이스 기본 통계 ===
     print("\n" + "=" * 80)
-    print("📊 성공 케이스 - 중간 눌림 분석 (회복한 것들)")
+    print("📊 성공 케이스 기본 통계")
     print("=" * 80)
 
-    all_recovered_pullbacks = []
+    max_gains = [r["max_gain"] for r in success_results]
+    final_drops = [r["final_drop_from_peak"] for r in success_results]
+
+    print(f"\n최대 상승률:")
+    print(f"  평균: {statistics.mean(max_gains):.2f}%")
+    print(f"  중앙값: {statistics.median(max_gains):.2f}%")
+    print(f"  최소: {min(max_gains):.2f}%, 최대: {max(max_gains):.2f}%")
+
+    print(f"\n고점 대비 최종 하락:")
+    print(f"  평균: {statistics.mean(final_drops):.2f}%")
+    print(f"  중앙값: {statistics.median(final_drops):.2f}%")
+
+    # === 모든 눌림 분석 ===
+    print("\n" + "=" * 80)
+    print("📉 중간 눌림 분석 (고점 대비 하락)")
+    print("=" * 80)
+
+    all_drawdowns = []
     for r in success_results:
-        for pb in r["pullbacks"]:
-            if pb["recovered"]:
-                all_recovered_pullbacks.append(pb["pullback_depth"])
+        all_drawdowns.extend(r["all_drawdowns"])
 
-    if all_recovered_pullbacks:
-        print(f"\n회복한 눌림 총 {len(all_recovered_pullbacks)}회")
-        print(f"  평균: {statistics.mean(all_recovered_pullbacks):.2f}%")
-        print(f"  중앙값: {statistics.median(all_recovered_pullbacks):.2f}%")
-        print(f"  최대: {max(all_recovered_pullbacks):.2f}%")
+    if all_drawdowns:
+        print(f"\n총 눌림 횟수: {len(all_drawdowns)}회")
+        print(f"  평균: {statistics.mean(all_drawdowns):.2f}%")
+        print(f"  중앙값: {statistics.median(all_drawdowns):.2f}%")
+        print(f"  최대: {max(all_drawdowns):.2f}%")
 
-        print("\n[눌림 깊이 분포 - 이후 회복됨]")
-        for low, high in [(0, 0.2), (0.2, 0.3), (0.3, 0.5), (0.5, 0.8), (0.8, 1.0), (1.0, 2.0), (2.0, 10)]:
-            cnt = sum(1 for v in all_recovered_pullbacks if low <= v < high)
-            pct = cnt / len(all_recovered_pullbacks) * 100
-            bar = "█" * int(pct / 5)
-            print(f"  {low:.1f}%~{high:.1f}%: {cnt:>3}회 ({pct:>4.0f}%) {bar}")
+        # 분포
+        print("\n[눌림 깊이 분포]")
+        bins = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0),
+                (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 100)]
+        for low, high in bins:
+            cnt = sum(1 for v in all_drawdowns if low <= v < high)
+            pct = cnt / len(all_drawdowns) * 100 if all_drawdowns else 0
+            bar = "█" * int(pct / 3)
+            print(f"  {low:.1f}%~{high:.1f}%: {cnt:>4}회 ({pct:>5.1f}%) {bar}")
 
-    # === 트레일링 시뮬레이션 결과 ===
+    # === 트레일링 시뮬레이션 ===
     print("\n" + "=" * 80)
-    print("🎯 트레일링 폭별 조기 청산 분석 (성공 케이스)")
+    print("🎯 트레일링 폭별 시뮬레이션 (성공 케이스)")
     print("=" * 80)
 
-    print(f"\n{'트레일링':>8} | {'청산됨':>8} | {'평균수익':>10} | {'수익놓침':>10} | 판정")
+    print(f"\n{'트레일링':>8} | {'청산됨':>12} | {'평균수익':>10} | {'놓친수익':>10} | 판정")
     print("-" * 70)
 
-    for trail_pct in [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0]:
-        triggered_gains = []
-        missed_gains = []
+    best_trail = None
+    best_net_gain = -100
 
-        for r in success_results:
-            ts = r["trail_stops"][trail_pct]
-            if ts["triggered"]:
-                triggered_gains.append(ts["gain"])
-                missed_gains.append(r["max_gain"] - ts["gain"])
+    for trail_pct in [0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]:
+        results = [simulate_trailing(r, trail_pct) for r in success_results]
 
-        triggered_cnt = len(triggered_gains)
-        triggered_pct = triggered_cnt / len(success_results) * 100
+        triggered_cnt = sum(1 for r in results if r["triggered"])
+        triggered_pct = triggered_cnt / len(results) * 100
 
-        if triggered_gains:
-            avg_gain = statistics.mean(triggered_gains)
-            avg_missed = statistics.mean(missed_gains)
-        else:
-            avg_gain = 0
-            avg_missed = 0
+        exit_gains = [r["exit_gain"] for r in results]
+        missed_gains = [r["missed_gain"] for r in results]
+
+        avg_exit = statistics.mean(exit_gains)
+        avg_missed = statistics.mean(missed_gains)
 
         # 판정
         if triggered_pct >= 80:
             verdict = "❌ 너무 타이트"
-        elif triggered_pct >= 50:
+        elif triggered_pct >= 60:
             verdict = "⚠️  주의"
-        elif triggered_pct >= 30:
+        elif triggered_pct >= 40:
             verdict = "✅ 적절"
         else:
             verdict = "🔵 느슨"
 
-        print(f"{trail_pct:>7.1f}% | {triggered_cnt:>3}/{len(success_results)} ({triggered_pct:>3.0f}%) | "
-              f"{avg_gain:>+8.2f}% | {avg_missed:>+8.2f}% | {verdict}")
+        # 최적 찾기 (청산율 40-70%, 평균수익 최대화)
+        if 30 <= triggered_pct <= 70 and avg_exit > best_net_gain:
+            best_net_gain = avg_exit
+            best_trail = trail_pct
 
-    # === 구간별 권장 트레일링 ===
+        print(f"{trail_pct:>7.1f}% | {triggered_cnt:>3}/{len(results)} ({triggered_pct:>4.0f}%) | "
+              f"{avg_exit:>+8.2f}% | {avg_missed:>+8.2f}% | {verdict}")
+
+    # === 권장 설정 ===
     print("\n" + "=" * 80)
     print("💡 권장 트레일링 설정")
     print("=" * 80)
 
-    # 회복한 눌림의 75백분위 = 이 이상 눌리면 회복 안 될 가능성 높음
-    if all_recovered_pullbacks:
-        p75 = sorted(all_recovered_pullbacks)[int(len(all_recovered_pullbacks) * 0.75)]
-        p90 = sorted(all_recovered_pullbacks)[int(len(all_recovered_pullbacks) * 0.90)]
+    if all_drawdowns:
+        sorted_dd = sorted(all_drawdowns)
+        p50 = sorted_dd[int(len(sorted_dd) * 0.50)]
+        p75 = sorted_dd[int(len(sorted_dd) * 0.75)]
+        p90 = sorted_dd[int(len(sorted_dd) * 0.90)]
 
-        print(f"\n성공 케이스 회복한 눌림:")
-        print(f"  75백분위: {p75:.2f}% (이 이상 눌리면 25%는 회복 못함)")
-        print(f"  90백분위: {p90:.2f}% (이 이상 눌리면 10%는 회복 못함)")
+        print(f"\n눌림 깊이 백분위:")
+        print(f"  50백분위: {p50:.2f}%")
+        print(f"  75백분위: {p75:.2f}%")
+        print(f"  90백분위: {p90:.2f}%")
 
-        print(f"\n권장: 트레일링 폭 {p75:.1f}% ~ {p90:.1f}% 사이")
-        print(f"  → 대부분의 정상 눌림은 버티고, 진짜 하락은 청산")
+        print(f"\n권장: 트레일링 폭 {p75:.1f}% ~ {p90:.1f}%")
+        print(f"  → 75%의 정상 눌림은 버티고, 큰 하락만 청산")
+
+    if best_trail:
+        print(f"\n시뮬레이션 기반 최적: {best_trail:.1f}%")
+        print(f"  → 평균 수익 {best_net_gain:.2f}% 달성")
 
 if __name__ == "__main__":
     main()
