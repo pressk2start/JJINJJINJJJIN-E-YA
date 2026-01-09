@@ -1718,121 +1718,138 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     cycle = 0
 
     # 🔧 시간 기반 타임아웃 제거 - 가격 조건으로만 매도
+    NOTIFY_EVERY_N_CYCLES = 12  # 12사이클(=1시간)마다 상태 알림
 
-    while True:
-        cycle += 1
-        print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
+    try:
+        while True:
+            cycle += 1
+            print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
 
-        # 🔧 유령 포지션 탈출: 실잔고 확인
-        with _POSITION_LOCK:
-            pos = OPEN_POSITIONS.get(m)
-        if not pos:
-            print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
-            # 🔧 FIX: 포지션 없음 알람 추가
-            tg_send(f"⚠️ {m} 포지션 정리됨 (OPEN_POSITIONS에서 제거됨)")
-            return False
+            # 🔧 주기적 상태 알림 (1시간마다)
+            if cycle % NOTIFY_EVERY_N_CYCLES == 0:
+                try:
+                    cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+                    cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+                    cur_pnl = (cur_price / entry_price - 1.0) * 100 if entry_price > 0 else 0
+                    tg_send(f"📍 {m} 재모니터링 중 ({cycle}사이클, {cycle*5}분 경과)\n• 현재가: {fmt6(cur_price)}원 ({cur_pnl:+.2f}%)")
+                except:
+                    pass
 
-        # 실제 거래소 잔고 확인
-        actual = get_actual_balance(m)
-        if actual <= 0:
-            print(f"[REMONITOR] {m} 실잔고 0 → 유령 포지션 정리 후 루프 종료")
-            # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
-            entry_price_for_msg = pos.get("entry_price", 0)
-            tg_send(f"⚠️ {m} 포지션 정리 (실잔고 0 확인)\n• 매수가: {fmt6(entry_price_for_msg)}원\n• 외부 청산 또는 이미 정리됨")
+            # 🔧 유령 포지션 탈출: 실잔고 확인
             with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return False
+                pos = OPEN_POSITIONS.get(m)
+            if not pos:
+                print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
+                # 🔧 FIX: 포지션 없음 알람 추가
+                tg_send(f"⚠️ {m} 포지션 정리됨 (OPEN_POSITIONS에서 제거됨)")
+                return False
 
-        # 🔧 부분청산 후 추가 하락 체크
-        if pos and pos.get("partial_done"):
-            partial_price = pos.get("partial_price", 0)
-            partial_type = pos.get("partial_type", "loss")
+            # 실제 거래소 잔고 확인
+            actual = get_actual_balance(m)
+            if actual <= 0:
+                print(f"[REMONITOR] {m} 실잔고 0 → 유령 포지션 정리 후 루프 종료")
+                # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
+                entry_price_for_msg = pos.get("entry_price", 0)
+                tg_send(f"⚠️ {m} 포지션 정리 (실잔고 0 확인)\n• 매수가: {fmt6(entry_price_for_msg)}원\n• 외부 청산 또는 이미 정리됨")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return False
 
-            # 현재가 조회
-            try:
-                cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-                cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
-            except:
-                cur_price = 0
+            # 🔧 부분청산 후 추가 하락 체크
+            if pos and pos.get("partial_done"):
+                partial_price = pos.get("partial_price", 0)
+                partial_type = pos.get("partial_type", "loss")
 
-            if cur_price > 0 and partial_price > 0:
-                if partial_type == "profit":
-                    # 익절 부분청산 후: -0.2% 추가 하락 OR 진입가 이하 → 청산
-                    drop_from_partial = (partial_price - cur_price) / partial_price
-                    if cur_price <= entry_price or drop_from_partial >= PARTIAL_EXIT_PROFIT_DROP:
-                        reason = f"부분익절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
-                        print(f"[REMONITOR] {m} {reason} → 나머지 청산")
-                        close_auto_position(m, reason)
-                        return True
-                else:
-                    # 손절 부분청산 후: -0.1% 추가 하락 → 청산
-                    drop_from_partial = (partial_price - cur_price) / partial_price
-                    if drop_from_partial >= PARTIAL_EXIT_LOSS_DROP:
-                        reason = f"부분손절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
-                        print(f"[REMONITOR] {m} {reason} → 나머지 청산")
-                        close_auto_position(m, reason)
-                        return True
+                # 현재가 조회
+                try:
+                    cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+                    cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+                except:
+                    cur_price = 0
 
-        verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
-            monitor_position(
-                m, entry_price, pre,
-                tight_mode=tight_mode,
-                horizon=CYCLE_SEC,
-                reentry=True
-            )
+                if cur_price > 0 and partial_price > 0:
+                    if partial_type == "profit":
+                        # 익절 부분청산 후: -0.2% 추가 하락 OR 진입가 이하 → 청산
+                        drop_from_partial = (partial_price - cur_price) / partial_price
+                        if cur_price <= entry_price or drop_from_partial >= PARTIAL_EXIT_PROFIT_DROP:
+                            reason = f"부분익절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
+                            print(f"[REMONITOR] {m} {reason} → 나머지 청산")
+                            close_auto_position(m, reason)
+                            return True
+                    else:
+                        # 손절 부분청산 후: -0.1% 추가 하락 → 청산
+                        drop_from_partial = (partial_price - cur_price) / partial_price
+                        if drop_from_partial >= PARTIAL_EXIT_LOSS_DROP:
+                            reason = f"부분손절 후 추가하락 -{drop_from_partial*100:.2f}% 잔량청산"
+                            print(f"[REMONITOR] {m} {reason} → 나머지 청산")
+                            close_auto_position(m, reason)
+                            return True
 
-        should_close = False
-        reason = verdict or action or "모니터링 종료"
+            verdict, action, rationale, ret_pct, last_price, maxrun, maxdd = \
+                monitor_position(
+                    m, entry_price, pre,
+                    tight_mode=tight_mode,
+                    horizon=CYCLE_SEC,
+                    reentry=True
+                )
 
-        # 1) 급락 / 손절 권고
-        if verdict and ("급락" in verdict or "손절" in verdict):
-            should_close = True
+            should_close = False
+            reason = verdict or action or "모니터링 종료"
 
-        # 2) 전량 청산 권고
-        elif action and "전량 청산 권고" in action:
-            should_close = True
+            # 1) 급락 / 손절 권고
+            if verdict and ("급락" in verdict or "손절" in verdict):
+                should_close = True
 
-        # 3) 수익 실현:
-        #    - 2.5% 이상: 전량 청산
-        #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
-        elif ret_pct is not None and ret_pct >= 2.5:
-            should_close = True
-            reason = f"수익실현 진입 후 +{ret_pct:.2f}% 달성 전량청산"
+            # 2) 전량 청산 권고
+            elif action and "전량 청산 권고" in action:
+                should_close = True
 
-        elif ret_pct is not None and ret_pct >= 1.5:
-            # 중간 구간: 30% 부분 수익실현 후 계속 보유
-            ok, msg, executed = safe_partial_sell(
-                m, sell_ratio=0.3, reason=f"진입 후 +{ret_pct:.2f}% 수익 달성 30% 부분익절")
-            if ok and executed > 0:
-                print(msg)
-            # 부분익절 후에는 계속 재모니터링
-            continue
+            # 3) 수익 실현:
+            #    - 2.5% 이상: 전량 청산
+            #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
+            elif ret_pct is not None and ret_pct >= 2.5:
+                should_close = True
+                reason = f"수익실현 진입 후 +{ret_pct:.2f}% 달성 전량청산"
 
-        # 4) 컨텍스트 청산 권고는 → 청산 안 하고 계속 재모니터링
-        elif verdict and verdict.startswith("청산 권고("):
-            continue
+            elif ret_pct is not None and ret_pct >= 1.5:
+                # 중간 구간: 30% 부분 수익실현 후 계속 보유
+                ok, msg, executed = safe_partial_sell(
+                    m, sell_ratio=0.3, reason=f"진입 후 +{ret_pct:.2f}% 수익 달성 30% 부분익절")
+                if ok and executed > 0:
+                    print(msg)
+                # 부분익절 후에는 계속 재모니터링
+                continue
 
-        # 5) 부분 청산(50%) 권고 → 실제 50% 매도 후 계속 재모니터링
-        elif action == "부분 청산(50%) 권고":
-            ok, msg, executed = safe_partial_sell(m,
-                                                  sell_ratio=0.5,
-                                                  reason=f"재모니터링{cycle}사이클 부분청산({rationale})")
-            if ok and executed > 0:
-                print(msg)
-            continue
+            # 4) 컨텍스트 청산 권고는 → 청산 안 하고 계속 재모니터링
+            elif verdict and verdict.startswith("청산 권고("):
+                continue
 
-        # 6) 유지 권고 → 계속 재모니터링
-        elif action == "유지 권고":
-            continue
+            # 5) 부분 청산(50%) 권고 → 실제 50% 매도 후 계속 재모니터링
+            elif action == "부분 청산(50%) 권고":
+                ok, msg, executed = safe_partial_sell(m,
+                                                      sell_ratio=0.5,
+                                                      reason=f"재모니터링{cycle}사이클 부분청산({rationale})")
+                if ok and executed > 0:
+                    print(msg)
+                continue
 
-        # 7) 그냥 시간 만료면 → 다시 한 번 사이클
-        elif verdict == "시간 만료(모니터링 종료)":
-            continue
+            # 6) 유지 권고 → 계속 재모니터링
+            elif action == "유지 권고":
+                continue
 
-        if should_close:
-            print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
-            close_auto_position(m, reason)
-            return True
+            # 7) 그냥 시간 만료면 → 다시 한 번 사이클
+            elif verdict == "시간 만료(모니터링 종료)":
+                continue
+
+            if should_close:
+                print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
+                close_auto_position(m, reason)
+                return True
+
+    except Exception as e:
+        # 🔧 예외 발생 시 알림
+        tg_send(f"❌ {m} 재모니터링 오류 발생!\n• 오류: {str(e)[:100]}\n• 포지션 확인 필요")
+        return False
 
 
 # =========================
