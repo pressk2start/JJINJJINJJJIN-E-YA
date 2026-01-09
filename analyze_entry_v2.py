@@ -120,6 +120,10 @@ CASES = [
     ("BOUNTY", "2026-01-09", "11:05", False),
     ("BOUNTY", "2026-01-09", "10:46", False),
     ("BOUNTY", "2026-01-09", "10:07", False),
+    ("DEEP", "2026-01-09", "12:51", False),
+    ("DEEP", "2026-01-09", "13:00", False),
+    ("PEPE", "2026-01-09", "13:00", False),
+    ("BREV", "2026-01-09", "14:12", False),
 ]
 
 def get_candles(market, to_time, count=50, unit=1):
