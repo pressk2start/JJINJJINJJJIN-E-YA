@@ -4154,22 +4154,22 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
 
-    # === 조건 판정 (v8 - 시간대별 차등) ===
+    # === 조건 판정 (v9 - 시간대별 + 강화) ===
     is_bullish = cur_is_bullish
 
-    # 🎯 시간대별 임계치 (analyze_entry_v2 + 시간대 분석 기반)
+    # 🎯 시간대별 임계치 (analyze_entry_v2 + deep_v3 기반)
     from datetime import datetime
     current_hour = datetime.now().hour
     is_daytime = 8 <= current_hour < 18  # 08:00 ~ 17:59
 
     if is_daytime:
-        # 주간: 느슨 (기회 포착)
-        rsi_threshold = 55
-        trend_threshold = 0.3
-    else:
-        # 야간: 엄격 (손실 방지)
-        rsi_threshold = 74
+        # 주간: RSI>=68, 추세>=1.0% (순효과 +63%)
+        rsi_threshold = 68
         trend_threshold = 1.0
+    else:
+        # 야간: 더 엄격 (성공률 13%)
+        rsi_threshold = 74
+        trend_threshold = 1.5
 
     rsi_ok = rsi_5m is not None and rsi_5m >= rsi_threshold
     trend_ok = trend_5m >= trend_threshold
@@ -5359,18 +5359,17 @@ def monitor_position(m,
             peak_gain = (best / entry_price - 1.0)  # 고점 수익률
 
             # 수익 구간별 트레일링 폭 결정
-            # 🔧 v4: 수익 보호 + 적절한 눌림 허용
-            # 핵심: trail_dist가 gain을 초과하지 않도록 설계
+            # 🔧 v5: 눌림 44%가 3%+ → 대폭 완화 (권장 4.4~6.6%)
             if gain_from_entry >= 0.05:      # +5.0% 이상
-                trail_dist = 0.03            # 3.0% → 최소 +2% 수익 보호
+                trail_dist = 0.05            # 5.0% → 최소 0% (BEP) 보호
             elif gain_from_entry >= 0.02:    # +2.0% ~ +5.0%
-                trail_dist = 0.015           # 1.5% → 최소 +0.5% 수익 보호
+                trail_dist = 0.04            # 4.0% → 큰 눌림 허용
             elif gain_from_entry >= 0.01:    # +1.0% ~ +2.0%
-                trail_dist = 0.008           # 0.8% → 최소 +0.2% 수익 보호
+                trail_dist = 0.025           # 2.5%
             elif gain_from_entry >= 0.005:   # +0.5% ~ +1.0%
-                trail_dist = 0.004           # 0.4% → 최소 +0.1% 수익 보호
+                trail_dist = 0.008           # 0.8%
             else:                            # 0% ~ +0.5% (BEP 구간)
-                trail_dist = 0.003           # 0.3% (손절 방어)
+                trail_dist = 0.004           # 0.4% (손절 방어)
 
             # 고점 갱신시 트레일스탑 상향
             if new_high:
