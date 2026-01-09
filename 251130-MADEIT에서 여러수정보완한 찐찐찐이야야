@@ -4154,12 +4154,25 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
 
-    # === 조건 판정 (v7 - 최적 임계치) ===
+    # === 조건 판정 (v8 - 시간대별 차등) ===
     is_bullish = cur_is_bullish
 
-    # 🎯 핵심 조건 (analyze_entry_v2 기반: 성공78%, 실패10%, 순효과+68%)
-    rsi_ok = rsi_5m is not None and rsi_5m >= 67      # 65→67 미세 강화
-    trend_ok = trend_5m >= 0.7                         # 0.8→0.7 미세 완화
+    # 🎯 시간대별 임계치 (analyze_entry_v2 + 시간대 분석 기반)
+    from datetime import datetime
+    current_hour = datetime.now().hour
+    is_daytime = 8 <= current_hour < 18  # 08:00 ~ 17:59
+
+    if is_daytime:
+        # 주간: 느슨 (기회 포착)
+        rsi_threshold = 55
+        trend_threshold = 0.3
+    else:
+        # 야간: 엄격 (손실 방지)
+        rsi_threshold = 74
+        trend_threshold = 1.0
+
+    rsi_ok = rsi_5m is not None and rsi_5m >= rsi_threshold
+    trend_ok = trend_5m >= trend_threshold
 
     # 점수 계산 (모니터링용 - 보조지표 포함)
     score = sum([
@@ -4173,7 +4186,8 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
         int(is_bullish)
     ])
 
-    # 🎯 감지 조건: 양봉 + RSI>=67 + 추세>=0.7%
+    # 🎯 감지 조건: 양봉 + RSI/추세 (시간대별 차등)
+    # 주간(08-18시): RSI>=55, 추세>=0.3% | 야간: RSI>=74, 추세>=1.0%
     detected = is_bullish and rsi_ok and trend_ok
 
     # 상세정보 (알림용 - 모든 지표 표시)
