@@ -1086,16 +1086,237 @@ def run_deep_analysis(client: UpbitClient) -> None:
 
 
 # =========================
+# Exit/Trailing Analysis (from trailing_v3)
+# =========================
+def analyze_price_path(
+    client: UpbitClient,
+    ticker: str,
+    date_str: str,
+    time_str: str,
+    minutes: int = 30,
+) -> Optional[Dict[str, Any]]:
+    """가격 경로 분석 - 진입 후 분봉별 고/저/종가 추적"""
+    target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
+    to_time = _to_upbit_iso_kst(target_dt + timedelta(minutes=minutes) + timedelta(seconds=1))
+
+    raw = client.get_candles_minutes(ticker, to_time, unit=1, count=minutes + 120)
+    if not raw:
+        return None
+
+    candles_all = _parse_candles(raw)
+    end_dt = target_dt + timedelta(minutes=minutes)
+    candles_window = [c for c in candles_all if c.dt_kst <= end_dt]
+    if len(candles_window) < 10:
+        return None
+
+    # 진입 캔들 찾기 (가까운 dt, gap 60초 제한)
+    entry_idx = None
+    candidates = [(i, c) for i, c in enumerate(candles_window) if c.dt_kst <= target_dt]
+    if candidates:
+        i, c = candidates[-1]
+        gap = (target_dt - c.dt_kst).total_seconds()
+        if 0 <= gap <= 60:
+            entry_idx = i
+
+    if entry_idx is None:
+        return None
+
+    entry = candles_window[entry_idx]
+    post = candles_window[entry_idx:]
+    if len(post) < 3:
+        return None
+
+    entry_price = entry.close
+
+    running_high = entry_price
+    max_gain = 0.0
+    max_drawdown = 0.0
+    t_peak = 0
+
+    prices: List[Dict[str, float]] = []
+    for i, c in enumerate(post):
+        gain_high = (c.high / entry_price - 1.0) * 100.0
+        gain_low = (c.low / entry_price - 1.0) * 100.0
+        gain_close = (c.close / entry_price - 1.0) * 100.0
+
+        prices.append({"minute": float(i), "high": gain_high, "low": gain_low, "close": gain_close})
+
+        if c.high > running_high:
+            running_high = c.high
+            t_peak = i
+        max_gain = max(max_gain, gain_high)
+        max_drawdown = min(max_drawdown, gain_low)
+
+    final_price = post[-1].close
+    final_gain = (final_price / entry_price - 1.0) * 100.0
+    final_drop_from_peak = (running_high - final_price) / running_high * 100.0 if running_high > 0 else 0.0
+
+    return {
+        "ticker": ticker,
+        "time": f"{date_str} {time_str}",
+        "entry_dt": target_dt.isoformat(),
+        "entry_price": entry_price,
+        "max_gain": max_gain,
+        "max_drawdown": max_drawdown,
+        "t_peak": t_peak,
+        "final_gain": final_gain,
+        "final_drop_from_peak": final_drop_from_peak,
+        "prices": prices,
+    }
+
+
+def simulate_trailing(path: Dict[str, Any], trail_pct: float, model: str = "optimistic") -> Dict[str, Any]:
+    """
+    트레일링 시뮬레이션
+    model:
+      - optimistic: exit at trail_stop when low crosses it
+      - conservative: if low < trail_stop, assume fill at low (gap risk)
+    """
+    entry_price = float(path["entry_price"])
+    prices = path["prices"]
+
+    running_high = entry_price
+    trail_stop: Optional[float] = None
+
+    for p in prices:
+        high_price = entry_price * (1.0 + p["high"] / 100.0)
+        low_price = entry_price * (1.0 + p["low"] / 100.0)
+
+        if high_price > running_high:
+            running_high = high_price
+            trail_stop = running_high * (1.0 - trail_pct / 100.0)
+
+        if trail_stop is not None and low_price <= trail_stop:
+            exit_price = trail_stop if model == "optimistic" else low_price
+            exit_gain = (exit_price / entry_price - 1.0) * 100.0
+            return {
+                "triggered": True,
+                "minute": int(p["minute"]),
+                "exit_gain": exit_gain,
+            }
+
+    return {
+        "triggered": False,
+        "minute": None,
+        "exit_gain": float(path["final_gain"]),
+    }
+
+
+def score_trail(
+    success_paths: Sequence[Dict[str, Any]],
+    fail_paths: Sequence[Dict[str, Any]],
+    trail_pct: float,
+    model: str,
+    fail_penalty: float = 1.0,
+) -> Dict[str, Any]:
+    """트레일별 점수 계산 - 성공 수익과 실패 손실 동시 고려"""
+    s_res = [simulate_trailing(p, trail_pct, model) for p in success_paths]
+    f_res = [simulate_trailing(p, trail_pct, model) for p in fail_paths]
+
+    s_gains = [r["exit_gain"] for r in s_res]
+    f_gains = [r["exit_gain"] for r in f_res]
+
+    s_avg = statistics.mean(s_gains) if s_gains else 0.0
+    f_avg = statistics.mean(f_gains) if f_gains else 0.0
+
+    # 목적함수: 성공 평균수익 - (패널티 * 실패 평균 손실)
+    f_downside = min(0.0, f_avg)
+    score = s_avg + fail_penalty * f_downside
+
+    return {
+        "trail_pct": trail_pct,
+        "model": model,
+        "s_avg": s_avg,
+        "f_avg": f_avg,
+        "score": score,
+        "s_trigger_rate": sum(1 for r in s_res if r["triggered"]) / len(s_res) * 100.0 if s_res else 0.0,
+        "f_trigger_rate": sum(1 for r in f_res if r["triggered"]) / len(f_res) * 100.0 if f_res else 0.0,
+    }
+
+
+def run_exit_analysis(client: UpbitClient) -> None:
+    print("\n" + "=" * 80)
+    print("🎯 트레일링/익절 분석 (Exit Analysis)")
+    print("    성공/실패 포함 + 체결모델(optimistic/conservative) + 목적함수")
+    print("=" * 80)
+
+    success_paths: List[Dict[str, Any]] = []
+    fail_paths: List[Dict[str, Any]] = []
+
+    print("\n데이터 수집 중...")
+    for ticker, date_str, time_str, is_success in CASES:
+        path = analyze_price_path(client, ticker, date_str, time_str, minutes=30)
+        if not path:
+            continue
+        tag = "✅" if is_success else "❌"
+        print(f"  [{tag}] {ticker} {time_str}: max+{path['max_gain']:.2f}% mdd{path['max_drawdown']:.2f}% t_peak={path['t_peak']}m")
+        (success_paths if is_success else fail_paths).append(path)
+
+    print(f"\n수집 완료: 성공 {len(success_paths)}건, 실패 {len(fail_paths)}건")
+    if not success_paths or not fail_paths:
+        print("성공/실패 케이스 모두 필요합니다.")
+        return
+
+    trails = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
+
+    print("\n" + "=" * 80)
+    print("📊 트레일별 성능 비교")
+    print("=" * 80)
+
+    rows: List[Dict[str, Any]] = []
+    for model in ("optimistic", "conservative"):
+        for t in trails:
+            rows.append(score_trail(success_paths, fail_paths, t, model=model, fail_penalty=1.5))
+
+    print(f"\n{'trail':>6} | {'model':<12} | {'S_avg':>8} | {'F_avg':>8} | {'score':>8} | {'S_trig':>6} | {'F_trig':>6}")
+    print("-" * 80)
+    for r in sorted(rows, key=lambda x: (x["model"], -x["score"])):
+        print(f"{r['trail_pct']:>5.1f}% | {r['model']:<12} | {r['s_avg']:>+7.2f}% | {r['f_avg']:>+7.2f}% | {r['score']:>+7.2f} | {r['s_trigger_rate']:>5.0f}% | {r['f_trigger_rate']:>5.0f}%")
+
+    best_opt = max([r for r in rows if r["model"] == "optimistic"], key=lambda x: x["score"])
+    best_con = max([r for r in rows if r["model"] == "conservative"], key=lambda x: x["score"])
+
+    print("\n" + "=" * 80)
+    print("💡 추천 트레일링")
+    print("=" * 80)
+    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  score={best_opt['score']:+.2f}  S_avg={best_opt['s_avg']:+.2f}%  F_avg={best_opt['f_avg']:+.2f}%")
+    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  score={best_con['score']:+.2f}  S_avg={best_con['s_avg']:+.2f}%  F_avg={best_con['f_avg']:+.2f}%")
+
+    # 경로 피처 힌트
+    print("\n" + "=" * 80)
+    print("🔎 힌트: 케이스별 경로 특성")
+    print("=" * 80)
+    s_tpeak = [p["t_peak"] for p in success_paths]
+    f_tpeak = [p["t_peak"] for p in fail_paths]
+    s_maxgain = [p["max_gain"] for p in success_paths]
+    f_maxgain = [p["max_gain"] for p in fail_paths]
+    s_mdd = [p["max_drawdown"] for p in success_paths]
+    f_mdd = [p["max_drawdown"] for p in fail_paths]
+
+    print(f"  t_peak(분):   성공 median={statistics.median(s_tpeak):.0f} vs 실패 median={statistics.median(f_tpeak):.0f}")
+    print(f"  max_gain(%):  성공 median={statistics.median(s_maxgain):.2f} vs 실패 median={statistics.median(f_maxgain):.2f}")
+    print(f"  max_dd(%):    성공 median={statistics.median(s_mdd):.2f} vs 실패 median={statistics.median(f_mdd):.2f}")
+
+    # AUC for path features
+    auc_tpeak = auc_from_ranks(s_tpeak, f_tpeak)
+    auc_maxgain = auc_from_ranks(s_maxgain, f_maxgain)
+    if auc_tpeak:
+        print(f"  t_peak AUC: {auc_tpeak:.2f} (>0.5면 성공이 더 늦게 peak)")
+    if auc_maxgain:
+        print(f"  max_gain AUC: {auc_maxgain:.2f} (>0.5면 성공이 더 높은 고점)")
+
+
+# =========================
 # Main
 # =========================
 def main() -> None:
     parser = argparse.ArgumentParser(description="통합 분석 스크립트")
-    parser.add_argument("--mode", choices=["entry", "deep", "all"], default="all",
-                        help="분석 모드: entry(진입), deep(심층), all(전체)")
+    parser.add_argument("--mode", choices=["entry", "deep", "exit", "all"], default="all",
+                        help="분석 모드: entry(진입), deep(심층), exit(트레일링), all(전체)")
     args = parser.parse_args()
 
     print("=" * 80)
-    print("📊 통합 분석 스크립트 (Entry + Deep)")
+    print("📊 통합 분석 스크립트 (Entry + Deep + Exit)")
     print("    미래데이터 방지 + Wilder RSI + 5분봉 리샘플링 + AUC 판별력")
     print("=" * 80)
     print(f"모드: {args.mode}")
@@ -1108,6 +1329,9 @@ def main() -> None:
 
     if args.mode in ("deep", "all"):
         run_deep_analysis(client)
+
+    if args.mode in ("exit", "all"):
+        run_exit_analysis(client)
 
     print("\n" + "=" * 80)
     print("✅ 분석 완료")
