@@ -4362,21 +4362,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # if imbalance < imb_min_check:
     #     return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
-    # === 진입 신호 체크 (수렴돌파 OR 점화) ===
-    # 점화 3점 + 보조조건(turn>=1% or buy>=58%)
-    entry_signal = consol_detected or (ignition_score >= 3 and (turn_pct >= 1.0 or buy_ratio >= 0.58))
+    # === 진입 신호 체크 (수렴돌파만 사용) ===
+    # 🔧 v11: 점화 비활성화 - 분석 결과와 동일한 조건으로 통일
+    entry_signal = consol_detected
 
     if not entry_signal:
-        return False, f"진입조건미달 수렴={consol_score}/6 점화={ignition_score}/4"
+        return False, f"진입조건미달 수렴={consol_score}/6 (점화 비활성화)"
 
     # === 통과 ===
-    # 🔧 신호 타입: 리포트 집계용 단순 경로명 + 알림용 상세정보 분리
-    if consol_detected:
-        signal_tag = f"📊{consol_reason}"  # 리포트용: "📊수렴돌파"
-        detail_info = f"({consol_detail})"  # 알림용 상세: "(수렴0.3% 저점↑3회 양봉)"
-    else:
-        signal_tag = "🔥점화"
-        detail_info = ""
+    signal_tag = f"📊{consol_reason}"
+    detail_info = f"({consol_detail})"
 
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
