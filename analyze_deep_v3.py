@@ -771,8 +771,8 @@ def main():
         ("bb_pos_5m", "BB위치(5분봉)"),
     ]
 
-    print(f"\n{'지표':<20} | {'성공(평균/중앙)':>18} | {'실패(평균/중앙)':>18} | {'판별력':>8}")
-    print("-" * 80)
+    print(f"\n{'지표':<18} | {'성공(평균/중앙)':>16} | {'실패(평균/중앙)':>16} | {'판별력':>6} | {'신뢰도':>6}")
+    print("-" * 90)
 
     discriminators = []  # 판별력 있는 지표 저장
 
@@ -788,6 +788,11 @@ def main():
             diff = s_avg - f_avg
             diff_med = s_med - f_med
 
+            # 🔧 신뢰도 계산: |평균-중앙값|/중앙값 (낮을수록 좋음)
+            s_reliability = abs(s_avg - s_med) / abs(s_med) * 100 if s_med != 0 else 0
+            f_reliability = abs(f_avg - f_med) / abs(f_med) * 100 if f_med != 0 else 0
+            avg_reliability = (s_reliability + f_reliability) / 2
+
             # 판별력 계산 (중앙값 기준으로도 계산)
             try:
                 all_vals = s_vals + f_vals
@@ -801,12 +806,13 @@ def main():
             # 더 보수적인 판별력 사용 (평균과 중앙값 중 낮은 것)
             final_disc = min(discriminant, discriminant_med)
 
-            # 판별력 0.5 이상이면 ★ 표시
+            # 판별력 0.5 이상이면 ★, 신뢰도 15% 이하면 ◆ 표시
             star = "★" if final_disc >= 0.5 else ""
-            print(f"{label:<20} | {s_avg:>7.2f}/{s_med:>7.2f} | {f_avg:>7.2f}/{f_med:>7.2f} | {final_disc:>6.2f} {star}")
+            reliable = "◆" if avg_reliability <= 15 else ""
+            print(f"{label:<18} | {s_avg:>6.2f}/{s_med:>6.2f} | {f_avg:>6.2f}/{f_med:>6.2f} | {final_disc:>5.2f}{star} | {avg_reliability:>5.1f}%{reliable}")
 
             if final_disc >= 0.5:
-                discriminators.append((label, s_avg, s_med, f_avg, f_med, diff, final_disc))
+                discriminators.append((label, s_avg, s_med, f_avg, f_med, diff, final_disc, avg_reliability))
 
     # ==========================================
     # 핵심 판별 지표
@@ -818,11 +824,15 @@ def main():
 
     discriminators.sort(key=lambda x: x[6], reverse=True)
 
-    for label, s_avg, s_med, f_avg, f_med, diff, disc in discriminators:
+    for item in discriminators:
+        label, s_avg, s_med, f_avg, f_med, diff, disc = item[:7]
+        reliability = item[7] if len(item) > 7 else 0
         direction = "성공이 높음" if diff > 0 else "실패가 높음"
+        reliable_str = "✓신뢰" if reliability <= 15 else "△편차큼"
         print(f"  ★ {label}:")
         print(f"      평균: 성공 {s_avg:.2f} vs 실패 {f_avg:.2f}")
-        print(f"      중앙: 성공 {s_med:.2f} vs 실패 {f_med:.2f} ({direction}, 판별력 {disc:.2f})")
+        print(f"      중앙: 성공 {s_med:.2f} vs 실패 {f_med:.2f}")
+        print(f"      ({direction}, 판별력 {disc:.2f}, {reliable_str} {reliability:.1f}%)")
 
     # ==========================================
     # 시간대별 분석

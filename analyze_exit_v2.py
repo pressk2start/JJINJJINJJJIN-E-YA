@@ -169,8 +169,10 @@ def analyze_price_path(ticker, date_str, time_str, minutes=30):
     max_gain = 0
     max_drawdown = 0
 
-    # 모든 눌림(고점 대비 하락) 기록
-    all_drawdowns_from_peak = []  # 고점 대비 하락폭 (%)
+    # 🔧 수정: 진짜 눌림만 집계 (하락 후 회복한 경우만)
+    true_pullbacks = []  # 회복된 눌림만 기록
+    current_pullback_low = None  # 현재 눌림 중 최저점
+    in_pullback = False  # 눌림 진행 중 여부
 
     for i, c in enumerate(post_candles):
         high = c["high_price"]
@@ -193,17 +195,31 @@ def analyze_price_path(ticker, date_str, time_str, minutes=30):
         max_gain = max(max_gain, gain_high)
         max_drawdown = min(max_drawdown, gain_low)
 
-        # 고점 갱신
-        if high > running_high:
-            running_high = high
-
-        # 현재 고점 대비 하락폭 기록
+        # 🔧 진짜 눌림 감지 로직
         if running_high > entry_price:
-            drop_from_peak = (running_high - low) / running_high * 100
-            if drop_from_peak > 0.05:  # 0.05% 이상 하락만 기록
-                all_drawdowns_from_peak.append(drop_from_peak)
+            if high >= running_high:
+                # 고점 갱신됨 = 이전 눌림이 있었다면 "회복 완료"
+                if in_pullback and current_pullback_low is not None:
+                    pullback_depth = (running_high - current_pullback_low) / running_high * 100
+                    if pullback_depth > 0.1:  # 0.1% 이상만 기록
+                        true_pullbacks.append(pullback_depth)
+                # 리셋
+                running_high = high
+                in_pullback = False
+                current_pullback_low = None
+            else:
+                # 고점 미갱신 = 눌림 진행 중
+                in_pullback = True
+                if current_pullback_low is None:
+                    current_pullback_low = low
+                else:
+                    current_pullback_low = min(current_pullback_low, low)
+        else:
+            # 아직 진입가 위로 안 올라감
+            if high > running_high:
+                running_high = high
 
-    # 최종 고점 대비 최종 가격 하락폭
+    # 최종 고점 대비 최종 가격 하락폭 (이건 눌림 아님, 최종 하락)
     final_price = post_candles[-1]["trade_price"]
     final_drop_from_peak = (running_high - final_price) / running_high * 100 if running_high > entry_price else 0
 
@@ -214,7 +230,7 @@ def analyze_price_path(ticker, date_str, time_str, minutes=30):
         "peak_price": running_high,
         "entry_price": entry_price,
         "final_drop_from_peak": final_drop_from_peak,
-        "all_drawdowns": all_drawdowns_from_peak,
+        "true_pullbacks": true_pullbacks,  # 🔧 진짜 눌림만 (회복된 것)
         "prices": prices,
     }
 
@@ -294,30 +310,32 @@ def main():
     print(f"  평균: {statistics.mean(final_drops):.2f}%")
     print(f"  중앙값: {statistics.median(final_drops):.2f}%")
 
-    # === 모든 눌림 분석 ===
+    # === 진짜 눌림 분석 (회복된 것만) ===
     print("\n" + "=" * 80)
-    print("📉 중간 눌림 분석 (고점 대비 하락)")
+    print("📉 진짜 눌림 분석 (하락 후 회복된 것만)")
     print("=" * 80)
 
-    all_drawdowns = []
+    true_pullbacks = []
     for r in success_results:
-        all_drawdowns.extend(r["all_drawdowns"])
+        true_pullbacks.extend(r["true_pullbacks"])
 
-    if all_drawdowns:
-        print(f"\n총 눌림 횟수: {len(all_drawdowns)}회")
-        print(f"  평균: {statistics.mean(all_drawdowns):.2f}%")
-        print(f"  중앙값: {statistics.median(all_drawdowns):.2f}%")
-        print(f"  최대: {max(all_drawdowns):.2f}%")
+    if true_pullbacks:
+        print(f"\n총 눌림 횟수: {len(true_pullbacks)}회 (회복된 것만)")
+        print(f"  평균: {statistics.mean(true_pullbacks):.2f}%")
+        print(f"  중앙값: {statistics.median(true_pullbacks):.2f}%")
+        print(f"  최대: {max(true_pullbacks):.2f}%")
 
         # 분포
         print("\n[눌림 깊이 분포]")
         bins = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0),
                 (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 100)]
         for low, high in bins:
-            cnt = sum(1 for v in all_drawdowns if low <= v < high)
-            pct = cnt / len(all_drawdowns) * 100 if all_drawdowns else 0
+            cnt = sum(1 for v in true_pullbacks if low <= v < high)
+            pct = cnt / len(true_pullbacks) * 100 if true_pullbacks else 0
             bar = "█" * int(pct / 3)
             print(f"  {low:.1f}%~{high:.1f}%: {cnt:>4}회 ({pct:>5.1f}%) {bar}")
+    else:
+        print("\n진짜 눌림(회복된 것) 없음")
 
     # === 트레일링 시뮬레이션 ===
     print("\n" + "=" * 80)
@@ -365,13 +383,13 @@ def main():
     print("💡 권장 트레일링 설정")
     print("=" * 80)
 
-    if all_drawdowns:
-        sorted_dd = sorted(all_drawdowns)
-        p50 = sorted_dd[int(len(sorted_dd) * 0.50)]
-        p75 = sorted_dd[int(len(sorted_dd) * 0.75)]
-        p90 = sorted_dd[int(len(sorted_dd) * 0.90)]
+    if true_pullbacks:
+        sorted_pb = sorted(true_pullbacks)
+        p50 = sorted_pb[int(len(sorted_pb) * 0.50)] if len(sorted_pb) > 1 else sorted_pb[0]
+        p75 = sorted_pb[int(len(sorted_pb) * 0.75)] if len(sorted_pb) > 1 else sorted_pb[0]
+        p90 = sorted_pb[int(len(sorted_pb) * 0.90)] if len(sorted_pb) > 1 else sorted_pb[0]
 
-        print(f"\n눌림 깊이 백분위:")
+        print(f"\n진짜 눌림(회복된 것) 깊이 백분위:")
         print(f"  50백분위: {p50:.2f}%")
         print(f"  75백분위: {p75:.2f}%")
         print(f"  90백분위: {p90:.2f}%")
