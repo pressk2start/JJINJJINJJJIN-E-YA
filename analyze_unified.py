@@ -677,7 +677,8 @@ class EntryFeatures:
 def analyze_entry(client: UpbitClient, case: Case) -> Optional[EntryFeatures]:
     """1분봉 캐시 사용 + entry_idx 기준 통일 + 5분봉 리샘플링"""
     candles_1m = get_1m_cached(client, case.ticker, case.dt_kst, count=200)
-    if not candles_1m or len(candles_1m) < 40:
+    # 5분봉 20개 = 1분봉 100개 필요, 여유 포함 120개
+    if not candles_1m or len(candles_1m) < 120:
         return None
 
     # Deep과 동일한 entry_idx 찾기 로직
@@ -1119,27 +1120,34 @@ def analyze_price_path(
 ) -> Optional[Dict[str, Any]]:
     """가격 경로 분석 - 진입 후 분봉별 고/저/종가 추적"""
     target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
-    to_time = _to_upbit_iso_kst(target_dt + timedelta(minutes=minutes) + timedelta(seconds=1))
+    end_dt = target_dt + timedelta(minutes=minutes)
 
-    raw = client.get_candles_minutes(ticker, to_time, unit=1, count=minutes + 120)
-    if not raw:
+    # Exit용 캐시 (end_dt 기준으로 별도 캐시)
+    cache_key = (ticker, end_dt)
+    if cache_key in _1m_cache:
+        candles_all = _1m_cache[cache_key]
+    else:
+        to_time = _to_upbit_iso_kst(end_dt + timedelta(seconds=1))
+        # count 클램프 (업비트 최대 200)
+        raw = client.get_candles_minutes(ticker, to_time, unit=1, count=min(200, minutes + 120))
+        if not raw:
+            return None
+        candles_all = _parse_candles(raw)
+        candles_all = [c for c in candles_all if c.dt_kst <= end_dt]
+        if candles_all:
+            _1m_cache[cache_key] = candles_all
+
+    if not candles_all or len(candles_all) < 10:
         return None
 
-    candles_all = _parse_candles(raw)
-    end_dt = target_dt + timedelta(minutes=minutes)
-    candles_window = [c for c in candles_all if c.dt_kst <= end_dt]
+    # 윈도우 정리: start_dt 하한 추가 (진입 10분 전 ~ end_dt)
+    start_dt = target_dt - timedelta(minutes=10)
+    candles_window = [c for c in candles_all if start_dt <= c.dt_kst <= end_dt]
     if len(candles_window) < 10:
         return None
 
-    # 진입 캔들 찾기 (가까운 dt, gap 60초 제한)
-    entry_idx = None
-    candidates = [(i, c) for i, c in enumerate(candles_window) if c.dt_kst <= target_dt]
-    if candidates:
-        i, c = candidates[-1]
-        gap = (target_dt - c.dt_kst).total_seconds()
-        if 0 <= gap <= 60:
-            entry_idx = i
-
+    # 공용 find_entry_index 사용 (entry/deep과 통일)
+    entry_idx = find_entry_index(candles_window, target_dt, max_gap_sec=60)
     if entry_idx is None:
         return None
 
@@ -1155,13 +1163,14 @@ def analyze_price_path(
     max_drawdown = 0.0
     t_peak = 0
 
-    prices: List[Dict[str, float]] = []
+    prices: List[Dict[str, Any]] = []
     for i, c in enumerate(post):
         gain_high = (c.high / entry_price - 1.0) * 100.0
         gain_low = (c.low / entry_price - 1.0) * 100.0
         gain_close = (c.close / entry_price - 1.0) * 100.0
 
-        prices.append({"minute": float(i), "high": gain_high, "low": gain_low, "close": gain_close})
+        # minute을 int로 (불필요한 float 제거)
+        prices.append({"minute": i, "high": gain_high, "low": gain_low, "close": gain_close})
 
         if c.high > running_high:
             running_high = c.high
@@ -1187,12 +1196,18 @@ def analyze_price_path(
     }
 
 
-def simulate_trailing(path: Dict[str, Any], trail_pct: float, model: str = "optimistic") -> Dict[str, Any]:
+def simulate_trailing(
+    path: Dict[str, Any],
+    trail_pct: float,
+    model: str = "optimistic",
+    fee_pct: float = 0.1,  # 업비트 왕복 수수료 약 0.1%
+) -> Dict[str, Any]:
     """
     트레일링 시뮬레이션
     model:
       - optimistic: exit at trail_stop when low crosses it
       - conservative: if low < trail_stop, assume fill at low (gap risk)
+    fee_pct: 왕복 수수료 (매수+매도)
     """
     entry_price = float(path["entry_price"])
     prices = path["prices"]
@@ -1210,17 +1225,18 @@ def simulate_trailing(path: Dict[str, Any], trail_pct: float, model: str = "opti
 
         if trail_stop is not None and low_price <= trail_stop:
             exit_price = trail_stop if model == "optimistic" else low_price
-            exit_gain = (exit_price / entry_price - 1.0) * 100.0
+            exit_gain = (exit_price / entry_price - 1.0) * 100.0 - fee_pct  # 수수료 차감
             return {
                 "triggered": True,
-                "minute": int(p["minute"]),
+                "minute": p["minute"],
                 "exit_gain": exit_gain,
             }
 
+    # 트레일 미발동 시 final_gain에서도 수수료 차감
     return {
         "triggered": False,
         "minute": None,
-        "exit_gain": float(path["final_gain"]),
+        "exit_gain": float(path["final_gain"]) - fee_pct,
     }
 
 
@@ -1229,11 +1245,12 @@ def score_trail(
     fail_paths: Sequence[Dict[str, Any]],
     trail_pct: float,
     model: str,
-    fail_penalty: float = 1.0,
+    fail_penalty: float = 1.5,
+    fee_pct: float = 0.1,
 ) -> Dict[str, Any]:
     """트레일별 점수 계산 - 성공 수익과 실패 손실 동시 고려"""
-    s_res = [simulate_trailing(p, trail_pct, model) for p in success_paths]
-    f_res = [simulate_trailing(p, trail_pct, model) for p in fail_paths]
+    s_res = [simulate_trailing(p, trail_pct, model, fee_pct) for p in success_paths]
+    f_res = [simulate_trailing(p, trail_pct, model, fee_pct) for p in fail_paths]
 
     s_gains = [r["exit_gain"] for r in s_res]
     f_gains = [r["exit_gain"] for r in f_res]
@@ -1241,15 +1258,20 @@ def score_trail(
     s_avg = statistics.mean(s_gains) if s_gains else 0.0
     f_avg = statistics.mean(f_gains) if f_gains else 0.0
 
-    # 목적함수: 성공 평균수익 - (패널티 * 실패 평균 손실)
-    f_downside = min(0.0, f_avg)
-    score = s_avg + fail_penalty * f_downside
+    # 개선된 목적함수: 실패 평균이 양수여도 리스크로 반영
+    # score = 성공평균 - fail_penalty * |실패평균| (실패는 어쨌든 리스크)
+    score = s_avg - fail_penalty * abs(f_avg)
+
+    # 하위 25% 평균도 계산 (꼬리 리스크)
+    f_gains_sorted = sorted(f_gains)
+    f_tail_25 = statistics.mean(f_gains_sorted[:max(1, len(f_gains_sorted) // 4)]) if f_gains_sorted else 0.0
 
     return {
         "trail_pct": trail_pct,
         "model": model,
         "s_avg": s_avg,
         "f_avg": f_avg,
+        "f_tail_25": f_tail_25,  # 실패 하위 25% 평균
         "score": score,
         "s_trigger_rate": sum(1 for r in s_res if r["triggered"]) / len(s_res) * 100.0 if s_res else 0.0,
         "f_trigger_rate": sum(1 for r in f_res if r["triggered"]) / len(f_res) * 100.0 if f_res else 0.0,
@@ -1299,10 +1321,10 @@ def run_exit_analysis(client: UpbitClient) -> None:
     best_con = max([r for r in rows if r["model"] == "conservative"], key=lambda x: x["score"])
 
     print("\n" + "=" * 80)
-    print("💡 추천 트레일링")
+    print("💡 추천 트레일링 (수수료 0.1% 반영)")
     print("=" * 80)
-    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  score={best_opt['score']:+.2f}  S_avg={best_opt['s_avg']:+.2f}%  F_avg={best_opt['f_avg']:+.2f}%")
-    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  score={best_con['score']:+.2f}  S_avg={best_con['s_avg']:+.2f}%  F_avg={best_con['f_avg']:+.2f}%")
+    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  score={best_opt['score']:+.2f}  S_avg={best_opt['s_avg']:+.2f}%  F_avg={best_opt['f_avg']:+.2f}%  F_tail25={best_opt['f_tail_25']:+.2f}%")
+    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  score={best_con['score']:+.2f}  S_avg={best_con['s_avg']:+.2f}%  F_avg={best_con['f_avg']:+.2f}%  F_tail25={best_con['f_tail_25']:+.2f}%")
 
     # 경로 피처 힌트
     print("\n" + "=" * 80)
@@ -1319,12 +1341,12 @@ def run_exit_analysis(client: UpbitClient) -> None:
     print(f"  max_gain(%):  성공 median={statistics.median(s_maxgain):.2f} vs 실패 median={statistics.median(f_maxgain):.2f}")
     print(f"  max_dd(%):    성공 median={statistics.median(s_mdd):.2f} vs 실패 median={statistics.median(f_mdd):.2f}")
 
-    # AUC for path features
+    # AUC for path features (is not None 조건으로 변경)
     auc_tpeak = auc_from_ranks(s_tpeak, f_tpeak)
     auc_maxgain = auc_from_ranks(s_maxgain, f_maxgain)
-    if auc_tpeak:
+    if auc_tpeak is not None:
         print(f"  t_peak AUC: {auc_tpeak:.2f} (>0.5면 성공이 더 늦게 peak)")
-    if auc_maxgain:
+    if auc_maxgain is not None:
         print(f"  max_gain AUC: {auc_maxgain:.2f} (>0.5면 성공이 더 높은 고점)")
 
 
