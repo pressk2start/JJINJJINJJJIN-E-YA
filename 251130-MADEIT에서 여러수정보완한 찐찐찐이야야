@@ -826,6 +826,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
+        # 🔧 FIX: 매매 OFF여도 TG 알림은 보내기
+        gate_reason = pre.get("gate_reason", "") if pre else ""
+        signal_type = pre.get("signal_type", "신호") if pre else "신호"
+        tg_send(f"🔔 <b>{signal_type} 감지</b> (매매OFF)\n{m}\n{gate_reason}")
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
@@ -3860,9 +3864,9 @@ def ignition_detected(
     # ---- 점수 계산 ----
     score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
 
-    # ---- 점화 판정: 4요건 중 4개 모두 + 스프레드 양호 ----
-    # 🔧 3/4 → 4/4로 강화 (점화 승률 15~22%로 가장 낮음)
-    is_ignition = (score >= 4) and spread_ok
+    # ---- 점화 판정: 4요건 중 3개 이상 + 스프레드 양호 ----
+    # 🔧 4/4 → 3/4로 완화 (알람이 너무 안 뜸)
+    is_ignition = (score >= 3) and spread_ok
 
     if is_ignition:
         # 마지막 신호 시각 기록
@@ -4277,7 +4281,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
-    is_ignition = (ignition_score >= 4)  # 🔧 3→4 강화
+    is_ignition = (ignition_score >= 3)  # 🔧 4→3 완화 (알람 활성화)
 
     # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
     metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
@@ -4360,8 +4364,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     #     return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
     # === 진입 신호 체크 (수렴돌파 OR 점화) ===
-    # 🔧 FIX: 점화 경로도 활성화 (테스트용)
-    entry_signal = consol_detected or (ignition_score >= 4)
+    # 🔧 FIX: 점화 경로도 활성화 + 3/4로 완화
+    entry_signal = consol_detected or (ignition_score >= 3)
 
     if not entry_signal:
         return False, f"진입조건미달 수렴={consol_score}/6 점화={ignition_score}/4"
@@ -4429,6 +4433,16 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
     """
     if len(c1) < 3:
         return None
+
+    # === 🔧 c5(5분봉) 20개 확보 (수렴돌파 조건에 필수) ===
+    if not c5 or len(c5) < 20:
+        try:
+            c5 = get_minutes_candles(5, m, 30)  # 30개 요청 (여유있게)
+        except Exception:
+            c5 = None
+    if not c5 or len(c5) < 20:
+        # 5분봉 부족 시 수렴돌파 불가 → 점화만 가능
+        c5 = None
 
     # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
     if any(stable in m.upper() for stable in ["USDT", "USDC", "DAI", "TUSD", "BUSD"]):
