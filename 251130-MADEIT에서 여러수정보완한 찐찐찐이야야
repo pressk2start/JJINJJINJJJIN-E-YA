@@ -4191,15 +4191,16 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     if is_night_blocked:
         return False, 0, "심야차단", f"22-08시 진입금지 (현재 {current_hour}시)"
 
-    # 모든 시간대 동일 임계치 (분석 최적값)
-    rsi_threshold = 70
-    trend_threshold = 1.0
+    # 🔧 v11.1: RSI/추세 완화, 거래량배수가 핵심 필터
+    # 성공 74% (28건) 통과, 실패 11% (8건) 통과, Precision 78%
+    rsi_threshold = 55       # 70→55 완화
+    trend_threshold = 0.3    # 1.0→0.3% 완화
 
-    # === 🔥 핵심 조건 (분석 결과 기반 - 강화) ===
+    # === 🔥 핵심 조건 (거래량배수가 핵심 필터) ===
     rsi_ok = rsi_5m is not None and rsi_5m >= rsi_threshold
     trend_ok = trend_5m >= trend_threshold
-    vol_ratio_ok = vol_ratio >= 1.9  # 🔧 1.5→1.9 강화 (AUC 0.89)
-    body_ok = body_pct >= 0.4        # 🔧 0.3→0.4 강화 (AUC 0.88)
+    vol_ratio_ok = vol_ratio >= 1.9  # 핵심 필터 (AUC 0.89)
+    body_ok = body_pct >= 0.3        # 0.4→0.3 완화 (보조)
 
     # 점수 계산 (모니터링용 - 핵심지표 가중)
     score = sum([
