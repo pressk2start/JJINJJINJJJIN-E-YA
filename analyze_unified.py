@@ -253,6 +253,42 @@ def _parse_candles(raw: List[Dict[str, Any]]) -> List[Candle]:
 
 
 # =========================
+# 1분봉 캐시 (API 중복 호출 방지)
+# =========================
+_1m_cache: Dict[Tuple[str, datetime], List[Candle]] = {}
+
+
+def get_1m_cached(client: UpbitClient, ticker: str, target_dt: datetime, count: int = 200) -> Optional[List[Candle]]:
+    """케이스별 1분봉 캐시 - entry/deep/exit 공유"""
+    key = (ticker, target_dt)
+    if key in _1m_cache:
+        return _1m_cache[key]
+
+    to_time = _to_upbit_iso_kst(target_dt + timedelta(seconds=1))
+    raw = client.get_candles_minutes(ticker, to_time, unit=1, count=count)
+    if not raw:
+        return None
+    candles = _parse_candles(raw)
+    candles = [c for c in candles if c.dt_kst <= target_dt]
+    if not candles:
+        return None
+    _1m_cache[key] = candles
+    return candles
+
+
+def find_entry_index(candles: Sequence[Candle], target_dt: datetime, max_gap_sec: int = 60) -> Optional[int]:
+    """
+    공용 진입 캔들 찾기 - 마지막 일치 선택 (dt <= target, gap <= max_gap_sec)
+    """
+    candidates = [(i, c) for i, c in enumerate(candles) if c.dt_kst <= target_dt]
+    if not candidates:
+        return None
+    i, c = candidates[-1]
+    gap = (target_dt - c.dt_kst).total_seconds()
+    return i if 0 <= gap <= max_gap_sec else None
+
+
+# =========================
 # Indicators
 # =========================
 def ema_series(values: Sequence[float], period: int) -> List[Optional[float]]:
@@ -639,24 +675,25 @@ class EntryFeatures:
 
 
 def analyze_entry(client: UpbitClient, case: Case) -> Optional[EntryFeatures]:
-    """1분봉으로 수집 후 5분봉 리샘플링"""
-    to_time = _to_upbit_iso_kst(case.dt_kst + timedelta(seconds=1))
-
-    raw = client.get_candles_minutes(case.ticker, to_time, unit=1, count=200)
-    if not raw:
+    """1분봉 캐시 사용 + entry_idx 기준 통일 + 5분봉 리샘플링"""
+    candles_1m = get_1m_cached(client, case.ticker, case.dt_kst, count=200)
+    if not candles_1m or len(candles_1m) < 40:
         return None
 
-    candles_1m = _parse_candles(raw)
-    candles_1m = [c for c in candles_1m if c.dt_kst <= case.dt_kst]
-
-    if len(candles_1m) < 60:
+    # Deep과 동일한 entry_idx 찾기 로직
+    entry_idx = find_entry_index(candles_1m, case.dt_kst, max_gap_sec=60)
+    if entry_idx is None:
         return None
+
+    # entry 직전까지 데이터로 5분봉 구성 (Deep과 기준 통일)
+    candles_1m_cut = candles_1m[:entry_idx + 1]
 
     # 5분봉 리샘플링
-    candles_5m = resample_5m(candles_1m)
+    candles_5m = resample_5m(candles_1m_cut)
     candles_5m = [c for c in candles_5m if c.dt_kst <= floor_to_5m(case.dt_kst)]
 
-    if len(candles_5m) < 25:
+    # 완화: 25 → 20 (RSI14 + EMA20 + BB20 모두 계산 가능)
+    if len(candles_5m) < 20:
         return None
 
     closes = [c.close for c in candles_5m[-30:]]
@@ -749,10 +786,11 @@ def run_entry_analysis(client: UpbitClient) -> None:
             if s_rate >= 50:
                 print(f"{rsi_min:>5} | {trend_min:>5.1f}% | {s_pass:>3}/{len(success_data):<3} ({s_rate:>4.0f}%) | {f_pass:>3}/{len(fail_data):<3} ({f_rate:>4.0f}%) | {precision:>7.1f}%")
 
-    # 최적 조합 찾기
-    print("\n💡 최적 조합 (Precision 기준)")
+    # 최적 조합 찾기 (min_total_pass 제약 추가)
+    print("\n💡 최적 조합 (Precision 기준, 최소 통과 10건)")
     best_precision = 0
     best_config = None
+    min_total_pass = 10  # Precision 뻥튀기 방지
 
     for rsi_min in range(55, 85):
         for trend_i in range(0, 25):
@@ -764,14 +802,15 @@ def run_entry_analysis(client: UpbitClient) -> None:
             total_pass = s_pass + f_pass
             precision = (s_pass / total_pass * 100) if total_pass > 0 else 0
 
-            if s_rate >= 50 and precision > best_precision:
+            # 성공 50% 유지 + 최소 통과 수 제약
+            if s_rate >= 50 and total_pass >= min_total_pass and precision > best_precision:
                 best_precision = precision
-                best_config = (rsi_min, trend_min, s_rate, precision)
+                best_config = (rsi_min, trend_min, s_rate, precision, total_pass)
 
     if best_config:
-        rsi_min, trend_min, s_rate, precision = best_config
+        rsi_min, trend_min, s_rate, precision, total_pass = best_config
         print(f"  RSI >= {rsi_min}, 추세 >= {trend_min:.1f}%")
-        print(f"  성공 통과: {s_rate:.0f}%, Precision: {precision:.1f}%")
+        print(f"  성공 통과: {s_rate:.0f}%, Precision: {precision:.1f}%, 총 통과: {total_pass}건")
 
     # 시간대별
     print("\n🕐 시간대별 성공률")
@@ -796,31 +835,14 @@ def run_entry_analysis(client: UpbitClient) -> None:
 # =========================
 def analyze_deep(client: UpbitClient, ticker: str, date_str: str, time_str: str) -> Optional[Dict[str, Any]]:
     target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
-    to_time = _to_upbit_iso_kst(target_dt + timedelta(seconds=1))
 
-    raw_1m = client.get_candles_minutes(ticker, to_time, unit=1, count=200)
-    if not raw_1m:
+    # 캐시 사용
+    candles_1m = get_1m_cached(client, ticker, target_dt, count=200)
+    if not candles_1m or len(candles_1m) < 60:
         return None
 
-    candles_1m_all = _parse_candles(raw_1m)
-    candles_1m = [c for c in candles_1m_all if c.dt_kst <= target_dt]
-    if len(candles_1m) < 60:
-        return None
-
-    # Find entry index
-    entry_idx = None
-    for i, c in enumerate(candles_1m):
-        if c.dt_kst == target_dt:
-            entry_idx = i
-            break
-    if entry_idx is None:
-        candidates = [(i, c) for i, c in enumerate(candles_1m) if c.dt_kst <= target_dt]
-        if candidates:
-            i, c = candidates[-1]
-            gap = (target_dt - c.dt_kst).total_seconds()
-            if 0 <= gap <= 60:
-                entry_idx = i
-
+    # 공용 find_entry_index 사용 (break 제거, 마지막 일치 선택)
+    entry_idx = find_entry_index(candles_1m, target_dt, max_gap_sec=60)
     if entry_idx is None or entry_idx < 35:
         return None
 
