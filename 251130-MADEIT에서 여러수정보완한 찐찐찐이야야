@@ -4373,8 +4373,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     #     return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
     # === 진입 신호 체크 (수렴돌파 OR 점화) ===
-    # 🔧 FIX: 점화 2점 + 보조조건(turn>=1% or buy>=58%)으로 완화
-    entry_signal = consol_detected or (ignition_score >= 2 and (turn_pct >= 1.0 or buy_ratio >= 0.58))
+    # 점화 3점 + 보조조건(turn>=1% or buy>=58%)
+    entry_signal = consol_detected or (ignition_score >= 3 and (turn_pct >= 1.0 or buy_ratio >= 0.58))
 
     if not entry_signal:
         return False, f"진입조건미달 수렴={consol_score}/6 점화={ignition_score}/4"
