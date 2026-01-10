@@ -53,14 +53,15 @@ HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
-# 🎯 구간별 트레일링 (Tiered Trailing) - 진입 직후부터 활성화
-# 수익 구간별 트레일링 폭 (🔧 저구간 타이트하게 조정):
-#   0% ~ +0.15%: 0.05% (매우 타이트 - 대부분 여기서 끝남)
-#   +0.15% ~ +0.3%: 0.08%
-#   +0.3% ~ +0.5%: 0.12%
-#   +0.5% ~ +1.0%: 0.2%
-#   +1.0% 이상: 0.3% (루즈 - 큰 상승 시 여유)
-# → 횡보탈출/얇은수익/Plateau 로직 통합 제거됨
+# 🎯 구간별 트레일링 (Tiered Trailing) - v10 최적화
+# analyze_unified 분석 결과: 0.2% optimistic이 최적 (score +0.35)
+# 수익 구간별 트레일링 폭 (🔧 저구간 살짝 완화 - 성공 t_peak median=20분):
+#   0% ~ +0.15%: 0.06% (기존 0.05% → 0.06% 완화)
+#   +0.15% ~ +0.3%: 0.10% (기존 0.08% → 0.10% 완화)
+#   +0.3% ~ +0.5%: 0.12% (유지)
+#   +0.5% ~ +1.0%: 0.2% (유지)
+#   +1.0% 이상: 0.3% (유지 - 큰 상승 시 여유)
+# → 성공 케이스가 늦게 고점 도달하므로 너무 타이트하면 일찍 털림
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -112,7 +113,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 4
         EXIT_DEBOUNCE_N = 2
         TRAIL_ATR_MULT = 0.7
-        TRAIL_DISTANCE_MIN = 0.0015  # 0.15% 간격 (가장 타이트)
+        TRAIL_DISTANCE_MIN = 0.002  # 🔧 0.15% → 0.2% (분석결과 최적)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2  # 컨텍스트 역전 더 민감
@@ -4076,16 +4077,19 @@ def calc_ema_list(prices, period):
 
 def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     """
-    수렴돌파 패턴 감지 - v7 (최적 임계치)
+    수렴돌파 패턴 감지 - v10 (조합 분석 기반 최적화)
 
-    🎯 목표: 실패 필터링 + 성공 최대화 (순효과 +68%)
+    🎯 목표: AUC 기반 핵심 지표 조합으로 실패 필터링 극대화
 
     [필수 조건 - 모두 AND]
     1. 양봉 (필수)
-    2. 5분봉 RSI >= 67 (65→67 미세 강화)
-    3. 5분봉추세 >= 0.7% (0.8→0.7 미세 완화)
+    2. 5분봉 RSI >= 67 (주간) / >= 73 (야간)
+    3. 5분봉추세 >= 0.5% (주간) / >= 1.0% (야간)
+    4. 진입봉 거래량배수 >= 1.9x (AUC 0.89 - 최고 판별력)
+    5. 진입봉 몸통% >= 0.4% (AUC 0.88)
+    6. 심야(22-06시) 진입 차단 (성공률 9%)
 
-    analyze_entry_v2: 성공 78%, 실패 10%, 순효과 +68%
+    analyze_unified 조합분석: Precision 52%+, 실패통과 10~11%
 
     Returns: (detected: bool, score: int, reason: str, detail: str)
     """
@@ -4140,6 +4144,15 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     cur = recent[-1]
     cur_is_bullish = cur["trade_price"] > cur["opening_price"]
     cur_price = cur["trade_price"]
+    cur_open = cur["opening_price"]
+
+    # === 🔥 진입봉 거래량배수 (AUC 0.89 - 최고 판별력) ===
+    cur_vol = cur.get("candle_acc_trade_volume", 0)
+    prev_vol_avg = sum(volumes[:-1]) / max(len(volumes) - 1, 1) if len(volumes) > 1 else 1
+    vol_ratio = cur_vol / prev_vol_avg if prev_vol_avg > 0 else 1.0
+
+    # === 🔥 진입봉 몸통% (AUC 0.88) ===
+    body_pct = abs(cur_price - cur_open) / cur_open * 100 if cur_open > 0 else 0
 
     # === 가격/EMA20 (모니터링용) ===
     ema20 = calc_ema_list(closes, 20)
@@ -4154,47 +4167,59 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     prev_vol = sum(volumes[:-5]) / 15 if len(volumes) >= 20 else 0
     vol_trend = recent_vol / prev_vol if prev_vol > 0 else 1
 
-    # === 조건 판정 (v9 - 시간대별 + 강화) ===
+    # === 조건 판정 (v10 - 조합 분석 기반) ===
     is_bullish = cur_is_bullish
 
-    # 🎯 시간대별 임계치 (analyze_entry_v2 + deep_v3 기반)
+    # 🎯 시간대별 임계치 (analyze_unified 조합분석 기반)
     from datetime import datetime
     current_hour = datetime.now().hour
+
+    # 심야(22-06시) 진입 차단 (성공률 9%)
+    is_night_restricted = current_hour >= 22 or current_hour < 6
     is_daytime = 8 <= current_hour < 18  # 08:00 ~ 17:59
 
-    if is_daytime:
-        # 주간: RSI>=68, 추세>=1.0% (순효과 +63%)
-        rsi_threshold = 68
-        trend_threshold = 1.0
-    else:
-        # 야간: 더 엄격 (성공률 13%)
-        rsi_threshold = 74
-        trend_threshold = 1.5
+    if is_night_restricted:
+        # 심야: 진입 차단 (성공률 9%)
+        return False, 0, "심야차단", f"심야시간({current_hour}시) 진입제한"
 
+    if is_daytime:
+        # 주간: RSI>=67, 추세>=0.5% (밸런스)
+        rsi_threshold = 67
+        trend_threshold = 0.5
+    else:
+        # 저녁(18-22시): RSI>=73, 추세>=1.0% (보수적)
+        rsi_threshold = 73
+        trend_threshold = 1.0
+
+    # === 🔥 핵심 조건 (AUC 기반) ===
     rsi_ok = rsi_5m is not None and rsi_5m >= rsi_threshold
     trend_ok = trend_5m >= trend_threshold
+    vol_ratio_ok = vol_ratio >= 1.9  # AUC 0.89 (실패통과 11%)
+    body_ok = body_pct >= 0.4       # AUC 0.88 (실패통과 10%)
 
-    # 점수 계산 (모니터링용 - 보조지표 포함)
+    # 점수 계산 (모니터링용 - 핵심지표 가중)
     score = sum([
-        int(rsi_ok),
-        int(trend_ok),
+        int(rsi_ok) * 2,       # RSI 가중
+        int(trend_ok) * 2,     # 추세 가중
+        int(vol_ratio_ok) * 3, # 거래량배수 최고 가중 (AUC 0.89)
+        int(body_ok) * 3,      # 몸통% 가중 (AUC 0.88)
         int(williams_r <= -41),
         int(bb_pos_5m >= 55),
         int(price_vs_ema20 >= 0.4),
         int(ema_ok),
-        int(vol_trend >= 1.5),
         int(is_bullish)
     ])
 
-    # 🎯 감지 조건: 양봉 + RSI/추세 (시간대별 차등)
-    # 주간(08-18시): RSI>=55, 추세>=0.3% | 야간: RSI>=74, 추세>=1.0%
-    detected = is_bullish and rsi_ok and trend_ok
+    # 🎯 감지 조건: 양봉 + RSI + 추세 + 거래량배수 + 몸통% (모두 AND)
+    detected = is_bullish and rsi_ok and trend_ok and vol_ratio_ok and body_ok
 
-    # 상세정보 (알림용 - 모든 지표 표시)
+    # 상세정보 (알림용 - 핵심 지표 강조)
     reason = "수렴돌파"
     rsi_str = f"RSI5m{rsi_5m:.0f}" if rsi_5m else "RSI?"
     ema_str = "EMA정배열" if ema_ok else "EMA역배열"
-    detail = f"{rsi_str} 추세{trend_5m:.2f}% WR{williams_r:.0f} BB{bb_pos_5m:.0f}% EMA20+{price_vs_ema20:.2f}% {ema_str} 거래량{vol_trend:.1f}x"
+    vol_tag = "✓" if vol_ratio_ok else "✗"
+    body_tag = "✓" if body_ok else "✗"
+    detail = f"{rsi_str} 추세{trend_5m:.2f}% 거래량{vol_ratio:.1f}x{vol_tag} 몸통{body_pct:.2f}%{body_tag} BB{bb_pos_5m:.0f}% {ema_str}"
 
     return detected, score, reason, detail
 
