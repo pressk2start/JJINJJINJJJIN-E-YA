@@ -1910,7 +1910,7 @@ GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
-GATE_FRESH_AGE_MAX = 4.5  # 🔧 2.0→4.5 완화 (스캔 6초 기준 현실적 값)
+GATE_FRESH_AGE_MAX = 8.0  # 🔧 SCAN_INTERVAL(6)+2 = 8초 (스캔 주기와 동기화)
 GATE_VOL_MIN = 30_000_000     # 🔧 3천만원 (원 단위) - 중소형코인 포함
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
@@ -4518,6 +4518,11 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
     turn = twin["krw"] / max(ob["depth_krw"], 1)
 
+    # 🔧 FIX: 실시간 거래대금 추정 (15초 대금을 60초로 환산)
+    # 초입(0~20초)에도 감지 가능하도록 1분봉 누적과 합성
+    rt_1m_krw_est = t15["krw"] * 4.0  # 15초 → 60초 환산
+    current_volume_gate = max(current_volume, rt_1m_krw_est)
+
     # 🔥 1단계 게이트 적용 (단일 통합 필터)
     # 점화 감지도 stage1_gate 내에서 처리
     vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
@@ -4597,7 +4602,7 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
         fresh_ok=fresh_ok,
         fresh_age=fresh_age,
         fresh_max_age=fresh_max_age,
-        current_volume=current_volume,
+        current_volume=current_volume_gate,  # 🔧 FIX: 실시간 추정치 합성
         price_change=price_change,
         mega=mega,
         # 🚀 신규 파라미터
@@ -4609,8 +4614,8 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
         candles_5m=c5   # 📊 5분봉 RSI 계산용
     )
     if not gate_ok:
-        # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
-        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=False)
+        # 🔧 FIX: near_miss=True로 변경 → CUT_SUMMARY에서 원인 확인 가능
+        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=True)
         return None
 
     # 🔥 BTC 역풍 시 추가 요건 체크 (게이트 통과 후)
