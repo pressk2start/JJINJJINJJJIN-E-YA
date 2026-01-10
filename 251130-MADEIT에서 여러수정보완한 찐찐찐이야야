@@ -152,6 +152,14 @@ for part in _raw_chats.split(","):
 
 print("[DEBUG] CHAT_IDS =", CHAT_IDS)  # 실행 시 한 번 찍혀서 확인용
 
+# 🔧 FIX: TG 설정 경고 (봇 시작 시 눈에 띄게 표시)
+if not TG_TOKEN or not CHAT_IDS:
+    print("\n" + "=" * 50)
+    print("⚠️  텔레그램 설정 미완료 - 알림이 콘솔에만 출력됩니다!")
+    print("   TG_TOKEN:", "설정됨" if TG_TOKEN else "❌ 미설정")
+    print("   CHAT_IDS:", CHAT_IDS if CHAT_IDS else "❌ 비어있음")
+    print("=" * 50 + "\n")
+
 # =========================
 # 🔥 점화 감지 (Ignition Detection) 전역 변수
 # =========================
@@ -1903,7 +1911,7 @@ GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
 GATE_FRESH_AGE_MAX = 4.5  # 🔧 2.0→4.5 완화 (스캔 6초 기준 현실적 값)
-GATE_VOL_MIN = 30_000     # 🔧 대폭완화: 100K→30K (3천만) - 중소형코인 포함
+GATE_VOL_MIN = 30_000_000     # 🔧 3천만원 (원 단위) - 중소형코인 포함
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
@@ -3853,7 +3861,8 @@ def ignition_detected(
         price_impulse = False
 
     # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 25%) ----
-    vol_burst = t10["krw"] >= 0.25 * avg_candle_volume if avg_candle_volume > 0 else False
+    # 🔧 FIX: avg_candle_volume이 0일 때 절대값 기준 fallback (80만원)
+    vol_burst = t10["krw"] >= 0.25 * avg_candle_volume if avg_candle_volume > 0 else t10["krw"] >= 800_000
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
@@ -4364,8 +4373,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     #     return False, f"호가균형취약 임밸{imbalance:.2f}<{imb_min_check:.2f}"
 
     # === 진입 신호 체크 (수렴돌파 OR 점화) ===
-    # 🔧 FIX: 점화 경로도 활성화 + 3/4로 완화
-    entry_signal = consol_detected or (ignition_score >= 3)
+    # 🔧 FIX: 점화 2점 + 보조조건(turn>=1% or buy>=58%)으로 완화
+    entry_signal = consol_detected or (ignition_score >= 2 and (turn_pct >= 1.0 or buy_ratio >= 0.58))
 
     if not entry_signal:
         return False, f"진입조건미달 수렴={consol_score}/6 점화={ignition_score}/4"
@@ -4461,6 +4470,7 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
         pos = OPEN_POSITIONS.get(m)
         if pos:
             # 🔧 FIX: 락 내부에서 체크해야 race condition 방지
+            cut("ALREADY_POS", f"{m} 이미 포지션 보유")
             return None
 
     # === 틱 기반 초봉(10초) 선행 진입 시그널 ===
@@ -4474,10 +4484,13 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
 
     ob = obc.get(m)
     if not ob or not isinstance(ob.get("raw"), dict):
+        cut("OB_MISS", f"{m} 호가데이터 없음")
         return None
     if not ob.get("raw", {}).get("orderbook_units"):
+        cut("OB_EMPTY", f"{m} 호가유닛 비어있음")
         return None
     if ob.get("depth_krw", 0) <= 0:
+        cut("DEPTH_LOW", f"{m} 호가깊이<=0")
         return None
 
     mega = is_mega_breakout(c1)
