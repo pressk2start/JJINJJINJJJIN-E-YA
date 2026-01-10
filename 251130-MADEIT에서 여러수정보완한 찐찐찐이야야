@@ -1902,7 +1902,7 @@ GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
-GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
+GATE_FRESH_AGE_MAX = 4.5  # 🔧 2.0→4.5 완화 (스캔 6초 기준 현실적 값)
 GATE_VOL_MIN = 30_000     # 🔧 대폭완화: 100K→30K (3천만) - 중소형코인 포함
 GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
@@ -3833,8 +3833,8 @@ def ignition_detected(
         baseline_tps = _IGNITION_BASELINE_TPS.get(market, 0.5)  # 기본값 0.5 tps
 
     t10 = micro_tape_stats_from_ticks(ticks, 10)
-    # 평시의 3배 이상, 최소 12틱
-    tps_threshold = max(12, 3 * baseline_tps * 10)
+    # 🔧 평시의 2.5배 이상, 최소 8틱 (12→8 완화)
+    tps_threshold = max(8, 2.5 * baseline_tps * 10)
     tps_burst = t10["n"] >= tps_threshold
 
     # ---- 2) 연속 매수 (10초 윈도우) ----
@@ -4178,20 +4178,20 @@ def detect_consolidation_breakout(candles_1m, candles_5m=None, min_candles=5):
     # 🔧 FIX: datetime.now() → now_kst() (타임존 버그 수정)
     current_hour = now_kst().hour
 
-    # 심야(22-06시) 진입 차단 (성공률 9%)
-    is_night_restricted = current_hour >= 22 or current_hour < 6
-    is_daytime = 8 <= current_hour < 18  # 08:00 ~ 17:59
-
-    if is_night_restricted:
-        # 심야: 진입 차단 (성공률 9%)
-        return False, 0, "심야차단", f"심야시간({current_hour}시) 진입제한"
+    # 시간대 구분
+    is_night_restricted = current_hour >= 22 or current_hour < 6  # 심야
+    is_daytime = 8 <= current_hour < 18  # 주간
 
     if is_daytime:
-        # 주간: RSI>=67, 추세>=0.5% (밸런스)
+        # 주간(08-18시): RSI>=67, 추세>=0.5% (밸런스)
         rsi_threshold = 67
         trend_threshold = 0.5
+    elif is_night_restricted:
+        # 🔧 심야(22-06시): 차단→엄격으로 변경 (RSI>=75, 추세>=1.2%)
+        rsi_threshold = 75
+        trend_threshold = 1.2
     else:
-        # 저녁(18-22시): RSI>=70, 추세>=0.8% (보수적, 기존보다 완화)
+        # 저녁(18-22시): RSI>=70, 추세>=0.8% (보수적)
         rsi_threshold = 70
         trend_threshold = 0.8
 
@@ -4431,7 +4431,14 @@ def detect_leader_stock(m, obc, c1, c5=None, tight_mode=False):
       - Probe(소액): 완화된 early 흐름 감지 → 초기 염탐 진입
       - Confirm(추세): 강한 점화/매집/돌파 → 확정 진입
     """
-    if len(c1) < 3:
+    # === 🔧 c1(1분봉) 30개 확보 (EMA20, vol_ma20, 수렴돌파에 필수) ===
+    if not c1 or len(c1) < 30:
+        try:
+            c1 = get_minutes_candles(1, m, 60)  # 60개 요청 (여유있게)
+        except Exception:
+            pass
+    if not c1 or len(c1) < 20:
+        cut("C1_SHORT", f"{m} c1={len(c1) if c1 else 0}<20")
         return None
 
     # === 🔧 c5(5분봉) 20개 확보 (수렴돌파 조건에 필수) ===
