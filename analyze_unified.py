@@ -260,6 +260,7 @@ def _parse_candles(raw: List[Dict[str, Any]]) -> List[Candle]:
 # 1분봉 캐시 (API 중복 호출 방지)
 # =========================
 _1m_cache: Dict[Tuple[str, datetime], List[Candle]] = {}
+_1m_cache_exit: Dict[Tuple[str, datetime], List[Candle]] = {}  # Exit용 별도 캐시 (미래 포함)
 
 
 def get_1m_cached(client: UpbitClient, ticker: str, target_dt: datetime, count: int = 200) -> Optional[List[Candle]]:
@@ -1126,20 +1127,20 @@ def analyze_price_path(
     target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
     end_dt = target_dt + timedelta(minutes=minutes)
 
-    # Exit용 캐시 (end_dt 기준으로 별도 캐시)
+    # Exit용 별도 캐시 (entry/deep과 분리 - 미래 데이터 포함)
     cache_key = (ticker, end_dt)
-    if cache_key in _1m_cache:
-        candles_all = _1m_cache[cache_key]
+    if cache_key in _1m_cache_exit:
+        candles_all = _1m_cache_exit[cache_key]
     else:
         to_time = _to_upbit_iso_kst(end_dt + timedelta(seconds=1))
-        # count 클램프 (업비트 최대 200)
-        raw = client.get_candles_minutes(ticker, to_time, unit=1, count=min(200, minutes + 120))
+        # 항상 200개 고정 (안정성 확보)
+        raw = client.get_candles_minutes(ticker, to_time, unit=1, count=200)
         if not raw:
             return None
         candles_all = _parse_candles(raw)
         candles_all = [c for c in candles_all if c.dt_kst <= end_dt]
         if candles_all:
-            _1m_cache[cache_key] = candles_all
+            _1m_cache_exit[cache_key] = candles_all
 
     if not candles_all or len(candles_all) < 10:
         return None
@@ -1157,7 +1158,9 @@ def analyze_price_path(
 
     entry = candles_window[entry_idx]
     post = candles_window[entry_idx:]
-    if len(post) < 3:
+    # 30분 분석이면 최소 24개(80%)는 있어야 의미있는 경로
+    min_post = int(minutes * 0.8)
+    if len(post) < min_post:
         return None
 
     entry_price = entry.close
@@ -1262,13 +1265,14 @@ def score_trail(
     s_avg = statistics.mean(s_gains) if s_gains else 0.0
     f_avg = statistics.mean(f_gains) if f_gains else 0.0
 
-    # 개선된 목적함수: 실패 평균이 양수여도 리스크로 반영
-    # score = 성공평균 - fail_penalty * |실패평균| (실패는 어쨌든 리스크)
-    score = s_avg - fail_penalty * abs(f_avg)
-
-    # 하위 25% 평균도 계산 (꼬리 리스크)
+    # 하위 25% 평균 계산 (꼬리 리스크)
     f_gains_sorted = sorted(f_gains)
     f_tail_25 = statistics.mean(f_gains_sorted[:max(1, len(f_gains_sorted) // 4)]) if f_gains_sorted else 0.0
+
+    # 개선된 목적함수: 꼬리 리스크 기반
+    # score = 성공평균 + fail_penalty * min(0, f_tail_25)
+    # → 실패군 전체가 +여도 "최악 구간"이 아프면 패널티
+    score = s_avg + fail_penalty * min(0.0, f_tail_25)
 
     return {
         "trail_pct": trail_pct,
