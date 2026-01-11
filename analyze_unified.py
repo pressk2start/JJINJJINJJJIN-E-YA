@@ -1,12 +1,10 @@
 # /analyze_unified.py
 # -*- coding: utf-8 -*-
 """
-통합 분석 스크립트 (Entry + Deep)
-- 미래 데이터 누수 방지
-- Wilder RSI
-- 1분봉 → 5분봉 리샘플링
-- AUC 기반 판별력
-- Precision 기반 최적 조합
+롤백 코드 기준 분석 스크립트
+- 롤백 코드의 stage1_gate / detect_leader_stock 지표 기준
+- 성공 케이스만 분석 (지표 분포 확인)
+- 1분봉 기반 지표 수집
 
 Usage:
   python3 analyze_unified.py              # 전체 분석
@@ -595,157 +593,197 @@ def find_optimal_threshold(
 
 
 # =========================
-# Entry Analysis (from entry_v3)
+# Entry Analysis (롤백 코드 기준)
 # =========================
 @dataclass(frozen=True)
 class EntryFeatures:
-    rsi_5m: float
-    trend_5m: float
-    price_vs_ema20: float
+    """롤백 코드 stage1_gate / detect_leader_stock 기준 지표"""
+    # 거래량 지표
+    vol_surge: float        # 현재 1분봉 거래량 / 과거 평균 (GATE_SURGE_MIN = 0.4x)
+    vol_vs_ma20: float      # 거래량 / MA20 (진입신호 >= 0.5x)
+
+    # 가격 지표
+    price_change: float     # 1분봉 가격변화율 % (GATE_PRICE_MIN = 0.05%)
+    ema20_breakout: bool    # 가격 > EMA20 (진입신호)
+    high_breakout: bool     # 가격 > 직전 고점 (진입신호)
+
+    # 추가 지표
+    accel: float            # 가속도 (GATE_ACCEL_MIN = 0.3x)
+    body_pct: float         # 진입봉 몸통 %
+    bullish: bool           # 양봉 여부
+
     hour: int
 
 
 def analyze_entry(client: UpbitClient, case: Case) -> Optional[EntryFeatures]:
-    """1분봉 캐시 사용 + entry_idx 기준 통일 + 5분봉 리샘플링"""
+    """1분봉 기반 롤백 코드 지표 수집"""
     candles_1m = get_1m_cached(client, case.ticker, case.dt_kst, count=200)
-    # 5분봉 20개 = 1분봉 100개 필요, 여유 포함 120개
-    if not candles_1m or len(candles_1m) < 120:
+    if not candles_1m or len(candles_1m) < 60:
         return None
 
-    # Deep과 동일한 entry_idx 찾기 로직
     entry_idx = find_entry_index(candles_1m, case.dt_kst, max_gap_sec=60)
-    if entry_idx is None:
+    if entry_idx is None or entry_idx < 30:
         return None
 
-    # entry 직전까지 데이터로 5분봉 구성 (Deep과 기준 통일)
-    candles_1m_cut = candles_1m[:entry_idx + 1]
-
-    # 5분봉 리샘플링
-    candles_5m = resample_5m(candles_1m_cut)
-    candles_5m = [c for c in candles_5m if c.dt_kst <= floor_to_5m(case.dt_kst)]
-
-    # 완화: 25 → 20 (RSI14 + EMA20 + BB20 모두 계산 가능)
-    if len(candles_5m) < 20:
+    # 진입봉과 과거 데이터
+    entry = candles_1m[entry_idx]
+    pre = candles_1m[max(0, entry_idx - 30):entry_idx]
+    if len(pre) < 20:
         return None
 
-    closes = [c.close for c in candles_5m[-30:]]
+    closes = [c.close for c in pre]
+    volumes = [c.volume for c in pre]
+    highs = [c.high for c in pre]
 
-    rsi = rsi_wilder(closes, 14)
-    rsi_val = float(rsi) if rsi is not None else 50.0
+    # 1. vol_surge: 현재 거래량 / 과거 평균 (롤백 코드: GATE_SURGE_MIN = 0.4x)
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
+    vol_surge = entry.volume / avg_vol if avg_vol > 0 else 0.0
 
-    if len(closes) >= 10:
-        recent_avg = sum(closes[-5:]) / 5
-        prev_avg = sum(closes[-10:-5]) / 5
-        trend = (recent_avg / prev_avg - 1.0) * 100.0 if prev_avg > 0 else 0.0
+    # 2. vol_vs_ma20: 거래량 / MA20 (롤백 코드 진입신호: >= 0.5x)
+    vol_ma20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else sum(volumes) / len(volumes)
+    vol_vs_ma20 = entry.volume / vol_ma20 if vol_ma20 > 0 else 0.0
+
+    # 3. price_change: 1분봉 가격변화 % (롤백 코드: GATE_PRICE_MIN = 0.05%)
+    price_change = (entry.close - entry.open) / entry.open * 100.0 if entry.open > 0 else 0.0
+
+    # 4. ema20_breakout: 가격 > EMA20 (롤백 코드 진입신호)
+    ema20 = calc_ema(closes + [entry.close], 20)
+    ema20_breakout = entry.close > ema20 if ema20 else False
+
+    # 5. high_breakout: 가격 > 직전 1분봉 고점 (롤백 코드 진입신호)
+    prev_high = highs[-1] if highs else entry.close
+    high_breakout = entry.close > prev_high
+
+    # 6. accel: 가속도 (롤백 코드: GATE_ACCEL_MIN = 0.3x)
+    #    최근 5분 거래량 변화율 / 이전 5분 거래량 변화율
+    if len(volumes) >= 10:
+        recent_vol = sum(volumes[-5:]) / 5
+        prev_vol = sum(volumes[-10:-5]) / 5
+        accel = recent_vol / prev_vol if prev_vol > 0 else 1.0
     else:
-        trend = 0.0
+        accel = 1.0
 
-    ema20 = calc_ema(closes, 20)
-    price_vs_ema20 = (closes[-1] / ema20 - 1.0) * 100.0 if ema20 else 0.0
+    # 7. body_pct: 진입봉 몸통 %
+    body_pct = abs(entry.close - entry.open) / entry.open * 100.0 if entry.open > 0 else 0.0
+
+    # 8. bullish: 양봉 여부
+    bullish = entry.close > entry.open
 
     return EntryFeatures(
-        rsi_5m=rsi_val,
-        trend_5m=trend,
-        price_vs_ema20=price_vs_ema20,
+        vol_surge=vol_surge,
+        vol_vs_ma20=vol_vs_ma20,
+        price_change=price_change,
+        ema20_breakout=ema20_breakout,
+        high_breakout=high_breakout,
+        accel=accel,
+        body_pct=body_pct,
+        bullish=bullish,
         hour=case.dt_kst.hour,
     )
 
 
 def run_entry_analysis(client: UpbitClient) -> None:
+    """롤백 코드 기준 진입 지표 분석 (성공 케이스만)"""
     print("\n" + "=" * 80)
-    print("📈 진입 조건 분석 (Entry Analysis)")
+    print("📈 롤백 코드 기준 진입 분석 (Entry Analysis)")
+    print("    stage1_gate / detect_leader_stock 지표")
     print("=" * 80)
 
-    success_data: List[EntryFeatures] = []
-    fail_data: List[EntryFeatures] = []
+    data: List[EntryFeatures] = []
 
     print("\n데이터 수집 중...")
     for ticker, date_str, time_str, is_success in CASES:
         case = Case.from_tuple(ticker, date_str, time_str, is_success)
         feats = analyze_entry(client, case)
         if feats is None:
+            print(f"  [SKIP] {ticker} {time_str}: 데이터 부족")
             continue
 
-        (success_data if is_success else fail_data).append(feats)
-        tag = "성공" if is_success else "실패"
-        print(f"  [{tag}] {ticker} {case.dt_kst.strftime('%H:%M')}: RSI={feats.rsi_5m:.0f} 추세={feats.trend_5m:.2f}%")
+        data.append(feats)
+        ema_tag = "EMA돌파" if feats.ema20_breakout else ""
+        high_tag = "고점돌파" if feats.high_breakout else ""
+        print(f"  [OK] {ticker} {time_str}: vol_surge={feats.vol_surge:.2f}x vol_ma20={feats.vol_vs_ma20:.2f}x 가격변화={feats.price_change:+.2f}% {ema_tag} {high_tag}")
 
-    print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
-    if not success_data or not fail_data:
+    print(f"\n수집 완료: {len(data)}건")
+    if len(data) < 5:
         print("데이터가 부족합니다.")
         return
 
-    s_rsi = [d.rsi_5m for d in success_data]
-    f_rsi = [d.rsi_5m for d in fail_data]
-    s_trend = [d.trend_5m for d in success_data]
-    f_trend = [d.trend_5m for d in fail_data]
+    # 롤백 코드 gate 임계치
+    GATE_SURGE_MIN = 0.4
+    GATE_PRICE_MIN = 0.05
+    GATE_ACCEL_MIN = 0.3
 
-    # RSI 분포
-    print("\n[RSI 분포]")
-    for low, high in [(0, 50), (50, 60), (60, 70), (70, 80), (80, 101)]:
-        s_cnt = sum(1 for v in s_rsi if low <= v < high)
-        f_cnt = sum(1 for v in f_rsi if low <= v < high)
-        s_pct = s_cnt / len(s_rsi) * 100
-        f_pct = f_cnt / len(f_rsi) * 100
-        print(f"  {low:>2}-{high:<3}: 성공 {s_cnt:>3}건 ({s_pct:>4.0f}%), 실패 {f_cnt:>3}건 ({f_pct:>4.0f}%)")
-
-    # 추세 분포
-    print("\n[추세 분포]")
-    for low, high in [(-10, 0), (0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 10)]:
-        s_cnt = sum(1 for v in s_trend if low <= v < high)
-        f_cnt = sum(1 for v in f_trend if low <= v < high)
-        s_pct = s_cnt / len(s_trend) * 100
-        f_pct = f_cnt / len(f_trend) * 100
-        print(f"  {low:>4.1f}~{high:<4.1f}%: 성공 {s_cnt:>3}건 ({s_pct:>4.0f}%), 실패 {f_cnt:>3}건 ({f_pct:>4.0f}%)")
-
-    # RSI + 추세 조합 테스트
+    # === 거래량 지표 분포 ===
     print("\n" + "=" * 80)
-    print("🔬 RSI + 추세 조합 테스트")
+    print("📊 거래량 지표 분포")
     print("=" * 80)
-    print(f"\n{'RSI':>5} | {'추세':>6} | {'성공통과':>14} | {'실패통과':>14} | {'Precision':>9}")
-    print("-" * 65)
 
-    for rsi_min in [55, 60, 65, 68, 70, 75]:
-        for trend_min in [0.3, 0.5, 0.8, 1.0, 1.2]:
-            s_pass = sum(1 for d in success_data if d.rsi_5m >= rsi_min and d.trend_5m >= trend_min)
-            f_pass = sum(1 for d in fail_data if d.rsi_5m >= rsi_min and d.trend_5m >= trend_min)
-            s_rate = s_pass / len(success_data) * 100
-            f_rate = f_pass / len(fail_data) * 100
+    vol_surge_vals = [d.vol_surge for d in data]
+    vol_ma20_vals = [d.vol_vs_ma20 for d in data]
 
-            total_pass = s_pass + f_pass
-            precision = (s_pass / total_pass * 100) if total_pass > 0 else 0
+    print(f"\n[vol_surge] 현재 거래량 / 과거 평균 (GATE_SURGE_MIN = {GATE_SURGE_MIN}x)")
+    for low, high in [(0, 0.4), (0.4, 0.8), (0.8, 1.5), (1.5, 3.0), (3.0, 100)]:
+        cnt = sum(1 for v in vol_surge_vals if low <= v < high)
+        pct = cnt / len(vol_surge_vals) * 100
+        gate_ok = "✓" if low >= GATE_SURGE_MIN else ""
+        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
 
-            if s_rate >= 50:
-                print(f"{rsi_min:>5} | {trend_min:>5.1f}% | {s_pass:>3}/{len(success_data):<3} ({s_rate:>4.0f}%) | {f_pass:>3}/{len(fail_data):<3} ({f_rate:>4.0f}%) | {precision:>7.1f}%")
+    print(f"\n[vol_vs_ma20] 거래량 / MA20 (진입신호 >= 0.5x)")
+    for low, high in [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 100)]:
+        cnt = sum(1 for v in vol_ma20_vals if low <= v < high)
+        pct = cnt / len(vol_ma20_vals) * 100
+        signal_ok = "✓진입신호" if low >= 0.5 else ""
+        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {signal_ok}")
 
-    # 최적 조합 찾기 (min_total_pass 제약 추가)
-    print("\n💡 최적 조합 (Precision 기준, 최소 통과 10건)")
-    best_precision = 0
-    best_config = None
-    min_total_pass = 10  # Precision 뻥튀기 방지
+    # === 가격 지표 분포 ===
+    print("\n" + "=" * 80)
+    print("📊 가격 지표 분포")
+    print("=" * 80)
 
-    for rsi_min in range(55, 85):
-        for trend_i in range(0, 25):
-            trend_min = trend_i / 10.0
-            s_pass = sum(1 for d in success_data if d.rsi_5m >= rsi_min and d.trend_5m >= trend_min)
-            f_pass = sum(1 for d in fail_data if d.rsi_5m >= rsi_min and d.trend_5m >= trend_min)
-            s_rate = s_pass / len(success_data) * 100
+    price_change_vals = [d.price_change for d in data]
 
-            total_pass = s_pass + f_pass
-            precision = (s_pass / total_pass * 100) if total_pass > 0 else 0
+    print(f"\n[price_change] 1분봉 가격변화 % (GATE_PRICE_MIN = {GATE_PRICE_MIN}%)")
+    for low, high in [(-1, 0), (0, 0.05), (0.05, 0.2), (0.2, 0.5), (0.5, 5)]:
+        cnt = sum(1 for v in price_change_vals if low <= v < high)
+        pct = cnt / len(price_change_vals) * 100
+        gate_ok = "✓" if low >= GATE_PRICE_MIN else ""
+        print(f"  {low:>5.2f}% ~ {high:<5.2f}%: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
 
-            # 성공 50% 유지 + 최소 통과 수 제약
-            if s_rate >= 50 and total_pass >= min_total_pass and precision > best_precision:
-                best_precision = precision
-                best_config = (rsi_min, trend_min, s_rate, precision, total_pass)
+    # === 진입 신호 분포 ===
+    print("\n" + "=" * 80)
+    print("📊 진입 신호 분포")
+    print("=" * 80)
 
-    if best_config:
-        rsi_min, trend_min, s_rate, precision, total_pass = best_config
-        print(f"  RSI >= {rsi_min}, 추세 >= {trend_min:.1f}%")
-        print(f"  성공 통과: {s_rate:.0f}%, Precision: {precision:.1f}%, 총 통과: {total_pass}건")
+    ema_cnt = sum(1 for d in data if d.ema20_breakout)
+    high_cnt = sum(1 for d in data if d.high_breakout)
+    vol_signal_cnt = sum(1 for d in data if d.vol_vs_ma20 >= 0.5)
+    any_signal = sum(1 for d in data if d.ema20_breakout or d.high_breakout or d.vol_vs_ma20 >= 0.5)
 
-    # 시간대별
-    print("\n🕐 시간대별 성공률")
+    print(f"\n롤백 코드 진입 신호: (EMA20돌파 OR 고점돌파 OR vol_vs_ma>=0.5x)")
+    print(f"  EMA20 돌파:        {ema_cnt:>3}건 ({ema_cnt/len(data)*100:>5.1f}%)")
+    print(f"  직전 고점 돌파:    {high_cnt:>3}건 ({high_cnt/len(data)*100:>5.1f}%)")
+    print(f"  vol_vs_ma >= 0.5x: {vol_signal_cnt:>3}건 ({vol_signal_cnt/len(data)*100:>5.1f}%)")
+    print(f"  ANY (OR 조건):     {any_signal:>3}건 ({any_signal/len(data)*100:>5.1f}%)")
+
+    # === 가속도 분포 ===
+    print("\n" + "=" * 80)
+    print("📊 가속도 분포")
+    print("=" * 80)
+
+    accel_vals = [d.accel for d in data]
+    print(f"\n[accel] 거래량 가속도 (GATE_ACCEL_MIN = {GATE_ACCEL_MIN}x)")
+    for low, high in [(0, 0.3), (0.3, 0.6), (0.6, 1.0), (1.0, 2.0), (2.0, 100)]:
+        cnt = sum(1 for v in accel_vals if low <= v < high)
+        pct = cnt / len(accel_vals) * 100
+        gate_ok = "✓" if low >= GATE_ACCEL_MIN else ""
+        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
+
+    # === 시간대별 분포 ===
+    print("\n" + "=" * 80)
+    print("🕐 시간대별 분포")
+    print("=" * 80)
+
     time_buckets = [
         ("아침 (8-10시)", lambda h: 8 <= h < 10),
         ("오전 (10-12시)", lambda h: 10 <= h < 12),
@@ -755,11 +793,37 @@ def run_entry_analysis(client: UpbitClient) -> None:
     ]
 
     for name, cond in time_buckets:
-        s_cnt = sum(1 for d in success_data if cond(d.hour))
-        f_cnt = sum(1 for d in fail_data if cond(d.hour))
-        total = s_cnt + f_cnt
-        rate = (s_cnt / total * 100) if total > 0 else 0
-        print(f"  {name}: 성공 {s_cnt} / 실패 {f_cnt} = {rate:.0f}%")
+        cnt = sum(1 for d in data if cond(d.hour))
+        pct = cnt / len(data) * 100
+        print(f"  {name}: {cnt:>3}건 ({pct:>5.1f}%)")
+
+    # === 통계 요약 ===
+    print("\n" + "=" * 80)
+    print("📈 통계 요약")
+    print("=" * 80)
+
+    print(f"\nvol_surge:    min={min(vol_surge_vals):.2f}x, max={max(vol_surge_vals):.2f}x, avg={statistics.mean(vol_surge_vals):.2f}x, med={statistics.median(vol_surge_vals):.2f}x")
+    print(f"vol_vs_ma20:  min={min(vol_ma20_vals):.2f}x, max={max(vol_ma20_vals):.2f}x, avg={statistics.mean(vol_ma20_vals):.2f}x, med={statistics.median(vol_ma20_vals):.2f}x")
+    print(f"price_change: min={min(price_change_vals):+.2f}%, max={max(price_change_vals):+.2f}%, avg={statistics.mean(price_change_vals):+.2f}%, med={statistics.median(price_change_vals):+.2f}%")
+    print(f"accel:        min={min(accel_vals):.2f}x, max={max(accel_vals):.2f}x, avg={statistics.mean(accel_vals):.2f}x, med={statistics.median(accel_vals):.2f}x")
+
+    bullish_cnt = sum(1 for d in data if d.bullish)
+    print(f"\n양봉 비율: {bullish_cnt}/{len(data)} ({bullish_cnt/len(data)*100:.1f}%)")
+
+    # === GATE 통과율 ===
+    print("\n" + "=" * 80)
+    print("🚪 GATE 통과율 (롤백 코드 임계치)")
+    print("=" * 80)
+
+    gate_surge_pass = sum(1 for d in data if d.vol_surge >= GATE_SURGE_MIN)
+    gate_price_pass = sum(1 for d in data if d.price_change >= GATE_PRICE_MIN)
+    gate_accel_pass = sum(1 for d in data if d.accel >= GATE_ACCEL_MIN)
+    gate_all_pass = sum(1 for d in data if d.vol_surge >= GATE_SURGE_MIN and d.price_change >= GATE_PRICE_MIN and d.accel >= GATE_ACCEL_MIN)
+
+    print(f"\n  vol_surge >= {GATE_SURGE_MIN}x:   {gate_surge_pass:>3}건 ({gate_surge_pass/len(data)*100:>5.1f}%)")
+    print(f"  price_change >= {GATE_PRICE_MIN}%: {gate_price_pass:>3}건 ({gate_price_pass/len(data)*100:>5.1f}%)")
+    print(f"  accel >= {GATE_ACCEL_MIN}x:        {gate_accel_pass:>3}건 ({gate_accel_pass/len(data)*100:>5.1f}%)")
+    print(f"  전체 AND 조건:      {gate_all_pass:>3}건 ({gate_all_pass/len(data)*100:>5.1f}%)")
 
 
 # =========================
@@ -913,303 +977,104 @@ def analyze_deep(client: UpbitClient, ticker: str, date_str: str, time_str: str)
 
 
 def run_deep_analysis(client: UpbitClient) -> None:
+    """롤백 코드 기준 심층 지표 분석 (성공 케이스만)"""
     print("\n" + "=" * 80)
-    print("🔬 심층 지표 분석 (Deep Analysis)")
+    print("🔬 심층 지표 분석 (Deep Analysis) - 성공 케이스만")
     print("=" * 80)
 
-    success: List[Dict[str, Any]] = []
-    fail: List[Dict[str, Any]] = []
+    data: List[Dict[str, Any]] = []
 
     for ticker, date_str, time_str, is_success in CASES:
-        label = "✅" if is_success else "❌"
-        print(f"분석 중: {label} {ticker} @ {date_str} {time_str}...", end=" ")
+        print(f"분석 중: {ticker} @ {date_str} {time_str}...", end=" ")
         r = analyze_deep(client, ticker, date_str, time_str)
         if r is None:
             print("✗")
             continue
-        r["is_success"] = is_success
-        (success if is_success else fail).append(r)
+        data.append(r)
         print("✓")
 
-    if not success or not fail:
-        print("\n성공/실패 케이스 모두 필요합니다.")
+    if len(data) < 5:
+        print("\n데이터가 부족합니다.")
         return
 
+    # 롤백 코드 관련 핵심 지표
     metrics = [
-        ("range_5", "5봉 범위(%)"),
-        ("range_10", "10봉 범위(%)"),
-        ("pos_30", "30봉 내 위치(%)"),
+        ("vol_ratio", "거래량배수"),
+        ("vol_trend", "거래량 추세"),
+        ("entry_body_pct", "진입봉 몸통(%)"),
+        ("price_vs_ema20", "가격/EMA20(%)"),
+        ("bullish_ratio_5", "양봉비율(%)"),
         ("higher_lows", "저점상승 횟수"),
         ("higher_highs", "고점상승 횟수"),
-        ("bullish_ratio_5", "양봉비율(%)"),
-        ("entry_body_pct", "진입봉 몸통(%)"),
-        ("vol_ratio", "진입봉 거래량배수"),
-        ("vol_trend", "거래량 추세"),
+        ("range_5", "5봉 범위(%)"),
+        ("pos_30", "30봉 내 위치(%)"),
         ("rsi_14", "RSI(14)"),
-        ("rsi_6", "RSI(6)"),
-        ("macd", "MACD"),
-        ("macd_hist", "MACD 히스토"),
-        ("bb_width", "BB폭(%)"),
-        ("bb_pos", "BB위치(%)"),
-        ("stoch_k", "스토캐스틱K"),
-        ("stoch_d", "스토캐스틱D"),
-        ("atr", "ATR(%)"),
-        ("obv_trend", "OBV기울기"),
-        ("cci", "CCI"),
-        ("williams_r", "Williams %R"),
-        ("adx", "ADX"),
-        ("mfi", "MFI"),
-        ("roc_10", "ROC(10)"),
-        ("disparity_20", "이격도(20)"),
-        ("price_accel", "가격가속도"),
-        ("ema_5_10", "EMA5/10(%)"),
-        ("ema_10_20", "EMA10/20(%)"),
-        ("price_vs_ema20", "가격/EMA20(%)"),
         ("rsi_5m", "RSI(5분봉)"),
         ("trend_5m", "5분봉추세(%)"),
-        ("bb_pos_5m", "BB위치(5분봉)"),
+        ("bb_pos", "BB위치(%)"),
+        ("stoch_k", "스토캐스틱K"),
+        ("adx", "ADX"),
+        ("mfi", "MFI"),
     ]
 
     print("\n" + "=" * 80)
-    print("⚖️ 성공 vs 실패 비교 (AUC 판별력)")
+    print("📊 성공 케이스 지표 분포")
     print("=" * 80)
-    print(f"\n{'지표':<18} | {'성공(평균/중앙)':>16} | {'실패(평균/중앙)':>16} | {'AUC':>6} | {'MAD%':>6}")
-    print("-" * 90)
-
-    discriminators: List[Tuple[str, str, float, float, float, float, float, float]] = []
+    print(f"\n{'지표':<18} | {'평균':>10} | {'중앙값':>10} | {'최소':>10} | {'최대':>10}")
+    print("-" * 65)
 
     for key, label in metrics:
-        s_vals = [float(r[key]) for r in success if key in r and r[key] is not None]
-        f_vals = [float(r[key]) for r in fail if key in r and r[key] is not None]
-        if not s_vals or not f_vals:
+        vals = [float(r[key]) for r in data if key in r and r[key] is not None]
+        if not vals:
             continue
 
-        s_avg, s_med = statistics.mean(s_vals), statistics.median(s_vals)
-        f_avg, f_med = statistics.mean(f_vals), statistics.median(f_vals)
+        avg = statistics.mean(vals)
+        med = statistics.median(vals)
+        min_v = min(vals)
+        max_v = max(vals)
 
-        auc = auc_from_ranks(s_vals, f_vals)
-        if auc is None:
-            continue
+        print(f"{label:<18} | {avg:>10.2f} | {med:>10.2f} | {min_v:>10.2f} | {max_v:>10.2f}")
 
-        all_vals = s_vals + f_vals
-        m = mad(all_vals) or 0.0
-        med_all = statistics.median(all_vals)
-        denom = abs(med_all) if abs(med_all) > 1e-9 else max(1.0, abs(statistics.mean(all_vals)))
-        mad_pct = (m / denom) * 100.0
-
-        print(f"{label:<18} | {s_avg:>6.2f}/{s_med:>6.2f} | {f_avg:>6.2f}/{f_med:>6.2f} | {auc:>5.2f} | {mad_pct:>5.1f}%")
-        discriminators.append((key, label, s_avg, s_med, f_avg, f_med, auc, mad_pct))
-
-    discriminators.sort(key=lambda x: abs(x[6] - 0.5), reverse=True)
-
+    # === 시간대별 분포 ===
     print("\n" + "=" * 80)
-    print("🎯 핵심 판별 지표 TOP (|AUC-0.5| 큰 순)")
+    print("🕐 시간대별 분포")
+    print("=" * 80)
+    morning_cnt = sum(1 for r in data if r.get('is_morning'))
+    afternoon_cnt = sum(1 for r in data if r.get('is_afternoon'))
+    night_cnt = sum(1 for r in data if r.get('is_night'))
+    print(f"  아침(8-10시):  {morning_cnt:>3}건 ({morning_cnt/len(data)*100:>5.1f}%)")
+    print(f"  오후(13-16시): {afternoon_cnt:>3}건 ({afternoon_cnt/len(data)*100:>5.1f}%)")
+    print(f"  밤(20-06시):   {night_cnt:>3}건 ({night_cnt/len(data)*100:>5.1f}%)")
+
+    # === 롤백 코드 임계치 통과율 ===
+    print("\n" + "=" * 80)
+    print("🚪 롤백 코드 임계치 통과율")
     print("=" * 80)
 
-    top = discriminators[:10]
-    for key, label, s_avg, s_med, f_avg, f_med, auc, mad_pct in top:
-        direction = ">=" if s_med >= f_med else "<="
-        print(f"  ★ {label}: AUC {auc:.2f}, 방향 {direction}, MAD% {mad_pct:.1f}%")
+    # vol_ratio (진입봉 거래량배수)
+    vol_ratio_vals = [r.get("vol_ratio", 0) for r in data]
+    print(f"\n[거래량배수] 분포:")
+    for low, high in [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 100)]:
+        cnt = sum(1 for v in vol_ratio_vals if low <= v < high)
+        pct = cnt / len(vol_ratio_vals) * 100
+        print(f"  {low:>4.1f}x ~ {high:<5.1f}x: {cnt:>3}건 ({pct:>5.1f}%)")
 
-    print("\n" + "=" * 80)
-    print("🕐 시간대별 카운트")
-    print("=" * 80)
-    print(f"  아침(8-10시): 성공 {sum(1 for r in success if r.get('is_morning'))} / 실패 {sum(1 for r in fail if r.get('is_morning'))}")
-    print(f"  오후(13-16시): 성공 {sum(1 for r in success if r.get('is_afternoon'))} / 실패 {sum(1 for r in fail if r.get('is_afternoon'))}")
-    print(f"  밤(20-06시): 성공 {sum(1 for r in success if r.get('is_night'))} / 실패 {sum(1 for r in fail if r.get('is_night'))}")
+    # price_vs_ema20 (EMA20 돌파)
+    ema_vals = [r.get("price_vs_ema20", 0) for r in data]
+    ema_above = sum(1 for v in ema_vals if v > 0)
+    print(f"\n[가격 > EMA20] {ema_above:>3}건 ({ema_above/len(data)*100:>5.1f}%)")
 
-    print("\n" + "=" * 80)
-    print("💡 권장 진입 조건 (목표 성공통과율 70% 유지, 실패통과 최소)")
-    print("=" * 80)
-
-    target = 0.70
-    shown = 0
-    for key, label, s_avg, s_med, f_avg, f_med, auc, mad_pct in top:
-        s_vals = [float(r[key]) for r in success if key in r and r[key] is not None]
-        f_vals = [float(r[key]) for r in fail if key in r and r[key] is not None]
-        direction = ">=" if s_med >= f_med else "<="
-
-        opt = find_optimal_threshold(s_vals, f_vals, target, direction)
-        if opt is None:
-            continue
-        thr, s_rate, f_rate = opt
-        print(f"  - {label} {direction} {thr:.2f}  (성공 {s_rate*100:.0f}%, 실패 {f_rate*100:.0f}%, AUC {auc:.2f})")
-        shown += 1
-        if shown >= 8:
-            break
-
-    # === 조합 분석 추가 ===
-    run_combination_analysis(success, fail)
-
-
-def run_combination_analysis(success: List[Dict], fail: List[Dict]) -> None:
-    """핵심 지표 조합 분석 - 실제 봇 파라미터 기준"""
-    print("\n" + "=" * 80)
-    print("🔥 Entry 조합 분석 (봇 파라미터 매핑)")
-    print("=" * 80)
-
-    # 핵심 지표들 (봇에서 사용하는 것들)
-    # RSI_5분봉, 5분봉추세, 거래량배수, 몸통%, 가격/EMA20%, BB위치%
-
-    # RSI 임계치 후보
-    rsi_thresholds = [60, 65, 67, 68, 70, 72, 74]
-    # 추세 임계치 후보
-    trend_thresholds = [0.3, 0.5, 0.7, 0.8, 1.0, 1.2, 1.5]
-    # 거래량배수 임계치 후보
-    vol_thresholds = [1.0, 1.3, 1.5, 1.7, 1.9, 2.0, 2.5]
-    # 몸통% 임계치 후보
-    body_thresholds = [0.2, 0.3, 0.4, 0.5, 0.6]
-
-    results = []
-
-    # 1. RSI + 추세 조합 (봇 핵심 조건)
-    print("\n[1] RSI(5분봉) + 추세(5분봉) 조합")
-    print("-" * 70)
-    print(f"{'RSI':>5} | {'추세':>5} | {'성공통과':>12} | {'실패통과':>12} | {'Precision':>10}")
-    print("-" * 70)
-
-    for rsi_thr in rsi_thresholds:
-        for trend_thr in trend_thresholds:
-            s_pass = sum(1 for r in success
-                        if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                        and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr)
-            f_pass = sum(1 for r in fail
-                        if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                        and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr)
-
-            total = s_pass + f_pass
-            if total >= 5:  # 최소 5건 이상
-                prec = s_pass / total * 100
-                s_rate = s_pass / len(success) * 100 if success else 0
-                f_rate = f_pass / len(fail) * 100 if fail else 0
-                results.append({
-                    "combo": f"RSI>={rsi_thr} AND 추세>={trend_thr}",
-                    "s_pass": s_pass, "f_pass": f_pass, "total": total,
-                    "prec": prec, "s_rate": s_rate, "f_rate": f_rate,
-                    "score": prec - f_rate * 0.5  # precision 높고 실패통과율 낮을수록 좋음
-                })
-                print(f"{rsi_thr:>5} | {trend_thr:>5.1f}% | {s_pass:>4}/{len(success):>3} ({s_rate:>5.1f}%) | {f_pass:>4}/{len(fail):>3} ({f_rate:>5.1f}%) | {prec:>8.1f}%")
-
-    # 2. RSI + 추세 + 거래량배수 조합
-    print("\n[2] RSI + 추세 + 거래량배수 조합 (TOP 20)")
-    print("-" * 80)
-
-    combo_results = []
-    for rsi_thr in [65, 67, 68, 70]:
-        for trend_thr in [0.5, 0.7, 1.0]:
-            for vol_thr in [1.3, 1.5, 1.7, 1.9]:
-                s_pass = sum(1 for r in success
-                            if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                            and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr
-                            and r.get("vol_ratio") is not None and r["vol_ratio"] >= vol_thr)
-                f_pass = sum(1 for r in fail
-                            if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                            and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr
-                            and r.get("vol_ratio") is not None and r["vol_ratio"] >= vol_thr)
-
-                total = s_pass + f_pass
-                if total >= 5:
-                    prec = s_pass / total * 100
-                    s_rate = s_pass / len(success) * 100 if success else 0
-                    f_rate = f_pass / len(fail) * 100 if fail else 0
-                    combo_results.append({
-                        "combo": f"RSI>={rsi_thr} 추세>={trend_thr}% 거래량>={vol_thr}x",
-                        "s_pass": s_pass, "f_pass": f_pass, "total": total,
-                        "prec": prec, "s_rate": s_rate, "f_rate": f_rate,
-                        "score": prec * 0.7 + (100 - f_rate) * 0.3  # precision 70% + 실패차단 30%
-                    })
-
-    # score 기준 정렬
-    combo_results.sort(key=lambda x: x["score"], reverse=True)
-    print(f"{'조합':<45} | {'성공':>8} | {'실패':>8} | {'Prec':>6} | {'Score':>6}")
-    print("-" * 80)
-    for r in combo_results[:20]:
-        print(f"{r['combo']:<45} | {r['s_pass']:>3}/{len(success):>3} ({r['s_rate']:>4.0f}%) | {r['f_pass']:>3}/{len(fail):>3} ({r['f_rate']:>4.0f}%) | {r['prec']:>5.1f}% | {r['score']:>5.1f}")
-
-    # 3. 4개 지표 조합 (RSI + 추세 + 거래량 + 몸통)
-    print("\n[3] 4지표 조합 (RSI + 추세 + 거래량 + 몸통%) TOP 10")
-    print("-" * 90)
-
-    quad_results = []
-    for rsi_thr in [65, 68, 70]:
-        for trend_thr in [0.5, 0.7, 1.0]:
-            for vol_thr in [1.5, 1.7]:
-                for body_thr in [0.3, 0.4, 0.5]:
-                    s_pass = sum(1 for r in success
-                                if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                                and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr
-                                and r.get("vol_ratio") is not None and r["vol_ratio"] >= vol_thr
-                                and r.get("body_pct") is not None and r["body_pct"] >= body_thr)
-                    f_pass = sum(1 for r in fail
-                                if r.get("rsi_5m") is not None and r["rsi_5m"] >= rsi_thr
-                                and r.get("trend_5m") is not None and r["trend_5m"] >= trend_thr
-                                and r.get("vol_ratio") is not None and r["vol_ratio"] >= vol_thr
-                                and r.get("body_pct") is not None and r["body_pct"] >= body_thr)
-
-                    total = s_pass + f_pass
-                    if total >= 3:  # 4개 조합은 더 적은 샘플도 허용
-                        prec = s_pass / total * 100
-                        s_rate = s_pass / len(success) * 100 if success else 0
-                        f_rate = f_pass / len(fail) * 100 if fail else 0
-                        quad_results.append({
-                            "combo": f"RSI>={rsi_thr} 추세>={trend_thr}% 거래량>={vol_thr}x 몸통>={body_thr}%",
-                            "s_pass": s_pass, "f_pass": f_pass, "total": total,
-                            "prec": prec, "s_rate": s_rate, "f_rate": f_rate,
-                            "score": prec * 0.6 + (100 - f_rate) * 0.4
-                        })
-
-    quad_results.sort(key=lambda x: x["score"], reverse=True)
-    print(f"{'조합':<55} | {'성공':>8} | {'실패':>8} | {'Prec':>6}")
-    print("-" * 90)
-    for r in quad_results[:10]:
-        print(f"{r['combo']:<55} | {r['s_pass']:>3}/{len(success):>3} ({r['s_rate']:>4.0f}%) | {r['f_pass']:>3}/{len(fail):>3} ({r['f_rate']:>4.0f}%) | {r['prec']:>5.1f}%")
-
-    # === 최적 조합 결론 ===
-    print("\n" + "=" * 80)
-    print("⭐ Entry 최적 조합 결론")
-    print("=" * 80)
-
-    # 가장 좋은 2지표 조합
-    results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    if results:
-        best2 = results[0]
-        print(f"\n[2지표 최적] {best2['combo']}")
-        print(f"  → 성공 {best2['s_pass']}/{len(success)} ({best2['s_rate']:.0f}%), 실패 {best2['f_pass']}/{len(fail)} ({best2['f_rate']:.0f}%), Precision {best2['prec']:.1f}%")
-
-    # 가장 좋은 3지표 조합
-    if combo_results:
-        best3 = combo_results[0]
-        print(f"\n[3지표 최적] {best3['combo']}")
-        print(f"  → 성공 {best3['s_pass']}/{len(success)} ({best3['s_rate']:.0f}%), 실패 {best3['f_pass']}/{len(fail)} ({best3['f_rate']:.0f}%), Precision {best3['prec']:.1f}%")
-
-    # 가장 좋은 4지표 조합
-    if quad_results:
-        best4 = quad_results[0]
-        print(f"\n[4지표 최적] {best4['combo']}")
-        print(f"  → 성공 {best4['s_pass']}/{len(success)} ({best4['s_rate']:.0f}%), 실패 {best4['f_pass']}/{len(fail)} ({best4['f_rate']:.0f}%), Precision {best4['prec']:.1f}%")
-
-    # 봇 적용 권장값
-    print("\n" + "-" * 80)
-    print("📌 봇 적용 권장값 (detect_consolidation_breakout 기준)")
-    print("-" * 80)
-    if combo_results:
-        # precision >= 60% 이면서 성공통과율 >= 50% 인 것 중 최고
-        good_combos = [r for r in combo_results if r["prec"] >= 55 and r["s_rate"] >= 40]
-        if good_combos:
-            rec = good_combos[0]
-            # 조합 파싱
-            parts = rec["combo"].split()
-            rsi_val = parts[0].replace("RSI>=", "")
-            trend_val = parts[1].replace("추세>=", "").replace("%", "")
-            vol_val = parts[2].replace("거래량>=", "").replace("x", "")
-            print(f"  주간(08-18시): RSI >= {rsi_val}, 추세 >= {trend_val}%")
-            print(f"  야간(18-08시): RSI >= {int(rsi_val)+6}, 추세 >= {float(trend_val)+0.5}% (강화)")
-            print(f"  추가조건: 거래량배수 >= {vol_val}x")
-            print(f"  예상: Precision {rec['prec']:.1f}%, 성공통과 {rec['s_rate']:.0f}%, 실패통과 {rec['f_rate']:.0f}%")
+    # trend_5m (5분봉 추세)
+    trend_vals = [r.get("trend_5m", 0) for r in data]
+    print(f"\n[5분봉 추세] 분포:")
+    for low, high in [(-5, 0), (0, 0.3), (0.3, 0.7), (0.7, 1.5), (1.5, 10)]:
+        cnt = sum(1 for v in trend_vals if low <= v < high)
+        pct = cnt / len(trend_vals) * 100
+        print(f"  {low:>4.1f}% ~ {high:<4.1f}%: {cnt:>3}건 ({pct:>5.1f}%)")
 
 
 # =========================
-# Exit/Trailing Analysis (from trailing_v3)
+# Exit/Trailing Analysis (성공 케이스만)
 # =========================
 def analyze_price_path(
     client: UpbitClient,
@@ -1342,66 +1207,51 @@ def simulate_trailing(
     }
 
 
-def score_trail(
-    success_paths: Sequence[Dict[str, Any]],
-    fail_paths: Sequence[Dict[str, Any]],
+def score_trail_success_only(
+    paths: Sequence[Dict[str, Any]],
     trail_pct: float,
     model: str,
-    fail_penalty: float = 1.5,
     fee_pct: float = 0.1,
 ) -> Dict[str, Any]:
-    """트레일별 점수 계산 - 성공 수익과 실패 손실 동시 고려"""
-    s_res = [simulate_trailing(p, trail_pct, model, fee_pct) for p in success_paths]
-    f_res = [simulate_trailing(p, trail_pct, model, fee_pct) for p in fail_paths]
+    """트레일별 점수 계산 - 성공 케이스만"""
+    results = [simulate_trailing(p, trail_pct, model, fee_pct) for p in paths]
+    gains = [r["exit_gain"] for r in results]
 
-    s_gains = [r["exit_gain"] for r in s_res]
-    f_gains = [r["exit_gain"] for r in f_res]
+    avg_gain = statistics.mean(gains) if gains else 0.0
 
-    s_avg = statistics.mean(s_gains) if s_gains else 0.0
-    f_avg = statistics.mean(f_gains) if f_gains else 0.0
-
-    # 하위 25% 평균 계산 (꼬리 리스크)
-    f_gains_sorted = sorted(f_gains)
-    f_tail_25 = statistics.mean(f_gains_sorted[:max(1, len(f_gains_sorted) // 4)]) if f_gains_sorted else 0.0
-
-    # 개선된 목적함수: 꼬리 리스크 기반
-    # score = 성공평균 + fail_penalty * min(0, f_tail_25)
-    # → 실패군 전체가 +여도 "최악 구간"이 아프면 패널티
-    score = s_avg + fail_penalty * min(0.0, f_tail_25)
+    # 하위 25% 평균 (손실 리스크)
+    gains_sorted = sorted(gains)
+    tail_25 = statistics.mean(gains_sorted[:max(1, len(gains_sorted) // 4)]) if gains_sorted else 0.0
 
     return {
         "trail_pct": trail_pct,
         "model": model,
-        "s_avg": s_avg,
-        "f_avg": f_avg,
-        "f_tail_25": f_tail_25,  # 실패 하위 25% 평균
-        "score": score,
-        "s_trigger_rate": sum(1 for r in s_res if r["triggered"]) / len(s_res) * 100.0 if s_res else 0.0,
-        "f_trigger_rate": sum(1 for r in f_res if r["triggered"]) / len(f_res) * 100.0 if f_res else 0.0,
+        "avg_gain": avg_gain,
+        "tail_25": tail_25,
+        "trigger_rate": sum(1 for r in results if r["triggered"]) / len(results) * 100.0 if results else 0.0,
     }
 
 
 def run_exit_analysis(client: UpbitClient) -> None:
+    """트레일링/익절 분석 - 성공 케이스만"""
     print("\n" + "=" * 80)
-    print("🎯 트레일링/익절 분석 (Exit Analysis)")
-    print("    성공/실패 포함 + 체결모델(optimistic/conservative) + 목적함수")
+    print("🎯 트레일링/익절 분석 (Exit Analysis) - 성공 케이스만")
     print("=" * 80)
 
-    success_paths: List[Dict[str, Any]] = []
-    fail_paths: List[Dict[str, Any]] = []
+    paths: List[Dict[str, Any]] = []
 
     print("\n데이터 수집 중...")
     for ticker, date_str, time_str, is_success in CASES:
         path = analyze_price_path(client, ticker, date_str, time_str, minutes=30)
         if not path:
+            print(f"  [SKIP] {ticker} {time_str}")
             continue
-        tag = "✅" if is_success else "❌"
-        print(f"  [{tag}] {ticker} {time_str}: max+{path['max_gain']:.2f}% mdd{path['max_drawdown']:.2f}% t_peak={path['t_peak']}m")
-        (success_paths if is_success else fail_paths).append(path)
+        print(f"  [OK] {ticker} {time_str}: max+{path['max_gain']:.2f}% mdd{path['max_drawdown']:.2f}% t_peak={path['t_peak']}m")
+        paths.append(path)
 
-    print(f"\n수집 완료: 성공 {len(success_paths)}건, 실패 {len(fail_paths)}건")
-    if not success_paths or not fail_paths:
-        print("성공/실패 케이스 모두 필요합니다.")
+    print(f"\n수집 완료: {len(paths)}건")
+    if len(paths) < 5:
+        print("데이터가 부족합니다.")
         return
 
     trails = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
@@ -1413,47 +1263,36 @@ def run_exit_analysis(client: UpbitClient) -> None:
     rows: List[Dict[str, Any]] = []
     for model in ("optimistic", "conservative"):
         for t in trails:
-            rows.append(score_trail(success_paths, fail_paths, t, model=model, fail_penalty=1.5))
+            rows.append(score_trail_success_only(paths, t, model=model))
 
-    print(f"\n{'trail':>6} | {'model':<12} | {'S_avg':>8} | {'F_avg':>8} | {'score':>8} | {'S_trig':>6} | {'F_trig':>6}")
-    print("-" * 80)
-    for r in sorted(rows, key=lambda x: (x["model"], -x["score"])):
-        print(f"{r['trail_pct']:>5.1f}% | {r['model']:<12} | {r['s_avg']:>+7.2f}% | {r['f_avg']:>+7.2f}% | {r['score']:>+7.2f} | {r['s_trigger_rate']:>5.0f}% | {r['f_trigger_rate']:>5.0f}%")
+    print(f"\n{'trail':>6} | {'model':<12} | {'avg_gain':>10} | {'tail_25':>10} | {'trigger':>8}")
+    print("-" * 60)
+    for r in sorted(rows, key=lambda x: (x["model"], -x["avg_gain"])):
+        print(f"{r['trail_pct']:>5.1f}% | {r['model']:<12} | {r['avg_gain']:>+9.2f}% | {r['tail_25']:>+9.2f}% | {r['trigger_rate']:>6.0f}%")
 
-    best_opt = max([r for r in rows if r["model"] == "optimistic"], key=lambda x: x["score"])
-    best_con = max([r for r in rows if r["model"] == "conservative"], key=lambda x: x["score"])
+    best_opt = max([r for r in rows if r["model"] == "optimistic"], key=lambda x: x["avg_gain"])
+    best_con = max([r for r in rows if r["model"] == "conservative"], key=lambda x: x["avg_gain"])
 
     print("\n" + "=" * 80)
     print("💡 추천 트레일링 (수수료 0.1% 반영)")
     print("=" * 80)
-    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  score={best_opt['score']:+.2f}  S_avg={best_opt['s_avg']:+.2f}%  F_avg={best_opt['f_avg']:+.2f}%  F_tail25={best_opt['f_tail_25']:+.2f}%")
-    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  score={best_con['score']:+.2f}  S_avg={best_con['s_avg']:+.2f}%  F_avg={best_con['f_avg']:+.2f}%  F_tail25={best_con['f_tail_25']:+.2f}%")
+    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  avg={best_opt['avg_gain']:+.2f}%  tail25={best_opt['tail_25']:+.2f}%")
+    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  avg={best_con['avg_gain']:+.2f}%  tail25={best_con['tail_25']:+.2f}%")
 
-    # 경로 피처 힌트
+    # 경로 피처 통계
     print("\n" + "=" * 80)
-    print("🔎 힌트: 케이스별 경로 특성")
+    print("🔎 케이스별 경로 특성")
     print("=" * 80)
-    s_tpeak = [p["t_peak"] for p in success_paths]
-    f_tpeak = [p["t_peak"] for p in fail_paths]
-    s_maxgain = [p["max_gain"] for p in success_paths]
-    f_maxgain = [p["max_gain"] for p in fail_paths]
-    s_mdd = [p["max_drawdown"] for p in success_paths]
-    f_mdd = [p["max_drawdown"] for p in fail_paths]
+    tpeak = [p["t_peak"] for p in paths]
+    maxgain = [p["max_gain"] for p in paths]
+    mdd = [p["max_drawdown"] for p in paths]
 
-    print(f"  t_peak(분):   성공 median={statistics.median(s_tpeak):.0f} vs 실패 median={statistics.median(f_tpeak):.0f}")
-    print(f"  max_gain(%):  성공 median={statistics.median(s_maxgain):.2f} vs 실패 median={statistics.median(f_maxgain):.2f}")
-    print(f"  max_dd(%):    성공 median={statistics.median(s_mdd):.2f} vs 실패 median={statistics.median(f_mdd):.2f}")
-
-    # AUC for path features (is not None 조건으로 변경)
-    auc_tpeak = auc_from_ranks(s_tpeak, f_tpeak)
-    auc_maxgain = auc_from_ranks(s_maxgain, f_maxgain)
-    if auc_tpeak is not None:
-        print(f"  t_peak AUC: {auc_tpeak:.2f} (>0.5면 성공이 더 늦게 peak)")
-    if auc_maxgain is not None:
-        print(f"  max_gain AUC: {auc_maxgain:.2f} (>0.5면 성공이 더 높은 고점)")
+    print(f"  t_peak(분):   avg={statistics.mean(tpeak):.1f}, med={statistics.median(tpeak):.0f}, min={min(tpeak)}, max={max(tpeak)}")
+    print(f"  max_gain(%):  avg={statistics.mean(maxgain):.2f}, med={statistics.median(maxgain):.2f}, min={min(maxgain):.2f}, max={max(maxgain):.2f}")
+    print(f"  max_dd(%):    avg={statistics.mean(mdd):.2f}, med={statistics.median(mdd):.2f}, min={min(mdd):.2f}, max={max(mdd):.2f}")
 
     # === Tiered Trailing 시뮬레이션 ===
-    run_tiered_trailing_analysis(success_paths, fail_paths)
+    run_tiered_trailing_analysis_success_only(paths)
 
 
 def simulate_tiered_trailing(
@@ -1505,74 +1344,55 @@ def simulate_tiered_trailing(
     return {"triggered": False, "minute": None, "exit_gain": final_gain - fee_pct}
 
 
-def run_tiered_trailing_analysis(success_paths: List[Dict], fail_paths: List[Dict]) -> None:
-    """Tiered Trailing 분석 - 봇 설정과 비교"""
+def run_tiered_trailing_analysis_success_only(paths: List[Dict]) -> None:
+    """Tiered Trailing 분석 - 성공 케이스만"""
     print("\n" + "=" * 80)
-    print("🎯 Tiered Trailing 분석 (구간별 트레일링)")
+    print("🎯 Tiered Trailing 분석 (구간별 트레일링) - 성공 케이스만")
     print("=" * 80)
 
-    # 현재 봇 설정
-    bot_tiers = [
-        (0.0, 0.05),   # 0% ~ +0.15%: 0.05%
-        (0.15, 0.08),  # +0.15% ~ +0.3%: 0.08%
-        (0.3, 0.12),   # +0.3% ~ +0.5%: 0.12%
-        (0.5, 0.2),    # +0.5% ~ +1.0%: 0.2%
-        (1.0, 0.3),    # +1.0% 이상: 0.3%
-    ]
+    # 롤백 코드 설정 (TRAIL_DISTANCE_MIN = 0.002 = 0.2% 고정)
+    rollback_trail = 0.2
 
     # 후보 설정들
     tier_configs = {
-        "봇현재(0.05/0.08/0.12/0.2/0.3)": bot_tiers,
-        "타이트(0.03/0.05/0.08/0.12/0.2)": [
-            (0.0, 0.03), (0.15, 0.05), (0.3, 0.08), (0.5, 0.12), (1.0, 0.2)
+        "롤백코드(0.2% 고정)": [(0.0, 0.2)],
+        "타이트(0.15% 고정)": [(0.0, 0.15)],
+        "루즈(0.3% 고정)": [(0.0, 0.3)],
+        "단계별(0.1/0.15/0.2/0.3)": [
+            (0.0, 0.1), (0.3, 0.15), (0.5, 0.2), (1.0, 0.3)
         ],
-        "루즈(0.08/0.12/0.15/0.25/0.4)": [
-            (0.0, 0.08), (0.15, 0.12), (0.3, 0.15), (0.5, 0.25), (1.0, 0.4)
-        ],
-        "초타이트(0.02/0.04/0.06/0.1/0.15)": [
-            (0.0, 0.02), (0.15, 0.04), (0.3, 0.06), (0.5, 0.1), (1.0, 0.15)
-        ],
-        "균형(0.05/0.1/0.15/0.2/0.25)": [
-            (0.0, 0.05), (0.2, 0.1), (0.4, 0.15), (0.7, 0.2), (1.2, 0.25)
+        "단계별타이트(0.05/0.1/0.15/0.2)": [
+            (0.0, 0.05), (0.2, 0.1), (0.4, 0.15), (0.7, 0.2)
         ],
     }
 
     results = []
     for name, tiers in tier_configs.items():
         for model in ["optimistic", "conservative"]:
-            s_res = [simulate_tiered_trailing(p, tiers, model) for p in success_paths]
-            f_res = [simulate_tiered_trailing(p, tiers, model) for p in fail_paths]
+            res = [simulate_tiered_trailing(p, tiers, model) for p in paths]
+            gains = [r["exit_gain"] for r in res]
 
-            s_gains = [r["exit_gain"] for r in s_res]
-            f_gains = [r["exit_gain"] for r in f_res]
+            avg_gain = statistics.mean(gains) if gains else 0.0
 
-            s_avg = statistics.mean(s_gains) if s_gains else 0.0
-            f_avg = statistics.mean(f_gains) if f_gains else 0.0
-
-            f_sorted = sorted(f_gains)
-            f_tail_25 = statistics.mean(f_sorted[:max(1, len(f_sorted)//4)]) if f_sorted else 0.0
-
-            score = s_avg + 1.5 * min(0.0, f_tail_25)
+            gains_sorted = sorted(gains)
+            tail_25 = statistics.mean(gains_sorted[:max(1, len(gains_sorted)//4)]) if gains_sorted else 0.0
 
             results.append({
                 "name": name,
                 "model": model,
-                "s_avg": s_avg,
-                "f_avg": f_avg,
-                "f_tail_25": f_tail_25,
-                "score": score,
-                "s_trig": sum(1 for r in s_res if r["triggered"]) / len(s_res) * 100,
-                "f_trig": sum(1 for r in f_res if r["triggered"]) / len(f_res) * 100,
+                "avg_gain": avg_gain,
+                "tail_25": tail_25,
+                "trigger_rate": sum(1 for r in res if r["triggered"]) / len(res) * 100,
             })
 
     # 결과 출력
-    print(f"\n{'설정':<30} | {'모델':<12} | {'S_avg':>8} | {'F_avg':>8} | {'F_tail25':>8} | {'Score':>8}")
-    print("-" * 90)
+    print(f"\n{'설정':<25} | {'모델':<12} | {'avg_gain':>10} | {'tail_25':>10} | {'trigger':>8}")
+    print("-" * 75)
 
-    # score 기준 정렬
-    results.sort(key=lambda x: x["score"], reverse=True)
+    # avg_gain 기준 정렬
+    results.sort(key=lambda x: x["avg_gain"], reverse=True)
     for r in results:
-        print(f"{r['name']:<30} | {r['model']:<12} | {r['s_avg']:>+7.2f}% | {r['f_avg']:>+7.2f}% | {r['f_tail_25']:>+7.2f}% | {r['score']:>+7.2f}")
+        print(f"{r['name']:<25} | {r['model']:<12} | {r['avg_gain']:>+9.2f}% | {r['tail_25']:>+9.2f}% | {r['trigger_rate']:>6.0f}%")
 
     # 최적 설정 결론
     print("\n" + "=" * 80)
@@ -1581,51 +1401,32 @@ def run_tiered_trailing_analysis(success_paths: List[Dict], fail_paths: List[Dic
 
     best = results[0]
     print(f"\n[최적] {best['name']} ({best['model']})")
-    print(f"  → S_avg: {best['s_avg']:+.2f}%, F_avg: {best['f_avg']:+.2f}%, F_tail25: {best['f_tail_25']:+.2f}%")
-    print(f"  → Score: {best['score']:+.2f}")
+    print(f"  → avg_gain: {best['avg_gain']:+.2f}%, tail_25: {best['tail_25']:+.2f}%")
 
     # Optimistic vs Conservative 비교
-    best_opt = max([r for r in results if r["model"] == "optimistic"], key=lambda x: x["score"])
-    best_con = max([r for r in results if r["model"] == "conservative"], key=lambda x: x["score"])
+    best_opt = max([r for r in results if r["model"] == "optimistic"], key=lambda x: x["avg_gain"])
+    best_con = max([r for r in results if r["model"] == "conservative"], key=lambda x: x["avg_gain"])
 
-    print(f"\n[Optimistic 최적] {best_opt['name']}: Score {best_opt['score']:+.2f}")
-    print(f"[Conservative 최적] {best_con['name']}: Score {best_con['score']:+.2f}")
-
-    # 봇 적용 권장
-    print("\n" + "-" * 80)
-    print("📌 봇 적용 권장값")
-    print("-" * 80)
-    if best["model"] == "optimistic":
-        print("  체결모델: Optimistic (손절가 기준 - 실제 체결 가정)")
-    else:
-        print("  체결모델: Conservative (저가 기준 - 슬리피지 고려)")
-
-    # 최적 설정 해석
-    if "봇현재" in best["name"]:
-        print("  → 현재 봇 설정 유지 권장")
-    elif "타이트" in best["name"]:
-        print("  → 더 타이트한 트레일링 권장 (빠른 익절)")
-    elif "루즈" in best["name"]:
-        print("  → 더 루즈한 트레일링 권장 (큰 상승 포착)")
-    elif "초타이트" in best["name"]:
-        print("  → 매우 타이트한 트레일링 권장 (초단타)")
+    print(f"\n[Optimistic 최적] {best_opt['name']}: avg={best_opt['avg_gain']:+.2f}%")
+    print(f"[Conservative 최적] {best_con['name']}: avg={best_con['avg_gain']:+.2f}%")
 
 
 # =========================
 # Main
 # =========================
 def main() -> None:
-    parser = argparse.ArgumentParser(description="통합 분석 스크립트")
+    parser = argparse.ArgumentParser(description="롤백 코드 기준 분석 스크립트")
     parser.add_argument("--mode", choices=["entry", "deep", "exit", "all"], default="all",
                         help="분석 모드: entry(진입), deep(심층), exit(트레일링), all(전체)")
     args = parser.parse_args()
 
     print("=" * 80)
-    print("📊 통합 분석 스크립트 (Entry + Deep + Exit)")
-    print("    미래데이터 방지 + Wilder RSI + 5분봉 리샘플링 + AUC 판별력")
+    print("📊 롤백 코드 기준 분석 스크립트")
+    print("    stage1_gate / detect_leader_stock 지표 기준")
+    print("    성공 케이스만 분석 (지표 분포 확인)")
     print("=" * 80)
     print(f"모드: {args.mode}")
-    print(f"케이스: 성공 {sum(1 for c in CASES if c[3])}건, 실패 {sum(1 for c in CASES if not c[3])}건")
+    print(f"케이스: 성공 {len(CASES)}건")
 
     client = UpbitClient(min_interval_sec=0.12)
 
