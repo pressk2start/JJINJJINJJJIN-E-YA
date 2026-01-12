@@ -61,7 +61,23 @@ SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 
 
 # 트레일링 손절 설정
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
+TRAIL_DISTANCE_MIN = 0.002  # 기본 트레일 간격 (fallback용)
+
+# 🔧 단계별 타이트 트레일링 (실전분석: +0.11% avg vs 0.2% 고정 +0.02%)
+# (gain_threshold, trail_pct) - 수익률 구간별 트레일 간격
+TRAIL_TIERS = [
+    (0.007, 0.002),   # 0.7%+ 수익 시 0.2% 트레일
+    (0.004, 0.0015),  # 0.4%+ 수익 시 0.15% 트레일
+    (0.002, 0.001),   # 0.2%+ 수익 시 0.1% 트레일
+    (0.0, 0.0005),    # 기본 0.05% 트레일
+]
+
+def get_tiered_trail_dist(gain_pct: float) -> float:
+    """수익률에 따른 단계별 트레일 간격 반환"""
+    for threshold, trail in TRAIL_TIERS:
+        if gain_pct >= threshold:
+            return trail
+    return TRAIL_DISTANCE_MIN
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -2000,8 +2016,8 @@ GATE_CONSEC_MAX = 10      # 🔧 신규: 연속매수 상한 (승5 vs 패12~20)
 GATE_CV_MAX = 2.0         # 🔧 신규: CV 상한 (승1.47 vs 패2.05)
 GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정 (MED 2.7s, WAVES 5.2s 패배)
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
-GATE_SURGE_MIN = 0.4      # 🔧 완화: 0.8→0.4 (더 공격적)
-GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
+GATE_SURGE_MIN = 1.5      # 🔧 강화: 0.4→1.5 (실전분석: 성공 중앙값 2.53x vs 실패 1.28x)
+GATE_PRICE_MIN = 0.003    # 🔧 강화: 0.05%→0.3% (실전분석: AUC=0.722 최고 판별력)
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
@@ -5300,13 +5316,14 @@ def monitor_position(m,
 
             if (not trail_armed) and gain_from_entry >= PROFIT_CHECKPOINT:
                 trail_armed = True
-                # 초기 트레일: ATR 기준 혹은 최소거리
+                # 🔧 단계별 타이트 트레일링 적용 (실전분석 기반)
+                tiered_dist = get_tiered_trail_dist(gain_from_entry)
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
                 if atr and atr > 0:
-                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                    trail_dist = max(tiered_dist,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
-                    trail_dist = TRAIL_DISTANCE_MIN
+                    trail_dist = tiered_dist
                 trail_stop = curp * (1.0 - trail_dist)
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
@@ -5346,12 +5363,14 @@ def monitor_position(m,
 
             # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
             if trail_armed and new_high:
+                # 🔧 단계별 타이트 트레일링 적용 (수익 구간별 간격 조정)
+                tiered_dist = get_tiered_trail_dist(gain_from_entry)
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
                 if atr and atr > 0:
-                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                    trail_dist = max(tiered_dist,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
-                    trail_dist = TRAIL_DISTANCE_MIN
+                    trail_dist = tiered_dist
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             # 🔧 [신규] 트레일링 손절 실제 청산 트리거
