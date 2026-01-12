@@ -29,45 +29,87 @@ import requests
 # 입력 케이스
 # =========================
 CASES: List[Tuple[str, str, str, bool]] = [
-    # === 성공 케이스만 ===
-    ("TOSHI", "2026-01-06", "10:09", True),
-    ("BORA", "2026-01-06", "09:05", True),
-    ("PLUME", "2026-01-06", "10:29", True),
-    ("QTUM", "2026-01-06", "09:02", True),
-    ("DOOD", "2026-01-06", "10:11", True),
-    ("SUI", "2026-01-06", "09:00", True),
-    ("ONT", "2026-01-06", "09:03", True),
-    ("VIRTUAL", "2026-01-05", "10:24", True),
-    ("BSV", "2026-01-05", "09:51", True),
-    ("PEPE", "2026-01-04", "17:08", True),
-    ("BTT", "2026-01-06", "09:01", True),
-    ("SHIB", "2026-01-06", "01:10", True),
-    ("STORJ", "2026-01-05", "21:32", True),
-    ("XRP", "2026-01-05", "23:29", True),
-    ("BTC", "2026-01-05", "08:59", True),
-    ("ETH", "2026-01-05", "08:59", True),
-    ("VIRTUAL", "2026-01-03", "12:30", True),
-    ("ORCA", "2026-01-05", "09:01", True),
-    ("GRS", "2026-01-03", "14:42", True),
-    ("MMT", "2026-01-05", "19:52", True),
-    ("BOUNTY", "2026-01-07", "09:06", True),
-    ("MOC", "2026-01-07", "09:08", True),
-    ("FCT2", "2026-01-07", "09:07", True),
-    ("BOUNTY", "2026-01-07", "16:23", True),
-    ("ZKP", "2026-01-07", "19:39", True),
-    ("STRAX", "2026-01-08", "09:00", True),
-    ("BREV", "2026-01-08", "09:06", True),
-    ("ELF", "2026-01-08", "10:35", True),
-    ("MED", "2026-01-08", "11:21", True),
-    ("VIRTUAL", "2026-01-08", "17:18", True),
-    ("ARDR", "2026-01-08", "19:40", True),
-    ("IP", "2026-01-08", "18:20", True),
-    ("G", "2026-01-09", "04:23", True),
-    ("AQT", "2026-01-09", "10:45", True),
-    ("BOUNTY", "2026-01-09", "09:46", True),
-    ("BOUNTY", "2026-01-10", "09:57", True),
-    ("ELF", "2026-01-10", "09:00", True),
-    ("GMT", "2026-01-10", "11:32", True),
+    # === 1/11 실패 ===
+    ("SOL", "2026-01-11", "23:05", False),
+    ("BREV", "2026-01-11", "22:33", False),
+    ("IP", "2026-01-11", "21:28", False),
+    ("RENDER", "2026-01-11", "21:06", False),
+    ("ETH", "2026-01-11", "20:05", False),
+    ("SUI", "2026-01-11", "17:38", False),
+    ("VIRTUAL", "2026-01-11", "17:30", False),
+    ("BOUNTY", "2026-01-11", "17:22", False),
+    ("DEEP", "2026-01-11", "17:18", False),
+    ("DEEP", "2026-01-11", "16:22", False),
+    ("BCH", "2026-01-11", "15:19", False),
+    ("CTC", "2026-01-11", "14:37", False),
+    ("CTC", "2026-01-11", "13:39", False),
+    # === 1/11 성공 ===
+    ("BOUNTY", "2026-01-11", "14:18", True),
+    ("RENDER", "2026-01-11", "23:37", True),
+    ("RENDER", "2026-01-11", "23:35", True),
+    ("BOUNTY", "2026-01-11", "21:29", True),
+    # === 1/12 실패 (밤~아침) ===
+    ("SOL", "2026-01-12", "00:13", False),
+    ("ETH", "2026-01-12", "00:44", False),
+    ("XRP", "2026-01-12", "01:04", False),
+    ("SOL", "2026-01-12", "01:04", False),
+    ("DEEP", "2026-01-12", "01:55", False),
+    ("RENDER", "2026-01-12", "02:08", False),
+    ("RENDER", "2026-01-12", "02:17", False),
+    ("SOL", "2026-01-12", "03:21", False),
+    ("IP", "2026-01-12", "03:55", False),
+    ("RENDER", "2026-01-12", "04:06", False),
+    ("IP", "2026-01-12", "04:34", False),
+    ("BOUNTY", "2026-01-12", "04:54", False),
+    ("RENDER", "2026-01-12", "06:12", False),
+    ("IP", "2026-01-12", "07:42", False),
+    ("IP", "2026-01-12", "07:50", False),
+    ("RENDER", "2026-01-12", "08:01", False),
+    ("SUI", "2026-01-12", "08:43", False),
+    ("RENDER", "2026-01-12", "08:55", False),
+    ("G", "2026-01-12", "09:07", False),
+    ("RENDER", "2026-01-12", "09:08", False),
+    ("XRP", "2026-01-12", "09:13", False),
+    ("SUI", "2026-01-12", "09:39", False),
+    # === 1/12 실패 (오전~오후) ===
+    ("HP", "2026-01-12", "09:49", False),
+    ("ETH", "2026-01-12", "09:55", False),
+    ("IP", "2026-01-12", "10:04", False),
+    ("XAUT", "2026-01-12", "10:21", False),
+    ("XRP", "2026-01-12", "10:38", False),
+    ("IP", "2026-01-12", "10:39", False),
+    ("XRP", "2026-01-12", "10:49", False),
+    ("SUI", "2026-01-12", "11:03", False),
+    ("SUI", "2026-01-12", "11:08", False),
+    ("API3", "2026-01-12", "11:52", False),
+    ("SUI", "2026-01-12", "11:55", False),
+    ("ETC", "2026-01-12", "11:56", False),
+    ("IP", "2026-01-12", "11:57", False),
+    ("IP", "2026-01-12", "12:00", False),
+    ("XAUT", "2026-01-12", "13:20", False),
+    ("ZIL", "2026-01-12", "13:43", False),
+    ("IP", "2026-01-12", "14:03", False),
+    ("IP", "2026-01-12", "14:29", False),
+    ("BOUNTY", "2026-01-12", "14:44", False),
+    ("SOL", "2026-01-12", "14:44", False),
+    ("XAUT", "2026-01-12", "14:54", False),
+    ("ETH", "2026-01-12", "14:54", False),
+    ("SOL", "2026-01-12", "15:58", False),
+    ("XAUT", "2026-01-12", "16:24", False),
+    # === 1/12 성공 ===
+    ("SUI", "2026-01-12", "01:30", True),
+    ("IP", "2026-01-12", "08:08", True),
+    ("AVNT", "2026-01-12", "09:44", True),
+    ("IP", "2026-01-12", "09:54", True),
+    ("XRP", "2026-01-12", "09:54", True),
+    ("BTC", "2026-01-12", "10:00", True),
+    ("AKT", "2026-01-12", "10:02", True),
+    ("IP", "2026-01-12", "10:33", True),
+    ("ERA", "2026-01-12", "10:49", True),
+    ("IP", "2026-01-12", "11:00", True),
+    ("IP", "2026-01-12", "12:41", True),
+    ("XRP", "2026-01-12", "13:07", True),
+    ("ZIL", "2026-01-12", "13:45", True),
 ]
 
 
@@ -683,13 +725,14 @@ def analyze_entry(client: UpbitClient, case: Case) -> Optional[EntryFeatures]:
 
 
 def run_entry_analysis(client: UpbitClient) -> None:
-    """롤백 코드 기준 진입 지표 분석 (성공 케이스만)"""
+    """롤백 코드 기준 진입 지표 분석 (성공 vs 실패 비교)"""
     print("\n" + "=" * 80)
-    print("📈 롤백 코드 기준 진입 분석 (Entry Analysis)")
-    print("    stage1_gate / detect_leader_stock 지표")
+    print("📈 실전 데이터 기준 진입 분석 (Entry Analysis)")
+    print("    성공 vs 실패 비교")
     print("=" * 80)
 
-    data: List[EntryFeatures] = []
+    success_data: List[EntryFeatures] = []
+    fail_data: List[EntryFeatures] = []
 
     print("\n데이터 수집 중...")
     for ticker, date_str, time_str, is_success in CASES:
@@ -699,15 +742,20 @@ def run_entry_analysis(client: UpbitClient) -> None:
             print(f"  [SKIP] {ticker} {time_str}: 데이터 부족")
             continue
 
-        data.append(feats)
-        ema_tag = "EMA돌파" if feats.ema20_breakout else ""
-        high_tag = "고점돌파" if feats.high_breakout else ""
-        print(f"  [OK] {ticker} {time_str}: vol_surge={feats.vol_surge:.2f}x vol_ma20={feats.vol_vs_ma20:.2f}x 가격변화={feats.price_change:+.2f}% {ema_tag} {high_tag}")
+        if is_success:
+            success_data.append(feats)
+        else:
+            fail_data.append(feats)
 
-    print(f"\n수집 완료: {len(data)}건")
-    if len(data) < 5:
+        tag = "✓" if is_success else "✗"
+        print(f"  [{tag}] {ticker} {time_str}: vol_surge={feats.vol_surge:.2f}x price_change={feats.price_change:+.2f}%")
+
+    print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
+    if len(success_data) < 3 or len(fail_data) < 3:
         print("데이터가 부족합니다.")
         return
+
+    data = success_data + fail_data
 
     # 롤백 코드 gate 임계치
     GATE_SURGE_MIN = 0.4
@@ -824,6 +872,98 @@ def run_entry_analysis(client: UpbitClient) -> None:
     print(f"  price_change >= {GATE_PRICE_MIN}%: {gate_price_pass:>3}건 ({gate_price_pass/len(data)*100:>5.1f}%)")
     print(f"  accel >= {GATE_ACCEL_MIN}x:        {gate_accel_pass:>3}건 ({gate_accel_pass/len(data)*100:>5.1f}%)")
     print(f"  전체 AND 조건:      {gate_all_pass:>3}건 ({gate_all_pass/len(data)*100:>5.1f}%)")
+
+    # === 성공 vs 실패 비교 ===
+    print("\n" + "=" * 80)
+    print("⚔️ 성공 vs 실패 비교 (핵심)")
+    print("=" * 80)
+
+    s_vol_surge = [d.vol_surge for d in success_data]
+    f_vol_surge = [d.vol_surge for d in fail_data]
+    s_vol_ma20 = [d.vol_vs_ma20 for d in success_data]
+    f_vol_ma20 = [d.vol_vs_ma20 for d in fail_data]
+    s_price = [d.price_change for d in success_data]
+    f_price = [d.price_change for d in fail_data]
+    s_accel = [d.accel for d in success_data]
+    f_accel = [d.accel for d in fail_data]
+
+    print(f"\n{'지표':<15} | {'성공 평균':>10} | {'성공 중앙':>10} | {'실패 평균':>10} | {'실패 중앙':>10} | {'차이':>8}")
+    print("-" * 75)
+    print(f"{'vol_surge':<15} | {statistics.mean(s_vol_surge):>10.2f}x | {statistics.median(s_vol_surge):>10.2f}x | {statistics.mean(f_vol_surge):>10.2f}x | {statistics.median(f_vol_surge):>10.2f}x | {statistics.median(s_vol_surge)-statistics.median(f_vol_surge):>+8.2f}")
+    print(f"{'vol_vs_ma20':<15} | {statistics.mean(s_vol_ma20):>10.2f}x | {statistics.median(s_vol_ma20):>10.2f}x | {statistics.mean(f_vol_ma20):>10.2f}x | {statistics.median(f_vol_ma20):>10.2f}x | {statistics.median(s_vol_ma20)-statistics.median(f_vol_ma20):>+8.2f}")
+    print(f"{'price_change':<15} | {statistics.mean(s_price):>10.2f}% | {statistics.median(s_price):>10.2f}% | {statistics.mean(f_price):>10.2f}% | {statistics.median(f_price):>10.2f}% | {statistics.median(s_price)-statistics.median(f_price):>+8.2f}")
+    print(f"{'accel':<15} | {statistics.mean(s_accel):>10.2f}x | {statistics.median(s_accel):>10.2f}x | {statistics.mean(f_accel):>10.2f}x | {statistics.median(f_accel):>10.2f}x | {statistics.median(s_accel)-statistics.median(f_accel):>+8.2f}")
+
+    # 진입 신호 비교
+    print("\n[진입 신호 비교]")
+    s_ema = sum(1 for d in success_data if d.ema20_breakout)
+    f_ema = sum(1 for d in fail_data if d.ema20_breakout)
+    s_high = sum(1 for d in success_data if d.high_breakout)
+    f_high = sum(1 for d in fail_data if d.high_breakout)
+    print(f"  EMA20 돌파:  성공 {s_ema:>2}/{len(success_data)} ({s_ema/len(success_data)*100:>5.1f}%) vs 실패 {f_ema:>2}/{len(fail_data)} ({f_ema/len(fail_data)*100:>5.1f}%)")
+    print(f"  고점 돌파:   성공 {s_high:>2}/{len(success_data)} ({s_high/len(success_data)*100:>5.1f}%) vs 실패 {f_high:>2}/{len(fail_data)} ({f_high/len(fail_data)*100:>5.1f}%)")
+
+    # 양봉 비교
+    s_bull = sum(1 for d in success_data if d.bullish)
+    f_bull = sum(1 for d in fail_data if d.bullish)
+    print(f"  양봉 진입:   성공 {s_bull:>2}/{len(success_data)} ({s_bull/len(success_data)*100:>5.1f}%) vs 실패 {f_bull:>2}/{len(fail_data)} ({f_bull/len(fail_data)*100:>5.1f}%)")
+
+    # === AUC 판별력 ===
+    print("\n" + "=" * 80)
+    print("📊 AUC 판별력 (0.5=무작위, >0.5=성공이 높음, <0.5=실패가 높음)")
+    print("=" * 80)
+
+    auc_vol_surge = auc_from_ranks(s_vol_surge, f_vol_surge)
+    auc_vol_ma20 = auc_from_ranks(s_vol_ma20, f_vol_ma20)
+    auc_price = auc_from_ranks(s_price, f_price)
+    auc_accel = auc_from_ranks(s_accel, f_accel)
+
+    print(f"\n  vol_surge:    AUC = {auc_vol_surge:.3f}" if auc_vol_surge else "")
+    print(f"  vol_vs_ma20:  AUC = {auc_vol_ma20:.3f}" if auc_vol_ma20 else "")
+    print(f"  price_change: AUC = {auc_price:.3f}" if auc_price else "")
+    print(f"  accel:        AUC = {auc_accel:.3f}" if auc_accel else "")
+
+    # === 시간대별 승률 ===
+    print("\n" + "=" * 80)
+    print("🕐 시간대별 승률")
+    print("=" * 80)
+
+    time_buckets = [
+        ("아침 (8-10시)", lambda h: 8 <= h < 10),
+        ("오전 (10-12시)", lambda h: 10 <= h < 12),
+        ("오후 (12-18시)", lambda h: 12 <= h < 18),
+        ("저녁 (18-22시)", lambda h: 18 <= h < 22),
+        ("밤 (22-08시)", lambda h: h >= 22 or h < 8),
+    ]
+
+    for name, cond in time_buckets:
+        s_cnt = sum(1 for d in success_data if cond(d.hour))
+        f_cnt = sum(1 for d in fail_data if cond(d.hour))
+        total = s_cnt + f_cnt
+        rate = (s_cnt / total * 100) if total > 0 else 0
+        print(f"  {name}: 성공 {s_cnt:>2} / 실패 {f_cnt:>2} = {rate:>5.1f}% 승률")
+
+    # === 핵심 인사이트 ===
+    print("\n" + "=" * 80)
+    print("💡 핵심 인사이트")
+    print("=" * 80)
+
+    # 가장 판별력 있는 지표 찾기
+    aucs = [
+        ("vol_surge", auc_vol_surge or 0.5),
+        ("vol_vs_ma20", auc_vol_ma20 or 0.5),
+        ("price_change", auc_price or 0.5),
+        ("accel", auc_accel or 0.5),
+    ]
+    best_auc = max(aucs, key=lambda x: abs(x[1] - 0.5))
+    worst_auc = min(aucs, key=lambda x: abs(x[1] - 0.5))
+
+    print(f"\n  가장 판별력 있는 지표: {best_auc[0]} (AUC={best_auc[1]:.3f})")
+    print(f"  가장 판별력 없는 지표: {worst_auc[0]} (AUC={worst_auc[1]:.3f})")
+
+    if best_auc[1] < 0.55 and best_auc[1] > 0.45:
+        print("\n  ⚠️ 모든 지표의 판별력이 낮습니다 (AUC ≈ 0.5)")
+        print("     → 현재 사용 중인 지표로는 성공/실패 구분이 어렵습니다")
 
 
 # =========================
@@ -1420,13 +1560,16 @@ def main() -> None:
                         help="분석 모드: entry(진입), deep(심층), exit(트레일링), all(전체)")
     args = parser.parse_args()
 
+    success_cnt = sum(1 for c in CASES if c[3])
+    fail_cnt = sum(1 for c in CASES if not c[3])
+    win_rate = success_cnt / len(CASES) * 100 if CASES else 0
+
     print("=" * 80)
-    print("📊 롤백 코드 기준 분석 스크립트")
-    print("    stage1_gate / detect_leader_stock 지표 기준")
-    print("    성공 케이스만 분석 (지표 분포 확인)")
+    print("📊 실전 데이터 기준 분석 스크립트")
+    print("    1/11 ~ 1/12 실제 거래 결과 분석")
     print("=" * 80)
     print(f"모드: {args.mode}")
-    print(f"케이스: 성공 {len(CASES)}건")
+    print(f"케이스: 성공 {success_cnt}건, 실패 {fail_cnt}건 (승률 {win_rate:.1f}%)")
 
     client = UpbitClient(min_interval_sec=0.12)
 
