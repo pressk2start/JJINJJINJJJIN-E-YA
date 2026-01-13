@@ -2018,6 +2018,7 @@ GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 1.5      # 🔧 강화: 0.4→1.5 (실전분석: 성공 중앙값 2.53x vs 실패 1.28x)
 GATE_PRICE_MIN = 0.003    # 🔧 강화: 0.05%→0.3% (실전분석: AUC=0.722 최고 판별력)
+GATE_VOL_VS_MA20_MIN = 1.0  # 🔧 신규: vol/MA20 >= 1.0x (v2분석: AUC=0.841, 성공 3.28x vs 실패 0.84x)
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
@@ -4183,8 +4184,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     relax = ignition_score * 0.08  # 점수당 8% 완화 (3점이면 24% 완화)
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
-    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
-    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
+    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 1.5 → 0.4 (3점)
+    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점) - 진입신호용
+    eff_vol_vs_ma20_min = max(0.5, GATE_VOL_VS_MA20_MIN * (1 - relax))  # 1.0 → 0.5 (3점) - GATE 필터
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
@@ -4220,6 +4222,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 가격변동 하한 컷 (동적) ===
     if price_change < eff_price_min and not mega:
         return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
+
+    # === vol/MA20 하한 컷 (동적) - v2분석 AUC=0.841 ===
+    if vol_vs_ma < eff_vol_vs_ma20_min and not mega:
+        return False, f"MA20대비부족 {vol_vs_ma:.2f}x<{eff_vol_vs_ma20_min:.2f}x"
 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
