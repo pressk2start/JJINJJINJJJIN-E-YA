@@ -1610,7 +1610,7 @@ def close_auto_position(m, reason=""):
         # 🔧 DEBUG: 청산 알람 발송 직전 로그
         print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
 
-        tg_send(
+        tg_result = tg_send(
             f"====================================\n"
             f"{result_emoji} <b>자동청산 완료</b> {m}\n"
             f"====================================\n"
@@ -1625,6 +1625,8 @@ def close_auto_position(m, reason=""):
             f"====================================\n"
             f"{link_for(m)}"
         )
+        # 🔧 DEBUG: 청산 알람 발송 결과 확인
+        print(f"[CLOSE_DEBUG] {m} 청산알람 발송완료 | tg_result={tg_result}")
 
     except Exception as e:
         print("[AUTO SELL ERR]", e)
@@ -2018,7 +2020,7 @@ GATE_FRESH_AGE_MAX = 2.0  # 틱 신선도 상한 (초) - 데이터 기반 조정
 GATE_VOL_MIN = 100_000    # 🔧 완화: 200K→100K (1억) - 밤시간대 저유동성 대응
 GATE_SURGE_MIN = 1.5      # 🔧 강화: 0.4→1.5 (실전분석: 성공 중앙값 2.53x vs 실패 1.28x)
 GATE_PRICE_MIN = 0.003    # 🔧 강화: 0.05%→0.3% (실전분석: AUC=0.722 최고 판별력)
-GATE_VOL_VS_MA20_MIN = 1.0  # 🔧 신규: vol/MA20 >= 1.0x (v2분석: AUC=0.841, 성공 3.28x vs 실패 0.84x)
+GATE_VOL_VS_MA20_MIN = 0.8  # 🔧 완화: 1.0→0.8x (진입 빈도 개선)
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
