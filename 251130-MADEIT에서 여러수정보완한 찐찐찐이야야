@@ -1457,6 +1457,9 @@ def close_auto_position(m, reason=""):
     """
     손절/청산 시 자동 매도 (찌꺼기 방지 포함)
     """
+    # 🔧 DEBUG: 청산 함수 진입 확인
+    tg_send(f"🔧 [{m}] 청산시작 | {reason[:30]}")
+
     if not AUTO_TRADE:
         print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
         return
