@@ -5268,6 +5268,7 @@ def monitor_position(m,
 
             # 🔧 웜업 제거: 체결 직후부터 ATR 손절 적용
             if cur_gain <= -eff_sl_pct:
+                tg_send(f"⚠️ [{m}] ATR손절 트리거 | {cur_gain*100:.2f}%")  # DEBUG
                 close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% ({atr_info})")
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
@@ -5282,6 +5283,7 @@ def monitor_position(m,
                 # 청산 조건: 고점에서 0.03% 하락
                 SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
                 if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
+                    tg_send(f"⚠️ [{m}] 횡보탈출 트리거 | {alive_sec:.0f}초")  # DEBUG
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     verdict = "횡보탈출"
                     outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
@@ -5392,6 +5394,7 @@ def monitor_position(m,
                 trail_gain = (curp / entry_price - 1.0)
                 peak_gain = (best / entry_price - 1.0)
                 drop_pct = (best - curp) / best * 100
+                tg_send(f"⚠️ [{m}] 트레일링손절 트리거 | {trail_gain*100:+.2f}%")  # DEBUG
                 close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
                 verdict = "TRAIL_STOP"
                 break
@@ -5472,6 +5475,14 @@ def monitor_position(m,
         
         if verdict is None:
             verdict = "시간 만료(모니터링 종료)"
+
+    except Exception as _mon_ex:
+        # 🔧 DEBUG: 모니터링 루프 내 예외 발생 시 텔레그램 알람
+        print(f"[MON_LOOP_ERR] {m}: {_mon_ex}")
+        import traceback
+        traceback.print_exc()
+        tg_send(f"❌ [{m}] 모니터링 루프 예외\n{str(_mon_ex)[:100]}")
+        verdict = f"예외발생: {str(_mon_ex)[:50]}"
 
     finally:
         # ================================
@@ -6194,7 +6205,11 @@ def main():
                         try:
                             monitor_position(market, entry, pre_data, tight_mode=tight)
                         except Exception as e:
+                            # 🔧 DEBUG: 모니터링 예외 시 텔레그램 알람 추가
                             print(f"[MON_ERR] {market}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            tg_send(f"❌ [{market}] 모니터링 예외 발생\n{str(e)[:100]}")
                         finally:
                             _release_entry_lock(market)
 
