@@ -1625,8 +1625,11 @@ def close_auto_position(m, reason=""):
             f"====================================\n"
             f"{link_for(m)}"
         )
-        # 🔧 DEBUG: 청산 알람 발송 결과 확인
-        print(f"[CLOSE_DEBUG] {m} 청산알람 발송완료 | tg_result={tg_result}")
+        # 🔧 DEBUG: 청산 알람 발송 실패 시 재시도
+        if not tg_result:
+            print(f"[CLOSE_DEBUG] {m} 청산알람 실패! 재시도...")
+            time.sleep(1)
+            tg_send(f"⚠️ 청산알람 재전송 {m}\n{result_emoji} {ret_pct:+.2f}% | {reason}")
 
     except Exception as e:
         print("[AUTO SELL ERR]", e)
