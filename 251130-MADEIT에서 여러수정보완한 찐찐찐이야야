@@ -59,16 +59,8 @@ PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
 # 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
 SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
 
-# 트레일링 손절 설정 (계단식: 수익 클수록 느슨하게)
-# 🔧 "손절 타이트, 익절 느슨" 전략
-TRAIL_TIERS = [
-    # (수익률 도달, 트레일 거리)
-    (0.003, 0.002),   # +0.3% → 0.2% 트레일 (본절 확보)
-    (0.008, 0.004),   # +0.8% → 0.4% 트레일
-    (0.015, 0.006),   # +1.5% → 0.6% 트레일
-    (0.025, 0.010),   # +2.5% → 1.0% 트레일 (홈런 모드)
-]
-TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (백업용)
+# 트레일링 손절 설정
+TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
 TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
@@ -464,10 +456,8 @@ def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
     headers = _make_auth_headers(body)
-    # 🔧 FIX: pyupbit 공식 방식 - JSON body + Content-Type 명시
-    headers["Content-Type"] = "application/json"
     _throttle()
-    r = SESSION.post(url, headers=headers, data=json.dumps(body), timeout=timeout)
+    r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -1263,19 +1253,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 except Exception:
                     best_ask_krw = 0.0
 
-                # 🔥 놓친 지표들 계산
-                is_prebreak = pre.get("is_prebreak", False)
-                krw_per_sec = t15_stats.get("krw_per_sec", 0)
-                depth_krw = ob.get("depth_krw", 0) if ob else 0
-                # 매수/매도 호가비
-                try:
-                    raw_units = ob.get("raw", {}).get("orderbook_units", [])[:5]
-                    bid_sum = sum(float(u["bid_size"]) * float(u["bid_price"]) for u in raw_units)
-                    ask_sum = sum(float(u["ask_size"]) * float(u["ask_price"]) for u in raw_units)
-                    bidask_ratio = bid_sum / max(ask_sum, 1)
-                except Exception:
-                    bidask_ratio = 1.0
-
                 # 🔍 경로 정보: signal_tag 하나로 통일
                 log_trade_features({
                     "ts": now_kst_str(),
@@ -1301,11 +1278,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     "cv": round(cv, 2),
                     "pstd": round(pstd * 100, 4),  # % 단위
                     "best_ask_krw": int(best_ask_krw),
-                    # 🔥 놓친 중요 지표 추가
-                    "is_prebreak": 1 if is_prebreak else 0,
-                    "krw_per_sec": round(krw_per_sec, 0),
-                    "depth_krw": round(depth_krw, 0),
-                    "bidask_ratio": round(bidask_ratio, 2),
                 })
             except Exception as e:
                 print(f"[FEATURE_LOG_ERR] {e}")
@@ -2251,11 +2223,6 @@ FEATURE_FIELDS = [
     "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
     # 🔥 GATE 핵심 + 초단기 미세필터 지표
     "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
-    # 🔥 놓친 중요 지표 추가
-    "is_prebreak",      # 돌파직전 여부
-    "krw_per_sec",      # 초당 거래대금 (틱속도)
-    "depth_krw",        # 호가창 두께 (유동성)
-    "bidask_ratio",     # 매수/매도 호가비 (수급)
     # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
     "shadow_flags", "would_cut",
     # 🔍 리포트 상세: 추매여부 + 청산사유
@@ -2550,11 +2517,6 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             best_ask_krw = row.get("best_ask_krw", 0) or 0
             is_prebreak = row.get("is_prebreak", 0) or 0
 
-            # 🔥 놓친 중요 지표
-            krw_per_sec = row.get("krw_per_sec", 0) or 0
-            depth_krw = row.get("depth_krw", 0) or 0
-            bidask_ratio = row.get("bidask_ratio", 1.0) or 1.0
-
             # 시간 (ts에서 시:분만 추출)
             ts = str(row.get("ts", ""))
             time_str = ts[11:16] if len(ts) >= 16 else "?"
@@ -2587,8 +2549,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                 f"   ⏹청산:{exit_reason}\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
                 f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
-                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}%\n"
-                f"   💰속도{krw_per_sec/1000:.0f}K 호가비{bidask_ratio:.1f}"
+                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}%"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -2603,8 +2564,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                               ("spread", "스프레드"), ("volume_surge", "배수"),
                               ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도"),
                               ("overheat", "과열"), ("fresh_age", "틱나이"),
-                              ("cv", "CV"), ("pstd", "pstd"),
-                              ("krw_per_sec", "틱속도"), ("bidask_ratio", "호가비")]:
+                              ("cv", "CV"), ("pstd", "pstd")]:
                 if col in df.columns:
                     w_avg = wins[col].mean() if col in wins.columns else 0
                     l_avg = loses[col].mean() if col in loses.columns else 0
@@ -4953,21 +4913,6 @@ def postcheck_6s(m, pre):
     return True, "OK"
 
 # =========================
-# 🎯 계단식 트레일 거리 계산
-# =========================
-def get_tiered_trail_distance(gain_pct: float) -> float:
-    """
-    수익률에 따른 계단식 트레일 거리 반환
-    - 수익 클수록 느슨하게 (홈런 허용)
-    - 수익 작을수록 타이트하게 (본절 확보)
-    """
-    trail_dist = TRAIL_DISTANCE_MIN  # 기본값 0.2%
-    for threshold, distance in TRAIL_TIERS:
-        if gain_pct >= threshold:
-            trail_dist = distance
-    return trail_dist
-
-# =========================
 # 🎯 틱 기반 손절 헬퍼 함수
 # =========================
 def upbit_tick_size(price: float) -> float:
@@ -5477,8 +5422,13 @@ def monitor_position(m,
 
             if (not trail_armed) and gain_from_entry >= PROFIT_CHECKPOINT:
                 trail_armed = True
-                # 🔧 계단식 트레일: 수익률에 따라 트레일 거리 결정
-                trail_dist = get_tiered_trail_distance(gain_from_entry)
+                # 초기 트레일: ATR 기준 혹은 최소거리
+                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                if atr and atr > 0:
+                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                                     (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                else:
+                    trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = curp * (1.0 - trail_dist)
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
@@ -5518,9 +5468,12 @@ def monitor_position(m,
 
             # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
             if trail_armed and new_high:
-                # 🔧 계단식 트레일: 고점 갱신시 수익률에 맞게 트레일 거리 재계산
-                cur_gain_for_trail = (curp / entry_price - 1.0)
-                trail_dist = get_tiered_trail_distance(cur_gain_for_trail)
+                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                if atr and atr > 0:
+                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                                     (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                else:
+                    trail_dist = TRAIL_DISTANCE_MIN
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             # 🔧 [신규] 트레일링 손절 실제 청산 트리거
