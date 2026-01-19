@@ -368,8 +368,10 @@ def analyze_pre_entry_env(
 
     # 1. vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2] = entry_idx-6 ~ entry_idx-2)
     #    봇 코드: past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2]]
+    #    c1[-7:-2] = 인덱스 -7, -6, -5, -4, -3 (5개, -2 제외)
+    #    entry_idx가 마지막 봉이면: entry_idx-6 ~ entry_idx-2 (exclusive end이므로 -1해야 함)
     past_vol_start = max(0, entry_idx - 6)
-    past_vol_end = entry_idx - 1  # -2 + 1 = -1 (exclusive)
+    past_vol_end = entry_idx - 1  # Python slice: [start:end) → 실제로 entry_idx-2까지 포함
     past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:past_vol_end] if c.volume_krw > 0]
     if past_volumes_krw:
         vol_surge = entry.volume_krw / statistics.mean(past_volumes_krw)
@@ -380,11 +382,12 @@ def analyze_pre_entry_env(
     prev_candle = candles[entry_idx - 1]
     price_change = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
 
-    # 3. accel: 최근 5봉 / 이전 5봉 거래대금 (틱 대신 봉으로 근사)
-    #    봇은 초단위 틱이지만, 분봉으로 근사
-    recent_5_vol = sum(c.volume_krw for c in pre_5)
-    prev_5_vol = sum(c.volume_krw for c in pre_10[:5]) if len(pre_10) >= 10 else recent_5_vol
-    accel = (recent_5_vol / prev_5_vol) if prev_5_vol > 0 else 1.0
+    # 3. accel: 봇은 틱 기반 (t5s_krw_per_sec / t15s_krw_per_sec)
+    #    분봉으로는 정확한 근사 불가 → 최근 2봉 평균 / 직전 5봉 평균으로 근사
+    #    (5초/15초 ≈ 1:3 비율 유지)
+    recent_2_vol = sum(c.volume_krw for c in candles[entry_idx-1:entry_idx+1]) / 2  # 진입봉 + 직전봉
+    prev_5_vol_avg = statistics.mean([c.volume_krw for c in candles[max(0,entry_idx-6):entry_idx-1]]) if entry_idx > 5 else recent_2_vol
+    accel = (recent_2_vol / prev_5_vol_avg) if prev_5_vol_avg > 0 else 1.0
 
     # === 직전 5봉 환경 분석 ===
 
