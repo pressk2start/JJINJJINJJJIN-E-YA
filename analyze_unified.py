@@ -1,15 +1,16 @@
 # /analyze_unified.py
 # -*- coding: utf-8 -*-
 """
-롤백 코드 기준 분석 스크립트
-- 롤백 코드의 stage1_gate / detect_leader_stock 지표 기준
-- 성공 케이스만 분석 (지표 분포 확인)
-- 1분봉 기반 지표 수집
+실전 데이터 분석 스크립트 (통합 버전)
+
+핵심 변경점:
+1. 봇의 실제 계산 방식 적용 (vol_surge, price_change, accel)
+2. 진입 시점 이전의 환경 분석 (직전 5~10봉 패턴)
+3. 성공/실패 케이스 환경 비교
 
 Usage:
   python3 analyze_unified.py              # 전체 분석
-  python3 analyze_unified.py --mode entry # 진입 분석만
-  python3 analyze_unified.py --mode deep  # 심층 분석만
+  python3 analyze_unified.py --mode env   # 진입 전 환경 분석만
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import argparse
 import math
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -26,7 +27,7 @@ import requests
 
 
 # =========================
-# 입력 케이스
+# 입력 케이스 (v1: 전체 데이터 - 계속 누적)
 # =========================
 CASES: List[Tuple[str, str, str, bool]] = [
     # === 1/11 실패 ===
@@ -110,6 +111,26 @@ CASES: List[Tuple[str, str, str, bool]] = [
     ("IP", "2026-01-12", "12:41", True),
     ("XRP", "2026-01-12", "13:07", True),
     ("ZIL", "2026-01-12", "13:45", True),
+    # === 1/12 추가 실패 (밤) ===
+    ("SUI", "2026-01-12", "23:26", False),
+    ("XRP", "2026-01-12", "23:26", False),
+    # === 1/13 실패 ===
+    ("KAITO", "2026-01-13", "00:39", False),
+    ("KAITO", "2026-01-13", "00:55", False),
+    ("PUMP", "2026-01-13", "02:10", False),
+    ("KAITO", "2026-01-13", "02:34", False),
+    ("IP", "2026-01-13", "04:46", False),
+    ("IP", "2026-01-13", "05:40", False),
+    ("XAUT", "2026-01-13", "09:00", False),
+    ("BREV", "2026-01-13", "09:06", False),
+    ("BTC", "2026-01-13", "09:23", False),
+    ("XAUT", "2026-01-13", "09:40", False),
+    ("ETH", "2026-01-13", "09:49", False),
+    # === 1/13 성공 ===
+    ("IP", "2026-01-13", "04:06", True),
+    ("IP", "2026-01-13", "04:08", True),
+    ("ZIL", "2026-01-13", "08:14", True),
+    ("BREV", "2026-01-13", "09:02", True),
 ]
 
 
@@ -126,19 +147,49 @@ class Candle:
     high: float
     low: float
     close: float
-    volume: float
+    volume: float        # 코인 거래량
+    volume_krw: float    # 원화 거래대금
 
 
-@dataclass(frozen=True)
-class Case:
+@dataclass
+class PreEntryEnv:
+    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용"""
     ticker: str
-    dt_kst: datetime
+    time_str: str
     is_success: bool
+    hour: int
 
-    @staticmethod
-    def from_tuple(ticker: str, date_str: str, time_str: str, is_success: bool) -> "Case":
-        dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
-        return Case(ticker=ticker, dt_kst=dt, is_success=is_success)
+    # === 봇 실제 계산 방식 지표 ===
+    # vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2])
+    vol_surge: float
+    # price_change: (현재봉 종가 / 이전봉 종가) - 1 (소수점)
+    price_change: float
+    # accel: 최근 5봉 거래대금 / 이전 5봉 거래대금 (틱 대신 봉 근사)
+    accel: float
+
+    # === 진입 전 환경 (직전 5봉) ===
+    bullish_count_5: int      # 직전 5봉 중 양봉 수
+    higher_lows_5: int        # 직전 5봉 저점상승 횟수 (0~4)
+    higher_highs_5: int       # 직전 5봉 고점상승 횟수 (0~4)
+    vol_increasing_5: int     # 직전 5봉 거래량증가 횟수 (0~4)
+    avg_body_pct_5: float     # 직전 5봉 평균 몸통 크기 %
+    trend_5: float            # 직전 5봉 가격 추세 % (5봉전 종가 → 현재)
+
+    # === 진입 전 환경 (직전 10봉) ===
+    bullish_count_10: int     # 직전 10봉 중 양봉 수
+    vol_trend_10: float       # 직전 10봉 거래량 추세 (후반5 / 전반5)
+    price_range_10: float     # 직전 10봉 가격 범위 %
+
+    # === 30봉 환경 ===
+    pos_in_range_30: float    # 30봉 내 현재 가격 위치 (0~100%)
+    ema20_above: bool         # 현재가 > EMA20
+    ema5_above_20: bool       # EMA5 > EMA20 (상승 추세)
+
+    # === 진입봉 자체 ===
+    entry_bullish: bool       # 진입봉 양봉 여부
+    entry_body_pct: float     # 진입봉 몸통 크기 %
+    entry_upper_wick: float   # 진입봉 윗꼬리 %
+    entry_lower_wick: float   # 진입봉 아랫꼬리 %
 
 
 # =========================
@@ -216,6 +267,7 @@ def _parse_candles(raw: List[Dict[str, Any]]) -> List[Candle]:
                 low=float(c["low_price"]),
                 close=float(c["trade_price"]),
                 volume=float(c["candle_acc_trade_volume"]),
+                volume_krw=float(c.get("candle_acc_trade_price", 0)),
             )
         )
     candles.sort(key=lambda x: x.dt_kst)
@@ -223,14 +275,12 @@ def _parse_candles(raw: List[Dict[str, Any]]) -> List[Candle]:
 
 
 # =========================
-# 1분봉 캐시 (API 중복 호출 방지)
+# 캐시
 # =========================
 _1m_cache: Dict[Tuple[str, datetime], List[Candle]] = {}
-_1m_cache_exit: Dict[Tuple[str, datetime], List[Candle]] = {}  # Exit용 별도 캐시 (미래 포함)
 
 
 def get_1m_cached(client: UpbitClient, ticker: str, target_dt: datetime, count: int = 200) -> Optional[List[Candle]]:
-    """케이스별 1분봉 캐시 - entry/deep/exit 공유"""
     key = (ticker, target_dt)
     if key in _1m_cache:
         return _1m_cache[key]
@@ -248,9 +298,6 @@ def get_1m_cached(client: UpbitClient, ticker: str, target_dt: datetime, count: 
 
 
 def find_entry_index(candles: Sequence[Candle], target_dt: datetime, max_gap_sec: int = 60) -> Optional[int]:
-    """
-    공용 진입 캔들 찾기 - 마지막 일치 선택 (dt <= target, gap <= max_gap_sec)
-    """
     candidates = [(i, c) for i, c in enumerate(candles) if c.dt_kst <= target_dt]
     if not candidates:
         return None
@@ -260,7 +307,7 @@ def find_entry_index(candles: Sequence[Candle], target_dt: datetime, max_gap_sec
 
 
 # =========================
-# Indicators
+# 지표 계산 함수
 # =========================
 def ema_series(values: Sequence[float], period: int) -> List[Optional[float]]:
     if period <= 0:
@@ -283,315 +330,171 @@ def calc_ema(prices: Sequence[float], period: int) -> Optional[float]:
     return series[-1] if series else None
 
 
-def rsi_wilder(values: Sequence[float], period: int = 14) -> Optional[float]:
-    if period <= 0 or len(values) < period + 1:
-        return None
-    deltas = [values[i] - values[i - 1] for i in range(1, len(values))]
-    gains = [max(d, 0.0) for d in deltas]
-    losses = [max(-d, 0.0) for d in deltas]
+# =========================
+# 진입 전 환경 분석 (핵심)
+# =========================
+def analyze_pre_entry_env(
+    client: UpbitClient,
+    ticker: str,
+    date_str: str,
+    time_str: str,
+    is_success: bool
+) -> Optional[PreEntryEnv]:
+    """
+    진입 시점 이전의 봉들을 분석하여 환경 파악
+    봇의 실제 계산 방식을 적용
+    """
+    target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(deltas)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def macd(values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    if len(values) < slow + signal:
-        return None, None, None
-    ema_fast = ema_series(values, fast)
-    ema_slow = ema_series(values, slow)
-
-    macd_line: List[Optional[float]] = [None] * len(values)
-    for i in range(len(values)):
-        if ema_fast[i] is None or ema_slow[i] is None:
-            continue
-        macd_line[i] = ema_fast[i] - ema_slow[i]
-
-    macd_vals = [v for v in macd_line if v is not None]
-    if len(macd_vals) < signal:
-        return None, None, None
-
-    sig_series = ema_series(macd_vals, signal)
-    sig_last = next((v for v in reversed(sig_series) if v is not None), None)
-    macd_last = macd_vals[-1]
-    hist = macd_last - sig_last if sig_last is not None else None
-    return macd_last, sig_last, hist
-
-
-def bollinger(values: Sequence[float], period: int = 20, std_dev: float = 2.0) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    if len(values) < period:
-        return None, None, None
-    window = values[-period:]
-    mid = sum(window) / period
-    var = sum((x - mid) ** 2 for x in window) / period
-    std = math.sqrt(var)
-    return mid + std_dev * std, mid, mid - std_dev * std
-
-
-def stochastic_kd(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], k_period: int = 14, d_period: int = 3) -> Tuple[Optional[float], Optional[float]]:
-    if len(closes) < k_period + d_period - 1:
-        return None, None
-
-    ks: List[float] = []
-    for i in range(len(closes) - (k_period - 1), len(closes) + 1):
-        if i <= 0:
-            continue
-        start = i - k_period
-        hh = max(highs[start:i])
-        ll = min(lows[start:i])
-        if hh == ll:
-            k = 50.0
-        else:
-            k = (closes[i - 1] - ll) / (hh - ll) * 100.0
-        ks.append(k)
-
-    if len(ks) < d_period:
-        return ks[-1] if ks else None, None
-    d = sum(ks[-d_period:]) / d_period
-    return ks[-1], d
-
-
-def atr_wilder(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 14) -> Optional[float]:
-    if len(closes) < period + 1:
-        return None
-    trs: List[float] = []
-    for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
-        )
-        trs.append(tr)
-
-    atr = sum(trs[:period]) / period
-    for i in range(period, len(trs)):
-        atr = (atr * (period - 1) + trs[i]) / period
-    return atr
-
-
-def adx_wilder(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 14) -> Optional[float]:
-    if len(closes) < period * 2 + 1:
+    candles = get_1m_cached(client, ticker, target_dt, count=200)
+    if not candles or len(candles) < 40:
         return None
 
-    tr: List[float] = []
-    plus_dm: List[float] = []
-    minus_dm: List[float] = []
-
-    for i in range(1, len(closes)):
-        tr.append(
-            max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i - 1]),
-                abs(lows[i] - closes[i - 1]),
-            )
-        )
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
-        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
-
-    atr = sum(tr[:period]) / period
-    p_dm = sum(plus_dm[:period]) / period
-    m_dm = sum(minus_dm[:period]) / period
-
-    dxs: List[float] = []
-    for i in range(period, len(tr)):
-        if i != period:
-            atr = (atr * (period - 1) + tr[i]) / period
-            p_dm = (p_dm * (period - 1) + plus_dm[i]) / period
-            m_dm = (m_dm * (period - 1) + minus_dm[i]) / period
-
-        if atr == 0:
-            dxs.append(0.0)
-            continue
-
-        plus_di = (p_dm / atr) * 100.0
-        minus_di = (m_dm / atr) * 100.0
-        denom = plus_di + minus_di
-        dx = (abs(plus_di - minus_di) / denom) * 100.0 if denom > 0 else 0.0
-        dxs.append(dx)
-
-    if len(dxs) < period:
+    entry_idx = find_entry_index(candles, target_dt, max_gap_sec=60)
+    if entry_idx is None or entry_idx < 35:
         return None
 
-    adx = sum(dxs[:period]) / period
-    for i in range(period, len(dxs)):
-        adx = (adx * (period - 1) + dxs[i]) / period
-    return adx
+    entry = candles[entry_idx]
 
+    # 진입 전 봉들 (entry_idx는 진입봉, entry_idx-1이 직전봉)
+    pre_30 = candles[max(0, entry_idx - 30):entry_idx]  # 직전 30봉 (진입봉 제외)
+    pre_10 = pre_30[-10:] if len(pre_30) >= 10 else pre_30
+    pre_5 = pre_30[-5:] if len(pre_30) >= 5 else pre_30
 
-def cci(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 20) -> Optional[float]:
-    if len(closes) < period:
+    if len(pre_5) < 5 or len(pre_10) < 10:
         return None
-    tp = [(highs[i] + lows[i] + closes[i]) / 3.0 for i in range(len(closes))]
-    window = tp[-period:]
-    sma_tp = sum(window) / period
-    mean_dev = sum(abs(x - sma_tp) for x in window) / period
-    if mean_dev == 0:
-        return 0.0
-    return (tp[-1] - sma_tp) / (0.015 * mean_dev)
 
+    # === 봇 실제 계산 방식 ===
 
-def williams_r(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 14) -> Optional[float]:
-    if len(closes) < period:
-        return None
-    hh = max(highs[-period:])
-    ll = min(lows[-period:])
-    if hh == ll:
-        return -50.0
-    return (hh - closes[-1]) / (hh - ll) * -100.0
+    # 1. vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2] = entry_idx-6 ~ entry_idx-2)
+    #    봇 코드: past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2]]
+    past_vol_start = max(0, entry_idx - 6)
+    past_vol_end = entry_idx - 1  # -2 + 1 = -1 (exclusive)
+    past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:past_vol_end] if c.volume_krw > 0]
+    if past_volumes_krw:
+        vol_surge = entry.volume_krw / statistics.mean(past_volumes_krw)
+    else:
+        vol_surge = 1.0
 
+    # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1 (봇: 봉 사이 변화)
+    prev_candle = candles[entry_idx - 1]
+    price_change = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
 
-def mfi(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], volumes: Sequence[float], period: int = 14) -> Optional[float]:
-    if len(closes) < period + 1:
-        return None
-    tp = [(highs[i] + lows[i] + closes[i]) / 3.0 for i in range(len(closes))]
-    pos = 0.0
-    neg = 0.0
-    for i in range(-period, 0):
-        flow = tp[i] * volumes[i]
-        if tp[i] > tp[i - 1]:
-            pos += flow
-        else:
-            neg += flow
-    if neg == 0:
-        return 100.0
-    ratio = pos / neg
-    return 100.0 - (100.0 / (1.0 + ratio))
+    # 3. accel: 최근 5봉 / 이전 5봉 거래대금 (틱 대신 봉으로 근사)
+    #    봇은 초단위 틱이지만, 분봉으로 근사
+    recent_5_vol = sum(c.volume_krw for c in pre_5)
+    prev_5_vol = sum(c.volume_krw for c in pre_10[:5]) if len(pre_10) >= 10 else recent_5_vol
+    accel = (recent_5_vol / prev_5_vol) if prev_5_vol > 0 else 1.0
 
+    # === 직전 5봉 환경 분석 ===
 
-def roc(closes: Sequence[float], period: int = 10) -> Optional[float]:
-    if len(closes) < period + 1:
-        return None
-    base = closes[-period - 1]
-    return (closes[-1] - base) / base * 100.0 if base != 0 else 0.0
+    # 양봉 수
+    bullish_count_5 = sum(1 for c in pre_5 if c.close > c.open)
 
+    # 저점/고점 상승 횟수
+    higher_lows_5 = sum(1 for i in range(1, len(pre_5)) if pre_5[i].low >= pre_5[i-1].low)
+    higher_highs_5 = sum(1 for i in range(1, len(pre_5)) if pre_5[i].high >= pre_5[i-1].high)
 
-def disparity(closes: Sequence[float], period: int = 20) -> Optional[float]:
-    if len(closes) < period:
-        return None
-    ma = sum(closes[-period:]) / period
-    return (closes[-1] / ma) * 100.0 if ma != 0 else 100.0
+    # 거래량 증가 횟수
+    vol_increasing_5 = sum(1 for i in range(1, len(pre_5)) if pre_5[i].volume_krw > pre_5[i-1].volume_krw)
 
+    # 평균 몸통 크기 %
+    body_pcts = []
+    for c in pre_5:
+        if c.open > 0:
+            body_pcts.append(abs(c.close - c.open) / c.open * 100)
+    avg_body_pct_5 = statistics.mean(body_pcts) if body_pcts else 0.0
 
-def obv_slope(closes: Sequence[float], volumes: Sequence[float], period: int = 10) -> Optional[float]:
-    if len(closes) < period + 1:
-        return None
-    obv = 0.0
-    series: List[float] = []
-    for i in range(1, len(closes)):
-        if closes[i] > closes[i - 1]:
-            obv += volumes[i]
-        elif closes[i] < closes[i - 1]:
-            obv -= volumes[i]
-        series.append(obv)
-    if len(series) < period:
-        return None
-    y = series[-period:]
-    x = list(range(period))
-    x_mean = (period - 1) / 2.0
-    y_mean = sum(y) / period
-    num = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(period))
-    den = sum((x[i] - x_mean) ** 2 for i in range(period))
-    slope = num / den if den != 0 else 0.0
-    scale = abs(y_mean) if y_mean != 0 else max(1.0, abs(y[-1]))
-    return slope / scale
+    # 5봉 가격 추세 %
+    if pre_5[0].close > 0:
+        trend_5 = (pre_5[-1].close / pre_5[0].close - 1.0) * 100
+    else:
+        trend_5 = 0.0
 
+    # === 직전 10봉 환경 분석 ===
 
-def price_acceleration(closes: Sequence[float], period: int = 5) -> Optional[float]:
-    if len(closes) < period * 3:
-        return None
-    a = sum(closes[-period:]) / period
-    b = sum(closes[-2 * period:-period]) / period
-    c = sum(closes[-3 * period:-2 * period]) / period
-    v1 = a - b
-    v0 = b - c
-    base = b if b != 0 else 1.0
-    return (v1 - v0) / base * 100.0
+    bullish_count_10 = sum(1 for c in pre_10 if c.close > c.open)
 
+    # 거래량 추세 (후반5 / 전반5)
+    first_5_vol = sum(c.volume_krw for c in pre_10[:5])
+    second_5_vol = sum(c.volume_krw for c in pre_10[5:])
+    vol_trend_10 = (second_5_vol / first_5_vol) if first_5_vol > 0 else 1.0
 
-def detect_candle_pattern(opens: Sequence[float], highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]) -> Dict[str, int]:
-    if len(closes) < 3:
-        return {"doji": 0, "hammer": 0, "engulfing": 0, "three_soldiers": 0}
+    # 가격 범위 %
+    high_10 = max(c.high for c in pre_10)
+    low_10 = min(c.low for c in pre_10)
+    price_range_10 = ((high_10 - low_10) / low_10 * 100) if low_10 > 0 else 0.0
 
-    out = {"doji": 0, "hammer": 0, "engulfing": 0, "three_soldiers": 0}
+    # === 30봉 환경 분석 ===
 
-    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
-    body = abs(c - o)
-    upper = h - max(o, c)
-    lower = min(o, c) - l
-    rng = h - l
+    closes_30 = [c.close for c in pre_30]
+    high_30 = max(c.high for c in pre_30)
+    low_30 = min(c.low for c in pre_30)
 
-    if rng > 0:
-        if body / rng < 0.1:
-            out["doji"] = 1
-        if lower > body * 2 and upper < body * 0.5:
-            out["hammer"] = 1
+    # 현재가의 30봉 범위 내 위치 (0=저점, 100=고점)
+    if high_30 > low_30:
+        pos_in_range_30 = (entry.close - low_30) / (high_30 - low_30) * 100
+    else:
+        pos_in_range_30 = 50.0
 
-    prev_o, prev_c = opens[-2], closes[-2]
-    if prev_c < prev_o and c > o:
-        if o <= prev_c and c >= prev_o:
-            out["engulfing"] = 1
+    # EMA 계산 (진입봉 포함)
+    closes_with_entry = closes_30 + [entry.close]
+    ema5 = calc_ema(closes_with_entry, 5)
+    ema20 = calc_ema(closes_with_entry, 20)
 
-    three = all(closes[-i] > opens[-i] and closes[-i] > closes[-i - 1] for i in range(1, 4))
-    out["three_soldiers"] = 1 if three else 0
-    return out
+    ema20_above = entry.close > ema20 if ema20 else False
+    ema5_above_20 = (ema5 > ema20) if (ema5 and ema20) else False
+
+    # === 진입봉 자체 분석 ===
+
+    entry_bullish = entry.close > entry.open
+    entry_body_pct = abs(entry.close - entry.open) / entry.open * 100 if entry.open > 0 else 0.0
+
+    entry_range = entry.high - entry.low
+    if entry_range > 0:
+        entry_upper_wick = (entry.high - max(entry.open, entry.close)) / entry_range * 100
+        entry_lower_wick = (min(entry.open, entry.close) - entry.low) / entry_range * 100
+    else:
+        entry_upper_wick = 0.0
+        entry_lower_wick = 0.0
+
+    return PreEntryEnv(
+        ticker=ticker,
+        time_str=f"{date_str} {time_str}",
+        is_success=is_success,
+        hour=target_dt.hour,
+        # 봇 실제 계산 방식
+        vol_surge=vol_surge,
+        price_change=price_change,
+        accel=accel,
+        # 직전 5봉
+        bullish_count_5=bullish_count_5,
+        higher_lows_5=higher_lows_5,
+        higher_highs_5=higher_highs_5,
+        vol_increasing_5=vol_increasing_5,
+        avg_body_pct_5=avg_body_pct_5,
+        trend_5=trend_5,
+        # 직전 10봉
+        bullish_count_10=bullish_count_10,
+        vol_trend_10=vol_trend_10,
+        price_range_10=price_range_10,
+        # 30봉
+        pos_in_range_30=pos_in_range_30,
+        ema20_above=ema20_above,
+        ema5_above_20=ema5_above_20,
+        # 진입봉
+        entry_bullish=entry_bullish,
+        entry_body_pct=entry_body_pct,
+        entry_upper_wick=entry_upper_wick,
+        entry_lower_wick=entry_lower_wick,
+    )
 
 
 # =========================
-# Resample 1m -> 5m
+# 통계 함수
 # =========================
-def floor_to_5m(dt: datetime) -> datetime:
-    minute = dt.minute - (dt.minute % 5)
-    return dt.replace(minute=minute, second=0, microsecond=0)
-
-
-def resample_5m(candles_1m: Sequence[Candle]) -> List[Candle]:
-    if not candles_1m:
-        return []
-    buckets: Dict[datetime, List[Candle]] = {}
-    for c in candles_1m:
-        key = floor_to_5m(c.dt_kst)
-        buckets.setdefault(key, []).append(c)
-
-    out: List[Candle] = []
-    for k in sorted(buckets.keys()):
-        chunk = buckets[k]
-        chunk.sort(key=lambda x: x.dt_kst)
-        o = chunk[0].open
-        h = max(x.high for x in chunk)
-        l = min(x.low for x in chunk)
-        cl = chunk[-1].close
-        v = sum(x.volume for x in chunk)
-        out.append(Candle(dt_kst=k, open=o, high=h, low=l, close=cl, volume=v))
-    return out
-
-
-# =========================
-# Stats
-# =========================
-def safe_stats(values: Sequence[float]) -> Optional[Tuple[float, float, float, float]]:
-    if not values:
-        return None
-    return (statistics.mean(values), statistics.median(values), min(values), max(values))
-
-
-def mad(values: Sequence[float]) -> Optional[float]:
-    if not values:
-        return None
-    med = statistics.median(values)
-    return statistics.median([abs(x - med) for x in values])
-
-
 def auc_from_ranks(success: Sequence[float], fail: Sequence[float]) -> Optional[float]:
+    """AUC 계산: 0.5=무작위, >0.5=성공이 높음, <0.5=실패가 높음"""
     if not success or not fail:
         return None
     win = 0.0
@@ -609,319 +512,231 @@ def auc_from_ranks(success: Sequence[float], fail: Sequence[float]) -> Optional[
 def find_optimal_threshold(
     s_vals: Sequence[float],
     f_vals: Sequence[float],
-    target_success_rate: float,
     direction: str = ">=",
-) -> Optional[Tuple[float, float, float]]:
+    min_success_keep: float = 0.7,  # 최소 70% 성공 케이스 유지
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    최적 임계값 찾기
+    Returns: (threshold, success_pass_rate, fail_pass_rate, win_rate_if_applied)
+    """
     if not s_vals or not f_vals:
         return None
+
     candidates = sorted(set(s_vals) | set(f_vals))
-    best: Optional[Tuple[float, float, float]] = None
+    best = None
+    best_win_rate = 0.0
 
     for t in candidates:
         if direction == ">=":
             s_pass = sum(1 for v in s_vals if v >= t)
             f_pass = sum(1 for v in f_vals if v >= t)
-        else:
+        else:  # "<="
             s_pass = sum(1 for v in s_vals if v <= t)
             f_pass = sum(1 for v in f_vals if v <= t)
 
         s_rate = s_pass / len(s_vals)
         f_rate = f_pass / len(f_vals)
 
-        if s_rate >= target_success_rate:
-            if best is None or f_rate < best[2]:
-                best = (t, s_rate, f_rate)
+        # 최소 성공 유지율 체크
+        if s_rate < min_success_keep:
+            continue
+
+        total_pass = s_pass + f_pass
+        if total_pass == 0:
+            continue
+
+        win_rate = s_pass / total_pass
+
+        if win_rate > best_win_rate:
+            best_win_rate = win_rate
+            best = (t, s_rate, f_rate, win_rate)
+
     return best
 
 
 # =========================
-# Entry Analysis (롤백 코드 기준)
+# 분석 실행
 # =========================
-@dataclass(frozen=True)
-class EntryFeatures:
-    """롤백 코드 stage1_gate / detect_leader_stock 기준 지표"""
-    # 거래량 지표
-    vol_surge: float        # 현재 1분봉 거래량 / 과거 평균 (GATE_SURGE_MIN = 0.4x)
-    vol_vs_ma20: float      # 거래량 / MA20 (진입신호 >= 0.5x)
-
-    # 가격 지표
-    price_change: float     # 1분봉 가격변화율 % (GATE_PRICE_MIN = 0.05%)
-    ema20_breakout: bool    # 가격 > EMA20 (진입신호)
-    high_breakout: bool     # 가격 > 직전 고점 (진입신호)
-
-    # 추가 지표
-    accel: float            # 가속도 (GATE_ACCEL_MIN = 0.3x)
-    body_pct: float         # 진입봉 몸통 %
-    bullish: bool           # 양봉 여부
-
-    hour: int
-
-
-def analyze_entry(client: UpbitClient, case: Case) -> Optional[EntryFeatures]:
-    """1분봉 기반 롤백 코드 지표 수집"""
-    candles_1m = get_1m_cached(client, case.ticker, case.dt_kst, count=200)
-    if not candles_1m or len(candles_1m) < 60:
-        return None
-
-    entry_idx = find_entry_index(candles_1m, case.dt_kst, max_gap_sec=60)
-    if entry_idx is None or entry_idx < 30:
-        return None
-
-    # 진입봉과 과거 데이터
-    entry = candles_1m[entry_idx]
-    pre = candles_1m[max(0, entry_idx - 30):entry_idx]
-    if len(pre) < 20:
-        return None
-
-    closes = [c.close for c in pre]
-    volumes = [c.volume for c in pre]
-    highs = [c.high for c in pre]
-
-    # 1. vol_surge: 현재 거래량 / 과거 평균 (롤백 코드: GATE_SURGE_MIN = 0.4x)
-    avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
-    vol_surge = entry.volume / avg_vol if avg_vol > 0 else 0.0
-
-    # 2. vol_vs_ma20: 거래량 / MA20 (롤백 코드 진입신호: >= 0.5x)
-    vol_ma20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else sum(volumes) / len(volumes)
-    vol_vs_ma20 = entry.volume / vol_ma20 if vol_ma20 > 0 else 0.0
-
-    # 3. price_change: 1분봉 가격변화 % (롤백 코드: GATE_PRICE_MIN = 0.05%)
-    price_change = (entry.close - entry.open) / entry.open * 100.0 if entry.open > 0 else 0.0
-
-    # 4. ema20_breakout: 가격 > EMA20 (롤백 코드 진입신호)
-    ema20 = calc_ema(closes + [entry.close], 20)
-    ema20_breakout = entry.close > ema20 if ema20 else False
-
-    # 5. high_breakout: 가격 > 직전 1분봉 고점 (롤백 코드 진입신호)
-    prev_high = highs[-1] if highs else entry.close
-    high_breakout = entry.close > prev_high
-
-    # 6. accel: 가속도 (롤백 코드: GATE_ACCEL_MIN = 0.3x)
-    #    최근 5분 거래량 변화율 / 이전 5분 거래량 변화율
-    if len(volumes) >= 10:
-        recent_vol = sum(volumes[-5:]) / 5
-        prev_vol = sum(volumes[-10:-5]) / 5
-        accel = recent_vol / prev_vol if prev_vol > 0 else 1.0
-    else:
-        accel = 1.0
-
-    # 7. body_pct: 진입봉 몸통 %
-    body_pct = abs(entry.close - entry.open) / entry.open * 100.0 if entry.open > 0 else 0.0
-
-    # 8. bullish: 양봉 여부
-    bullish = entry.close > entry.open
-
-    return EntryFeatures(
-        vol_surge=vol_surge,
-        vol_vs_ma20=vol_vs_ma20,
-        price_change=price_change,
-        ema20_breakout=ema20_breakout,
-        high_breakout=high_breakout,
-        accel=accel,
-        body_pct=body_pct,
-        bullish=bullish,
-        hour=case.dt_kst.hour,
-    )
-
-
-def run_entry_analysis(client: UpbitClient) -> None:
-    """롤백 코드 기준 진입 지표 분석 (성공 vs 실패 비교)"""
+def run_env_analysis(client: UpbitClient) -> None:
+    """진입 전 환경 분석 - 성공 vs 실패 비교"""
     print("\n" + "=" * 80)
-    print("📈 실전 데이터 기준 진입 분석 (Entry Analysis)")
-    print("    성공 vs 실패 비교")
+    print("🔍 진입 전 환경 분석 (Pre-Entry Environment Analysis)")
+    print("    봇 실제 계산 방식 적용 + 직전 봉 패턴 분석")
     print("=" * 80)
 
-    success_data: List[EntryFeatures] = []
-    fail_data: List[EntryFeatures] = []
+    success_data: List[PreEntryEnv] = []
+    fail_data: List[PreEntryEnv] = []
 
     print("\n데이터 수집 중...")
     for ticker, date_str, time_str, is_success in CASES:
-        case = Case.from_tuple(ticker, date_str, time_str, is_success)
-        feats = analyze_entry(client, case)
-        if feats is None:
-            print(f"  [SKIP] {ticker} {time_str}: 데이터 부족")
+        env = analyze_pre_entry_env(client, ticker, date_str, time_str, is_success)
+        if env is None:
+            print(f"  [SKIP] {ticker} {time_str}")
             continue
 
         if is_success:
-            success_data.append(feats)
+            success_data.append(env)
         else:
-            fail_data.append(feats)
+            fail_data.append(env)
 
         tag = "✓" if is_success else "✗"
-        print(f"  [{tag}] {ticker} {time_str}: vol_surge={feats.vol_surge:.2f}x price_change={feats.price_change:+.2f}%")
+        print(f"  [{tag}] {ticker} {time_str}: surge={env.vol_surge:.2f}x chg={env.price_change*100:+.2f}% accel={env.accel:.2f}x")
 
     print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
+    total = len(success_data) + len(fail_data)
+    base_win_rate = len(success_data) / total * 100 if total > 0 else 0
+    print(f"기본 승률: {base_win_rate:.1f}%")
+
     if len(success_data) < 3 or len(fail_data) < 3:
         print("데이터가 부족합니다.")
         return
 
-    data = success_data + fail_data
-
-    # 롤백 코드 gate 임계치
-    GATE_SURGE_MIN = 0.4
-    GATE_PRICE_MIN = 0.05
-    GATE_ACCEL_MIN = 0.3
-
-    # === 거래량 지표 분포 ===
+    # === 봇 실제 계산 방식 지표 비교 ===
     print("\n" + "=" * 80)
-    print("📊 거래량 지표 분포")
+    print("📊 봇 실제 계산 방식 지표 (성공 vs 실패)")
     print("=" * 80)
 
-    vol_surge_vals = [d.vol_surge for d in data]
-    vol_ma20_vals = [d.vol_vs_ma20 for d in data]
-
-    print(f"\n[vol_surge] 현재 거래량 / 과거 평균 (GATE_SURGE_MIN = {GATE_SURGE_MIN}x)")
-    for low, high in [(0, 0.4), (0.4, 0.8), (0.8, 1.5), (1.5, 3.0), (3.0, 100)]:
-        cnt = sum(1 for v in vol_surge_vals if low <= v < high)
-        pct = cnt / len(vol_surge_vals) * 100
-        gate_ok = "✓" if low >= GATE_SURGE_MIN else ""
-        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
-
-    print(f"\n[vol_vs_ma20] 거래량 / MA20 (진입신호 >= 0.5x)")
-    for low, high in [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 100)]:
-        cnt = sum(1 for v in vol_ma20_vals if low <= v < high)
-        pct = cnt / len(vol_ma20_vals) * 100
-        signal_ok = "✓진입신호" if low >= 0.5 else ""
-        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {signal_ok}")
-
-    # === 가격 지표 분포 ===
-    print("\n" + "=" * 80)
-    print("📊 가격 지표 분포")
-    print("=" * 80)
-
-    price_change_vals = [d.price_change for d in data]
-
-    print(f"\n[price_change] 1분봉 가격변화 % (GATE_PRICE_MIN = {GATE_PRICE_MIN}%)")
-    for low, high in [(-1, 0), (0, 0.05), (0.05, 0.2), (0.2, 0.5), (0.5, 5)]:
-        cnt = sum(1 for v in price_change_vals if low <= v < high)
-        pct = cnt / len(price_change_vals) * 100
-        gate_ok = "✓" if low >= GATE_PRICE_MIN else ""
-        print(f"  {low:>5.2f}% ~ {high:<5.2f}%: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
-
-    # === 진입 신호 분포 ===
-    print("\n" + "=" * 80)
-    print("📊 진입 신호 분포")
-    print("=" * 80)
-
-    ema_cnt = sum(1 for d in data if d.ema20_breakout)
-    high_cnt = sum(1 for d in data if d.high_breakout)
-    vol_signal_cnt = sum(1 for d in data if d.vol_vs_ma20 >= 0.5)
-    any_signal = sum(1 for d in data if d.ema20_breakout or d.high_breakout or d.vol_vs_ma20 >= 0.5)
-
-    print(f"\n롤백 코드 진입 신호: (EMA20돌파 OR 고점돌파 OR vol_vs_ma>=0.5x)")
-    print(f"  EMA20 돌파:        {ema_cnt:>3}건 ({ema_cnt/len(data)*100:>5.1f}%)")
-    print(f"  직전 고점 돌파:    {high_cnt:>3}건 ({high_cnt/len(data)*100:>5.1f}%)")
-    print(f"  vol_vs_ma >= 0.5x: {vol_signal_cnt:>3}건 ({vol_signal_cnt/len(data)*100:>5.1f}%)")
-    print(f"  ANY (OR 조건):     {any_signal:>3}건 ({any_signal/len(data)*100:>5.1f}%)")
-
-    # === 가속도 분포 ===
-    print("\n" + "=" * 80)
-    print("📊 가속도 분포")
-    print("=" * 80)
-
-    accel_vals = [d.accel for d in data]
-    print(f"\n[accel] 거래량 가속도 (GATE_ACCEL_MIN = {GATE_ACCEL_MIN}x)")
-    for low, high in [(0, 0.3), (0.3, 0.6), (0.6, 1.0), (1.0, 2.0), (2.0, 100)]:
-        cnt = sum(1 for v in accel_vals if low <= v < high)
-        pct = cnt / len(accel_vals) * 100
-        gate_ok = "✓" if low >= GATE_ACCEL_MIN else ""
-        print(f"  {low:>4.1f}x ~ {high:<4.1f}x: {cnt:>3}건 ({pct:>5.1f}%) {gate_ok}")
-
-    # === 시간대별 분포 ===
-    print("\n" + "=" * 80)
-    print("🕐 시간대별 분포")
-    print("=" * 80)
-
-    time_buckets = [
-        ("아침 (8-10시)", lambda h: 8 <= h < 10),
-        ("오전 (10-12시)", lambda h: 10 <= h < 12),
-        ("오후 (12-18시)", lambda h: 12 <= h < 18),
-        ("저녁 (18-22시)", lambda h: 18 <= h < 22),
-        ("밤 (22-08시)", lambda h: h >= 22 or h < 8),
+    metrics = [
+        ("vol_surge", "거래량급등 (봇방식)", ">="),
+        ("price_change", "가격변화 (봉간)", ">="),
+        ("accel", "가속도 (봉근사)", ">="),
     ]
 
-    for name, cond in time_buckets:
-        cnt = sum(1 for d in data if cond(d.hour))
-        pct = cnt / len(data) * 100
-        print(f"  {name}: {cnt:>3}건 ({pct:>5.1f}%)")
+    print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
+    print("-" * 70)
 
-    # === 통계 요약 ===
+    for attr, label, _ in metrics:
+        s_vals = [getattr(e, attr) for e in success_data]
+        f_vals = [getattr(e, attr) for e in fail_data]
+
+        s_med = statistics.median(s_vals)
+        f_med = statistics.median(f_vals)
+        auc = auc_from_ranks(s_vals, f_vals)
+
+        # 판별력 해석
+        if auc:
+            if auc >= 0.65:
+                power = "★★★ 강함"
+            elif auc >= 0.55:
+                power = "★★ 보통"
+            elif auc <= 0.35:
+                power = "★★★ 역방향"
+            elif auc <= 0.45:
+                power = "★★ 역방향"
+            else:
+                power = "★ 약함"
+        else:
+            power = "-"
+
+        # 단위 처리
+        if attr == "price_change":
+            print(f"{label:<20} | {s_med*100:>+9.2f}% | {f_med*100:>+9.2f}% | {auc:.3f}   | {power}")
+        else:
+            print(f"{label:<20} | {s_med:>10.2f}x | {f_med:>10.2f}x | {auc:.3f}   | {power}")
+
+    # === 진입 전 환경 비교 (직전 5봉) ===
     print("\n" + "=" * 80)
-    print("📈 통계 요약")
+    print("📊 진입 전 환경 - 직전 5봉 (성공 vs 실패)")
     print("=" * 80)
 
-    print(f"\nvol_surge:    min={min(vol_surge_vals):.2f}x, max={max(vol_surge_vals):.2f}x, avg={statistics.mean(vol_surge_vals):.2f}x, med={statistics.median(vol_surge_vals):.2f}x")
-    print(f"vol_vs_ma20:  min={min(vol_ma20_vals):.2f}x, max={max(vol_ma20_vals):.2f}x, avg={statistics.mean(vol_ma20_vals):.2f}x, med={statistics.median(vol_ma20_vals):.2f}x")
-    print(f"price_change: min={min(price_change_vals):+.2f}%, max={max(price_change_vals):+.2f}%, avg={statistics.mean(price_change_vals):+.2f}%, med={statistics.median(price_change_vals):+.2f}%")
-    print(f"accel:        min={min(accel_vals):.2f}x, max={max(accel_vals):.2f}x, avg={statistics.mean(accel_vals):.2f}x, med={statistics.median(accel_vals):.2f}x")
+    env_metrics_5 = [
+        ("bullish_count_5", "양봉 수 (0~5)", ">=", "개"),
+        ("higher_lows_5", "저점상승 (0~4)", ">=", "회"),
+        ("higher_highs_5", "고점상승 (0~4)", ">=", "회"),
+        ("vol_increasing_5", "거래량증가 (0~4)", ">=", "회"),
+        ("avg_body_pct_5", "평균몸통 (%)", ">=", "%"),
+        ("trend_5", "5봉추세 (%)", ">=", "%"),
+    ]
 
-    bullish_cnt = sum(1 for d in data if d.bullish)
-    print(f"\n양봉 비율: {bullish_cnt}/{len(data)} ({bullish_cnt/len(data)*100:.1f}%)")
+    print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
+    print("-" * 70)
 
-    # === GATE 통과율 ===
+    for attr, label, direction, unit in env_metrics_5:
+        s_vals = [getattr(e, attr) for e in success_data]
+        f_vals = [getattr(e, attr) for e in fail_data]
+
+        s_med = statistics.median(s_vals)
+        f_med = statistics.median(f_vals)
+        auc = auc_from_ranks(s_vals, f_vals)
+
+        if auc:
+            if auc >= 0.65:
+                power = "★★★ 강함"
+            elif auc >= 0.55:
+                power = "★★ 보통"
+            elif auc <= 0.35:
+                power = "★★★ 역방향"
+            elif auc <= 0.45:
+                power = "★★ 역방향"
+            else:
+                power = "★ 약함"
+        else:
+            power = "-"
+
+        print(f"{label:<20} | {s_med:>9.2f}{unit} | {f_med:>9.2f}{unit} | {auc:.3f}   | {power}")
+
+    # === 진입 전 환경 비교 (직전 10봉 + 30봉) ===
     print("\n" + "=" * 80)
-    print("🚪 GATE 통과율 (롤백 코드 임계치)")
+    print("📊 진입 전 환경 - 10봉/30봉 (성공 vs 실패)")
     print("=" * 80)
 
-    gate_surge_pass = sum(1 for d in data if d.vol_surge >= GATE_SURGE_MIN)
-    gate_price_pass = sum(1 for d in data if d.price_change >= GATE_PRICE_MIN)
-    gate_accel_pass = sum(1 for d in data if d.accel >= GATE_ACCEL_MIN)
-    gate_all_pass = sum(1 for d in data if d.vol_surge >= GATE_SURGE_MIN and d.price_change >= GATE_PRICE_MIN and d.accel >= GATE_ACCEL_MIN)
+    env_metrics_long = [
+        ("bullish_count_10", "10봉 양봉 수", ">=", "개"),
+        ("vol_trend_10", "10봉 거래량추세", ">=", "x"),
+        ("price_range_10", "10봉 범위 (%)", "<=", "%"),
+        ("pos_in_range_30", "30봉내 위치 (%)", ">=", "%"),
+    ]
 
-    print(f"\n  vol_surge >= {GATE_SURGE_MIN}x:   {gate_surge_pass:>3}건 ({gate_surge_pass/len(data)*100:>5.1f}%)")
-    print(f"  price_change >= {GATE_PRICE_MIN}%: {gate_price_pass:>3}건 ({gate_price_pass/len(data)*100:>5.1f}%)")
-    print(f"  accel >= {GATE_ACCEL_MIN}x:        {gate_accel_pass:>3}건 ({gate_accel_pass/len(data)*100:>5.1f}%)")
-    print(f"  전체 AND 조건:      {gate_all_pass:>3}건 ({gate_all_pass/len(data)*100:>5.1f}%)")
+    print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
+    print("-" * 70)
 
-    # === 성공 vs 실패 비교 ===
+    for attr, label, direction, unit in env_metrics_long:
+        s_vals = [getattr(e, attr) for e in success_data]
+        f_vals = [getattr(e, attr) for e in fail_data]
+
+        s_med = statistics.median(s_vals)
+        f_med = statistics.median(f_vals)
+        auc = auc_from_ranks(s_vals, f_vals)
+
+        if auc:
+            if auc >= 0.65:
+                power = "★★★ 강함"
+            elif auc >= 0.55:
+                power = "★★ 보통"
+            elif auc <= 0.35:
+                power = "★★★ 역방향"
+            elif auc <= 0.45:
+                power = "★★ 역방향"
+            else:
+                power = "★ 약함"
+        else:
+            power = "-"
+
+        print(f"{label:<20} | {s_med:>9.2f}{unit} | {f_med:>9.2f}{unit} | {auc:.3f}   | {power}")
+
+    # === Boolean 지표 비교 ===
     print("\n" + "=" * 80)
-    print("⚔️ 성공 vs 실패 비교 (핵심)")
+    print("📊 Boolean 지표 (성공 vs 실패)")
     print("=" * 80)
 
-    s_vol_surge = [d.vol_surge for d in success_data]
-    f_vol_surge = [d.vol_surge for d in fail_data]
-    s_vol_ma20 = [d.vol_vs_ma20 for d in success_data]
-    f_vol_ma20 = [d.vol_vs_ma20 for d in fail_data]
-    s_price = [d.price_change for d in success_data]
-    f_price = [d.price_change for d in fail_data]
-    s_accel = [d.accel for d in success_data]
-    f_accel = [d.accel for d in fail_data]
+    bool_metrics = [
+        ("ema20_above", "가격 > EMA20"),
+        ("ema5_above_20", "EMA5 > EMA20"),
+        ("entry_bullish", "진입봉 양봉"),
+    ]
 
-    print(f"\n{'지표':<15} | {'성공 평균':>10} | {'성공 중앙':>10} | {'실패 평균':>10} | {'실패 중앙':>10} | {'차이':>8}")
-    print("-" * 75)
-    print(f"{'vol_surge':<15} | {statistics.mean(s_vol_surge):>10.2f}x | {statistics.median(s_vol_surge):>10.2f}x | {statistics.mean(f_vol_surge):>10.2f}x | {statistics.median(f_vol_surge):>10.2f}x | {statistics.median(s_vol_surge)-statistics.median(f_vol_surge):>+8.2f}")
-    print(f"{'vol_vs_ma20':<15} | {statistics.mean(s_vol_ma20):>10.2f}x | {statistics.median(s_vol_ma20):>10.2f}x | {statistics.mean(f_vol_ma20):>10.2f}x | {statistics.median(f_vol_ma20):>10.2f}x | {statistics.median(s_vol_ma20)-statistics.median(f_vol_ma20):>+8.2f}")
-    print(f"{'price_change':<15} | {statistics.mean(s_price):>10.2f}% | {statistics.median(s_price):>10.2f}% | {statistics.mean(f_price):>10.2f}% | {statistics.median(f_price):>10.2f}% | {statistics.median(s_price)-statistics.median(f_price):>+8.2f}")
-    print(f"{'accel':<15} | {statistics.mean(s_accel):>10.2f}x | {statistics.median(s_accel):>10.2f}x | {statistics.mean(f_accel):>10.2f}x | {statistics.median(f_accel):>10.2f}x | {statistics.median(s_accel)-statistics.median(f_accel):>+8.2f}")
+    print(f"\n{'지표':<20} | {'성공 비율':>12} | {'실패 비율':>12} | {'차이':>10}")
+    print("-" * 60)
 
-    # 진입 신호 비교
-    print("\n[진입 신호 비교]")
-    s_ema = sum(1 for d in success_data if d.ema20_breakout)
-    f_ema = sum(1 for d in fail_data if d.ema20_breakout)
-    s_high = sum(1 for d in success_data if d.high_breakout)
-    f_high = sum(1 for d in fail_data if d.high_breakout)
-    print(f"  EMA20 돌파:  성공 {s_ema:>2}/{len(success_data)} ({s_ema/len(success_data)*100:>5.1f}%) vs 실패 {f_ema:>2}/{len(fail_data)} ({f_ema/len(fail_data)*100:>5.1f}%)")
-    print(f"  고점 돌파:   성공 {s_high:>2}/{len(success_data)} ({s_high/len(success_data)*100:>5.1f}%) vs 실패 {f_high:>2}/{len(fail_data)} ({f_high/len(fail_data)*100:>5.1f}%)")
+    for attr, label in bool_metrics:
+        s_true = sum(1 for e in success_data if getattr(e, attr))
+        f_true = sum(1 for e in fail_data if getattr(e, attr))
 
-    # 양봉 비교
-    s_bull = sum(1 for d in success_data if d.bullish)
-    f_bull = sum(1 for d in fail_data if d.bullish)
-    print(f"  양봉 진입:   성공 {s_bull:>2}/{len(success_data)} ({s_bull/len(success_data)*100:>5.1f}%) vs 실패 {f_bull:>2}/{len(fail_data)} ({f_bull/len(fail_data)*100:>5.1f}%)")
+        s_rate = s_true / len(success_data) * 100
+        f_rate = f_true / len(fail_data) * 100
+        diff = s_rate - f_rate
 
-    # === AUC 판별력 ===
-    print("\n" + "=" * 80)
-    print("📊 AUC 판별력 (0.5=무작위, >0.5=성공이 높음, <0.5=실패가 높음)")
-    print("=" * 80)
-
-    auc_vol_surge = auc_from_ranks(s_vol_surge, f_vol_surge)
-    auc_vol_ma20 = auc_from_ranks(s_vol_ma20, f_vol_ma20)
-    auc_price = auc_from_ranks(s_price, f_price)
-    auc_accel = auc_from_ranks(s_accel, f_accel)
-
-    print(f"\n  vol_surge:    AUC = {auc_vol_surge:.3f}" if auc_vol_surge else "")
-    print(f"  vol_vs_ma20:  AUC = {auc_vol_ma20:.3f}" if auc_vol_ma20 else "")
-    print(f"  price_change: AUC = {auc_price:.3f}" if auc_price else "")
-    print(f"  accel:        AUC = {auc_accel:.3f}" if auc_accel else "")
+        print(f"{label:<20} | {s_rate:>11.1f}% | {f_rate:>11.1f}% | {diff:>+9.1f}%")
 
     # === 시간대별 승률 ===
     print("\n" + "=" * 80)
@@ -937,627 +752,122 @@ def run_entry_analysis(client: UpbitClient) -> None:
     ]
 
     for name, cond in time_buckets:
-        s_cnt = sum(1 for d in success_data if cond(d.hour))
-        f_cnt = sum(1 for d in fail_data if cond(d.hour))
+        s_cnt = sum(1 for e in success_data if cond(e.hour))
+        f_cnt = sum(1 for e in fail_data if cond(e.hour))
         total = s_cnt + f_cnt
         rate = (s_cnt / total * 100) if total > 0 else 0
-        print(f"  {name}: 성공 {s_cnt:>2} / 실패 {f_cnt:>2} = {rate:>5.1f}% 승률")
+        bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
+        print(f"  {name}: {s_cnt:>2}승 {f_cnt:>2}패 = {rate:>5.1f}% |{bar}|")
+
+    # === 최적 임계값 찾기 ===
+    print("\n" + "=" * 80)
+    print("🎯 최적 임계값 제안 (70% 성공 유지 기준)")
+    print("=" * 80)
+
+    all_metrics = [
+        ("vol_surge", "거래량급등", ">="),
+        ("price_change", "가격변화", ">="),
+        ("accel", "가속도", ">="),
+        ("bullish_count_5", "5봉양봉수", ">="),
+        ("higher_lows_5", "저점상승", ">="),
+        ("higher_highs_5", "고점상승", ">="),
+        ("vol_trend_10", "10봉거래량추세", ">="),
+        ("pos_in_range_30", "30봉내위치", ">="),
+    ]
+
+    recommendations = []
+
+    print(f"\n{'지표':<15} | {'임계값':>10} | {'성공통과':>10} | {'실패통과':>10} | {'예상승률':>10}")
+    print("-" * 65)
+
+    for attr, label, direction in all_metrics:
+        s_vals = [getattr(e, attr) for e in success_data]
+        f_vals = [getattr(e, attr) for e in fail_data]
+
+        result = find_optimal_threshold(s_vals, f_vals, direction, min_success_keep=0.7)
+        if result:
+            threshold, s_rate, f_rate, win_rate = result
+
+            # 승률 개선이 있는 것만 표시
+            if win_rate > base_win_rate / 100:
+                improvement = (win_rate * 100) - base_win_rate
+
+                if attr == "price_change":
+                    thresh_str = f"{threshold*100:+.2f}%"
+                elif attr in ["vol_surge", "accel", "vol_trend_10"]:
+                    thresh_str = f"{threshold:.2f}x"
+                elif attr == "pos_in_range_30":
+                    thresh_str = f"{threshold:.1f}%"
+                else:
+                    thresh_str = f"{threshold:.1f}"
+
+                print(f"{label:<15} | {thresh_str:>10} | {s_rate*100:>9.1f}% | {f_rate*100:>9.1f}% | {win_rate*100:>9.1f}%")
+
+                if improvement > 5:  # 5%p 이상 개선
+                    recommendations.append((label, thresh_str, direction, improvement, win_rate * 100))
 
     # === 핵심 인사이트 ===
     print("\n" + "=" * 80)
     print("💡 핵심 인사이트")
     print("=" * 80)
 
-    # 가장 판별력 있는 지표 찾기
-    aucs = [
-        ("vol_surge", auc_vol_surge or 0.5),
-        ("vol_vs_ma20", auc_vol_ma20 or 0.5),
-        ("price_change", auc_price or 0.5),
-        ("accel", auc_accel or 0.5),
-    ]
-    best_auc = max(aucs, key=lambda x: abs(x[1] - 0.5))
-    worst_auc = min(aucs, key=lambda x: abs(x[1] - 0.5))
+    # AUC가 높은 지표 찾기
+    all_auc = []
+    for attr, label, _ in metrics + [(a, l, d) for a, l, d, _ in env_metrics_5] + [(a, l, d) for a, l, d, _ in env_metrics_long]:
+        s_vals = [getattr(e, attr) for e in success_data]
+        f_vals = [getattr(e, attr) for e in fail_data]
+        auc = auc_from_ranks(s_vals, f_vals)
+        if auc:
+            all_auc.append((label, auc))
 
-    print(f"\n  가장 판별력 있는 지표: {best_auc[0]} (AUC={best_auc[1]:.3f})")
-    print(f"  가장 판별력 없는 지표: {worst_auc[0]} (AUC={worst_auc[1]:.3f})")
+    all_auc.sort(key=lambda x: abs(x[1] - 0.5), reverse=True)
 
-    if best_auc[1] < 0.55 and best_auc[1] > 0.45:
-        print("\n  ⚠️ 모든 지표의 판별력이 낮습니다 (AUC ≈ 0.5)")
-        print("     → 현재 사용 중인 지표로는 성공/실패 구분이 어렵습니다")
+    print("\n[가장 판별력 있는 지표 TOP 5]")
+    for i, (label, auc) in enumerate(all_auc[:5], 1):
+        direction = "성공↑" if auc > 0.5 else "실패↑"
+        print(f"  {i}. {label}: AUC={auc:.3f} ({direction})")
 
+    if recommendations:
+        print("\n[추천 임계값 조정]")
+        recommendations.sort(key=lambda x: x[3], reverse=True)
+        for label, thresh, direction, improvement, win_rate in recommendations[:5]:
+            print(f"  - {label} {direction} {thresh} → 예상 승률 {win_rate:.1f}% (+{improvement:.1f}%p)")
 
-# =========================
-# Deep Analysis (from deep_v4)
-# =========================
-def analyze_deep(client: UpbitClient, ticker: str, date_str: str, time_str: str) -> Optional[Dict[str, Any]]:
-    target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
-
-    # 캐시 사용
-    candles_1m = get_1m_cached(client, ticker, target_dt, count=200)
-    if not candles_1m or len(candles_1m) < 60:
-        return None
-
-    # 공용 find_entry_index 사용 (break 제거, 마지막 일치 선택)
-    entry_idx = find_entry_index(candles_1m, target_dt, max_gap_sec=60)
-    if entry_idx is None or entry_idx < 35:
-        return None
-
-    pre = candles_1m[entry_idx - 30:entry_idx]
-    entry = candles_1m[entry_idx]
-
-    closes = [c.close for c in pre]
-    highs = [c.high for c in pre]
-    lows = [c.low for c in pre]
-    opens = [c.open for c in pre]
-    vols = [c.volume for c in pre]
-
-    entry_price = entry.close
-
-    result: Dict[str, Any] = {"ticker": ticker, "time": f"{date_str} {time_str}", "entry_price": entry_price}
-
-    # Range / Position
-    last5_h = highs[-5:]
-    last5_l = lows[-5:]
-    base5 = min(last5_l) if min(last5_l) != 0 else 1.0
-    result["range_5"] = (max(last5_h) - min(last5_l)) / base5 * 100.0
-
-    last10_h = highs[-10:]
-    last10_l = lows[-10:]
-    base10 = min(last10_l) if min(last10_l) != 0 else 1.0
-    result["range_10"] = (max(last10_h) - min(last10_l)) / base10 * 100.0
-
-    high_30 = max(highs)
-    low_30 = min(lows)
-    result["pos_30"] = (entry_price - low_30) / (high_30 - low_30) * 100.0 if high_30 > low_30 else 50.0
-
-    result["higher_lows"] = sum(1 for i in range(1, 5) if lows[-5 + i] >= lows[-5 + i - 1])
-    result["higher_highs"] = sum(1 for i in range(1, 5) if highs[-5 + i] >= highs[-5 + i - 1])
-
-    bullish_5 = sum(1 for c in pre[-5:] if c.close > c.open)
-    result["bullish_ratio_5"] = bullish_5 / 5.0 * 100.0
-
-    result["entry_bullish"] = entry.close > entry.open
-    result["entry_body_pct"] = abs(entry.close - entry.open) / (entry.open if entry.open != 0 else 1.0) * 100.0
-
-    avg_vol = sum(vols) / len(vols) if vols else 1.0
-    result["vol_ratio"] = entry.volume / avg_vol if avg_vol > 0 else 0.0
-    recent_vol = sum(vols[-5:]) / 5.0
-    prev_vol = sum(vols[:-5]) / 25.0 if len(vols) >= 30 else None
-    result["vol_trend"] = (recent_vol / prev_vol) if (prev_vol and prev_vol > 0) else 1.0
-
-    # Indicators (1m)
-    result["rsi_14"] = rsi_wilder(closes, 14) or 50.0
-    result["rsi_6"] = rsi_wilder(closes, 6) or 50.0
-
-    macd_line, macd_sig, macd_hist = macd(closes)
-    result["macd"] = macd_line or 0.0
-    result["macd_signal"] = macd_sig or 0.0
-    result["macd_hist"] = macd_hist or 0.0
-
-    bb_u, bb_m, bb_l = bollinger(closes, 20, 2.0)
-    if bb_u is not None and bb_m is not None and bb_l is not None and bb_u > bb_l:
-        result["bb_width"] = (bb_u - bb_l) / (bb_m if bb_m != 0 else 1.0) * 100.0
-        result["bb_pos"] = (entry_price - bb_l) / (bb_u - bb_l) * 100.0
-    else:
-        result["bb_width"] = 0.0
-        result["bb_pos"] = 50.0
-
-    k, d = stochastic_kd(highs, lows, closes, 14, 3)
-    result["stoch_k"] = k if k is not None else 50.0
-    result["stoch_d"] = d if d is not None else 50.0
-
-    atr = atr_wilder(highs, lows, closes, 14)
-    result["atr"] = (atr / entry_price * 100.0) if (atr and entry_price > 0) else 0.0
-
-    result["obv_trend"] = obv_slope(closes, vols, 10) or 0.0
-    result["cci"] = cci(highs, lows, closes, 20) or 0.0
-    result["williams_r"] = williams_r(highs, lows, closes, 14) or -50.0
-    result["adx"] = adx_wilder(highs, lows, closes, 14) or 0.0
-    result["mfi"] = mfi(highs, lows, closes, vols, 14) or 50.0
-    result["roc_10"] = roc(closes, 10) or 0.0
-    result["disparity_20"] = disparity(closes, 20) or 100.0
-    result["price_accel"] = price_acceleration(closes, 5) or 0.0
-
-    patterns = detect_candle_pattern(opens, highs, lows, closes)
-    result["pattern_doji"] = patterns["doji"]
-    result["pattern_hammer"] = patterns["hammer"]
-    result["pattern_engulfing"] = patterns["engulfing"]
-    result["pattern_3soldiers"] = patterns["three_soldiers"]
-
-    # EMA relations
-    ema5 = ema_series(closes, 5)[-1]
-    ema10 = ema_series(closes, 10)[-1]
-    ema20 = ema_series(closes, 20)[-1]
-    if ema5 and ema10:
-        result["ema_5_10"] = (ema5 / ema10 - 1.0) * 100.0 if ema10 != 0 else 0.0
-    else:
-        result["ema_5_10"] = 0.0
-    if ema10 and ema20:
-        result["ema_10_20"] = (ema10 / ema20 - 1.0) * 100.0 if ema20 != 0 else 0.0
-        result["price_vs_ema20"] = (entry_price / ema20 - 1.0) * 100.0 if ema20 != 0 else 0.0
-    else:
-        result["ema_10_20"] = 0.0
-        result["price_vs_ema20"] = 0.0
-
-    # 5m (resampled from 1m)
-    candles_5m_all = resample_5m(candles_1m)
-    candles_5m = [c for c in candles_5m_all if c.dt_kst <= floor_to_5m(target_dt)]
-    if len(candles_5m) >= 20:
-        closes_5 = [c.close for c in candles_5m]
-        highs_5 = [c.high for c in candles_5m]
-        lows_5 = [c.low for c in candles_5m]
-
-        result["rsi_5m"] = rsi_wilder(closes_5, 14) or 50.0
-
-        if len(closes_5) >= 10:
-            recent_avg = sum(closes_5[-5:]) / 5.0
-            prev_avg = sum(closes_5[-10:-5]) / 5.0
-            result["trend_5m"] = (recent_avg / prev_avg - 1.0) * 100.0 if prev_avg > 0 else 0.0
-        else:
-            result["trend_5m"] = 0.0
-
-        bb_u5, bb_m5, bb_l5 = bollinger(closes_5, 20, 2.0)
-        if bb_u5 is not None and bb_l5 is not None and bb_u5 > bb_l5:
-            result["bb_pos_5m"] = (entry_price - bb_l5) / (bb_u5 - bb_l5) * 100.0
-        else:
-            result["bb_pos_5m"] = 50.0
-    else:
-        result["rsi_5m"] = 50.0
-        result["trend_5m"] = 0.0
-        result["bb_pos_5m"] = 50.0
-
-    # Time buckets
-    hour = int(time_str.split(":")[0])
-    result["hour"] = hour
-    result["is_morning"] = 8 <= hour <= 10
-    result["is_afternoon"] = 13 <= hour <= 16
-    result["is_night"] = hour >= 20 or hour <= 6
-
-    return result
-
-
-def run_deep_analysis(client: UpbitClient) -> None:
-    """롤백 코드 기준 심층 지표 분석 (성공 케이스만)"""
+    # === 성공 케이스 공통 패턴 ===
     print("\n" + "=" * 80)
-    print("🔬 심층 지표 분석 (Deep Analysis) - 성공 케이스만")
+    print("✅ 성공 케이스 공통 패턴")
     print("=" * 80)
 
-    data: List[Dict[str, Any]] = []
+    # 성공 케이스의 특징적인 값들
+    print(f"\n[성공 케이스 특징] (중앙값 기준)")
+    print(f"  - 거래량급등: {statistics.median([e.vol_surge for e in success_data]):.2f}x")
+    print(f"  - 가격변화: {statistics.median([e.price_change for e in success_data])*100:+.2f}%")
+    print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in success_data]):.1f}개")
+    print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in success_data]):.1f}회")
+    print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in success_data]):.1f}%")
+    print(f"  - EMA20 위: {sum(1 for e in success_data if e.ema20_above)/len(success_data)*100:.1f}%")
 
-    for ticker, date_str, time_str, is_success in CASES:
-        print(f"분석 중: {ticker} @ {date_str} {time_str}...", end=" ")
-        r = analyze_deep(client, ticker, date_str, time_str)
-        if r is None:
-            print("✗")
-            continue
-        data.append(r)
-        print("✓")
-
-    if len(data) < 5:
-        print("\n데이터가 부족합니다.")
-        return
-
-    # 롤백 코드 관련 핵심 지표
-    metrics = [
-        ("vol_ratio", "거래량배수"),
-        ("vol_trend", "거래량 추세"),
-        ("entry_body_pct", "진입봉 몸통(%)"),
-        ("price_vs_ema20", "가격/EMA20(%)"),
-        ("bullish_ratio_5", "양봉비율(%)"),
-        ("higher_lows", "저점상승 횟수"),
-        ("higher_highs", "고점상승 횟수"),
-        ("range_5", "5봉 범위(%)"),
-        ("pos_30", "30봉 내 위치(%)"),
-        ("rsi_14", "RSI(14)"),
-        ("rsi_5m", "RSI(5분봉)"),
-        ("trend_5m", "5분봉추세(%)"),
-        ("bb_pos", "BB위치(%)"),
-        ("stoch_k", "스토캐스틱K"),
-        ("adx", "ADX"),
-        ("mfi", "MFI"),
-    ]
-
+    # === 실패 케이스 경고 신호 ===
     print("\n" + "=" * 80)
-    print("📊 성공 케이스 지표 분포")
-    print("=" * 80)
-    print(f"\n{'지표':<18} | {'평균':>10} | {'중앙값':>10} | {'최소':>10} | {'최대':>10}")
-    print("-" * 65)
-
-    for key, label in metrics:
-        vals = [float(r[key]) for r in data if key in r and r[key] is not None]
-        if not vals:
-            continue
-
-        avg = statistics.mean(vals)
-        med = statistics.median(vals)
-        min_v = min(vals)
-        max_v = max(vals)
-
-        print(f"{label:<18} | {avg:>10.2f} | {med:>10.2f} | {min_v:>10.2f} | {max_v:>10.2f}")
-
-    # === 시간대별 분포 ===
-    print("\n" + "=" * 80)
-    print("🕐 시간대별 분포")
-    print("=" * 80)
-    morning_cnt = sum(1 for r in data if r.get('is_morning'))
-    afternoon_cnt = sum(1 for r in data if r.get('is_afternoon'))
-    night_cnt = sum(1 for r in data if r.get('is_night'))
-    print(f"  아침(8-10시):  {morning_cnt:>3}건 ({morning_cnt/len(data)*100:>5.1f}%)")
-    print(f"  오후(13-16시): {afternoon_cnt:>3}건 ({afternoon_cnt/len(data)*100:>5.1f}%)")
-    print(f"  밤(20-06시):   {night_cnt:>3}건 ({night_cnt/len(data)*100:>5.1f}%)")
-
-    # === 롤백 코드 임계치 통과율 ===
-    print("\n" + "=" * 80)
-    print("🚪 롤백 코드 임계치 통과율")
+    print("⚠️ 실패 케이스 경고 신호")
     print("=" * 80)
 
-    # vol_ratio (진입봉 거래량배수)
-    vol_ratio_vals = [r.get("vol_ratio", 0) for r in data]
-    print(f"\n[거래량배수] 분포:")
-    for low, high in [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 100)]:
-        cnt = sum(1 for v in vol_ratio_vals if low <= v < high)
-        pct = cnt / len(vol_ratio_vals) * 100
-        print(f"  {low:>4.1f}x ~ {high:<5.1f}x: {cnt:>3}건 ({pct:>5.1f}%)")
-
-    # price_vs_ema20 (EMA20 돌파)
-    ema_vals = [r.get("price_vs_ema20", 0) for r in data]
-    ema_above = sum(1 for v in ema_vals if v > 0)
-    print(f"\n[가격 > EMA20] {ema_above:>3}건 ({ema_above/len(data)*100:>5.1f}%)")
-
-    # trend_5m (5분봉 추세)
-    trend_vals = [r.get("trend_5m", 0) for r in data]
-    print(f"\n[5분봉 추세] 분포:")
-    for low, high in [(-5, 0), (0, 0.3), (0.3, 0.7), (0.7, 1.5), (1.5, 10)]:
-        cnt = sum(1 for v in trend_vals if low <= v < high)
-        pct = cnt / len(trend_vals) * 100
-        print(f"  {low:>4.1f}% ~ {high:<4.1f}%: {cnt:>3}건 ({pct:>5.1f}%)")
-
-
-# =========================
-# Exit/Trailing Analysis (성공 케이스만)
-# =========================
-def analyze_price_path(
-    client: UpbitClient,
-    ticker: str,
-    date_str: str,
-    time_str: str,
-    minutes: int = 30,
-) -> Optional[Dict[str, Any]]:
-    """가격 경로 분석 - 진입 후 분봉별 고/저/종가 추적"""
-    target_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00").replace(tzinfo=KST)
-    end_dt = target_dt + timedelta(minutes=minutes)
-
-    # Exit용 별도 캐시 (entry/deep과 분리 - 미래 데이터 포함)
-    cache_key = (ticker, end_dt)
-    if cache_key in _1m_cache_exit:
-        candles_all = _1m_cache_exit[cache_key]
-    else:
-        to_time = _to_upbit_iso_kst(end_dt + timedelta(seconds=1))
-        # 항상 200개 고정 (안정성 확보)
-        raw = client.get_candles_minutes(ticker, to_time, unit=1, count=200)
-        if not raw:
-            return None
-        candles_all = _parse_candles(raw)
-        candles_all = [c for c in candles_all if c.dt_kst <= end_dt]
-        if candles_all:
-            _1m_cache_exit[cache_key] = candles_all
-
-    if not candles_all or len(candles_all) < 10:
-        return None
-
-    # 윈도우 정리: start_dt 하한 추가 (진입 10분 전 ~ end_dt)
-    start_dt = target_dt - timedelta(minutes=10)
-    candles_window = [c for c in candles_all if start_dt <= c.dt_kst <= end_dt]
-    if len(candles_window) < 10:
-        return None
-
-    # 공용 find_entry_index 사용 (entry/deep과 통일)
-    entry_idx = find_entry_index(candles_window, target_dt, max_gap_sec=60)
-    if entry_idx is None:
-        return None
-
-    entry = candles_window[entry_idx]
-    post = candles_window[entry_idx:]
-    # 30분 분석이면 최소 24개(80%)는 있어야 의미있는 경로
-    min_post = int(minutes * 0.8)
-    if len(post) < min_post:
-        return None
-
-    entry_price = entry.close
-
-    running_high = entry_price
-    max_gain = 0.0
-    max_drawdown = 0.0
-    t_peak = 0
-
-    prices: List[Dict[str, Any]] = []
-    for i, c in enumerate(post):
-        gain_high = (c.high / entry_price - 1.0) * 100.0
-        gain_low = (c.low / entry_price - 1.0) * 100.0
-        gain_close = (c.close / entry_price - 1.0) * 100.0
-
-        # minute을 int로 (불필요한 float 제거)
-        prices.append({"minute": i, "high": gain_high, "low": gain_low, "close": gain_close})
-
-        if c.high > running_high:
-            running_high = c.high
-            t_peak = i
-        max_gain = max(max_gain, gain_high)
-        max_drawdown = min(max_drawdown, gain_low)
-
-    final_price = post[-1].close
-    final_gain = (final_price / entry_price - 1.0) * 100.0
-    final_drop_from_peak = (running_high - final_price) / running_high * 100.0 if running_high > 0 else 0.0
-
-    return {
-        "ticker": ticker,
-        "time": f"{date_str} {time_str}",
-        "entry_dt": target_dt.isoformat(),
-        "entry_price": entry_price,
-        "max_gain": max_gain,
-        "max_drawdown": max_drawdown,
-        "t_peak": t_peak,
-        "final_gain": final_gain,
-        "final_drop_from_peak": final_drop_from_peak,
-        "prices": prices,
-    }
-
-
-def simulate_trailing(
-    path: Dict[str, Any],
-    trail_pct: float,
-    model: str = "optimistic",
-    fee_pct: float = 0.1,  # 업비트 왕복 수수료 약 0.1%
-) -> Dict[str, Any]:
-    """
-    트레일링 시뮬레이션
-    model:
-      - optimistic: exit at trail_stop when low crosses it
-      - conservative: if low < trail_stop, assume fill at low (gap risk)
-    fee_pct: 왕복 수수료 (매수+매도)
-    """
-    entry_price = float(path["entry_price"])
-    prices = path["prices"]
-
-    running_high = entry_price
-    trail_stop: Optional[float] = None
-
-    for p in prices:
-        high_price = entry_price * (1.0 + p["high"] / 100.0)
-        low_price = entry_price * (1.0 + p["low"] / 100.0)
-
-        if high_price > running_high:
-            running_high = high_price
-            trail_stop = running_high * (1.0 - trail_pct / 100.0)
-
-        if trail_stop is not None and low_price <= trail_stop:
-            exit_price = trail_stop if model == "optimistic" else low_price
-            exit_gain = (exit_price / entry_price - 1.0) * 100.0 - fee_pct  # 수수료 차감
-            return {
-                "triggered": True,
-                "minute": p["minute"],
-                "exit_gain": exit_gain,
-            }
-
-    # 트레일 미발동 시 final_gain에서도 수수료 차감
-    return {
-        "triggered": False,
-        "minute": None,
-        "exit_gain": float(path["final_gain"]) - fee_pct,
-    }
-
-
-def score_trail_success_only(
-    paths: Sequence[Dict[str, Any]],
-    trail_pct: float,
-    model: str,
-    fee_pct: float = 0.1,
-) -> Dict[str, Any]:
-    """트레일별 점수 계산 - 성공 케이스만"""
-    results = [simulate_trailing(p, trail_pct, model, fee_pct) for p in paths]
-    gains = [r["exit_gain"] for r in results]
-
-    avg_gain = statistics.mean(gains) if gains else 0.0
-
-    # 하위 25% 평균 (손실 리스크)
-    gains_sorted = sorted(gains)
-    tail_25 = statistics.mean(gains_sorted[:max(1, len(gains_sorted) // 4)]) if gains_sorted else 0.0
-
-    return {
-        "trail_pct": trail_pct,
-        "model": model,
-        "avg_gain": avg_gain,
-        "tail_25": tail_25,
-        "trigger_rate": sum(1 for r in results if r["triggered"]) / len(results) * 100.0 if results else 0.0,
-    }
-
-
-def run_exit_analysis(client: UpbitClient) -> None:
-    """트레일링/익절 분석 - 성공 케이스만"""
-    print("\n" + "=" * 80)
-    print("🎯 트레일링/익절 분석 (Exit Analysis) - 성공 케이스만")
-    print("=" * 80)
-
-    paths: List[Dict[str, Any]] = []
-
-    print("\n데이터 수집 중...")
-    for ticker, date_str, time_str, is_success in CASES:
-        path = analyze_price_path(client, ticker, date_str, time_str, minutes=30)
-        if not path:
-            print(f"  [SKIP] {ticker} {time_str}")
-            continue
-        print(f"  [OK] {ticker} {time_str}: max+{path['max_gain']:.2f}% mdd{path['max_drawdown']:.2f}% t_peak={path['t_peak']}m")
-        paths.append(path)
-
-    print(f"\n수집 완료: {len(paths)}건")
-    if len(paths) < 5:
-        print("데이터가 부족합니다.")
-        return
-
-    trails = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
-
-    print("\n" + "=" * 80)
-    print("📊 트레일별 성능 비교")
-    print("=" * 80)
-
-    rows: List[Dict[str, Any]] = []
-    for model in ("optimistic", "conservative"):
-        for t in trails:
-            rows.append(score_trail_success_only(paths, t, model=model))
-
-    print(f"\n{'trail':>6} | {'model':<12} | {'avg_gain':>10} | {'tail_25':>10} | {'trigger':>8}")
-    print("-" * 60)
-    for r in sorted(rows, key=lambda x: (x["model"], -x["avg_gain"])):
-        print(f"{r['trail_pct']:>5.1f}% | {r['model']:<12} | {r['avg_gain']:>+9.2f}% | {r['tail_25']:>+9.2f}% | {r['trigger_rate']:>6.0f}%")
-
-    best_opt = max([r for r in rows if r["model"] == "optimistic"], key=lambda x: x["avg_gain"])
-    best_con = max([r for r in rows if r["model"] == "conservative"], key=lambda x: x["avg_gain"])
-
-    print("\n" + "=" * 80)
-    print("💡 추천 트레일링 (수수료 0.1% 반영)")
-    print("=" * 80)
-    print(f"  Optimistic:   trail {best_opt['trail_pct']:.1f}%  avg={best_opt['avg_gain']:+.2f}%  tail25={best_opt['tail_25']:+.2f}%")
-    print(f"  Conservative: trail {best_con['trail_pct']:.1f}%  avg={best_con['avg_gain']:+.2f}%  tail25={best_con['tail_25']:+.2f}%")
-
-    # 경로 피처 통계
-    print("\n" + "=" * 80)
-    print("🔎 케이스별 경로 특성")
-    print("=" * 80)
-    tpeak = [p["t_peak"] for p in paths]
-    maxgain = [p["max_gain"] for p in paths]
-    mdd = [p["max_drawdown"] for p in paths]
-
-    print(f"  t_peak(분):   avg={statistics.mean(tpeak):.1f}, med={statistics.median(tpeak):.0f}, min={min(tpeak)}, max={max(tpeak)}")
-    print(f"  max_gain(%):  avg={statistics.mean(maxgain):.2f}, med={statistics.median(maxgain):.2f}, min={min(maxgain):.2f}, max={max(maxgain):.2f}")
-    print(f"  max_dd(%):    avg={statistics.mean(mdd):.2f}, med={statistics.median(mdd):.2f}, min={min(mdd):.2f}, max={max(mdd):.2f}")
-
-    # === Tiered Trailing 시뮬레이션 ===
-    run_tiered_trailing_analysis_success_only(paths)
-
-
-def simulate_tiered_trailing(
-    path: Dict[str, Any],
-    tiers: List[Tuple[float, float]],  # [(gain_threshold, trail_pct), ...]
-    model: str = "optimistic",
-    fee_pct: float = 0.1
-) -> Dict[str, Any]:
-    """
-    구간별 트레일링 시뮬레이션
-    tiers: [(0.0, 0.05), (0.15, 0.08), (0.3, 0.12), (0.5, 0.2), (1.0, 0.3)]
-    """
-    prices = path["prices"]
-    if not prices:
-        return {"triggered": False, "minute": None, "exit_gain": 0.0}
-
-    running_high = 0.0
-    stop_price_pct = -999.0  # 초기 손절선 (매우 낮게)
-
-    for p in prices:
-        high_gain = p["high"]
-        low_gain = p["low"]
-        close_gain = p["close"]
-
-        # 현재 구간에 맞는 trail_pct 찾기
-        current_trail = tiers[0][1]  # 기본값
-        for gain_thr, trail_pct in tiers:
-            if running_high >= gain_thr:
-                current_trail = trail_pct
-
-        # 고점 갱신 시 손절선 조정
-        if high_gain > running_high:
-            running_high = high_gain
-            stop_price_pct = running_high - current_trail
-
-        # 트레일링 발동 체크
-        check_price = stop_price_pct if model == "optimistic" else low_gain
-        if model == "optimistic":
-            triggered = low_gain <= stop_price_pct and running_high > 0
-        else:
-            triggered = low_gain <= stop_price_pct and running_high > 0
-
-        if triggered:
-            exit_gain = stop_price_pct - fee_pct
-            return {"triggered": True, "minute": p["minute"], "exit_gain": exit_gain}
-
-    # 미발동: 최종 종가로 청산
-    final_gain = prices[-1]["close"]
-    return {"triggered": False, "minute": None, "exit_gain": final_gain - fee_pct}
-
-
-def run_tiered_trailing_analysis_success_only(paths: List[Dict]) -> None:
-    """Tiered Trailing 분석 - 성공 케이스만"""
-    print("\n" + "=" * 80)
-    print("🎯 Tiered Trailing 분석 (구간별 트레일링) - 성공 케이스만")
-    print("=" * 80)
-
-    # 롤백 코드 설정 (TRAIL_DISTANCE_MIN = 0.002 = 0.2% 고정)
-    rollback_trail = 0.2
-
-    # 후보 설정들
-    tier_configs = {
-        "롤백코드(0.2% 고정)": [(0.0, 0.2)],
-        "타이트(0.15% 고정)": [(0.0, 0.15)],
-        "루즈(0.3% 고정)": [(0.0, 0.3)],
-        "단계별(0.1/0.15/0.2/0.3)": [
-            (0.0, 0.1), (0.3, 0.15), (0.5, 0.2), (1.0, 0.3)
-        ],
-        "단계별타이트(0.05/0.1/0.15/0.2)": [
-            (0.0, 0.05), (0.2, 0.1), (0.4, 0.15), (0.7, 0.2)
-        ],
-    }
-
-    results = []
-    for name, tiers in tier_configs.items():
-        for model in ["optimistic", "conservative"]:
-            res = [simulate_tiered_trailing(p, tiers, model) for p in paths]
-            gains = [r["exit_gain"] for r in res]
-
-            avg_gain = statistics.mean(gains) if gains else 0.0
-
-            gains_sorted = sorted(gains)
-            tail_25 = statistics.mean(gains_sorted[:max(1, len(gains_sorted)//4)]) if gains_sorted else 0.0
-
-            results.append({
-                "name": name,
-                "model": model,
-                "avg_gain": avg_gain,
-                "tail_25": tail_25,
-                "trigger_rate": sum(1 for r in res if r["triggered"]) / len(res) * 100,
-            })
-
-    # 결과 출력
-    print(f"\n{'설정':<25} | {'모델':<12} | {'avg_gain':>10} | {'tail_25':>10} | {'trigger':>8}")
-    print("-" * 75)
-
-    # avg_gain 기준 정렬
-    results.sort(key=lambda x: x["avg_gain"], reverse=True)
-    for r in results:
-        print(f"{r['name']:<25} | {r['model']:<12} | {r['avg_gain']:>+9.2f}% | {r['tail_25']:>+9.2f}% | {r['trigger_rate']:>6.0f}%")
-
-    # 최적 설정 결론
-    print("\n" + "=" * 80)
-    print("⭐ Exit 최적 설정 결론")
-    print("=" * 80)
-
-    best = results[0]
-    print(f"\n[최적] {best['name']} ({best['model']})")
-    print(f"  → avg_gain: {best['avg_gain']:+.2f}%, tail_25: {best['tail_25']:+.2f}%")
-
-    # Optimistic vs Conservative 비교
-    best_opt = max([r for r in results if r["model"] == "optimistic"], key=lambda x: x["avg_gain"])
-    best_con = max([r for r in results if r["model"] == "conservative"], key=lambda x: x["avg_gain"])
-
-    print(f"\n[Optimistic 최적] {best_opt['name']}: avg={best_opt['avg_gain']:+.2f}%")
-    print(f"[Conservative 최적] {best_con['name']}: avg={best_con['avg_gain']:+.2f}%")
+    print(f"\n[실패 케이스 특징] (중앙값 기준)")
+    print(f"  - 거래량급등: {statistics.median([e.vol_surge for e in fail_data]):.2f}x")
+    print(f"  - 가격변화: {statistics.median([e.price_change for e in fail_data])*100:+.2f}%")
+    print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in fail_data]):.1f}개")
+    print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in fail_data]):.1f}회")
+    print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in fail_data]):.1f}%")
+    print(f"  - EMA20 위: {sum(1 for e in fail_data if e.ema20_above)/len(fail_data)*100:.1f}%")
 
 
 # =========================
 # Main
 # =========================
 def main() -> None:
-    parser = argparse.ArgumentParser(description="롤백 코드 기준 분석 스크립트")
-    parser.add_argument("--mode", choices=["entry", "deep", "exit", "all"], default="all",
-                        help="분석 모드: entry(진입), deep(심층), exit(트레일링), all(전체)")
+    parser = argparse.ArgumentParser(description="실전 데이터 분석 스크립트 v1")
+    parser.add_argument("--mode", choices=["env", "all"], default="all",
+                        help="분석 모드: env(환경분석), all(전체)")
     args = parser.parse_args()
 
     success_cnt = sum(1 for c in CASES if c[3])
@@ -1565,22 +875,14 @@ def main() -> None:
     win_rate = success_cnt / len(CASES) * 100 if CASES else 0
 
     print("=" * 80)
-    print("📊 실전 데이터 기준 분석 스크립트")
-    print("    1/11 ~ 1/12 실제 거래 결과 분석")
+    print("📊 실전 데이터 분석 v1 (봇 실제 계산 방식 적용)")
+    print("    진입 전 환경 분석 + 성공/실패 패턴 비교")
     print("=" * 80)
-    print(f"모드: {args.mode}")
     print(f"케이스: 성공 {success_cnt}건, 실패 {fail_cnt}건 (승률 {win_rate:.1f}%)")
 
     client = UpbitClient(min_interval_sec=0.12)
 
-    if args.mode in ("entry", "all"):
-        run_entry_analysis(client)
-
-    if args.mode in ("deep", "all"):
-        run_deep_analysis(client)
-
-    if args.mode in ("exit", "all"):
-        run_exit_analysis(client)
+    run_env_analysis(client)
 
     print("\n" + "=" * 80)
     print("✅ 분석 완료")
