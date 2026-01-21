@@ -53,7 +53,21 @@ EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
-PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
+# 🔧 동적화: 수수료 + 슬리피지 + 최소알파 기반
+PROFIT_CHECKPOINT_BASE = 0.0025  # 기본값 0.25% (폴백용)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0010  # 최소 알파 0.10%
+_SLIP_HISTORY = deque(maxlen=50)  # 최근 50회 슬리피지 기록
+
+def get_dynamic_checkpoint():
+    """수수료 + 평균슬리피지 + 최소알파 기반 동적 체크포인트"""
+    avg_slip = statistics.mean(_SLIP_HISTORY) if len(_SLIP_HISTORY) >= 5 else 0.0008
+    # 왕복 수수료(0.1%) + 슬리피지 + 최소알파(0.1%)
+    dynamic_cp = (FEE_RATE * 2) + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
+    # 최소 0.25%, 최대 0.45%
+    return max(0.0025, min(0.0045, dynamic_cp))
+
+# 하위 호환용
+PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
 
 # 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
 SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
@@ -76,7 +90,15 @@ MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
 # 트레일링 손절 설정
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
+TRAIL_DISTANCE_MIN_BASE = 0.002  # 기본 최소 트레일 간격 0.2%
+
+def get_trail_distance_min():
+    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
+    # 손절폭의 60%를 트레일 최소 간격으로 (0.4% * 0.6 = 0.24%)
+    return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.6)
+
+# 하위 호환용
+TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -1147,6 +1169,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             }
 
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
+        # 🔧 슬리피지 기록 (동적 체크포인트용)
+        if slip_pct > 0:
+            _SLIP_HISTORY.append(slip_pct)
 
         # 진입 사유 한 줄 생성 (디테일 포함)
         kd = pre.get("killer_details", {})
@@ -2013,7 +2038,7 @@ GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이�
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
-GATE_OVERHEAT_MAX = 100.0 # 🔧 사실상 제거: 급등 초입 잡기
+GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 1       # 🔧 연속매수 하한 - 2→1 완화 (점심시간 대응, 매수비로 품질 보완)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
@@ -4882,9 +4907,13 @@ def monitor_position(m,
     outcome_extra = ""
 
     # === 🎯 얇은 수익 체크포인트 상태 ===
-    checkpoint_reached = False   # 얇은 수익(0.3%) 도달 여부
+    checkpoint_reached = False   # 얇은 수익 도달 여부
     strong_mode = False          # 강세 확인 후 트레일링 모드
     strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
+    # 🔧 동적 체크포인트 (수수료+슬리피지 기반)
+    dyn_checkpoint = get_dynamic_checkpoint()
+    # 🔧 동적 트레일 간격 (손절폭 연동 - 휩쏘 컷 감소)
+    trail_dist_min = get_trail_distance_min()
 
     # === 🔥 Plateau 감지용 상태 ===
     last_peak_ts = time.time()   # 마지막 고점 갱신 시간
@@ -4985,7 +5014,7 @@ def monitor_position(m,
                     outcome_extra = f"(MFE {max_gain*100:.3f}%, {alive_sec:.0f}초)"
                     break
 
-            # === 🔧 횡보 탈출 로직 (미니트레일링) ===
+            # === 🔧 횡보 탈출 로직 (미니트레일링 + flow_accel) ===
             # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
             if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
                 # 고점 갱신
@@ -4997,6 +5026,16 @@ def monitor_position(m,
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     verdict = "횡보탈출"
                     outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
+                    break
+
+            # === 🔧 [신규] 조기 횡보탈출: 25초 + 흐름 둔화 시 빠른 청산 ===
+            # 25초 이후 + 수익 0.03% 미만 + flow_accel < 0.7 → 나쁜 포지션 빨리 접기
+            if alive_sec >= 25 and not trail_armed and cur_gain < 0.0003:
+                flow_accel = calc_flow_acceleration(ticks)
+                if flow_accel < 0.7:
+                    close_auto_position(m, f"조기횡보탈출 | {alive_sec:.0f}초 +{cur_gain*100:.2f}% 흐름둔화({flow_accel:.2f}x)")
+                    verdict = "조기횡보탈출"
+                    outcome_extra = f"(flow_accel={flow_accel:.2f})"
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
@@ -5040,15 +5079,15 @@ def monitor_position(m,
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
-            if (not trail_armed) and gain_from_entry >= PROFIT_CHECKPOINT:
+            if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                # 초기 트레일: ATR 기준 혹은 최소거리
+                # 초기 트레일: ATR 기준 혹은 최소거리 (🔧 손절폭 연동)
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
                 if atr and atr > 0:
-                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                    trail_dist = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
-                    trail_dist = TRAIL_DISTANCE_MIN
+                    trail_dist = trail_dist_min
                 trail_stop = curp * (1.0 - trail_dist)
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
@@ -5090,10 +5129,10 @@ def monitor_position(m,
             if trail_armed and new_high:
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
                 if atr and atr > 0:
-                    trail_dist = max(TRAIL_DISTANCE_MIN,
+                    trail_dist = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
-                    trail_dist = TRAIL_DISTANCE_MIN
+                    trail_dist = trail_dist_min
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             # 🔧 [신규] 트레일링 손절 실제 청산 트리거
@@ -5119,13 +5158,13 @@ def monitor_position(m,
 
             # ② 체크포인트 도달 시 강세/약세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 30% 아래로 떨어지면 리셋
-            if checkpoint_reached and cur_gain < (PROFIT_CHECKPOINT * 0.3):
+            if checkpoint_reached and cur_gain < (dyn_checkpoint * 0.3):
                 checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
 
             # 🔧 소프트 가드: 초기 30초간 청산 조건 강화
             in_soft_guard = alive_sec < SOFT_GUARD_SEC
 
-            if not checkpoint_reached and cur_gain >= PROFIT_CHECKPOINT:
+            if not checkpoint_reached and cur_gain >= dyn_checkpoint:
                 checkpoint_reached = True
                 # 🔧 [변경] 강세/약세 판단 → 약세만 25% 부분익절, 강세는 트레일링에 맡김
                 if is_strong_momentum(ticks, ob_now):
@@ -5175,7 +5214,7 @@ def monitor_position(m,
             time_since_peak = time.time() - last_peak_ts
             if (not plateau_partial_done
                 and not mfe_partial_done  # 🔧 MFE 익절 완료 시 스킵
-                and cur_gain_now >= PROFIT_CHECKPOINT
+                and cur_gain_now >= dyn_checkpoint
                 and time_since_peak >= PLATEAU_SEC):
 
                 decay_flag, decay_info = buy_decay_flag(ticks)
@@ -5193,8 +5232,8 @@ def monitor_position(m,
             drop_from_high = (best - curp) / best if best > 0 else 0
             if drop_from_high >= 0.005 and uptick_streak_from_ticks(ticks, need=3):
                 if trail_armed:
-                    # 재진입 대신 트레일 간격 타이트하게 강화
-                    trail_stop = max(trail_stop, curp * (1.0 - max(TRAIL_DISTANCE_MIN * 0.8, 0.0025)))
+                    # 재진입 대신 트레일 간격 타이트하게 강화 (🔧 손절폭 연동)
+                    trail_stop = max(trail_stop, curp * (1.0 - max(trail_dist_min * 0.8, 0.0025)))
                     tg_send_mid(f"🔧 {m} 재상승 감지 → 트레일 강화")
         
         if verdict is None:
