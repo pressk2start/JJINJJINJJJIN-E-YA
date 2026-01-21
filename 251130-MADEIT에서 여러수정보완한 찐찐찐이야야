@@ -5004,15 +5004,17 @@ def monitor_position(m,
                     outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
                     break
 
-            # === 🔧 스크래치 규칙 (초반 개선 없으면 빠른 탈출) ===
-            # 25초 경과 + MFE 0.03% 미만 → 모멘텀 약한 신호, 빠른 탈출
+            # === 🔧 스크래치 규칙 (초반 개선 없으면 + 흐름 약하면 빠른 탈출) ===
+            # 25초 경과 + MFE 0.03% 미만 + flow_accel < 0.7 → 스크래치
             if alive_sec >= SCRATCH_TIMEOUT_SEC and alive_sec < SIDEWAYS_TIMEOUT:
                 max_gain = (best / entry_price - 1.0)  # MFE
                 if max_gain < SCRATCH_MIN_GAIN:
-                    close_auto_position(m, f"스크래치 | {alive_sec:.0f}초 경과, MFE {max_gain*100:.3f}% < {SCRATCH_MIN_GAIN*100:.2f}%")
-                    verdict = "스크래치"
-                    outcome_extra = f"(MFE {max_gain*100:.3f}%, {alive_sec:.0f}초)"
-                    break
+                    flow_accel = calc_flow_acceleration(ticks)
+                    if flow_accel < 0.7:  # 🔧 흐름도 약해야 스크래치 (조기횡보탈출 통합)
+                        close_auto_position(m, f"스크래치 | {alive_sec:.0f}초 MFE {max_gain*100:.3f}% 흐름둔화({flow_accel:.2f}x)")
+                        verdict = "스크래치"
+                        outcome_extra = f"(MFE {max_gain*100:.3f}%, flow={flow_accel:.2f})"
+                        break
 
             # === 🔧 횡보 탈출 로직 (미니트레일링 + flow_accel) ===
             # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
@@ -5026,16 +5028,6 @@ def monitor_position(m,
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     verdict = "횡보탈출"
                     outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
-                    break
-
-            # === 🔧 [신규] 조기 횡보탈출: 25초 + 흐름 둔화 시 빠른 청산 ===
-            # 25초 이후 + 수익 0.03% 미만 + flow_accel < 0.7 → 나쁜 포지션 빨리 접기
-            if alive_sec >= 25 and not trail_armed and cur_gain < 0.0003:
-                flow_accel = calc_flow_acceleration(ticks)
-                if flow_accel < 0.7:
-                    close_auto_position(m, f"조기횡보탈출 | {alive_sec:.0f}초 +{cur_gain*100:.2f}% 흐름둔화({flow_accel:.2f}x)")
-                    verdict = "조기횡보탈출"
-                    outcome_extra = f"(flow_accel={flow_accel:.2f})"
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
