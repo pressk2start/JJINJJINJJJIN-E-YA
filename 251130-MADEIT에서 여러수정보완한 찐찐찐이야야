@@ -53,15 +53,32 @@ HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
-# 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
-PROFIT_CHECKPOINT = 0.0025  # +0.25% (이 값 하나만 바꾸면 전체 적용)
+# =====================================================
+# 📊 매도 로직 통합 상수 (한 곳에서 관리)
+# =====================================================
 
-# 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
+# --- 체크포인트 (트레일링/부분익절 발동 기준) ---
+PROFIT_CHECKPOINT = 0.0025  # +0.25% 도달 시 트레일링 무장 + 강세/약세 판단
+
+# --- 횡보 탈출 (미니트레일링) ---
 SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
+SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03% - 고점에서 이만큼 하락 시 청산
 
-# 트레일링 손절 설정
-TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN = 0.002  # 최소 트레일 간격 0.2%
+# --- 실패 브레이크아웃 ---
+BREAKOUT_THRESHOLD = 0.0015  # +0.15% 돌파 기준
+BREAKOUT_FAIL_SEC = 5        # 돌파 후 5초 내 복귀하면 실패
+
+# --- Plateau 감지 (횡보 + 매수약화) ---
+PLATEAU_SEC = 20             # 고점 갱신 없이 버틴 시간
+BE_OFFSET_EXTRA = 0.0005     # 본절 = 수수료 + 이 값 = 0.15%
+
+# --- 트레일링 손절 ---
+TRAIL_ATR_MULT = 0.8         # ATR 기반 여유폭 (타이트)
+TRAIL_DISTANCE_MIN = 0.002   # 최소 트레일 간격 0.2%
+
+# --- remonitor 수익실현 기준 ---
+REMONITOR_FULL_EXIT_PCT = 1.5   # +1.5% 이상 전량청산
+REMONITOR_PARTIAL_EXIT_PCT = 0.8  # +0.8% 이상 30% 부분익절
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
@@ -1894,19 +1911,26 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             elif action and "전량 청산 권고" in action:
                 should_close = True
 
-            # 3) 수익 실현:
-            #    - 2.5% 이상: 전량 청산
-            #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
-            elif ret_pct is not None and ret_pct >= 2.5:
+            # 3) 수익 실현 (🔧 상수는 상단에서 정의):
+            #    - REMONITOR_FULL_EXIT_PCT 이상: 전량 청산
+            #    - REMONITOR_PARTIAL_EXIT_PCT 이상: 30% 부분익절
+            elif ret_pct is not None and ret_pct >= REMONITOR_FULL_EXIT_PCT:
                 should_close = True
-                reason = f"수익실현 진입 후 +{ret_pct:.2f}% 달성 전량청산"
+                reason = f"수익실현 +{ret_pct:.2f}% 달성 전량청산"
 
-            elif ret_pct is not None and ret_pct >= 1.5:
+            elif ret_pct is not None and ret_pct >= REMONITOR_PARTIAL_EXIT_PCT:
                 # 중간 구간: 30% 부분 수익실현 후 계속 보유
-                ok, msg, executed = safe_partial_sell(
-                    m, sell_ratio=0.3, reason=f"진입 후 +{ret_pct:.2f}% 수익 달성 30% 부분익절")
-                if ok and executed > 0:
-                    print(msg)
+                # 🔧 이미 부분청산 했으면 스킵
+                with _POSITION_LOCK:
+                    pos = OPEN_POSITIONS.get(m, {})
+                if not pos.get("remonitor_partial_done"):
+                    ok, msg, executed = safe_partial_sell(
+                        m, sell_ratio=0.3, reason=f"+{ret_pct:.2f}% 수익 달성 30% 부분익절")
+                    if ok and executed > 0:
+                        print(msg)
+                        with _POSITION_LOCK:
+                            if m in OPEN_POSITIONS:
+                                OPEN_POSITIONS[m]["remonitor_partial_done"] = True
                 # 부분익절 후에는 계속 재모니터링
                 continue
 
@@ -5285,10 +5309,9 @@ def monitor_position(m,
     verdict = None
     outcome_extra = ""
 
-    # === 🎯 얇은 수익 체크포인트 상태 ===
-    checkpoint_reached = False   # 얇은 수익(0.3%) 도달 여부
-    strong_mode = False          # 강세 확인 후 트레일링 모드
-    strong_peak = entry_price    # 강세 모드 진입 후 고점 추적
+    # === 🎯 체크포인트 상태 ===
+    checkpoint_reached = False   # 수익 체크포인트 도달 여부
+    # 🔧 [삭제됨] strong_mode, strong_peak - 미사용 변수 제거
 
     # === 🔥 Plateau 감지용 상태 ===
     last_peak_ts = time.time()   # 마지막 고점 갱신 시간
@@ -5350,8 +5373,7 @@ def monitor_position(m,
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
-            BREAKOUT_THRESHOLD = 0.0015  # +0.15%
-            BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
+            # 🔧 상수는 상단에서 정의: BREAKOUT_THRESHOLD, BREAKOUT_FAIL_SEC
 
             if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
                 breakout_reached = True
@@ -5367,12 +5389,12 @@ def monitor_position(m,
 
             # === 🔧 횡보 탈출 로직 (미니트레일링) ===
             # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
+            # 🔧 상수는 상단에서 정의: SIDEWAYS_TIMEOUT, SIDEWAYS_TRAIL_DROP
             if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
                 # 고점 갱신
                 sideways_peak = max(sideways_peak, cur_gain)
 
                 # 청산 조건: 고점에서 0.03% 하락
-                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
                 if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     verdict = "횡보탈출"
@@ -5380,8 +5402,8 @@ def monitor_position(m,
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
-            gain_from_entry = (curp / entry_price - 1.0)
-            
+            # 🔧 cur_gain 이미 위에서 계산됨 - 중복 제거
+
             # === PROBE → CONFIRM 전환 로직 ===
             with _POSITION_LOCK:
                 pos = OPEN_POSITIONS.get(m, {})
@@ -5389,8 +5411,6 @@ def monitor_position(m,
             if pos.get("entry_mode") == "probe":
                 # 전환 조건: 일정 수익 이상 + 거래속도 정상 + 매수세 유지
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
-                # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
-                gain_now = (curp / entry_price - 1.0)
 
                 strong_flow = (
                     t15_now["buy_ratio"] >= 0.58
@@ -5398,8 +5418,8 @@ def monitor_position(m,
                     and uptick_streak_from_ticks(ticks, need=2)
                 )
 
-                if gain_now >= 0.012 and strong_flow:
-                    add_reason = f"상승확정 (수익+{gain_now*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} 초당{t15_now['krw_per_sec']/1000:.0f}K)"
+                if cur_gain >= 0.012 and strong_flow:
+                    add_reason = f"상승확정 (수익+{cur_gain*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} 초당{t15_now['krw_per_sec']/1000:.0f}K)"
                     ok_add, new_entry = add_auto_position(m, curp, add_reason)
                     if ok_add and new_entry:
                         # 진입모드 승격
@@ -5420,7 +5440,7 @@ def monitor_position(m,
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
-            if (not trail_armed) and gain_from_entry >= PROFIT_CHECKPOINT:
+            if (not trail_armed) and cur_gain >= PROFIT_CHECKPOINT:
                 trail_armed = True
                 # 초기 트레일: ATR 기준 혹은 최소거리
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
@@ -5436,7 +5456,7 @@ def monitor_position(m,
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
-                add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
+                add_cond_price = cur_gain >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
                 add_cond_flow = (
                     t15_now["buy_ratio"] >= 0.55 and
                     t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
@@ -5459,7 +5479,7 @@ def monitor_position(m,
                     cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
 
                     if pos and (not already_added) and cooldown_ok:
-                        add_reason = f"재상승EMA (수익+{gain_from_entry*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} EMA3>EMA8)"
+                        add_reason = f"재상승EMA (수익+{cur_gain*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} EMA3>EMA8)"
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
@@ -5487,15 +5507,15 @@ def monitor_position(m,
 
             # 🔧 [제거됨] 브레이크이븐 → 트레일링 0.4% 발동으로 대체
             # 트레일링이 +0.4%에서 발동되면 트레일스탑이 자동으로 본절 이상이 됨
-            in_breakeven_box = abs(gain_from_entry) <= BREAKEVEN_BOX  # ±0.15% 박스 내 (다른 곳에서 사용)
+            in_breakeven_box = abs(cur_gain) <= BREAKEVEN_BOX  # ±0.15% 박스 내 (다른 곳에서 사용)
 
             # === 🔥 심플 체크포인트 매도 로직 ===
-            cur_gain = (curp / entry_price - 1.0)
+            # 🔧 cur_gain 이미 위에서 계산됨 - 중복 계산 제거
             ob_now = pre.get("ob", {})
 
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
-            # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
-            # 여기는 트레일링 손절 이후 추가 손절 판정용
+            # 이미 위 ATR손절 블록에서 웜업 없이 즉시 적용 중
+            # 트레일링 손절과 독립적으로 작동
 
             # ② 체크포인트 도달 시 강세/약세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 30% 아래로 떨어지면 리셋
@@ -5526,30 +5546,29 @@ def monitor_position(m,
 
             # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
             # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
-            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
-            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (고점 대비)
+            # 🔧 cur_gain_now 삭제 - cur_gain 사용
 
             # === 🔥 (B) Plateau + 모멘텀 약화 → 부분익절 + 본절상향 ===
             # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
-            PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
-            # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
-            BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
+            # 🔧 상수는 상단에서 정의: PLATEAU_SEC, BE_OFFSET_EXTRA
+            BE_OFFSET = FEE_RATE + BE_OFFSET_EXTRA  # 본절 = 수수료 + 여유 = 0.15%
 
             time_since_peak = time.time() - last_peak_ts
             if (not plateau_partial_done
-                and cur_gain_now >= PROFIT_CHECKPOINT
+                and cur_gain >= PROFIT_CHECKPOINT
                 and time_since_peak >= PLATEAU_SEC):
 
                 decay_flag, decay_info = buy_decay_flag(ticks)
                 if decay_flag:
                     # 부분익절 실행 (50%)
-                    ok, msg, sold = safe_partial_sell(m, 0.5, f"Plateau부분익절 +{cur_gain_now*100:.2f}% (고점후 {time_since_peak:.0f}초 횡보+매수약화)")
+                    ok, msg, sold = safe_partial_sell(m, 0.5, f"Plateau부분익절 +{cur_gain*100:.2f}% (고점후 {time_since_peak:.0f}초 횡보+매수약화)")
                     if ok:
                         plateau_partial_done = True
                         # 🔥 본절 상향: 남은 50%는 최소한 손해 안 보게
                         be_stop = entry_price * (1.0 + BE_OFFSET)
                         base_stop = max(base_stop, be_stop)
-                        tg_send_mid(f"📉 {m} Plateau 부분익절 50% | +{cur_gain_now*100:.2f}% | 손절선→본절({BE_OFFSET*100:.2f}%) 상향")
+                        tg_send_mid(f"📉 {m} Plateau 부분익절 50% | +{cur_gain*100:.2f}% | 손절선→본절({BE_OFFSET*100:.2f}%) 상향")
 
             # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
             drop_from_high = (best - curp) / best if best > 0 else 0
