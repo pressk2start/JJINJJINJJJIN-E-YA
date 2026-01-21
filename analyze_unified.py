@@ -1,12 +1,20 @@
 # /analyze_unified.py
 # -*- coding: utf-8 -*-
 """
-실전 데이터 분석 스크립트 (통합 버전)
+실전 데이터 분석 스크립트 (통합 버전 v2)
 
-핵심 변경점:
-1. 봇의 실제 계산 방식 적용 (vol_surge, price_change, accel)
-2. 진입 시점 이전의 환경 분석 (직전 5~10봉 패턴)
-3. 성공/실패 케이스 환경 비교
+핵심 변경점 (2026-01-21 업데이트):
+1. 봇의 실제 계산 방식 완전 적용
+   - vol_surge: c1[-7:-2] 5개봉 평균 대비 현재 거래대금
+   - price_change: 현재봉/이전봉 종가 비율 - 1
+   - accel: 최근 2봉 / 직전 5봉 비율 (틱 기반 근사)
+2. 봇 GATE 조건 지표 추가
+   - vol_vs_ma: 현재 거래대금 / MA20 (GATE_VOL_VS_MA20_MIN)
+   - ema20_breakout: 현재가 > EMA20 여부
+   - high_breakout: 12봉 고점 돌파 여부
+   - overheat: accel * vol_surge (과열 지표)
+3. 진입 시점 이전의 환경 분석 (직전 5~10봉 패턴)
+4. 성공/실패 케이스 환경 비교
 
 Usage:
   python3 analyze_unified.py              # 전체 분석
@@ -153,19 +161,29 @@ class Candle:
 
 @dataclass
 class PreEntryEnv:
-    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용"""
+    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용 (v2)"""
     ticker: str
     time_str: str
     is_success: bool
     hour: int
 
-    # === 봇 실제 계산 방식 지표 ===
+    # === 봇 실제 계산 방식 지표 (stage1_gate 핵심) ===
     # vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2])
     vol_surge: float
     # price_change: (현재봉 종가 / 이전봉 종가) - 1 (소수점)
     price_change: float
-    # accel: 최근 5봉 거래대금 / 이전 5봉 거래대금 (틱 대신 봉 근사)
+    # accel: 최근 2봉 평균 / 직전 5봉 평균 (틱 t5s/t15s 근사)
     accel: float
+    # overheat: accel * vol_surge (봇 GATE_OVERHEAT_MAX 체크용)
+    overheat: float
+
+    # === 봇 GATE 추가 지표 (신규) ===
+    # vol_vs_ma: 현재봉 거래대금 / 20봉 MA (GATE_VOL_VS_MA20_MIN 체크)
+    vol_vs_ma: float
+    # ema20_breakout: 현재가 > EMA20 여부 (진입 시그널)
+    ema20_breakout: bool
+    # high_breakout: 12봉 고점 돌파 여부 (진입 시그널)
+    high_breakout: bool
 
     # === 진입 전 환경 (직전 5봉) ===
     bullish_count_5: int      # 직전 5봉 중 양봉 수
@@ -364,30 +382,48 @@ def analyze_pre_entry_env(
     if len(pre_5) < 5 or len(pre_10) < 10:
         return None
 
-    # === 봇 실제 계산 방식 ===
+    # === 봇 실제 계산 방식 (stage1_gate 핵심 지표) ===
 
-    # 1. vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2] = entry_idx-6 ~ entry_idx-2)
+    # 1. vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2])
     #    봇 코드: past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2]]
     #    c1[-7:-2] = 인덱스 -7, -6, -5, -4, -3 (5개, -2 제외)
-    #    entry_idx가 마지막 봉이면: entry_idx-6 ~ entry_idx-2 (exclusive end이므로 -1해야 함)
+    #    entry_idx가 마지막이면: entry_idx-6 ~ entry_idx-2 (5개)
     past_vol_start = max(0, entry_idx - 6)
-    past_vol_end = entry_idx - 1  # Python slice: [start:end) → 실제로 entry_idx-2까지 포함
+    past_vol_end = entry_idx - 1  # Python slice [start:end) → entry_idx-6 ~ entry_idx-2
     past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:past_vol_end] if c.volume_krw > 0]
     if past_volumes_krw:
         vol_surge = entry.volume_krw / statistics.mean(past_volumes_krw)
     else:
         vol_surge = 1.0
 
-    # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1 (봇: 봉 사이 변화)
+    # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1
+    #    봇: price_change = (cur["trade_price"] / max(prev["trade_price"], 1) - 1)
     prev_candle = candles[entry_idx - 1]
     price_change = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
 
     # 3. accel: 봇은 틱 기반 (t5s_krw_per_sec / t15s_krw_per_sec)
-    #    분봉으로는 정확한 근사 불가 → 최근 2봉 평균 / 직전 5봉 평균으로 근사
-    #    (5초/15초 ≈ 1:3 비율 유지)
-    recent_2_vol = sum(c.volume_krw for c in candles[entry_idx-1:entry_idx+1]) / 2  # 진입봉 + 직전봉
-    prev_5_vol_avg = statistics.mean([c.volume_krw for c in candles[max(0,entry_idx-6):entry_idx-1]]) if entry_idx > 5 else recent_2_vol
+    #    분봉 근사: 최근 2봉 평균 / 직전 5봉 평균 (5초:15초 ≈ 1:3 비율)
+    recent_2_vol = sum(c.volume_krw for c in candles[entry_idx-1:entry_idx+1]) / 2
+    prev_5_vol_list = [c.volume_krw for c in candles[max(0,entry_idx-6):entry_idx-1]]
+    prev_5_vol_avg = statistics.mean(prev_5_vol_list) if prev_5_vol_list else recent_2_vol
     accel = (recent_2_vol / prev_5_vol_avg) if prev_5_vol_avg > 0 else 1.0
+
+    # 4. overheat: accel * vol_surge (봇 GATE_OVERHEAT_MAX 체크용)
+    overheat = accel * vol_surge
+
+    # 5. vol_vs_ma: 현재봉 거래대금 / 20봉 MA (봇 stage1_gate에서 사용)
+    #    봇: vol_ma20 = vol_ma_from_candles(c1, period=20)
+    #        vol_vs_ma = current_volume / max(vol_ma20, 1)
+    vol_ma20_list = [c.volume_krw for c in candles[max(0, entry_idx-19):entry_idx+1]]
+    vol_ma20 = statistics.mean(vol_ma20_list) if len(vol_ma20_list) >= 10 else entry.volume_krw
+    vol_vs_ma = entry.volume_krw / max(vol_ma20, 1)
+
+    # 6. high_breakout: 12봉 고점 돌파 여부
+    #    봇: prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
+    #        high_breakout = (prev_high > 0 and cur_price > prev_high)
+    lookback_candles = candles[max(0, entry_idx-12):entry_idx]  # 직전 12봉 (진입봉 제외)
+    prev_high = max(c.high for c in lookback_candles) if lookback_candles else entry.high
+    high_breakout = entry.close > prev_high
 
     # === 직전 5봉 환경 분석 ===
 
@@ -466,10 +502,15 @@ def analyze_pre_entry_env(
         time_str=f"{date_str} {time_str}",
         is_success=is_success,
         hour=target_dt.hour,
-        # 봇 실제 계산 방식
+        # 봇 실제 계산 방식 (stage1_gate 핵심)
         vol_surge=vol_surge,
         price_change=price_change,
         accel=accel,
+        overheat=overheat,
+        # 봇 GATE 추가 지표
+        vol_vs_ma=vol_vs_ma,
+        ema20_breakout=ema20_above,  # ema20_above와 동일
+        high_breakout=high_breakout,
         # 직전 5봉
         bullish_count_5=bullish_count_5,
         higher_lows_5=higher_lows_5,
@@ -583,7 +624,7 @@ def run_env_analysis(client: UpbitClient) -> None:
             fail_data.append(env)
 
         tag = "✓" if is_success else "✗"
-        print(f"  [{tag}] {ticker} {time_str}: surge={env.vol_surge:.2f}x chg={env.price_change*100:+.2f}% accel={env.accel:.2f}x")
+        print(f"  [{tag}] {ticker} {time_str}: surge={env.vol_surge:.2f}x MA대비={env.vol_vs_ma:.2f}x chg={env.price_change*100:+.2f}% accel={env.accel:.2f}x overheat={env.overheat:.1f}")
 
     print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
     total = len(success_data) + len(fail_data)
@@ -601,8 +642,10 @@ def run_env_analysis(client: UpbitClient) -> None:
 
     metrics = [
         ("vol_surge", "거래량급등 (봇방식)", ">="),
+        ("vol_vs_ma", "MA20 대비 (봇방식)", ">="),
         ("price_change", "가격변화 (봉간)", ">="),
         ("accel", "가속도 (봉근사)", ">="),
+        ("overheat", "과열지수 (accel*surge)", ">="),
     ]
 
     print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
@@ -634,6 +677,8 @@ def run_env_analysis(client: UpbitClient) -> None:
         # 단위 처리
         if attr == "price_change":
             print(f"{label:<20} | {s_med*100:>+9.2f}% | {f_med*100:>+9.2f}% | {auc:.3f}   | {power}")
+        elif attr == "overheat":
+            print(f"{label:<20} | {s_med:>10.1f} | {f_med:>10.1f} | {auc:.3f}   | {power}")
         else:
             print(f"{label:<20} | {s_med:>10.2f}x | {f_med:>10.2f}x | {auc:.3f}   | {power}")
 
@@ -724,6 +769,8 @@ def run_env_analysis(client: UpbitClient) -> None:
 
     bool_metrics = [
         ("ema20_above", "가격 > EMA20"),
+        ("ema20_breakout", "EMA20 돌파 (봇)"),
+        ("high_breakout", "12봉고점 돌파 (봇)"),
         ("ema5_above_20", "EMA5 > EMA20"),
         ("entry_bullish", "진입봉 양봉"),
     ]
@@ -769,8 +816,10 @@ def run_env_analysis(client: UpbitClient) -> None:
 
     all_metrics = [
         ("vol_surge", "거래량급등", ">="),
+        ("vol_vs_ma", "MA20대비", ">="),
         ("price_change", "가격변화", ">="),
         ("accel", "가속도", ">="),
+        ("overheat", "과열지수", "<="),  # 과열은 낮을수록 좋음
         ("bullish_count_5", "5봉양봉수", ">="),
         ("higher_lows_5", "저점상승", ">="),
         ("higher_highs_5", "고점상승", ">="),
@@ -816,7 +865,9 @@ def run_env_analysis(client: UpbitClient) -> None:
 
     # AUC가 높은 지표 찾기
     all_auc = []
-    for attr, label, _ in metrics + [(a, l, d) for a, l, d, _ in env_metrics_5] + [(a, l, d) for a, l, d, _ in env_metrics_long]:
+    all_check_metrics = metrics + [(a, l, d, "") for a, l, d, _ in env_metrics_5] + [(a, l, d, "") for a, l, d, _ in env_metrics_long]
+    for item in all_check_metrics:
+        attr, label = item[0], item[1]
         s_vals = [getattr(e, attr) for e in success_data]
         f_vals = [getattr(e, attr) for e in fail_data]
         auc = auc_from_ranks(s_vals, f_vals)
@@ -844,11 +895,15 @@ def run_env_analysis(client: UpbitClient) -> None:
     # 성공 케이스의 특징적인 값들
     print(f"\n[성공 케이스 특징] (중앙값 기준)")
     print(f"  - 거래량급등: {statistics.median([e.vol_surge for e in success_data]):.2f}x")
+    print(f"  - MA20 대비: {statistics.median([e.vol_vs_ma for e in success_data]):.2f}x")
     print(f"  - 가격변화: {statistics.median([e.price_change for e in success_data])*100:+.2f}%")
+    print(f"  - 가속도: {statistics.median([e.accel for e in success_data]):.2f}x")
+    print(f"  - 과열지수: {statistics.median([e.overheat for e in success_data]):.1f}")
     print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in success_data]):.1f}개")
     print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in success_data]):.1f}회")
     print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in success_data]):.1f}%")
     print(f"  - EMA20 위: {sum(1 for e in success_data if e.ema20_above)/len(success_data)*100:.1f}%")
+    print(f"  - 12봉고점 돌파: {sum(1 for e in success_data if e.high_breakout)/len(success_data)*100:.1f}%")
 
     # === 실패 케이스 경고 신호 ===
     print("\n" + "=" * 80)
@@ -857,11 +912,15 @@ def run_env_analysis(client: UpbitClient) -> None:
 
     print(f"\n[실패 케이스 특징] (중앙값 기준)")
     print(f"  - 거래량급등: {statistics.median([e.vol_surge for e in fail_data]):.2f}x")
+    print(f"  - MA20 대비: {statistics.median([e.vol_vs_ma for e in fail_data]):.2f}x")
     print(f"  - 가격변화: {statistics.median([e.price_change for e in fail_data])*100:+.2f}%")
+    print(f"  - 가속도: {statistics.median([e.accel for e in fail_data]):.2f}x")
+    print(f"  - 과열지수: {statistics.median([e.overheat for e in fail_data]):.1f}")
     print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in fail_data]):.1f}개")
     print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in fail_data]):.1f}회")
     print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in fail_data]):.1f}%")
     print(f"  - EMA20 위: {sum(1 for e in fail_data if e.ema20_above)/len(fail_data)*100:.1f}%")
+    print(f"  - 12봉고점 돌파: {sum(1 for e in fail_data if e.high_breakout)/len(fail_data)*100:.1f}%")
 
 
 # =========================
@@ -878,8 +937,8 @@ def main() -> None:
     win_rate = success_cnt / len(CASES) * 100 if CASES else 0
 
     print("=" * 80)
-    print("📊 실전 데이터 분석 v1 (봇 실제 계산 방식 적용)")
-    print("    진입 전 환경 분석 + 성공/실패 패턴 비교")
+    print("📊 실전 데이터 분석 v2 (봇 실제 계산 방식 적용)")
+    print("    stage1_gate 지표 완전 반영 + 성공/실패 패턴 비교")
     print("=" * 80)
     print(f"케이스: 성공 {success_cnt}건, 실패 {fail_cnt}건 (승률 {win_rate:.1f}%)")
 
