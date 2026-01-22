@@ -1834,6 +1834,15 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
                     pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
 
+                    # 🔧 브레이크이븐 (본절): 부분익절 후 손절가를 진입가로 이동
+                    # - "먹고 뱉는" 거래 방지
+                    # - 수익 구간에서 부분익절 시에만 적용
+                    if ret_pct > 0 and not pos2.get("breakeven_set"):
+                        old_stop = pos2.get("stop", 0)
+                        pos2["stop"] = entry_price  # 손절가 = 진입가 (본절)
+                        pos2["breakeven_set"] = True
+                        print(f"[BREAKEVEN] {m} 부분익절 후 본절 설정: 손절 {old_stop:.0f} → {entry_price:.0f}")
+
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
@@ -4079,6 +4088,117 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     return True, f"{signal_tag} PASS | {pass_summary}"
 
 
+# =========================
+# 🔧 레짐 필터 (횡보장 진입 차단)
+# =========================
+def is_sideways_regime(c1, lookback=20):
+    """
+    횡보장 판정: 최근 N봉의 고저 범위가 좁으면 횡보
+    - 변동폭 1.5% 미만 = 횡보
+    - 횡보장에서 돌파 신호는 페이크 확률 높음
+    """
+    if len(c1) < lookback:
+        return False, 0.0
+
+    candles = c1[-lookback:]
+    highs = [c["high_price"] for c in candles]
+    lows = [c["low_price"] for c in candles]
+
+    box_high = max(highs)
+    box_low = min(lows)
+
+    if box_low <= 0:
+        return False, 0.0
+
+    range_pct = (box_high - box_low) / box_low
+
+    # 1.5% 미만이면 횡보 판정
+    is_sideways = range_pct < 0.015
+
+    return is_sideways, range_pct
+
+
+def near_box_boundary(price, c1, lookback=20, threshold=0.98):
+    """
+    박스 상단/하단 근처 판정
+    - 박스 상단 근처에서 진입하면 저항에 막힐 확률 높음
+    - threshold=0.98: 상단의 98% 이상이면 "근처"로 판정
+    """
+    if len(c1) < lookback:
+        return False, ""
+
+    candles = c1[-lookback:]
+    highs = [c["high_price"] for c in candles]
+    lows = [c["low_price"] for c in candles]
+
+    box_high = max(highs)
+    box_low = min(lows)
+
+    # 박스 상단 근처 (저항)
+    if price >= box_high * threshold:
+        return True, "BOX_TOP"
+
+    # 박스 하단 근처 (지지) - 이건 오히려 좋을 수 있어서 패스
+    # if price <= box_low * (2 - threshold):
+    #     return True, "BOX_BOTTOM"
+
+    return False, ""
+
+
+def calc_ema_slope(c1, period=20, lookback=5):
+    """
+    EMA 기울기 계산: 평평하면 횡보
+    - 기울기 0.1% 미만 = 횡보
+    """
+    if len(c1) < period + lookback:
+        return 0.0
+
+    closes = [c["trade_price"] for c in c1]
+
+    # EMA 계산
+    mult = 2 / (period + 1)
+    ema = closes[0]
+    for p in closes[1:]:
+        ema = p * mult + ema * (1 - mult)
+    ema_now = ema
+
+    # lookback 전 EMA
+    ema_prev = closes[0]
+    for p in closes[1:-lookback]:
+        ema_prev = p * mult + ema_prev * (1 - mult)
+
+    if ema_prev <= 0:
+        return 0.0
+
+    slope = (ema_now - ema_prev) / ema_prev
+    return slope
+
+
+def regime_filter(m, c1, cur_price):
+    """
+    통합 레짐 필터: 횡보장/박스상단이면 진입 차단
+    Returns: (pass: bool, reason: str)
+    """
+    # 1) 횡보 판정
+    is_sw, range_pct = is_sideways_regime(c1, lookback=20)
+    if is_sw:
+        return False, f"SIDEWAYS({range_pct*100:.1f}%)"
+
+    # 2) 박스 상단 근처 판정
+    near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
+    if near_box and box_pos == "BOX_TOP":
+        return False, "BOX_TOP"
+
+    # 3) EMA 기울기 판정 (선택적)
+    slope = calc_ema_slope(c1, period=20, lookback=5)
+    if abs(slope) < 0.001:  # 0.1% 미만
+        # 횡보 + 기울기 평평 = 강한 횡보 신호
+        # 하지만 다른 조건 통과했으면 일단 허용
+        pass
+
+    return True, "OK"
+
+
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
 def detect_leader_stock(m, obc, c1, tight_mode=False):
     """
@@ -4092,6 +4212,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
     if any(stable in m.upper() for stable in ["USDT", "USDC", "DAI", "TUSD", "BUSD"]):
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
+        return None
+
+    # === 🔧 레짐 필터: 횡보장/박스상단 진입 차단 ===
+    cur_price = c1[-1]["trade_price"] if c1 else 0
+    regime_ok, regime_reason = regime_filter(m, c1, cur_price)
+    if not regime_ok:
+        cut("REGIME_FILTER", f"{m} {regime_reason}")
         return None
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
@@ -4956,6 +5083,11 @@ def monitor_position(m,
     last_peak_ts = time.time()   # 마지막 고점 갱신 시간
     plateau_partial_done = False # Plateau 부분익절 완료 여부
 
+    # === 🔧 고점 갱신 기반 시간손절 (페이크 돌파 조기 탈출) ===
+    peak_update_count = 0        # 고점 갱신 횟수
+    NO_PEAK_TIMEOUT_SEC = 45     # 45초 내 고점 갱신 없으면 페이크로 간주
+    MIN_PEAK_UPDATES = 1         # 최소 1회 고점 갱신 필요
+
     # === 🔧 MFE 기반 부분익절 상태 ===
     mfe_partial_done = False     # MFE 부분익절 완료 여부
 
@@ -4999,8 +5131,19 @@ def monitor_position(m,
             new_high = curp > best
             if new_high:
                 last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
+                peak_update_count += 1      # 🔧 고점 갱신 횟수 증가
             best = max(best, curp)
             worst = min(worst, curp)
+
+            # 🔧 고점 미갱신 시간손절: 45초 내 고점 갱신 1회도 없으면 페이크 돌파
+            alive_sec_now = time.time() - start_ts
+            if alive_sec_now >= NO_PEAK_TIMEOUT_SEC and peak_update_count < MIN_PEAK_UPDATES:
+                cur_gain_check = (curp / entry_price - 1.0)
+                # 손실 구간이면 즉시 청산 (수익 구간이면 일단 유지)
+                if cur_gain_check <= 0:
+                    close_auto_position(m, f"고점미갱신 | {alive_sec_now:.0f}초 내 갱신 {peak_update_count}회 (페이크 돌파)")
+                    verdict = "고점 미갱신 페이크"
+                    break
 
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100
