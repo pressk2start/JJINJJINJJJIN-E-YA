@@ -62,7 +62,8 @@ def get_dynamic_checkpoint():
     """수수료 + 평균슬리피지 + 최소알파 기반 동적 체크포인트"""
     avg_slip = statistics.mean(_SLIP_HISTORY) if len(_SLIP_HISTORY) >= 5 else 0.0008
     # 왕복 수수료(0.1%) + 슬리피지 + 최소알파(0.1%)
-    dynamic_cp = (FEE_RATE * 2) + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
+    # 🔧 FIX: FEE_RATE가 이미 왕복(0.1%)이므로 *2 제거
+    dynamic_cp = FEE_RATE + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
     # 최소 0.25%, 최대 0.45%
     return max(0.0025, min(0.0045, dynamic_cp))
 
@@ -1797,11 +1798,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             if total_vol > 0:
                 exit_price_used = total_krw / total_vol
 
+        # 🔧 FIX: exit_price_used=0 fallback (리포트/학습 품질 보장)
+        exit_price_used = exit_price_used if exit_price_used > 0 else cur_price
+
         # 손익 계산
         est_entry_value = entry_price * executed
-        est_exit_value = exit_price_used * executed if exit_price_used > 0 else 0
+        est_exit_value = exit_price_used * executed
         pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 and exit_price_used > 0 else 0.0
+        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
         fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
 
         # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
