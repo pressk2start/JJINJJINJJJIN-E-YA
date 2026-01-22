@@ -2340,8 +2340,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     """
     global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
-    # 🔧 방어: last_trade_was_loss가 아직 없으면 초기화
-    globals().setdefault("last_trade_was_loss", {})
+    # 🔧 방어: last_trade_was_loss가 아직 없으면 초기화 (로컬 바인딩)
+    last_trade_was_loss = globals().setdefault("last_trade_was_loss", {})
 
     # 🔧 중복 카운트 방지: 같은 마켓이 30초 내 중복 호출되면 스킵
     now_ts = time.time()
