@@ -60,10 +60,12 @@ _SLIP_HISTORY = deque(maxlen=50)  # 최근 50회 슬리피지 기록
 
 def get_dynamic_checkpoint():
     """수수료 + 평균슬리피지 + 최소알파 기반 동적 체크포인트"""
+    # 🔧 CRITICAL FIX: 안전한 전역 참조 (NameError 방지)
+    fee = globals().get("FEE_RATE", 0.001)
     avg_slip = statistics.mean(_SLIP_HISTORY) if len(_SLIP_HISTORY) >= 5 else 0.0008
     # 왕복 수수료(0.1%) + 슬리피지 + 최소알파(0.1%)
     # 🔧 FIX: FEE_RATE가 이미 왕복(0.1%)이므로 *2 제거
-    dynamic_cp = FEE_RATE + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
+    dynamic_cp = fee + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
     # 최소 0.25%, 최대 0.45%
     return max(0.0025, min(0.0045, dynamic_cp))
 
@@ -96,8 +98,10 @@ TRAIL_DISTANCE_MIN_BASE = 0.002  # 기본 최소 트레일 간격 0.2%
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
+    # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 line 2171에서 정의됨)
+    dyn_sl = globals().get("DYN_SL_MIN", 0.004)
     # 손절폭의 60%를 트레일 최소 간격으로 (0.4% * 0.6 = 0.24%)
-    return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.6)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -119,6 +123,11 @@ except Exception:
 
 # ==== Exit Profile (gentle/ balanced / strict) ====
 EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
+
+# 🔧 CRITICAL FIX: _apply_exit_profile() 호출 전 기본값 선언 (NameError 방지)
+SPIKE_RECOVERY_WINDOW = 3
+SPIKE_RECOVERY_MIN_BUY = 0.58
+CTX_EXIT_THRESHOLD = 3
 
 
 def _apply_exit_profile():
