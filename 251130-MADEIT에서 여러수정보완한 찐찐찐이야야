@@ -885,10 +885,10 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         if drift > thr:
             # 평소라면 고점 추격으로 컷
             # 하지만 공격 모드면 일정 구간까지는 허용
-            # 🔧 0.5% 기준이니 +0.5% 추가 = 총 1% 까지 허용
-            if AGGRESSIVE_MODE and drift <= (thr + 0.005):
+            # 🔧 FIX: 추격 허용폭 0.5%→0.3% 축소 (기대값 개선)
+            if AGGRESSIVE_MODE and drift <= (thr + 0.003):
                 print(
-                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+1.2% "
+                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+0.3% "
                     f"→ 공격 모드: 추격 진입 허용"
                 )
                 return True, current_price
@@ -1565,6 +1565,11 @@ def close_auto_position(m, reason=""):
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
                     tg_send(f"🧹 <b>자동청산 완료(지연확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
+                    # 🔧 FIX: 지연청산에서도 record_trade 기록 (승률 기반 리스크 조정에 필수)
+                    try:
+                        record_trade(m, ret_pct)
+                    except Exception as _e:
+                        print("[DELAYED_TRADE_RECORD_ERR]", _e)
                     # 🔧 학습 로그 업데이트
                     if AUTO_LEARN_ENABLED:
                         try:
@@ -1960,21 +1965,47 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action and "전량 청산 권고" in action:
             should_close = True
 
-        # 3) 수익 실현:
-        #    - 2.5% 이상: 전량 청산
-        #    - 1.5% ~ 2.5%: 30% 부분익절(포지션당 1회)
-        elif ret_pct is not None and ret_pct >= 2.5:
-            should_close = True
-            reason = f"수익실현 진입 후 +{ret_pct:.2f}% 달성 전량청산"
+        # 3) 수익 실현 (🔧 FIX: signal_tag별 익절 목표 차등화)
+        #    - 강신호: 높은 목표, 약신호: 낮은 목표 (기대값 개선)
+        elif ret_pct is not None:
+            # signal_tag별 익절 목표 (% 단위)
+            TP_FULL = {
+                "🔥점화": 2.2,
+                "강돌파 (EMA↑+고점↑)": 1.8,
+                "EMA↑": 1.4,
+                "고점↑": 1.2,
+                "거래량↑": 1.0,
+                "기본": 1.2,
+            }
+            TP_PART = {
+                "🔥점화": 1.2,
+                "강돌파 (EMA↑+고점↑)": 1.0,
+                "EMA↑": 0.8,
+                "고점↑": 0.7,
+                "거래량↑": 0.6,
+                "기본": 0.7,
+            }
 
-        elif ret_pct is not None and ret_pct >= 1.5:
-            # 중간 구간: 30% 부분 수익실현 후 계속 보유
-            ok, msg, executed = safe_partial_sell(
-                m, sell_ratio=0.3, reason=f"진입 후 +{ret_pct:.2f}% 수익 달성 30% 부분익절")
-            if ok and executed > 0:
-                print(msg)
-            # 부분익절 후에는 계속 재모니터링
-            continue
+            # 현재 포지션의 signal_tag 가져오기
+            with _POSITION_LOCK:
+                pos_for_tag = OPEN_POSITIONS.get(m) or {}
+            tag = pos_for_tag.get("signal_tag", "기본")
+
+            # 목표값 조회 (없으면 기본값)
+            full_tp = TP_FULL.get(tag, 1.2)
+            part_tp = TP_PART.get(tag, 0.7)
+
+            if ret_pct >= full_tp:
+                should_close = True
+                reason = f"{tag} 목표수익 +{ret_pct:.2f}% ≥ {full_tp:.1f}% 전량청산"
+            elif ret_pct >= part_tp:
+                # 부분익절: 50% 매도 후 계속 보유 (30%→50%로 상향)
+                ok, msg, executed = safe_partial_sell(
+                    m, sell_ratio=0.5, reason=f"{tag} +{ret_pct:.2f}% ≥ {part_tp:.1f}% 50% 부분익절")
+                if ok and executed > 0:
+                    print(msg)
+                # 부분익절 후에는 계속 재모니터링
+                continue
 
         # 4) 컨텍스트 청산 권고는 → 청산 안 하고 계속 재모니터링
         elif verdict and verdict.startswith("청산 권고("):
@@ -4293,13 +4324,14 @@ def final_check_leader(m, pre, tight_mode=False):
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
 
-    # === 🔥 스코어 기반 진입모드 자동 매핑 ===
-    # score < 55: probe (소액 탐색) → 추격 진입 방지
-    # score 55~70: half (절반)
-    # score >= 70: confirm (풀 사이즈)
-    if score < 55:
+    # === 🔥 스코어 기반 진입모드 자동 매핑 (기대값 우선) ===
+    # 🔧 FIX: confirm 문턱 상향 (70→78) - 손실 빈도/크기 감소
+    # score < 60: probe (소액 탐색) → 추격 진입 방지
+    # score 60~78: half (절반)
+    # score >= 78: confirm (풀 사이즈)
+    if score < 60:
         entry_mode = "probe"
-    elif score < 70:
+    elif score < 78:
         entry_mode = "half"
     else:
         entry_mode = "confirm"
