@@ -74,8 +74,9 @@ PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
 SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
 
 # 🔧 스크래치 규칙 (초반 개선 없으면 빠른 탈출)
-SCRATCH_TIMEOUT_SEC = 25    # 25초 내 개선 없으면 탈출 검토
-SCRATCH_MIN_GAIN = 0.0003   # 최소 +0.03% 이상 상승해야 유지 (아니면 스크래치)
+# 🔧 FIX: 승률 개선 - 시간 단축 + 최소 개선폭 상향
+SCRATCH_TIMEOUT_SEC = 20    # 20초 내 개선 없으면 탈출 검토 (25→20)
+SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지 (0.03%→0.06%)
 
 # 🔧 MFE 기반 부분익절 (경로별 동적 타겟)
 # 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
@@ -3924,9 +3925,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     """
     # ============================================================
     # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
-    # ignition_score: 0~4, 점수당 완화 비율 적용
+    # 🔧 FIX: 4점 점화(확정)에서만 완화 - 애매한 1~3점은 완화 없음 (승률 개선)
     # ============================================================
-    relax = ignition_score * 0.10  # 🔧 점수당 10% 완화 (8%→10% 강화, 3점이면 30% 완화)
+    relax = 0.30 if ignition_score >= 4 else 0  # 4점에서만 30% 완화
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
