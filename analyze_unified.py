@@ -161,7 +161,7 @@ class Candle:
 
 @dataclass
 class PreEntryEnv:
-    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용 (v2)"""
+    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용 (v3 - 2026-01-23 동기화)"""
     ticker: str
     time_str: str
     is_success: bool
@@ -184,6 +184,18 @@ class PreEntryEnv:
     ema20_breakout: bool
     # high_breakout: 12봉 고점 돌파 여부 (진입 시그널)
     high_breakout: bool
+
+    # === 🔥 신규: 레짐 필터 (v3) ===
+    sideways_pct: float       # 20봉 범위 % (레짐 판정용)
+    is_sideways: bool         # 횡보장 여부 (range < 0.5%)
+
+    # === 🔥 신규: 킬러 조건 / 스코어 (v3) ===
+    buy_ratio: float          # 매수비율 추정 (양봉 비율 기반)
+    turn_pct: float           # 회전율 추정 (거래대금/시총 근사)
+    imbalance: float          # 임밸런스 추정 (매수-매도 압력)
+    confirm_score: int        # 종합 스코어 (0~100)
+    entry_mode: str           # "confirm" / "half" / "probe"
+    signal_tag: str           # 신호 태그 (점화/강돌파/EMA↑ 등)
 
     # === 진입 전 환경 (직전 5봉) ===
     bullish_count_5: int      # 직전 5봉 중 양봉 수
@@ -425,6 +437,92 @@ def analyze_pre_entry_env(
     prev_high = max(c.high for c in lookback_candles) if lookback_candles else entry.high
     high_breakout = entry.close > prev_high
 
+    # === 🔥 신규: 레짐 필터 (v3) ===
+    # sideways_pct: 20봉 범위 % (봇: is_sideways_regime)
+    regime_candles = candles[max(0, entry_idx-19):entry_idx+1]
+    if len(regime_candles) >= 10:
+        regime_high = max(c.high for c in regime_candles)
+        regime_low = min(c.low for c in regime_candles)
+        sideways_pct = ((regime_high - regime_low) / regime_low * 100) if regime_low > 0 else 0.0
+    else:
+        sideways_pct = 5.0  # 기본값 (충분한 데이터 없으면 횡보 아님으로)
+    is_sideways = sideways_pct < 0.5  # 봇 기준: 0.5% 미만 = 횡보
+
+    # === 🔥 신규: 킬러 조건 / 스코어 (v3) ===
+    # buy_ratio: 분봉 기반 매수비율 추정 (양봉 비율 + 거래량 가중)
+    recent_5 = candles[max(0, entry_idx-4):entry_idx+1]
+    bullish_weighted = sum(c.volume_krw for c in recent_5 if c.close > c.open)
+    total_vol_5 = sum(c.volume_krw for c in recent_5)
+    buy_ratio = (bullish_weighted / total_vol_5) if total_vol_5 > 0 else 0.5
+
+    # turn_pct: 회전율 추정 (거래대금 / 가격 비율로 근사)
+    # 실제로는 시총 정보가 없어서 거래대금 증가율로 대체
+    turn_pct = vol_surge * 0.1  # 거래량 서지의 10%를 회전율로 근사
+
+    # imbalance: 매수-매도 압력 차이 추정
+    # 양봉일 때 (종가-시가)/범위, 음봉일 때 반대
+    if entry.high > entry.low:
+        price_position = (entry.close - entry.low) / (entry.high - entry.low)
+    else:
+        price_position = 0.5
+    imbalance = (price_position - 0.5) * 2  # -1 ~ +1 범위로 정규화
+
+    # === 🔥 신규: 스코어 계산 (v3) ===
+    # 봇 actual_score() 로직 근사
+    confirm_score = 50  # 기본점수
+
+    # 거래량 관련 (+30점 max)
+    if vol_surge >= 0.5:
+        confirm_score += min(int(vol_surge * 10), 15)  # 최대 +15
+    if vol_vs_ma >= 0.5:
+        confirm_score += min(int(vol_vs_ma * 10), 15)  # 최대 +15
+
+    # 매수비율 (+15점 max)
+    if buy_ratio >= 0.55:
+        confirm_score += int((buy_ratio - 0.5) * 30)  # 최대 +15
+
+    # 임밸런스 (+10점 max)
+    if imbalance >= 0.3:
+        confirm_score += int(imbalance * 10)
+
+    # 돌파 신호 (+15점 max)
+    if high_breakout:
+        confirm_score += 10
+    if ema20_above:
+        confirm_score += 5
+
+    # 가격 변화 (+10점 max)
+    if price_change > 0.002:
+        confirm_score += min(int(price_change * 500), 10)
+
+    # 횡보장 감점 (-20점)
+    if is_sideways:
+        confirm_score -= 20
+
+    confirm_score = max(0, min(100, confirm_score))  # 0~100 클램프
+
+    # entry_mode: 스코어 기반 진입모드 (봇 78점 기준)
+    if confirm_score >= 78:
+        entry_mode = "confirm"
+    elif confirm_score >= 60:
+        entry_mode = "half"
+    else:
+        entry_mode = "probe"
+
+    # signal_tag: 신호 태그 생성
+    tags = []
+    if vol_surge >= 2.0 and buy_ratio >= 0.65 and imbalance >= 0.5:
+        tags.append("🔥점화")
+    if high_breakout and ema20_above:
+        tags.append("강돌파")
+    elif ema20_above:
+        tags.append("EMA↑")
+    elif high_breakout:
+        tags.append("고점↑")
+    if vol_surge >= 1.5:
+        tags.append("거래량↑")
+    signal_tag = " ".join(tags) if tags else "기본"
+
     # === 직전 5봉 환경 분석 ===
 
     # 양봉 수
@@ -511,6 +609,16 @@ def analyze_pre_entry_env(
         vol_vs_ma=vol_vs_ma,
         ema20_breakout=ema20_above,  # ema20_above와 동일
         high_breakout=high_breakout,
+        # 🔥 신규: 레짐 필터 (v3)
+        sideways_pct=sideways_pct,
+        is_sideways=is_sideways,
+        # 🔥 신규: 킬러 조건 / 스코어 (v3)
+        buy_ratio=buy_ratio,
+        turn_pct=turn_pct,
+        imbalance=imbalance,
+        confirm_score=confirm_score,
+        entry_mode=entry_mode,
+        signal_tag=signal_tag,
         # 직전 5봉
         bullish_count_5=bullish_count_5,
         higher_lows_5=higher_lows_5,
@@ -624,7 +732,8 @@ def run_env_analysis(client: UpbitClient) -> None:
             fail_data.append(env)
 
         tag = "✓" if is_success else "✗"
-        print(f"  [{tag}] {ticker} {time_str}: surge={env.vol_surge:.2f}x MA대비={env.vol_vs_ma:.2f}x chg={env.price_change*100:+.2f}% accel={env.accel:.2f}x overheat={env.overheat:.1f}")
+        sw_tag = "횡보" if env.is_sideways else ""
+        print(f"  [{tag}] {ticker} {time_str}: score={env.confirm_score} mode={env.entry_mode} tag={env.signal_tag} buy={env.buy_ratio:.0%} imb={env.imbalance:+.2f} {sw_tag}")
 
     print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
     total = len(success_data) + len(fail_data)
@@ -646,6 +755,11 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("price_change", "가격변화 (봉간)", ">="),
         ("accel", "가속도 (봉근사)", ">="),
         ("overheat", "과열지수 (accel*surge)", ">="),
+        # 🔥 신규 (v3)
+        ("buy_ratio", "매수비율 (추정)", ">="),
+        ("imbalance", "임밸런스 (추정)", ">="),
+        ("sideways_pct", "20봉범위 (%)", ">="),
+        ("confirm_score", "스코어 (0~100)", ">="),
     ]
 
     print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
@@ -773,6 +887,7 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("high_breakout", "12봉고점 돌파 (봇)"),
         ("ema5_above_20", "EMA5 > EMA20"),
         ("entry_bullish", "진입봉 양봉"),
+        ("is_sideways", "횡보장 (v3)"),  # 🔥 신규
     ]
 
     print(f"\n{'지표':<20} | {'성공 비율':>12} | {'실패 비율':>12} | {'차이':>10}")
@@ -809,6 +924,40 @@ def run_env_analysis(client: UpbitClient) -> None:
         bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
         print(f"  {name}: {s_cnt:>2}승 {f_cnt:>2}패 = {rate:>5.1f}% |{bar}|")
 
+    # === 🔥 신규 (v3): 진입모드별 승률 ===
+    print("\n" + "=" * 80)
+    print("🎯 진입모드별 승률 (v3)")
+    print("=" * 80)
+
+    for mode in ["confirm", "half", "probe"]:
+        s_cnt = sum(1 for e in success_data if e.entry_mode == mode)
+        f_cnt = sum(1 for e in fail_data if e.entry_mode == mode)
+        total = s_cnt + f_cnt
+        rate = (s_cnt / total * 100) if total > 0 else 0
+        bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
+        print(f"  {mode:>8}: {s_cnt:>2}승 {f_cnt:>2}패 = {rate:>5.1f}% |{bar}|")
+
+    # === 🔥 신규 (v3): 스코어 구간별 승률 ===
+    print("\n" + "=" * 80)
+    print("📊 스코어 구간별 승률 (v3)")
+    print("=" * 80)
+
+    score_buckets = [
+        ("80+ (confirm)", lambda s: s >= 80),
+        ("70-79 (half)", lambda s: 70 <= s < 80),
+        ("60-69 (half)", lambda s: 60 <= s < 70),
+        ("50-59 (probe)", lambda s: 50 <= s < 60),
+        ("50 미만", lambda s: s < 50),
+    ]
+
+    for name, cond in score_buckets:
+        s_cnt = sum(1 for e in success_data if cond(e.confirm_score))
+        f_cnt = sum(1 for e in fail_data if cond(e.confirm_score))
+        total = s_cnt + f_cnt
+        rate = (s_cnt / total * 100) if total > 0 else 0
+        bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
+        print(f"  {name}: {s_cnt:>2}승 {f_cnt:>2}패 = {rate:>5.1f}% |{bar}|")
+
     # === 최적 임계값 찾기 ===
     print("\n" + "=" * 80)
     print("🎯 최적 임계값 제안 (70% 성공 유지 기준)")
@@ -825,6 +974,10 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("higher_highs_5", "고점상승", ">="),
         ("vol_trend_10", "10봉거래량추세", ">="),
         ("pos_in_range_30", "30봉내위치", ">="),
+        # 🔥 신규 (v3)
+        ("buy_ratio", "매수비율", ">="),
+        ("imbalance", "임밸런스", ">="),
+        ("confirm_score", "스코어", ">="),
     ]
 
     recommendations = []
