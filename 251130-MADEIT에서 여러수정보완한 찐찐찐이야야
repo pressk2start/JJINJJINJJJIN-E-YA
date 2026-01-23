@@ -4121,8 +4121,8 @@ def is_sideways_regime(c1, lookback=20):
 
     range_pct = (box_high - box_low) / box_low
 
-    # 1.5% 미만이면 횡보 판정
-    is_sideways = range_pct < 0.015
+    # 🔧 완화: 1.5% → 1.0% (밤/새벽 저변동 시간대 대응)
+    is_sideways = range_pct < 0.010
 
     return is_sideways, range_pct
 
