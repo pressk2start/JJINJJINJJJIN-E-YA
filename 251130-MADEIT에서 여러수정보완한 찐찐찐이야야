@@ -4193,10 +4193,10 @@ def regime_filter(m, c1, cur_price):
     if is_sw:
         return False, f"SIDEWAYS({range_pct*100:.1f}%)"
 
-    # 2) 박스 상단 근처 판정
-    near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
-    if near_box and box_pos == "BOX_TOP":
-        return False, "BOX_TOP"
+    # 2) 박스 상단 근처 판정 - 🔧 비활성화 (돌파 전략에서 고점 진입은 정상)
+    # near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
+    # if near_box and box_pos == "BOX_TOP":
+    #     return False, "BOX_TOP"
 
     # 3) EMA 기울기 판정 (선택적)
     slope = calc_ema_slope(c1, period=20, lookback=5)
