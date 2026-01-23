@@ -5177,20 +5177,19 @@ def monitor_position(m,
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
-            BREAKOUT_THRESHOLD = 0.0015  # +0.15%
-            BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
-
-            if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
-                breakout_reached = True
-                breakout_ts = time.time()
-
-            if breakout_reached and cur_gain <= 0:
-                time_since_breakout = time.time() - breakout_ts
-                if time_since_breakout <= BREAKOUT_FAIL_SEC:
-                    close_auto_position(m, f"실패돌파 | +{BREAKOUT_THRESHOLD*100:.2f}%→{cur_gain*100:.2f}% ({time_since_breakout:.1f}초)")
-                    verdict = "실패돌파"
-                    outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
-                    break
+            # === 🔧 실패돌파 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
+            # BREAKOUT_THRESHOLD = 0.0015  # +0.15%
+            # BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
+            # if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
+            #     breakout_reached = True
+            #     breakout_ts = time.time()
+            # if breakout_reached and cur_gain <= 0:
+            #     time_since_breakout = time.time() - breakout_ts
+            #     if time_since_breakout <= BREAKOUT_FAIL_SEC:
+            #         close_auto_position(m, f"실패돌파 | +{BREAKOUT_THRESHOLD*100:.2f}%→{cur_gain*100:.2f}% ({time_since_breakout:.1f}초)")
+            #         verdict = "실패돌파"
+            #         outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
+            #         break
 
             # === 🔧 스크래치 규칙 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
             # if alive_sec >= SCRATCH_TIMEOUT_SEC and alive_sec < SIDEWAYS_TIMEOUT:
@@ -5203,19 +5202,15 @@ def monitor_position(m,
             #             outcome_extra = f"(MFE {max_gain*100:.3f}%, flow={flow_accel:.2f})"
             #             break
 
-            # === 🔧 횡보 탈출 로직 (미니트레일링 + flow_accel) ===
-            # 60초 이후 + trail_armed=False → 고점 추적, 고점-0.03% 하락 시 청산
-            if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
-                # 고점 갱신
-                sideways_peak = max(sideways_peak, cur_gain)
-
-                # 청산 조건: 고점에서 0.03% 하락
-                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
-                if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
-                    close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
-                    verdict = "횡보탈출"
-                    outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
-                    break
+            # === 🔧 횡보 탈출 로직 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
+            # if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
+            #     sideways_peak = max(sideways_peak, cur_gain)
+            #     SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
+            #     if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
+            #         close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
+            #         verdict = "횡보탈출"
+            #         outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
+            #         break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
