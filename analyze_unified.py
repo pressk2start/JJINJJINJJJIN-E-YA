@@ -1,9 +1,9 @@
 # /analyze_unified.py
 # -*- coding: utf-8 -*-
 """
-실전 데이터 분석 스크립트 (통합 버전 v2)
+실전 데이터 분석 스크립트 (통합 버전 v3)
 
-핵심 변경점 (2026-01-21 업데이트):
+핵심 변경점 (2026-01-24 업데이트):
 1. 봇의 실제 계산 방식 완전 적용
    - vol_surge: c1[-7:-2] 5개봉 평균 대비 현재 거래대금
    - price_change: 현재봉/이전봉 종가 비율 - 1
@@ -13,12 +13,20 @@
    - ema20_breakout: 현재가 > EMA20 여부
    - high_breakout: 12봉 고점 돌파 여부
    - overheat: accel * vol_surge (과열 지표)
-3. 진입 시점 이전의 환경 분석 (직전 5~10봉 패턴)
-4. 성공/실패 케이스 환경 비교
+3. 레짐 필터 (v3 신규)
+   - sideways_pct: 20봉 범위 % (횡보 판정)
+   - is_sideways: range < 0.5% = 횡보
+4. 킬러 조건 / 스코어 (v3 신규)
+   - buy_ratio, imbalance, turn_pct
+   - confirm_score (0~100), entry_mode, signal_tag
+5. 청산 후 분석 (v3 신규)
+   - 청산 후 N분봉 추적하여 조기청산/적정청산 판정
+   - 트레일링 임계치 최적화 분석
 
 Usage:
-  python3 analyze_unified.py              # 전체 분석
-  python3 analyze_unified.py --mode env   # 진입 전 환경 분석만
+  python3 analyze_unified.py                    # 전체 분석
+  python3 analyze_unified.py --mode env         # 진입 전 환경 분석만
+  python3 analyze_unified.py --mode exit        # 청산 후 분석 (EXIT_CASES 필요)
 """
 
 from __future__ import annotations
@@ -141,6 +149,16 @@ CASES: List[Tuple[str, str, str, bool]] = [
     ("BREV", "2026-01-13", "09:02", True),
 ]
 
+# =========================
+# 청산 분석용 케이스 (v3 신규)
+# (ticker, date, entry_time, exit_time, pnl_pct, exit_reason)
+# 청산 후 N분봉 추적하여 조기청산/적정청산 판정
+# =========================
+EXIT_CASES: List[Tuple[str, str, str, str, float, str]] = [
+    # 예시: ("BTC", "2026-01-24", "10:00", "10:05", -0.3, "ATR손절")
+    # pnl_pct: 실제 손익률 (%), exit_reason: 청산 사유
+]
+
 
 KST = timezone(timedelta(hours=9))
 
@@ -220,6 +238,33 @@ class PreEntryEnv:
     entry_body_pct: float     # 진입봉 몸통 크기 %
     entry_upper_wick: float   # 진입봉 윗꼬리 %
     entry_lower_wick: float   # 진입봉 아랫꼬리 %
+
+
+@dataclass
+class ExitAnalysis:
+    """청산 후 분석 결과 (v3 신규)"""
+    ticker: str
+    entry_time: str
+    exit_time: str
+    exit_reason: str
+    actual_pnl: float         # 실제 손익률 %
+
+    # === 청산 후 가격 움직임 ===
+    post_1m_chg: float        # 청산 후 1분 가격변화 %
+    post_3m_chg: float        # 청산 후 3분 가격변화 %
+    post_5m_chg: float        # 청산 후 5분 가격변화 %
+    post_10m_chg: float       # 청산 후 10분 가격변화 %
+    post_max_up: float        # 청산 후 10분 내 최대 상승 %
+    post_max_down: float      # 청산 후 10분 내 최대 하락 %
+
+    # === 청산 판정 ===
+    exit_verdict: str         # "조기청산" / "적정청산" / "늦은청산"
+    missed_profit: float      # 놓친 수익 % (조기청산 시)
+    avoided_loss: float       # 피한 손실 % (적정청산 시)
+
+    # === 최적 청산 시점 분석 ===
+    optimal_exit_idx: int     # 청산 후 최적 청산 시점 (분)
+    optimal_pnl: float        # 최적 청산 시 예상 손익 %
 
 
 # =========================
@@ -1077,27 +1122,261 @@ def run_env_analysis(client: UpbitClient) -> None:
 
 
 # =========================
+# 청산 후 분석 (v3 신규)
+# =========================
+def analyze_exit_one(
+    client: "UpbitClient",
+    ticker: str,
+    date_str: str,
+    entry_time: str,
+    exit_time: str,
+    actual_pnl: float,
+    exit_reason: str,
+    post_candles: int = 10,
+) -> Optional[ExitAnalysis]:
+    """
+    단일 청산 케이스 분석
+    - 청산 후 N분봉을 가져와서 가격 움직임 분석
+    - 조기청산/적정청산/늦은청산 판정
+    """
+    # 청산 시점 + 이후 N분봉 가져오기
+    exit_dt = datetime.strptime(f"{date_str} {exit_time}", "%Y-%m-%d %H:%M")
+    exit_dt = exit_dt.replace(tzinfo=KST)
+
+    # 청산 후 10분 + 여유 2분
+    to_time = exit_dt + timedelta(minutes=post_candles + 2)
+    to_time_iso = to_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    raw = client.get_candles_minutes(ticker, to_time_iso, unit=1, count=post_candles + 5)
+    if not raw or len(raw) < post_candles:
+        print(f"  [WARN] {ticker} {exit_time} 이후 분봉 데이터 부족")
+        return None
+
+    # 분봉 파싱 (최신순 → 시간순)
+    candles = []
+    for r in reversed(raw):
+        dt_utc = datetime.fromisoformat(r["candle_date_time_utc"].replace("Z", "+00:00"))
+        dt_kst = dt_utc.astimezone(KST)
+        candles.append(Candle(
+            dt_kst=dt_kst,
+            open=r["opening_price"],
+            high=r["high_price"],
+            low=r["low_price"],
+            close=r["trade_price"],
+            volume=r["candle_acc_trade_volume"],
+            volume_krw=r["candle_acc_trade_price"],
+        ))
+
+    # 청산 시점 봉 찾기
+    exit_idx = None
+    for i, c in enumerate(candles):
+        if c.dt_kst.hour == exit_dt.hour and c.dt_kst.minute == exit_dt.minute:
+            exit_idx = i
+            break
+
+    if exit_idx is None:
+        # 가장 가까운 봉 찾기
+        for i, c in enumerate(candles):
+            if c.dt_kst >= exit_dt:
+                exit_idx = max(0, i - 1)
+                break
+
+    if exit_idx is None or exit_idx >= len(candles) - 1:
+        print(f"  [WARN] {ticker} 청산 시점 봉 찾기 실패")
+        return None
+
+    exit_price = candles[exit_idx].close
+
+    # 청산 후 가격 변화 계산
+    def get_post_change(minutes: int) -> float:
+        idx = exit_idx + minutes
+        if idx < len(candles):
+            return (candles[idx].close / exit_price - 1.0) * 100
+        return 0.0
+
+    post_1m = get_post_change(1)
+    post_3m = get_post_change(3)
+    post_5m = get_post_change(5)
+    post_10m = get_post_change(10)
+
+    # 청산 후 최대 상승/하락
+    post_highs = [c.high for c in candles[exit_idx+1:exit_idx+11] if exit_idx+1 < len(candles)]
+    post_lows = [c.low for c in candles[exit_idx+1:exit_idx+11] if exit_idx+1 < len(candles)]
+
+    post_max_up = ((max(post_highs) / exit_price - 1.0) * 100) if post_highs else 0.0
+    post_max_down = ((min(post_lows) / exit_price - 1.0) * 100) if post_lows else 0.0
+
+    # 청산 판정
+    # - 조기청산: 청산 후 크게 상승 (놓친 수익 > 0.3%)
+    # - 적정청산: 청산 후 횡보 또는 하락
+    # - 늦은청산: 청산 전에 더 좋은 청산 시점 있었음 (여기선 분석 어려움)
+    if post_max_up > 0.3:
+        verdict = "조기청산"
+        missed_profit = post_max_up
+        avoided_loss = 0.0
+    elif post_max_down < -0.2:
+        verdict = "적정청산"
+        missed_profit = 0.0
+        avoided_loss = abs(post_max_down)
+    else:
+        verdict = "적정청산"
+        missed_profit = max(0, post_max_up)
+        avoided_loss = max(0, abs(post_max_down))
+
+    # 최적 청산 시점 찾기 (청산 후 최고점)
+    optimal_idx = 0
+    optimal_price = exit_price
+    for i, c in enumerate(candles[exit_idx+1:exit_idx+11]):
+        if c.high > optimal_price:
+            optimal_price = c.high
+            optimal_idx = i + 1
+
+    optimal_pnl = actual_pnl + ((optimal_price / exit_price - 1.0) * 100)
+
+    return ExitAnalysis(
+        ticker=ticker,
+        entry_time=entry_time,
+        exit_time=exit_time,
+        exit_reason=exit_reason,
+        actual_pnl=actual_pnl,
+        post_1m_chg=post_1m,
+        post_3m_chg=post_3m,
+        post_5m_chg=post_5m,
+        post_10m_chg=post_10m,
+        post_max_up=post_max_up,
+        post_max_down=post_max_down,
+        exit_verdict=verdict,
+        missed_profit=missed_profit,
+        avoided_loss=avoided_loss,
+        optimal_exit_idx=optimal_idx,
+        optimal_pnl=optimal_pnl,
+    )
+
+
+def run_exit_analysis(client: "UpbitClient") -> None:
+    """청산 후 분석 실행"""
+    if not EXIT_CASES:
+        print("\n[EXIT_CASES가 비어있습니다. 청산 케이스를 추가해주세요]")
+        print("형식: (ticker, date, entry_time, exit_time, pnl_pct, exit_reason)")
+        print('예시: ("BTC", "2026-01-24", "10:00", "10:05", -0.3, "ATR손절")')
+        return
+
+    print("\n" + "=" * 80)
+    print("📊 청산 후 분석 (v3)")
+    print("=" * 80)
+
+    results: List[ExitAnalysis] = []
+    premature_exits = []  # 조기청산
+    good_exits = []       # 적정청산
+
+    for ticker, date_str, entry_time, exit_time, pnl_pct, exit_reason in EXIT_CASES:
+        print(f"\n분석 중: {ticker} {date_str} {exit_time} ({exit_reason})...")
+        result = analyze_exit_one(client, ticker, date_str, entry_time, exit_time, pnl_pct, exit_reason)
+        if result:
+            results.append(result)
+            if result.exit_verdict == "조기청산":
+                premature_exits.append(result)
+            else:
+                good_exits.append(result)
+
+    if not results:
+        print("분석 결과 없음")
+        return
+
+    # === 개별 결과 출력 ===
+    print("\n" + "-" * 80)
+    print(f"{'티커':<8} | {'청산시간':<6} | {'손익':>7} | {'후1분':>6} | {'후5분':>6} | {'최대↑':>6} | {'최대↓':>6} | {'판정':<8}")
+    print("-" * 80)
+
+    for r in results:
+        print(f"{r.ticker:<8} | {r.exit_time:<6} | {r.actual_pnl:>+6.2f}% | {r.post_1m_chg:>+5.2f}% | {r.post_5m_chg:>+5.2f}% | {r.post_max_up:>+5.2f}% | {r.post_max_down:>+5.2f}% | {r.exit_verdict:<8}")
+
+    # === 요약 통계 ===
+    print("\n" + "=" * 80)
+    print("📈 청산 분석 요약")
+    print("=" * 80)
+
+    print(f"\n총 {len(results)}건 분석")
+    print(f"  - 조기청산: {len(premature_exits)}건 ({len(premature_exits)/len(results)*100:.1f}%)")
+    print(f"  - 적정청산: {len(good_exits)}건 ({len(good_exits)/len(results)*100:.1f}%)")
+
+    if premature_exits:
+        avg_missed = statistics.mean([r.missed_profit for r in premature_exits])
+        print(f"\n[조기청산 분석]")
+        print(f"  - 평균 놓친 수익: +{avg_missed:.2f}%")
+        print(f"  - 최대 놓친 수익: +{max(r.missed_profit for r in premature_exits):.2f}%")
+
+        # 청산 사유별 조기청산 비율
+        reasons = {}
+        for r in premature_exits:
+            reasons[r.exit_reason] = reasons.get(r.exit_reason, 0) + 1
+        print(f"  - 사유별 분포:")
+        for reason, cnt in sorted(reasons.items(), key=lambda x: -x[1]):
+            print(f"      {reason}: {cnt}건")
+
+    if good_exits:
+        avg_avoided = statistics.mean([r.avoided_loss for r in good_exits])
+        print(f"\n[적정청산 분석]")
+        print(f"  - 평균 피한 손실: -{avg_avoided:.2f}%")
+
+    # === 트레일링 임계치 최적화 제안 ===
+    print("\n" + "=" * 80)
+    print("🎯 트레일링 임계치 최적화 제안")
+    print("=" * 80)
+
+    if premature_exits:
+        # 조기청산 케이스들의 청산 후 최대 상승 분석
+        max_ups = [r.post_max_up for r in premature_exits]
+        median_missed = statistics.median(max_ups)
+        print(f"\n조기청산 시 놓친 수익 중앙값: +{median_missed:.2f}%")
+
+        if median_missed > 0.3:
+            print(f"→ 트레일링 거리를 현재보다 +{median_missed/2:.2f}% 넓히는 것을 권장")
+            print(f"   (현재 ATR×0.8 → ATR×{0.8 + median_missed/100:.2f} 또는 고정값 추가)")
+    else:
+        print("\n조기청산 케이스가 없어 트레일링이 적절한 것으로 보입니다.")
+
+    # 청산 후 가격 패턴
+    print(f"\n[청산 후 평균 가격 변화]")
+    print(f"  - 1분 후: {statistics.mean([r.post_1m_chg for r in results]):+.2f}%")
+    print(f"  - 3분 후: {statistics.mean([r.post_3m_chg for r in results]):+.2f}%")
+    print(f"  - 5분 후: {statistics.mean([r.post_5m_chg for r in results]):+.2f}%")
+    print(f"  - 10분 후: {statistics.mean([r.post_10m_chg for r in results]):+.2f}%")
+
+
+# =========================
 # Main
 # =========================
 def main() -> None:
-    parser = argparse.ArgumentParser(description="실전 데이터 분석 스크립트 v1")
-    parser.add_argument("--mode", choices=["env", "all"], default="all",
-                        help="분석 모드: env(환경분석), all(전체)")
+    parser = argparse.ArgumentParser(description="실전 데이터 분석 스크립트 v3")
+    parser.add_argument("--mode", choices=["env", "exit", "all"], default="all",
+                        help="분석 모드: env(진입환경), exit(청산후분석), all(전체)")
     args = parser.parse_args()
-
-    success_cnt = sum(1 for c in CASES if c[3])
-    fail_cnt = sum(1 for c in CASES if not c[3])
-    win_rate = success_cnt / len(CASES) * 100 if CASES else 0
-
-    print("=" * 80)
-    print("📊 실전 데이터 분석 v2 (봇 실제 계산 방식 적용)")
-    print("    stage1_gate 지표 완전 반영 + 성공/실패 패턴 비교")
-    print("=" * 80)
-    print(f"케이스: 성공 {success_cnt}건, 실패 {fail_cnt}건 (승률 {win_rate:.1f}%)")
 
     client = UpbitClient(min_interval_sec=0.12)
 
-    run_env_analysis(client)
+    if args.mode == "exit":
+        # 청산 후 분석만
+        print("=" * 80)
+        print("📊 청산 후 분석 모드 (v3)")
+        print("=" * 80)
+        run_exit_analysis(client)
+    else:
+        # 진입 환경 분석
+        success_cnt = sum(1 for c in CASES if c[3])
+        fail_cnt = sum(1 for c in CASES if not c[3])
+        win_rate = success_cnt / len(CASES) * 100 if CASES else 0
+
+        print("=" * 80)
+        print("📊 실전 데이터 분석 v3 (봇 실제 계산 방식 적용)")
+        print("    stage1_gate + 레짐필터 + 스코어 완전 반영")
+        print("=" * 80)
+        print(f"케이스: 성공 {success_cnt}건, 실패 {fail_cnt}건 (승률 {win_rate:.1f}%)")
+
+        run_env_analysis(client)
+
+        if args.mode == "all" and EXIT_CASES:
+            run_exit_analysis(client)
 
     print("\n" + "=" * 80)
     print("✅ 분석 완료")
