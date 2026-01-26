@@ -207,6 +207,9 @@ class PreEntryEnv:
     sideways_pct: float       # 20봉 범위 % (레짐 판정용)
     is_sideways: bool         # 횡보장 여부 (range < 0.5%)
 
+    # === 🔥 신규: CV 분석 (v3.1) ===
+    cv_approx: float          # CV 근사 (분봉 거래대금 기반 변동계수)
+
     # === 🔥 신규: 킬러 조건 / 스코어 (v3) ===
     buy_ratio: float          # 매수비율 추정 (양봉 비율 기반)
     turn_pct: float           # 회전율 추정 (거래대금/시총 근사)
@@ -493,6 +496,23 @@ def analyze_pre_entry_env(
         sideways_pct = 5.0  # 기본값 (충분한 데이터 없으면 횡보 아님으로)
     is_sideways = sideways_pct < 0.5  # 봇 기준: 0.5% 미만 = 횡보
 
+    # === 🔥 신규: CV 근사 (v3.1) ===
+    # 봇 CV: 틱 도착 간격의 변동계수 (std/mean)
+    # 분봉 근사: 최근 10봉 거래대금의 변동계수로 계산
+    # CV가 낮으면 = 거래 패턴이 규칙적 (봇/세력 가능성)
+    # CV가 높으면 = 거래 패턴이 불규칙 (과열/급변동)
+    cv_candles = candles[max(0, entry_idx-9):entry_idx+1]  # 최근 10봉
+    if len(cv_candles) >= 5:
+        cv_volumes = [c.volume_krw for c in cv_candles if c.volume_krw > 0]
+        if cv_volumes and len(cv_volumes) >= 3:
+            cv_mean = statistics.mean(cv_volumes)
+            cv_std = statistics.stdev(cv_volumes) if len(cv_volumes) > 1 else 0.0
+            cv_approx = (cv_std / cv_mean) if cv_mean > 0 else 0.0
+        else:
+            cv_approx = 1.0  # 기본값
+    else:
+        cv_approx = 1.0  # 기본값
+
     # === 🔥 신규: 킬러 조건 / 스코어 (v3) ===
     # buy_ratio: 분봉 기반 매수비율 추정 (양봉 비율 + 거래량 가중)
     recent_5 = candles[max(0, entry_idx-4):entry_idx+1]
@@ -657,6 +677,8 @@ def analyze_pre_entry_env(
         # 🔥 신규: 레짐 필터 (v3)
         sideways_pct=sideways_pct,
         is_sideways=is_sideways,
+        # 🔥 신규: CV 근사 (v3.1)
+        cv_approx=cv_approx,
         # 🔥 신규: 킬러 조건 / 스코어 (v3)
         buy_ratio=buy_ratio,
         turn_pct=turn_pct,
@@ -778,7 +800,7 @@ def run_env_analysis(client: UpbitClient) -> None:
 
         tag = "✓" if is_success else "✗"
         sw_tag = "횡보" if env.is_sideways else ""
-        print(f"  [{tag}] {ticker} {time_str}: score={env.confirm_score} mode={env.entry_mode} tag={env.signal_tag} buy={env.buy_ratio:.0%} imb={env.imbalance:+.2f} {sw_tag}")
+        print(f"  [{tag}] {ticker} {time_str}: score={env.confirm_score} mode={env.entry_mode} cv={env.cv_approx:.2f} buy={env.buy_ratio:.0%} imb={env.imbalance:+.2f} {sw_tag}")
 
     print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
     total = len(success_data) + len(fail_data)
@@ -805,6 +827,8 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("imbalance", "임밸런스 (추정)", ">="),
         ("sideways_pct", "20봉범위 (%)", ">="),
         ("confirm_score", "스코어 (0~100)", ">="),
+        # 🔥 신규 (v3.1) - CV 분석
+        ("cv_approx", "CV 근사 (변동계수)", "<="),  # CV 낮을수록 좋음
     ]
 
     print(f"\n{'지표':<20} | {'성공 중앙':>10} | {'실패 중앙':>10} | {'AUC':>8} | {'판별력':>8}")
@@ -1023,6 +1047,8 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("buy_ratio", "매수비율", ">="),
         ("imbalance", "임밸런스", ">="),
         ("confirm_score", "스코어", ">="),
+        # 🔥 신규 (v3.1) - CV 분석
+        ("cv_approx", "CV(변동계수)", "<="),  # CV 낮을수록 좋음 (규칙적 거래)
     ]
 
     recommendations = []
@@ -1044,7 +1070,7 @@ def run_env_analysis(client: UpbitClient) -> None:
 
                 if attr == "price_change":
                     thresh_str = f"{threshold*100:+.2f}%"
-                elif attr in ["vol_surge", "accel", "vol_trend_10"]:
+                elif attr in ["vol_surge", "accel", "vol_trend_10", "cv_approx"]:
                     thresh_str = f"{threshold:.2f}x"
                 elif attr == "pos_in_range_30":
                     thresh_str = f"{threshold:.1f}%"
@@ -1097,6 +1123,7 @@ def run_env_analysis(client: UpbitClient) -> None:
     print(f"  - 가격변화: {statistics.median([e.price_change for e in success_data])*100:+.2f}%")
     print(f"  - 가속도: {statistics.median([e.accel for e in success_data]):.2f}x")
     print(f"  - 과열지수: {statistics.median([e.overheat for e in success_data]):.1f}")
+    print(f"  - CV(변동계수): {statistics.median([e.cv_approx for e in success_data]):.2f}")
     print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in success_data]):.1f}개")
     print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in success_data]):.1f}회")
     print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in success_data]):.1f}%")
@@ -1114,6 +1141,7 @@ def run_env_analysis(client: UpbitClient) -> None:
     print(f"  - 가격변화: {statistics.median([e.price_change for e in fail_data])*100:+.2f}%")
     print(f"  - 가속도: {statistics.median([e.accel for e in fail_data]):.2f}x")
     print(f"  - 과열지수: {statistics.median([e.overheat for e in fail_data]):.1f}")
+    print(f"  - CV(변동계수): {statistics.median([e.cv_approx for e in fail_data]):.2f}")
     print(f"  - 직전 5봉 양봉: {statistics.median([e.bullish_count_5 for e in fail_data]):.1f}개")
     print(f"  - 저점상승: {statistics.median([e.higher_lows_5 for e in fail_data]):.1f}회")
     print(f"  - 30봉내 위치: {statistics.median([e.pos_in_range_30 for e in fail_data]):.1f}%")
