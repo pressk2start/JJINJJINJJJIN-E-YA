@@ -374,6 +374,10 @@ OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
 
+# 🔧 FIX: 모니터링 스레드 중복 방지
+_ACTIVE_MONITORS = {}  # { "KRW-BTC": thread_id }
+_MONITOR_LOCK = threading.Lock()
+
 # 🔧 유령 포지션 동기화
 _LAST_ORPHAN_SYNC = 0
 ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
@@ -779,6 +783,13 @@ def sync_orphan_positions():
                         OPEN_POSITIONS.pop(market, None)
                     _ORPHAN_HANDLED.discard(market)
             else:
+                # 🔧 FIX: 모니터링 스레드 중복 방지
+                with _MONITOR_LOCK:
+                    if market in _ACTIVE_MONITORS:
+                        print(f"[ORPHAN_SKIP] {market} 이미 모니터링 중 → 스레드 생성 스킵")
+                        continue
+                    _ACTIVE_MONITORS[market] = threading.current_thread().ident
+
                 # 모니터링 스레드 시작
                 def _orphan_monitor(m, entry_price):
                     try:
@@ -804,6 +815,10 @@ def sync_orphan_positions():
                         with _POSITION_LOCK:
                             OPEN_POSITIONS.pop(m, None)
                         _ORPHAN_HANDLED.discard(m)
+                    finally:
+                        # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
+                        with _MONITOR_LOCK:
+                            _ACTIVE_MONITORS.pop(m, None)
 
                 t = threading.Thread(target=_orphan_monitor, args=(market, avg_buy_price), daemon=True)
                 t.start()
@@ -1744,6 +1759,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
             return False, msg, 0.0
+        # 🔧 FIX: TOCTOU 레이스 방지 - 락 해제 전 partial_done 선점
+        # 주문 실패 시 아래에서 False로 롤백
+        pos["partial_done"] = True
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
@@ -1751,6 +1769,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     if sell_volume <= 0:
         msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
         print(msg)
+        # 🔧 FIX: 실패 시 partial_done 롤백
+        with _POSITION_LOCK:
+            pos2 = OPEN_POSITIONS.get(m)
+            if pos2:
+                pos2["partial_done"] = False
         return False, msg, 0.0
 
     # 🔧 현재가 조회 (최소주문금액 체크용)
@@ -1792,6 +1815,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         f"• 요청 비율: {sell_ratio*100:.0f}%\n"
                         f"• 요청 수량: {sell_volume:.6f}\n"
                         f"• 체결 수량: 0 (실패)")
+            # 🔧 FIX: 체결 실패 시 partial_done 롤백
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["partial_done"] = False
             return False, msg, 0.0
 
         remaining_volume = max(current_volume - executed, 0.0)
@@ -1897,6 +1925,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         # - 포지션을 pop하면 잔고는 남아있는데 OPEN_POSITIONS에 없어서 orphan 됨!
         if "최소주문금액" in str(e) or "5000" in str(e):
             tg_send(f"⚠️ {m} 부분청산 스킵 (최소주문금액 미만)\n• 포지션 유지, 전량청산 대기")
+        # 🔧 FIX: 예외 발생 시 partial_done 롤백
+        with _POSITION_LOCK:
+            pos2 = OPEN_POSITIONS.get(m)
+            if pos2:
+                pos2["partial_done"] = False
         return False, msg, 0.0
 
 
@@ -6166,6 +6199,14 @@ def main():
                         actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", pre["price"])
 
                     # 🔧 FIX: 별도 스레드에서 모니터링 실행 (메인 스캔 루프 블로킹 방지)
+                    # 🔧 FIX: 모니터링 스레드 중복 방지
+                    with _MONITOR_LOCK:
+                        if m in _ACTIVE_MONITORS:
+                            print(f"[MON_SKIP] {m} 이미 모니터링 중 → 스레드 생성 스킵")
+                            _release_entry_lock(m)
+                            continue
+                        _ACTIVE_MONITORS[m] = threading.current_thread().ident
+
                     pre_copy = dict(pre)  # 클로저 문제 방지
                     def _run_monitor(market, entry, pre_data, tight):
                         try:
@@ -6191,6 +6232,9 @@ def main():
                                 tg_send(f"🚨 {market} 모니터링 오류 (청산 시도 실패)\n• 예외: {e}")
                         finally:
                             _release_entry_lock(market)
+                            # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
+                            with _MONITOR_LOCK:
+                                _ACTIVE_MONITORS.pop(market, None)
 
                     threading.Thread(
                         target=_run_monitor,
