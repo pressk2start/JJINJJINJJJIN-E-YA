@@ -72,11 +72,12 @@ def get_dynamic_checkpoint():
         avg_slip = statistics.median(_SLIP_HISTORY)  # 샘플 적으면 median
     else:
         avg_slip = 0.0008
-    # 왕복 수수료(0.1%) + 슬리피지 + 최소알파(0.1%)
-    # 🔧 FIX: FEE_RATE가 이미 왕복(0.1%)이므로 *2 제거
-    dynamic_cp = fee + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 최소 0.25%, 최대 0.45%
-    return max(0.0025, min(0.0045, dynamic_cp))
+    # 🔧 FIX: 슬리피지를 왕복으로 추정 (매수+매도 양쪽에서 발생)
+    est_roundtrip_slip = max(0.0005, avg_slip) * 2.0
+    # 왕복 수수료(0.1%) + 왕복슬리피지 + 최소알파(0.1%)
+    dynamic_cp = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
+    # 최소 0.28%, 최대 0.50% (왕복 슬리피지 반영으로 상향)
+    return max(0.0028, min(0.0050, dynamic_cp))
 
 # 하위 호환용
 PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
@@ -109,8 +110,10 @@ def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
     # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 line 2171에서 정의됨)
     dyn_sl = globals().get("DYN_SL_MIN", 0.004)
+    # 🔧 FIX: EXIT_PROFILE 반영값 사용 (BASE 대신 TRAIL_DISTANCE_MIN 참조)
+    base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
     # 손절폭의 60%를 트레일 최소 간격으로 (0.4% * 0.6 = 0.24%)
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
+    return max(base, dyn_sl * 0.6)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -4453,9 +4456,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     ema20 = ema_last(closes, 20) if len(closes) >= 20 else None
     ema20_breakout = (ema20 is not None and cur_price > ema20)
 
-    # 🔧 FIX: 고점 돌파를 고가 기준으로 변경 (펌프 초반 감지)
+    # 🔧 FIX: 고점 돌파 - 윗꼬리 오탐 방지 (점화 아닐 때는 종가 확인)
     prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
-    high_breakout = (prev_high > 0 and cur_high > prev_high)  # 🔧 종가→고가
+    high_breakout_wick = (prev_high > 0 and cur_high > prev_high)  # 고가 기준 (윅 포함)
+    high_breakout_close = (prev_high > 0 and cur_price > prev_high * 1.0005)  # 종가 기준 (0.05% 버퍼)
 
     vol_ma20 = vol_ma_from_candles(c1, period=20)
     vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
@@ -4468,6 +4472,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ob=ob,
         cooldown_ms=15000
     )
+
+    # 🔧 FIX: 점화 강할 때만 윅 허용, 아니면 종가 확인 (윗꼬리 오탐 방지)
+    if ignition_score >= 3:
+        high_breakout = high_breakout_wick  # 점화 시 고가 기준 허용
+    else:
+        high_breakout = high_breakout_close  # 비점화 시 종가 확인 필수
 
     # === 🔥 BTC 역풍 가드 (게이트 통과 후 추가 요건 체크) ===
     btc5 = btc_5m_change()
@@ -5345,15 +5355,20 @@ def monitor_position(m,
                 pos = OPEN_POSITIONS.get(m, {})
 
             if pos.get("entry_mode") == "probe":
-                # 전환 조건: 일정 수익 이상 + 거래속도 정상 + 매수세 유지
+                # 전환 조건: 일정 수익 이상 + 거래속도 정상 + 매수세 유지 + 호가 임밸런스
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
                 # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
                 gain_now = (curp / entry_price - 1.0)
+
+                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
+                ob_now = pre.get("ob", {})
+                imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
                     t15_now["buy_ratio"] >= 0.58
                     and t15_now["krw_per_sec"] >= 18000
                     and uptick_streak_from_ticks(ticks, need=2)
+                    and imb_now >= 0.40  # 🔧 호가 임밸런스 조건 추가
                 )
 
                 if gain_now >= 0.012 and strong_flow:
@@ -5393,12 +5408,17 @@ def monitor_position(m,
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
+                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
+                ob_pyr = pre.get("ob", {})
+                imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
+
                 # 💡 조건 완화 — 약상승에서도 반응하도록
                 add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
                 add_cond_flow = (
                     t15_now["buy_ratio"] >= 0.55 and
                     t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
-                    last_two_ticks_fresh(ticks)
+                    last_two_ticks_fresh(ticks) and
+                    imb_pyr >= 0.40  # 🔧 호가 임밸런스 조건 추가
                 )
 
                 # 📊 단기 EMA 기준으로 단기 상승 전환 감지 (1분봉)
@@ -5491,6 +5511,10 @@ def monitor_position(m,
             # 신호 강도별로 다른 MFE 타겟 적용 → 목표 도달 시 50% 익절
             if not mfe_partial_done and not plateau_partial_done:
                 mfe_target = MFE_PARTIAL_TARGETS.get(signal_tag, 0.004)  # 기본 0.4%
+                # 🔧 FIX: BTC 역풍 시 TP 보수화 (목표 낮춤)
+                btc5_now = btc_5m_change()
+                if btc5_now <= -0.003:  # BTC -0.3% 역풍
+                    mfe_target *= 0.75  # 목표 25% 하향
                 if max_gain >= mfe_target:
                     ok, msg, sold = safe_partial_sell(
                         m, MFE_PARTIAL_RATIO,
