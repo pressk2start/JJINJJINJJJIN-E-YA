@@ -1206,6 +1206,19 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 return
 
         # === 매수 ===
+        # 🔧 FIX: 매수 전 보유량 저장 (체결 재검증용)
+        # - od가 None/timeout/executed 0이어도 실제 체결됐을 수 있음
+        # - prev_balance 대비 증가 시에만 포지션 생성 → 오탐 방지
+        coin = m.replace("KRW-", "")
+        prev_balance = 0.0
+        try:
+            for acc in accounts:
+                if acc.get("currency") == coin:
+                    prev_balance = float(acc.get("balance") or "0")
+                    break
+        except Exception:
+            prev_balance = 0.0
+
         try:
             res = place_market_buy(m, krw_to_use)
             print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
@@ -1218,13 +1231,42 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             else:
                 volume_filled = 0.0
 
-            # 🔧 FIX: 체결 0이면 실패 처리 (잔고 fallback 제거 - 이전 잔고 오판 방지)
+            # 🔧 FIX: 체결 0이면 잔고 재검증 (prev_balance 대비 증가 시에만 복구)
+            # - od가 None/timeout/executed 0이어도 실제 체결됐을 수 있음
+            # - 전면 잔고 fallback 부활 X → prev_balance 대비 증가분만 인정 (오탐 방지)
             if volume_filled <= 0:
-                signal_skip("체결 0 (주문 실패)")
-                tg_send(f"⚠️ {m} 자동매수 체결 0 → 포지션 생성 안 함")
-                with _POSITION_LOCK:
-                    OPEN_POSITIONS.pop(m, None)
-                return
+                # 1회 재검증: 잔고가 prev_balance보다 증가했는지 확인
+                try:
+                    time.sleep(0.5)  # 업비트 잔고 반영 대기
+                    accounts_retry = get_account_info()
+                    new_balance = 0.0
+                    avg_buy_price_from_acc = entry_price
+                    for acc in accounts_retry:
+                        if acc.get("currency") == coin:
+                            new_balance = float(acc.get("balance") or "0")
+                            avg_buy_price_from_acc = float(acc.get("avg_buy_price") or "0")
+                            break
+
+                    balance_diff = new_balance - prev_balance
+                    if balance_diff > 1e-8:  # 증가분 존재 → 실제 체결됨
+                        volume_filled = balance_diff
+                        avg_price = avg_buy_price_from_acc if avg_buy_price_from_acc > 0 else entry_price
+                        print(f"[BUY_VERIFY] {m} od 실패했으나 잔고 증가 확인: {prev_balance:.8f} → {new_balance:.8f} (체결량: {volume_filled:.8f})")
+                        tg_send(f"🔄 {m} 체결 재검증 성공\n• 잔고 변화: {prev_balance:.6f} → {new_balance:.6f}\n• 체결량: {volume_filled:.6f}")
+                    else:
+                        # 증가 없음 → 진짜 실패
+                        signal_skip("체결 0 (잔고 재검증 실패)")
+                        tg_send(f"⚠️ {m} 자동매수 체결 0 (잔고 변화 없음) → 포지션 생성 안 함")
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(m, None)
+                        return
+                except Exception as ve:
+                    print(f"[BUY_VERIFY_ERR] {m} 재검증 실패: {ve}")
+                    signal_skip(f"체결 0 (재검증 예외)")
+                    tg_send(f"⚠️ {m} 자동매수 체결 0 (재검증 실패) → 포지션 생성 안 함")
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                    return
 
             # 평균가 계산 (체결 정보가 있으면)
             if 'avg_price' not in locals():
@@ -1858,11 +1900,16 @@ def close_auto_position(m, reason=""):
             _CLOSING_MARKETS.discard(m)
 
 
+PARTIAL_PENDING_TIMEOUT = 30.0  # 🔧 FIX: pending 상태 타임아웃 (초)
+
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
     부분 청산 공용 함수
     - sell_ratio: 0.5 → 50%, 0.3 → 30% 등
-    - partial_done 플래그로 1회만 부분청산/부분익절 허용
+    - partial_state + partial_ts로 1회만 부분청산/부분익절 허용 (크래시 후 봉인 방지)
+      - None: 미수행
+      - "pending": 진행 중 (타임아웃 시 자동 해제)
+      - "done": 완료
     반환: (성공여부:bool, 메시지:str, 체결량:float)
     """
     with _POSITION_LOCK:
@@ -1876,15 +1923,35 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             msg = f"[REMONITOR] {m} 부분청산 실패: 포지션 없음/수량 0"
             print(msg)
             return False, msg, 0.0
-        if pos.get("partial_done"):
+
+        # 🔧 FIX: partial_state 기반 체크 (크래시 후 봉인 방지)
+        # - "done": 이미 완료 → 스킵
+        # - "pending": 진행 중이지만, 타임아웃(30초) 초과 시 자동 해제
+        partial_state = pos.get("partial_state")
+        partial_ts = pos.get("partial_ts", 0)
+
+        if partial_state == "done":
             msg = f"[REMONITOR] {m} 부분청산 이미 수행됨 → 스킵"
             print(msg)
             return False, msg, 0.0
+        elif partial_state == "pending":
+            elapsed = time.time() - partial_ts
+            if elapsed < PARTIAL_PENDING_TIMEOUT:
+                msg = f"[REMONITOR] {m} 부분청산 진행 중 ({elapsed:.1f}초 경과) → 스킵"
+                print(msg)
+                return False, msg, 0.0
+            else:
+                # 타임아웃: pending 자동 해제 (크래시 후 복구 가능)
+                print(f"[PARTIAL_TIMEOUT] {m} pending 상태 {elapsed:.1f}초 → 자동 해제 (재시도 허용)")
+                pos["partial_state"] = None
+                pos.pop("partial_ts", None)
+
         # 🔧 FIX: 부분청산도 _CLOSING_MARKETS에 등록 (전량청산과 동시 실행 방지)
         _CLOSING_MARKETS.add(m)
-        # 🔧 FIX: TOCTOU 레이스 방지 - 락 해제 전 partial_done 선점
-        # 주문 실패 시 아래에서 False로 롤백
-        pos["partial_done"] = True
+        # 🔧 FIX: TOCTOU 레이스 방지 - 락 해제 전 partial_state=pending 선점
+        # 주문 실패 시 아래에서 None으로 롤백
+        pos["partial_state"] = "pending"
+        pos["partial_ts"] = time.time()
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
@@ -1892,11 +1959,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     if sell_volume <= 0:
         msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
         print(msg)
-        # 🔧 FIX: 실패 시 partial_done 롤백
+        # 🔧 FIX: 실패 시 partial_state 롤백
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
-                pos2["partial_done"] = False
+                pos2["partial_state"] = None
+                pos2.pop("partial_ts", None)
             _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
         return False, msg, 0.0
 
@@ -1920,11 +1988,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
         sell_volume = current_volume  # 전량으로 변경
         was_full = True  # 🔧 전량청산 시도 표시
-        # 🔧 FIX: 전량청산 모드로 전환 → partial_done 해제 (부분체결 시 재시도 가능하게)
+        # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
-                pos2["partial_done"] = False
+                pos2["partial_state"] = None
+                pos2.pop("partial_ts", None)
 
     try:
         res = place_market_sell(m, sell_volume, price_hint=cur_price)
@@ -1946,11 +2015,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         f"• 요청 비율: {sell_ratio*100:.0f}%\n"
                         f"• 요청 수량: {sell_volume:.6f}\n"
                         f"• 체결 수량: 0 (실패)")
-            # 🔧 FIX: 체결 실패 시 partial_done 롤백
+            # 🔧 FIX: 체결 실패 시 partial_state 롤백
             with _POSITION_LOCK:
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
-                    pos2["partial_done"] = False
+                    pos2["partial_state"] = None
+                    pos2.pop("partial_ts", None)
                 _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
             return False, msg, 0.0
 
@@ -2008,12 +2078,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
                     pos2["volume"] = remaining_volume
-                    # 🔧 FIX: 전량청산 시도 후 부분체결이면 partial_done=False (재시도 가능)
+                    # 🔧 FIX: 전량청산 시도 후 부분체결이면 partial_state=None (재시도 가능)
                     if was_full:
-                        pos2["partial_done"] = False  # 전량 시도했는데 잔량 남음 → 재시도 허용
+                        pos2["partial_state"] = None  # 전량 시도했는데 잔량 남음 → 재시도 허용
+                        pos2.pop("partial_ts", None)
                         print(f"[PARTIAL_RETRY] {m} 전량청산 시도 후 부분체결 → 재시도 허용")
                     else:
-                        pos2["partial_done"] = True   # 일반 부분청산 → 1회만
+                        pos2["partial_state"] = "done"  # 일반 부분청산 → 1회만
+                        pos2.pop("partial_ts", None)  # pending 타임스탬프 제거
                     pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
                     pos2["partial_type"] = "profit" if net_ret_pct > 0 else "loss"  # 🔧 net 기준
 
@@ -2086,11 +2158,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         # - 포지션을 pop하면 잔고는 남아있는데 OPEN_POSITIONS에 없어서 orphan 됨!
         if "최소주문금액" in str(e) or "5000" in str(e):
             tg_send(f"⚠️ {m} 부분청산 스킵 (최소주문금액 미만)\n• 포지션 유지, 전량청산 대기")
-        # 🔧 FIX: 예외 발생 시 partial_done 롤백
+        # 🔧 FIX: 예외 발생 시 partial_state 롤백
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
             if pos2:
-                pos2["partial_done"] = False
+                pos2["partial_state"] = None
+                pos2.pop("partial_ts", None)
             _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
         return False, msg, 0.0
 
@@ -2130,7 +2203,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             return False
 
         # 🔧 부분청산 후 추가 하락 체크
-        if pos and pos.get("partial_done"):
+        if pos and pos.get("partial_state") == "done":
             partial_price = pos.get("partial_price", 0)
             partial_type = pos.get("partial_type", "loss")
 
@@ -2249,21 +2322,24 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             full_tp = TP_FULL.get(tag, 1.2)
             part_tp = TP_PART.get(tag, 0.7)
 
-            # 🔧 FIX: TP 바닥값 = alpha + 조건부 슬립
-            # - 최근 슬립이 높은 경우(저유동성) TP 기준 상향으로 슬립 손실 커버
+            # 🔧 FIX: TP 바닥값 = alpha만 (슬립 이중 차감 방지)
+            # - 슬립은 ret_net에서 한 번만 차감 (A안)
+            # - 기존: slip_extra로 TP 바닥값 상향 + ret_net에서 슬립 차감 → 이중 페널티
+            # - 개선: ret_net 차감만 유지, TP 바닥값에서는 슬립 제거
             cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha)
 
-            # 🔧 FIX: 조건부 슬립 반영 - exit 슬립만 사용 (정확한 청산 비용 반영)
+            # 🔧 FIX: exit 슬립은 ret_net에서만 반영 (이중 차감 방지)
             avg_exit_slip_pct = get_expected_exit_slip_pct()  # exit 전용 trimmed mean
-            # 슬립 0.15% 초과 시 TP에 초과분 반영 (청산 슬립만 고려)
-            slip_extra = max(0, (avg_exit_slip_pct - 0.15) * 1.5)
+            # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
+            # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
 
-            part_tp = max(part_tp, cp_alpha + 0.15 + slip_extra)    # 0.25%+ 최소
-            full_tp = max(full_tp, cp_alpha + 0.45 + slip_extra)    # 0.55%+ 최소
+            part_tp = max(part_tp, cp_alpha + 0.15)    # 0.25%+ 최소 (slip_extra 제거)
+            full_tp = max(full_tp, cp_alpha + 0.45)    # 0.55%+ 최소 (slip_extra 제거)
 
             # 🔧 FIX: TP 판단을 net 기준으로 (수수료 + 예상 exit 슬립 반영)
             # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
-            expected_exit_slip = avg_exit_slip_pct  # 🔧 FIX: exit 슬립만 (entry는 이미 반영됨)
+            # - 슬립은 여기서만 한 번 차감 (A안: ret_net 차감 유지)
+            expected_exit_slip = avg_exit_slip_pct  # exit 슬립만 (entry는 이미 반영됨)
             ret_net = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0) - expected_exit_slip
 
             if ret_net >= full_tp:
