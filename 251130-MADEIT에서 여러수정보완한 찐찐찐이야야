@@ -1176,7 +1176,21 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             return
 
         entry_price = current_price
-        stop_price = dyn_stop
+
+        # 🔧 FIX (A): 현재가 기준으로 SL 재계산 (신호가와 현재가 차이 보정)
+        # - 기존: dyn_stop은 신호 시점 가격 기준 → 현재가로 진입 시 손절폭 불일치
+        # - 개선: final_price_guard 통과 후 현재가 기준으로 dynamic_stop_loss 재계산
+        c1_for_sl = pre.get("c1")
+        signal_type = pre.get("signal_type", None)
+        if c1_for_sl:
+            new_stop, new_sl_pct, sl_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type, entry_price)
+            stop_price = new_stop
+            eff_sl_pct = new_sl_pct
+            print(f"[SL_RECALC] {m} 현재가 기준 SL 재계산: {eff_sl_pct*100:.2f}% (stop={fmt6(stop_price)})")
+        else:
+            # c1 없으면 기존 dyn_stop 사용 (폴백)
+            stop_price = dyn_stop
+            print(f"[SL_RECALC] {m} c1 없음 → 기존 SL 사용")
 
         # ✅ 최근 승률 기반 동적 리스크
         adaptive_risk = get_adaptive_risk()
@@ -1640,12 +1654,14 @@ def close_auto_position(m, reason=""):
         return
 
     # 🔧 FIX: 중복 청산 방지 락 (동시 청산 시도 시 한 쪽만 실행)
+    # 🔧 FIX (B): 락 안에서 복사본 생성 → 락 해제 후 레이스 방지
     with _POSITION_LOCK:
         if m in _CLOSING_MARKETS:
             print(f"[AUTO] {m} 이미 청산 진행 중 → 스킵 (reason={reason})")
             return
         _CLOSING_MARKETS.add(m)
-        pos = OPEN_POSITIONS.get(m)
+        pos_raw = OPEN_POSITIONS.get(m)
+        pos = dict(pos_raw) if pos_raw else None  # 복사본 생성
 
     try:
         if not pos:
@@ -2246,8 +2262,10 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
 
         # 🔧 유령 포지션 탈출: 실잔고 확인
+        # 🔧 FIX (B): 락 안에서 복사본 생성 → 락 해제 후 레이스 방지
         with _POSITION_LOCK:
-            pos = OPEN_POSITIONS.get(m)
+            pos_raw = OPEN_POSITIONS.get(m)
+            pos = dict(pos_raw) if pos_raw else None  # 복사본 생성
         if not pos:
             print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
             # 🔧 FIX: 포지션 없음 알람 추가
@@ -4363,7 +4381,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0):
+                 ignition_score=0, best_ask_krw=0):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4402,8 +4420,27 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
-    # 🔧 FIX: 점화에서도 spread는 완화하지 않음 (급등 초입 슬리피지 위험)
-    eff_spread_max = GATE_SPREAD_MAX  # 0.4% 고정 (완화 제거)
+    # 🔧 FIX (C): 호가깊이/시간대 기반 동적 스프레드 제한
+    # - 호가깊이 낮으면 → 스프레드 상한 더 낮게 (슬리피지 위험)
+    # - 새벽(00~06시) → 스프레드 상한 더 낮게 (휩쏘 위험)
+    eff_spread_max = GATE_SPREAD_MAX  # 기본값 0.4%
+
+    # 호가깊이 기반 동적 조정
+    if best_ask_krw > 0:
+        if best_ask_krw < 500_000:         # 50만원 미만: 매우 얇음
+            eff_spread_max = min(eff_spread_max, 0.15)
+        elif best_ask_krw < 1_000_000:     # 100만원 미만: 얇음
+            eff_spread_max = min(eff_spread_max, 0.20)
+        elif best_ask_krw < 3_000_000:     # 300만원 미만: 보통
+            eff_spread_max = min(eff_spread_max, 0.30)
+
+    # 새벽 시간대(00~06시) 강화
+    try:
+        cur_hour = now_kst().hour
+        if 0 <= cur_hour < 6:
+            eff_spread_max = min(eff_spread_max, 0.20)  # 새벽엔 0.2% 상한
+    except:
+        pass
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
@@ -4814,7 +4851,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ema20_breakout=ema20_breakout,
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
-        ignition_score=ignition_score
+        ignition_score=ignition_score,
+        best_ask_krw=ob.get("best_ask_krw", 0)  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
@@ -5623,11 +5661,16 @@ def monitor_position(m,
             dd_now = (curp / best - 1.0)
             cur_gain = (curp / entry_price - 1.0)
 
-            # 🔧 웜업 제거: 체결 직후부터 ATR 손절 적용
-            if cur_gain <= -eff_sl_pct:
-                close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% ({atr_info})")
+            # 🔧 FIX (D): 손절도 net 기준 정합성 (fee 마진 추가)
+            # - 익절: ret_net = ret_pct - fee로 판단 (실제 수익 기준)
+            # - 손절: 손절선에 fee 마진 추가 → 청산 후 실손실이 의도한 손절선에 근접
+            # - 효과: 손절이 약간 완화되어 휩쏘 방지 + 익절과 정합성 확보
+            fee_margin = FEE_RATE_ROUNDTRIP  # 왕복 0.1%
+            eff_sl_with_fee = eff_sl_pct + fee_margin  # 손절선 완화
+            if cur_gain <= -eff_sl_with_fee:
+                close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
                 verdict = "ATR손절"
-                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
+                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
                 break
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
