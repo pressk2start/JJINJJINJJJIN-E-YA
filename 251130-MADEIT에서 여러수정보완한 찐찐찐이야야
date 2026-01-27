@@ -1607,6 +1607,20 @@ def close_auto_position(m, reason=""):
                     # 실잔고+locked 0 = 체결된 것으로 간주
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
+
+                    # 🔧 FIX: 지연청산 시 실제 체결가 조회 시도 (학습 데이터 정확도 개선)
+                    if order_uuid:
+                        try:
+                            od_delayed = get_order_result(order_uuid, timeout_sec=5.0)
+                            if od_delayed:
+                                delayed_avg = float(od_delayed.get("avg_price") or "0")
+                                if delayed_avg > 0:
+                                    exit_price_used = delayed_avg
+                                    ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+                                    print(f"[DELAYED] {m} 실제 체결가 조회 성공: {delayed_avg:.0f}원 → ret={ret_pct:+.2f}%")
+                        except Exception as _delayed_err:
+                            print(f"[DELAYED_PRICE_ERR] {m} 체결가 조회 실패 (추정값 사용): {_delayed_err}")
+
                     tg_send(f"🧹 <b>자동청산 완료(지연확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
                     # 🔧 FIX: 지연청산에서도 record_trade 기록 (승률 기반 리스크 조정에 필수)
                     try:
@@ -1621,7 +1635,8 @@ def close_auto_position(m, reason=""):
                             mae = pos.get("mae_pct", 0.0)
                             update_trade_result(m, exit_price_used, ret_pct/100.0 if entry_price else 0, hold_sec,
                                                 added=pos.get('added', False), exit_reason=reason,
-                                                mfe_pct=mfe, mae_pct=mae)
+                                                mfe_pct=mfe, mae_pct=mae,
+                                                entry_ts=pos.get("entry_ts"))
                         except Exception as _e:
                             print("[DELAYED_CLOSE_LOG_ERR]", _e)
                     return
@@ -1699,7 +1714,8 @@ def close_auto_position(m, reason=""):
                 mae = pos.get("mae_pct", 0.0)
                 update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec,
                                     added=was_added, exit_reason=reason,
-                                    mfe_pct=mfe, mae_pct=mae)
+                                    mfe_pct=mfe, mae_pct=mae,
+                                    entry_ts=pos.get("entry_ts"))
             except Exception as _e:
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
@@ -1930,7 +1946,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 else:
                     hold_sec = 0
                 update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec,
-                                    added=backup_added, exit_reason=reason or "부분청산")
+                                    added=backup_added, exit_reason=reason or "부분청산",
+                                    entry_ts=backup_entry_ts)
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
@@ -2138,7 +2155,7 @@ MIN_DEPTH_KRW = 6_000_000
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - 20→40 완화 (무알람 대응)
+GATE_TURN_MAX = 60.0      # 🔧 회전율 상한 (%) - 40→60 (복합조건 turn>50+spread 활성화)
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - 0.20→0.40 완화
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
@@ -2378,30 +2395,44 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
                 row.update(exit_data)
             w.writerow(row)
 
-_last_report_ts = {}  # 🔧 중복 카운트 방지: 마지막 리포트 시각 (market -> ts)
+_reported_trades = set()  # 🔧 FIX: (market, entry_ts) 기반 중복 방지 (30초→거래ID 기반)
 
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
-                        mfe_pct: float = 0.0, mae_pct: float = 0.0):
+                        mfe_pct: float = 0.0, mae_pct: float = 0.0,
+                        entry_ts: float = None):
     """
     청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
     - added: 추매 여부 (probe → confirm 승격 시 True)
     - exit_reason: 청산 사유 (예: ATR손절, 트레일링, 얇은수익, 시간종료 등)
     - mfe_pct: 최고 수익률 (Maximum Favorable Excursion)
     - mae_pct: 최저 수익률 (Maximum Adverse Excursion)
+    - entry_ts: 진입 시각 (중복 방지용 - 동일 거래 식별)
     """
     global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
     # 🔧 방어: last_trade_was_loss가 아직 없으면 초기화 (로컬 바인딩)
     last_trade_was_loss = globals().setdefault("last_trade_was_loss", {})
 
-    # 🔧 중복 카운트 방지: 같은 마켓이 30초 내 중복 호출되면 스킵
-    now_ts = time.time()
-    last_ts = _last_report_ts.get(market, 0)
-    if now_ts - last_ts < 30:
-        print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 ({now_ts - last_ts:.1f}초 내)")
-        return
-    _last_report_ts[market] = now_ts
+    # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
+    # entry_ts가 있으면 거래 ID로 사용, 없으면 market+현재시각 기준 (호환성)
+    if entry_ts is not None:
+        trade_id = (market, int(entry_ts))  # 초 단위로 정규화
+        if trade_id in _reported_trades:
+            print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
+            return
+        _reported_trades.add(trade_id)
+        # 오래된 항목 정리 (1시간 이상 지난 거래)
+        now = time.time()
+        _reported_trades.discard(set(t for t in _reported_trades if now - t[1] > 3600))
+    else:
+        # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
+        now_ts = time.time()
+        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] < 30]
+        if recent:
+            print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
+            return
+        _reported_trades.add((market, int(now_ts)))
 
     print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
 
