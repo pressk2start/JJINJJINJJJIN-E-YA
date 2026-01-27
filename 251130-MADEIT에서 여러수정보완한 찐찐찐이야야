@@ -93,28 +93,31 @@ def get_expected_exit_slip_pct():
 PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
 
 # 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
-SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - 이후 고점 추적 시작
+# 🔧 익절키우기: 횡보 허용 시간 상향 → 더 오래 기다리며 큰 수익 추구
+SIDEWAYS_TIMEOUT = 90       # 횡보 판정 시간 (초) - 60→90 (익절키우기)
 
 # 🔧 스크래치 규칙 (초반 개선 없으면 빠른 탈출)
-# 🔧 FIX: 승률 개선 - 시간 단축 + 최소 개선폭 상향
-SCRATCH_TIMEOUT_SEC = 20    # 20초 내 개선 없으면 탈출 검토 (25→20)
-SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지 (0.03%→0.06%)
+# 🔧 익절키우기: 초반 탈출 기준 완화 → 더 오래 홀딩
+SCRATCH_TIMEOUT_SEC = 30    # 30초 내 개선 없으면 탈출 검토 (20→30 익절키우기)
+SCRATCH_MIN_GAIN = 0.0004   # 최소 +0.04% 이상 상승해야 유지 (0.06%→0.04% 완화)
 
-# 🔧 MFE 기반 부분익절 (경로별 동적 타겟)
+# 🔧 MFE 기반 부분익절 (경로별 동적 타겟) - 익절키우기 전략
 # 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
+# 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.006,              # +0.6% MFE 시 50% 익절 (강신호, 높은 목표)
-    "강돌파 (EMA↑+고점↑)": 0.005,  # +0.5% MFE 시 50% 익절
-    "EMA↑": 0.004,                 # +0.4% MFE 시 50% 익절
-    "고점↑": 0.0035,               # +0.35% MFE 시 50% 익절
-    "거래량↑": 0.003,              # +0.3% MFE 시 50% 익절 (약신호, 빠른 익절)
-    "기본": 0.004,                 # +0.4% MFE 기본값
+    "🔥점화": 0.008,              # +0.8% MFE 시 50% 익절 (강신호, 높은 목표)
+    "강돌파 (EMA↑+고점↑)": 0.007,  # +0.7% MFE 시 50% 익절
+    "EMA↑": 0.006,                 # +0.6% MFE 시 50% 익절
+    "고점↑": 0.005,                # +0.5% MFE 시 50% 익절
+    "거래량↑": 0.004,              # +0.4% MFE 시 50% 익절 (약신호도 상향)
+    "기본": 0.005,                 # +0.5% MFE 기본값
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
-# 트레일링 손절 설정
-TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN_BASE = 0.002  # 기본 최소 트레일 간격 0.2%
+# 트레일링 손절 설정 - 익절키우기 적용
+# 🔧 익절키우기: 트레일 간격 완화 → 조기 이탈 방지
+TRAIL_ATR_MULT = 0.9  # ATR 기반 여유폭 (0.8→0.9 완화)
+TRAIL_DISTANCE_MIN_BASE = 0.0025  # 기본 최소 트레일 간격 0.25% (0.2%→0.25%)
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
@@ -181,26 +184,27 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 3  # 더 빠른 반응
-        HARD_STOP_DD = 0.012  # -1.2% 손절
-        EXIT_DEBOUNCE_SEC = 4
+        # 🔧 익절키우기: strict도 트레일 완화 (조기 이탈 방지)
+        WARMUP_SEC = 5  # 3→5 (약간 여유)
+        HARD_STOP_DD = 0.015  # -1.2% → -1.5% (손절 완화)
+        EXIT_DEBOUNCE_SEC = 5
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.7
-        TRAIL_DISTANCE_MIN = 0.0015  # 0.15% 간격 (가장 타이트)
-        SPIKE_RECOVERY_WINDOW = 2
-        SPIKE_RECOVERY_MIN_BUY = 0.65
-        CTX_EXIT_THRESHOLD = 2  # 컨텍스트 역전 더 민감
-
-    else:  # balanced (현재 값에 근접)
-        WARMUP_SEC = 12
-        HARD_STOP_DD = 0.022
-        EXIT_DEBOUNCE_SEC = 8
-        EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.8
-        TRAIL_DISTANCE_MIN = 0.002  # 0.2% 간격
+        TRAIL_ATR_MULT = 0.8  # 0.7→0.8 (완화)
+        TRAIL_DISTANCE_MIN = 0.002  # 0.15% → 0.2% (완화)
         SPIKE_RECOVERY_WINDOW = 3
-        SPIKE_RECOVERY_MIN_BUY = 0.58
-        CTX_EXIT_THRESHOLD = 3
+        SPIKE_RECOVERY_MIN_BUY = 0.60
+        CTX_EXIT_THRESHOLD = 3  # 2→3 (완화)
+
+    else:  # balanced (현재 값에 근접) - 익절키우기 적용
+        WARMUP_SEC = 14  # 12→14 (약간 여유)
+        HARD_STOP_DD = 0.025  # 0.022 → 0.025 (손절 완화)
+        EXIT_DEBOUNCE_SEC = 10
+        EXIT_DEBOUNCE_N = 2
+        TRAIL_ATR_MULT = 0.9  # 0.8→0.9 (완화)
+        TRAIL_DISTANCE_MIN = 0.0025  # 0.2% → 0.25% (완화)
+        SPIKE_RECOVERY_WINDOW = 4
+        SPIKE_RECOVERY_MIN_BUY = 0.55
+        CTX_EXIT_THRESHOLD = 4  # 3→4 (완화)
 
 
 _apply_exit_profile()
@@ -2366,25 +2370,26 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 print(msg)
             continue
 
-        # 5) 수익 실현 (🔧 signal_tag별 익절 목표 차등화)
+        # 5) 수익 실현 (🔧 signal_tag별 익절 목표 차등화) - 익절키우기 전략
         #    - 강신호: 높은 목표, 약신호: 낮은 목표 (기대값 개선)
+        #    - 🔧 익절키우기: 전체 목표 상향 → 더 큰 수익 추구
         elif ret_pct is not None:
-            # signal_tag별 익절 목표 (% 단위)
+            # signal_tag별 익절 목표 (% 단위) - 익절키우기 적용
             TP_FULL = {
-                "🔥점화": 2.2,
-                "강돌파 (EMA↑+고점↑)": 1.8,
-                "EMA↑": 1.4,
-                "고점↑": 1.2,
-                "거래량↑": 1.0,
-                "기본": 1.2,
+                "🔥점화": 3.0,              # 2.2% → 3.0% (강신호는 크게)
+                "강돌파 (EMA↑+고점↑)": 2.5,  # 1.8% → 2.5%
+                "EMA↑": 2.0,                 # 1.4% → 2.0%
+                "고점↑": 1.6,                # 1.2% → 1.6%
+                "거래량↑": 1.3,              # 1.0% → 1.3%
+                "기본": 1.5,                 # 1.2% → 1.5%
             }
             TP_PART = {
-                "🔥점화": 1.2,
-                "강돌파 (EMA↑+고점↑)": 1.0,
-                "EMA↑": 0.8,
-                "고점↑": 0.7,
-                "거래량↑": 0.6,
-                "기본": 0.7,
+                "🔥점화": 1.6,              # 1.2% → 1.6%
+                "강돌파 (EMA↑+고점↑)": 1.4,  # 1.0% → 1.4%
+                "EMA↑": 1.2,                 # 0.8% → 1.2%
+                "고점↑": 1.0,                # 0.7% → 1.0%
+                "거래량↑": 0.8,              # 0.6% → 0.8%
+                "기본": 0.9,                 # 0.7% → 0.9%
             }
 
             # 현재 포지션의 signal_tag 가져오기
@@ -2557,11 +2562,11 @@ POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
 POSTCHECK_MAX_DD = 0.018
 
-# 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
+# 동적 손절(ATR) - 단일 스탑 (틱스탑 제거) - 익절키우기 적용
 ATR_PERIOD = 14
-ATR_MULT = 0.35           # 🔧 0.30 → 0.35 (약간 완화)
-DYN_SL_MIN = 0.004        # 🔧 0.3% → 0.4% (손절 완화)
-DYN_SL_MAX = 0.006        # 🔧 0.5% → 0.6% (손절 완화)
+ATR_MULT = 0.40           # 🔧 익절키우기: 0.35 → 0.40 (휩쏘 방지)
+DYN_SL_MIN = 0.005        # 🔧 익절키우기: 0.4% → 0.5% (손절 완화)
+DYN_SL_MAX = 0.007        # 🔧 익절키우기: 0.6% → 0.7% (손절 완화)
 
 # =========================
 # 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
