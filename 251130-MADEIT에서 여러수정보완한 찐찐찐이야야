@@ -1865,7 +1865,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     if sell_krw < MIN_ORDER_KRW or remaining_krw < MIN_ORDER_KRW:
         print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
         sell_volume = current_volume  # 전량으로 변경
-        # partial_done은 설정하지 않음 (전량청산이므로 포지션 종료됨)
+        # 🔧 FIX: 전량청산 모드로 전환 → partial_done 해제 (부분체결 시 재시도 가능하게)
+        with _POSITION_LOCK:
+            pos2 = OPEN_POSITIONS.get(m)
+            if pos2:
+                pos2["partial_done"] = False
 
     try:
         res = place_market_sell(m, sell_volume, price_hint=cur_price)
@@ -2465,7 +2469,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
     # entry_ts가 있으면 거래 ID로 사용, 없으면 market+현재시각 기준 (호환성)
     if entry_ts is not None:
-        trade_id = (market, int(entry_ts))  # 초 단위로 정규화
+        # 🔧 FIX: ms 단위로 변경 (1초 내 재진입 시 중복 판정 방지)
+        trade_id = (market, int(entry_ts * 1000))  # ms 단위
         if trade_id in _reported_trades:
             print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
             return
@@ -2473,7 +2478,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         # 오래된 항목 정리 (1시간 이상 지난 거래)
         # 🔧 FIX: discard()는 단일 원소만 제거 → difference_update() 사용
         now = time.time()
-        _old_trades = {t for t in _reported_trades if now - t[1] > 3600}
+        _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
         _reported_trades.difference_update(_old_trades)
     else:
         # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
@@ -2529,14 +2534,11 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     if AUTO_LEARN_ENABLED:
         _trade_count_since_learn += 1
 
-        if is_win:
-            _lose_streak = 0   # 승리 시 연패 리셋
-            _win_streak += 1   # 🔧 연승 증가
-        else:
-            _lose_streak += 1  # 패배 시 연패 증가
-            _win_streak = 0    # 🔧 연승 리셋
+        # 🔧 FIX: streak 업데이트는 record_trade()에서만 (중복 방지)
+        # - 여기서 또 업데이트하면 거래 1번에 streak 2번 올라감
+        # - record_trade()가 streak의 단일 진실 공급원(SSOT)
 
-        # 🔧 연패 3회 시 Pre-break 10분간 중지
+        # 🔧 연패 3회 시 Pre-break 10분간 중지 (streak 값은 참조만)
         global _PREBREAK_SUSPEND_UNTIL
         if _lose_streak >= 3:
             _PREBREAK_SUSPEND_UNTIL = time.time() + 600  # 10분
