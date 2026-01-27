@@ -954,7 +954,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
 
         # 🔧 동적 임계치: 변동성 + 장세 반영 (신호→주문 짧은 구간)
         if max_drift is None:
-            pstd = price_band_std(ticks or [], sec=10) if ticks else 0.0
+            pstd = price_band_std(ticks or [], sec=10) if ticks else None
+            pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
             r = relax_knob()  # 0~1.5
             # 🔧 0.5% 기준 (짧은 순간 0.5% 움직임이면 충분)
             base = 0.005 if not AGGRESSIVE_MODE else 0.006
@@ -1417,7 +1418,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 # 🚀 초단기 미세필터 지표 계산
                 ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
                 cv = ia_stats.get("cv", 0.0)
-                pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+                pstd = price_band_std(ticks, sec=10) if ticks else None
+                pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
                 overheat = flow_accel * float(pre.get("volume_surge", 1.0))
                 # 틱 신선도
                 fresh_age = 0.0
@@ -3017,8 +3019,11 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                         diff = w_avg - l_avg
                         if col == "buy_ratio":
                             lines.append(f"  {name}: 승{w_avg:.0%} / 패{l_avg:.0%} (차이 {diff:+.0%})")
-                        elif col in ["turn", "spread"]:
+                        elif col == "turn":
                             lines.append(f"  {name}: 승{w_avg:.1%} / 패{l_avg:.1%} (차이 {diff:+.1%})")
+                        elif col == "spread":
+                            # spread는 이미 % 단위로 저장됨 (0.15 = 0.15%)
+                            lines.append(f"  {name}: 승{w_avg:.2f}% / 패{l_avg:.2f}% (차이 {diff:+.2f}%)")
                         else:
                             lines.append(f"  {name}: 승{w_avg:.2f} / 패{l_avg:.2f} (차이 {diff:+.2f})")
 
@@ -3953,7 +3958,8 @@ def dynamic_prebreak_band(ticks):
     - 조용하면 살짝 관대
     """
     # 10초 가격밴드 표준편차
-    pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+    pstd = price_band_std(ticks, sec=10) if ticks else None
+    pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
     # 기본 0.20% ± pstd*40% (상한 0.35%)
     base = PREBREAK_HIGH_PCT  # 0.002
     band = min(0.0035, base + pstd * 0.40)
@@ -3992,14 +3998,15 @@ def inter_arrival_stats(ticks, sec=30):
 
 
 def price_band_std(ticks, sec=30):
-    if not ticks: return 9.9
+    """가격밴드 표준편차. 데이터 부족시 None 반환 (센티넬 9.9 제거)"""
+    if not ticks: return None
     try:
         newest_ts = ticks[0]["timestamp"]
     except:
-        return 9.9
+        return None
     cutoff = newest_ts - sec * 1000
     ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
-    if len(ps) < 3: return 9.9
+    if len(ps) < 3: return None
     m = sum(ps) / len(ps)
     var = sum((p - m)**2 for p in ps) / len(ps)
     std = (var**0.5) / max(m, 1)
@@ -4951,7 +4958,8 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
     # 🚀 초단기 미세필터 지표
     ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
     cv = ia_stats.get("cv", 0.0)
-    pstd = price_band_std(ticks, sec=10) if ticks else 0.0
+    pstd = price_band_std(ticks, sec=10) if ticks else None
+    pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
     prebreak_band = dynamic_prebreak_band(ticks) if ticks else PREBREAK_HIGH_PCT
     is_prebreak = 1 if pre.get("filter_type") == "prebreak" else 0
     # 베스트호가 깊이
@@ -5109,6 +5117,7 @@ def postcheck_6s(m, pre):
         t10 = micro_tape_stats_from_ticks(list(acc), 10)
         ia = inter_arrival_stats(list(acc), 20)
         pstd = price_band_std(list(acc), 20)
+        pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
 
         # ★ 가변 임계치 적용
         pass_now = (t10["buy_ratio"] >= pc_min_buy
@@ -5140,6 +5149,7 @@ def postcheck_6s(m, pre):
     t10 = micro_tape_stats_from_ticks(list(acc), 10)
     ia = inter_arrival_stats(list(acc), 20)
     pstd = price_band_std(list(acc), 20)
+    pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
 
     # ★ 최종 판정도 가변 임계치로
     if t10["buy_ratio"] < pc_min_buy:
@@ -5172,6 +5182,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if not atr or atr <= 0:
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
 
+    # 🔧 ATR 바닥값: 너무 작으면 휩쏘에 털림 방지 (최소 0.05% 또는 1원)
+    atr = max(atr, entry_price * 0.0005, 1.0)
+
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
     pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
 
@@ -5183,8 +5196,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
 
-    # ATR 상세 (텔레그램용) - 읽기 쉬운 포맷
-    atr_info = f"ATR {atr:.0f}원×{ATR_MULT}배"
+    # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
+    atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
     return entry_price * (1 - pct), pct, atr_info
 
 # =========================
