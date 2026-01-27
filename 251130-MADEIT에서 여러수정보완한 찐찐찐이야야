@@ -1421,8 +1421,12 @@ def add_auto_position(m, cur_price, reason=""):
     stop_price = pos["stop"]
 
     # 추매도 적응형 리스크 적용 (연패/연승 반영)
+    # 🔧 FIX: 추매에는 리스크 캡 적용 (연승 중 과도한 리스크 확대 방지)
+    # - seed는 streak 보너스 100% 적용
+    # - add는 캡으로 제한 (연승 보너스가 추매까지 타면 DD 확대 위험)
     adaptive = max(0.0001, get_adaptive_risk())
     add_risk_pct = max(0.0001, adaptive * ADD_RISK_FRACTION)
+    add_risk_pct = min(add_risk_pct, RISK_PER_TRADE * 0.6)  # 캡: 기본 리스크의 60%
     qty_theoretical = calc_position_size(cur_price, stop_price, krw_bal, add_risk_pct)
     krw_to_use = qty_theoretical * cur_price
 
@@ -1970,13 +1974,14 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
                     # 🔧 브레이크이븐 (본절): 부분익절 후 손절가를 진입가로 이동
                     # - "먹고 뱉는" 거래 방지
-                    # - 🔧 FIX: 수수료+슬립 고려한 순수익 기준으로 변경 (휩쏘 본절컷 방지)
-                    cp_pct = get_dynamic_checkpoint() * 100.0  # 동적 체크포인트 (%)
-                    if net_ret_pct >= cp_pct and not pos2.get("breakeven_set"):
+                    # - 🔧 FIX: fee 이중 카운트 제거 (cp는 fee 포함, net은 fee 차감 → fee 한 번만)
+                    cp_gross = get_dynamic_checkpoint() * 100.0  # fee + slip + alpha
+                    cp_net = cp_gross - (FEE_RATE_ROUNDTRIP * 100.0)  # fee 이미 net에서 뺐으니 제거
+                    if net_ret_pct >= cp_net and not pos2.get("breakeven_set"):
                         old_stop = pos2.get("stop", 0)
                         pos2["stop"] = entry_price  # 손절가 = 진입가 (본절)
                         pos2["breakeven_set"] = True
-                        print(f"[BREAKEVEN] {m} 본절 설정: 손절 {old_stop:.0f} → {entry_price:.0f} (net:{net_ret_pct:.2f}% >= cp:{cp_pct:.2f}%)")
+                        print(f"[BREAKEVEN] {m} 본절 설정: 손절 {old_stop:.0f} → {entry_price:.0f} (net:{net_ret_pct:.2f}% >= cp_net:{cp_net:.2f}%)")
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
@@ -2092,9 +2097,13 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 loss_drop_thr = max(PARTIAL_EXIT_LOSS_DROP, trail_min * 0.8)
 
                 if partial_type == "profit":
-                    # 익절 부분청산 후: 추가 하락 OR 진입가 이하 → 청산
+                    # 익절 부분청산 후: 추가 하락 OR 진입가 "확실히" 이하 → 청산
                     drop_from_partial = (partial_price - cur_price) / partial_price
-                    if cur_price <= entry_price or drop_from_partial >= profit_drop_thr:
+                    # 🔧 FIX: breakeven box 적용 - entry 살짝 찍는 정상 변동성 허용
+                    # - 기존: entry 찍으면 바로 잔량 청산 → 크게 가는 거래 꼬리 잘림
+                    # - 변경: entry*(1-box) 이하일 때만 청산 (box = trail_min * 0.5)
+                    breakeven_box = trail_min * 0.5
+                    if cur_price <= entry_price * (1 - breakeven_box) or drop_from_partial >= profit_drop_thr:
                         reason = f"부분익절 후 추가하락 -{drop_from_partial*100:.2f}% (thr:{profit_drop_thr*100:.2f}%) 잔량청산"
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
                         close_auto_position(m, reason)
@@ -2175,9 +2184,11 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             part_tp = TP_PART.get(tag, 0.7)
 
             # 🔧 FIX: 동적 체크포인트 기반 TP 바닥값 (슬립 큰 코인/저유동성 보호)
-            cp = get_dynamic_checkpoint() * 100.0  # %
-            part_tp = max(part_tp, cp + 0.15)      # +0.15% 여유
-            full_tp = max(full_tp, cp + 0.45)      # +0.45% 여유
+            # 🔧 FIX: fee 이중 카운트 제거 - cp는 fee 포함이고 ret_net은 fee 차감이니까
+            cp_gross = get_dynamic_checkpoint() * 100.0  # fee + slip + alpha
+            cp_net = cp_gross - (FEE_RATE_ROUNDTRIP * 100.0)  # net 기준 (slip + alpha)
+            part_tp = max(part_tp, cp_net + 0.15)      # +0.15% 여유
+            full_tp = max(full_tp, cp_net + 0.45)      # +0.45% 여유
 
             # 🔧 FIX: TP 판단을 net 기준으로 (수수료 반영)
             # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
