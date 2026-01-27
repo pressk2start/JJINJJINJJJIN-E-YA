@@ -3842,11 +3842,11 @@ def ignition_detected(
     """
     점화 감지: 급등 시작 0~30초 내 감지
 
-    4요건 중 3개 충족 시 점화:
-    1. 틱 폭주: 최근 10초 틱수 >= 평시의 3배
-    2. 연속 매수: 10초 내 5회 이상 연속 매수
-    3. 가격 임펄스: 0.3% 이상 상승 + 최근 6틱 단조증가
-    4. 거래량 폭발: 10초 거래량 >= 1분평균의 25%
+    4요건 중 3개 충족 시 점화 (폭발적 급등 감지):
+    1. 틱 폭주: 최근 10초 틱수 >= 평시의 4배 (강화: 3→4배)
+    2. 연속 매수: 10초 내 7회 이상 연속 매수 (강화: 5→7회)
+    3. 가격 임펄스: 0.5% 이상 상승 + 최근 6틱 단조증가 (강화: 0.3→0.5%)
+    4. 거래량 폭발: 10초 거래량 >= 1분평균의 40% (강화: 25→40%)
 
     추가 필터:
     - 스프레드 안정성 (평시 2배 이하)
@@ -3877,12 +3877,13 @@ def ignition_detected(
         baseline_tps = _IGNITION_BASELINE_TPS.get(market, 0.5)  # 기본값 0.5 tps
 
     t10 = micro_tape_stats_from_ticks(ticks, 10)
-    # 평시의 3배 이상, 최소 12틱
-    tps_threshold = max(12, 3 * baseline_tps * 10)
+    # 🔧 강화: 평시의 4배 이상, 최소 15틱 (폭발적 급등 감지)
+    tps_threshold = max(15, 4 * baseline_tps * 10)
     tps_burst = t10["n"] >= tps_threshold
 
     # ---- 2) 연속 매수 (10초 윈도우) ----
-    consec_buys = calc_consecutive_buys(window, 10) >= 5
+    # 🔧 강화: 5회 → 7회 (폭발적 매수세만 감지)
+    consec_buys = calc_consecutive_buys(window, 10) >= 7
 
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
     prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
@@ -3891,13 +3892,15 @@ def ignition_detected(
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
         up_count = sum(1 for a, b in zip(prices[-6:-1], prices[-5:]) if b > a)
         mostly_up = up_count >= 4
-        price_impulse = (ret >= 0.003) and mostly_up  # 0.3% 이상 + 대부분 상승
+        # 🔧 강화: 0.3% → 0.5% (폭발적 급등만 감지)
+        price_impulse = (ret >= 0.005) and mostly_up  # 0.5% 이상 + 대부분 상승
     else:
         ret = 0
         price_impulse = False
 
-    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 25%) ----
-    vol_burst = t10["krw"] >= 0.25 * avg_candle_volume if avg_candle_volume > 0 else False
+    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40%) ----
+    # 🔧 강화: 25% → 40% (폭발적 거래량만 감지)
+    vol_burst = t10["krw"] >= 0.40 * avg_candle_volume if avg_candle_volume > 0 else False
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
@@ -3908,9 +3911,9 @@ def ignition_detected(
     # ---- 점수 계산 ----
     score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
 
-    # ---- 점화 판정: 4요건 중 4개 모두 + 스프레드 양호 ----
-    # 🔧 3/4 → 4/4로 강화 (점화 승률 15~22%로 가장 낮음)
-    is_ignition = (score >= 4) and spread_ok
+    # ---- 점화 판정: 4요건 중 3개 이상 + 스프레드 양호 ----
+    # 🔧 4/4 → 3/4로 완화 (개별 조건이 강화됐으므로, 폭발적 급등 유연하게 감지)
+    is_ignition = (score >= 3) and spread_ok
 
     if is_ignition:
         # 마지막 신호 시각 기록
@@ -4007,9 +4010,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     """
     # ============================================================
     # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
-    # 🔧 FIX: 4점 점화(확정)에서만 완화 - 애매한 1~3점은 완화 없음 (승률 개선)
+    # 🔧 FIX: 3점 이상 점화(확정)에서 완화 - 개별조건 강화로 3점도 신뢰성↑
     # ============================================================
-    relax = 0.30 if ignition_score >= 4 else 0  # 4점에서만 30% 완화
+    relax = 0.30 if ignition_score >= 3 else 0  # 3점 이상에서 30% 완화
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
@@ -4022,7 +4025,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
-    is_ignition = (ignition_score >= 4)  # 🔧 3→4 강화
+    is_ignition = (ignition_score >= 3)  # 🔧 4→3 완화 (개별조건 강화)
 
     # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
     metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
@@ -4107,7 +4110,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%)"
 
     # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
+    # 🔧 4→3 완화: 개별조건 강화로 3점도 폭발적 급등 신호
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"

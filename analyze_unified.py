@@ -576,7 +576,8 @@ def analyze_pre_entry_env(
 
     # signal_tag: 신호 태그 생성
     tags = []
-    if vol_surge >= 2.0 and buy_ratio >= 0.65 and imbalance >= 0.5:
+    # 🔧 강화: 폭발적 급등 감지 (vol_surge 2.5x, buy_ratio 70%, imbalance 0.55)
+    if vol_surge >= 2.5 and buy_ratio >= 0.70 and imbalance >= 0.55:
         tags.append("🔥점화")
     if high_breakout and ema20_above:
         tags.append("강돌파")
