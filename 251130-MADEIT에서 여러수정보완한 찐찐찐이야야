@@ -1229,9 +1229,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             }
 
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
-        # 🔧 슬리피지 기록 (동적 체크포인트용)
-        if slip_pct > 0:
-            _SLIP_HISTORY.append(slip_pct)
+        # 🔧 FIX: 슬리피지 기록 - 절댓값 사용 (음수=유리한 슬리피지도 포함)
+        # 기존: slip_pct > 0만 기록 → 샘플 왜곡
+        # 수정: 절댓값 + 1% 캡 (이상치 방지, 실제 트림은 percentile로)
+        slip_abs = min(0.01, abs(slip_pct))  # 1% 캡
+        _SLIP_HISTORY.append(slip_abs)
 
         # 진입 사유 한 줄 생성 (디테일 포함)
         kd = pre.get("killer_details", {})
@@ -1638,8 +1640,10 @@ def close_auto_position(m, reason=""):
 
                     tg_send(f"🧹 <b>자동청산 완료(지연확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
                     # 🔧 FIX: 지연청산에서도 record_trade 기록 (승률 기반 리스크 조정에 필수)
+                    # 🔧 FIX: 수수료 반영한 순수익률 사용
+                    net_ret_delayed = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
                     try:
-                        record_trade(m, ret_pct / 100.0)  # 🔧 FIX: 소수 단위로 통일
+                        record_trade(m, net_ret_delayed / 100.0)  # 🔧 수수료 반영
                     except Exception as _e:
                         print("[DELAYED_TRADE_RECORD_ERR]", _e)
                     # 🔧 학습 로그 업데이트
@@ -1648,7 +1652,8 @@ def close_auto_position(m, reason=""):
                             hold_sec = time.time() - pos.get("entry_ts", time.time())
                             mfe = pos.get("mfe_pct", 0.0)
                             mae = pos.get("mae_pct", 0.0)
-                            update_trade_result(m, exit_price_used, ret_pct/100.0 if entry_price else 0, hold_sec,
+                            # 🔧 FIX: 수수료 반영한 순수익률 사용
+                            update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
                                                 added=pos.get('added', False), exit_reason=reason,
                                                 mfe_pct=mfe, mae_pct=mae,
                                                 entry_ts=pos.get("entry_ts"))
@@ -1710,12 +1715,16 @@ def close_auto_position(m, reason=""):
         est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
         est_exit_value = exit_price_used * vol
         pl_value = est_exit_value - est_entry_value
-        ret_pct = (exit_price_used / entry_price -
-                   1.0) * 100.0 if entry_price > 0 else 0.0
+        gross_ret_pct = (exit_price_used / entry_price -
+                         1.0) * 100.0 if entry_price > 0 else 0.0
+        # 🔧 FIX: 수수료 반영한 순수익률 계산 (승률/리스크 튜닝 정확도 개선)
+        net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)  # 왕복 0.1% 차감
+        ret_pct = gross_ret_pct  # 알람용 (기존 유지)
 
         # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
+        # 🔧 FIX: net_ret_pct 사용 (수수료 반영)
         try:
-            record_trade(m, ret_pct / 100.0)  # 🔧 FIX: 소수 단위로 통일
+            record_trade(m, net_ret_pct / 100.0)  # 🔧 소수 단위 + 수수료 반영
         except Exception as _e:
             print("[TRADE_RECORD_ERR]", _e)
 
@@ -1727,7 +1736,8 @@ def close_auto_position(m, reason=""):
                 # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
                 mfe = pos.get("mfe_pct", 0.0)
                 mae = pos.get("mae_pct", 0.0)
-                update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec,
+                # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
+                update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                     added=was_added, exit_reason=reason,
                                     mfe_pct=mfe, mae_pct=mae,
                                     entry_ts=pos.get("entry_ts"))
@@ -2059,15 +2069,32 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         should_close = False
         reason = verdict or action or "모니터링 종료"
 
-        # 1) 급락 / 손절 권고
+        # 🔧 FIX: 분기 순서 수정 - 위험신호/청산권고를 TP보다 먼저 처리
+        # (기존: ret_pct 블록이 먼저 실행되어 청산권고/부분청산권고 도달 불가)
+
+        # 1) 급락 / 손절 권고 → 즉시 청산
         if verdict and ("급락" in verdict or "손절" in verdict):
             should_close = True
 
-        # 2) 전량 청산 권고
+        # 2) 전량 청산 권고 (action 기반) → 즉시 청산
         elif action and "전량 청산 권고" in action:
             should_close = True
 
-        # 3) 수익 실현 (🔧 FIX: signal_tag별 익절 목표 차등화)
+        # 3) 컨텍스트 청산 권고 → 참고만 (계속 재모니터링)
+        elif verdict and verdict.startswith("청산 권고("):
+            print(f"[REMONITOR] {m} 컨텍스트 청산 권고 감지 → 참고만 (계속 모니터링)")
+            continue
+
+        # 4) 부분 청산(50%) 권고 → 실제 50% 매도 후 계속 재모니터링
+        elif action == "부분 청산(50%) 권고":
+            ok, msg, executed = safe_partial_sell(m,
+                                                  sell_ratio=0.5,
+                                                  reason="모니터 권고 부분청산")
+            if ok and executed > 0:
+                print(msg)
+            continue
+
+        # 5) 수익 실현 (🔧 signal_tag별 익절 목표 차등화)
         #    - 강신호: 높은 목표, 약신호: 낮은 목표 (기대값 개선)
         elif ret_pct is not None:
             # signal_tag별 익절 목표 (% 단위)
@@ -2108,19 +2135,6 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                     print(msg)
                 # 부분익절 후에는 계속 재모니터링
                 continue
-
-        # 4) 컨텍스트 청산 권고는 → 청산 안 하고 계속 재모니터링
-        elif verdict and verdict.startswith("청산 권고("):
-            continue
-
-        # 5) 부분 청산(50%) 권고 → 실제 50% 매도 후 계속 재모니터링
-        elif action == "부분 청산(50%) 권고":
-            ok, msg, executed = safe_partial_sell(m,
-                                                  sell_ratio=0.5,
-                                                  reason="모니터링 종료 시점 50% 부분청산")
-            if ok and executed > 0:
-                print(msg)
-            continue
 
         # 6) 유지 권고 → 계속 재모니터링
         elif action == "유지 권고":
