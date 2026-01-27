@@ -990,8 +990,25 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         return True, current_price
 
     except Exception as e:
-        print(f"[GUARD_ERR] {m}: {e}")
-        # 🔧 FIX: API 실패 시 항상 진입 차단 (블라인드 진입 방지)
+        print(f"[GUARD_ERR] {m}: {e} → 1회 재시도")
+        # 🔧 FIX: API 실패 시 1회 재시도 (네트워크 순간 장애로 기회손실 방지)
+        # - 기존: 무조건 차단 → 좋은 신호도 날릴 수 있음
+        # - 개선: 0.3초 후 1회 재시도, 그래도 실패면 차단
+        try:
+            time.sleep(0.3)
+            js_retry = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+            if js_retry:
+                current_price = js_retry[0].get("trade_price", initial_price)
+                drift = (current_price / initial_price - 1.0)
+                # 재시도 성공 시 간단히 상승률만 체크 (동적 임계치는 기본값 사용)
+                if drift <= 0.006:  # 0.6% 이하면 통과
+                    print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
+                    return True, current_price
+                else:
+                    print(f"[GUARD_RETRY_FAIL] {m} 재시도 성공했으나 급등 (drift={drift*100:.2f}%)")
+                    return False, current_price
+        except Exception as e2:
+            print(f"[GUARD_RETRY_ERR] {m}: {e2}")
         return False, initial_price
 
 # =========================
@@ -1810,8 +1827,11 @@ def close_auto_position(m, reason=""):
         ret_pct = gross_ret_pct  # 알람용 (기존 유지)
 
         # 🔧 FIX: 청산 슬립 기록 (진입 슬립만 기록하면 과소추정됨)
+        # 🔧 FIX: 상한 캡 추가 (0.5%) - 가격이동이 슬립으로 섞이면 TP 과도 상승
+        # - cur_price는 주문 직전 티커값 → 체결까지 시장 이동분 포함될 수 있음
+        # - 이상치 제외로 expected_exit_slip_pct 정확도 개선
         if cur_price > 0 and exit_price_used > 0:
-            exit_slip = abs(exit_price_used / cur_price - 1.0)
+            exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
             _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
@@ -2047,8 +2067,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         exit_price_used = exit_price_used if exit_price_used > 0 else cur_price
 
         # 🔧 FIX: 청산 슬립 기록 (진입 슬립만 기록하면 과소추정됨)
+        # 🔧 FIX: 상한 캡 추가 (0.5%) - 가격이동이 슬립으로 섞이면 TP 과도 상승
         if cur_price > 0 and exit_price_used > 0:
-            exit_slip = abs(exit_price_used / cur_price - 1.0)
+            exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
             _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
@@ -2255,6 +2276,16 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
         # 🔧 FIX: 분기 순서 수정 - 위험신호/청산권고를 TP보다 먼저 처리
         # (기존: ret_pct 블록이 먼저 실행되어 청산권고/부분청산권고 도달 불가)
+
+        # 🔧 FIX: 컨텍스트 청산 권고가 아니면 연속 카운트 리셋 (간헐 경고 누적 방지)
+        # - 기존: 리셋 없이 누적 → "청산 권고 1번씩 뜨다 말다"도 결국 3회 도달
+        # - 개선: N회 "연속"을 제대로 판정하려면 비청산권고 시 리셋 필수
+        if not (verdict and verdict.startswith("청산 권고(")):
+            with _POSITION_LOCK:
+                pos_reset = OPEN_POSITIONS.get(m, {})
+                if pos_reset and pos_reset.get("ctx_close_count", 0) > 0:
+                    pos_reset["ctx_close_count"] = 0
+                    print(f"[REMONITOR] {m} 컨텍스트 청산 권고 해제 → ctx_close_count 리셋")
 
         # 1) 급락 / 손절 권고 → 즉시 청산
         if verdict and ("급락" in verdict or "손절" in verdict):
