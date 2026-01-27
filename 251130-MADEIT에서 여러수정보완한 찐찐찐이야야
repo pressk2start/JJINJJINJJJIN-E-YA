@@ -1794,21 +1794,30 @@ def close_auto_position(m, reason=""):
             # 🔧 FIX #1: 부분체결 시 잔여량으로 업데이트
             if executed < vol - 1e-10:
                 remaining = max(vol - executed, 0.0)
-                # ✅ 잔여가 최소주문금액(5000원) 미만이면 메모리에서 제거 (좀비 방지)
-                if exit_price_used * remaining < 5000:
-                    remaining = 0.0
+                remaining_krw = exit_price_used * remaining
+                # ✅ 잔여가 최소주문금액(5000원) 미만이면 dust 처리
+                is_dust = remaining_krw < 5000 and remaining > 1e-12
                 with _POSITION_LOCK:
                     pos2 = OPEN_POSITIONS.get(m)
                     if pos2:
-                        if remaining <= 0:
+                        if remaining <= 1e-12:
+                            # 잔여 없음 → 포지션 제거
                             OPEN_POSITIONS.pop(m, None)
+                        elif is_dust:
+                            # 🔧 FIX: dust 잔여는 포지션 제거 + _ORPHAN_HANDLED에 등록
+                            # → 유령으로 감지되지 않음 (부분청산 후 손절 방지)
+                            OPEN_POSITIONS.pop(m, None)
+                            _ORPHAN_HANDLED.add(m)
+                            print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
                         else:
                             pos2["volume"] = remaining
                             pos2["last_exit_ts"] = time.time()
                             OPEN_POSITIONS[m] = pos2
-                print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f}")
-                if remaining > 0:
+                print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f} ({remaining_krw:.0f}원)")
+                if remaining > 1e-12 and not is_dust:
                     tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
+                elif is_dust:
+                    tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여 {remaining:.6f} (dust, 유령감지 제외)")
                 else:
                     tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여 미달 → 정리완료")
                 # 부분체결도 손익 계산은 함 (executed 기준)
@@ -1890,10 +1899,12 @@ def close_auto_position(m, reason=""):
             tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
             # 🔧 FIX: 최소주문금액 미만 → 매도 불가 찌꺼기, 메모리 포지션만 정리
+            # 🔧 FIX: _ORPHAN_HANDLED에 등록하여 유령으로 감지되지 않게 함
             if "최소주문금액" in str(e) or "5000" in str(e):
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
-                tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미만)\n• 소량 잔여는 거래소에 보유")
+                _ORPHAN_HANDLED.add(m)
+                tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미달 dust)\n• 소량 잔여는 거래소에 보유 (유령감지 제외)")
                 # 🔧 FIX: 리포트 카운트 증가
                 if AUTO_LEARN_ENABLED:
                     try:
