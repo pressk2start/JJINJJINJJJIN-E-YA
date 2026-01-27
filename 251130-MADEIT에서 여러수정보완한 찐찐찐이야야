@@ -1862,9 +1862,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     remaining_krw = remaining_volume * cur_price
 
     # 매도금액 또는 잔여금액이 5000원 미만이면 → 전량청산으로 전환
+    # 🔧 FIX: was_full 플래그로 전량청산 시도 여부 추적 (부분체결 시 재시도용)
+    was_full = False
     if sell_krw < MIN_ORDER_KRW or remaining_krw < MIN_ORDER_KRW:
         print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
         sell_volume = current_volume  # 전량으로 변경
+        was_full = True  # 🔧 전량청산 시도 표시
         # 🔧 FIX: 전량청산 모드로 전환 → partial_done 해제 (부분체결 시 재시도 가능하게)
         with _POSITION_LOCK:
             pos2 = OPEN_POSITIONS.get(m)
@@ -1927,6 +1930,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
         fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
 
+        # 🔧 FIX: net 기준으로 통일 (수수료 반영) - 모든 분기에서 사용
+        net_ret_pct = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+
         # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
         # 🔧 FIX: pop 전에 entry_ts, added 백업 (hold_sec 0 버그 방지)
         backup_entry_ts = None
@@ -1937,20 +1943,24 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 backup_entry_ts = pos_backup.get("entry_ts")
                 backup_added = pos_backup.get("added", False)
                 OPEN_POSITIONS.pop(m, None)
-            print(f"[PARTIAL→FULL_DONE] {m} 전량청산 완료 → 포지션 제거")
+            print(f"[PARTIAL→FULL_DONE] {m} 전량청산 완료 → 포지션 제거 (net:{net_ret_pct:+.2f}%)")
         else:
             with _POSITION_LOCK:
                 pos2 = OPEN_POSITIONS.get(m)
                 if pos2:
                     pos2["volume"] = remaining_volume
-                    pos2["partial_done"] = True
+                    # 🔧 FIX: 전량청산 시도 후 부분체결이면 partial_done=False (재시도 가능)
+                    if was_full:
+                        pos2["partial_done"] = False  # 전량 시도했는데 잔량 남음 → 재시도 허용
+                        print(f"[PARTIAL_RETRY] {m} 전량청산 시도 후 부분체결 → 재시도 허용")
+                    else:
+                        pos2["partial_done"] = True   # 일반 부분청산 → 1회만
                     pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
-                    pos2["partial_type"] = "profit" if ret_pct > 0 else "loss"
+                    pos2["partial_type"] = "profit" if net_ret_pct > 0 else "loss"  # 🔧 net 기준
 
                     # 🔧 브레이크이븐 (본절): 부분익절 후 손절가를 진입가로 이동
                     # - "먹고 뱉는" 거래 방지
                     # - 🔧 FIX: 수수료+슬립 고려한 순수익 기준으로 변경 (휩쏘 본절컷 방지)
-                    net_ret_pct = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
                     cp_pct = get_dynamic_checkpoint() * 100.0  # 동적 체크포인트 (%)
                     if net_ret_pct >= cp_pct and not pos2.get("breakeven_set"):
                         old_stop = pos2.get("stop", 0)
@@ -1962,12 +1972,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
         print(msg)
 
-        result_emoji = "🟢" if ret_pct > 0 else "🔴"
+        # 🔧 FIX: net 기준으로 판정 (수수료 반영)
+        result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
         tg_send(
             f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
             f"====================================\n"
-            f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
+            f"💰 순손익: {pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
@@ -1979,18 +1990,23 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"===================================="
         )
 
-        # 🔧 부분청산도 거래 기록에 추가 (경로 리포트 카운트용)
-        if AUTO_LEARN_ENABLED and remaining_volume <= 1e-10:
-            # 전량청산된 경우만 기록 (부분청산 후 전량청산 시)
+        # 🔧 FIX: 전량청산 시 record_trade(net) + update_trade_result(net) 호출
+        # - 기존: update_trade_result(gross)만 호출 → TRADE_HISTORY/streak 누락
+        # - 변경: net 기준으로 통일, record_trade도 호출
+        if remaining_volume <= 1e-10:
             # 🔧 FIX: 백업된 entry_ts, added 사용 (pop 후라 OPEN_POSITIONS에 없음)
             try:
                 if backup_entry_ts is not None:
                     hold_sec = time.time() - backup_entry_ts
                 else:
                     hold_sec = 0
-                update_trade_result(m, exit_price_used, ret_pct / 100.0, hold_sec,
-                                    added=backup_added, exit_reason=reason or "부분청산",
-                                    entry_ts=backup_entry_ts)
+                # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
+                record_trade(m, net_ret_pct / 100.0)
+                # 🔧 FIX: update_trade_result(net) - 학습/쿨다운 정확성
+                if AUTO_LEARN_ENABLED:
+                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                                        added=backup_added, exit_reason=reason or "부분청산",
+                                        entry_ts=backup_entry_ts)
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
