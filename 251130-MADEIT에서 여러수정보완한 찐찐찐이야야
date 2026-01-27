@@ -776,9 +776,10 @@ def sync_orphan_positions():
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
 
-            # 🔧 FIX: 봇 내부 최근 매수 체크 (60초 내 매수면 유령 아님)
+            # 🔧 FIX: 봇 내부 최근 매수 체크 (120초 내 매수면 유령 아님)
+            # 60초 → 120초로 증가: 모니터링 중 예외 발생 시 오탐 방지
             last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 60:
+            if now - last_buy_ts < 120:
                 print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
                 continue
 
@@ -1902,9 +1903,10 @@ def close_auto_position(m, reason=""):
                 return
 
             # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
+            # 🔧 FIX: get_actual_balance → get_balance_with_locked (locked 포함, 유령 오탐 방지)
             if "400" in str(e) or "Bad Request" in str(e):
-                actual_check = get_actual_balance(m)
-                if actual_check <= 0:
+                actual_check = get_balance_with_locked(m)
+                if actual_check <= 1e-12:
                     print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
                     tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
                     with _POSITION_LOCK:
