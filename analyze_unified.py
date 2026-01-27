@@ -444,22 +444,46 @@ def analyze_pre_entry_env(
 
     # === 봇 실제 계산 방식 (stage1_gate 핵심 지표) ===
 
-    # 1. vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2])
-    #    봇 코드: past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2]]
-    #    c1[-7:-2] = 인덱스 -7, -6, -5, -4, -3 (5개, -2 제외)
-    #    entry_idx가 마지막이면: entry_idx-6 ~ entry_idx-2 (5개)
-    past_vol_start = max(0, entry_idx - 6)
-    past_vol_end = entry_idx - 1  # Python slice [start:end) → entry_idx-6 ~ entry_idx-2
-    past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:past_vol_end] if c.volume_krw > 0]
-    if past_volumes_krw:
-        vol_surge = entry.volume_krw / statistics.mean(past_volumes_krw)
+    # 1. vol_surge: 현재봉 거래대금 / 과거 거래량 기준
+    #    🔧 FIX: SMA → EMA 변경 (펌프 초반 더 빠른 반응)
+    #    + 3분 누적 거래량 비교 추가 (단일봉보다 안정적)
+    past_vol_start = max(0, entry_idx - 20)
+    past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:entry_idx] if c.volume_krw > 0]
+
+    if len(past_volumes_krw) >= 5:
+        # 🔧 EMA 기반 (더 빠른 반응)
+        vol_ema = calc_ema(past_volumes_krw, min(len(past_volumes_krw), 10))
+        vol_surge_ema = entry.volume_krw / vol_ema if vol_ema and vol_ema > 0 else 1.0
+
+        # 🔧 3분 누적 비교 (펌프 안정 감지)
+        if entry_idx >= 3:
+            sum_3 = sum(c.volume_krw for c in candles[entry_idx-2:entry_idx+1])
+            # 과거 3분 누적들의 평균
+            past_sums = []
+            for i in range(max(0, entry_idx-12), entry_idx-2):
+                if i >= 2:
+                    s = sum(c.volume_krw for c in candles[i-2:i+1])
+                    past_sums.append(s)
+            if past_sums:
+                vol_surge_3m = sum_3 / statistics.mean(past_sums)
+            else:
+                vol_surge_3m = vol_surge_ema
+        else:
+            vol_surge_3m = vol_surge_ema
+
+        # 둘 중 큰 값 사용 (펌프 감지 최대화)
+        vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
     else:
         vol_surge = 1.0
 
     # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1
-    #    봇: price_change = (cur["trade_price"] / max(prev["trade_price"], 1) - 1)
+    #    🔧 FIX: 고가 기준 펌프 감지 추가 (종가만 보면 윗꼬리 놓침)
     prev_candle = candles[entry_idx - 1]
-    price_change = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
+    price_change_close = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
+    # 🔧 NEW: 고가 기준 펌프 무브 (펌프 초반 감지용)
+    pump_move = (entry.high / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
+    # 가중 합산: 종가 70% + 고가 30% (고가만 치고 빠지는 경우 방어)
+    price_change = max(price_change_close, pump_move * 0.7)
 
     # 3. accel: 봇은 틱 기반 (t5s_krw_per_sec / t15s_krw_per_sec)
     #    분봉 근사: 최근 2봉 평균 / 직전 5봉 평균 (5초:15초 ≈ 1:3 비율)
@@ -479,11 +503,12 @@ def analyze_pre_entry_env(
     vol_vs_ma = entry.volume_krw / max(vol_ma20, 1)
 
     # 6. high_breakout: 12봉 고점 돌파 여부
+    #    🔧 FIX: 종가→고가 기준으로 변경 (펌프 초반 감지)
     #    봇: prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
-    #        high_breakout = (prev_high > 0 and cur_price > prev_high)
     lookback_candles = candles[max(0, entry_idx-12):entry_idx]  # 직전 12봉 (진입봉 제외)
     prev_high = max(c.high for c in lookback_candles) if lookback_candles else entry.high
-    high_breakout = entry.close > prev_high
+    high_breakout = entry.high > prev_high  # 🔧 FIX: close→high (고가 기준 돌파)
+    close_confirm = entry.close > prev_high * 0.997  # 종가 확인 (0.3% 여유)
 
     # === 🔥 신규: 레짐 필터 (v3) ===
     # sideways_pct: 20봉 범위 % (봇: is_sideways_regime)

@@ -4313,7 +4313,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     mega = is_mega_breakout(c1)
     th = get_dynamic_thresholds()
     cur, prev = c1[-1], c1[-2]
-    price_change = (cur["trade_price"] / max(prev["trade_price"], 1) - 1)
+    # 🔧 FIX: 고가 기준 펌프 감지 추가 (종가만 보면 윗꼬리 펌프 놓침)
+    price_change_close = (cur["trade_price"] / max(prev["trade_price"], 1) - 1)
+    cur_high = cur.get("high_price", cur["trade_price"])
+    pump_move = (cur_high / max(prev["trade_price"], 1) - 1)
+    # 가중 합산: 고가 기준 70% 반영 (펌프 초반 감지)
+    price_change = max(price_change_close, pump_move * 0.7)
 
     # 🔧 SPREAD_HIGH, VOL_LOW, SURGE_LOW, PRICE_LOW → stage1_gate로 이동
     # 거래량 데이터 (stage1_gate에서 사용)
@@ -4336,8 +4341,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     turn = twin["krw"] / max(ob["depth_krw"], 1)
 
     # 🔥 1단계 게이트 적용 (단일 통합 필터)
-    # 점화 감지도 stage1_gate 내에서 처리
-    vol_surge = current_volume / max(statistics.mean(past_volumes) if past_volumes else current_volume / 8, 1)
+    # 🔧 FIX: SMA → EMA 기반 vol_surge (펌프 초반 더 빠른 반응)
+    if past_volumes and len(past_volumes) >= 3:
+        vol_ema = ema_last(past_volumes, min(len(past_volumes), 10))
+        vol_surge_ema = current_volume / max(vol_ema, 1) if vol_ema else 1.0
+        # 3분 누적 비교 추가 (c1[-4:-1] vs 과거 평균)
+        if len(c1) >= 6:
+            sum_3 = sum(c["candle_acc_trade_price"] for c in c1[-3:])
+            past_sums = []
+            for i in range(max(0, len(c1)-15), len(c1)-3):
+                if i >= 2:
+                    s = sum(c["candle_acc_trade_price"] for c in c1[i-2:i+1])
+                    past_sums.append(s)
+            vol_surge_3m = (sum_3 / statistics.mean(past_sums)) if past_sums else vol_surge_ema
+            vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
+        else:
+            vol_surge = vol_surge_ema
+    else:
+        vol_surge = current_volume / max(current_volume / 8, 1)
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
     imbalance = calc_orderbook_imbalance(ob)
@@ -4381,12 +4402,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
+    cur_high = cur.get("high_price", cur_price)  # 🔧 현재봉 고가
     closes = [x["trade_price"] for x in c1]
     ema20 = ema_last(closes, 20) if len(closes) >= 20 else None
     ema20_breakout = (ema20 is not None and cur_price > ema20)
 
+    # 🔧 FIX: 고점 돌파를 고가 기준으로 변경 (펌프 초반 감지)
     prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
-    high_breakout = (prev_high > 0 and cur_price > prev_high)
+    high_breakout = (prev_high > 0 and cur_high > prev_high)  # 🔧 종가→고가
 
     vol_ma20 = vol_ma_from_candles(c1, period=20)
     vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
