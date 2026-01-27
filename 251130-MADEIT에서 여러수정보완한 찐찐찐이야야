@@ -1627,293 +1627,293 @@ def close_auto_position(m, reason=""):
             # 🔧 FIX: 이미 청산된 포지션에 대한 중복 알람 제거 (동시 모니터링 시 노이즈 방지)
             return
 
-    # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
-    actual_vol = get_balance_with_locked(m)
-    if actual_vol <= 1e-12:
-        print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
-        # OPEN_POSITIONS 정리 (혹시 남아있으면)
-        with _POSITION_LOCK:
-            OPEN_POSITIONS.pop(m, None)
-        return
-
-    # 실제 보유량 사용
-    vol = actual_vol
-
-    # 🔧 청산 시도 알람 (실잔고 확인 후에만 발송)
-    tg_send(f"💣 {m} 청산시도\n• 사유: {reason}\n• 수량: {vol:.4f}")
-
-    if vol <= 0:
-        print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
-        with _POSITION_LOCK:
-            OPEN_POSITIONS.pop(m, None)
-        # 🔧 FIX: volume 0이어도 알람 + 리포트 카운트 증가
-        tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
-        if AUTO_LEARN_ENABLED:
-            try:
-                update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
-            except:
-                pass
-        return
-
-    entry_price = pos.get("entry_price", 0)
-
-    # 현재가(청산 전 기준) 조회 - ✅ 퍼블릭 API 사용
-    try:
-        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-        cur_price = cur_js[0].get("trade_price",
-                                  entry_price) if cur_js else entry_price
-    except Exception:
-        cur_price = entry_price
-
-    # 선 계산(대략)
-    ret_pct = (cur_price / entry_price -
-               1.0) * 100.0 if entry_price > 0 else 0.0
-    est_entry_value = entry_price * vol
-    est_exit_value = cur_price * vol
-    pl_value = est_exit_value - est_entry_value
-
-    print(
-        f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}, PnL(선계산)={ret_pct:+.2f}%"
-    )
-
-    exit_price_used = cur_price  # 실제 체결가 성공 시 교체
-
-    try:
-        res = place_market_sell(m, vol, price_hint=cur_price)  # 🔧 가격 힌트 전달
-        order_uuid = res.get("uuid") if isinstance(res, dict) else None
-        if order_uuid:
-            od = get_order_result(order_uuid, timeout_sec=20.0)  # 🔧 12→20초로 증가
-        else:
-            od = None
-
-        # 실제 체결량/체결가 계산 (🔧 FIX: trades 없을 때 executed_volume 대체 사용)
-        executed = 0.0
-        if od:
-            trades = od.get("trades") or []
-            total_krw = 0.0
-            total_vol = 0.0
-            for tr in trades:
-                try:
-                    p = float(tr.get("price", "0"))
-                    v = float(tr.get("volume", "0"))
-                except Exception:
-                    continue
-                total_krw += p * v
-                total_vol += v
-            executed = total_vol
-            if total_vol > 0:
-                exit_price_used = total_krw / total_vol
-            # 🔧 FIX: trades 배열 없어도 executed_volume이 있으면 체결된 것으로 간주
-            if executed <= 0:
-                try:
-                    executed = float(od.get("executed_volume") or "0")
-                    if executed > 0:
-                        # 평균 체결가 계산 (가능하면)
-                        try:
-                            avg_price = float(od.get("avg_price") or "0")
-                            if avg_price > 0:
-                                exit_price_used = avg_price
-                        except:
-                            pass
-                        print(f"[AUTO] {m} trades 없음, executed_volume={executed:.6f}로 대체")
-                except:
-                    pass
-
-        # 🔧 FIX #1: 미체결 시 잔고 재확인 후 처리 (지연 체결 대응 강화)
-        if executed <= 0:
-            # 🔧 PATCH: 최대 30초까지 잔고+locked=0 재확인 (지연 체결 대비)
-            for _retry in range(15):  # 15회 x 2초 = 30초
-                time.sleep(2.0)
-                actual_after = get_balance_with_locked(m)  # 🔧 locked 포함
-                if actual_after <= 1e-12:
-                    # 실잔고+locked 0 = 체결된 것으로 간주
-                    with _POSITION_LOCK:
-                        OPEN_POSITIONS.pop(m, None)
-
-                    # 🔧 FIX: 지연청산 시 실제 체결가 조회 시도 (학습 데이터 정확도 개선)
-                    if order_uuid:
-                        try:
-                            od_delayed = get_order_result(order_uuid, timeout_sec=5.0)
-                            if od_delayed:
-                                delayed_avg = float(od_delayed.get("avg_price") or "0")
-                                if delayed_avg > 0:
-                                    exit_price_used = delayed_avg
-                                    ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-                                    print(f"[DELAYED] {m} 실제 체결가 조회 성공: {delayed_avg:.0f}원 → ret={ret_pct:+.2f}%")
-                        except Exception as _delayed_err:
-                            print(f"[DELAYED_PRICE_ERR] {m} 체결가 조회 실패 (추정값 사용): {_delayed_err}")
-
-                    tg_send(f"🧹 <b>자동청산 완료(지연확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
-                    # 🔧 FIX: 지연청산에서도 record_trade 기록 (승률 기반 리스크 조정에 필수)
-                    # 🔧 FIX: 수수료 반영한 순수익률 사용
-                    net_ret_delayed = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
-                    try:
-                        record_trade(m, net_ret_delayed / 100.0)  # 🔧 수수료 반영
-                    except Exception as _e:
-                        print("[DELAYED_TRADE_RECORD_ERR]", _e)
-                    # 🔧 학습 로그 업데이트
-                    if AUTO_LEARN_ENABLED:
-                        try:
-                            hold_sec = time.time() - pos.get("entry_ts", time.time())
-                            mfe = pos.get("mfe_pct", 0.0)
-                            mae = pos.get("mae_pct", 0.0)
-                            # 🔧 FIX: 수수료 반영한 순수익률 사용
-                            update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
-                                                added=pos.get('added', False), exit_reason=reason,
-                                                mfe_pct=mfe, mae_pct=mae,
-                                                entry_ts=pos.get("entry_ts"))
-                        except Exception as _e:
-                            print("[DELAYED_CLOSE_LOG_ERR]", _e)
-                    return
-
-            # 30초 후에도 잔고 있으면 → 후속 워커로 추가 감시
-            print(f"[AUTO] {m} 청산 미체결 → 후속 감시 시작")
-            tg_send(f"⚠️ <b>자동청산 미체결</b> {m}\n사유: 체결 지연 / 후속 감시 진행")
-
-            def _followup_check():
-                try:
-                    for _ in range(120):  # 추가 4분 감시 (120회 x 2초)
-                        time.sleep(2.0)
-                        if get_balance_with_locked(m) <= 1e-12:  # 🔧 locked 포함
-                            with _POSITION_LOCK:
-                                OPEN_POSITIONS.pop(m, None)
-                            tg_send(f"🧹 <b>자동청산 완료(후속확인)</b> {m}\n• 사유: {reason}")
-                            return
-                    # 🔧 4분 후에도 미체결 → 경고 알림
-                    tg_send(f"🚨 <b>{m} 청산 미완료</b>\n• 4분 후속감시 종료, 수동 확인 필요\n• 사유: {reason}")
-                except Exception as e:
-                    print("[FOLLOWUP_ERR]", e)
-                    # 🔧 FIX: 예외 발생해도 알람 발송
-                    tg_send(f"🚨 <b>{m} 후속감시 오류</b>\n• 예외: {e}\n• 수동 확인 필요")
-            threading.Thread(target=_followup_check, daemon=True).start()
+        # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
+        actual_vol = get_balance_with_locked(m)
+        if actual_vol <= 1e-12:
+            print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
+            # OPEN_POSITIONS 정리 (혹시 남아있으면)
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
             return
 
-        # 🔧 FIX #1: 부분체결 시 잔여량으로 업데이트
-        if executed < vol - 1e-10:
-            remaining = max(vol - executed, 0.0)
-            # ✅ 잔여가 최소주문금액(5000원) 미만이면 메모리에서 제거 (좀비 방지)
-            if exit_price_used * remaining < 5000:
-                remaining = 0.0
-            with _POSITION_LOCK:
-                pos2 = OPEN_POSITIONS.get(m)
-                if pos2:
-                    if remaining <= 0:
-                        OPEN_POSITIONS.pop(m, None)
-                    else:
-                        pos2["volume"] = remaining
-                        pos2["last_exit_ts"] = time.time()
-                        OPEN_POSITIONS[m] = pos2
-            print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f}")
-            if remaining > 0:
-                tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
-            else:
-                tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여 미달 → 정리완료")
-            # 부분체결도 손익 계산은 함 (executed 기준)
-            vol = executed  # 아래 손익 계산용
+        # 실제 보유량 사용
+        vol = actual_vol
 
-        # 🔧 FIX #1: 전량체결 시에만 포지션 제거
-        else:
+        # 🔧 청산 시도 알람 (실잔고 확인 후에만 발송)
+        tg_send(f"💣 {m} 청산시도\n• 사유: {reason}\n• 수량: {vol:.4f}")
+
+        if vol <= 0:
+            print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
-
-        # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
-        est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
-        est_exit_value = exit_price_used * vol
-        pl_value = est_exit_value - est_entry_value
-        gross_ret_pct = (exit_price_used / entry_price -
-                         1.0) * 100.0 if entry_price > 0 else 0.0
-        # 🔧 FIX: 수수료 반영한 순수익률 계산 (승률/리스크 튜닝 정확도 개선)
-        net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)  # 왕복 0.1% 차감
-        ret_pct = gross_ret_pct  # 알람용 (기존 유지)
-
-        # 🔧 FIX: 청산 슬립 기록 (진입 슬립만 기록하면 과소추정됨)
-        # 🔧 FIX: 상한 캡 추가 (0.5%) - 가격이동이 슬립으로 섞이면 TP 과도 상승
-        # - cur_price는 주문 직전 티커값 → 체결까지 시장 이동분 포함될 수 있음
-        # - 이상치 제외로 expected_exit_slip_pct 정확도 개선
-        if cur_price > 0 and exit_price_used > 0:
-            exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
-            _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
-            _SLIP_HISTORY.append(exit_slip)  # 하위호환
-
-        # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
-        # 🔧 FIX: net_ret_pct 사용 (수수료 반영)
-        try:
-            record_trade(m, net_ret_pct / 100.0)  # 🔧 소수 단위 + 수수료 반영
-        except Exception as _e:
-            print("[TRADE_RECORD_ERR]", _e)
-
-        # 🧠 자동 학습용 결과 업데이트
-        if AUTO_LEARN_ENABLED:
-            try:
-                hold_sec = time.time() - pos.get("entry_ts", time.time())
-                was_added = pos.get("added", False)  # 🔍 추매 여부
-                # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
-                mfe = pos.get("mfe_pct", 0.0)
-                mae = pos.get("mae_pct", 0.0)
-                # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
-                update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
-                                    added=was_added, exit_reason=reason,
-                                    mfe_pct=mfe, mae_pct=mae,
-                                    entry_ts=pos.get("entry_ts"))
-            except Exception as _e:
-                print(f"[FEATURE_UPDATE_ERR] {_e}")
-
-        result_emoji = "🟢" if ret_pct > 0 else "🔴"
-        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
-
-        # 🔧 DEBUG: 청산 알람 발송 직전 로그
-        print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
-
-        tg_send(
-            f"====================================\n"
-            f"{result_emoji} <b>자동청산 완료</b> {m}\n"
-            f"====================================\n"
-            f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
-            f"• 사유: {reason}\n"
-            f"• 매수평단: {fmt6(entry_price)}원\n"
-            f"• 실매도가: {fmt6(exit_price_used)}원\n"
-            f"• 체결수량: {vol:.6f}\n"
-            f"• 매수금액: {est_entry_value:,.0f}원\n"
-            f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원\n"
-            f"====================================\n"
-            f"{link_for(m)}"
-        )
-
-    except Exception as e:
-        print("[AUTO SELL ERR]", e)
-        import traceback
-        traceback.print_exc()  # 🔧 DEBUG: 상세 에러 출력
-        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
-
-        # 🔧 FIX: 최소주문금액 미만 → 매도 불가 찌꺼기, 메모리 포지션만 정리
-        if "최소주문금액" in str(e) or "5000" in str(e):
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미만)\n• 소량 잔여는 거래소에 보유")
-            # 🔧 FIX: 리포트 카운트 증가
+            # 🔧 FIX: volume 0이어도 알람 + 리포트 카운트 증가
+            tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
             if AUTO_LEARN_ENABLED:
                 try:
-                    update_trade_result(m, 0, 0, 0)
+                    update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
                 except:
                     pass
             return
 
-        # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
-        if "400" in str(e) or "Bad Request" in str(e):
-            actual_check = get_actual_balance(m)
-            if actual_check <= 0:
-                print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
-                tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
+        entry_price = pos.get("entry_price", 0)
+
+        # 현재가(청산 전 기준) 조회 - ✅ 퍼블릭 API 사용
+        try:
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+            cur_price = cur_js[0].get("trade_price",
+                                      entry_price) if cur_js else entry_price
+        except Exception:
+            cur_price = entry_price
+
+        # 선 계산(대략)
+        ret_pct = (cur_price / entry_price -
+                   1.0) * 100.0 if entry_price > 0 else 0.0
+        est_entry_value = entry_price * vol
+        est_exit_value = cur_price * vol
+        pl_value = est_exit_value - est_entry_value
+
+        print(
+            f"[AUTO] {m} 청산 시도: volume={vol}, reason={reason}, PnL(선계산)={ret_pct:+.2f}%"
+        )
+
+        exit_price_used = cur_price  # 실제 체결가 성공 시 교체
+
+        try:
+            res = place_market_sell(m, vol, price_hint=cur_price)  # 🔧 가격 힌트 전달
+            order_uuid = res.get("uuid") if isinstance(res, dict) else None
+            if order_uuid:
+                od = get_order_result(order_uuid, timeout_sec=20.0)  # 🔧 12→20초로 증가
+            else:
+                od = None
+
+            # 실제 체결량/체결가 계산 (🔧 FIX: trades 없을 때 executed_volume 대체 사용)
+            executed = 0.0
+            if od:
+                trades = od.get("trades") or []
+                total_krw = 0.0
+                total_vol = 0.0
+                for tr in trades:
+                    try:
+                        p = float(tr.get("price", "0"))
+                        v = float(tr.get("volume", "0"))
+                    except Exception:
+                        continue
+                    total_krw += p * v
+                    total_vol += v
+                executed = total_vol
+                if total_vol > 0:
+                    exit_price_used = total_krw / total_vol
+                # 🔧 FIX: trades 배열 없어도 executed_volume이 있으면 체결된 것으로 간주
+                if executed <= 0:
+                    try:
+                        executed = float(od.get("executed_volume") or "0")
+                        if executed > 0:
+                            # 평균 체결가 계산 (가능하면)
+                            try:
+                                avg_price = float(od.get("avg_price") or "0")
+                                if avg_price > 0:
+                                    exit_price_used = avg_price
+                            except:
+                                pass
+                            print(f"[AUTO] {m} trades 없음, executed_volume={executed:.6f}로 대체")
+                    except:
+                        pass
+
+            # 🔧 FIX #1: 미체결 시 잔고 재확인 후 처리 (지연 체결 대응 강화)
+            if executed <= 0:
+                # 🔧 PATCH: 최대 30초까지 잔고+locked=0 재확인 (지연 체결 대비)
+                for _retry in range(15):  # 15회 x 2초 = 30초
+                    time.sleep(2.0)
+                    actual_after = get_balance_with_locked(m)  # 🔧 locked 포함
+                    if actual_after <= 1e-12:
+                        # 실잔고+locked 0 = 체결된 것으로 간주
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(m, None)
+
+                        # 🔧 FIX: 지연청산 시 실제 체결가 조회 시도 (학습 데이터 정확도 개선)
+                        if order_uuid:
+                            try:
+                                od_delayed = get_order_result(order_uuid, timeout_sec=5.0)
+                                if od_delayed:
+                                    delayed_avg = float(od_delayed.get("avg_price") or "0")
+                                    if delayed_avg > 0:
+                                        exit_price_used = delayed_avg
+                                        ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+                                        print(f"[DELAYED] {m} 실제 체결가 조회 성공: {delayed_avg:.0f}원 → ret={ret_pct:+.2f}%")
+                            except Exception as _delayed_err:
+                                print(f"[DELAYED_PRICE_ERR] {m} 체결가 조회 실패 (추정값 사용): {_delayed_err}")
+
+                        tg_send(f"🧹 <b>자동청산 완료(지연확인)</b> {m}\n• 주문응답 지연으로 잔고=0 확인 후 완료 처리\n• 사유: {reason}")
+                        # 🔧 FIX: 지연청산에서도 record_trade 기록 (승률 기반 리스크 조정에 필수)
+                        # 🔧 FIX: 수수료 반영한 순수익률 사용
+                        net_ret_delayed = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+                        try:
+                            record_trade(m, net_ret_delayed / 100.0)  # 🔧 수수료 반영
+                        except Exception as _e:
+                            print("[DELAYED_TRADE_RECORD_ERR]", _e)
+                        # 🔧 학습 로그 업데이트
+                        if AUTO_LEARN_ENABLED:
+                            try:
+                                hold_sec = time.time() - pos.get("entry_ts", time.time())
+                                mfe = pos.get("mfe_pct", 0.0)
+                                mae = pos.get("mae_pct", 0.0)
+                                # 🔧 FIX: 수수료 반영한 순수익률 사용
+                                update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
+                                                    added=pos.get('added', False), exit_reason=reason,
+                                                    mfe_pct=mfe, mae_pct=mae,
+                                                    entry_ts=pos.get("entry_ts"))
+                            except Exception as _e:
+                                print("[DELAYED_CLOSE_LOG_ERR]", _e)
+                        return
+
+                # 30초 후에도 잔고 있으면 → 후속 워커로 추가 감시
+                print(f"[AUTO] {m} 청산 미체결 → 후속 감시 시작")
+                tg_send(f"⚠️ <b>자동청산 미체결</b> {m}\n사유: 체결 지연 / 후속 감시 진행")
+
+                def _followup_check():
+                    try:
+                        for _ in range(120):  # 추가 4분 감시 (120회 x 2초)
+                            time.sleep(2.0)
+                            if get_balance_with_locked(m) <= 1e-12:  # 🔧 locked 포함
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(m, None)
+                                tg_send(f"🧹 <b>자동청산 완료(후속확인)</b> {m}\n• 사유: {reason}")
+                                return
+                        # 🔧 4분 후에도 미체결 → 경고 알림
+                        tg_send(f"🚨 <b>{m} 청산 미완료</b>\n• 4분 후속감시 종료, 수동 확인 필요\n• 사유: {reason}")
+                    except Exception as e:
+                        print("[FOLLOWUP_ERR]", e)
+                        # 🔧 FIX: 예외 발생해도 알람 발송
+                        tg_send(f"🚨 <b>{m} 후속감시 오류</b>\n• 예외: {e}\n• 수동 확인 필요")
+                threading.Thread(target=_followup_check, daemon=True).start()
+                return
+
+            # 🔧 FIX #1: 부분체결 시 잔여량으로 업데이트
+            if executed < vol - 1e-10:
+                remaining = max(vol - executed, 0.0)
+                # ✅ 잔여가 최소주문금액(5000원) 미만이면 메모리에서 제거 (좀비 방지)
+                if exit_price_used * remaining < 5000:
+                    remaining = 0.0
+                with _POSITION_LOCK:
+                    pos2 = OPEN_POSITIONS.get(m)
+                    if pos2:
+                        if remaining <= 0:
+                            OPEN_POSITIONS.pop(m, None)
+                        else:
+                            pos2["volume"] = remaining
+                            pos2["last_exit_ts"] = time.time()
+                            OPEN_POSITIONS[m] = pos2
+                print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f}")
+                if remaining > 0:
+                    tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
+                else:
+                    tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여 미달 → 정리완료")
+                # 부분체결도 손익 계산은 함 (executed 기준)
+                vol = executed  # 아래 손익 계산용
+
+            # 🔧 FIX #1: 전량체결 시에만 포지션 제거
+            else:
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
+
+            # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
+            est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
+            est_exit_value = exit_price_used * vol
+            pl_value = est_exit_value - est_entry_value
+            gross_ret_pct = (exit_price_used / entry_price -
+                             1.0) * 100.0 if entry_price > 0 else 0.0
+            # 🔧 FIX: 수수료 반영한 순수익률 계산 (승률/리스크 튜닝 정확도 개선)
+            net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)  # 왕복 0.1% 차감
+            ret_pct = gross_ret_pct  # 알람용 (기존 유지)
+
+            # 🔧 FIX: 청산 슬립 기록 (진입 슬립만 기록하면 과소추정됨)
+            # 🔧 FIX: 상한 캡 추가 (0.5%) - 가격이동이 슬립으로 섞이면 TP 과도 상승
+            # - cur_price는 주문 직전 티커값 → 체결까지 시장 이동분 포함될 수 있음
+            # - 이상치 제외로 expected_exit_slip_pct 정확도 개선
+            if cur_price > 0 and exit_price_used > 0:
+                exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
+                _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
+                _SLIP_HISTORY.append(exit_slip)  # 하위호환
+
+            # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
+            # 🔧 FIX: net_ret_pct 사용 (수수료 반영)
+            try:
+                record_trade(m, net_ret_pct / 100.0)  # 🔧 소수 단위 + 수수료 반영
+            except Exception as _e:
+                print("[TRADE_RECORD_ERR]", _e)
+
+            # 🧠 자동 학습용 결과 업데이트
+            if AUTO_LEARN_ENABLED:
+                try:
+                    hold_sec = time.time() - pos.get("entry_ts", time.time())
+                    was_added = pos.get("added", False)  # 🔍 추매 여부
+                    # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
+                    mfe = pos.get("mfe_pct", 0.0)
+                    mae = pos.get("mae_pct", 0.0)
+                    # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
+                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                                        added=was_added, exit_reason=reason,
+                                        mfe_pct=mfe, mae_pct=mae,
+                                        entry_ts=pos.get("entry_ts"))
+                except Exception as _e:
+                    print(f"[FEATURE_UPDATE_ERR] {_e}")
+
+            result_emoji = "🟢" if ret_pct > 0 else "🔴"
+            fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
+
+            # 🔧 DEBUG: 청산 알람 발송 직전 로그
+            print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
+
+            tg_send(
+                f"====================================\n"
+                f"{result_emoji} <b>자동청산 완료</b> {m}\n"
+                f"====================================\n"
+                f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
+                f"• 사유: {reason}\n"
+                f"• 매수평단: {fmt6(entry_price)}원\n"
+                f"• 실매도가: {fmt6(exit_price_used)}원\n"
+                f"• 체결수량: {vol:.6f}\n"
+                f"• 매수금액: {est_entry_value:,.0f}원\n"
+                f"• 청산금액: {est_exit_value:,.0f}원\n"
+                f"• 수수료: {fee_total:,.0f}원\n"
+                f"====================================\n"
+                f"{link_for(m)}"
+            )
+
+        except Exception as e:
+            print("[AUTO SELL ERR]", e)
+            import traceback
+            traceback.print_exc()  # 🔧 DEBUG: 상세 에러 출력
+            tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+
+            # 🔧 FIX: 최소주문금액 미만 → 매도 불가 찌꺼기, 메모리 포지션만 정리
+            if "최소주문금액" in str(e) or "5000" in str(e):
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미만)\n• 소량 잔여는 거래소에 보유")
                 # 🔧 FIX: 리포트 카운트 증가
                 if AUTO_LEARN_ENABLED:
                     try:
                         update_trade_result(m, 0, 0, 0)
                     except:
                         pass
-        return
+                return
+
+            # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
+            if "400" in str(e) or "Bad Request" in str(e):
+                actual_check = get_actual_balance(m)
+                if actual_check <= 0:
+                    print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
+                    tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                    # 🔧 FIX: 리포트 카운트 증가
+                    if AUTO_LEARN_ENABLED:
+                        try:
+                            update_trade_result(m, 0, 0, 0)
+                        except:
+                            pass
+            return
     finally:
         # 🔧 FIX: 중복 청산 방지 락 해제 (성공/실패 상관없이)
         with _POSITION_LOCK:
