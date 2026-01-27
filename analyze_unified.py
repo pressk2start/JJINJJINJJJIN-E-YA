@@ -49,7 +49,7 @@ GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%)
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x)
 GATE_ACCEL_MAX = 5.0      # 가속도 상한 (x)
 GATE_BUY_RATIO_MIN = 0.58 # 매수비 하한
-GATE_SURGE_MAX = 100.0    # 급등 상한 (사실상 제거)
+GATE_SURGE_MAX = 3.0      # 🔧 FIX v5: 급등 상한 (100→3) - 과도한 급등 필터링
 GATE_OVERHEAT_MAX = 20.0  # 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 호가 임밸런스 하한
 GATE_CONSEC_MIN = 1       # 연속매수 하한
@@ -512,12 +512,21 @@ def analyze_pre_entry_env(
 
     # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1
     #    🔧 FIX: 고가 기준 펌프 감지 추가 (종가만 보면 윗꼬리 놓침)
+    #    🔧 FIX v5: 과도한 펌프 상한선 추가 (141% 이상치 방지)
     prev_candle = candles[entry_idx - 1]
     price_change_close = (entry.close / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
     # 🔧 NEW: 고가 기준 펌프 무브 (펌프 초반 감지용)
     pump_move = (entry.high / prev_candle.close - 1.0) if prev_candle.close > 0 else 0.0
-    # 가중 합산: 종가 70% + 고가 30% (고가만 치고 빠지는 경우 방어)
-    price_change = max(price_change_close, pump_move * 0.7)
+
+    # 🔧 FIX v5: 과도한 펌프 필터링 (3% 초과 시 고가 가중치 무시)
+    # 이유: pstd 141% vs 0.06% 극단적 차이 → 급등 후 급락 패턴에서 손실
+    PUMP_MAX_THRESHOLD = 0.03  # 3%
+    if pump_move > PUMP_MAX_THRESHOLD:
+        # 과도한 펌프: 종가만 사용 (고가 가중치 제거)
+        price_change = price_change_close
+    else:
+        # 정상 범위: 가중 합산: 종가 70% + 고가 30%
+        price_change = max(price_change_close, pump_move * 0.7)
 
     # 3. accel: 봇은 틱 기반 (t5s_krw_per_sec / t15s_krw_per_sec)
     #    분봉 근사: 최근 2봉 평균 / 직전 5봉 평균 (5초:15초 ≈ 1:3 비율)
@@ -688,6 +697,24 @@ def analyze_pre_entry_env(
     if is_sideways:
         confirm_score -= 15
 
+    # 🔧 FIX v5: 과열 지수 게이트 활성화
+    # 데이터 분석: accel(틱나이) 승리 4.02 vs 패배 5.21 → 과열 시 손실
+    # overheat = accel * vol_surge, GATE_OVERHEAT_MAX = 20.0
+    if overheat > GATE_OVERHEAT_MAX:
+        # 과열 상태: 강력 감점 (-20점) → 꼭대기 진입 방지
+        confirm_score -= 20
+
+    # 🔧 FIX v5: 가속도 과열 필터
+    # accel > 5.0 = 급등 후반, 추격 매수 위험
+    if accel > GATE_ACCEL_MAX:
+        confirm_score -= 10
+
+    # 🔧 FIX v5: 배수(vol_surge) 상한선 필터
+    # 데이터 분석: 승리 0.92x vs 패배 1.27x → 과도한 배수에서 손실
+    # GATE_SURGE_MAX = 3.0 (100.0에서 하향)
+    if vol_surge > GATE_SURGE_MAX:
+        confirm_score -= 15  # 과도한 거래량 급등 = 꼭대기 신호
+
     confirm_score = max(0, min(100, int(confirm_score)))  # 0~100 클램프
 
     # entry_mode: 스코어 기반 진입모드 (봇 78점 기준)
@@ -700,10 +727,21 @@ def analyze_pre_entry_env(
 
     # signal_tag: 봇 방식 (점화 점수 기반)
     # 🔧 봇 동기화: ignition_score >= 3 → 🔥점화
+    # 🔧 FIX v5: 강돌파 조건 강화 (25% → 40%+ 목표)
+    #    - 횡보장(is_sideways) 제외: 가짜 돌파 필터링
+    #    - 진입봉 양봉 체크: 모멘텀 확인
+    entry_is_bullish = entry.close > entry.open  # 진입봉 양봉 여부 (미리 계산)
+
     if ignition_score >= 3:
         signal_tag = "🔥점화"
-    elif high_breakout and ema20_above:
+    elif high_breakout and ema20_above and not is_sideways and entry_is_bullish:
+        # 🔧 FIX v5: 강돌파 조건 강화
+        # 기존: high_breakout and ema20_above
+        # 추가: 횡보장 제외 + 진입봉 양봉
         signal_tag = "강돌파 (EMA↑+고점↑)"
+    elif high_breakout and ema20_above:
+        # 조건 미달 강돌파 → 약한 EMA↑로 강등
+        signal_tag = "EMA↑"
     elif ema20_above:
         signal_tag = "EMA↑"
     elif high_breakout:
