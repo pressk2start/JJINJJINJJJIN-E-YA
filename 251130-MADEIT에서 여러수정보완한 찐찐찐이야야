@@ -59,10 +59,19 @@ PROFIT_CHECKPOINT_MIN_ALPHA = 0.0010  # 최소 알파 0.10%
 _SLIP_HISTORY = deque(maxlen=50)  # 최근 50회 슬리피지 기록
 
 def get_dynamic_checkpoint():
-    """수수료 + 평균슬리피지 + 최소알파 기반 동적 체크포인트"""
+    """수수료 + 슬리피지(trimmed mean) + 최소알파 기반 동적 체크포인트"""
     # 🔧 CRITICAL FIX: 안전한 전역 참조 (NameError 방지)
     fee = globals().get("FEE_RATE", 0.001)
-    avg_slip = statistics.mean(_SLIP_HISTORY) if len(_SLIP_HISTORY) >= 5 else 0.0008
+    # 🔧 FIX: mean → trimmed mean (상하위 10% 제거) - 급등장 outlier 방지
+    if len(_SLIP_HISTORY) >= 10:
+        sorted_slip = sorted(_SLIP_HISTORY)
+        trim_n = max(1, len(sorted_slip) // 10)  # 상하위 10% 제거
+        trimmed = sorted_slip[trim_n:-trim_n] if trim_n > 0 else sorted_slip
+        avg_slip = statistics.mean(trimmed) if trimmed else 0.0008
+    elif len(_SLIP_HISTORY) >= 5:
+        avg_slip = statistics.median(_SLIP_HISTORY)  # 샘플 적으면 median
+    else:
+        avg_slip = 0.0008
     # 왕복 수수료(0.1%) + 슬리피지 + 최소알파(0.1%)
     # 🔧 FIX: FEE_RATE가 이미 왕복(0.1%)이므로 *2 제거
     dynamic_cp = fee + max(0.0005, avg_slip) + PROFIT_CHECKPOINT_MIN_ALPHA
@@ -107,7 +116,10 @@ def get_trail_distance_min():
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
-FEE_RATE = 0.001  # 0.05% 매수 + 0.05% 매도
+# 🔧 FIX: 변수명 명확화 - 왕복/편도 혼동 방지
+FEE_RATE_ROUNDTRIP = 0.001   # 왕복 0.1% (0.05% 매수 + 0.05% 매도)
+FEE_RATE_ONEWAY = FEE_RATE_ROUNDTRIP / 2  # 편도 0.05%
+FEE_RATE = FEE_RATE_ROUNDTRIP  # 하위 호환용
 
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
@@ -1720,7 +1732,7 @@ def close_auto_position(m, reason=""):
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
         result_emoji = "🟢" if ret_pct > 0 else "🔴"
-        fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
+        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
 
         # 🔧 DEBUG: 청산 알람 발송 직전 로그
         print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
@@ -1884,7 +1896,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         est_exit_value = exit_price_used * executed
         pl_value = est_exit_value - est_entry_value
         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-        fee_total = (est_entry_value + est_exit_value) * (FEE_RATE / 2.0)  # 편도 수수료
+        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
 
         # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
         # 🔧 FIX: pop 전에 entry_ts, added 백업 (hold_sec 0 버그 방지)
@@ -2423,8 +2435,10 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             return
         _reported_trades.add(trade_id)
         # 오래된 항목 정리 (1시간 이상 지난 거래)
+        # 🔧 FIX: discard()는 단일 원소만 제거 → difference_update() 사용
         now = time.time()
-        _reported_trades.discard(set(t for t in _reported_trades if now - t[1] > 3600))
+        _old_trades = {t for t in _reported_trades if now - t[1] > 3600}
+        _reported_trades.difference_update(_old_trades)
     else:
         # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
         now_ts = time.time()
@@ -4071,7 +4085,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
-    eff_spread_max = GATE_SPREAD_MAX * (1 + relax)               # 0.4 → 0.5 (3점)
+    # 🔧 FIX: 점화에서도 spread는 완화하지 않음 (급등 초입 슬리피지 위험)
+    eff_spread_max = GATE_SPREAD_MAX  # 0.4% 고정 (완화 제거)
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
