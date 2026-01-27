@@ -1,27 +1,25 @@
 # /analyze_unified.py
 # -*- coding: utf-8 -*-
 """
-실전 데이터 분석 스크립트 (통합 버전 v3)
+실전 데이터 분석 스크립트 (통합 버전 v4)
 
-핵심 변경점 (2026-01-24 업데이트):
-1. 봇의 실제 계산 방식 완전 적용
-   - vol_surge: c1[-7:-2] 5개봉 평균 대비 현재 거래대금
-   - price_change: 현재봉/이전봉 종가 비율 - 1
-   - accel: 최근 2봉 / 직전 5봉 비율 (틱 기반 근사)
-2. 봇 GATE 조건 지표 추가
-   - vol_vs_ma: 현재 거래대금 / MA20 (GATE_VOL_VS_MA20_MIN)
-   - ema20_breakout: 현재가 > EMA20 여부
-   - high_breakout: 12봉 고점 돌파 여부
-   - overheat: accel * vol_surge (과열 지표)
-3. 레짐 필터 (v3 신규)
-   - sideways_pct: 20봉 범위 % (횡보 판정)
-   - is_sideways: range < 0.5% = 횡보
-4. 킬러 조건 / 스코어 (v3 신규)
-   - buy_ratio, imbalance, turn_pct
-   - confirm_score (0~100), entry_mode, signal_tag
-5. 청산 후 분석 (v3 신규)
-   - 청산 후 N분봉 추적하여 조기청산/적정청산 판정
-   - 트레일링 임계치 최적화 분석
+핵심 변경점 (2026-01-27 동기화):
+1. 봇의 실제 계산 방식 완전 동기화
+   - vol_surge: c1[-7:-2] 5개봉 EMA 대비 + 3분 누적 비교
+   - price_change: 종가 + 고가 펌프 가중 합산
+   - accel: 분봉 기반 근사 (틱 없이)
+2. 봇 GATE 상수 완전 동기화
+   - GATE_* 임계치 봇 코드와 일치
+   - SCORE_WEIGHTS 가중치 봇 코드와 일치
+3. ignition_score 계산 추가 (봇 방식 근사)
+   - 거래량 폭발, TPS 급증, 연속 매수 기반 점화 점수
+4. high_breakout 조건 동기화
+   - 점화 시: 고가 기준 허용
+   - 비점화 시: 종가 확인 필수 (0.05% 버퍼)
+5. confirm_score → calc_risk_score 방식 동기화
+   - 봇의 SCORE_WEIGHTS 가중치 적용
+6. 레짐 필터 동기화
+   - sideways_pct < 0.5% = 횡보
 
 Usage:
   python3 analyze_unified.py                    # 전체 분석
@@ -40,6 +38,37 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
+
+
+# =========================
+# 🔧 봇 동기화: GATE 상수 (2026-01-27)
+# =========================
+GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
+GATE_TURN_MAX = 60.0      # 회전율 상한 (%)
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%)
+GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x)
+GATE_ACCEL_MAX = 5.0      # 가속도 상한 (x)
+GATE_BUY_RATIO_MIN = 0.58 # 매수비 하한
+GATE_SURGE_MAX = 100.0    # 급등 상한 (사실상 제거)
+GATE_OVERHEAT_MAX = 20.0  # 과열 필터 (accel*surge > 20 = 꼭대기)
+GATE_IMBALANCE_MIN = 0.50 # 호가 임밸런스 하한
+GATE_CONSEC_MIN = 1       # 연속매수 하한
+GATE_CONSEC_MAX = 15      # 연속매수 상한
+GATE_CV_MAX = 4.0         # CV 상한
+GATE_FRESH_AGE_MAX = 7.5  # 틱 신선도 상한 (초)
+GATE_VOL_MIN = 100_000    # 거래대금 하한 (원)
+GATE_SURGE_MIN = 0.5      # 배수 하한
+GATE_PRICE_MIN = 0.0005   # 가격변동 하한 (0.05%)
+
+# 🔧 봇 동기화: SCORE_WEIGHTS (합계 100)
+SCORE_WEIGHTS = {
+    "buy_ratio": 28,      # 매수비 (핵심)
+    "spread": 15,         # 스프레드 (낮을수록 좋음)
+    "turn": 22,           # 회전율
+    "imbalance": 18,      # 오더북 임밸런스
+    "fresh": 7,           # 틱 신선도
+    "volume_surge": 10,   # 거래량 급증
+}
 
 
 # =========================
@@ -179,14 +208,14 @@ class Candle:
 
 @dataclass
 class PreEntryEnv:
-    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용 (v3 - 2026-01-23 동기화)"""
+    """진입 전 환경 분석 결과 - 봇 실제 계산 방식 적용 (v4 - 2026-01-27 동기화)"""
     ticker: str
     time_str: str
     is_success: bool
     hour: int
 
     # === 봇 실제 계산 방식 지표 (stage1_gate 핵심) ===
-    # vol_surge: 현재봉 거래대금 / 과거 5봉 평균 (c1[-7:-2])
+    # vol_surge: 현재봉 거래대금 / 과거 5봉 EMA (c1[-7:-2])
     vol_surge: float
     # price_change: (현재봉 종가 / 이전봉 종가) - 1 (소수점)
     price_change: float
@@ -195,26 +224,29 @@ class PreEntryEnv:
     # overheat: accel * vol_surge (봇 GATE_OVERHEAT_MAX 체크용)
     overheat: float
 
-    # === 봇 GATE 추가 지표 (신규) ===
-    # vol_vs_ma: 현재봉 거래대금 / 20봉 MA (GATE_VOL_VS_MA20_MIN 체크)
+    # === 봇 GATE 추가 지표 ===
+    # vol_vs_ma: 현재봉 거래대금 / 20봉 MA
     vol_vs_ma: float
     # ema20_breakout: 현재가 > EMA20 여부 (진입 시그널)
     ema20_breakout: bool
     # high_breakout: 12봉 고점 돌파 여부 (진입 시그널)
     high_breakout: bool
 
-    # === 🔥 신규: 레짐 필터 (v3) ===
+    # === 🔥 점화 점수 (v4 신규) ===
+    ignition_score: int       # 점화 점수 (0~4, 3+ = 점화)
+
+    # === 레짐 필터 ===
     sideways_pct: float       # 20봉 범위 % (레짐 판정용)
     is_sideways: bool         # 횡보장 여부 (range < 0.5%)
 
-    # === 🔥 신규: CV 분석 (v3.1) ===
+    # === CV 분석 ===
     cv_approx: float          # CV 근사 (분봉 거래대금 기반 변동계수)
 
-    # === 🔥 신규: 킬러 조건 / 스코어 (v3) ===
+    # === 킬러 조건 / 스코어 ===
     buy_ratio: float          # 매수비율 추정 (양봉 비율 기반)
     turn_pct: float           # 회전율 추정 (거래대금/시총 근사)
     imbalance: float          # 임밸런스 추정 (매수-매도 압력)
-    confirm_score: int        # 종합 스코어 (0~100)
+    confirm_score: int        # 종합 스코어 (0~100) - calc_risk_score 방식
     entry_mode: str           # "confirm" / "half" / "probe"
     signal_tag: str           # 신호 태그 (점화/강돌파/EMA↑ 등)
 
@@ -445,22 +477,23 @@ def analyze_pre_entry_env(
     # === 봇 실제 계산 방식 (stage1_gate 핵심 지표) ===
 
     # 1. vol_surge: 현재봉 거래대금 / 과거 거래량 기준
-    #    🔧 FIX: SMA → EMA 변경 (펌프 초반 더 빠른 반응)
-    #    + 3분 누적 거래량 비교 추가 (단일봉보다 안정적)
-    past_vol_start = max(0, entry_idx - 20)
-    past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:entry_idx] if c.volume_krw > 0]
+    #    🔧 봇 동기화: c1[-7:-2] = 5개봉 EMA + 3분 누적 비교
+    #    봇 코드: past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] ...]
+    past_vol_start = max(0, entry_idx - 6)  # 🔧 봇: -7 ~ -2 = 5개봉
+    past_vol_end = max(0, entry_idx - 1)    # 🔧 봇: skip recent 1
+    past_volumes_krw = [c.volume_krw for c in candles[past_vol_start:past_vol_end] if c.volume_krw > 0]
 
-    if len(past_volumes_krw) >= 5:
+    if len(past_volumes_krw) >= 3:  # 🔧 봇: >= 3
         # 🔧 EMA 기반 (더 빠른 반응)
         vol_ema = calc_ema(past_volumes_krw, min(len(past_volumes_krw), 10))
         vol_surge_ema = entry.volume_krw / vol_ema if vol_ema and vol_ema > 0 else 1.0
 
-        # 🔧 3분 누적 비교 (펌프 안정 감지)
-        if entry_idx >= 3:
-            sum_3 = sum(c.volume_krw for c in candles[entry_idx-2:entry_idx+1])
-            # 과거 3분 누적들의 평균
+        # 🔧 봇 동기화: 3분 누적 비교 (c1[-3:] vs 과거 평균)
+        if entry_idx >= 6:  # 🔧 봇: len(c1) >= 6
+            sum_3 = sum(c.volume_krw for c in candles[entry_idx-2:entry_idx+1])  # 현재 3봉
+            # 🔧 봇: range(max(0, len(c1)-15), len(c1)-3)
             past_sums = []
-            for i in range(max(0, entry_idx-12), entry_idx-2):
+            for i in range(max(0, entry_idx-14), entry_idx-2):
                 if i >= 2:
                     s = sum(c.volume_krw for c in candles[i-2:i+1])
                     past_sums.append(s)
@@ -474,7 +507,8 @@ def analyze_pre_entry_env(
         # 둘 중 큰 값 사용 (펌프 감지 최대화)
         vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
     else:
-        vol_surge = 1.0
+        # 🔧 봇: vol_surge = current_volume / max(current_volume / 8, 1)
+        vol_surge = entry.volume_krw / max(entry.volume_krw / 8, 1) if entry.volume_krw > 0 else 1.0
 
     # 2. price_change: (현재봉 종가 / 이전봉 종가) - 1
     #    🔧 FIX: 고가 기준 펌프 감지 추가 (종가만 보면 윗꼬리 놓침)
@@ -503,12 +537,43 @@ def analyze_pre_entry_env(
     vol_vs_ma = entry.volume_krw / max(vol_ma20, 1)
 
     # 6. high_breakout: 12봉 고점 돌파 여부
-    #    🔧 FIX: 종가→고가 기준으로 변경 (펌프 초반 감지)
+    #    🔧 봇 동기화: 점화 시 고가 기준, 비점화 시 종가 확인 필수
     #    봇: prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
     lookback_candles = candles[max(0, entry_idx-12):entry_idx]  # 직전 12봉 (진입봉 제외)
     prev_high = max(c.high for c in lookback_candles) if lookback_candles else entry.high
-    high_breakout = entry.high > prev_high  # 🔧 FIX: close→high (고가 기준 돌파)
-    close_confirm = entry.close > prev_high * 0.997  # 종가 확인 (0.3% 여유)
+    # 🔧 봇: 고가 기준 (윅 포함)
+    high_breakout_wick = entry.high > prev_high
+    # 🔧 봇: 종가 기준 (0.05% 버퍼)
+    high_breakout_close = entry.close > prev_high * 1.0005
+
+    # === 🔥 ignition_score 근사 계산 (봇 방식) ===
+    # 봇: 4요건 중 3개 충족 시 점화 (틱 기반)
+    # 분봉 근사: 틱 없이 분봉 지표로 판단
+    ignition_conditions = 0
+    # 1. 틱 폭주 근사: vol_surge >= 4 (평시의 4배)
+    if vol_surge >= 4.0:
+        ignition_conditions += 1
+    # 2. 연속 매수 근사: buy_ratio >= 0.70 (양봉 거래량 70% 이상)
+    if buy_ratio >= 0.70:
+        ignition_conditions += 1
+    # 3. 가격 임펄스: price_change >= 0.5%
+    if price_change >= 0.005:
+        ignition_conditions += 1
+    # 4. 거래량 폭발 근사: vol_vs_ma >= 2 (MA20의 2배)
+    if vol_vs_ma >= 2.0:
+        ignition_conditions += 1
+
+    # 추가 조건: imbalance >= 0.55 (강한 매수 압력)
+    if imbalance >= 0.55:
+        ignition_conditions += 1
+
+    ignition_score = min(ignition_conditions, 4)  # 최대 4점
+
+    # 🔧 봇 동기화: 점화 강할 때만 윅 허용, 아니면 종가 확인
+    if ignition_score >= 3:
+        high_breakout = high_breakout_wick  # 점화 시 고가 기준 허용
+    else:
+        high_breakout = high_breakout_close  # 비점화 시 종가 확인 필수
 
     # === 🔥 신규: 레짐 필터 (v3) ===
     # sideways_pct: 20봉 범위 % (봇: is_sideways_regime)
@@ -557,39 +622,73 @@ def analyze_pre_entry_env(
         price_position = 0.5
     imbalance = (price_position - 0.5) * 2  # -1 ~ +1 범위로 정규화
 
-    # === 🔥 신규: 스코어 계산 (v3) ===
-    # 봇 actual_score() 로직 근사
-    confirm_score = 50  # 기본점수
+    # === 🔧 봇 동기화: calc_risk_score 방식 (v4) ===
+    # 봇: SCORE_WEIGHTS 가중치 사용 (합계 100)
+    # 분봉에서는 spread, fresh_ok가 없으므로 대체 지표 사용
 
-    # 거래량 관련 (+30점 max)
-    if vol_surge >= 0.5:
-        confirm_score += min(int(vol_surge * 10), 15)  # 최대 +15
-    if vol_vs_ma >= 0.5:
-        confirm_score += min(int(vol_vs_ma * 10), 15)  # 최대 +15
+    def _safe_float(x, default=0.0):
+        try:
+            if x is None:
+                return default
+            f = float(x)
+            if math.isnan(f) or math.isinf(f):
+                return default
+            return f
+        except:
+            return default
 
-    # 매수비율 (+15점 max)
-    if buy_ratio >= 0.55:
-        confirm_score += int((buy_ratio - 0.5) * 30)  # 최대 +15
+    # 값 안전 변환
+    _buy_ratio = _safe_float(buy_ratio, 0.5)
+    _turn = _safe_float(turn_pct / 100.0, 0.01)  # 퍼센트 → 소수
+    _imbalance = _safe_float(imbalance, 0.0)
+    _vol_surge = _safe_float(vol_surge, 1.0)
 
-    # 임밸런스 (+10점 max)
-    if imbalance >= 0.3:
-        confirm_score += int(imbalance * 10)
+    # 매수비 100% 클리핑 (스푸핑 방지)
+    if _buy_ratio >= 0.999:
+        _buy_ratio = 0.98
 
-    # 돌파 신호 (+15점 max)
-    if high_breakout:
+    confirm_score = 0.0
+
+    # 매수비: 0.50~0.70 → 0~1 정규화 → 가중치 28
+    buy_norm = max(0, min(1, (_buy_ratio - 0.50) / 0.20))
+    confirm_score += SCORE_WEIGHTS["buy_ratio"] * buy_norm
+
+    # 스프레드: 분봉에서는 없으므로 cv_approx 역수로 대체
+    # CV 낮을수록 좋음 → 1 - (cv / 2) 정규화
+    spread_norm = max(0, min(1, 1.0 - cv_approx / 2.0))
+    confirm_score += SCORE_WEIGHTS["spread"] * spread_norm
+
+    # 회전율: 0~0.05 → 0~1 정규화 → 가중치 22
+    turn_norm = max(0, min(1, _turn / 0.05))
+    confirm_score += SCORE_WEIGHTS["turn"] * turn_norm
+
+    # 임밸런스: -0.3~+0.3 → 0~1 정규화 → 가중치 18
+    imb_norm = max(0, min(1, (_imbalance + 0.3) / 0.6))
+    confirm_score += SCORE_WEIGHTS["imbalance"] * imb_norm
+
+    # 틱 신선도: 분봉 분석에서는 항상 True → 가중치 7
+    confirm_score += SCORE_WEIGHTS["fresh"] * 1.0
+
+    # 거래량 급증: 0~3배 → 0~1 정규화 → 가중치 10
+    surge_norm = max(0, min(1, _vol_surge / 3.0))
+    confirm_score += SCORE_WEIGHTS["volume_surge"] * surge_norm
+
+    # 🔧 보너스: 점화 점수 추가 (봇 ignition_score 반영)
+    # ignition_score >= 3 → +10점 보너스
+    if ignition_score >= 3:
         confirm_score += 10
-    if ema20_above:
+
+    # 🔧 돌파 신호 보너스
+    if high_breakout:
         confirm_score += 5
+    if ema20_above:
+        confirm_score += 3
 
-    # 가격 변화 (+10점 max)
-    if price_change > 0.002:
-        confirm_score += min(int(price_change * 500), 10)
-
-    # 횡보장 감점 (-20점)
+    # 횡보장 감점 (-15점)
     if is_sideways:
-        confirm_score -= 20
+        confirm_score -= 15
 
-    confirm_score = max(0, min(100, confirm_score))  # 0~100 클램프
+    confirm_score = max(0, min(100, int(confirm_score)))  # 0~100 클램프
 
     # entry_mode: 스코어 기반 진입모드 (봇 78점 기준)
     if confirm_score >= 78:
@@ -599,20 +698,20 @@ def analyze_pre_entry_env(
     else:
         entry_mode = "probe"
 
-    # signal_tag: 신호 태그 생성
-    tags = []
-    # 🔧 강화: 폭발적 급등 감지 (vol_surge 2.5x, buy_ratio 70%, imbalance 0.55)
-    if vol_surge >= 2.5 and buy_ratio >= 0.70 and imbalance >= 0.55:
-        tags.append("🔥점화")
-    if high_breakout and ema20_above:
-        tags.append("강돌파")
+    # signal_tag: 봇 방식 (점화 점수 기반)
+    # 🔧 봇 동기화: ignition_score >= 3 → 🔥점화
+    if ignition_score >= 3:
+        signal_tag = "🔥점화"
+    elif high_breakout and ema20_above:
+        signal_tag = "강돌파 (EMA↑+고점↑)"
     elif ema20_above:
-        tags.append("EMA↑")
+        signal_tag = "EMA↑"
     elif high_breakout:
-        tags.append("고점↑")
-    if vol_surge >= 1.5:
-        tags.append("거래량↑")
-    signal_tag = " ".join(tags) if tags else "기본"
+        signal_tag = "고점↑"
+    elif vol_vs_ma >= 0.5 or vol_surge >= 1.5:
+        signal_tag = "거래량↑"
+    else:
+        signal_tag = "기본"
 
     # === 직전 5봉 환경 분석 ===
 
@@ -700,12 +799,14 @@ def analyze_pre_entry_env(
         vol_vs_ma=vol_vs_ma,
         ema20_breakout=ema20_above,  # ema20_above와 동일
         high_breakout=high_breakout,
-        # 🔥 신규: 레짐 필터 (v3)
+        # 🔥 점화 점수 (v4)
+        ignition_score=ignition_score,
+        # 레짐 필터
         sideways_pct=sideways_pct,
         is_sideways=is_sideways,
-        # 🔥 신규: CV 근사 (v3.1)
+        # CV 근사
         cv_approx=cv_approx,
-        # 🔥 신규: 킬러 조건 / 스코어 (v3)
+        # 킬러 조건 / 스코어
         buy_ratio=buy_ratio,
         turn_pct=turn_pct,
         imbalance=imbalance,
@@ -826,7 +927,7 @@ def run_env_analysis(client: UpbitClient) -> None:
 
         tag = "✓" if is_success else "✗"
         sw_tag = "횡보" if env.is_sideways else ""
-        print(f"  [{tag}] {ticker} {time_str}: score={env.confirm_score} mode={env.entry_mode} cv={env.cv_approx:.2f} buy={env.buy_ratio:.0%} imb={env.imbalance:+.2f} {sw_tag}")
+        print(f"  [{tag}] {ticker} {time_str}: score={env.confirm_score} mode={env.entry_mode} ign={env.ignition_score} cv={env.cv_approx:.2f} buy={env.buy_ratio:.0%} imb={env.imbalance:+.2f} {sw_tag}")
 
     print(f"\n수집 완료: 성공 {len(success_data)}건, 실패 {len(fail_data)}건")
     total = len(success_data) + len(fail_data)
@@ -848,12 +949,14 @@ def run_env_analysis(client: UpbitClient) -> None:
         ("price_change", "가격변화 (봉간)", ">="),
         ("accel", "가속도 (봉근사)", ">="),
         ("overheat", "과열지수 (accel*surge)", ">="),
-        # 🔥 신규 (v3)
+        # 킬러 조건
         ("buy_ratio", "매수비율 (추정)", ">="),
         ("imbalance", "임밸런스 (추정)", ">="),
         ("sideways_pct", "20봉범위 (%)", ">="),
         ("confirm_score", "스코어 (0~100)", ">="),
-        # 🔥 신규 (v3.1) - CV 분석
+        # 🔥 v4 신규: 점화 점수
+        ("ignition_score", "점화점수 (0~4)", ">="),
+        # CV 분석
         ("cv_approx", "CV 근사 (변동계수)", "<="),  # CV 낮을수록 좋음
     ]
 
@@ -1048,6 +1151,27 @@ def run_env_analysis(client: UpbitClient) -> None:
     for name, cond in score_buckets:
         s_cnt = sum(1 for e in success_data if cond(e.confirm_score))
         f_cnt = sum(1 for e in fail_data if cond(e.confirm_score))
+        total = s_cnt + f_cnt
+        rate = (s_cnt / total * 100) if total > 0 else 0
+        bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
+        print(f"  {name}: {s_cnt:>2}승 {f_cnt:>2}패 = {rate:>5.1f}% |{bar}|")
+
+    # === 🔥 v4 신규: 점화점수별 승률 ===
+    print("\n" + "=" * 80)
+    print("🔥 점화점수별 승률 (v4)")
+    print("=" * 80)
+
+    ignition_buckets = [
+        ("4점 (완전점화)", lambda s: s >= 4),
+        ("3점 (점화)", lambda s: s == 3),
+        ("2점 (준점화)", lambda s: s == 2),
+        ("1점", lambda s: s == 1),
+        ("0점", lambda s: s == 0),
+    ]
+
+    for name, cond in ignition_buckets:
+        s_cnt = sum(1 for e in success_data if cond(e.ignition_score))
+        f_cnt = sum(1 for e in fail_data if cond(e.ignition_score))
         total = s_cnt + f_cnt
         rate = (s_cnt / total * 100) if total > 0 else 0
         bar = "█" * int(rate / 5) + "░" * (20 - int(rate / 5))
