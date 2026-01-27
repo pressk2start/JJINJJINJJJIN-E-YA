@@ -393,6 +393,7 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # �
 # 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
 OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
+_CLOSING_MARKETS = set()  # 🔧 FIX: 중복 청산 방지용 (청산 진행 중 마켓 표시)
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
 
 # 🔧 FIX: 모니터링 스레드 중복 방지
@@ -477,6 +478,12 @@ def get_adaptive_risk() -> float:
         base_risk *= 0.85  # 연패 3회 → 리스크 15% 감소
     elif _win_streak >= 3:
         base_risk *= 1.15  # 연승 3회 → 리스크 15% 증가
+
+    # 🔧 FIX: 리스크 상한 (연승 시에도 과도한 리스크 방지)
+    # - 최대 기본값의 1.5배 또는 절대값 5% 중 작은 값
+    MAX_RISK_MULTIPLIER = 1.5
+    MAX_RISK_ABSOLUTE = 0.05  # 5%
+    base_risk = min(base_risk, RISK_PER_TRADE * MAX_RISK_MULTIPLIER, MAX_RISK_ABSOLUTE)
 
     return base_risk
 
@@ -1167,10 +1174,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             if krw_to_use > cap:
                 print(f"[IMPACT_CAP] {m} 주문 {krw_to_use:,.0f} > 15% of top3-ask {cap:,.0f} → 캡")
                 krw_to_use = int(cap)
-                # confirm이면 half로 다운시프트 (금액 이중억제 제거)
+                # 🔧 FIX: confirm이면 entry_mode를 half로 변경 (포지션 추적에 반영)
+                # - 기존: entry_fraction만 변경 → 이미 사이징 완료라 무효
+                # - 변경: entry_mode 자체를 바꿔서 OPEN_POSITIONS에 정확히 기록
                 if entry_mode == "confirm":
-                    entry_fraction = 0.5
-                    print(f"[IMPACT_CAP] {m} confirm → half 전환")
+                    entry_mode = "half"
+                    print(f"[IMPACT_CAP] {m} confirm → half 전환 (임팩트캡 적용)")
 
         krw_to_use = int(krw_to_use)
 
@@ -1534,13 +1543,19 @@ def close_auto_position(m, reason=""):
         print(f"[AUTO] AUTO_TRADE=0 → 청산 스킵 ({m}, reason={reason})")
         return
 
+    # 🔧 FIX: 중복 청산 방지 락 (동시 청산 시도 시 한 쪽만 실행)
     with _POSITION_LOCK:
+        if m in _CLOSING_MARKETS:
+            print(f"[AUTO] {m} 이미 청산 진행 중 → 스킵 (reason={reason})")
+            return
+        _CLOSING_MARKETS.add(m)
         pos = OPEN_POSITIONS.get(m)
 
-    if not pos:
-        print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
-        # 🔧 FIX: 이미 청산된 포지션에 대한 중복 알람 제거 (동시 모니터링 시 노이즈 방지)
-        return
+    try:
+        if not pos:
+            print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
+            # 🔧 FIX: 이미 청산된 포지션에 대한 중복 알람 제거 (동시 모니터링 시 노이즈 방지)
+            return
 
     # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
     actual_vol = get_balance_with_locked(m)
@@ -1825,6 +1840,10 @@ def close_auto_position(m, reason=""):
                     except:
                         pass
         return
+    finally:
+        # 🔧 FIX: 중복 청산 방지 락 해제 (성공/실패 상관없이)
+        with _POSITION_LOCK:
+            _CLOSING_MARKETS.discard(m)
 
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
@@ -2204,15 +2223,25 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             full_tp = TP_FULL.get(tag, 1.2)
             part_tp = TP_PART.get(tag, 0.7)
 
-            # 🔧 FIX: TP 바닥값을 alpha만으로 단순화 (slip은 gate/impact_cap으로 이미 관리)
-            # - ret_net에 slip 없으니 TP 기준에서도 slip 제거 → 일관된 비교
-            cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha만)
-            part_tp = max(part_tp, cp_alpha + 0.15)    # 0.25% 최소
-            full_tp = max(full_tp, cp_alpha + 0.45)    # 0.55% 최소
+            # 🔧 FIX: TP 바닥값 = alpha + 조건부 슬립
+            # - 최근 슬립이 높은 경우(저유동성) TP 기준 상향으로 슬립 손실 커버
+            cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha)
 
-            # 🔧 FIX: TP 판단을 net 기준으로 (수수료 반영)
+            # 🔧 FIX: 조건부 슬립 반영 (최근 슬립 높으면 TP도 높여야 실익 확보)
+            if len(_SLIP_HISTORY) >= 5:
+                avg_slip_pct = statistics.mean(_SLIP_HISTORY) * 100.0
+                # 슬립 0.15% 초과 시 TP에 초과분 반영 (왕복 고려)
+                slip_extra = max(0, (avg_slip_pct - 0.15) * 2.0)
+            else:
+                slip_extra = 0.0
+
+            part_tp = max(part_tp, cp_alpha + 0.15 + slip_extra)    # 0.25%+ 최소
+            full_tp = max(full_tp, cp_alpha + 0.45 + slip_extra)    # 0.55%+ 최소
+
+            # 🔧 FIX: TP 판단을 net 기준으로 (수수료 + 예상슬립 반영)
             # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
-            ret_net = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+            expected_exit_slip = (avg_slip_pct if len(_SLIP_HISTORY) >= 5 else 0.1)
+            ret_net = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0) - expected_exit_slip
 
             if ret_net >= full_tp:
                 should_close = True
