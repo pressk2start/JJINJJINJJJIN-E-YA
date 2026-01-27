@@ -651,19 +651,35 @@ def get_actual_balance(market):
     except:
         return 0.0
 
-def get_balance_with_locked(market):
-    """실제 보유량 + 주문 대기량 조회 (청산 완료 판정용)"""
-    try:
-        currency = market.replace("KRW-", "")
-        accounts = get_account_info()
-        for a in accounts:
-            if a.get("currency") == currency:
-                balance = float(a.get("balance", "0"))
-                locked = float(a.get("locked", "0"))
-                return balance + locked
-        return 0.0
-    except:
-        return 0.0
+def get_balance_with_locked(market, retries=2):
+    """
+    실제 보유량 + 주문 대기량 조회 (청산 완료 판정용)
+    🔧 FIX: API 오류 시 재시도 (단발 조회로 0 오판 → 유령 오탐 방지)
+    - retries: 재시도 횟수 (기본 2회 = 총 3회 시도)
+    """
+    currency = market.replace("KRW-", "")
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            accounts = get_account_info()
+            if accounts:
+                for a in accounts:
+                    if a.get("currency") == currency:
+                        balance = float(a.get("balance", "0"))
+                        locked = float(a.get("locked", "0"))
+                        return balance + locked
+                # 계정 목록에서 찾지 못함 = 진짜 0
+                return 0.0
+            # accounts가 비어있으면 API 오류일 수 있음 → 재시도
+            last_err = "accounts empty"
+        except Exception as e:
+            last_err = str(e)
+        # 재시도 전 짧은 대기
+        if attempt < retries:
+            time.sleep(0.5)
+    # 모든 재시도 실패 → -1 반환 (0과 구분, 호출부에서 처리)
+    print(f"[BALANCE_ERR] {market} 잔고 조회 실패 ({retries+1}회 시도): {last_err}")
+    return -1.0  # 🔧 -1 = 조회 실패 (0 = 진짜 없음과 구분)
 
 def sell_all(market):
     """실제 보유량 전량 매도 (1원 찌꺼기 방지)"""
@@ -864,16 +880,19 @@ def sync_orphan_positions():
                         # 🔧 FIX: 예외 발생 시 알람 + 잔고 확인 후 정리
                         try:
                             actual = get_balance_with_locked(m)
-                            if actual <= 1e-12:
+                            # 🔧 FIX: -1 = 조회 실패 → 포지션 유지 (오탐 방지)
+                            if actual < 0:
+                                tg_send(f"⚠️ {m} 유령포지션 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
+                            elif actual <= 1e-12:
                                 tg_send(f"⚠️ {m} 유령포지션 오류 (이미 청산됨)\n• 예외: {e}")
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(m, None)
+                                _ORPHAN_HANDLED.discard(m)
                             else:
                                 tg_send(f"🚨 {m} 유령포지션 오류 → 청산 시도\n• 예외: {e}")
                                 close_auto_position(m, f"유령모니터링예외 | {e}")
                         except:
                             tg_send(f"🚨 {m} 유령포지션 오류\n• 예외: {e}")
-                        with _POSITION_LOCK:
-                            OPEN_POSITIONS.pop(m, None)
-                        _ORPHAN_HANDLED.discard(m)
                     finally:
                         # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
                         with _MONITOR_LOCK:
@@ -1632,6 +1651,10 @@ def close_auto_position(m, reason=""):
 
         # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
         actual_vol = get_balance_with_locked(m)
+        # 🔧 FIX: -1 = 조회 실패 → 청산 진행하지 않음 (오탐 방지)
+        if actual_vol < 0:
+            print(f"[AUTO] {m} 잔고 조회 실패 → 청산 스킵 (reason={reason})")
+            return
         if actual_vol <= 1e-12:
             print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
             # OPEN_POSITIONS 정리 (혹시 남아있으면)
@@ -2229,6 +2252,11 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
         # 실제 거래소 잔고 확인 (🔧 FIX: balance + locked 모두 체크)
         actual = get_balance_with_locked(m)
+        # 🔧 FIX: -1 = 조회 실패 → 포지션 삭제하지 않고 다음 사이클 대기
+        if actual < 0:
+            print(f"[REMONITOR] {m} 잔고 조회 실패 → 포지션 유지, 다음 사이클 대기")
+            time.sleep(5)
+            continue
         if actual <= 1e-12:
             print(f"[REMONITOR] {m} 실잔고+locked=0 → 유령 포지션 정리 후 루프 종료")
             # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
@@ -6626,7 +6654,10 @@ def main():
                             # 🔧 FIX: 예외 발생 시 알람 + 잔고 확인 후 정리
                             try:
                                 actual = get_balance_with_locked(market)
-                                if actual <= 1e-12:
+                                # 🔧 FIX: -1 = 조회 실패 → 포지션 유지 (오탐 방지)
+                                if actual < 0:
+                                    tg_send(f"⚠️ {market} 모니터링 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
+                                elif actual <= 1e-12:
                                     # 잔고 0이면 이미 청산됨 → 알람만 발송
                                     tg_send(f"⚠️ {market} 모니터링 오류 (이미 청산됨)\n• 예외: {e}")
                                     with _POSITION_LOCK:
