@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1661,7 +1661,7 @@ def close_auto_position(m, reason=""):
             return
         _CLOSING_MARKETS.add(m)
         pos_raw = OPEN_POSITIONS.get(m)
-        pos = dict(pos_raw) if pos_raw else None  # 복사본 생성
+        pos = copy.deepcopy(pos_raw) if pos_raw else None  # 🔧 FIX: 깊은 복사 (nested dict 레이스 방지)
 
     try:
         if not pos:
@@ -1704,11 +1704,11 @@ def close_auto_position(m, reason=""):
         entry_price = pos.get("entry_price", 0)
 
         # 현재가(청산 전 기준) 조회 - ✅ 퍼블릭 API 사용
+        # 🔧 FIX: IndexError 방어 (빈 리스트 체크)
         try:
             cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-            cur_price = cur_js[0].get("trade_price",
-                                      entry_price) if cur_js else entry_price
-        except Exception:
+            cur_price = cur_js[0].get("trade_price", entry_price) if cur_js and len(cur_js) > 0 else entry_price
+        except (IndexError, Exception):
             cur_price = entry_price
 
         # 선 계산(대략)
@@ -2265,7 +2265,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         # 🔧 FIX (B): 락 안에서 복사본 생성 → 락 해제 후 레이스 방지
         with _POSITION_LOCK:
             pos_raw = OPEN_POSITIONS.get(m)
-            pos = dict(pos_raw) if pos_raw else None  # 복사본 생성
+            pos = copy.deepcopy(pos_raw) if pos_raw else None  # 🔧 FIX: 깊은 복사 (nested dict 레이스 방지)
         if not pos:
             print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
             # 🔧 FIX: 포지션 없음 알람 추가
@@ -2309,19 +2309,21 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
                 if partial_type == "profit":
                     # 익절 부분청산 후: 추가 하락 OR 진입가 "확실히" 이하 → 청산
-                    drop_from_partial = (partial_price - cur_price) / partial_price
+                    # 🔧 FIX: Division by Zero 방어
+                    drop_from_partial = (partial_price - cur_price) / partial_price if partial_price > 0 else 0
                     # 🔧 FIX: breakeven box 적용 - entry 살짝 찍는 정상 변동성 허용
                     # - 기존: entry 찍으면 바로 잔량 청산 → 크게 가는 거래 꼬리 잘림
                     # - 변경: entry*(1-box) 이하일 때만 청산 (box = trail_min * 0.5)
                     breakeven_box = trail_min * 0.5
-                    if cur_price <= entry_price * (1 - breakeven_box) or drop_from_partial >= profit_drop_thr:
+                    if entry_price > 0 and (cur_price <= entry_price * (1 - breakeven_box) or drop_from_partial >= profit_drop_thr):
                         reason = f"부분익절 후 추가하락 -{drop_from_partial*100:.2f}% (thr:{profit_drop_thr*100:.2f}%) 잔량청산"
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
                         close_auto_position(m, reason)
                         return True
                 else:
                     # 손절 부분청산 후: 추가 하락 → 청산
-                    drop_from_partial = (partial_price - cur_price) / partial_price
+                    # 🔧 FIX: Division by Zero 방어
+                    drop_from_partial = (partial_price - cur_price) / partial_price if partial_price > 0 else 0
                     if drop_from_partial >= loss_drop_thr:
                         reason = f"부분손절 후 추가하락 -{drop_from_partial*100:.2f}% (thr:{loss_drop_thr*100:.2f}%) 잔량청산"
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
@@ -5531,6 +5533,11 @@ def monitor_position(m,
                      tight_mode=False,
                      horizon=None,
                      reentry=False):
+    # 🔧 FIX: entry_price 유효성 검증 (Division by Zero 방지)
+    if not entry_price or entry_price <= 0:
+        print(f"[MONITOR_ERR] {m} entry_price 무효 ({entry_price}) → 모니터링 중단")
+        return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
+
     c1 = get_minutes_candles(1, m, 20)
     base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1)
 
@@ -5819,9 +5826,10 @@ def monitor_position(m,
 
             # 🔧 [신규] 트레일링 손절 실제 청산 트리거
             if trail_armed and curp < trail_stop:
-                trail_gain = (curp / entry_price - 1.0)
-                peak_gain = (best / entry_price - 1.0)
-                drop_pct = (best - curp) / best * 100
+                # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
+                trail_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
+                drop_pct = (best - curp) / best * 100 if best > 0 else 0
                 close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
                 verdict = "TRAIL_STOP"
                 break
@@ -5940,13 +5948,18 @@ def monitor_position(m,
         ob = pre.get("ob") or {}
         ob_depth_krw = ob.get("depth_krw", 10_000_000)
 
-        try:
-            ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
-        except:
+        # 🔧 FIX: Division by Zero 방어
+        if entry_price > 0:
+            try:
+                ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
+            except:
+                ret_pct = 0.0
+            maxrun = (best / entry_price - 1.0) * 100.0
+            maxdd = (worst / entry_price - 1.0) * 100.0
+        else:
             ret_pct = 0.0
-
-        maxrun = (best / entry_price - 1.0) * 100.0
-        maxdd = (worst / entry_price - 1.0) * 100.0
+            maxrun = 0.0
+            maxdd = 0.0
 
         # ================================
         # 2) 끝알람 문구 생성
