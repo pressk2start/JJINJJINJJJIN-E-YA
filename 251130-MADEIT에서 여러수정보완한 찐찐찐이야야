@@ -4701,9 +4701,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
-    # 🔧 과회전 상한 (승 10.2% vs 패 26.8% → 20% 상한)
-    if turn_pct > GATE_TURN_MAX:
-        return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}%"
+    # 🔧 과회전 상한 (동적 - 점화 시 완화)
+    # ENSO 같은 얇은 호가 코인은 구조적으로 회전율 높음 → 점화 시 허용
+    eff_turn_max = GATE_TURN_MAX * 3.5 if is_ignition else GATE_TURN_MAX  # 60% → 210% (점화3)
+    if turn_pct > eff_turn_max:
+        return False, f"과회전 {turn_pct:.1f}%>{eff_turn_max:.0f}%"
     # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
     # 🔧 HOTFIX: 저가 코인 스프레드 허용 (0.25%→1.0%)
     if turn_pct > 50 and spread > 1.0:
