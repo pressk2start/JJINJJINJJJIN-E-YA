@@ -502,6 +502,8 @@ def mark_position_closed(market, reason=""):
         pos["closed_at"] = time.time()
         pos["closed_reason"] = reason
         OPEN_POSITIONS.pop(market, None)
+    # 🔧 FIX: 청산 시 _RECENT_BUY_TS에서도 제거 (유령 감지 해제)
+    _RECENT_BUY_TS.pop(market, None)
     return True
 
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
@@ -851,11 +853,10 @@ def sync_orphan_positions():
                 if market in OPEN_POSITIONS:
                     continue  # 이미 추적 중
 
-            # 🔧 FIX: _RECENT_BUY_TS 체크를 맨 앞으로 이동 (유령 오탐 방지 강화)
-            # 매수 직후 OPEN_POSITIONS가 비어있을 수 있으나 _RECENT_BUY_TS는 항상 설정됨
-            last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 120:
-                print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
+            # 🔧 FIX: 활성 포지션 체크 (매수~청산 사이는 절대 유령 아님)
+            # _RECENT_BUY_TS: 매수 시 등록, 청산 시 제거 → 존재하면 활성 포지션
+            if market in _RECENT_BUY_TS:
+                print(f"[ORPHAN] {market} 활성 포지션 (매수 후 청산 전) → 유령 아님, 스킵")
                 continue
 
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
@@ -1877,6 +1878,7 @@ def close_auto_position(m, reason=""):
                         # 실잔고+locked 0 = 체결된 것으로 간주
                         with _POSITION_LOCK:
                             OPEN_POSITIONS.pop(m, None)
+                        _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
 
                         # 🔧 FIX: 지연청산 시 실제 체결가 조회 시도 (학습 데이터 정확도 개선)
                         if order_uuid:
@@ -1925,6 +1927,7 @@ def close_auto_position(m, reason=""):
                             if get_balance_with_locked(m) <= 1e-12:  # 🔧 locked 포함
                                 with _POSITION_LOCK:
                                     OPEN_POSITIONS.pop(m, None)
+                                _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
                                 tg_send(f"🧹 <b>자동청산 완료(후속확인)</b> {m}\n• 사유: {reason}")
                                 return
                         # 🔧 4분 후에도 미체결 → 경고 알림
@@ -1948,10 +1951,12 @@ def close_auto_position(m, reason=""):
                         if remaining <= 1e-12:
                             # 잔여 없음 → 포지션 제거
                             OPEN_POSITIONS.pop(m, None)
+                            _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
                         elif is_dust:
                             # 🔧 FIX: dust 잔여는 포지션 제거 + _ORPHAN_HANDLED에 등록
                             # → 유령으로 감지되지 않음 (부분청산 후 손절 방지)
                             OPEN_POSITIONS.pop(m, None)
+                            _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
                             _ORPHAN_HANDLED.add(m)
                             print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
                         else:
@@ -2048,6 +2053,7 @@ def close_auto_position(m, reason=""):
             if "최소주문금액" in str(e) or "5000" in str(e):
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
+                _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
                 _ORPHAN_HANDLED.add(m)
                 tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미달 dust)\n• 소량 잔여는 거래소에 보유 (유령감지 제외)")
                 # 🔧 FIX: 리포트 카운트 증가
@@ -2067,6 +2073,7 @@ def close_auto_position(m, reason=""):
                     tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
+                    _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
                     # 🔧 FIX: 리포트 카운트 증가
                     if AUTO_LEARN_ENABLED:
                         try:
@@ -2253,6 +2260,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 backup_entry_ts = pos_backup.get("entry_ts")
                 backup_added = pos_backup.get("added", False)
                 OPEN_POSITIONS.pop(m, None)
+            _RECENT_BUY_TS.pop(m, None)  # 🔧 유령 감지 해제
             print(f"[PARTIAL→FULL_DONE] {m} 전량청산 완료 → 포지션 제거 (net:{net_ret_pct:+.2f}%)")
         else:
             with _POSITION_LOCK:
