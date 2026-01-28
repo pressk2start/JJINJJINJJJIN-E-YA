@@ -140,8 +140,6 @@ def get_dynamic_tp(signal_tag, ob_depth_krw=None, atr_pct=None):
     - 야간 시간대 TP 하향 (유동성 낮음)
     Returns: (full_tp, part_tp) in % units
     """
-    import datetime
-
     base_full = TP_FULL_BASE.get(signal_tag, 1.5)
     base_part = TP_PART_BASE.get(signal_tag, 0.9)
 
@@ -163,7 +161,7 @@ def get_dynamic_tp(signal_tag, ob_depth_krw=None, atr_pct=None):
         mult *= max(volatility_mult, 0.9)  # 최소 -10%
 
     # 3) 시간대: 야간(0~6시) 유동성 낮음 → TP 하향
-    hour = datetime.datetime.now().hour
+    hour = datetime.now().hour  # 🔧 FIX: 상단 import 사용
     if 0 <= hour < 6:
         mult *= 0.85  # -15%
     elif 6 <= hour < 9:
