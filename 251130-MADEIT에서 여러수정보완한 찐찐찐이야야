@@ -4612,7 +4612,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0, best_ask_krw=0):
+                 ignition_score=0, best_ask_krw=0, tick_count_30s=99):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4644,8 +4644,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # ============================================================
     relax = 0.30 if ignition_score >= 3 else 0  # 3점 이상에서 30% 완화
 
+    # 🔧 FIX: 희박 틱 종목 조건부 완화 (NOM 같은 케이스 대응)
+    # 30초 내 틱이 8개 미만이면 서지 임계치 20% 추가 완화
+    sparse_tick_relax = 0.20 if tick_count_30s < 8 else 0
+
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
-    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
+    # 🔧 FIX: 희박 틱에도 surge 임계치 추가 완화 적용
+    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax - sparse_tick_relax))  # 0.5→0.4(희박) 또는 0.1(점화)
     eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
@@ -4975,6 +4980,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             vol_surge = vol_surge_ema
     else:
         vol_surge = current_volume / max(current_volume / 8, 1)
+
+    # 🔧 FIX: 틱 기반 실시간 서지 추가 (5초 vs 30초 시간창)
+    # 봉 마감 전에도 펌프 초반 감지 가능 (NOM 같은 틱 희박 코인 대응)
+    t5 = micro_tape_stats_from_ticks(ticks, 5)
+    t30 = micro_tape_stats_from_ticks(ticks, 30)
+    if t5 and t30 and t30.get("krw_per_sec", 0) > 0:
+        tick_surge = t5["krw_per_sec"] / max(t30["krw_per_sec"], 1.0)
+        tick_surge = max(0.0, min(tick_surge, 8.0))  # 클램프 (페이크 방지)
+        vol_surge = max(vol_surge, tick_surge)
+
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
     imbalance = calc_orderbook_imbalance(ob)
@@ -5070,7 +5085,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
         ignition_score=ignition_score,
-        best_ask_krw=ob.get("best_ask_krw", 0)  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
+        best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
+        tick_count_30s=t30.get("n", 99) if t30 else 99  # 🔧 FIX: 희박 틱 완화용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
