@@ -426,6 +426,26 @@ PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # �
 OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 _CLOSING_MARKETS = set()  # 🔧 FIX: 중복 청산 방지용 (청산 진행 중 마켓 표시)
+
+def mark_position_closed(market, reason=""):
+    """
+    🔧 FIX: 포지션 청산 완료 마킹 (중복 청산 방지 핵심)
+    - state='closed' 마킹 후 OPEN_POSITIONS에서 제거
+    - 이미 closed면 False 반환 (중복 호출 방지)
+    """
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(market)
+        if not pos:
+            return False
+        # 이미 closed면 재처리 방지
+        if pos.get("state") == "closed":
+            return False
+        pos["state"] = "closed"
+        pos["closed_at"] = time.time()
+        pos["closed_reason"] = reason
+        OPEN_POSITIONS.pop(market, None)
+    return True
+
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
 
 # 🔧 FIX: 모니터링 스레드 중복 방지
@@ -1695,9 +1715,8 @@ def close_auto_position(m, reason=""):
             return
         if actual_vol <= 1e-12:
             print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
-            # OPEN_POSITIONS 정리 (혹시 남아있으면)
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
+            # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
+            mark_position_closed(m, f"already_zero:{reason}")
             return
 
         # 실제 보유량 사용
@@ -1886,8 +1905,8 @@ def close_auto_position(m, reason=""):
 
             # 🔧 FIX #1: 전량체결 시에만 포지션 제거
             else:
-                with _POSITION_LOCK:
-                    OPEN_POSITIONS.pop(m, None)
+                # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
+                mark_position_closed(m, f"full_close:{reason}")
 
             # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
             est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
@@ -2270,6 +2289,23 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
     🔧 FIX: 장기 보유 타임아웃 추가 (부분청산 후 정체 방지)
     """
+    # 🔧 FIX: 진입 전 가드 - 이미 청산 중/완료된 포지션은 즉시 리턴
+    with _POSITION_LOCK:
+        if m in _CLOSING_MARKETS:
+            print(f"[REMONITOR] {m} 이미 청산 진행 중(_CLOSING_MARKETS) → 스킵")
+            return False
+        pos_check = OPEN_POSITIONS.get(m)
+        if pos_check and pos_check.get("state") == "closed":
+            print(f"[REMONITOR] {m} 이미 청산 완료(state=closed) → 스킵")
+            return False
+
+    # 🔧 FIX: 잔고 0이면 즉시 리턴 (청산 완료 확인)
+    bal_check = get_balance_with_locked(m)
+    if bal_check >= 0 and bal_check <= 1e-12:
+        print(f"[REMONITOR] {m} 진입 전 잔고=0 확인 → 스킵")
+        mark_position_closed(m, "remonitor entry - balance zero")
+        return False
+
     CYCLE_SEC = 300
     cycle = 0
 
@@ -2302,8 +2338,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
             entry_price_for_msg = pos.get("entry_price", 0)
             tg_send(f"⚠️ {m} 포지션 정리 (잔고+locked=0 확인)\n• 매수가: {fmt6(entry_price_for_msg)}원\n• 외부 청산 또는 이미 정리됨")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
+            # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
+            mark_position_closed(m, "remonitor_zero_balance")
             return False
 
         # 🔧 부분청산 후 추가 하락 체크
