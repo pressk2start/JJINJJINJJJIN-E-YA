@@ -851,6 +851,13 @@ def sync_orphan_positions():
                 if market in OPEN_POSITIONS:
                     continue  # 이미 추적 중
 
+            # 🔧 FIX: _RECENT_BUY_TS 체크를 맨 앞으로 이동 (유령 오탐 방지 강화)
+            # 매수 직후 OPEN_POSITIONS가 비어있을 수 있으나 _RECENT_BUY_TS는 항상 설정됨
+            last_buy_ts = _RECENT_BUY_TS.get(market, 0)
+            if now - last_buy_ts < 120:
+                print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
+                continue
+
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
             # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
             if market not in _PREV_SYNC_MARKETS:
@@ -891,13 +898,6 @@ def sync_orphan_positions():
 
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
-
-            # 🔧 FIX: 봇 내부 최근 매수 체크 (120초 내 매수면 유령 아님)
-            # 60초 → 120초로 증가: 모니터링 중 예외 발생 시 오탐 방지
-            last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 120:
-                print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
-                continue
 
             # 🔥 유령 포지션 발견! (2사이클 연속 존재 + OPEN_POSITIONS에 없음)
             print(f"[ORPHAN] {market} 유령 포지션 발견! 잔고={balance:.4f} 평단={avg_buy_price:.2f}")
