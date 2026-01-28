@@ -2502,7 +2502,7 @@ MIN_DEPTH_KRW = 6_000_000
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 60.0      # 🔧 회전율 상한 (%) - 40→60 (복합조건 turn>50+spread 활성화)
-GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - 0.20→0.40 완화
+GATE_SPREAD_MAX = 1.50    # 🔧 HOTFIX: 저가 코인(100원 이하) 스프레드 허용 - 0.40→1.50%
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
@@ -4422,27 +4422,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
-    # 🔧 FIX (C): 호가깊이/시간대 기반 동적 스프레드 제한
-    # - 호가깊이 낮으면 → 스프레드 상한 더 낮게 (슬리피지 위험)
-    # - 새벽(00~06시) → 스프레드 상한 더 낮게 (휩쏘 위험)
-    eff_spread_max = GATE_SPREAD_MAX  # 기본값 0.4%
-
-    # 호가깊이 기반 동적 조정
-    if best_ask_krw > 0:
-        if best_ask_krw < 500_000:         # 50만원 미만: 매우 얇음
-            eff_spread_max = min(eff_spread_max, 0.15)
-        elif best_ask_krw < 1_000_000:     # 100만원 미만: 얇음
-            eff_spread_max = min(eff_spread_max, 0.20)
-        elif best_ask_krw < 3_000_000:     # 300만원 미만: 보통
-            eff_spread_max = min(eff_spread_max, 0.30)
-
-    # 새벽 시간대(00~06시) 강화
-    try:
-        cur_hour = now_kst().hour
-        if 0 <= cur_hour < 6:
-            eff_spread_max = min(eff_spread_max, 0.20)  # 새벽엔 0.2% 상한
-    except:
-        pass
+    # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영)
+    # - 저가 코인(100원 이하)은 호가단위 때문에 스프레드가 구조적으로 높음
+    # - 호가깊이 기반 제한 제거 → 기본 GATE_SPREAD_MAX만 사용
+    # - GATE_SPREAD_MAX를 0.40% → 0.60%로 상향 (저가 허용)
+    eff_spread_max = GATE_SPREAD_MAX  # 기본값 사용 (상단에서 조정)
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
@@ -4480,9 +4464,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 과회전 상한 (승 10.2% vs 패 26.8% → 20% 상한)
     if turn_pct > GATE_TURN_MAX:
         return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험 (120→50 현실화)
-    if turn_pct > 50 and spread > 0.25:
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25%"
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
+    # 🔧 HOTFIX: 저가 코인 스프레드 허용 (0.25%→1.0%)
+    if turn_pct > 50 and spread > 1.0:
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>1.0%"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
