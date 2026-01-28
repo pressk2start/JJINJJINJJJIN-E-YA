@@ -114,6 +114,66 @@ MFE_PARTIAL_TARGETS = {
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
+# 🔧 동적 TP 기본값 (signal_tag별)
+TP_FULL_BASE = {
+    "🔥점화": 3.0,
+    "강돌파 (EMA↑+고점↑)": 2.5,
+    "EMA↑": 2.0,
+    "고점↑": 1.6,
+    "거래량↑": 1.3,
+    "기본": 1.5,
+}
+TP_PART_BASE = {
+    "🔥점화": 1.6,
+    "강돌파 (EMA↑+고점↑)": 1.4,
+    "EMA↑": 1.2,
+    "고점↑": 1.0,
+    "거래량↑": 0.8,
+    "기본": 0.9,
+}
+
+def get_dynamic_tp(signal_tag, ob_depth_krw=None, atr_pct=None):
+    """
+    🔧 동적 TP 계산 (호가깊이/ATR/시간대 반영)
+    - 호가 얇으면 TP 하향 (슬립 고려)
+    - ATR 높으면 TP 상향 (변동성 활용)
+    - 야간 시간대 TP 하향 (유동성 낮음)
+    Returns: (full_tp, part_tp) in % units
+    """
+    import datetime
+
+    base_full = TP_FULL_BASE.get(signal_tag, 1.5)
+    base_part = TP_PART_BASE.get(signal_tag, 0.9)
+
+    mult = 1.0
+
+    # 1) 호가 깊이 반영: 얇으면 TP 하향 (슬립 위험)
+    if ob_depth_krw is not None:
+        if ob_depth_krw < 10_000_000:  # 1천만원 미만
+            mult *= 0.85  # -15%
+        elif ob_depth_krw < 30_000_000:  # 3천만원 미만
+            mult *= 0.95  # -5%
+        elif ob_depth_krw > 100_000_000:  # 1억원 초과
+            mult *= 1.05  # +5%
+
+    # 2) ATR 기반: 변동성 높으면 목표 상향
+    if atr_pct is not None and atr_pct > 0:
+        # ATR 0.5% 기준, 1%면 +10%, 2%면 +20%
+        volatility_mult = 1 + min((atr_pct - 0.005) * 10, 0.3)  # 최대 +30%
+        mult *= max(volatility_mult, 0.9)  # 최소 -10%
+
+    # 3) 시간대: 야간(0~6시) 유동성 낮음 → TP 하향
+    hour = datetime.datetime.now().hour
+    if 0 <= hour < 6:
+        mult *= 0.85  # -15%
+    elif 6 <= hour < 9:
+        mult *= 0.95  # -5%
+
+    full_tp = base_full * mult
+    part_tp = base_part * mult
+
+    return full_tp, part_tp
+
 # 트레일링 손절 설정 - 익절키우기 적용
 # 🔧 익절키우기: 트레일 간격 완화 → 조기 이탈 방지
 TRAIL_ATR_MULT = 0.9  # ATR 기반 여유폭 (0.8→0.9 완화)
@@ -1218,10 +1278,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX (A): 현재가 기준으로 SL 재계산 (신호가와 현재가 차이 보정)
         # - 기존: dyn_stop은 신호 시점 가격 기준 → 현재가로 진입 시 손절폭 불일치
         # - 개선: final_price_guard 통과 후 현재가 기준으로 dynamic_stop_loss 재계산
+        # - 🔧 신호 강도(매수비/임밸런스) 반영으로 손절폭 최적화
         c1_for_sl = pre.get("c1")
         signal_type = pre.get("signal_type", None)
+        # 🔧 신호 강도 추출 (손절폭 조정용)
+        entry_buy_ratio = pre.get("tape", {}).get("buy_ratio")
+        entry_imbalance = pre.get("ob", {}).get("imbalance")
         if c1_for_sl:
-            new_stop, new_sl_pct, sl_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type, entry_price)
+            new_stop, new_sl_pct, sl_info = dynamic_stop_loss(
+                entry_price, c1_for_sl, signal_type, entry_price,
+                buy_ratio=entry_buy_ratio, imbalance=entry_imbalance
+            )
             stop_price = new_stop
             eff_sl_pct = new_sl_pct
             print(f"[SL_RECALC] {m} 현재가 기준 SL 재계산: {eff_sl_pct*100:.2f}% (stop={fmt6(stop_price)})")
@@ -2444,55 +2511,31 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 print(msg)
             continue
 
-        # 5) 수익 실현 (🔧 signal_tag별 익절 목표 차등화) - 익절키우기 전략
+        # 5) 수익 실현 (🔧 동적 TP: 호가깊이/ATR/시간대 반영) - 익절키우기 전략
         #    - 강신호: 높은 목표, 약신호: 낮은 목표 (기대값 개선)
-        #    - 🔧 익절키우기: 전체 목표 상향 → 더 큰 수익 추구
+        #    - 🔧 동적 TP: 시장 상황에 맞게 목표 조정
         elif ret_pct is not None:
-            # signal_tag별 익절 목표 (% 단위) - 익절키우기 적용
-            TP_FULL = {
-                "🔥점화": 3.0,              # 2.2% → 3.0% (강신호는 크게)
-                "강돌파 (EMA↑+고점↑)": 2.5,  # 1.8% → 2.5%
-                "EMA↑": 2.0,                 # 1.4% → 2.0%
-                "고점↑": 1.6,                # 1.2% → 1.6%
-                "거래량↑": 1.3,              # 1.0% → 1.3%
-                "기본": 1.5,                 # 1.2% → 1.5%
-            }
-            TP_PART = {
-                "🔥점화": 1.6,              # 1.2% → 1.6%
-                "강돌파 (EMA↑+고점↑)": 1.4,  # 1.0% → 1.4%
-                "EMA↑": 1.2,                 # 0.8% → 1.2%
-                "고점↑": 1.0,                # 0.7% → 1.0%
-                "거래량↑": 0.8,              # 0.6% → 0.8%
-                "기본": 0.9,                 # 0.7% → 0.9%
-            }
-
             # 현재 포지션의 signal_tag 가져오기
             with _POSITION_LOCK:
                 pos_for_tag = OPEN_POSITIONS.get(m) or {}
             tag = pos_for_tag.get("signal_tag", "기본")
 
-            # 목표값 조회 (없으면 기본값)
-            full_tp = TP_FULL.get(tag, 1.2)
-            part_tp = TP_PART.get(tag, 0.7)
+            # 🔧 동적 TP 계산 (호가깊이/ATR/시간대 반영)
+            ob_depth = pre.get("ob", {}).get("depth_krw") if pre else None
+            # ATR은 pos에 저장된 값 사용 (진입 시점 기준)
+            atr_pct = pos_for_tag.get("atr_pct", None)
+            full_tp, part_tp = get_dynamic_tp(tag, ob_depth_krw=ob_depth, atr_pct=atr_pct)
 
             # 🔧 FIX: TP 바닥값 = alpha만 (슬립 이중 차감 방지)
-            # - 슬립은 ret_net에서 한 번만 차감 (A안)
-            # - 기존: slip_extra로 TP 바닥값 상향 + ret_net에서 슬립 차감 → 이중 페널티
-            # - 개선: ret_net 차감만 유지, TP 바닥값에서는 슬립 제거
             cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha)
+            part_tp = max(part_tp, cp_alpha + 0.15)    # 0.25%+ 최소
+            full_tp = max(full_tp, cp_alpha + 0.45)    # 0.55%+ 최소
 
-            # 🔧 FIX: exit 슬립은 ret_net에서만 반영 (이중 차감 방지)
-            avg_exit_slip_pct = get_expected_exit_slip_pct()  # exit 전용 trimmed mean
-            # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
-            # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
-
-            part_tp = max(part_tp, cp_alpha + 0.15)    # 0.25%+ 최소 (slip_extra 제거)
-            full_tp = max(full_tp, cp_alpha + 0.45)    # 0.55%+ 최소 (slip_extra 제거)
+            # 🔧 FIX: exit 슬립 캡 적용 (과다 차감 방지)
+            avg_exit_slip_pct = get_expected_exit_slip_pct()
+            expected_exit_slip = min(avg_exit_slip_pct, 0.3)  # 🔧 0.3% 캡 (과다 차감 방지)
 
             # 🔧 FIX: TP 판단을 net 기준으로 (수수료 + 예상 exit 슬립 반영)
-            # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
-            # - 슬립은 여기서만 한 번 차감 (A안: ret_net 차감 유지)
-            expected_exit_slip = avg_exit_slip_pct  # exit 슬립만 (entry는 이미 반영됨)
             ret_net = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0) - expected_exit_slip
 
             if ret_net >= full_tp:
@@ -5438,7 +5481,12 @@ def upbit_tick_size(price: float) -> float:
     if p >=         1: return 0.01
     return 0.001
 
-def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
+def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, buy_ratio=None, imbalance=None):
+    """
+    🔧 동적 손절가 계산 (ATR + 신호 강도 반영)
+    - buy_ratio: 매수비율 (높으면 손절 좁게, 낮으면 넓게)
+    - imbalance: 호가 임밸런스 (매도 우위면 손절 넓게)
+    """
     atr = atr14_from_candles(c1, ATR_PERIOD)
     if not atr or atr <= 0:
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
@@ -5453,9 +5501,23 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
 
+    # 🔧 신호 강도 반영: 매수비 높으면 손절 좁게 (신호 신뢰)
+    if buy_ratio is not None:
+        if buy_ratio > 0.65:
+            pct *= 0.85  # 신호 강함 → 손절 좁게 (-15%)
+        elif buy_ratio < 0.50:
+            pct *= 1.15  # 신호 약함 → 손절 넓게 (+15%)
+
+    # 🔧 호가 임밸런스: 매도 우위면 손절 넓게 (하락 압력)
+    if imbalance is not None and imbalance < -0.2:
+        pct *= 1.15  # 매도 우위 → 손절 넓게 (+15%)
+
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
+
+    # 🔧 최종 클램프: DYN_SL_MIN ~ DYN_SL_MAX * 2 범위로 제한
+    pct = min(max(pct, DYN_SL_MIN), DYN_SL_MAX * 2)
 
     # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
