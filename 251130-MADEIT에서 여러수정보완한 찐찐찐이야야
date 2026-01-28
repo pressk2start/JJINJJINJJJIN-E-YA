@@ -2613,7 +2613,7 @@ GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 =
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 1       # 🔧 연속매수 하한 - 2→1 완화 (점심시간 대응, 매수비로 품질 보완)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
-GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
+GATE_STRONGBREAK_OFF = True   # 🔧 강돌파 차단 (승률 10~21% → 차단)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 8→6 완화
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
@@ -4776,6 +4776,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         signal_tag = "고점↑"
     else:
         signal_tag = "거래량↑"
+
+    # 🔧 FIX: 야간(0~6시) 거래량↑ 경로 차단 (승률 10% → 차단)
+    from datetime import datetime as _dt
+    _hour = _dt.now().hour
+    if signal_tag == "거래량↑" and 0 <= _hour < 6:
+        return False, f"야간거래량진입차단 {_hour}시 (0~6시 거래량↑ 승률10%)"
 
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
