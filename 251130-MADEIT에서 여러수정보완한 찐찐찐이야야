@@ -4664,11 +4664,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
-    # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영)
+    # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영 + 점화 완화)
     # - 저가 코인(100원 이하)은 호가단위 때문에 스프레드가 구조적으로 높음
-    # - 호가깊이 기반 제한 제거 → 기본 GATE_SPREAD_MAX만 사용
-    # - GATE_SPREAD_MAX를 0.40% → 0.60%로 상향 (저가 허용)
-    eff_spread_max = GATE_SPREAD_MAX  # 기본값 사용 (상단에서 조정)
+    # - 점화 점수 높으면 스프레드 허용치 상향 (SOMI 같은 케이스 대응)
+    eff_spread_max = min(1.5, GATE_SPREAD_MAX * (1 + relax))  # 점화 시 30% 상향 (0.17% → 0.22%)
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
