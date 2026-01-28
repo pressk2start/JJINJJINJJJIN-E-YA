@@ -237,6 +237,24 @@ _IGNITION_BASELINE_TPS = {}  # {market: tps} 종목별 평시 틱/초
 _IGNITION_LOCK = threading.Lock()
 
 # =========================
+# 🎯 리테스트 진입 모드 (Retest Entry Mode)
+# =========================
+# 장초 급등 → 첫 양봉 패스 → 되돌림 후 지지 확인 시 진입
+RETEST_MODE_ENABLED = True           # 리테스트 모드 활성화
+RETEST_PEAK_MIN_GAIN = 0.015         # 최소 1.5% 급등 시 워치리스트 등록
+RETEST_PULLBACK_MIN = 0.003          # 최소 0.3% 되돌림 필요 (고점 대비)
+RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
+RETEST_BOUNCE_MIN = 0.002            # 최소 0.2% 반등 확인
+RETEST_TIMEOUT_SEC = 180             # 3분 내 리테스트 없으면 제거
+RETEST_SUPPORT_EMA = 20              # EMA 지지 확인용
+RETEST_MORNING_HOURS = (8, 10)       # 장초 시간대 (08:00~10:00)
+
+# 리테스트 워치리스트: {market: {"peak_price", "peak_ts", "pullback_low", "state", "pre"}}
+# state: "watching" → "pullback" → "bounce" → "ready"
+_RETEST_WATCHLIST = {}
+_RETEST_LOCK = threading.Lock()
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 # 🔧 FIX: 락에 소유자(스레드 ID) 추적 추가 - reentrant 버그 수정
@@ -4367,6 +4385,140 @@ def is_mega_breakout(c1):
 
 
 # =========================
+# 🎯 리테스트 진입 함수들
+# =========================
+def add_to_retest_watchlist(m, peak_price, pre):
+    """첫 급등 감지 시 워치리스트에 등록"""
+    if not RETEST_MODE_ENABLED:
+        return
+    with _RETEST_LOCK:
+        if m in _RETEST_WATCHLIST:
+            return  # 이미 등록됨
+        _RETEST_WATCHLIST[m] = {
+            "peak_price": peak_price,
+            "peak_ts": time.time(),
+            "pullback_low": peak_price,  # 되돌림 저점 추적
+            "state": "watching",  # watching → pullback → bounce → ready
+            "pre": pre,
+            "entry_price": pre.get("price", peak_price),  # 원래 신호 가격
+        }
+        print(f"[RETEST] {m} 워치리스트 등록 | 고점 {peak_price:,.0f}원 | 리테스트 대기")
+
+
+def check_retest_entry(m):
+    """리테스트 조건 체크 → 진입 가능하면 pre 반환, 아니면 None"""
+    if not RETEST_MODE_ENABLED:
+        return None
+
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+
+        # 타임아웃 체크
+        elapsed = time.time() - watch["peak_ts"]
+        if elapsed > RETEST_TIMEOUT_SEC:
+            print(f"[RETEST] {m} 타임아웃 ({elapsed:.0f}초) → 워치리스트 제거")
+            _RETEST_WATCHLIST.pop(m, None)
+            return None
+
+        peak_price = watch["peak_price"]
+        entry_price = watch["entry_price"]
+        state = watch["state"]
+
+    # 현재가 조회
+    try:
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        if not cur_js or len(cur_js) == 0:
+            return None
+        cur_price = cur_js[0].get("trade_price", 0)
+    except:
+        return None
+
+    if cur_price <= 0:
+        return None
+
+    # 되돌림 저점 업데이트
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+        if cur_price < watch["pullback_low"]:
+            watch["pullback_low"] = cur_price
+        pullback_low = watch["pullback_low"]
+
+    # 고점 대비 하락률
+    pullback_pct = (peak_price - pullback_low) / peak_price if peak_price > 0 else 0
+    # 저점 대비 반등률
+    bounce_pct = (cur_price - pullback_low) / pullback_low if pullback_low > 0 else 0
+
+    # 상태 전이 로직
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+
+        if state == "watching":
+            # 충분히 되돌림이 왔는지 체크
+            if pullback_pct >= RETEST_PULLBACK_MIN:
+                watch["state"] = "pullback"
+                print(f"[RETEST] {m} 되돌림 감지 | -{pullback_pct*100:.2f}% | state→pullback")
+
+        elif state == "pullback":
+            # 너무 많이 빠졌으면 제거
+            if pullback_pct > RETEST_PULLBACK_MAX:
+                print(f"[RETEST] {m} 과도한 되돌림 -{pullback_pct*100:.2f}% > {RETEST_PULLBACK_MAX*100:.1f}% → 제거")
+                _RETEST_WATCHLIST.pop(m, None)
+                return None
+
+            # 반등 시작 체크
+            if bounce_pct >= RETEST_BOUNCE_MIN:
+                watch["state"] = "bounce"
+                print(f"[RETEST] {m} 반등 감지 | +{bounce_pct*100:.2f}% | state→bounce")
+
+        elif state == "bounce":
+            # EMA/VWAP 지지 확인 (간단히 entry_price 위인지 체크)
+            support_ok = cur_price >= entry_price * 0.995  # 진입가 -0.5% 이상
+
+            if support_ok and bounce_pct >= RETEST_BOUNCE_MIN:
+                watch["state"] = "ready"
+                print(f"[RETEST] {m} 지지 확인 | 현재가 {cur_price:,.0f} >= 진입가 {entry_price:,.0f} | state→ready")
+
+        elif state == "ready":
+            # 진입 조건 충족!
+            pre = watch.get("pre", {})
+            pre["retest_entry"] = True  # 리테스트 진입 마킹
+            pre["price"] = cur_price  # 현재가로 업데이트
+            _RETEST_WATCHLIST.pop(m, None)  # 워치리스트에서 제거
+            print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f}")
+            return pre
+
+    return None
+
+
+def cleanup_retest_watchlist():
+    """타임아웃된 항목 정리"""
+    if not RETEST_MODE_ENABLED:
+        return
+    with _RETEST_LOCK:
+        now = time.time()
+        expired = [m for m, w in _RETEST_WATCHLIST.items()
+                   if now - w["peak_ts"] > RETEST_TIMEOUT_SEC]
+        for m in expired:
+            print(f"[RETEST] {m} 타임아웃 → 워치리스트 제거")
+            _RETEST_WATCHLIST.pop(m, None)
+
+
+def is_morning_session():
+    """장초 시간대인지 확인 (08:00~10:00)"""
+    try:
+        cur_hour = now_kst().hour
+        return RETEST_MORNING_HOURS[0] <= cur_hour < RETEST_MORNING_HOURS[1]
+    except:
+        return False
+
+
+# =========================
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
 def _turn_needed(ob_depth_krw):
@@ -6348,6 +6500,26 @@ def main():
             # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
             sync_orphan_positions()
 
+            # 🎯 리테스트 워치리스트 체크 (장초 2차 기회 진입)
+            if RETEST_MODE_ENABLED:
+                cleanup_retest_watchlist()  # 타임아웃 정리
+                with _RETEST_LOCK:
+                    watch_markets = list(_RETEST_WATCHLIST.keys())
+                for wm in watch_markets:
+                    try:
+                        retest_pre = check_retest_entry(wm)
+                        if retest_pre:
+                            # 리테스트 조건 충족 → 진입
+                            print(f"[RETEST] {wm} 🎯 리테스트 진입 시작!")
+                            c1 = get_minutes_candles(1, wm, 20)
+                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1)
+                            tg_send(f"🎯 <b>리테스트 진입</b> {wm}\n"
+                                    f"• 첫 급등 후 되돌림 → 지지 확인\n"
+                                    f"• 현재가: {retest_pre['price']:,.0f}원")
+                            open_auto_position(wm, retest_pre, dyn_stop, eff_sl_pct)
+                    except Exception as e:
+                        print(f"[RETEST_ERR] {wm}: {e}")
+
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
             # 매도 파라미터는 고정 (매수만 학습)
@@ -6657,6 +6829,20 @@ def main():
                         print("[LOG_ERR]", e)
 
                     # --- 🔥 자동매수 진입 ---
+                    # 🎯 리테스트 모드: 장초 첫 양봉은 워치리스트에만 등록
+                    if RETEST_MODE_ENABLED and is_morning_session():
+                        # 급등률 체크 (신호가 대비 현재가)
+                        cur_price = pre.get("price", 0)
+                        entry_price_base = pre.get("entry_price", cur_price)
+                        gain_pct = (cur_price / entry_price_base - 1.0) if entry_price_base > 0 else 0
+
+                        if gain_pct >= RETEST_PEAK_MIN_GAIN:
+                            # 첫 급등 → 워치리스트 등록, 바로 진입 X
+                            add_to_retest_watchlist(m, cur_price, pre)
+                            print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% → 리테스트 대기 (바로 진입 X)")
+                            _release_entry_lock(m)
+                            continue  # 바로 진입하지 않고 다음 종목으로
+
                     # 🔧 FIX: 스캔 루프에서 획득한 파일락 해제 (open_auto_position에서 다시 획득)
                     _release_entry_lock(m)
                     try:
