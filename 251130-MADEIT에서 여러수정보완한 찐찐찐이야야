@@ -1464,6 +1464,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
                 "signal_tag": pre.get("signal_tag", "기본"),  # 🔧 MFE 익절 경로용
             }
+        # 🔧 FIX: 유령 오탐 방지 - OPEN_POSITIONS 설정 직후에 즉시 등록
+        _RECENT_BUY_TS[m] = time.time()
 
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
         # 🔧 FIX: 슬리피지 기록 - 절댓값 사용 (음수=유리한 슬리피지도 포함)
@@ -1538,9 +1540,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             f"• 손절가: {safe_stop_str}원\n"
             f"{link_for(m)}"
         )
-
-        # 🔧 FIX: 최근 매수 시간 기록 (유령 오탐 방지)
-        _RECENT_BUY_TS[m] = time.time()
 
         # === 🧠 피처 로깅 (자동 학습용) ===
         if AUTO_LEARN_ENABLED:
