@@ -4907,6 +4907,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     ia = inter_arrival_stats(ticks, 60)  # 🔧 30→60초 (CV 9.9 기본값 방지)
     cv = ia["cv"]
     pstd10 = price_band_std(ticks, 10)
+    if pstd10 is None:
+        pstd10 = 9.9  # 데이터 부족시 기본값 (하드컷 조건 회피)
     cons_buys = calc_consecutive_buys(ticks, 15)
     overheat = accel * vol_surge
     spread = ob.get("spread", 9.9)
