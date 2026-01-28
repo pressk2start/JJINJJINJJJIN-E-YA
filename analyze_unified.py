@@ -348,8 +348,11 @@ class UpbitClient:
         now = time.monotonic()
         elapsed = now - self._last_call_ts
         if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_call_ts = time.monotonic()
+            sleep_time = self._min_interval - elapsed
+            time.sleep(sleep_time)
+            self._last_call_ts = now + sleep_time
+        else:
+            self._last_call_ts = now
 
     def _sleep_backoff(self, attempt: int) -> None:
         time.sleep(self._backoff_base * (2 ** attempt))
@@ -530,8 +533,9 @@ def analyze_pre_entry_env(
 
     # 3. accel: 봇은 틱 기반 (t5s_krw_per_sec / t15s_krw_per_sec)
     #    분봉 근사: 최근 2봉 평균 / 직전 5봉 평균 (5초:15초 ≈ 1:3 비율)
-    recent_2_vol = sum(c.volume_krw for c in candles[entry_idx-1:entry_idx+1]) / 2
-    prev_5_vol_list = [c.volume_krw for c in candles[max(0,entry_idx-6):entry_idx-1]]
+    recent_2_start = max(0, entry_idx - 1)
+    recent_2_vol = sum(c.volume_krw for c in candles[recent_2_start:entry_idx+1]) / max(1, entry_idx + 1 - recent_2_start)
+    prev_5_vol_list = [c.volume_krw for c in candles[max(0, entry_idx-6):max(0, entry_idx-1)]]
     prev_5_vol_avg = statistics.mean(prev_5_vol_list) if prev_5_vol_list else recent_2_vol
     accel = (recent_2_vol / prev_5_vol_avg) if prev_5_vol_avg > 0 else 1.0
 
@@ -643,7 +647,7 @@ def analyze_pre_entry_env(
             if math.isnan(f) or math.isinf(f):
                 return default
             return f
-        except:
+        except (ValueError, TypeError):
             return default
 
     # 값 안전 변환
@@ -1361,7 +1365,7 @@ def analyze_exit_one(
 
     # 청산 후 10분 + 여유 2분
     to_time = exit_dt + timedelta(minutes=post_candles + 2)
-    to_time_iso = to_time.strftime("%Y-%m-%dT%H:%M:%S")
+    to_time_iso = _to_upbit_iso_kst(to_time)
 
     raw = client.get_candles_minutes(ticker, to_time_iso, unit=1, count=post_candles + 5)
     if not raw or len(raw) < post_candles:
@@ -1386,7 +1390,8 @@ def analyze_exit_one(
     # 청산 시점 봉 찾기
     exit_idx = None
     for i, c in enumerate(candles):
-        if c.dt_kst.hour == exit_dt.hour and c.dt_kst.minute == exit_dt.minute:
+        if (c.dt_kst.date() == exit_dt.date() and
+            c.dt_kst.hour == exit_dt.hour and c.dt_kst.minute == exit_dt.minute):
             exit_idx = i
             break
 
@@ -1416,8 +1421,12 @@ def analyze_exit_one(
     post_10m = get_post_change(10)
 
     # 청산 후 최대 상승/하락
-    post_highs = [c.high for c in candles[exit_idx+1:exit_idx+11] if exit_idx+1 < len(candles)]
-    post_lows = [c.low for c in candles[exit_idx+1:exit_idx+11] if exit_idx+1 < len(candles)]
+    if exit_idx + 1 < len(candles):
+        post_highs = [c.high for c in candles[exit_idx+1:min(exit_idx+11, len(candles))]]
+        post_lows = [c.low for c in candles[exit_idx+1:min(exit_idx+11, len(candles))]]
+    else:
+        post_highs = []
+        post_lows = []
 
     post_max_up = ((max(post_highs) / exit_price - 1.0) * 100) if post_highs else 0.0
     post_max_down = ((min(post_lows) / exit_price - 1.0) * 100) if post_lows else 0.0
