@@ -1303,9 +1303,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         risk_to_use = adaptive_risk * SEED_RISK_FRACTION if USE_PYRAMIDING else adaptive_risk
         risk_to_use *= entry_fraction  # probe는 리스크 축소 반영
 
+        # 🔧 사이징용 손절폭: 실제 최악 컷(HARD_STOP_DD) + 슬리피지 버퍼 반영
+        sizing_sl_pct = max(eff_sl_pct, HARD_STOP_DD)
+        stop_for_size = entry_price * (1 - sizing_sl_pct)
+
         base_qty = calc_position_size(
             entry_price,
-            stop_price,
+            stop_for_size,
             krw_bal,
             risk_to_use,
         )
@@ -5967,7 +5971,7 @@ def monitor_position(m,
             # - 손절: 손절선에 fee 마진 추가 → 청산 후 실손실이 의도한 손절선에 근접
             # - 효과: 손절이 약간 완화되어 휩쏘 방지 + 익절과 정합성 확보
             fee_margin = FEE_RATE_ROUNDTRIP  # 왕복 0.1%
-            eff_sl_with_fee = eff_sl_pct + fee_margin  # 손절선 완화
+            eff_sl_with_fee = max(0.0, eff_sl_pct - fee_margin)  # 🔧 FIX: net 기준 정합성 — gross를 더 일찍 잘라야 net 손실이 eff_sl_pct 이내
             if cur_gain <= -eff_sl_with_fee:
                 close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
                 verdict = "ATR손절"
