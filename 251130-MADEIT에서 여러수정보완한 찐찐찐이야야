@@ -2821,8 +2821,8 @@ FEATURE_FIELDS = [
     "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
     # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
     "shadow_flags", "would_cut",
-    # 🔍 리포트 상세: 추매여부 + 청산사유
-    "added", "exit_reason",
+    # 🔍 리포트 상세: 추매여부 + 청산사유 + 프리브레이크
+    "added", "exit_reason", "is_prebreak",
     # 🔧 MFE/MAE (최고점/최저점 수익률) - 익절/손절 튜닝용
     "mfe_pct", "mae_pct",
     "pnl_pct", "result", "hold_sec"
@@ -2843,7 +2843,7 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
                 row.update(exit_data)
             w.writerow(row)
 
-_reported_trades = set()  # 🔧 FIX: (market, entry_ts) 기반 중복 방지 (30초→거래ID 기반)
+# 🔧 FIX: _reported_trades 중복 선언 제거 (2810줄에서 이미 선언됨)
 
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
@@ -2877,9 +2877,9 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
         _reported_trades.difference_update(_old_trades)
     else:
-        # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
-        now_ts = time.time()
-        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] < 30]
+        # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초, ms 단위 통일)
+        now_ts = int(time.time() * 1000)  # ms 단위 통일
+        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] < 30000]
         if recent:
             print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
             return
@@ -4779,8 +4779,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         signal_tag = "거래량↑"
 
     # 🔧 FIX: 야간(0~6시) 거래량↑ 경로 차단 (승률 10% → 차단)
-    from datetime import datetime as _dt
-    _hour = _dt.now().hour
+    _hour = now_kst().hour
     if signal_tag == "거래량↑" and 0 <= _hour < 6:
         return False, f"야간거래량진입차단 {_hour}시 (0~6시 거래량↑ 승률10%)"
 
@@ -6296,6 +6295,24 @@ def tg_send(t, retry=1):
     if not TG_TOKEN or not CHAT_IDS:
         print(t)
         return True
+
+    # 🔧 FIX: 텔레그램 4096자 제한 대응 - 초과 시 분할 전송
+    if len(t) > 4000:
+        chunks = []
+        while t:
+            if len(t) <= 4000:
+                chunks.append(t)
+                break
+            # 줄바꿈 기준 분할
+            cut = t.rfind("\n", 0, 4000)
+            if cut <= 0:
+                cut = 4000
+            chunks.append(t[:cut])
+            t = t[cut:].lstrip("\n")
+        ok = True
+        for chunk in chunks:
+            ok = tg_send(chunk, retry=retry) and ok
+        return ok
 
     ok_any = False
     for cid in CHAT_IDS:
