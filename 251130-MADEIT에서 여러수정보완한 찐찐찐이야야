@@ -458,6 +458,8 @@ if os.getenv("DEBUG_KEYS") == "1":
 # AUTO_TRADE = 1 이면 실제 주문, 0이면 알림 + 모니터링만
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.003"))  # 계좌의 0.3% 리스크
+# 🔧 FIX: 1건당 최대 손실 KRW 절대 캡 (큰 손절 방어)
+MAX_LOSS_KRW_PER_TRADE = float(os.getenv("MAX_LOSS_KRW_PER_TRADE", "0"))  # 0이면 미적용
 
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
@@ -1199,7 +1201,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             entry_fraction = 0.50   # 🔧 50% 사이즈 (중간 회전율)
             mode_emoji = "⚡"
         elif entry_mode == "confirm":
-            entry_fraction = 1.0    # 전체 금액 (확정 진입)
+            entry_fraction = 0.70   # 🔧 FIX: 1.0→0.7 (큰 손절 방어, 분산 투자 여력 확보)
             mode_emoji = "🔥"
         else:
             entry_fraction = 1.0
@@ -1312,8 +1314,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = base_qty * entry_price
 
+        # 🔧 FIX: 1건당 최대 손실 KRW 캡 적용
+        if MAX_LOSS_KRW_PER_TRADE > 0 and eff_sl_pct > 0:
+            max_pos_by_loss = MAX_LOSS_KRW_PER_TRADE / eff_sl_pct
+            if krw_to_use > max_pos_by_loss:
+                print(f"[LOSS_CAP] {m} 주문 {krw_to_use:,.0f} → {max_pos_by_loss:,.0f} (최대손실 {MAX_LOSS_KRW_PER_TRADE:,.0f}원 캡)")
+                krw_to_use = max_pos_by_loss
+
         # 🔧 FIX: 가용잔고 초과 방지 (손절폭 좁으면 사이징 과대해짐)
-        MAX_POSITION_RATIO = 0.95  # 가용잔고의 95% 상한
+        # 🔧 FIX: 95% → 50% 하향 (한 종목에 올인 방지, 큰 손절 방어)
+        MAX_POSITION_RATIO = 0.50  # 가용잔고의 50% 상한
         if krw_to_use > krw_bal * MAX_POSITION_RATIO:
             print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 95% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
