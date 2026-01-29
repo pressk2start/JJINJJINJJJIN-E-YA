@@ -4755,7 +4755,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
-        return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%)"
+        # 🔧 차단 대신 EMA↑로 다운그레이드 (breakout_score를 1로 취급)
+        breakout_score = 1  # 강돌파 → EMA↑ 다운그레이드
 
     # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
     # 🔧 4→3 완화: 개별조건 강화로 3점도 폭발적 급등 신호
