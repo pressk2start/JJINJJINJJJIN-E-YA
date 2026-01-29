@@ -161,7 +161,7 @@ def get_dynamic_tp(signal_tag, ob_depth_krw=None, atr_pct=None):
         mult *= max(volatility_mult, 0.9)  # 최소 -10%
 
     # 3) 시간대: 야간(0~6시) 유동성 낮음 → TP 하향
-    hour = datetime.now().hour  # 🔧 FIX: 상단 import 사용
+    hour = now_kst().hour  # 🔧 FIX: KST 기준 통일
     if 0 <= hour < 6:
         mult *= 0.85  # -15%
     elif 6 <= hour < 9:
