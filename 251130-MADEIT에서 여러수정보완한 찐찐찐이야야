@@ -3543,6 +3543,9 @@ def _new_session():
 
 
 SESSION = _new_session()
+# 🔧 FIX: 텔레그램 전용 세션 분리 (업비트 세션 리프레시가 텔레그램에 영향주지 않도록)
+TG_SESSION = requests.Session()
+TG_SESSION.headers.update({"Connection": "keep-alive"})
 KST = timezone(timedelta(hours=9))
 
 def now_kst():
@@ -6329,7 +6332,7 @@ def tg_send(t, retry=1):
         sent = False
         for _ in range(retry + 1):
             try:
-                r = SESSION.post(
+                r = TG_SESSION.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload,
                     timeout=4,
@@ -6352,7 +6355,7 @@ def tg_send(t, retry=1):
                             "disable_web_page_preview": True,
                         }
                         try:
-                            r2 = SESSION.post(
+                            r2 = TG_SESSION.post(
                                 f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                                 json=payload_plain,
                                 timeout=4,
@@ -6374,7 +6377,7 @@ def tg_send(t, retry=1):
                     "text": t.replace("<b>", "").replace("</b>", ""),
                     "disable_web_page_preview": True,
                 }
-                r3 = SESSION.post(
+                r3 = TG_SESSION.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload_plain,
                     timeout=4,
