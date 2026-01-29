@@ -105,12 +105,12 @@ SCRATCH_MIN_GAIN = 0.0004   # 최소 +0.04% 이상 상승해야 유지 (0.06%→
 # 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.008,              # +0.8% MFE 시 50% 익절 (강신호, 높은 목표)
-    "강돌파 (EMA↑+고점↑)": 0.007,  # +0.7% MFE 시 50% 익절
-    "EMA↑": 0.006,                 # +0.6% MFE 시 50% 익절
-    "고점↑": 0.005,                # +0.5% MFE 시 50% 익절
-    "거래량↑": 0.004,              # +0.4% MFE 시 50% 익절 (약신호도 상향)
-    "기본": 0.005,                 # +0.5% MFE 기본값
+    "🔥점화": 0.012,              # +1.2% MFE 시 50% 익절 (강신호 → 더 달리게)
+    "강돌파 (EMA↑+고점↑)": 0.010,  # +1.0% MFE 시 50% 익절
+    "EMA↑": 0.008,                 # +0.8% MFE 시 50% 익절
+    "고점↑": 0.007,                # +0.7% MFE 시 50% 익절
+    "거래량↑": 0.006,              # +0.6% MFE 시 50% 익절 (수수료 커버 확보)
+    "기본": 0.007,                 # +0.7% MFE 기본값
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
@@ -2608,7 +2608,7 @@ MIN_DEPTH_KRW = 6_000_000
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 60.0      # 🔧 회전율 상한 (%) - 40→60 (복합조건 turn>50+spread 활성화)
-GATE_SPREAD_MAX = 1.50    # 🔧 HOTFIX: 저가 코인(100원 이하) 스프레드 허용 - 0.40→1.50%
+GATE_SPREAD_MAX = 0.80    # 🔧 스프레드 강화: 1.50→0.80% (고스프레드 종목 수수료 손해 방지)
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
@@ -6191,8 +6191,8 @@ def monitor_position(m,
                     )
                     if ok:
                         mfe_partial_done = True
-                        # 🔥 본절 상향: 남은 50%는 손해 방지
-                        BE_OFFSET_MFE = FEE_RATE + 0.0005  # 본절 여유
+                        # 🔥 본절 상향: 남은 50%가 더 달릴 여유 확보
+                        BE_OFFSET_MFE = FEE_RATE + 0.0015  # 본절 여유 0.25% (기존 0.15%→확대)
                         be_stop = entry_price * (1.0 + BE_OFFSET_MFE)
                         base_stop = max(base_stop, be_stop)
                         tg_send_mid(f"🎯 {m} MFE익절 {int(MFE_PARTIAL_RATIO*100)}% | +{max_gain*100:.2f}% ({signal_tag}) | 손절선→본절 상향")
@@ -6201,7 +6201,7 @@ def monitor_position(m,
             # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
             PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
             # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
-            BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
+            BE_OFFSET = FEE_RATE + 0.0015  # 본절 = 수수료(0.1%) + 여유(0.15%) = 0.25% (잔량 달리기 여유)
 
             time_since_peak = time.time() - last_peak_ts
             if (not plateau_partial_done
