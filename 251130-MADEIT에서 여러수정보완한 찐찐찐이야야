@@ -4783,6 +4783,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if signal_tag == "거래량↑" and 0 <= _hour < 6:
         return False, f"야간거래량진입차단 {_hour}시 (0~6시 거래량↑ 승률10%)"
 
+    # 🔧 FIX: 거래량↑ 경로 임밸런스 하한 강화 (돌파 신호 없이 볼륨만으로 진입 → 페이크 방지)
+    if signal_tag == "거래량↑" and imbalance < 0.35:
+        return False, f"거래량↑임밸부족 {imbalance:.2f}<0.35 (돌파 없는 볼륨 진입 강화)"
+
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
     return True, f"{signal_tag} PASS | {pass_summary}"
