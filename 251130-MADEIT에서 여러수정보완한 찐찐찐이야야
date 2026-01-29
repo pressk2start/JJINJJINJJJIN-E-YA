@@ -6915,9 +6915,10 @@ def main():
                     f"🔍 경로: {path_str}\n"
                     f"{link_for(m)}")
 
-                sent = tg_send(txt, retry=2)
+                # 🔧 FIX: 텔레그램 실패해도 매수는 진행 (알림≠매수 게이트)
+                tg_send(txt, retry=2)
 
-                if sent:
+                if True:
                     found += 1
                     # --- 로그 CSV 기록 (기존 그대로) ---
                     try:
