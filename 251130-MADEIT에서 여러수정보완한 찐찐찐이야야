@@ -4677,7 +4677,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
     # 🔧 FIX: 3점 이상 점화(확정)에서 완화 - 개별조건 강화로 3점도 신뢰성↑
     # ============================================================
-    relax = 0.30 if ignition_score >= 3 else 0  # 3점 이상에서 30% 완화
+    relax = 0.15 if ignition_score >= 3 else 0  # 🔧 30%→15% (노이즈 진입 축소)
 
     # 🔧 FIX: 희박 틱 종목 조건부 완화 (NOM 같은 케이스 대응)
     # 30초 내 틱이 8개 미만이면 서지 임계치 20% 추가 완화
@@ -4687,7 +4687,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 FIX: 희박 틱에도 surge 임계치 추가 완화 적용
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax - sparse_tick_relax))  # 0.5→0.4(희박) 또는 0.1(점화)
     eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
-    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
+    eff_price_min = max(0.00015, GATE_PRICE_MIN * (1 - relax * 2))  # 🔧 바닥 0.015% (0으로 안 떨어지게)
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
@@ -4786,9 +4786,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         # 🔧 차단 대신 EMA↑로 다운그레이드 (breakout_score를 1로 취급)
         breakout_score = 1  # 강돌파 → EMA↑ 다운그레이드
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    # 🔧 4→3 완화: 개별조건 강화로 3점도 폭발적 급등 신호
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
+    # 진입 조건: 돌파 OR vol_vs_ma (기본)
+    # 🔧 점화 단독 프리패스 제거 → 점화3점이어도 돌파/볼륨 중 하나는 필요
+    if ignition_score >= 3:
+        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
+    else:
+        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
