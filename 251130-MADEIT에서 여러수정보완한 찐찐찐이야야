@@ -3874,6 +3874,11 @@ def relax_knob():
 MKTS_CACHE_TTL = 90
 _MKTS_CACHE = {"ts": 0.0, "mkts": []}
 
+# 🔧 FIX: 급등 종목 스캔리스트 자동 편입 (top-N 밖 펌프 감지)
+SURGE_INJECT_ENABLED = True          # 급등 종목 편입 활성화
+SURGE_INJECT_CHANGE_MIN = 0.03       # 변동률 3% 이상이면 급등 판정
+SURGE_INJECT_VOL_MIN = 30_000_000    # 최소 거래대금 3천만원 (너무 소형 제외)
+
 
 def get_top_krw_by_24h(n=TOP_N):
     now = time.time()
@@ -3886,6 +3891,7 @@ def get_top_krw_by_24h(n=TOP_N):
             if d["market"].startswith("KRW-")
         ]
         acc = []
+        surge_inject = []  # top-N 밖이지만 급등 중인 종목
         for i in range(0, len(allm), 50):
             info = upbit_get("https://api.upbit.com/v1/ticker",
                              {"markets": ",".join(allm[i:i + 50])})
@@ -3893,11 +3899,26 @@ def get_top_krw_by_24h(n=TOP_N):
             for t in info:
                 v = t.get("acc_trade_price_24h", 0)
                 if v > 0: acc.append((t["market"], v))
+                # 급등 감지: 변동률 3%↑ & 거래대금 3천만↑
+                if SURGE_INJECT_ENABLED:
+                    chg = abs(t.get("signed_change_rate", 0))
+                    if chg >= SURGE_INJECT_CHANGE_MIN and v >= SURGE_INJECT_VOL_MIN:
+                        surge_inject.append((t["market"], v))
         acc.sort(key=lambda x: x[1], reverse=True)
         mkts = [m for m, _ in acc]
         _MKTS_CACHE["mkts"] = mkts
+        _MKTS_CACHE["surge"] = surge_inject
         _MKTS_CACHE["ts"] = now
-    return mkts[:n]
+    # top-N 목록 구성
+    result = mkts[:n]
+    # 🔧 급등 종목 중 top-N에 없는 것을 끝에 편입
+    if SURGE_INJECT_ENABLED:
+        surge_list = _MKTS_CACHE.get("surge", [])
+        for sm, sv in surge_list:
+            if sm not in result:
+                result.append(sm)
+                print(f"[SURGE-INJECT] {sm} 급등 감지 → 스캔리스트 편입 (거래대금 {sv/1e8:.1f}억)")
+    return result
 
 
 def get_minutes_candles(u, m, c):
@@ -6691,14 +6712,19 @@ def main():
                 aligned_sleep(SCAN_INTERVAL)
                 continue
 
+            # 기본 top-N shard (cursor 기반)
+            top_n_list = mkts_all[:TOP_N]  # 기본 top-N
+            surge_extras = mkts_all[TOP_N:]  # 급등 편입 종목
             start = _cursor
             end = _cursor + SHARD_SIZE
-            shard = mkts_all[start:end]
+            shard = top_n_list[start:end]
             if len(shard) < SHARD_SIZE:
-                shard += mkts_all[:(SHARD_SIZE - len(shard))]
+                shard += top_n_list[:(SHARD_SIZE - len(shard))]
+            # 🔧 급등 편입 종목은 항상 shard에 포함
+            shard += [m for m in surge_extras if m not in shard]
             # 🔧 FIX: shard 중복 제거 (wrap-around 시 중복 방지)
             shard = list(dict.fromkeys(shard))
-            _cursor = (end) % len(mkts_all)
+            _cursor = (end) % max(len(top_n_list), 1)
 
             obc = fetch_orderbook_cache(shard)
 
