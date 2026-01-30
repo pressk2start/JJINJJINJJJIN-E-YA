@@ -4719,10 +4719,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
-    # === 과열 필터 (완화 없음 - 안전장치) ===
+    # === 과열 필터 (점화/mega 시 완화) ===
     overheated = accel * volume_surge
-    if overheated > GATE_OVERHEAT_MAX:
-        return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
+    # 🔧 FIX: 점화/mega는 과열 상한 완화 (폭발 초입 진입 허용)
+    eff_overheat_max = GATE_OVERHEAT_MAX
+    if mega:
+        eff_overheat_max = GATE_OVERHEAT_MAX * 3.0  # mega: 사실상 무제한
+    elif ignition_score >= 3:
+        eff_overheat_max = GATE_OVERHEAT_MAX * 2.0  # 점화: 2배 완화
+    if overheated > eff_overheat_max:
+        return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
