@@ -6125,6 +6125,8 @@ def monitor_position(m,
 
             # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
+            max_gain = (best / entry_price - 1.0)  # MFE 수익률
+            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
             ob_now = pre.get("ob", {})
 
             # === 🔧 FIX (S3): 스크래치/횡보 타임아웃 ===
@@ -6174,8 +6176,7 @@ def monitor_position(m,
 
             # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
             # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
-            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
-            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+            # (max_gain, cur_gain_now는 루프 상단에서 이미 계산됨)
 
             # === 🔧 (A) MFE 기반 부분익절 (경로별 동적 타겟) ===
             # 🔧 FIX (S4): get_dynamic_tp() 연결 → 호가깊이/ATR/시간대 반영
@@ -6962,8 +6963,8 @@ def main():
                 # 🔧 FIX: 텔레그램 실패해도 매수는 진행 (알림≠매수 게이트)
                 tg_send(txt, retry=2)
 
-                if True:
-                    found += 1
+                found += 1
+                if True:  # 🔧 텔레그램 성공여부 무관하게 매수 진행
                     # --- 로그 CSV 기록 (기존 그대로) ---
                     try:
                         c5 = get_minutes_candles(5, m, 2) or []
@@ -7107,13 +7108,8 @@ def main():
                     # 🔧 FIX: 스레드 객체 저장 (ident 대신)
                     with _MONITOR_LOCK:
                         _ACTIVE_MONITORS[m] = mon_thread
-                else:
-                    # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리 + 락 해제
-                    with _POSITION_LOCK:
-                        pos = OPEN_POSITIONS.get(m)
-                        if pos and pos.get("pre_signal"):
-                            OPEN_POSITIONS.pop(m, None)
-                    _release_entry_lock(m)
+                # 🔧 [제거됨] if True: 의 else 블록은 실행 불가능한 dead code였음
+                # 실패 시 cleanup은 아래 except 블록에서 처리
 
               except Exception as e:
                 # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
