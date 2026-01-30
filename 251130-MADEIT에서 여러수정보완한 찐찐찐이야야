@@ -5597,7 +5597,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, buy
             pct *= 1.15  # 신호 약함 → 손절 넓게 (+15%)
 
     # 🔧 호가 임밸런스: 매도 우위면 손절 넓게 (하락 압력)
-    if imbalance is not None and imbalance < -0.2:
+    # 🔧 FIX (B): imbalance 스케일은 0~1 (0=매도우위, 1=매수우위). 기존 -0.2 조건은 dead code였음
+    if imbalance is not None and imbalance < 0.3:
         pct *= 1.15  # 매도 우위 → 손절 넓게 (+15%)
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
@@ -5864,7 +5865,14 @@ def monitor_position(m,
         return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
 
     c1 = get_minutes_candles(1, m, 20)
-    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1)
+    # 🔧 FIX (A+S1): signal_type/buy_ratio/imbalance 전달 → 신호별 손절 차등
+    _sig_tag = pre.get("signal_tag", "기본")
+    _sig_type = "ign" if "점화" in _sig_tag else ("mega" if pre.get("mega") else None)
+    _br = pre.get("buy_ratio")
+    _imb = pre.get("imbalance")
+    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(
+        entry_price, c1, signal_type=_sig_type, buy_ratio=_br, imbalance=_imb
+    )
 
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
@@ -5976,10 +5984,26 @@ def monitor_position(m,
             # - 효과: 손절이 약간 완화되어 휩쏘 방지 + 익절과 정합성 확보
             fee_margin = FEE_RATE_ROUNDTRIP  # 왕복 0.1%
             eff_sl_with_fee = max(0.0, eff_sl_pct - fee_margin)  # 🔧 FIX: net 기준 정합성 — gross를 더 일찍 잘라야 net 손실이 eff_sl_pct 이내
-            if cur_gain <= -eff_sl_with_fee:
-                close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
-                verdict = "ATR손절"
-                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
+            # 🔧 FIX (A): 통합 스탑 = max(base_stop, ATR pct 스탑, trail_stop)
+            atr_stop_price = entry_price * (1 - eff_sl_with_fee)
+            effective_stop = max(base_stop, atr_stop_price)
+            if trail_armed:
+                effective_stop = max(effective_stop, trail_stop)
+
+            if curp <= effective_stop:
+                if trail_armed and effective_stop == trail_stop:
+                    trail_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                    peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
+                    drop_pct = (best - curp) / best * 100 if best > 0 else 0
+                    close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
+                    verdict = "TRAIL_STOP"
+                elif effective_stop == base_stop and base_stop > atr_stop_price:
+                    close_auto_position(m, f"본절손절 | 현재 {curp:.2f} <= 본절선 {base_stop:.2f}")
+                    verdict = "본절손절"
+                else:
+                    close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
+                    verdict = "ATR손절"
+                outcome_extra = f"({cur_gain*100:.2f}%, stop@{effective_stop:.2f})"
                 break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
@@ -6023,9 +6047,11 @@ def monitor_position(m,
                             f"추매 후 평단: {fmt6(new_entry)}원"
                         )
 
-                        # 동적 손절 재계산
+                        # 동적 손절 재계산 (🔧 신호정보 전달)
                         c1_for_sl = get_minutes_candles(1, m, 20)
-                        base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
+                        base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(
+                            new_entry, c1_for_sl, signal_type=_sig_type, buy_ratio=_br, imbalance=_imb
+                        )
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
@@ -6077,7 +6103,9 @@ def monitor_position(m,
                         if ok_add and new_entry:
                             entry_price = new_entry
                             c1_for_sl = get_minutes_candles(1, m, 20)
-                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
+                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(
+                                entry_price, c1_for_sl, signal_type=_sig_type, buy_ratio=_br, imbalance=_imb
+                            )
 
             # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
             if trail_armed and new_high:
@@ -6089,15 +6117,7 @@ def monitor_position(m,
                     trail_dist = trail_dist_min
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
-            # 🔧 [신규] 트레일링 손절 실제 청산 트리거
-            if trail_armed and curp < trail_stop:
-                # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
-                trail_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
-                drop_pct = (best - curp) / best * 100 if best > 0 else 0
-                close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
-                verdict = "TRAIL_STOP"
-                break
+            # 🔧 [통합됨] 트레일링 손절은 위 통합 스탑에서 처리 (base_stop/ATR/trail 통합)
 
             # 🔧 [제거됨] 브레이크이븐 → 트레일링 0.4% 발동으로 대체
             # 트레일링이 +0.4%에서 발동되면 트레일스탑이 자동으로 본절 이상이 됨
@@ -6107,9 +6127,23 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             ob_now = pre.get("ob", {})
 
-            # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
-            # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
-            # 여기는 트레일링 손절 이후 추가 손절 판정용
+            # === 🔧 FIX (S3): 스크래치/횡보 타임아웃 ===
+            # 진입 후 SCRATCH_TIMEOUT_SEC 내 최소 상승 없으면 조기 탈출
+            if not trail_armed and alive_sec >= SCRATCH_TIMEOUT_SEC:
+                if max_gain < SCRATCH_MIN_GAIN:
+                    close_auto_position(m, f"스크래치탈출 | {alive_sec:.0f}초간 최대수익 +{max_gain*100:.3f}% < +{SCRATCH_MIN_GAIN*100:.3f}%")
+                    verdict = "스크래치탈출"
+                    outcome_extra = f"({cur_gain*100:.2f}%, {alive_sec:.0f}s)"
+                    break
+
+            # 횡보 타임아웃: SIDEWAYS_TIMEOUT 초간 고점 갱신 없고 수익 미미하면 탈출
+            if not trail_armed and alive_sec >= SIDEWAYS_TIMEOUT:
+                time_since_peak_sw = time.time() - last_peak_ts
+                if time_since_peak_sw >= SIDEWAYS_TIMEOUT and cur_gain_now < dyn_checkpoint:
+                    close_auto_position(m, f"횡보탈출 | {time_since_peak_sw:.0f}초간 고점 미갱신, 수익 +{cur_gain_now*100:.2f}%")
+                    verdict = "횡보탈출"
+                    outcome_extra = f"({cur_gain*100:.2f}%, {alive_sec:.0f}s)"
+                    break
 
             # ② 체크포인트 도달 시 강세/약세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 30% 아래로 떨어지면 리셋
@@ -6144,17 +6178,22 @@ def monitor_position(m,
             cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
 
             # === 🔧 (A) MFE 기반 부분익절 (경로별 동적 타겟) ===
-            # 신호 강도별로 다른 MFE 타겟 적용 → 목표 도달 시 50% 익절
+            # 🔧 FIX (S4): get_dynamic_tp() 연결 → 호가깊이/ATR/시간대 반영
             if not mfe_partial_done and not plateau_partial_done:
-                mfe_target = MFE_PARTIAL_TARGETS.get(signal_tag, 0.004)  # 기본 0.4%
+                _atr_for_tp = atr14_from_candles(c1, 14) if c1 else None
+                _atr_pct_tp = (_atr_for_tp / max(entry_price, 1)) if _atr_for_tp and _atr_for_tp > 0 else None
+                _dyn_full_tp, _dyn_part_tp = get_dynamic_tp(signal_tag, ob_depth_krw=ob_depth_default, atr_pct=_atr_pct_tp)
+                mfe_target = _dyn_part_tp / 100.0  # get_dynamic_tp returns % → 소수로 변환
                 # 🔧 FIX: BTC 역풍 시 TP 보수화 (목표 낮춤)
                 btc5_now = btc_5m_change()
                 if btc5_now <= -0.003:  # BTC -0.3% 역풍
                     mfe_target *= 0.75  # 목표 25% 하향
-                if max_gain >= mfe_target:
+                # 🔧 FIX (S2): MFE 도달 + 현재가도 타겟의 60% 이상일 때만 매도
+                # (고점 찍고 많이 빠진 상태에서 매도 방지)
+                if max_gain >= mfe_target and cur_gain_now >= mfe_target * 0.6:
                     ok, msg, sold = safe_partial_sell(
                         m, MFE_PARTIAL_RATIO,
-                        f"MFE익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
+                        f"MFE익절 +{cur_gain_now*100:.2f}% (MFE:{max_gain*100:.2f}%, 경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
                     )
                     if ok:
                         mfe_partial_done = True
