@@ -454,6 +454,9 @@ MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포�
 _ACTIVE_MONITORS = {}  # { "KRW-BTC": threading.Thread }
 _MONITOR_LOCK = threading.Lock()
 
+# 🔧 손실 후 쿨다운 추적 (상단 선언으로 초기화 순서 보장)
+last_trade_was_loss = {}
+
 # 🔧 유령 포지션 동기화
 _LAST_ORPHAN_SYNC = 0
 ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
@@ -2844,12 +2847,14 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         _reported_trades.difference_update(_old_trades)
     else:
         # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
+        # 🔧 FIX: ms 단위로 통일 (cleanup 로직과 단위 일치)
         now_ts = time.time()
-        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] < 30]
+        now_ms = int(now_ts * 1000)
+        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] / 1000 < 30]
         if recent:
             print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
             return
-        _reported_trades.add((market, int(now_ts)))
+        _reported_trades.add((market, now_ms))
 
     print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
 
@@ -3033,6 +3038,8 @@ def get_path_statistics(last_n: int = 100) -> str:
 
         return "\n".join(lines)
 
+    except ImportError:
+        return "📊 pandas 미설치 - 통계 불가"
     except Exception as e:
         return f"📊 통계 오류: {e}"
 
@@ -3163,6 +3170,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
 
         return "\n".join(lines)
 
+    except ImportError:
+        return "📋 pandas 미설치 - 상세 불가"
     except Exception as e:
         return f"📋 상세 오류: {e}"
 
@@ -6339,7 +6348,7 @@ last_signal_at = {}
 recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
-last_trade_was_loss = {}  # 🔧 손실 후 쿨다운 2배용
+# last_trade_was_loss → 상단(line 458)에서 초기화됨
 ALERT_TTL = 1800
 
 # =========================
