@@ -104,13 +104,14 @@ SCRATCH_MIN_GAIN = 0.0004   # 최소 +0.04% 이상 상승해야 유지 (0.06%→
 # 🔧 MFE 기반 부분익절 (경로별 동적 타겟) - 익절키우기 전략
 # 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
+# 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.008,              # +0.8% MFE 시 50% 익절 (강신호, 높은 목표)
-    "강돌파 (EMA↑+고점↑)": 0.007,  # +0.7% MFE 시 50% 익절
-    "EMA↑": 0.006,                 # +0.6% MFE 시 50% 익절
-    "고점↑": 0.005,                # +0.5% MFE 시 50% 익절
-    "거래량↑": 0.004,              # +0.4% MFE 시 50% 익절 (약신호도 상향)
-    "기본": 0.005,                 # +0.5% MFE 기본값
+    "🔥점화": 0.006,              # 0.8% → 0.6% MFE 시 50% 익절
+    "강돌파 (EMA↑+고점↑)": 0.005,  # 0.7% → 0.5% MFE 시 50% 익절
+    "EMA↑": 0.004,                 # 0.6% → 0.4% MFE 시 50% 익절
+    "고점↑": 0.004,                # 0.5% → 0.4% MFE 시 50% 익절
+    "거래량↑": 0.003,              # 0.4% → 0.3% MFE 시 50% 익절
+    "기본": 0.004,                 # 0.5% → 0.4% MFE 기본값
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
@@ -1246,10 +1247,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = base_qty * entry_price
 
-        # 🔧 FIX: 가용잔고 초과 방지 (손절폭 좁으면 사이징 과대해짐)
-        MAX_POSITION_RATIO = 0.95  # 가용잔고의 95% 상한
+        # 🔧 FIX: 가용잔고 초과 방지 (알트 1종목 과집중 방지)
+        MAX_POSITION_RATIO = 0.35  # 🔧 0.95→0.35 (가용잔고의 35% 상한)
         if krw_to_use > krw_bal * MAX_POSITION_RATIO:
-            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 95% → 캡")
+            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 35% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
 
         # 🔧 probe는 최소 7000원, confirm은 5000원
@@ -2460,21 +2461,22 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         #    - 🔧 익절키우기: 전체 목표 상향 → 더 큰 수익 추구
         elif ret_pct is not None:
             # signal_tag별 익절 목표 (% 단위) - 익절키우기 적용
+            # 🔧 TP 앞당기기: 부분익절을 빨리 → 승률 안정화, 남은 물량은 트레일로 길게
             TP_FULL = {
-                "🔥점화": 3.0,              # 2.2% → 3.0% (강신호는 크게)
-                "강돌파 (EMA↑+고점↑)": 2.5,  # 1.8% → 2.5%
-                "EMA↑": 2.0,                 # 1.4% → 2.0%
-                "고점↑": 1.6,                # 1.2% → 1.6%
-                "거래량↑": 1.3,              # 1.0% → 1.3%
-                "기본": 1.5,                 # 1.2% → 1.5%
+                "🔥점화": 1.8,              # 3.0% → 1.8% (강신호도 현실적으로)
+                "강돌파 (EMA↑+고점↑)": 1.5,  # 2.5% → 1.5%
+                "EMA↑": 1.2,                 # 2.0% → 1.2%
+                "고점↑": 1.0,                # 1.6% → 1.0%
+                "거래량↑": 0.8,              # 1.3% → 0.8%
+                "기본": 0.9,                 # 1.5% → 0.9%
             }
             TP_PART = {
-                "🔥점화": 1.6,              # 1.2% → 1.6%
-                "강돌파 (EMA↑+고점↑)": 1.4,  # 1.0% → 1.4%
-                "EMA↑": 1.2,                 # 0.8% → 1.2%
-                "고점↑": 1.0,                # 0.7% → 1.0%
-                "거래량↑": 0.8,              # 0.6% → 0.8%
-                "기본": 0.9,                 # 0.7% → 0.9%
+                "🔥점화": 0.6,              # 1.6% → 0.6% (강신호도 빠른 부분익절)
+                "강돌파 (EMA↑+고점↑)": 0.5,  # 1.4% → 0.5%
+                "EMA↑": 0.45,                # 1.2% → 0.45%
+                "고점↑": 0.40,               # 1.0% → 0.40%
+                "거래량↑": 0.35,             # 0.8% → 0.35%
+                "기본": 0.40,                # 0.9% → 0.40%
             }
 
             # 현재 포지션의 signal_tag 가져오기
@@ -2566,7 +2568,7 @@ MIN_DEPTH_KRW = 6_000_000
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 60.0      # 🔧 회전율 상한 (%) - 40→60 (복합조건 turn>50+spread 활성화)
+GATE_TURN_MAX = 30.0      # 🔧 회전율 상한 (%) - 60→30 (이미 한참 달린 종목 차단)
 GATE_SPREAD_MAX = 1.50    # 🔧 HOTFIX: 저가 코인(100원 이하) 스프레드 허용 - 0.40→1.50%
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
@@ -2582,9 +2584,9 @@ GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 8→6 완화
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - 4.0 (급등주 진입 허용)
-GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - 2.5→7.5 완화 (저유동성 시간대 대응)
+GATE_FRESH_AGE_MAX = 3.0  # 🔧 틱 신선도 상한 (초) - 7.5→3.0 (장중 기본, 시간대별 동적 완화)
 GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
-GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - 0.8→0.5 완화 (무알람 대응)
+GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
@@ -3687,9 +3689,13 @@ def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
         if return_age:
             return False, 999.0, max_age
         return False
+    # 🔧 시간대별 신선도 동적 완화 (장중 엄격, 야간 완화)
     h = now_kst().hour
     if 0 <= h < 6:
-        max_age = max_age + 0.8
+        max_age = max(max_age, 5.0)   # 야간: 최소 5초
+    elif 6 <= h < 9:
+        max_age = max(max_age, 4.0)   # 새벽~장전: 최소 4초
+    # 9~24시(장중): GATE_FRESH_AGE_MAX 그대로 (3초)
     now = int(time.time() * 1000)
     # 최근 2틱 중 가장 오래된 틱의 나이 계산
     tick_ages = [(now - x.get("timestamp", 0)) / 1000.0 for x in ticks[:2]]
@@ -4582,7 +4588,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0, best_ask_krw=0):
+                 ignition_score=0, best_ask_krw=0, cur_price=0):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4621,11 +4627,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
-    # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영)
-    # - 저가 코인(100원 이하)은 호가단위 때문에 스프레드가 구조적으로 높음
-    # - 호가깊이 기반 제한 제거 → 기본 GATE_SPREAD_MAX만 사용
-    # - GATE_SPREAD_MAX를 0.40% → 0.60%로 상향 (저가 허용)
-    eff_spread_max = GATE_SPREAD_MAX  # 기본값 사용 (상단에서 조정)
+    # 🔧 FIX: 스프레드 가격대별 상한 (저가 코인은 호가단위 때문에 구조적으로 높음)
+    if cur_price > 0 and cur_price < 100:
+        eff_spread_max = 0.80   # 100원 미만: 0.80%
+    elif cur_price >= 100 and cur_price < 1000:
+        eff_spread_max = 0.45   # 100~1000원: 0.45%
+    else:
+        eff_spread_max = 0.25   # 1000원 이상: 0.25%
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
@@ -5040,7 +5048,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         high_breakout=high_breakout,
         vol_vs_ma=vol_vs_ma,
         ignition_score=ignition_score,
-        best_ask_krw=ob.get("best_ask_krw", 0)  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
+        best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
+        cur_price=cur["trade_price"],  # 🔧 스프레드 가격대별 분리용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
