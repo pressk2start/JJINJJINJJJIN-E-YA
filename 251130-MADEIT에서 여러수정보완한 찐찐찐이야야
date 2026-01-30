@@ -4890,12 +4890,11 @@ def regime_filter(m, c1, cur_price):
     # if near_box and box_pos == "BOX_TOP":
     #     return False, "BOX_TOP"
 
-    # 3) EMA 기울기 판정 (선택적)
+    # 3) EMA 기울기 판정 → 평평하면 entry_mode 다운그레이드
     slope = calc_ema_slope(c1, period=20, lookback=5)
-    if abs(slope) < 0.001:  # 0.1% 미만
-        # 횡보 + 기울기 평평 = 강한 횡보 신호
-        # 하지만 다른 조건 통과했으면 일단 허용
-        pass
+    if abs(slope) < 0.001:  # 0.1% 미만 → 기울기 거의 없음
+        # 🔧 FIX: no-op 제거 → "FLAT_SLOPE" 힌트 반환 (caller에서 half로 다운그레이드)
+        return True, "FLAT_SLOPE"
 
     return True, "OK"
 
@@ -4921,6 +4920,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if not regime_ok:
         cut("REGIME_FILTER", f"{m} {regime_reason}")
         return None
+    # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
+    regime_flat = (regime_reason == "FLAT_SLOPE")
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
@@ -4994,7 +4995,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         else:
             vol_surge = vol_surge_ema
     else:
-        vol_surge = current_volume / max(current_volume / 8, 1)
+        # 🔧 FIX: 과거 거래량 없으면 보수적 1.0 (기존: 항상 8로 고정되는 버그)
+        vol_surge = 1.0
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
     imbalance = calc_orderbook_imbalance(ob)
@@ -5197,6 +5199,11 @@ def final_check_leader(m, pre, tight_mode=False):
         entry_mode = "half"
     else:
         entry_mode = "confirm"
+
+    # 🔧 FIX: FLAT_SLOPE 레짐 → confirm을 half로 다운그레이드 (횡보장 리스크 축소)
+    if regime_flat and entry_mode == "confirm":
+        entry_mode = "half"
+        print(f"[REGIME_FLAT] {m} EMA slope 평평 → confirm→half 다운그레이드")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
@@ -5518,6 +5525,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
+
+    # 🔧 FIX: 곱셈 후 재클램프 (DYN_SL_MAX 초과 방지)
+    pct = min(max(pct, DYN_SL_MIN), DYN_SL_MAX)
 
     # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
@@ -5851,7 +5861,7 @@ def monitor_position(m,
     signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
 
     try:
-        while time.time() - start_ts <= horizon:
+        while time.time() - start_ts <= MAX_RUNTIME:
             time.sleep(RECHECK_SEC)
 
             ticks = get_recent_ticks(m, 100)
@@ -6029,8 +6039,8 @@ def monitor_position(m,
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
-                ob_pyr = pre.get("ob", {})
+                # 🔧 FIX: 추매 시 fresh 오더북 조회 (진입 시점 스냅샷은 stale)
+                ob_pyr = fetch_orderbook_cache(m) or pre.get("ob", {})
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
