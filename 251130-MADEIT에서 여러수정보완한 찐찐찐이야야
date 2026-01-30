@@ -4829,8 +4829,20 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if signal_tag == "거래량↑" and imbalance < 0.35:
         return False, f"거래량↑임밸부족 {imbalance:.2f}<0.35 (돌파 없는 볼륨 진입 강화)"
 
+    # 🔧 FIX (1-1): 거래량↑ 단독 진입 시 스프레드 타이트 컷 (얇은 호가 미끄러짐 방지)
+    if signal_tag == "거래량↑" and spread > 0.5:
+        return False, f"거래량↑스프레드과다 {spread:.2f}%>0.50% (호가 얇은 볼륨 진입 차단)"
+
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
+    # 🔧 FIX (3): eff_* 임계치를 _last_eff에 저장 (CSV 로깅용)
+    stage1_gate._last_eff = {
+        "eff_surge_min": eff_surge_min,
+        "eff_turn_min": eff_turn_min,
+        "eff_spread_max": eff_spread_max,
+        "eff_buy_min": eff_buy_min,
+        "eff_imb_min": eff_imb_min,
+    }
     return True, f"{signal_tag} PASS | {pass_summary}"
 
 
@@ -5213,6 +5225,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
         "overheat": overheat,
+        # 🔧 FIX (3): eff_* 임계치 전달 (CSV 로깅용)
+        **getattr(stage1_gate, "_last_eff", {}),
     }
 
     return pre
@@ -5306,7 +5320,10 @@ DL_FIELDS = [
     # 🚀 초단기 미세필터 지표 추가
     "cv", "pstd", "best_ask_krw", "prebreak_band", "is_prebreak",
     "ret_3m", "ret_10m", "ret_15m", "maxdd_10m", "maxrun_10m", "label_win10",
-    "label_fail10"
+    "label_fail10",
+    # 🔧 FIX (3): 경로 분석 + 임계치 역추적용
+    "signal_tag", "eff_surge_min", "eff_turn_min", "eff_spread_max",
+    "eff_buy_min", "eff_imb_min", "ignition_score",
 ]
 
 
@@ -5407,7 +5424,15 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "maxdd_10m": "",
         "maxrun_10m": "",
         "label_win10": "",
-        "label_fail10": ""
+        "label_fail10": "",
+        # 🔧 FIX (3): 경로 분석 + 임계치 역추적용
+        "signal_tag": pre.get("signal_tag", ""),
+        "eff_surge_min": round(flags.get("eff_surge_min", 0), 3),
+        "eff_turn_min": round(flags.get("eff_turn_min", 0), 2),
+        "eff_spread_max": round(flags.get("eff_spread_max", 0), 2),
+        "eff_buy_min": round(flags.get("eff_buy_min", 0), 3),
+        "eff_imb_min": round(flags.get("eff_imb_min", 0), 3),
+        "ignition_score": pre.get("ignition_score", 0),
     }
     return row
 
@@ -5601,9 +5626,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, buy
     if imbalance is not None and imbalance < 0.3:
         pct *= 1.15  # 매도 우위 → 손절 넓게 (+15%)
 
-    # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
-    if current_price and current_price > entry_price * 1.008:
-        pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
+    # 🔧 FIX (2-2): 수익 중 손절 확대(pct*=1.5) 제거
+    # 수익 보호는 트레일링이 담당. 손절 넓히면 이익 반납 위험.
+    # (monitor_position에서 +0.8% 이상이면 trail_armed 강제로 전환)
 
     # 🔧 최종 클램프: DYN_SL_MIN ~ DYN_SL_MAX * 2 범위로 제한
     pct = min(max(pct, DYN_SL_MIN), DYN_SL_MAX * 2)
@@ -5933,6 +5958,16 @@ def monitor_position(m,
         entry_mode = pos.get("entry_mode", "confirm")
         signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
 
+    # 🔧 FIX (2-1): 경로별 트레일 간격 차등 (점화=넓게 달리기 / 거래량=좁게 스캘핑)
+    _TRAIL_MULT_BY_TAG = {
+        "🔥점화": 1.4,                    # 넓게 — 큰 추세 먹기
+        "강돌파 (EMA↑+고점↑)": 1.2,       # 약간 넓게
+        "EMA↑": 1.0,                       # 기본
+        "고점↑": 0.9,                      # 약간 좁게
+        "거래량↑": 0.75,                   # 좁게 — 짧게 먹고 튀기
+    }
+    trail_dist_min *= _TRAIL_MULT_BY_TAG.get(signal_tag, 1.0)
+
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
@@ -6019,8 +6054,9 @@ def monitor_position(m,
                 # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
                 gain_now = (curp / entry_price - 1.0)
 
-                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
-                ob_now = pre.get("ob", {})
+                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (stale pre["ob"] 대신)
+                _ob_fresh = fetch_orderbook_cache([m]).get(m, {})
+                ob_now = _ob_fresh if _ob_fresh else pre.get("ob", {})
                 imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
@@ -6054,7 +6090,8 @@ def monitor_position(m,
                         )
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
-            if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
+            # 🔧 FIX (2-2): +0.8% 이상이면 트레일 강제 무장 (pct*=1.5 대체)
+            if (not trail_armed) and (gain_from_entry >= dyn_checkpoint or gain_from_entry >= 0.008):
                 trail_armed = True
                 # 초기 트레일: ATR 기준 혹은 최소거리 (🔧 손절폭 연동)
                 atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
@@ -6069,8 +6106,9 @@ def monitor_position(m,
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
-                ob_pyr = pre.get("ob", {})
+                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (stale pre["ob"] 대신)
+                _ob_pyr_fresh = fetch_orderbook_cache([m]).get(m, {})
+                ob_pyr = _ob_pyr_fresh if _ob_pyr_fresh else pre.get("ob", {})
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
@@ -7012,7 +7050,13 @@ def main():
                             "early_ok":
                             pre.get("early_ok", False),
                             "uptick_ok":
-                            True
+                            True,
+                            # 🔧 FIX (3): eff_* 임계치 (CSV 역추적용)
+                            "eff_surge_min": pre.get("eff_surge_min", 0),
+                            "eff_turn_min": pre.get("eff_turn_min", 0),
+                            "eff_spread_max": pre.get("eff_spread_max", 0),
+                            "eff_buy_min": pre.get("eff_buy_min", 0),
+                            "eff_imb_min": pre.get("eff_imb_min", 0),
                         }
                         row = snapshot_row(m, pre["price"], payload, pre, c1,
                                            ob, t15_now, btc1m, btc5m, flags)
