@@ -1013,7 +1013,7 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
         if not js:
             print(f"[GUARD] {m} 티커 조회 실패 → 가드 스킵")
-            return True, initial_price
+            return True, initial_price, False
 
         current_price = js[0].get("trade_price", initial_price)
         drift = (current_price / initial_price - 1.0)
@@ -1041,20 +1041,20 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             if AGGRESSIVE_MODE and drift <= (thr + 0.003):
                 print(
                     f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+0.3% "
-                    f"→ 공격 모드: 추격 진입 허용"
+                    f"→ 공격 모드: 추격 진입 허용 (probe 강제)"
                 )
-                return True, current_price
+                return True, current_price, True  # chase=True → probe 강제
 
             # 이 이상은 진짜 너무 튄 거라 컷 (signal_skip에서 로그 처리)
-            return False, current_price
+            return False, current_price, False
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
         down_thr = max(0.005, thr * 0.8)  # 🔧 0.5% 또는 상단의 80%
         if drift < -down_thr:
             # 급락 컷 (signal_skip에서 로그 처리)
-            return False, current_price
+            return False, current_price, False
 
-        return True, current_price
+        return True, current_price, False
 
     except Exception as e:
         print(f"[GUARD_ERR] {m}: {e} → 1회 재시도")
@@ -1070,13 +1070,13 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
                 # 재시도 성공 시 간단히 상승률만 체크 (동적 임계치는 기본값 사용)
                 if drift <= 0.006:  # 0.6% 이하면 통과
                     print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
-                    return True, current_price
+                    return True, current_price, False
                 else:
                     print(f"[GUARD_RETRY_FAIL] {m} 재시도 성공했으나 급등 (drift={drift*100:.2f}%)")
-                    return False, current_price
+                    return False, current_price, False
         except Exception as e2:
             print(f"[GUARD_RETRY_ERR] {m}: {e2}")
-        return False, initial_price
+        return False, initial_price, False
 
 # =========================
 # 🔥 자동 매수 진입
@@ -1185,7 +1185,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
-        ok_guard, current_price = final_price_guard(m, signal_price, ticks=pre.get("ticks"))
+        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"))
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
             signal_skip(f"가격가드 실패 (신호가→현재가 {drift_pct:+.2f}%)")
@@ -1199,6 +1199,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             return
+
+        # 🔧 추격진입 시 사이즈 다운: probe 강제
+        if is_chase and entry_mode != "probe":
+            print(f"[CHASE_SIZE_DOWN] {m} 추격진입 감지 → entry_mode={entry_mode}→probe (10%)")
+            entry_mode = "probe"
+            entry_fraction = 0.10
+            mode_emoji = "🧭"
 
         # === 계좌 & 주문금액 계산 ===
         accounts = get_account_info()
@@ -2389,6 +2396,19 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                         print(f"[REMONITOR] {m} {reason} → 나머지 청산")
                         close_auto_position(m, reason)
                         return True
+
+                    # 🔧 부분익절 후 타임스탑: 3분간 횡보 시 잔량 정리
+                    # - 부분익절 후 추가 상승 없이 시간만 경과 → 기회비용 낭비 방지
+                    partial_elapsed = time.time() - partial_ts
+                    if partial_elapsed >= 180 and entry_price > 0:
+                        ret_from_entry = (cur_price / entry_price - 1.0)
+                        # 진입가 대비 +0.3% 이하면 더 이상 기대 어려움 → 잔량 정리
+                        if ret_from_entry <= 0.003:
+                            reason = (f"부분익절 후 타임스탑 {partial_elapsed:.0f}초 경과, "
+                                      f"수익률 {ret_from_entry*100:.2f}% ≤ 0.3% → 잔량청산")
+                            print(f"[REMONITOR][TIMESTOP] {m} {reason}")
+                            close_auto_position(m, reason)
+                            return True
                 else:
                     # 손절 부분청산 후: 추가 하락 → 청산
                     # 🔧 FIX: Division by Zero 방어
@@ -2502,8 +2522,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
             # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
 
-            part_tp = max(part_tp, cp_alpha + 0.15)    # 0.25%+ 최소 (slip_extra 제거)
-            full_tp = max(full_tp, cp_alpha + 0.45)    # 0.55%+ 최소 (slip_extra 제거)
+            # 🔧 TP 변동성 연동: ATR(sl_pct) 기반으로 TP 바닥을 동적으로 설정
+            # 변동성 큰 종목: TP가 너무 빨리 닿아서 잘게 먹고 끝 → 바닥 올림
+            # 변동성 작은 종목: TP가 너무 멀어서 도달 못함 → 기본값 유지
+            atr_pct_100 = pos_for_tag.get("sl_pct", 0.005) * 100  # 예: 0.5%
+            part_tp = max(part_tp, cp_alpha + 0.15, 0.6 * atr_pct_100)
+            full_tp = max(full_tp, cp_alpha + 0.45, 1.2 * atr_pct_100)
 
             # 🔧 FIX: TP 판단을 net 기준으로 (수수료 + 예상 exit 슬립 반영)
             # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
