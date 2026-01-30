@@ -4709,10 +4709,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
-    # 🔧 과회전 상한 (승 10.2% vs 패 26.8% → 20% 상한)
-    if turn_pct > GATE_TURN_MAX:
-        return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}%"
-    # 🔧 (제거됨) 50% hard check - GATE_TURN_MAX=30에서 도달 불가, 위에서 이미 컷됨
+    # 🔧 (제거됨) 과회전 상한 - 스프레드/임밸런스 게이트가 슬리피지 이미 필터링, 중복 제거
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
@@ -4751,9 +4748,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 🔧 강돌파 전용 강화 임계치 (일반보다 빡세게)
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
-        # 회전율 상한 강화
-        if turn_pct > GATE_STRONGBREAK_TURN_MAX:
-            return False, f"강돌파+과회전 {turn_pct:.1f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}%"
+        # 🔧 (제거됨) 회전율 상한 - 과회전 필터 전체 제거에 따라 삭제
         # 가속도 상한 강화
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x"
