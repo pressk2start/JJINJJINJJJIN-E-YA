@@ -750,7 +750,7 @@ def get_actual_balance(market):
             if a.get("currency") == currency:
                 return float(a.get("balance", "0"))
         return 0.0
-    except:
+    except Exception:
         return 0.0
 
 def get_balance_with_locked(market, retries=2):
@@ -907,7 +907,7 @@ def sync_orphan_positions():
             try:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
                 cur_price = cur_js[0].get("trade_price", avg_buy_price) if cur_js else avg_buy_price
-            except:
+            except Exception:
                 cur_price = avg_buy_price
 
             # 수익률 계산
@@ -992,7 +992,7 @@ def sync_orphan_positions():
                             else:
                                 tg_send(f"🚨 {m} 유령포지션 오류 → 청산 시도\n• 예외: {e}")
                                 close_auto_position(m, f"유령모니터링예외 | {e}")
-                        except:
+                        except Exception:
                             tg_send(f"🚨 {m} 유령포지션 오류\n• 예외: {e}")
                     finally:
                         # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
@@ -1803,7 +1803,7 @@ def close_auto_position(m, reason=""):
             if AUTO_LEARN_ENABLED:
                 try:
                     update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
-                except:
+                except Exception:
                     pass
             return
 
@@ -1865,10 +1865,10 @@ def close_auto_position(m, reason=""):
                                 avg_price = float(od.get("avg_price") or "0")
                                 if avg_price > 0:
                                     exit_price_used = avg_price
-                            except:
+                            except Exception:
                                 pass
                             print(f"[AUTO] {m} trades 없음, executed_volume={executed:.6f}로 대체")
-                    except:
+                    except Exception:
                         pass
 
             # 🔧 FIX #1: 미체결 시 잔고 재확인 후 처리 (지연 체결 대응 강화)
@@ -2063,7 +2063,7 @@ def close_auto_position(m, reason=""):
                 if AUTO_LEARN_ENABLED:
                     try:
                         update_trade_result(m, 0, 0, 0)
-                    except:
+                    except Exception:
                         pass
                 return
 
@@ -2081,7 +2081,7 @@ def close_auto_position(m, reason=""):
                     if AUTO_LEARN_ENABLED:
                         try:
                             update_trade_result(m, 0, 0, 0)
-                        except:
+                        except Exception:
                             pass
             return
     finally:
@@ -2427,7 +2427,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             try:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
                 cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
-            except:
+            except Exception:
                 cur_price = 0
 
             if cur_price > 0 and partial_price > 0:
@@ -2739,7 +2739,7 @@ def calc_orderbook_imbalance(ob):
             return 0.0
         imbalance = (bid_weighted - ask_weighted) / total
         return max(-1.0, min(1.0, imbalance))
-    except:
+    except Exception:
         return 0.0
 
 def _safe_float(x, default=0.0):
@@ -2751,7 +2751,7 @@ def _safe_float(x, default=0.0):
         if math.isnan(f) or math.isinf(f):
             return default
         return f
-    except:
+    except Exception:
         return default
 
 def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
@@ -3246,7 +3246,7 @@ def analyze_and_update_weights():
                 w_avg = pd.to_numeric(wins[col], errors='coerce').mean()
                 l_avg = pd.to_numeric(loses[col], errors='coerce').mean()
                 stats[col] = {"win": w_avg, "lose": l_avg}
-            except:
+            except Exception:
                 pass
 
         # 조절 로직 (10% 블렌딩, 하드바운드 적용)
@@ -3449,7 +3449,7 @@ def is_strong_momentum(ticks, ob):
 
         # 약세 점수 3점 이상이면 약세 판정 → False 반환 (🔧 2→3 강화: 확실한 약세만 스캘핑)
         return weak_score < 3
-    except:
+    except Exception:
         return False
 
 def load_exit_params():
@@ -3749,7 +3749,7 @@ def body_ratio(c):
     try:
         return max((c["trade_price"] - c["opening_price"]) /
                    max(c["opening_price"], 1), 0)
-    except:
+    except Exception:
         return 0
 
 
@@ -3813,7 +3813,7 @@ def five_min_context_ok(m):
         recent_break = c5[-1]["high_price"] > max(x["high_price"]
                                                   for x in c5[-4:-1])
         return (slope3 > 0) or recent_break
-    except:
+    except Exception:
         return True
 
 def get_dynamic_thresholds():
@@ -3862,7 +3862,7 @@ def relax_knob():
     """
     try:
         b5 = btc_5m_change()
-    except:
+    except Exception:
         b5 = 0.0
     h = now_kst().hour
     f = 0.0
@@ -3967,7 +3967,7 @@ def micro_tape_stats_from_ticks(ticks, sec):
     try:
         newest_ts = ticks[0]["timestamp"]
         cutoff = newest_ts - sec * 1000
-    except:
+    except Exception:
         return {
             "krw": 0,
             "n": 0,
@@ -4027,7 +4027,7 @@ def calc_consecutive_buys(ticks, sec=15):
     try:
         newest_ts = ticks[0]["timestamp"]
         cutoff = newest_ts - sec * 1000
-    except:
+    except Exception:
         return 0
 
     max_streak = 0
@@ -4171,7 +4171,7 @@ def dynamic_prebreak_band(ticks):
 def _pct(a, b):
     try:
         return abs(a / b - 1.0)
-    except:
+    except Exception:
         return 0.0
 
 
@@ -4179,7 +4179,7 @@ def inter_arrival_stats(ticks, sec=30):
     if not ticks: return {"cv": 9.9, "count": 0}
     try:
         newest_ts = ticks[0]["timestamp"]
-    except:
+    except Exception:
         return {"cv": 9.9, "count": 0}
     cutoff = newest_ts - sec * 1000
     ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
@@ -4198,7 +4198,7 @@ def price_band_std(ticks, sec=30):
     if not ticks: return None
     try:
         newest_ts = ticks[0]["timestamp"]
-    except:
+    except Exception:
         return None
     cutoff = newest_ts - sec * 1000
     ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
@@ -4213,7 +4213,7 @@ def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
     if not ticks: return 0.0
     try:
         newest_ts = ticks[0]["timestamp"]
-    except:
+    except Exception:
         return 0.0
     cutoff = newest_ts - sec * 1000
     win = [x for x in reversed(ticks) if x["timestamp"] >= cutoff]
@@ -4231,7 +4231,7 @@ def wash_trade_pattern(ticks, sec=30, repeats=BOT_WASH_REPEAT_VOL_N):
     if not ticks: return False
     try:
         newest_ts = ticks[0]["timestamp"]
-    except:
+    except Exception:
         return False
     cutoff = newest_ts - sec * 1000
     vols = {}
@@ -4249,7 +4249,7 @@ def _win_stats(ticks, start_s, end_s):
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     try:
         newest_ts = ticks[0]["timestamp"]
-    except:
+    except Exception:
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     lo = newest_ts - end_s * 1000
     hi = newest_ts - start_s * 1000
@@ -4544,7 +4544,7 @@ def check_retest_entry(m):
         if not cur_js or len(cur_js) == 0:
             return None
         cur_price = cur_js[0].get("trade_price", 0)
-    except:
+    except Exception:
         return None
 
     if cur_price <= 0:
@@ -4626,7 +4626,7 @@ def is_morning_session():
     try:
         cur_hour = now_kst().hour
         return RETEST_MORNING_HOURS[0] <= cur_hour < RETEST_MORNING_HOURS[1]
-    except:
+    except Exception:
         return False
 
 
@@ -4694,7 +4694,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영 + 점화 완화)
     # - 저가 코인(100원 이하)은 호가단위 때문에 스프레드가 구조적으로 높음
     # - 점화 점수 높으면 스프레드 허용치 상향 (SOMI 같은 케이스 대응)
-    eff_spread_max = min(1.5, GATE_SPREAD_MAX * (1 + relax))  # 점화 시 30% 상향 (0.17% → 0.22%)
+    eff_spread_max = min(1.5, GATE_SPREAD_MAX * (1 + relax))  # 점화 시 25% 상향
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
@@ -4790,8 +4790,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 점화4점+ 단독 프리패스 복원 (거래량 급등 진입 확보)
     if ignition_score >= 4:
         entry_signal = True  # 점화4점 이상 = 거래량+가격+연속체결 확정 → 자동 진입
-    elif ignition_score >= 3:
-        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
     else:
         entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
 
@@ -4964,9 +4962,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
         return None
 
-    # === 🔧 레짐 필터: stage1_gate 직전으로 이동 (점화/서지 bypass 지원) ===
-    cur_price = c1[-1]["trade_price"] if c1 else 0
-
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -5040,7 +5035,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         else:
             vol_surge = vol_surge_ema
     else:
-        vol_surge = current_volume / max(current_volume / 8, 1)
+        vol_surge = 1.0  # 과거 데이터 없으면 기본 1배 (비교 불가)
 
     # 🔧 FIX: 틱 기반 실시간 서지 추가 (5초 vs 30초 시간창)
     # 봉 마감 전에도 펌프 초반 감지 가능 (NOM 같은 틱 희박 코인 대응)
@@ -5323,7 +5318,7 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         bid_sum = sum(u["bid_size"] * u["bid_price"] for u in raw_ob)
         ask_sum = sum(u["ask_size"] * u["ask_price"] for u in raw_ob)
         bidask_ratio = bid_sum / max(ask_sum, 1)
-    except:
+    except Exception:
         bidask_ratio = 0.0
 
     # 🔥 새 지표 계산
@@ -5734,7 +5729,7 @@ def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
     """
     try:
         ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
-    except:
+    except Exception:
         ret_pct = 0.0
 
     # 컨텍스트 스코어(추세역전 신호들)
@@ -5865,7 +5860,6 @@ def monitor_position(m,
     if horizon is None:
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
     start_ts = time.time()
-    MAX_RUNTIME = horizon * 1.5  # 최대 허용 실행시간 (정상시간의 1.5배)
 
 
     # 디바운스/트레일 상태
@@ -5912,26 +5906,14 @@ def monitor_position(m,
     last_peak_ts = time.time()   # 마지막 고점 갱신 시간
     plateau_partial_done = False # Plateau 부분익절 완료 여부
 
-    # === 🔧 고점 갱신 기반 시간손절 (페이크 돌파 조기 탈출) ===
-    peak_update_count = 0        # 고점 갱신 횟수
-    NO_PEAK_TIMEOUT_SEC = 45     # 45초 내 고점 갱신 없으면 페이크로 간주
-    MIN_PEAK_UPDATES = 1         # 최소 1회 고점 갱신 필요
-
     # === 🔧 MFE 기반 부분익절 상태 ===
     mfe_partial_done = False     # MFE 부분익절 완료 여부
-
-    # === 🔧 횡보 탈출 미니트레일 상태 ===
-    sideways_peak = 0.0          # 60초 이후 고점 추적
-
-    # === 🔥 실패 브레이크아웃 감지 상태 ===
-    breakout_reached = False     # +0.15% 이상 돌파 여부
-    breakout_ts = 0.0            # 돌파 시점 타임스탬프
 
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
-    entry_mode = pos.get("entry_mode", "confirm")
-    signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
+        entry_mode = pos.get("entry_mode", "confirm")
+        signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
 
     try:
         while time.time() - start_ts <= horizon:
@@ -5960,18 +5942,8 @@ def monitor_position(m,
             new_high = curp > best
             if new_high:
                 last_peak_ts = time.time()  # 🔥 Plateau 감지용 고점 시간 갱신
-                peak_update_count += 1      # 🔧 고점 갱신 횟수 증가
             best = max(best, curp)
             worst = min(worst, curp)
-
-            # 🔧 고점 미갱신 시간손절 - 비활성화 (진입 타이트하므로 청산은 루즈하게)
-            # alive_sec_now = time.time() - start_ts
-            # if alive_sec_now >= NO_PEAK_TIMEOUT_SEC and peak_update_count < MIN_PEAK_UPDATES:
-            #     cur_gain_check = (curp / entry_price - 1.0)
-            #     if cur_gain_check <= 0:
-            #         close_auto_position(m, f"고점미갱신 | {alive_sec_now:.0f}초 내 갱신 {peak_update_count}회 (페이크 돌파)")
-            #         verdict = "고점 미갱신 페이크"
-            #         break
 
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100
@@ -5999,43 +5971,6 @@ def monitor_position(m,
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
                 break
-
-            # === 🔥 실패 브레이크아웃 즉시 탈출 ===
-            # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
-            # === 🔧 실패돌파 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
-            # BREAKOUT_THRESHOLD = 0.0015  # +0.15%
-            # BREAKOUT_FAIL_SEC = 5        # 5초 이내 복귀하면 실패
-            # if not breakout_reached and cur_gain >= BREAKOUT_THRESHOLD:
-            #     breakout_reached = True
-            #     breakout_ts = time.time()
-            # if breakout_reached and cur_gain <= 0:
-            #     time_since_breakout = time.time() - breakout_ts
-            #     if time_since_breakout <= BREAKOUT_FAIL_SEC:
-            #         close_auto_position(m, f"실패돌파 | +{BREAKOUT_THRESHOLD*100:.2f}%→{cur_gain*100:.2f}% ({time_since_breakout:.1f}초)")
-            #         verdict = "실패돌파"
-            #         outcome_extra = f"(돌파후 {time_since_breakout:.1f}초 내 복귀)"
-            #         break
-
-            # === 🔧 스크래치 규칙 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
-            # if alive_sec >= SCRATCH_TIMEOUT_SEC and alive_sec < SIDEWAYS_TIMEOUT:
-            #     max_gain = (best / entry_price - 1.0)  # MFE
-            #     if max_gain < SCRATCH_MIN_GAIN:
-            #         flow_accel = calc_flow_acceleration(ticks)
-            #         if flow_accel < 0.7:
-            #             close_auto_position(m, f"스크래치 | {alive_sec:.0f}초 MFE {max_gain*100:.3f}% 흐름둔화({flow_accel:.2f}x)")
-            #             verdict = "스크래치"
-            #             outcome_extra = f"(MFE {max_gain*100:.3f}%, flow={flow_accel:.2f})"
-            #             break
-
-            # === 🔧 횡보 탈출 로직 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
-            # if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
-            #     sideways_peak = max(sideways_peak, cur_gain)
-            #     SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
-            #     if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
-            #         close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
-            #         verdict = "횡보탈출"
-            #         outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
-            #         break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
@@ -6272,7 +6207,7 @@ def monitor_position(m,
         if entry_price > 0:
             try:
                 ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0
-            except:
+            except Exception:
                 ret_pct = 0.0
             maxrun = (best / entry_price - 1.0) * 100.0
             maxdd = (worst / entry_price - 1.0) * 100.0
@@ -6412,7 +6347,7 @@ def tg_send(t, retry=1):
                                 ok_any = True
                                 sent = True
                                 break
-                        except:
+                        except Exception:
                             pass
             except Exception as e:
                 print(f"[TG][{cid}] exception: {e}")
@@ -6655,7 +6590,7 @@ def fetch_orderbook_cache(mkts):
                     "depth_krw": askv + bidv,
                     "raw": ob
                 }
-            except:
+            except Exception:
                 pass
     return cache
 
@@ -6692,7 +6627,7 @@ def main():
             try:
                 with open("/home/ubuntu/bot/health.log", "w") as hf:
                     hf.write(f"{time.time()}\n")
-            except:
+            except Exception:
                 pass
 
             # BTC_guard 제거 — 항상 기본 모드로 실행
@@ -6765,7 +6700,7 @@ def main():
                     m = futures[f]
                     try:
                         c1_cache[m] = f.result() or []
-                    except:
+                    except Exception:
                         c1_cache[m] = []
 
             found = 0
