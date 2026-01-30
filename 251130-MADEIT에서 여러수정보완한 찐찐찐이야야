@@ -1325,6 +1325,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             prev_balance = 0.0
 
         try:
+            # 🔧 FIX: 매수 주문 전에 _RECENT_BUY_TS 선제 기록 (유령 오탐 방지)
+            # - 주문~체결 사이에 sync_orphan이 돌면 잔고 발견 → 유령으로 오판
+            # - 주문 전에 기록해두면 sync에서 300초 보호에 걸려 스킵됨
+            _RECENT_BUY_TS[m] = time.time()
             res = place_market_buy(m, krw_to_use)
             print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
             oid = res.get("uuid") if isinstance(res, dict) else None
