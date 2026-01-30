@@ -1344,28 +1344,37 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             # - od가 None/timeout/executed 0이어도 실제 체결됐을 수 있음
             # - 전면 잔고 fallback 부활 X → prev_balance 대비 증가분만 인정 (오탐 방지)
             if volume_filled <= 0:
-                # 1회 재검증: 잔고가 prev_balance보다 증가했는지 확인
+                # 🔧 FIX: 잔고 재검증 1초 간격 최대 8회 (업비트 잔고 반영 지연 대응)
+                # - 기존: 0.5초 1회 → 유령 포지션의 주요 원인
+                # - 변경: 1초 간격 최대 8회 재시도 → 체결 반영 지연 충분히 커버
+                verified = False
                 try:
-                    time.sleep(0.5)  # 업비트 잔고 반영 대기
-                    accounts_retry = get_account_info()
-                    new_balance = 0.0
-                    avg_buy_price_from_acc = entry_price
-                    for acc in accounts_retry:
-                        if acc.get("currency") == coin:
-                            new_balance = float(acc.get("balance") or "0")
-                            avg_buy_price_from_acc = float(acc.get("avg_buy_price") or "0")
-                            break
+                    for retry_i in range(8):
+                        time.sleep(1.0)  # 1초 간격 대기
+                        accounts_retry = get_account_info()
+                        new_balance = 0.0
+                        avg_buy_price_from_acc = entry_price
+                        for acc in (accounts_retry or []):
+                            if acc.get("currency") == coin:
+                                new_balance = float(acc.get("balance") or "0")
+                                avg_buy_price_from_acc = float(acc.get("avg_buy_price") or "0")
+                                break
 
-                    balance_diff = new_balance - prev_balance
-                    if balance_diff > 1e-8:  # 증가분 존재 → 실제 체결됨
-                        volume_filled = balance_diff
-                        avg_price = avg_buy_price_from_acc if avg_buy_price_from_acc > 0 else entry_price
-                        print(f"[BUY_VERIFY] {m} od 실패했으나 잔고 증가 확인: {prev_balance:.8f} → {new_balance:.8f} (체결량: {volume_filled:.8f})")
-                        tg_send(f"🔄 {m} 체결 재검증 성공\n• 잔고 변화: {prev_balance:.6f} → {new_balance:.6f}\n• 체결량: {volume_filled:.6f}")
-                    else:
-                        # 증가 없음 → 진짜 실패
-                        signal_skip("체결 0 (잔고 재검증 실패)")
-                        tg_send(f"⚠️ {m} 자동매수 체결 0 (잔고 변화 없음) → 포지션 생성 안 함")
+                        balance_diff = new_balance - prev_balance
+                        if balance_diff > 1e-8:  # 증가분 존재 → 실제 체결됨
+                            volume_filled = balance_diff
+                            avg_price = avg_buy_price_from_acc if avg_buy_price_from_acc > 0 else entry_price
+                            print(f"[BUY_VERIFY] {m} 잔고 증가 확인 (시도 {retry_i+1}/8): {prev_balance:.8f} → {new_balance:.8f} (체결량: {volume_filled:.8f})")
+                            tg_send(f"🔄 {m} 체결 재검증 성공 (시도 {retry_i+1}/8)\n• 잔고 변화: {prev_balance:.6f} → {new_balance:.6f}\n• 체결량: {volume_filled:.6f}")
+                            verified = True
+                            break
+                        if retry_i < 7:
+                            print(f"[BUY_VERIFY] {m} 잔고 변화 없음 (시도 {retry_i+1}/8) → 재시도")
+
+                    if not verified:
+                        # 8회 모두 증가 없음 → 진짜 실패
+                        signal_skip("체결 0 (잔고 재검증 8회 실패)")
+                        tg_send(f"⚠️ {m} 자동매수 체결 0 (잔고 변화 없음, 8회 재검증) → 포지션 생성 안 함")
                         with _POSITION_LOCK:
                             OPEN_POSITIONS.pop(m, None)
                         return
