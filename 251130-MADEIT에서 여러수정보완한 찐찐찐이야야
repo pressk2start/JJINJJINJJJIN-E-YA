@@ -4743,9 +4743,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
-    # === 과열 필터 (완화 없음 - 안전장치) ===
+    # === 과열 필터 (점화4점 이상 면제) ===
     overheated = accel * volume_surge
-    if overheated > GATE_OVERHEAT_MAX:
+    if overheated > GATE_OVERHEAT_MAX and ignition_score < 4:
         return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
 
     # === 가속도 컷 (동적) ===
