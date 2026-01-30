@@ -4699,7 +4699,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax - sparse_tick_relax))  # 0.5→0.4(희박) 또는 0.1(점화)
     eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
     eff_price_min = max(0.00015, GATE_PRICE_MIN * (1 - relax * 2))  # 🔧 바닥 0.015% (0으로 안 떨어지게)
-    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
+    eff_turn_min = max(0.8, GATE_TURN_MIN * (1 - relax))         # 2.0 → 1.5 (3점), 바닥 0.8% (잡음 방어)
     eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
     eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
     # 🔧 FIX: 스프레드 제한 (저가 코인 특성 반영 + 점화 완화)
@@ -4745,19 +4745,19 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_turn_max = GATE_TURN_MAX * 3.5 if is_ignition else GATE_TURN_MAX  # 60% → 210% (점화3)
     if turn_pct > eff_turn_max:
         return False, f"과회전 {turn_pct:.1f}%>{eff_turn_max:.0f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
-    # 🔧 HOTFIX: 저가 코인 스프레드 허용 (0.25%→1.0%)
-    if turn_pct > 50 and spread > 1.0:
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>1.0%"
+    # 🔧 과회전 + 스프레드 넓음 = 슬리피지 위험 (eff_spread_max 연동)
+    if turn_pct > 50 and spread > eff_spread_max:
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>{eff_spread_max:.2f}%"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
 
-    # === 과열 필터 (점화4점 이상 면제) ===
+    # === 과열 필터 (점화4점 면제, 점화3점 +50% 완화) ===
     overheated = accel * volume_surge
-    if overheated > GATE_OVERHEAT_MAX and ignition_score < 4:
-        return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX}"
+    eff_overheat_max = GATE_OVERHEAT_MAX * 1.5 if ignition_score == 3 else GATE_OVERHEAT_MAX
+    if overheated > eff_overheat_max and ignition_score < 4:
+        return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
