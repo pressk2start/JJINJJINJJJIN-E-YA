@@ -2805,7 +2805,7 @@ AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
 _trade_log_lock = threading.Lock()
 _trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
 _path_report_count = 0  # 🔍 경로 리포트용 카운터
-_reported_trades = set()  # 🔧 중복 카운트 방지용 (market, entry_ts) 세트
+_reported_trades = set()  # 🔧 중복 카운트 방지용 (market, entry_ts) 세트 — 유일 선언
 PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시와 맞춤)
 # 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
 
@@ -2818,7 +2818,7 @@ FEATURE_FIELDS = [
     # 🔥 GATE 핵심 + 초단기 미세필터 지표
     "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
     # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
-    "shadow_flags", "would_cut",
+    "shadow_flags", "would_cut", "is_prebreak",
     # 🔍 리포트 상세: 추매여부 + 청산사유
     "added", "exit_reason",
     # 🔧 MFE/MAE (최고점/최저점 수익률) - 익절/손절 튜닝용
@@ -2841,7 +2841,6 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
                 row.update(exit_data)
             w.writerow(row)
 
-_reported_trades = set()  # 🔧 FIX: (market, entry_ts) 기반 중복 방지 (30초→거래ID 기반)
 
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
@@ -4695,29 +4694,29 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 신선도 체크 (필수 - 완화 없음) ===
     if not fresh_ok:
-        return False, f"틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초"
+        return False, f"틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {metrics}"
 
     # === 거래대금 컷 ===
     if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M"
+        return False, f"거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {metrics}"
 
     # === 거래량 급등 조건 (동적) ===
     vol_ok = (volume_surge >= eff_surge_min) or (vol_vs_ma >= eff_vol_vs_ma)
     if not vol_ok and not mega:
-        return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x"
+        return False, f"거래량부족 surge{volume_surge:.1f}x<{eff_surge_min:.1f}x MA{vol_vs_ma:.1f}x<{eff_vol_vs_ma:.1f}x | {metrics}"
 
     # === 가격변동 하한 컷 (동적) ===
     if price_change < eff_price_min and not mega:
-        return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}%"
+        return False, f"변동부족 {price_change*100:.2f}%<{eff_price_min*100:.2f}% | {metrics}"
 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
-        return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}%"
+        return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}% | {metrics}"
     # 🔧 (제거됨) 과회전 상한 - 스프레드/임밸런스 게이트가 슬리피지 이미 필터링, 중복 제거
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
-        return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%"
+        return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {metrics}"
 
     # === 과열 필터 (점화/mega 시 완화) ===
     overheated = accel * volume_surge
@@ -4728,29 +4727,29 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     elif ignition_score >= 3:
         eff_overheat_max = GATE_OVERHEAT_MAX * 2.0  # 점화: 2배 완화
     if overheated > eff_overheat_max:
-        return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f}"
+        return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f} | {metrics}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
-        return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x"
+        return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x | {metrics}"
     if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x"
+        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
 
     # === 매수비 컷 (동적) ===
     if buy_ratio < eff_buy_min:
-        return False, f"매수비부족 {buy_ratio:.0%}<{eff_buy_min:.0%}"
+        return False, f"매수비부족 {buy_ratio:.0%}<{eff_buy_min:.0%} | {metrics}"
 
     # === 매수비 100% 컷 (스푸핑 의심 - 완화 없음) ===
     if abs(buy_ratio - 1.0) < 1e-6:
-        return False, "매수비100%(스푸핑)"
+        return False, f"매수비100%(스푸핑) | {metrics}"
 
     # === 급등 컷 (완화 없음 - 안전장치) ===
     if volume_surge > GATE_SURGE_MAX:
-        return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x"
+        return False, f"급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x | {metrics}"
 
     # === 호가 임밸런스 컷 (동적) ===
     if imbalance < eff_imb_min:
-        return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f}"
+        return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f} | {metrics}"
 
     # === 진입 신호 체크 (동적) ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
@@ -4761,16 +4760,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         # 🔧 (제거됨) 회전율 상한 - 과회전 필터 전체 제거에 따라 삭제
         # 가속도 상한 강화
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
-            return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x"
+            return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
-        return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%)"
+        return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
 
     # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
     # 🔧 4→3 완화: 개별조건 강화로 3점도 폭발적 급등 신호
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
-        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x"
+        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x | {metrics}"
 
     # === 통과 ===
     # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
