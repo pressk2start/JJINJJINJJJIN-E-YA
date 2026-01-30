@@ -2368,6 +2368,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         if pos and pos.get("partial_state") == "done":
             partial_price = pos.get("partial_price", 0)
             partial_type = pos.get("partial_type", "loss")
+            partial_ts = pos.get("partial_ts", 0)  # 🔧 FIX: 타임스탑용 타임스탬프
 
             # 현재가 조회
             try:
@@ -4922,6 +4923,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
     # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
     regime_flat = (regime_reason == "FLAT_SLOPE")
+    pre["regime_flat"] = regime_flat  # final_check_leader로 전달
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
@@ -5201,7 +5203,7 @@ def final_check_leader(m, pre, tight_mode=False):
         entry_mode = "confirm"
 
     # 🔧 FIX: FLAT_SLOPE 레짐 → confirm을 half로 다운그레이드 (횡보장 리스크 축소)
-    if regime_flat and entry_mode == "confirm":
+    if pre.get("regime_flat") and entry_mode == "confirm":
         entry_mode = "half"
         print(f"[REGIME_FLAT] {m} EMA slope 평평 → confirm→half 다운그레이드")
 
@@ -6040,7 +6042,8 @@ def monitor_position(m,
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
                 # 🔧 FIX: 추매 시 fresh 오더북 조회 (진입 시점 스냅샷은 stale)
-                ob_pyr = fetch_orderbook_cache(m) or pre.get("ob", {})
+                _ob_cache_pyr = fetch_orderbook_cache([m])
+                ob_pyr = _ob_cache_pyr.get(m, pre.get("ob", {}))
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
