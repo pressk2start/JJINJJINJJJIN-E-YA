@@ -2587,6 +2587,7 @@ GATE_CV_MAX = 4.0         # 🔧 CV 상한 - 4.0 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 3.0  # 🔧 틱 신선도 상한 (초) - 7.5→3.0 (장중 기본, 시간대별 동적 완화)
 GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
 GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
+GATE_VOL_VS_MA_MIN = 0.5  # 🔧 MA 대비 거래량 하한 (상수→전역변수화, 학습/튜닝 가능)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
@@ -4377,8 +4378,8 @@ def ignition_detected(
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
     if ob and ob.get("spread", 0) > 0:
-        # 스프레드가 0.5% 초과하면 불안정으로 판단
-        spread_ok = ob["spread"] <= 0.5
+        # 🔧 0.5% → 0.40% 강화 (점화 구간은 슬립 커지므로 더 엄격히)
+        spread_ok = ob["spread"] <= 0.40
 
     # ---- 점수 계산 ----
     score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
@@ -4615,18 +4616,24 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     Returns: (allow, reason)
     """
     # ============================================================
-    # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
-    # 🔧 FIX: 3점 이상 점화(확정)에서 완화 - 개별조건 강화로 3점도 신뢰성↑
+    # 🔥 점화 점수에 따른 동적 임계치 완화 (계단식 + 품질 필터 보호)
+    # 🔧 FIX: score=3은 약한 완화(0.12), score=4만 강한 완화(0.25)
+    # 🔧 FIX: 스프레드/임밸런스는 거의 안 풀기 (가짜 점화 방지)
     # ============================================================
-    relax = 0.30 if ignition_score >= 3 else 0  # 3점 이상에서 30% 완화
+    if ignition_score >= 4:
+        relax = 0.25
+    elif ignition_score == 3:
+        relax = 0.12
+    else:
+        relax = 0.0
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
-    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.4 → 0.1 (3점)
-    eff_vol_vs_ma = max(0.2, 0.5 * (1 - relax))                  # 0.5 → 0.2 (3점)
+    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.7→0.53 (4점)
+    eff_vol_vs_ma = max(0.2, GATE_VOL_VS_MA_MIN * (1 - relax))   # 🔧 상수→전역변수 기반
     eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
-    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0 → 0.5 (3점)
-    eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.55 → 0.48 (3점)
-    eff_imb_min = max(0.15, GATE_IMBALANCE_MIN * (1 - relax))    # 0.35 → 0.15 (3점)
+    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0→1.5 (4점)
+    eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.58→0.51 (4점)
+    eff_imb_min = max(0.35, GATE_IMBALANCE_MIN * (1 - relax * 0.3))  # 🔧 거의 안 풀기 (0.50→0.46)
     # 🔧 FIX: 스프레드 가격대별 상한 (저가 코인은 호가단위 때문에 구조적으로 높음)
     if cur_price > 0 and cur_price < 100:
         eff_spread_max = 0.80   # 100원 미만: 0.80%
@@ -4771,8 +4778,13 @@ def is_sideways_regime(c1, lookback=20):
 
     range_pct = (box_high - box_low) / box_low
 
-    # 🔧 완화: 1.5% → 0.5% (저변동 시간대 대응)
-    is_sideways = range_pct < 0.005
+    # 🔧 가격대별 횡보 판정 (저가 코인은 변동 단위가 커서 정상도 횡보로 잡힘)
+    cur_price = candles[-1].get("trade_price", 0)
+    if cur_price < 1000:
+        sideways_thr = 0.008   # 1000원 미만: 0.8%
+    else:
+        sideways_thr = 0.005   # 1000원 이상: 0.5%
+    is_sideways = range_pct < sideways_thr
 
     return is_sideways, range_pct
 
@@ -5463,8 +5475,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if not atr or atr <= 0:
         return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
 
-    # 🔧 ATR 바닥값: 너무 작으면 휩쏘에 털림 방지 (최소 0.05% 또는 1원)
-    atr = max(atr, entry_price * 0.0005, 1.0)
+    # 🔧 ATR 바닥값: 너무 작으면 휩쏘에 털림 방지 (최소 0.05% 또는 호가단위)
+    atr = max(atr, entry_price * 0.0005, upbit_tick_size(entry_price))
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
     pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
@@ -5925,8 +5937,12 @@ def monitor_position(m,
                 # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
                 gain_now = (curp / entry_price - 1.0)
 
-                # 🔧 FIX: 추매 조건에 호가 임밸런스 추가 (호가 꺾이면 평단 악화 방지)
-                ob_now = pre.get("ob", {})
+                # 🔧 FIX: 추매 조건에 최신 호가 임밸런스 사용 (과거 ob 사용 → 오판 방지)
+                try:
+                    _ob_fresh = fetch_orderbook_cache([m])
+                    ob_now = _ob_fresh.get(m, pre.get("ob", {}))
+                except Exception:
+                    ob_now = pre.get("ob", {})
                 imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
@@ -6035,7 +6051,12 @@ def monitor_position(m,
 
             # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
-            ob_now = pre.get("ob", {})
+            # 🔧 FIX: 최신 오더북 사용 (과거 ob 기반 판단 → 오판 방지)
+            try:
+                _ob_fresh2 = fetch_orderbook_cache([m])
+                ob_now = _ob_fresh2.get(m, pre.get("ob", {}))
+            except Exception:
+                ob_now = pre.get("ob", {})
 
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
