@@ -2216,7 +2216,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         print(f"[PARTIAL_RETRY] {m} 전량청산 시도 후 부분체결 → 재시도 허용")
                     else:
                         pos2["partial_state"] = "done"  # 일반 부분청산 → 1회만
-                        pos2.pop("partial_ts", None)  # pending 타임스탬프 제거
+                        pos2["partial_ts"] = time.time()  # 🔧 FIX: done 시점 기록 (타임스탑 기준점)
                     pos2["partial_price"] = exit_price_used if exit_price_used > 0 else cur_price
                     pos2["partial_type"] = "profit" if net_ret_pct > 0 else "loss"  # 🔧 net 기준
 
