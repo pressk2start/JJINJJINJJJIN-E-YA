@@ -4918,7 +4918,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
     # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
     regime_flat = (regime_reason == "FLAT_SLOPE")
-    pre["regime_flat"] = regime_flat  # final_check_leader로 전달
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
@@ -5143,6 +5142,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
         "overheat": overheat,
+        "regime_flat": regime_flat,
     }
 
     return pre
