@@ -2300,11 +2300,16 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             return False
 
     # 🔧 FIX: 잔고 0이면 즉시 리턴 (청산 완료 확인)
+    # 🔧 FIX: 매수 직후 300초 내에는 잔고=0이어도 API 지연 가능 → 포지션 유지
     bal_check = get_balance_with_locked(m)
+    buy_age = time.time() - _RECENT_BUY_TS.get(m, 0)
     if bal_check >= 0 and bal_check <= 1e-12:
-        print(f"[REMONITOR] {m} 진입 전 잔고=0 확인 → 스킵")
-        mark_position_closed(m, "remonitor entry - balance zero")
-        return False
+        if buy_age < 300:
+            print(f"[REMONITOR] {m} 진입 전 잔고=0이지만 매수 {buy_age:.0f}초 전 → API 지연 가능, 계속 진행")
+        else:
+            print(f"[REMONITOR] {m} 진입 전 잔고=0 확인 → 스킵")
+            mark_position_closed(m, "remonitor entry - balance zero")
+            return False
 
     CYCLE_SEC = 300
     cycle = 0
@@ -2334,6 +2339,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             time.sleep(5)
             continue
         if actual <= 1e-12:
+            # 🔧 FIX: 매수 직후 300초 내에는 잔고=0이어도 API 지연 가능 → 다음 사이클 대기
+            buy_age_loop = time.time() - _RECENT_BUY_TS.get(m, 0)
+            if buy_age_loop < 300:
+                print(f"[REMONITOR] {m} 잔고=0이지만 매수 {buy_age_loop:.0f}초 전 → API 지연 가능, 다음 사이클 대기")
+                time.sleep(5)
+                continue
             print(f"[REMONITOR] {m} 실잔고+locked=0 → 유령 포지션 정리 후 루프 종료")
             # 🔧 FIX: 청산 알람 추가 (외부 정리 또는 체결 누락 감지)
             entry_price_for_msg = pos.get("entry_price", 0)
@@ -6928,10 +6939,15 @@ def main():
                                 if actual < 0:
                                     tg_send(f"⚠️ {market} 모니터링 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
                                 elif actual <= 1e-12:
-                                    # 잔고 0이면 이미 청산됨 → 알람만 발송
-                                    tg_send(f"⚠️ {market} 모니터링 오류 (이미 청산됨)\n• 예외: {e}")
-                                    with _POSITION_LOCK:
-                                        OPEN_POSITIONS.pop(market, None)
+                                    # 🔧 FIX: 매수 직후 300초 내 잔고=0은 API 지연일 수 있음 → 포지션 유지
+                                    buy_age = time.time() - _RECENT_BUY_TS.get(market, 0)
+                                    if buy_age < 300:
+                                        tg_send(f"⚠️ {market} 모니터링 오류 (매수 {buy_age:.0f}초 전, 잔고=0 but 포지션 유지)\n• 예외: {e}")
+                                    else:
+                                        # 잔고 0이면 이미 청산됨 → 알람만 발송
+                                        tg_send(f"⚠️ {market} 모니터링 오류 (이미 청산됨)\n• 예외: {e}")
+                                        with _POSITION_LOCK:
+                                            OPEN_POSITIONS.pop(market, None)
                                 else:
                                     # 잔고 있으면 청산 시도
                                     tg_send(f"🚨 {market} 모니터링 오류 → 청산 시도\n• 예외: {e}")
