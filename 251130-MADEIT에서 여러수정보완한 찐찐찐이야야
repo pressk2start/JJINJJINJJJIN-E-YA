@@ -4911,15 +4911,28 @@ def calc_ema_slope(c1, period=20, lookback=5):
     return slope
 
 
-def regime_filter(m, c1, cur_price):
+def regime_filter(m, c1, cur_price, *,
+                  ignition_score=0, vol_surge=1.0, accel=0.0, high_breakout=False):
     """
     통합 레짐 필터: 횡보장/박스상단이면 진입 차단
+    - 단, 점화/돌파/서지가 감지되면 횡보여도 bypass (확장 초입 보호)
     Returns: (pass: bool, reason: str)
     """
     # 1) 횡보 판정
     is_sw, range_pct = is_sideways_regime(c1, lookback=20)
     if is_sw:
-        return False, f"SIDEWAYS({range_pct*100:.1f}%)"
+        # ✅ 돌파/점화 예외: 횡보처럼 보여도 점화/서지/돌파면 통과
+        breakout_bypass = (
+            ignition_score >= 3 or
+            vol_surge >= 2.0 or
+            accel >= 1.2 or
+            high_breakout
+        )
+        if not breakout_bypass:
+            return False, f"SIDEWAYS({range_pct*100:.1f}%)"
+        # bypass된 경우 로그만 남김
+        log(f"[REGIME] {m} SIDEWAYS({range_pct*100:.1f}%) bypass: "
+            f"ign={ignition_score} surge={vol_surge:.1f} accel={accel:.1f} brk={high_breakout}")
 
     # 2) 박스 상단 근처 판정 - 🔧 비활성화 (돌파 전략에서 고점 진입은 정상)
     # near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
@@ -4951,12 +4964,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
         return None
 
-    # === 🔧 레짐 필터: 횡보장/박스상단 진입 차단 ===
+    # === 🔧 레짐 필터: stage1_gate 직전으로 이동 (점화/서지 bypass 지원) ===
     cur_price = c1[-1]["trade_price"] if c1 else 0
-    regime_ok, regime_reason = regime_filter(m, c1, cur_price)
-    if not regime_ok:
-        cut("REGIME_FILTER", f"{m} {regime_reason}")
-        return None
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
@@ -5114,6 +5123,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         high_breakout = high_breakout_wick  # 점화 시 고가 기준 허용
     else:
         high_breakout = high_breakout_close  # 비점화 시 종가 확인 필수
+
+    # === 🔧 레짐 필터: 점화/서지/돌파 계산 후 적용 (bypass 지원) ===
+    regime_ok, regime_reason = regime_filter(m, c1, cur_price,
+        ignition_score=ignition_score, vol_surge=vol_surge,
+        accel=accel, high_breakout=high_breakout)
+    if not regime_ok:
+        cut("REGIME_FILTER", f"{m} {regime_reason}")
+        return None
 
     # === 🔥 BTC 역풍 가드 (게이트 통과 후 추가 요건 체크) ===
     btc5 = btc_5m_change()
