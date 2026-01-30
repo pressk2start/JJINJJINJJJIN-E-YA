@@ -3661,11 +3661,11 @@ def upbit_get(url, params=None, timeout=7):
 # =========================================================
 # 🧩 안전 네트워크 요청 래퍼 (자동 재시도 + 백오프)
 # =========================================================
-def safe_upbit_get(url, params=None, timeout=6, retries=3, backoff=1.5):
+def safe_upbit_get(url, params=None, timeout=6, retries=1, backoff=1.5):
     """
     업비트 API 요청용 안전 래퍼
-    - 일시적 연결 실패나 429 응답에도 자동 재시도
-    - 3회까지 재시도 (1.5초씩 증가하는 대기)
+    - upbit_get() 자체가 3회 재시도하므로 여기선 1회만 (중복 재시도 방지)
+    - 🔧 FIX: retries 3→1 (기존 3×3=9회 → 3+1=4회로 축소, 펌핑 지연 방지)
     """
     for i in range(retries):
         try:
@@ -5151,6 +5151,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "consecutive_buys": cons_buys,
         "overheat": overheat,
         "regime_flat": regime_flat,
+        # 🔧 FIX: postcheck bypass 정합성 (ign_ok/mega_ok 키 누락 → bypass 항상 실패하던 버그)
+        "ign_ok": (ignition_score >= 3),
+        "mega_ok": mega,
     }
 
     return pre
