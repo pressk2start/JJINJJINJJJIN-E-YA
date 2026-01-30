@@ -3175,7 +3175,7 @@ def analyze_and_update_weights():
     global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_IMBALANCE_MIN, GATE_OVERHEAT_MAX, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN
+    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
 
     if not os.path.exists(TRADE_LOG_PATH):
         print("[AUTO_LEARN] 거래 로그 없음")
@@ -3437,7 +3437,7 @@ def load_learned_weights():
     global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN
+    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
 
     if not os.path.exists(WEIGHTS_PATH):
         print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
@@ -4678,10 +4678,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 과회전 상한 (승 10.2% vs 패 26.8% → 20% 상한)
     if turn_pct > GATE_TURN_MAX:
         return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}%"
-    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
-    # 🔧 HOTFIX: 저가 코인 스프레드 허용 (0.25%→1.0%)
-    if turn_pct > 50 and spread > 1.0:
-        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>1.0%"
+    # 🔧 (제거됨) 50% hard check - GATE_TURN_MAX=30에서 도달 불가, 위에서 이미 컷됨
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
@@ -5938,11 +5935,21 @@ def monitor_position(m,
                 gain_now = (curp / entry_price - 1.0)
 
                 # 🔧 FIX: 추매 조건에 최신 호가 임밸런스 사용 (과거 ob 사용 → 오판 방지)
-                try:
-                    _ob_fresh = fetch_orderbook_cache([m])
-                    ob_now = _ob_fresh.get(m, pre.get("ob", {}))
-                except Exception:
-                    ob_now = pre.get("ob", {})
+                # 🔧 FIX: 10초 throttle (API 429 방지)
+                if not hasattr(monitor_position, '_last_ob_ts'):
+                    monitor_position._last_ob_ts = {}
+                _ob_age = time.time() - monitor_position._last_ob_ts.get(m, 0)
+                if _ob_age >= 10:
+                    try:
+                        _ob_fresh = fetch_orderbook_cache([m])
+                        ob_now = _ob_fresh.get(m, pre.get("ob", {}))
+                        monitor_position._last_ob_ts[m] = time.time()
+                        monitor_position._last_ob_cache = monitor_position.__dict__.get('_last_ob_cache', {})
+                        monitor_position._last_ob_cache[m] = ob_now
+                    except Exception:
+                        ob_now = pre.get("ob", {})
+                else:
+                    ob_now = getattr(monitor_position, '_last_ob_cache', {}).get(m, pre.get("ob", {}))
                 imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
@@ -6051,12 +6058,22 @@ def monitor_position(m,
 
             # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
-            # 🔧 FIX: 최신 오더북 사용 (과거 ob 기반 판단 → 오판 방지)
-            try:
-                _ob_fresh2 = fetch_orderbook_cache([m])
-                ob_now = _ob_fresh2.get(m, pre.get("ob", {}))
-            except Exception:
-                ob_now = pre.get("ob", {})
+            # 🔧 FIX: 최신 오더북 사용 (과거 ob 기반 판단 → 오판 방지, 10초 throttle)
+            if not hasattr(monitor_position, '_last_ob_ts'):
+                monitor_position._last_ob_ts = {}
+            _ob_age2 = time.time() - monitor_position._last_ob_ts.get(m, 0)
+            if _ob_age2 >= 10:
+                try:
+                    _ob_fresh2 = fetch_orderbook_cache([m])
+                    ob_now = _ob_fresh2.get(m, pre.get("ob", {}))
+                    monitor_position._last_ob_ts[m] = time.time()
+                    if not hasattr(monitor_position, '_last_ob_cache'):
+                        monitor_position._last_ob_cache = {}
+                    monitor_position._last_ob_cache[m] = ob_now
+                except Exception:
+                    ob_now = pre.get("ob", {})
+            else:
+                ob_now = getattr(monitor_position, '_last_ob_cache', {}).get(m, pre.get("ob", {}))
 
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
