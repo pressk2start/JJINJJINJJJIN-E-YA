@@ -799,7 +799,7 @@ def sync_orphan_positions():
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
-            # 🔧 FIX: 최근 2분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
+            # 🔧 FIX: 최근 5분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
             # - 업비트 주문 내역 조회로 실제 매수 여부 확인
             skip_recent_buy = False
@@ -821,7 +821,7 @@ def sync_orphan_positions():
                                     order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
                                     now_utc = datetime.now(timezone.utc)
                                     age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 120:  # 2분 이내 매수
+                                    if age_sec < 300:  # 5분 이내 매수
                                         print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
                                         skip_recent_buy = True
                                         break  # for loop 탈출
@@ -834,10 +834,10 @@ def sync_orphan_positions():
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
 
-            # 🔧 FIX: 봇 내부 최근 매수 체크 (120초 내 매수면 유령 아님)
-            # 60초 → 120초로 증가: 모니터링 중 예외 발생 시 오탐 방지
+            # 🔧 FIX: 봇 내부 최근 매수 체크 (300초 내 매수면 유령 아님)
+            # 120초 → 300초로 증가: 정상 매수 직후 유령 오탐 방지 강화
             last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 120:
+            if now - last_buy_ts < 300:
                 print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
                 continue
 
