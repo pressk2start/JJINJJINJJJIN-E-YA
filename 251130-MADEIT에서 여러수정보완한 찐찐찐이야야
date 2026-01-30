@@ -106,12 +106,12 @@ SCRATCH_MIN_GAIN = 0.0004   # 최소 +0.04% 이상 상승해야 유지 (0.06%→
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 # 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.006,              # 0.8% → 0.6% MFE 시 50% 익절
-    "강돌파 (EMA↑+고점↑)": 0.005,  # 0.7% → 0.5% MFE 시 50% 익절
-    "EMA↑": 0.004,                 # 0.6% → 0.4% MFE 시 50% 익절
-    "고점↑": 0.004,                # 0.5% → 0.4% MFE 시 50% 익절
-    "거래량↑": 0.003,              # 0.4% → 0.3% MFE 시 50% 익절
-    "기본": 0.004,                 # 0.5% → 0.4% MFE 기본값
+    "🔥점화": 0.006,              # 0.6% MFE 시 50% 익절
+    "강돌파 (EMA↑+고점↑)": 0.005,  # 0.5% MFE 시 50% 익절
+    "EMA↑": 0.005,                 # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
+    "고점↑": 0.005,                # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
+    "거래량↑": 0.005,              # 🔧 0.3→0.5% (0.3%는 수수료 감안 시 실익 거의 0)
+    "기본": 0.005,                 # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
@@ -2508,12 +2508,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 "기본": 0.9,                 # 1.5% → 0.9%
             }
             TP_PART = {
-                "🔥점화": 0.6,              # 1.6% → 0.6% (강신호도 빠른 부분익절)
-                "강돌파 (EMA↑+고점↑)": 0.5,  # 1.4% → 0.5%
-                "EMA↑": 0.45,                # 1.2% → 0.45%
-                "고점↑": 0.40,               # 1.0% → 0.40%
-                "거래량↑": 0.35,             # 0.8% → 0.35%
-                "기본": 0.40,                # 0.9% → 0.40%
+                "🔥점화": 0.6,              # 0.6% (강신호)
+                "강돌파 (EMA↑+고점↑)": 0.5,  # 0.5%
+                "EMA↑": 0.50,                # 🔧 0.45→0.50% (수수료/슬립 감안 실익 확보)
+                "고점↑": 0.50,               # 🔧 0.40→0.50% (수수료/슬립 감안 실익 확보)
+                "거래량↑": 0.50,             # 🔧 0.35→0.50% (0.35%는 net 0.15% 수준)
+                "기본": 0.50,                # 🔧 0.40→0.50% (수수료/슬립 감안 실익 확보)
             }
 
             # 현재 포지션의 signal_tag 가져오기
@@ -4741,8 +4741,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
         return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x | {metrics}"
-    if accel > GATE_ACCEL_MAX:
-        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
+    # 🔧 (제거됨) GATE_ACCEL_MAX 단독 컷 - 과열필터(accel*surge>OVERHEAT_MAX)와 중복
+    # if accel > GATE_ACCEL_MAX:
+    #     return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
 
     # === 매수비 컷 (동적) ===
     if buy_ratio < eff_buy_min:
@@ -5588,7 +5589,10 @@ def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
 
     # 💎 약상승/횡보 시 청산 점수 완화
     gain_now = (last_price / entry_price - 1.0)
-    if -0.004 <= gain_now <= 0.008:  # 완화 범위 확대
+    # 🔧 FIX: 완화 범위 축소 (±0.4%~+0.8% → ±0.2%~+0.3%)
+    # - 기존: +0.8%까지 완화 → 꼭대기에서 내려올 때 청산 지연
+    # - 변경: 본절 부근만 완화, 수익 구간에서는 정상 청산 판단
+    if -0.002 <= gain_now <= 0.003:
         score = max(0, score - 1)
         reasons.append("MILD_GAIN_RELAX")
 
@@ -6422,9 +6426,12 @@ def get_cooldown_sec(market: str) -> int:
     else:
         base = COOLDOWN  # 전역 기본값(480)
 
-    # 🔧 손실 후 동일 종목 재진입 쿨다운 2배
+    # 🔧 손실 후 동일 종목 재진입 쿨다운 (시간대별 차등)
+    # - 9시대: 1.5배 (장초반 급등 기회 보호, 6분→4.5분)
+    # - 그 외: 2배 (기존 유지)
     if last_trade_was_loss.get(market, False):
-        return base * 2
+        loss_mult = 1.5 if h == 9 else 2
+        return int(base * loss_mult)
 
     return base
 
