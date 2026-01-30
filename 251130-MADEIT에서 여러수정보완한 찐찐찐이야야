@@ -5968,9 +5968,19 @@ def monitor_position(m,
     }
     trail_dist_min *= _TRAIL_MULT_BY_TAG.get(signal_tag, 1.0)
 
+    # 🔧 FIX: 오더북 API 쿨다운 캐시 (루프 내 중복 호출 방지)
+    _ob_cache_ts = 0.0
+    _ob_cache_data = {}
+    _OB_COOLDOWN = 15  # 15초 쿨다운
+
     try:
         while time.time() - start_ts <= horizon:
             time.sleep(RECHECK_SEC)
+
+            # 🔧 오더북 캐시 갱신 (쿨다운 내에서는 재사용)
+            if time.time() - _ob_cache_ts >= _OB_COOLDOWN:
+                _ob_cache_data = fetch_orderbook_cache([m]).get(m, {})
+                _ob_cache_ts = time.time()
 
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
@@ -6054,9 +6064,8 @@ def monitor_position(m,
                 # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
                 gain_now = (curp / entry_price - 1.0)
 
-                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (stale pre["ob"] 대신)
-                _ob_fresh = fetch_orderbook_cache([m]).get(m, {})
-                ob_now = _ob_fresh if _ob_fresh else pre.get("ob", {})
+                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (캐시 사용)
+                ob_now = _ob_cache_data if _ob_cache_data else pre.get("ob", {})
                 imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
@@ -6106,9 +6115,8 @@ def monitor_position(m,
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (stale pre["ob"] 대신)
-                _ob_pyr_fresh = fetch_orderbook_cache([m]).get(m, {})
-                ob_pyr = _ob_pyr_fresh if _ob_pyr_fresh else pre.get("ob", {})
+                # 🔧 FIX (B): 최신 오더북으로 임밸런스 판단 (캐시 사용)
+                ob_pyr = _ob_cache_data if _ob_cache_data else pre.get("ob", {})
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
@@ -6736,7 +6744,15 @@ def main():
                             # 리테스트 조건 충족 → 진입
                             print(f"[RETEST] {wm} 🎯 리테스트 진입 시작!")
                             c1 = get_minutes_candles(1, wm, 20)
-                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1)
+                            # 🔧 FIX: signal_type/buy_ratio/imbalance 전달 (일반 진입과 정합성)
+                            _rt_tag = retest_pre.get("signal_tag", "")
+                            _rt_sig = "ign" if "점화" in _rt_tag else ("mega" if retest_pre.get("mega") else None)
+                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(
+                                retest_pre["price"], c1,
+                                signal_type=_rt_sig,
+                                buy_ratio=retest_pre.get("buy_ratio"),
+                                imbalance=retest_pre.get("imbalance"),
+                            )
                             tg_send(f"🎯 <b>리테스트 진입</b> {wm}\n"
                                     f"• 첫 급등 후 되돌림 → 지지 확인\n"
                                     f"• 현재가: {retest_pre['price']:,.0f}원")
