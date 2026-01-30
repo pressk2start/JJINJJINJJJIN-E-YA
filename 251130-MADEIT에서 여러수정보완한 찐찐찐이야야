@@ -4677,7 +4677,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔥 점화 점수에 따른 동적 임계치 완화 (별도 분기 X, 가점 방식)
     # 🔧 FIX: 3점 이상 점화(확정)에서 완화 - 개별조건 강화로 3점도 신뢰성↑
     # ============================================================
-    relax = 0.15 if ignition_score >= 3 else 0  # 🔧 30%→15% (노이즈 진입 축소)
+    relax = 0.25 if ignition_score >= 3 else 0  # 🔧 15%→25% (장초반 급등 진입 복원)
 
     # 🔧 FIX: 희박 틱 종목 조건부 완화 (NOM 같은 케이스 대응)
     # 30초 내 틱이 8개 미만이면 서지 임계치 20% 추가 완화
@@ -4787,8 +4787,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         breakout_score = 1  # 강돌파 → EMA↑ 다운그레이드
 
     # 진입 조건: 돌파 OR vol_vs_ma (기본)
-    # 🔧 점화 단독 프리패스 제거 → 점화3점이어도 돌파/볼륨 중 하나는 필요
-    if ignition_score >= 3:
+    # 🔧 점화4점+ 단독 프리패스 복원 (거래량 급등 진입 확보)
+    if ignition_score >= 4:
+        entry_signal = True  # 점화4점 이상 = 거래량+가격+연속체결 확정 → 자동 진입
+    elif ignition_score >= 3:
         entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
     else:
         entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma)
