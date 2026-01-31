@@ -5491,11 +5491,22 @@ def postcheck_6s(m, pre):
 
         curp = ticks[0].get("trade_price", base_price)
 
-        # ★★★ 가격 급등 컷 추가
+        # ★★★ 가격 급등 필터 (조건부 허용)
         if base_price > 0:
             surge = (curp / base_price - 1.0)
             if surge >= MAX_SURGE:
-                return False, f"SURGE_IN_POST({surge*100:.2f}%)"
+                # 급등이지만 강한 돌파 조건 충족 시 허용
+                t_surge = micro_tape_stats_from_ticks(list(acc), 10) if len(acc) >= 3 else {}
+                strong_break = (
+                    t_surge.get("buy_ratio", 0) >= 0.62
+                    and t_surge.get("krw_per_sec", 0) >= 20000
+                    and (peak - trough_after_peak) / max(peak, 1) < 0.003  # 되돌림 0.3% 미만
+                )
+                if not strong_break:
+                    return False, f"SURGE_IN_POST({surge*100:.2f}%)"
+                # 강한 돌파 → probe로 강제 다운그레이드하고 통과
+                print(f"[POSTCHECK] {surge*100:.1f}% 급등이나 강돌파 조건 충족 → probe 허용")
+                pre["_surge_probe"] = True  # 호출부에서 probe 강제용 플래그
 
         if curp > peak:
             peak = curp
@@ -6927,6 +6938,10 @@ def main():
                     with _POSITION_LOCK:
                         recent_alerts.pop(m, None)
                     continue
+
+                # 🔧 급등 허용 시 probe 강제 (리스크 제한)
+                if pre.get("_surge_probe"):
+                    pre["entry_mode"] = "probe"
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
