@@ -4683,7 +4683,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  fresh_age=0.0, fresh_max_age=2.0,
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0, best_ask_krw=0, cur_price=0):
+                 ignition_score=0, best_ask_krw=0, cur_price=0,
+                 consecutive_buys=0, cv=0.0, overheat=0.0):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4813,12 +4814,19 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 돌파 점수: EMA20 돌파 + 고점 돌파
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
-    # 🔧 강돌파 전용 강화 임계치 (일반보다 빡세게)
+    # 🔧 강돌파 전용 품질 필터 (OR 구조 + 과열 조합 컷)
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
-        # 🔧 (제거됨) 회전율 상한 - 과회전 필터 전체 제거에 따라 삭제
-        # 가속도 상한 강화
+        # 가속도 상한
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
+        # 🔧 모멘텀 확인: (A) 연속매수≥6 OR (B) 매수비≥0.65+임밸≥0.55
+        momentum_ok = (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
+                       or (buy_ratio >= 0.65 and imbalance >= 0.55))
+        if not momentum_ok:
+            return False, f"강돌파+모멘텀부족 consec{consecutive_buys}<{GATE_STRONGBREAK_CONSEC_MIN} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
+        # 🔧 회전율 과열 조합 컷: turn>25% AND (cv>2.2 OR overheat>3.0)
+        if turn_pct > GATE_STRONGBREAK_TURN_MAX and (cv > 2.2 or overheat > 3.0):
+            return False, f"강돌파+과열 turn{turn_pct:.0f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}% cv{cv:.1f} oh{overheat:.1f} | {metrics}"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
 
@@ -5168,6 +5176,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         ignition_score=ignition_score,
         best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
         cur_price=cur["trade_price"],  # 🔧 스프레드 가격대별 분리용
+        consecutive_buys=cons_buys,
+        cv=cv,
+        overheat=overheat,
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
@@ -5288,6 +5299,24 @@ def final_check_leader(m, pre, tight_mode=False):
         # probe는 유지 (소액 탐색은 횡보장에서도 허용 — 돌파 직전 기회 보존)
         if entry_mode != old_mode:
             print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
+
+    # 🔧 강돌파 다운그레이드 (추격꼭지 방지)
+    # OR 조건 중 한쪽만 통과 → 한 단계 내림, 양쪽 다 강하면 유지
+    if "강돌파" in pre.get("signal_tag", ""):
+        sb_cons = pre.get("consecutive_buys", 0)
+        sb_br = pre.get("buy_ratio", 0)
+        sb_imb = pre.get("imbalance", 0)
+        consec_ok = sb_cons >= GATE_STRONGBREAK_CONSEC_MIN
+        supply_ok = (sb_br >= 0.65 and sb_imb >= 0.55)
+        # 양쪽 다 강하면 유지, 한쪽만이면 다운그레이드
+        if not (consec_ok and supply_ok):
+            old_mode = entry_mode
+            if entry_mode == "confirm":
+                entry_mode = "half"
+            elif entry_mode == "half":
+                entry_mode = "probe"
+            if entry_mode != old_mode:
+                print(f"[강돌파↓] {m} 편면모멘텀 consec{'✓' if consec_ok else '✗'} supply{'✓' if supply_ok else '✗'} → {old_mode}→{entry_mode}")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
@@ -5454,6 +5483,13 @@ def postcheck_6s(m, pre):
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
+    # 🔧 강돌파 조건부 바이패스: 수급이 확실히 강할 때만
+    is_strongbreak = "강돌파" in pre.get("signal_tag", "")
+    if is_strongbreak:
+        sb_imb = pre.get("imbalance", 0)
+        sb_br = pre.get("buy_ratio", 0)
+        if sb_imb >= 0.55 and sb_br >= 0.62:
+            return True, "BYPASS_STRONGBREAK_STRONG"
 
     # ★★★ 장세/야간 완화 노브
     r = relax_knob()
