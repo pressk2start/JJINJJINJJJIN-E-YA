@@ -4863,19 +4863,12 @@ def is_sideways_regime(c1, lookback=20):
 
     range_pct = (box_high - box_low) / box_low
 
-    # 🔧 ATR 정규화: 고정 임계값 대신 ATR 기반 동적 횡보 판정
-    atr_raw = atr14_from_candles(candles)
+    # 🔧 가격대별 횡보 판정 (고정 임계값 — ATR 정규화는 저변동 코인에서 느슨해짐)
     cur_price = candles[-1].get("trade_price", 0)
-    if atr_raw and cur_price > 0:
-        atr_pct = atr_raw / cur_price
-        # 횡보 = 레인지가 ATR의 2.0배 미만 (변동성 대비 좁은 박스)
-        sideways_thr = max(0.004, 2.0 * atr_pct)
+    if cur_price < 1000:
+        sideways_thr = 0.008   # 1000원 미만: 0.8%
     else:
-        # ATR 계산 불가 시 기존 가격대별 폴백
-        if cur_price < 1000:
-            sideways_thr = 0.008
-        else:
-            sideways_thr = 0.005
+        sideways_thr = 0.005   # 1000원 이상: 0.5%
     is_sideways = range_pct < sideways_thr
 
     return is_sideways, range_pct
@@ -5270,8 +5263,7 @@ def final_check_leader(m, pre, tight_mode=False):
             entry_mode = "half"
         elif entry_mode == "half":
             entry_mode = "probe"
-        elif entry_mode == "probe":
-            return None  # 횡보장 + probe급 → 진입 차단
+        # probe는 유지 (소액 탐색은 횡보장에서도 허용 — 돌파 직전 기회 보존)
         if entry_mode != old_mode:
             print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
 
