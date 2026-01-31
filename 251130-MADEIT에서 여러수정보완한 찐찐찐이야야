@@ -3071,6 +3071,35 @@ def get_path_statistics(last_n: int = 100) -> str:
             else:
                 lines.append("💡 특별히 나쁜 경로 없음")
 
+        # 🔧 핵심 파라미터 현황 (실시간 값 리포팅)
+        lines.append("")
+        lines.append("─" * 20)
+        lines.append("<b>⚙️ 핵심 파라미터:</b>")
+        dyn_cp = get_dynamic_checkpoint() * 100
+        trail_min = get_trail_distance_min() * 100
+        lines.append(f"  체크포인트: {dyn_cp:.2f}%")
+        lines.append(f"  트레일최소: {trail_min:.2f}%")
+        lines.append(f"  MFE타겟: {MFE_PARTIAL_TARGETS.get('기본', 0.005)*100:.1f}%")
+        lines.append(f"  ATR배수: {TRAIL_ATR_MULT}")
+        lines.append(f"  SL범위: {DYN_SL_MIN*100:.1f}~{DYN_SL_MAX*100:.1f}%")
+        lines.append(f"  프로파일: {EXIT_PROFILE}")
+
+        # 📊 entry_mode 분포
+        if "entry_mode" in df.columns:
+            lines.append("<b>📦 진입모드 분포:</b>")
+            for mode in ["probe", "half", "confirm"]:
+                mode_df = df[df["entry_mode"] == mode]
+                if len(mode_df) > 0:
+                    mode_wins = len(mode_df[mode_df["result"] == "win"])
+                    mode_wr = mode_wins / len(mode_df) * 100
+                    lines.append(f"  {mode}: {len(mode_df)}건 ({mode_wr:.0f}%)")
+
+        # 📊 평균 MFE/MAE
+        if "mfe_pct" in df.columns and "mae_pct" in df.columns:
+            avg_mfe = df["mfe_pct"].mean()
+            avg_mae = df["mae_pct"].mean()
+            lines.append(f"  평균MFE: +{avg_mfe:.2f}% / 평균MAE: {avg_mae:.2f}%")
+
         return "\n".join(lines)
 
     except ImportError:
