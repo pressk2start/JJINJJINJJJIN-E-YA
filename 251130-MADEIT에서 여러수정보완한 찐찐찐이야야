@@ -5238,6 +5238,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "turn_pct": turn_pct,
         "spread": ob["spread"],
         "buy_ratio": twin["buy_ratio"],
+        "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),  # 🔧 스파이크 방지용 보수적 매수비
         "fresh_ok": fresh_ok,  # 🔧 CRITICAL: fresh_ok 전달 (스코어 계산용)
         "mega": mega,
         "filter_type": "stage1_gate",
@@ -5285,7 +5286,8 @@ def final_check_leader(m, pre, tight_mode=False):
         display_filter = "통합게이트"
 
     # 🔧 FIX: score 계산 복원 (calc_risk_score 호출)
-    buy_ratio = pre.get("buy_ratio", 0.5)
+    # 🔧 스코어링 지속성 반영: 보수적 매수비 min(t15, t45) 사용 → 스파이크 방지
+    buy_ratio = pre.get("buy_ratio_conservative", pre.get("buy_ratio", 0.5))
     spread = pre.get("spread", 0.5)
     # 🔧 CRITICAL: turn 단위 보정 (퍼센트 → 소수)
     turn = (pre.get("turn_pct", 1.0) or 1.0) / 100.0
@@ -5338,6 +5340,28 @@ def final_check_leader(m, pre, tight_mode=False):
                 entry_mode = "probe"
             if entry_mode != old_mode:
                 print(f"[강돌파↓] {m} 편면모멘텀 consec{'✓' if consec_ok else '✗'} supply{'✓' if supply_ok else '✗'} → {old_mode}→{entry_mode}")
+
+    # 🔧 매수세 둔화/decay 시 다운그레이드 (confirm→half, half→probe)
+    # - score>=78이어도 t15 vs t45 흐름이 꺾이면 스파이크 진입 방지
+    if entry_mode in ("confirm", "half"):
+        _ticks_for_decay = pre.get("ticks")
+        if _ticks_for_decay:
+            _decay = buy_decay_flag(_ticks_for_decay)
+            _t15_pre = pre.get("tape", {})
+            _t45_pre = micro_tape_stats_from_ticks(_ticks_for_decay, 45) if _ticks_for_decay else {}
+            # 둔화 조건: decay 플래그 OR (t15 거래속도가 t45의 60% 미만 = 급감)
+            _flow_fading = (
+                _decay
+                or (_t15_pre.get("krw_per_sec", 0) < _t45_pre.get("krw_per_sec", 1) * 0.6)
+            )
+            if _flow_fading:
+                old_mode = entry_mode
+                if entry_mode == "confirm":
+                    entry_mode = "half"
+                elif entry_mode == "half":
+                    entry_mode = "probe"
+                if entry_mode != old_mode:
+                    print(f"[DECAY↓] {m} 매수세둔화 decay={_decay} t15/t45_speed={_t15_pre.get('krw_per_sec',0):.0f}/{_t45_pre.get('krw_per_sec',0):.0f} → {old_mode}→{entry_mode}")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
@@ -6087,6 +6111,42 @@ def monitor_position(m,
                     _already_closed = True
                     verdict = "probe 스크래치"
                     break
+
+            # 🔧 Half/Confirm 초반 모멘텀 가드 (큰 사이즈 진입 후 흐름 부재 시 조기 탈출)
+            # - 점화/mega/강돌파 등 강한 신호는 바이패스 (충분한 모멘텀 기대)
+            if entry_mode in ("half", "confirm") and not pre.get("mega_ok") and not pre.get("ign_ok"):
+                alive_sec_now = time.time() - start_ts
+                mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
+                cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
+
+                # 모드별 시간/MFE/수익 임계값
+                if entry_mode == "half":
+                    _es_timeout = 90    # 90초
+                    _es_mfe_thr = 0.0025  # MFE 0.25% 미만
+                    _es_gain_thr = 0.0005  # 현재 수익 +0.05% 이하
+                else:  # confirm
+                    _es_timeout = 120   # 120초
+                    _es_mfe_thr = 0.0035  # MFE 0.35% 미만
+                    _es_gain_thr = 0.0010  # 현재 수익 +0.10% 이하
+
+                if alive_sec_now >= _es_timeout and mfe_now < _es_mfe_thr and cur_gain_check <= _es_gain_thr:
+                    # 테이프 흐름 확인: 매수세가 살아있으면 바이패스
+                    _t15 = micro_tape_stats_from_ticks(ticks, 15)
+                    _imb_now = calc_orderbook_imbalance(ob_snap) if ob_snap else 0.0
+                    _flow_alive = (
+                        _t15["buy_ratio"] >= 0.55
+                        and _t15["krw_per_sec"] >= (12000 if entry_mode == "half" else 15000)
+                        and uptick_streak_from_ticks(ticks, need=2)
+                        and _imb_now >= 0.35
+                    )
+                    if not _flow_alive:
+                        _reason = (f"{entry_mode}스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% "
+                                   f"cur={cur_gain_check*100:.2f}% "
+                                   f"(br={_t15['buy_ratio']:.0%} krw/s={_t15['krw_per_sec']:.0f} imb={_imb_now:.2f})")
+                        close_auto_position(m, _reason)
+                        _already_closed = True
+                        verdict = f"{entry_mode} 스크래치"
+                        break
 
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100 if entry_price > 0 else 0
