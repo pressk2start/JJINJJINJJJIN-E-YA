@@ -1527,7 +1527,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 fresh_age = 0.0
                 if ticks:
                     now_ms = int(time.time() * 1000)
-                    last_tick_ts = ticks[0].get("timestamp", now_ms)
+                    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+                    last_tick_ts = max(t.get("timestamp", 0) for t in ticks)
+                    if last_tick_ts == 0: last_tick_ts = now_ms
                     fresh_age = (now_ms - last_tick_ts) / 1000.0
                 # 베스트호가 깊이
                 try:
@@ -4222,7 +4224,8 @@ def _pct(a, b):
 def inter_arrival_stats(ticks, sec=30):
     if not ticks: return {"cv": 9.9, "count": 0}
     try:
-        newest_ts = ticks[0]["timestamp"]
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
         return {"cv": 9.9, "count": 0}
     cutoff = newest_ts - sec * 1000
@@ -4241,7 +4244,8 @@ def price_band_std(ticks, sec=30):
     """가격밴드 표준편차. 데이터 부족시 None 반환 (센티넬 9.9 제거)"""
     if not ticks: return None
     try:
-        newest_ts = ticks[0]["timestamp"]
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
         return None
     cutoff = newest_ts - sec * 1000
@@ -4256,7 +4260,8 @@ def price_band_std(ticks, sec=30):
 def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
     if not ticks: return 0.0
     try:
-        newest_ts = ticks[0]["timestamp"]
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
         return 0.0
     cutoff = newest_ts - sec * 1000
@@ -4274,13 +4279,15 @@ def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
 def wash_trade_pattern(ticks, sec=30, repeats=BOT_WASH_REPEAT_VOL_N):
     if not ticks: return False
     try:
-        newest_ts = ticks[0]["timestamp"]
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
         return False
     cutoff = newest_ts - sec * 1000
     vols = {}
     for x in ticks:
-        if x["timestamp"] < cutoff: break
+        # 🔧 FIX: break → continue (정렬 미보장 상태에서 break하면 데이터 누락)
+        if x["timestamp"] < cutoff: continue
         v = round(x["trade_volume"], 6)
         vols[v] = vols.get(v, 0) + 1
     if not vols: return False
@@ -4292,7 +4299,8 @@ def _win_stats(ticks, start_s, end_s):
     if not ticks:
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     try:
-        newest_ts = ticks[0]["timestamp"]
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     lo = newest_ts - end_s * 1000
@@ -4385,7 +4393,8 @@ def update_baseline_tps(market: str, ticks, window_sec: int = 300):
     if not ticks or len(ticks) < 10:
         return
 
-    now_ts = ticks[0].get("timestamp", ticks[0].get("ts", 0))
+    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+    now_ts = max(t.get("timestamp", t.get("ts", 0)) for t in ticks)
     cutoff = now_ts - (window_sec * 1000)
 
     # window_sec 내의 틱만 필터
@@ -4395,8 +4404,9 @@ def update_baseline_tps(market: str, ticks, window_sec: int = 300):
         return
 
     # 틱 수 / 시간(초) = TPS
-    first_ts = window_ticks[-1].get("timestamp", window_ticks[-1].get("ts", 0))
-    last_ts = window_ticks[0].get("timestamp", window_ticks[0].get("ts", 0))
+    ts_list = [t.get("timestamp", t.get("ts", 0)) for t in window_ticks]
+    first_ts = min(ts_list)
+    last_ts = max(ts_list)
     duration_sec = max((last_ts - first_ts) / 1000, 1)
 
     tps = len(window_ticks) / duration_sec
@@ -4432,7 +4442,10 @@ def ignition_detected(
     if not ticks or len(ticks) < 10:
         return False, "틱부족", 0
 
-    now_ts = ticks[0].get("timestamp", ticks[0].get("ts", int(time.time() * 1000)))
+    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+    now_ts = max(t.get("timestamp", t.get("ts", 0)) for t in ticks)
+    if now_ts == 0:
+        now_ts = int(time.time() * 1000)
 
     # ---- 쿨다운 체크 ----
     with _IGNITION_LOCK:
@@ -5403,7 +5416,9 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
     fresh_age = 0.0
     if ticks:
         now_ms = int(time.time() * 1000)
-        last_tick_ts = ticks[0].get("timestamp", now_ms)
+        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
+        last_tick_ts = max(t.get("timestamp", 0) for t in ticks)
+        if last_tick_ts == 0: last_tick_ts = now_ms
         fresh_age = (now_ms - last_tick_ts) / 1000.0
 
     # 🚀 초단기 미세필터 지표
