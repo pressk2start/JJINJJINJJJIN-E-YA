@@ -4837,12 +4837,19 @@ def is_sideways_regime(c1, lookback=20):
 
     range_pct = (box_high - box_low) / box_low
 
-    # 🔧 가격대별 횡보 판정 (저가 코인은 변동 단위가 커서 정상도 횡보로 잡힘)
+    # 🔧 ATR 정규화: 고정 임계값 대신 ATR 기반 동적 횡보 판정
+    atr_raw = atr14_from_candles(candles)
     cur_price = candles[-1].get("trade_price", 0)
-    if cur_price < 1000:
-        sideways_thr = 0.008   # 1000원 미만: 0.8%
+    if atr_raw and cur_price > 0:
+        atr_pct = atr_raw / cur_price
+        # 횡보 = 레인지가 ATR의 2.0배 미만 (변동성 대비 좁은 박스)
+        sideways_thr = max(0.004, 2.0 * atr_pct)
     else:
-        sideways_thr = 0.005   # 1000원 이상: 0.5%
+        # ATR 계산 불가 시 기존 가격대별 폴백
+        if cur_price < 1000:
+            sideways_thr = 0.008
+        else:
+            sideways_thr = 0.005
     is_sideways = range_pct < sideways_thr
 
     return is_sideways, range_pct
@@ -5231,10 +5238,17 @@ def final_check_leader(m, pre, tight_mode=False):
     else:
         entry_mode = "confirm"
 
-    # 🔧 FIX: FLAT_SLOPE 레짐 → confirm을 half로 다운그레이드 (횡보장 리스크 축소)
-    if pre.get("regime_flat") and entry_mode == "confirm":
-        entry_mode = "half"
-        print(f"[REGIME_FLAT] {m} EMA slope 평평 → confirm→half 다운그레이드")
+    # 🔧 FLAT_SLOPE 레짐 → 전 단계 다운그레이드 (횡보장 리스크 축소)
+    if pre.get("regime_flat"):
+        old_mode = entry_mode
+        if entry_mode == "confirm":
+            entry_mode = "half"
+        elif entry_mode == "half":
+            entry_mode = "probe"
+        elif entry_mode == "probe":
+            return None  # 횡보장 + probe급 → 진입 차단
+        if entry_mode != old_mode:
+            print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
@@ -5925,14 +5939,16 @@ def monitor_position(m,
             best = max(best, curp)
             worst = min(worst, curp)
 
-            # 🔧 고점 미갱신 시간손절 - 비활성화 (진입 타이트하므로 청산은 루즈하게)
-            # alive_sec_now = time.time() - start_ts
-            # if alive_sec_now >= NO_PEAK_TIMEOUT_SEC and peak_update_count < MIN_PEAK_UPDATES:
-            #     cur_gain_check = (curp / entry_price - 1.0)
-            #     if cur_gain_check <= 0:
-            #         close_auto_position(m, f"고점미갱신 | {alive_sec_now:.0f}초 내 갱신 {peak_update_count}회 (페이크 돌파)")
-            #         verdict = "고점 미갱신 페이크"
-            #         break
+            # 🔧 Probe 스크래치: probe 전용 시간손절 (소액 탐색 손실 방지)
+            if entry_mode == "probe":
+                alive_sec_now = time.time() - start_ts
+                mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
+                cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                if alive_sec_now >= 60 and mfe_now < 0.0015 and cur_gain_check <= 0:
+                    # 60초 경과, MFE 0.15% 미만, 현재 수익 0 이하 → 스크래치 청산
+                    close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
+                    verdict = "probe 스크래치"
+                    break
 
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100
@@ -6192,7 +6208,18 @@ def monitor_position(m,
             # === 🔧 (A) MFE 기반 부분익절 (경로별 동적 타겟) ===
             # 신호 강도별로 다른 MFE 타겟 적용 → 목표 도달 시 50% 익절
             if not mfe_partial_done and not plateau_partial_done:
-                mfe_target = MFE_PARTIAL_TARGETS.get(signal_tag, 0.004)  # 기본 0.4%
+                mfe_base = MFE_PARTIAL_TARGETS.get(signal_tag, 0.004)  # 기본 0.4%
+                # 🔧 ATR 동적화: 종목 변동성에 맞춰 MFE 타겟 조정
+                try:
+                    c1_mfe = get_minutes_candles(1, m, 20)
+                    atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
+                    if atr_raw and curp > 0:
+                        atr_pct = atr_raw / curp
+                        mfe_target = min(mfe_base, max(0.0025, 2.5 * atr_pct))
+                    else:
+                        mfe_target = mfe_base
+                except Exception:
+                    mfe_target = mfe_base
                 # 🔧 FIX: BTC 역풍 시 TP 보수화 (목표 낮춤)
                 btc5_now = btc_5m_change()
                 if btc5_now <= -0.003:  # BTC -0.3% 역풍
