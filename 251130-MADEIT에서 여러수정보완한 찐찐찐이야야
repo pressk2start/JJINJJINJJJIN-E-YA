@@ -1932,6 +1932,23 @@ def close_auto_position(m, reason=""):
                 # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
                 mark_position_closed(m, f"full_close:{reason}")
 
+                # 🔧 찌꺼기 청소: 전량 매도 후에도 소수점 잔량이 남을 수 있음
+                try:
+                    time.sleep(0.5)
+                    dust_bal = get_actual_balance(m)
+                    if dust_bal > 1e-12:
+                        dust_krw = dust_bal * exit_price_used
+                        if dust_krw >= 5000:
+                            # 5000원 이상이면 추가 매도 시도
+                            place_market_sell(m, dust_bal, price_hint=exit_price_used)
+                            print(f"[DUST_CLEAN] {m} 잔여 {dust_bal:.8f} ({dust_krw:.0f}원) 추가 매도")
+                        else:
+                            # 5000원 미만이면 매도 불가 → 유령감지 제외만
+                            _ORPHAN_HANDLED.add(m)
+                            print(f"[DUST_CLEAN] {m} 잔여 {dust_bal:.8f} ({dust_krw:.0f}원) → 최소금액 미달, 유령제외")
+                except Exception as _dust_err:
+                    print(f"[DUST_CLEAN_ERR] {m}: {_dust_err}")
+
             # 🔧 FIX: 실제 체결량(vol=executed) 기준으로 재계산
             est_entry_value = entry_price * vol  # ✅ executed 기준으로 재계산
             est_exit_value = exit_price_used * vol
