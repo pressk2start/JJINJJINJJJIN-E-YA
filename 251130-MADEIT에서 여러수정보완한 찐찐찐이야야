@@ -116,18 +116,18 @@ MFE_PARTIAL_TARGETS = {
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
 # 트레일링 손절 설정 - 익절키우기 적용
-# 🔧 익절키우기: 트레일 간격 완화 → 조기 이탈 방지
+# 🔧 트레일 간격을 MFE 타겟(0.5%)보다 넓게 → MFE 익절 우선 발동 보장
 TRAIL_ATR_MULT = 0.9  # ATR 기반 여유폭 (0.8→0.9 완화)
-TRAIL_DISTANCE_MIN_BASE = 0.0025  # 기본 최소 트레일 간격 0.25% (0.2%→0.25%)
+TRAIL_DISTANCE_MIN_BASE = 0.0055  # 🔧 0.25%→0.55% (MFE 0.5% + 눌림 여유 0.05%)
 
 def get_trail_distance_min():
-    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
+    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - MFE 익절 우선"""
     # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 line 2171에서 정의됨)
     dyn_sl = globals().get("DYN_SL_MIN", 0.004)
     # 🔧 FIX: EXIT_PROFILE 반영값 사용 (BASE 대신 TRAIL_DISTANCE_MIN 참조)
     base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
-    # 손절폭의 60%를 트레일 최소 간격으로 (0.4% * 0.6 = 0.24%)
-    return max(base, dyn_sl * 0.6)
+    # 🔧 FIX: 손절폭의 80%와 base 중 큰 값 (기존 60%→80%, MFE 보호)
+    return max(base, dyn_sl * 0.8)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -4774,25 +4774,39 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (4/4 모두 충족)
-    # 🔧 4→3 완화: 개별조건 강화로 3점도 폭발적 급등 신호
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
+    # === 🔧 후보 경로 사전 판정 (경로별 차등 게이트용) ===
+    if is_ignition:
+        cand_path = "🔥점화"
+    elif breakout_score == 2:
+        cand_path = "강돌파 (EMA↑+고점↑)"
+    elif ema20_breakout:
+        cand_path = "EMA↑"
+    elif high_breakout:
+        cand_path = "고점↑"
+    else:
+        cand_path = "거래량↑"
+
+    # === 🔧 거래량↑ 전용 강화 게이트 (37건 실전 데이터 기반) ===
+    # - 거래량↑ 승률 33%: 패배 공통점 = 낮은 turn, 낮은 imb
+    # - vol_vs_ma 단독 진입 금지: 구조 확인(EMA/고점 돌파) 없이 거래량만으로 진입 차단
+    if cand_path == "거래량↑":
+        if turn_pct < 20:
+            return False, f"거래량↑ 회전부족 {turn_pct:.1f}%<20% | {metrics}"
+        if imbalance < 0.50:
+            return False, f"거래량↑ 임밸부족 {imbalance:.2f}<0.50 | {metrics}"
+
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 3점
+    # 🔧 FIX: 거래량↑ 경로는 vol_vs_ma 단독 진입 금지 (돌파/점화 필수)
+    if cand_path == "거래량↑":
+        entry_signal = (breakout_score >= 1) or (ignition_score >= 3)
+    else:
+        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
-        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x | {metrics}"
+        return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 경로={cand_path} | {metrics}"
 
     # === 통과 ===
-    # 신호 타입 표시 (점화 / 강돌파 / EMA↑ / 고점↑ / 거래량↑)
-    if is_ignition:
-        signal_tag = "🔥점화"
-    elif breakout_score == 2:
-        signal_tag = "강돌파 (EMA↑+고점↑)"
-    elif ema20_breakout:
-        signal_tag = "EMA↑"
-    elif high_breakout:
-        signal_tag = "고점↑"
-    else:
-        signal_tag = "거래량↑"
+    signal_tag = cand_path
 
     # 통과 시 주요 지표만 간략 표시
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
