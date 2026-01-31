@@ -5346,13 +5346,13 @@ def final_check_leader(m, pre, tight_mode=False):
     if entry_mode in ("confirm", "half"):
         _ticks_for_decay = pre.get("ticks")
         if _ticks_for_decay:
-            _decay = buy_decay_flag(_ticks_for_decay)
-            _t15_pre = pre.get("tape", {})
-            _t45_pre = micro_tape_stats_from_ticks(_ticks_for_decay, 45) if _ticks_for_decay else {}
+            _decay, _decay_info = buy_decay_flag(_ticks_for_decay)
+            _t15_st = micro_tape_stats_from_ticks(_ticks_for_decay, 15)
+            _t45_st = micro_tape_stats_from_ticks(_ticks_for_decay, 45)
             # 둔화 조건: decay 플래그 OR (t15 거래속도가 t45의 60% 미만 = 급감)
             _flow_fading = (
                 _decay
-                or (_t15_pre.get("krw_per_sec", 0) < _t45_pre.get("krw_per_sec", 1) * 0.6)
+                or (_t15_st.get("krw_per_sec", 0) < _t45_st.get("krw_per_sec", 1) * 0.6)
             )
             if _flow_fading:
                 old_mode = entry_mode
@@ -5361,7 +5361,7 @@ def final_check_leader(m, pre, tight_mode=False):
                 elif entry_mode == "half":
                     entry_mode = "probe"
                 if entry_mode != old_mode:
-                    print(f"[DECAY↓] {m} 매수세둔화 decay={_decay} t15/t45_speed={_t15_pre.get('krw_per_sec',0):.0f}/{_t45_pre.get('krw_per_sec',0):.0f} → {old_mode}→{entry_mode}")
+                    print(f"[DECAY↓] {m} 매수세둔화 decay={_decay} t15/t45_speed={_t15_st.get('krw_per_sec',0):.0f}/{_t45_st.get('krw_per_sec',0):.0f} → {old_mode}→{entry_mode}")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
