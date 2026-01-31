@@ -2466,6 +2466,13 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         should_close = False
         reason = verdict or action or "모니터링 종료"
 
+        # 🔧 FIX: monitor_position 내부에서 이미 청산 완료된 경우 중복 청산 방지
+        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치"}
+        if verdict in _ALREADY_CLOSED_VERDICTS:
+            # 내부에서 close_auto_position 이미 호출됨 → remonitor 종료
+            print(f"[REMONITOR] {m} 내부청산 완료 ({verdict}) → remonitor 종료")
+            return True
+
         # 🔧 FIX: 분기 순서 수정 - 위험신호/청산권고를 TP보다 먼저 처리
         # (기존: ret_pct 블록이 먼저 실행되어 청산권고/부분청산권고 도달 불가)
 
@@ -5939,6 +5946,7 @@ def monitor_position(m,
 
     trail_armed = False
     trail_stop = 0.0
+    _already_closed = False  # 🔧 FIX: 내부 청산 완료 플래그 (중복 청산 방지)
 
     # 스파이크/그레이스 기존 로직 재활용
     consecutive_failures = 0
@@ -6045,6 +6053,7 @@ def monitor_position(m,
                 if alive_sec_now >= 60 and mfe_now < 0.0015 and cur_gain_check <= 0:
                     # 60초 경과, MFE 0.15% 미만, 현재 수익 0 이하 → 스크래치 청산
                     close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
+                    _already_closed = True
                     verdict = "probe 스크래치"
                     break
 
@@ -6071,6 +6080,7 @@ def monitor_position(m,
             eff_sl_with_fee = eff_sl_pct + fee_margin  # 손절선 완화
             if cur_gain <= -eff_sl_with_fee:
                 close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
+                _already_closed = True
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
                 break
@@ -6254,6 +6264,7 @@ def monitor_position(m,
                 peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
                 drop_pct = (best - curp) / best * 100 if best > 0 else 0
                 close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
+                _already_closed = True
                 verdict = "TRAIL_STOP"
                 break
 
@@ -6437,7 +6448,7 @@ def monitor_position(m,
         # ===========================================
         # ✅ 재모니터링 알림 비활성화 (불필요한 반복 메시지 방지)
         # (실제 로직은 유지하지만, 알림 발송만 차단)
-        if AUTO_TRADE and m in OPEN_POSITIONS and not reentry:
+        if AUTO_TRADE and m in OPEN_POSITIONS and not reentry and not _already_closed:
             remonitor_until_close(m, entry_price, pre, tight_mode)
 
         # ===========================================
