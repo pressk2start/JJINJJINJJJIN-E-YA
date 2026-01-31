@@ -6521,18 +6521,9 @@ def monitor_position(m,
         # 3) probe 손절 후 빠른 재진입 허용 로직
         # ===========================================
         if AUTO_TRADE and verdict and "손절" in verdict:
-            # 🔧 FIX: 락 밖에서 재진입 여부 판단 후 sleep/remonitor 수행
-            should_remonitor = False
-            with _POSITION_LOCK:
-                pos = OPEN_POSITIONS.get(m)
-                if pos and pos.get("entry_mode") == "probe":
-                    # 최근 종료 시각 기록
-                    pos["last_exit_ts"] = time.time()
-                    OPEN_POSITIONS[m] = pos
-                    should_remonitor = True
-
-            # 🔧 락 밖에서 sleep 및 remonitor (락 2분 점유 방지)
-            if should_remonitor:
+            # 🔧 FIX: close_auto_position이 이미 OPEN_POSITIONS에서 삭제했으므로
+            # pre["entry_mode"]로 probe 여부 판단 (기존: 항상 None이어서 사문화)
+            if pre.get("entry_mode") == "probe":
                 REMONITOR_QUICK_COOLDOWN_SEC = 120  # 2분 쿨다운
                 time.sleep(REMONITOR_QUICK_COOLDOWN_SEC)
                 remonitor_until_close(m, entry_price, pre, tight_mode)
@@ -7051,9 +7042,12 @@ def main():
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
 
-                # 🔧 FIX: score/filter_type을 pre에 복사 (자동매수 알람에서 사용)
+                # 🔧 FIX: score/filter_type/entry_mode를 pre에 복사 (자동매수 알람에서 사용)
                 pre["score"] = payload.get("score", 0)
                 pre["filter_type"] = payload.get("filter_type", "기본통과")
+                # 🔧 FIX: final_check_leader의 스코어/decay/레짐 다운그레이드 결과 반영
+                # 이전에는 entry_mode가 반영 안 되어 half 모드가 사실상 도달 불가능했음
+                pre["entry_mode"] = payload.get("entry_mode", pre.get("entry_mode", "confirm"))
 
                 # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
                 # 조건: 임밸 >= 0.6 AND 매수비 >= 63.5% (정밀도 ~82%)
@@ -7150,6 +7144,8 @@ def main():
                 ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
                 cv_val = ia_stats.get("cv", 0.0)
                 pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
+                if pstd_val is None:
+                    pstd_val = 0.0  # 🔧 FIX: price_band_std가 None 반환 시 TypeError 방지
                 prebreak_band_val = dynamic_prebreak_band(ticks_for_metrics) if ticks_for_metrics else PREBREAK_HIGH_PCT
                 is_prebreak = pre.get("filter_type") == "prebreak"
                 # 베스트호가 깊이
