@@ -2525,11 +2525,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             full_tp = TP_FULL.get(tag, 1.2)
             part_tp = TP_PART.get(tag, 0.7)
 
-            # 🔧 FIX: TP 바닥값 = alpha만 (슬립 이중 차감 방지)
-            # - 슬립은 ret_net에서 한 번만 차감 (A안)
-            # - 기존: slip_extra로 TP 바닥값 상향 + ret_net에서 슬립 차감 → 이중 페널티
-            # - 개선: ret_net 차감만 유지, TP 바닥값에서는 슬립 제거
-            cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha)
+            # 🔧 TP 바닥값 = dyn_checkpoint 기준 SSOT (수수료+슬립+알파 통합)
+            # - ret_net에서 수수료+슬립 차감 + TP 바닥도 동일 기준 → 일관성 확보
+            cp_alpha = get_dynamic_checkpoint() * 100.0  # 0.28~0.50% (수수료+슬립+알파)
 
             # 🔧 FIX: exit 슬립은 ret_net에서만 반영 (이중 차감 방지)
             avg_exit_slip_pct = get_expected_exit_slip_pct()  # exit 전용 trimmed mean
@@ -6109,7 +6107,12 @@ def monitor_position(m,
                 ema8 = ema_last([c["trade_price"] for c in c1m], 8)
                 short_term_up = ema3 > ema8
 
-                if add_cond_price and add_cond_flow and short_term_up:
+                # 🔧 MAE/MFE 게이트: 흔들린 포지션엔 추매 금지
+                mae_now = (worst / entry_price - 1.0) if entry_price > 0 else -1
+                mfe_now_add = (best / entry_price - 1.0) if entry_price > 0 else 0
+                add_cond_mfe = mae_now > -0.0025 and mfe_now_add > 0.007  # MAE>-0.25%, MFE>0.7%
+
+                if add_cond_price and add_cond_flow and short_term_up and add_cond_mfe:
                     with _POSITION_LOCK:
                         pos = OPEN_POSITIONS.get(m)
                         already_added = pos.get("added") if pos else True
