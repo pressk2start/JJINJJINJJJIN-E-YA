@@ -4890,22 +4890,21 @@ def calc_ema_slope(c1, period=20, lookback=5):
 
     closes = [c["trade_price"] for c in c1]
 
-    # EMA 계산
+    # 🔧 FIX: 전체 순회 1회로 ema_now + ema_prev(lookback 전 시점) 동시 추출
     mult = 2 / (period + 1)
     ema = closes[0]
-    for p in closes[1:]:
+    ema_prev = None
+    prev_idx = len(closes) - 1 - lookback  # lookback 전 인덱스
+
+    for i, p in enumerate(closes[1:], start=1):
         ema = p * mult + ema * (1 - mult)
-    ema_now = ema
+        if i == prev_idx:
+            ema_prev = ema
 
-    # lookback 전 EMA
-    ema_prev = closes[0]
-    for p in closes[1:-lookback]:
-        ema_prev = p * mult + ema_prev * (1 - mult)
-
-    if ema_prev <= 0:
+    if not ema_prev or ema_prev <= 0:
         return 0.0
 
-    slope = (ema_now - ema_prev) / ema_prev
+    slope = (ema - ema_prev) / ema_prev
     return slope
 
 
@@ -5037,9 +5036,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     fresh_ok, fresh_age, fresh_max_age = last_two_ticks_fresh(ticks, return_age=True)
 
     # 🔥 섀도우 모드용 지표 미리 계산
-    ia = inter_arrival_stats(ticks, 60)  # 🔧 30→60초 (CV 9.9 기본값 방지)
+    ia = inter_arrival_stats(ticks, 20)  # 🔧 sec=20 통일 (postcheck와 동일)
     cv = ia["cv"]
-    pstd10 = price_band_std(ticks, 10)
+    pstd10 = price_band_std(ticks, 20)  # 🔧 sec=20 통일
     if pstd10 is None:
         pstd10 = 9.9  # 데이터 부족시 기본값 (하드컷 조건 회피)
     cons_buys = calc_consecutive_buys(ticks, 15)
@@ -5329,9 +5328,9 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         fresh_age = (now_ms - last_tick_ts) / 1000.0
 
     # 🚀 초단기 미세필터 지표
-    ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
+    ia_stats = inter_arrival_stats(ticks, 20) if ticks else {"cv": 0.0}  # 🔧 sec=20 통일
     cv = ia_stats.get("cv", 0.0)
-    pstd = price_band_std(ticks, sec=10) if ticks else None
+    pstd = price_band_std(ticks, sec=20) if ticks else None  # 🔧 sec=20 통일
     pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
     prebreak_band = dynamic_prebreak_band(ticks) if ticks else PREBREAK_HIGH_PCT
     is_prebreak = 1 if pre.get("filter_type") == "prebreak" else 0
@@ -5906,6 +5905,18 @@ def monitor_position(m,
     entry_mode = pos.get("entry_mode", "confirm")
     signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
 
+    # === 🔧 1분봉 캐시 (10초 스로틀 — 루프 내 다중 호출 방지) ===
+    _c1_cache = None
+    _c1_cache_ts = 0.0
+
+    def _get_c1_cached():
+        nonlocal _c1_cache, _c1_cache_ts
+        now = time.time()
+        if _c1_cache is None or (now - _c1_cache_ts) >= 10:
+            _c1_cache = get_minutes_candles(1, m, 20)
+            _c1_cache_ts = now
+        return _c1_cache
+
     try:
         while time.time() - start_ts <= MAX_RUNTIME:
             time.sleep(RECHECK_SEC)
@@ -6050,7 +6061,9 @@ def monitor_position(m,
                     and imb_now >= 0.40  # 🔧 호가 임밸런스 조건 추가
                 )
 
-                if gain_now >= 0.012 and strong_flow:
+                # 🔧 MAE 게이트: 초반 흔들린 포지션은 전환 금지
+                mae_check = (worst / entry_price - 1.0) if entry_price > 0 else -1
+                if gain_now >= 0.012 and strong_flow and mae_check > -0.0035:
                     add_reason = f"상승확정 (수익+{gain_now*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} 초당{t15_now['krw_per_sec']/1000:.0f}K)"
                     ok_add, new_entry = add_auto_position(m, curp, add_reason)
                     if ok_add and new_entry:
@@ -6067,15 +6080,16 @@ def monitor_position(m,
                             f"추매 후 평단: {fmt6(new_entry)}원"
                         )
 
-                        # 동적 손절 재계산
-                        c1_for_sl = get_minutes_candles(1, m, 20)
+                        # 동적 손절 재계산 (캐시 강제 갱신)
+                        _c1_cache = None; _c1_cache_ts = 0.0
+                        c1_for_sl = _get_c1_cached()
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
                         trail_armed = False  # 새 기준으로 트레일링 리셋
 
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
                 # 초기 트레일: ATR 기준 혹은 최소거리 (🔧 손절폭 연동)
-                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                atr = atr14_from_candles(_get_c1_cached(), 14)
                 if atr and atr > 0:
                     trail_dist = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
@@ -6102,7 +6116,7 @@ def monitor_position(m,
                 )
 
                 # 📊 단기 EMA 기준으로 단기 상승 전환 감지 (1분봉)
-                c1m = get_minutes_candles(1, m, 20)
+                c1m = _get_c1_cached()
                 ema3 = ema_last([c["trade_price"] for c in c1m], 3)
                 ema8 = ema_last([c["trade_price"] for c in c1m], 8)
                 short_term_up = ema3 > ema8
@@ -6126,12 +6140,13 @@ def monitor_position(m,
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
-                            c1_for_sl = get_minutes_candles(1, m, 20)
+                            _c1_cache = None; _c1_cache_ts = 0.0  # 캐시 강제 갱신
+                            c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
 
             # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
             if trail_armed and new_high:
-                atr = atr14_from_candles(get_minutes_candles(1, m, 20), 14)
+                atr = atr14_from_candles(_get_c1_cached(), 14)
                 if atr and atr > 0:
                     trail_dist = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
@@ -6196,10 +6211,11 @@ def monitor_position(m,
                         # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
                         tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
                     else:
-                        # 약세 → 25% 부분익절 (나머지 75%는 트레일링/ATR손절)
-                        ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
-                        if ok:
-                            tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 완료")
+                        # 약세 → 25% 부분익절 (MFE/Plateau 미완료 시만)
+                        if not mfe_partial_done and not plateau_partial_done:
+                            ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
+                            if ok:
+                                tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 완료")
 
             # 🔧 [제거됨] 강세모드 동적 트레일링 → 일반 트레일링(0.2% 간격)으로 대체
 
@@ -6214,7 +6230,7 @@ def monitor_position(m,
                 mfe_base = MFE_PARTIAL_TARGETS.get(signal_tag, 0.004)  # 기본 0.4%
                 # 🔧 ATR 동적화: 종목 변동성에 맞춰 MFE 타겟 조정
                 try:
-                    c1_mfe = get_minutes_candles(1, m, 20)
+                    c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
                     if atr_raw and curp > 0:
                         atr_pct = atr_raw / curp
