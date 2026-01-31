@@ -686,16 +686,18 @@ def place_market_sell(market, volume, price_hint=None):
     return upbit_private_post("/v1/orders", body)
 
 def get_actual_balance(market):
-    """실제 보유량 조회 (찌꺼기 방지용)"""
+    """실제 매도 가능량 조회 (balance만, locked 제외)"""
     try:
         currency = market.replace("KRW-", "")
         accounts = get_account_info()
+        if not accounts:
+            return -1.0  # API 실패
         for a in accounts:
             if a.get("currency") == currency:
                 return float(a.get("balance", "0"))
-        return 0.0
+        return 0.0  # 목록에 없음 = 진짜 0
     except:
-        return 0.0
+        return -1.0  # 조회 실패
 
 def get_balance_with_locked(market, retries=2):
     """
@@ -1732,7 +1734,8 @@ def close_auto_position(m, reason=""):
             return
 
         # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
-        actual_vol = get_balance_with_locked(m)
+        # 🔧 FIX: 매도 시에는 실제 매도 가능량(balance만) 사용 — locked는 매도 불가
+        actual_vol = get_actual_balance(m)
         # 🔧 FIX: -1 = 조회 실패 → 청산 진행하지 않음 (오탐 방지)
         if actual_vol < 0:
             print(f"[AUTO] {m} 잔고 조회 실패 → 청산 스킵 (reason={reason})")
