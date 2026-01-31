@@ -4008,7 +4008,7 @@ def micro_tape_stats_from_ticks(ticks, sec):
             "krw_per_sec": 0
         }
     try:
-        newest_ts = ticks[0]["timestamp"]
+        newest_ts = max(t["timestamp"] for t in ticks)
         cutoff = newest_ts - sec * 1000
     except:
         return {
@@ -4027,7 +4027,7 @@ def micro_tape_stats_from_ticks(ticks, sec):
     for x in ticks:
         ts = x.get("timestamp", 0)
         if ts < cutoff:
-            break
+            continue
         p = x.get("trade_price", 0.0)
         v = x.get("trade_volume", 0.0)
         krw += p * v
@@ -4068,7 +4068,7 @@ def calc_consecutive_buys(ticks, sec=15):
     if not ticks:
         return 0
     try:
-        newest_ts = ticks[0]["timestamp"]
+        newest_ts = max(t["timestamp"] for t in ticks)
         cutoff = newest_ts - sec * 1000
     except:
         return 0
@@ -4077,7 +4077,7 @@ def calc_consecutive_buys(ticks, sec=15):
     current_streak = 0
     for x in ticks:
         if x.get("timestamp", 0) < cutoff:
-            break
+            continue
         if x.get("ask_bid") == "BID":
             current_streak += 1
             max_streak = max(max_streak, current_streak)
@@ -4148,16 +4148,17 @@ def running_1m_bar(ticks, last_candle=None):
         if not current_ticks:
             return None
 
+    # 🔧 FIX: 정렬 전제 제거 — timestamp 기준 명시 정렬
+    current_ticks = sorted(current_ticks, key=lambda t: t.get("timestamp", 0))
     prices = [t.get("trade_price", 0) for t in current_ticks if t.get("trade_price", 0) > 0]
     if not prices:
         return None
 
-    # OHLC 계산 (틱은 최신순 정렬이므로 reverse 필요)
-    prices_chrono = list(reversed(prices))  # 시간순 정렬
-    open_price = prices_chrono[0]
+    # OHLC 계산 (timestamp 정렬 완료 → 첫=시가, 끝=종가)
+    open_price = prices[0]
     high_price = max(prices)
     low_price = min(prices)
-    close_price = prices_chrono[-1]  # 가장 최근 가격
+    close_price = prices[-1]  # 가장 최근 가격
 
     # 거래대금/매수비
     volume_krw = sum(t.get("trade_price", 0) * t.get("trade_volume", 0) for t in current_ticks)
@@ -6037,6 +6038,21 @@ def monitor_position(m,
                 continue
             curp = cur_js[0].get("trade_price", last_price)
             last_price = curp
+
+            # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
+            if not hasattr(monitor_position, '_ob_snap_ts'):
+                monitor_position._ob_snap_ts = {}
+                monitor_position._ob_snap_cache = {}
+            _ob_snap_age = time.time() - monitor_position._ob_snap_ts.get(m, 0)
+            if _ob_snap_age >= 10:
+                try:
+                    _ob_snap_raw = fetch_orderbook_cache([m])
+                    monitor_position._ob_snap_cache[m] = _ob_snap_raw.get(m, pre.get("ob", {}))
+                    monitor_position._ob_snap_ts[m] = time.time()
+                except Exception:
+                    pass
+            ob_snap = monitor_position._ob_snap_cache.get(m, pre.get("ob", {}))
+
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
             if new_high:
@@ -6135,22 +6151,8 @@ def monitor_position(m,
                 # 🔧 FIX: Decimal 제거 (float와 비교 시 TypeError 발생)
                 gain_now = (curp / entry_price - 1.0)
 
-                # 🔧 FIX: 추매 조건에 최신 호가 임밸런스 사용 (과거 ob 사용 → 오판 방지)
-                # 🔧 FIX: 10초 throttle (API 429 방지)
-                if not hasattr(monitor_position, '_last_ob_ts'):
-                    monitor_position._last_ob_ts = {}
-                _ob_age = time.time() - monitor_position._last_ob_ts.get(m, 0)
-                if _ob_age >= 10:
-                    try:
-                        _ob_fresh = fetch_orderbook_cache([m])
-                        ob_now = _ob_fresh.get(m, pre.get("ob", {}))
-                        monitor_position._last_ob_ts[m] = time.time()
-                        monitor_position._last_ob_cache = monitor_position.__dict__.get('_last_ob_cache', {})
-                        monitor_position._last_ob_cache[m] = ob_now
-                    except Exception:
-                        ob_now = pre.get("ob", {})
-                else:
-                    ob_now = getattr(monitor_position, '_last_ob_cache', {}).get(m, pre.get("ob", {}))
+                # 🔧 FIX: 루프 상단 오더북 스냅샷 재사용 (API 중복 호출 제거)
+                ob_now = ob_snap
                 imb_now = calc_orderbook_imbalance(ob_now) if ob_now else 0.0
 
                 strong_flow = (
@@ -6201,9 +6203,8 @@ def monitor_position(m,
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
-                # 🔧 FIX: 추매 시 fresh 오더북 조회 (진입 시점 스냅샷은 stale)
-                _ob_cache_pyr = fetch_orderbook_cache([m])
-                ob_pyr = _ob_cache_pyr.get(m, pre.get("ob", {}))
+                # 🔧 FIX: 루프 상단 오더북 스냅샷 재사용 (API 중복 호출 제거)
+                ob_pyr = ob_snap
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
                 # 💡 조건 완화 — 약상승에서도 반응하도록
@@ -6274,22 +6275,8 @@ def monitor_position(m,
 
             # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
-            # 🔧 FIX: 최신 오더북 사용 (과거 ob 기반 판단 → 오판 방지, 10초 throttle)
-            if not hasattr(monitor_position, '_last_ob_ts'):
-                monitor_position._last_ob_ts = {}
-            _ob_age2 = time.time() - monitor_position._last_ob_ts.get(m, 0)
-            if _ob_age2 >= 10:
-                try:
-                    _ob_fresh2 = fetch_orderbook_cache([m])
-                    ob_now = _ob_fresh2.get(m, pre.get("ob", {}))
-                    monitor_position._last_ob_ts[m] = time.time()
-                    if not hasattr(monitor_position, '_last_ob_cache'):
-                        monitor_position._last_ob_cache = {}
-                    monitor_position._last_ob_cache[m] = ob_now
-                except Exception:
-                    ob_now = pre.get("ob", {})
-            else:
-                ob_now = getattr(monitor_position, '_last_ob_cache', {}).get(m, pre.get("ob", {}))
+            # 🔧 FIX: 루프 상단 오더북 스냅샷 재사용 (API 중복 호출 제거)
+            ob_now = ob_snap
 
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
