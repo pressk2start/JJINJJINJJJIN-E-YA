@@ -2145,7 +2145,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     was_full = False
     if sell_krw < MIN_ORDER_KRW or remaining_krw < MIN_ORDER_KRW:
         print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
-        sell_volume = current_volume  # 전량으로 변경
+        # 🔧 FIX: 전량 전환 시 거래소 실잔고 사용 (찌꺼기 방지)
+        actual_bal = get_actual_balance(m)
+        sell_volume = actual_bal if actual_bal > 0 else current_volume
         was_full = True  # 🔧 전량청산 시도 표시
         # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
         with _POSITION_LOCK:
