@@ -5960,8 +5960,8 @@ def monitor_position(m,
                     break
 
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
-            mfe_pct = (best / entry_price - 1.0) * 100
-            mae_pct = (worst / entry_price - 1.0) * 100
+            mfe_pct = (best / entry_price - 1.0) * 100 if entry_price > 0 else 0
+            mae_pct = (worst / entry_price - 1.0) * 100 if entry_price > 0 else 0
             with _POSITION_LOCK:
                 pos_now = OPEN_POSITIONS.get(m)
                 if pos_now:
@@ -6074,6 +6074,7 @@ def monitor_position(m,
                             pos["added"] = True
                             pos["last_add_ts"] = time.time()
                             OPEN_POSITIONS[m] = pos
+                        entry_mode = "confirm"  # 🔧 FIX: 로컬 변수 동기화 (probe scratch 오작동 방지)
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
@@ -6117,9 +6118,12 @@ def monitor_position(m,
 
                 # 📊 단기 EMA 기준으로 단기 상승 전환 감지 (1분봉)
                 c1m = _get_c1_cached()
-                ema3 = ema_last([c["trade_price"] for c in c1m], 3)
-                ema8 = ema_last([c["trade_price"] for c in c1m], 8)
-                short_term_up = ema3 > ema8
+                if c1m and len(c1m) >= 8:
+                    ema3 = ema_last([c["trade_price"] for c in c1m], 3)
+                    ema8 = ema_last([c["trade_price"] for c in c1m], 8)
+                    short_term_up = ema3 > ema8
+                else:
+                    short_term_up = False  # 🔧 FIX: 캔들 부족 시 보수적 처리
 
                 # 🔧 MAE/MFE 게이트: 흔들린 포지션엔 추매 금지
                 mae_now = (worst / entry_price - 1.0) if entry_price > 0 else -1
