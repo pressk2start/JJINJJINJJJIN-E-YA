@@ -1467,11 +1467,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # 🔧 스코어 기반 진입모드 라벨 (probe/half/confirm)
         if entry_mode == "probe":
-            mode_label = "탐색진입"      # 스코어 < 60, 10% 소액
+            mode_label = "탐색진입"      # 스코어 < 55, 10% 소액
         elif entry_mode == "half":
-            mode_label = "중간진입"      # 스코어 60~78, 50% 사이즈
+            mode_label = "중간진입"      # 스코어 55~70, 50% 사이즈
         else:  # confirm
-            mode_label = "확정진입"      # 스코어 >= 78, 풀 사이즈
+            mode_label = "확정진입"      # 스코어 >= 70, 풀 사이즈
         entry_reason = f"{signal_tag} ({detail_str})"
 
         # 🔧 실제 비율 계산 (최소금액 적용 시 entry_fraction과 다를 수 있음)
@@ -2672,11 +2672,11 @@ GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - 4.0 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 3.0  # 🔧 틱 신선도 상한 (초) - 7.5→3.0 (장중 기본, 시간대별 동적 완화)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
-GATE_PSTD_MAX = 0.06      # 🔧 pstd 상한 (%) - 0.08→0.06 강화 (승0.03 vs 패0.14, 분리력 최대화)
-GATE_PSTD_STRONGBREAK_MAX = 0.04  # 🔧 강돌파 pstd 상한 (%) - 0.06→0.04 강화 (양극화 방지)
-GATE_TURN_MAX_MAJOR = 300.0   # 🔧 BTC/ETH 과회전 상한 (%) - 400→300 (2286% 같은 극단치 차단)
-GATE_TURN_MAX_ALT = 120.0     # 🔧 알트 과회전 상한 (%) - 150→120 (승72% vs 패106% 기반)
-GATE_TURN_MAX_ALT_PROBE = 100.0  # 🔧 알트 probe 과회전 상한 (%) - 120→100 (탐색 더 엄격)
+GATE_PSTD_MAX = 0.08      # pstd 상한 (%) - 승0.03 vs 패0.14 → 0.08 컷
+GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚임 방지
+GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회전 높을 수 있음
+GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
+GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
 GATE_CONSEC_BUY_MIN_QUALITY = 8   # 연속매수 품질 하한 - 승37 vs 패24, 중간값 기준 (강돌파 consec≥6과 호환)
 GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
 GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
@@ -3153,45 +3153,6 @@ def get_path_statistics(last_n: int = 100) -> str:
             avg_mfe = df["mfe_pct"].mean()
             avg_mae = df["mae_pct"].mean()
             lines.append(f"  평균MFE: +{avg_mfe:.2f}% / 평균MAE: {avg_mae:.2f}%")
-
-        # 🔬 미세구조 분위수별 승률 분석 (올려준 분석 반영: 어디서 끊어야 하는지 데이터로 확인)
-        _quant_cols = [
-            ("spread", "스프레드", "%", 1),        # CSV: % 단위 (0.06 = 0.06%)
-            ("turn", "회전율", "%", 100),           # CSV: 소수점 (0.38 = 38%) → ×100으로 % 표시
-            ("pstd", "pstd", "%", 1),              # CSV: % 단위 (0.03 = 0.03%)
-        ]
-        has_quant = False
-        for col, label, unit, mult in _quant_cols:
-            if col not in df.columns:
-                continue
-            _vals = pd.to_numeric(df[col], errors="coerce").dropna()
-            if len(_vals) < 10:
-                continue
-            if not has_quant:
-                lines.append("")
-                lines.append("─" * 20)
-                lines.append("<b>🔬 미세구조 분위수별 승률:</b>")
-                has_quant = True
-
-            # 3분위: 하위33% / 중간 / 상위33%
-            q33 = _vals.quantile(0.33)
-            q67 = _vals.quantile(0.67)
-            buckets = [
-                ("하위", df[pd.to_numeric(df[col], errors="coerce") <= q33]),
-                ("중간", df[(pd.to_numeric(df[col], errors="coerce") > q33) & (pd.to_numeric(df[col], errors="coerce") <= q67)]),
-                ("상위", df[pd.to_numeric(df[col], errors="coerce") > q67]),
-            ]
-            parts = []
-            for bname, bdf in buckets:
-                bn = len(bdf)
-                if bn == 0:
-                    continue
-                bw = len(bdf[bdf["result"] == "win"])
-                bwr = bw / bn * 100
-                parts.append(f"{bname}{bn}건={bwr:.0f}%")
-            # 분위 경계값 표시
-            lines.append(f"  {label}: {' / '.join(parts)}")
-            lines.append(f"    (경계: {q33*mult:.2f}{unit} | {q67*mult:.2f}{unit})")
 
         return "\n".join(lines)
 
@@ -4816,13 +4777,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     eff_imb_min = max(0.35, GATE_IMBALANCE_MIN * (1 - relax * 0.3))  # 🔧 거의 안 풀기 (0.50→0.46)
     # 🔧 FIX: 스프레드 가격대별 상한 (GATE_SPREAD_MAX 학습값 기반 + 가격대 스케일링)
     # GATE_SPREAD_MAX를 기준으로 가격대별 비율 적용 → 학습 결과가 실제 게이트에 반영됨
-    # 🔧 스프레드 가격대별 상한 강화 (승0.06~0.11% vs 패0.11~0.28% 기반)
     if cur_price > 0 and cur_price < 100:
-        eff_spread_max = min(GATE_SPREAD_MAX, 0.60)        # 100원 미만: 0.80→0.60% 강화
+        eff_spread_max = min(GATE_SPREAD_MAX, 0.80)        # 100원 미만: 학습값 or 0.80% 중 작은 값
     elif cur_price >= 100 and cur_price < 1000:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.25, 0.35)  # 100~1000원: 0.45→0.35% 강화
+        eff_spread_max = min(GATE_SPREAD_MAX * 0.30, 0.45)  # 100~1000원: 학습값×0.3 or 0.45%
     else:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.13, 0.20)  # 1000원 이상: 0.25→0.20% 강화
+        eff_spread_max = min(GATE_SPREAD_MAX * 0.17, 0.25)  # 1000원 이상: 학습값×0.17 or 0.25%
     eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
 
     # 점화 여부 (로그용)
@@ -4914,20 +4874,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
 
     # === 🔧 조건부 스프레드 강화 (turn 높거나 pstd 높으면 더 엄격) ===
-    # 🔧 임계치 강화: turn 80%+, pstd 0.04%+, spread 0.05%+ (이전: 100/0.06/0.06)
-    if (turn_pct > 80 or pstd > 0.04) and spread > 0.05:
-        return False, f"조건부스프레드 spread{spread:.2f}%>0.05% (turn{turn_pct:.0f}% pstd{pstd:.2f}%) | {metrics}"
-
-    # === 🔧 미세구조 복합 품질 게이트 (올려준 분석 반영: 개별 컷 통과해도 복합적으로 나쁘면 차단) ===
-    # spread/turn/pstd 각각 "나쁜 방향" 정도를 0~1로 정규화 후 합산
-    # 승 평균: spread 0.06~0.11%, turn 38~72%, pstd 0.03~0.09%
-    # 패 평균: spread 0.11~0.28%, turn 106~312%, pstd 0.14%
-    _mq_spread = min(spread / 0.20, 1.0)        # 0.20%에서 1.0 (패 중간값)
-    _mq_turn = min(turn_pct / 150.0, 1.0)       # 150%에서 1.0 (패 중간값)
-    _mq_pstd = min(pstd / 0.10, 1.0)            # 0.10%에서 1.0 (패 중간값)
-    _mq_score = _mq_spread * 0.40 + _mq_turn * 0.35 + _mq_pstd * 0.25  # 가중합
-    if _mq_score > 0.70 and not mega:
-        return False, f"미세구조불량 mq={_mq_score:.2f}>0.70 (spr={spread:.2f}% turn={turn_pct:.0f}% pstd={pstd:.2f}%) | {metrics}"
+    if (turn_pct > 100 or pstd > 0.06) and spread > 0.06:
+        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd:.2f}%) | {metrics}"
 
     # === 🔧 연속매수 품질 하한 (승37 vs 패24 - 추세 지속력 확인) ===
     if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
@@ -5465,17 +5413,6 @@ def final_check_leader(m, pre, tight_mode=False):
                     entry_mode = "probe"
                 if entry_mode != old_mode:
                     print(f"[DECAY↓] {m} 매수세둔화 decay={_decay} t15/t45_speed={_t15_st.get('krw_per_sec',0):.0f}/{_t45_st.get('krw_per_sec',0):.0f} → {old_mode}→{entry_mode}")
-
-    # 🔧 half 모드 미세구조 품질 체크 (half 승률 0% 문제 대응)
-    # spread/pstd가 "패배 평균" 수준이면 probe로 다운그레이드
-    if entry_mode == "half":
-        _h_spread = pre.get("spread", 0)
-        _h_pstd = pre.get("pstd", 0)
-        _h_turn = pre.get("turn_pct", 0)
-        # 패배 중간값 이상이면 half→probe 다운그레이드
-        if _h_spread > 0.15 or _h_pstd > 0.08 or _h_turn > 100:
-            print(f"[HALF_MQ↓] {m} 미세구조 불량 spr={_h_spread:.2f}% pstd={_h_pstd:.2f}% turn={_h_turn:.0f}% → half→probe")
-            entry_mode = "probe"
 
     # 🔧 probe 알트 과회전 추가 필터 (stage1_gate에서는 entry_mode 미결정)
     if entry_mode == "probe":
@@ -6222,17 +6159,11 @@ def monitor_position(m,
             worst = min(worst, curp)
 
             # 🔧 Probe 스크래치: probe 전용 시간손절 (소액 탐색 손실 방지)
-            # 🔧 개선: 15초 초조기 + 25초 조기 + 60초 기존 (3단계 탈출)
+            # 🔧 개선: 25초 조기 탈출 + 60초 기존 조건 + imbalance 역전 체크
             if entry_mode == "probe":
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                # 🔧 Phase 0: 15초 초조기 탈출 (MFE 0.03% 못 찍고 손실중 → 즉시 철수)
-                if alive_sec_now >= 15 and mfe_now < 0.0003 and cur_gain_check < -0.001:
-                    close_auto_position(m, f"probe초조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% cur={cur_gain_check*100:.2f}% (즉시추진없음)")
-                    _already_closed = True
-                    verdict = "probe 스크래치"
-                    break
                 # 🔧 Phase 1: 25초 조기 모멘텀 확인 (MFE 0.08% 못 찍으면 즉시 철수)
                 if alive_sec_now >= 25 and mfe_now < 0.0008 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (조기모멘텀부재)")
