@@ -1894,6 +1894,20 @@ def close_auto_position(m, reason=""):
                                 with _POSITION_LOCK:
                                     OPEN_POSITIONS.pop(m, None)
                                 tg_send(f"🧹 <b>자동청산 완료(후속확인)</b> {m}\n• 사유: {reason}")
+                                # 🔧 FIX: 후속확인 청산에서도 trade result 기록 (누락 방지)
+                                if AUTO_LEARN_ENABLED:
+                                    try:
+                                        _hold = time.time() - pos.get("entry_ts", time.time())
+                                        _mfe = pos.get("mfe_pct", 0.0)
+                                        _mae = pos.get("mae_pct", 0.0)
+                                        _net_ret = (cur_price / entry_price - 1.0 - FEE_RATE_ROUNDTRIP) if entry_price > 0 else 0
+                                        update_trade_result(m, cur_price, _net_ret, _hold,
+                                                            added=pos.get('added', False),
+                                                            exit_reason=reason or "후속확인_청산",
+                                                            mfe_pct=_mfe, mae_pct=_mae,
+                                                            entry_ts=pos.get("entry_ts"))
+                                    except Exception as _e:
+                                        print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
                                 return
                         # 🔧 4분 후에도 미체결 → 경고 알림
                         tg_send(f"🚨 <b>{m} 청산 미완료</b>\n• 4분 후속감시 종료, 수동 확인 필요\n• 사유: {reason}")
@@ -2663,7 +2677,7 @@ GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚
 GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회전 높을 수 있음
 GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
 GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
-GATE_CONSEC_BUY_MIN_QUALITY = 15  # 연속매수 품질 하한 - 승37 vs 패24 기반
+GATE_CONSEC_BUY_MIN_QUALITY = 8   # 연속매수 품질 하한 - 승37 vs 패24, 중간값 기준 (강돌파 consec≥6과 호환)
 GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
 GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 MA 대비 거래량 하한 (상수→전역변수화, 학습/튜닝 가능)
@@ -4845,8 +4859,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 🔧 pstd 상한 컷 (승0.03 vs 패0.14 - 가장 강한 승패 분리자) ===
     # pstd는 % 단위 (0.08 = 0.08%)
-    breakout_score_pre = int(ema20_breakout) + int(high_breakout)
-    if breakout_score_pre == 2:
+    breakout_score = int(ema20_breakout) + int(high_breakout)
+    if breakout_score == 2:
         eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.06%
     else:
         eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.08%
@@ -4868,8 +4882,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"연속매수부족 {consecutive_buys}<{GATE_CONSEC_BUY_MIN_QUALITY} | {metrics}"
 
     # === 진입 신호 체크 (동적) ===
-    # 돌파 점수: EMA20 돌파 + 고점 돌파
-    breakout_score = int(ema20_breakout) + int(high_breakout)
+    # breakout_score는 위에서 이미 계산됨 (pstd 필터에서 사용)
 
     # 🔧 강돌파 전용 품질 필터 (OR 구조 + 과열 조합 컷)
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
@@ -5148,7 +5161,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     cv = ia["cv"]
     pstd10 = price_band_std(ticks, 10)  # 10초 윈도우 (현재 순간 흔들림 감지)
     if pstd10 is None:
-        pstd10 = 9.9  # 데이터 부족시 기본값 (하드컷 조건 회피)
+        pstd10 = 9.9  # 데이터 부족시 높은 기본값 → gate에서 pstd 필터에 의해 차단됨
     cons_buys = calc_consecutive_buys(ticks, 15)
     overheat = accel * vol_surge
     spread = ob.get("spread", 9.9)
