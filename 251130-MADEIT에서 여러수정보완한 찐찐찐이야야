@@ -3154,6 +3154,45 @@ def get_path_statistics(last_n: int = 100) -> str:
             avg_mae = df["mae_pct"].mean()
             lines.append(f"  평균MFE: +{avg_mfe:.2f}% / 평균MAE: {avg_mae:.2f}%")
 
+        # 🔬 미세구조 분위수별 승률 분석 (올려준 분석 반영: 어디서 끊어야 하는지 데이터로 확인)
+        _quant_cols = [
+            ("spread", "스프레드", "%", 1),        # CSV에 이미 % 단위로 저장됨
+            ("turn", "회전율", "%", 1),             # CSV 컬럼명 = turn (이미 %)
+            ("pstd", "pstd", "%", 1),              # CSV에 이미 % 단위로 저장됨 (round(pstd*100))
+        ]
+        has_quant = False
+        for col, label, unit, mult in _quant_cols:
+            if col not in df.columns:
+                continue
+            _vals = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(_vals) < 10:
+                continue
+            if not has_quant:
+                lines.append("")
+                lines.append("─" * 20)
+                lines.append("<b>🔬 미세구조 분위수별 승률:</b>")
+                has_quant = True
+
+            # 3분위: 하위33% / 중간 / 상위33%
+            q33 = _vals.quantile(0.33)
+            q67 = _vals.quantile(0.67)
+            buckets = [
+                ("하위", df[pd.to_numeric(df[col], errors="coerce") <= q33]),
+                ("중간", df[(pd.to_numeric(df[col], errors="coerce") > q33) & (pd.to_numeric(df[col], errors="coerce") <= q67)]),
+                ("상위", df[pd.to_numeric(df[col], errors="coerce") > q67]),
+            ]
+            parts = []
+            for bname, bdf in buckets:
+                bn = len(bdf)
+                if bn == 0:
+                    continue
+                bw = len(bdf[bdf["result"] == "win"])
+                bwr = bw / bn * 100
+                parts.append(f"{bname}{bn}건={bwr:.0f}%")
+            # 분위 경계값 표시
+            lines.append(f"  {label}: {' / '.join(parts)}")
+            lines.append(f"    (경계: {q33*mult:.2f}{unit} | {q67*mult:.2f}{unit})")
+
         return "\n".join(lines)
 
     except ImportError:
