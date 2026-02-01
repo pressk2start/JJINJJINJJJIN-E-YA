@@ -1766,7 +1766,7 @@ def close_auto_position(m, reason=""):
             tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
             if AUTO_LEARN_ENABLED:
                 try:
-                    update_trade_result(m, 0, 0, 0)  # 더미 값으로 카운트만
+                    update_trade_result(m, 0, 0, 0, exit_reason=reason or "잔고0_외부청산")  # 🔧 FIX: exit_reason 전달
                 except Exception:
                     pass
             return
@@ -2038,7 +2038,7 @@ def close_auto_position(m, reason=""):
                 # 🔧 FIX: 리포트 카운트 증가
                 if AUTO_LEARN_ENABLED:
                     try:
-                        update_trade_result(m, 0, 0, 0)
+                        update_trade_result(m, 0, 0, 0, exit_reason=reason or "최소주문금액_dust")  # 🔧 FIX: exit_reason 전달
                     except Exception:
                         pass
                 return
@@ -2055,7 +2055,7 @@ def close_auto_position(m, reason=""):
                     # 🔧 FIX: 리포트 카운트 증가
                     if AUTO_LEARN_ENABLED:
                         try:
-                            update_trade_result(m, 0, 0, 0)
+                            update_trade_result(m, 0, 0, 0, exit_reason=reason or "좀비포지션_잔고0")  # 🔧 FIX: exit_reason 전달
                         except Exception:
                             pass
             return
@@ -2657,6 +2657,13 @@ GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - 4.0 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 3.0  # 🔧 틱 신선도 상한 (초) - 7.5→3.0 (장중 기본, 시간대별 동적 완화)
+# 🔧 노이즈/과변동 필터 (승패 데이터 기반)
+GATE_PSTD_MAX = 0.08      # pstd 상한 (%) - 승0.03 vs 패0.14 → 0.08 컷
+GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚임 방지
+GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회전 높을 수 있음
+GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
+GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
+GATE_CONSEC_BUY_MIN_QUALITY = 15  # 연속매수 품질 하한 - 승37 vs 패24 기반
 GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
 GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 MA 대비 거래량 하한 (상수→전역변수화, 학습/튜닝 가능)
@@ -4708,7 +4715,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  current_volume=0, price_change=0, mega=False,
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
                  ignition_score=0, best_ask_krw=0, cur_price=0,
-                 consecutive_buys=0, cv=0.0, overheat=0.0):
+                 consecutive_buys=0, cv=0.0, overheat=0.0,
+                 pstd=0.0, market=""):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -4834,6 +4842,30 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 호가 임밸런스 컷 (동적) ===
     if imbalance < eff_imb_min:
         return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f} | {metrics}"
+
+    # === 🔧 pstd 상한 컷 (승0.03 vs 패0.14 - 가장 강한 승패 분리자) ===
+    # pstd는 % 단위 (0.08 = 0.08%)
+    breakout_score_pre = int(ema20_breakout) + int(high_breakout)
+    if breakout_score_pre == 2:
+        eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.06%
+    else:
+        eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.08%
+    if pstd > eff_pstd_max and not mega:
+        return False, f"pstd과다 {pstd:.2f}%>{eff_pstd_max:.2f}% | {metrics}"
+
+    # === 🔧 과회전 상한 컷 (승38% vs 패312% - 노이즈/휩쏘 구간 차단) ===
+    is_major = any(k in market.upper() for k in ("BTC", "ETH")) if market else False
+    eff_turn_max = GATE_TURN_MAX_MAJOR if is_major else GATE_TURN_MAX_ALT
+    if turn_pct > eff_turn_max:
+        return False, f"과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
+
+    # === 🔧 조건부 스프레드 강화 (turn 높거나 pstd 높으면 더 엄격) ===
+    if (turn_pct > 100 or pstd > 0.06) and spread > 0.06:
+        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd:.2f}%) | {metrics}"
+
+    # === 🔧 연속매수 품질 하한 (승37 vs 패24 - 추세 지속력 확인) ===
+    if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
+        return False, f"연속매수부족 {consecutive_buys}<{GATE_CONSEC_BUY_MIN_QUALITY} | {metrics}"
 
     # === 진입 신호 체크 (동적) ===
     # 돌파 점수: EMA20 돌파 + 고점 돌파
@@ -5204,6 +5236,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         consecutive_buys=cons_buys,
         cv=cv,
         overheat=overheat,
+        pstd=pstd10 * 100,  # 소수→% 변환 (gate 내부는 % 단위, 0.0003→0.03%)
+        market=m,
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
@@ -5366,6 +5400,13 @@ def final_check_leader(m, pre, tight_mode=False):
                     entry_mode = "probe"
                 if entry_mode != old_mode:
                     print(f"[DECAY↓] {m} 매수세둔화 decay={_decay} t15/t45_speed={_t15_st.get('krw_per_sec',0):.0f}/{_t45_st.get('krw_per_sec',0):.0f} → {old_mode}→{entry_mode}")
+
+    # 🔧 probe 알트 과회전 추가 필터 (stage1_gate에서는 entry_mode 미결정)
+    if entry_mode == "probe":
+        _is_major = any(k in m.upper() for k in ("BTC", "ETH")) if m else False
+        if not _is_major and pre.get("turn_pct", 0) > GATE_TURN_MAX_ALT_PROBE:
+            print(f"[PROBE_TURN↓] {m} 알트 probe 과회전 {pre.get('turn_pct',0):.0f}%>{GATE_TURN_MAX_ALT_PROBE:.0f}% → 진입 차단")
+            return None
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
@@ -6105,12 +6146,19 @@ def monitor_position(m,
             worst = min(worst, curp)
 
             # 🔧 Probe 스크래치: probe 전용 시간손절 (소액 탐색 손실 방지)
+            # 🔧 개선: 25초 조기 탈출 + 60초 기존 조건 + imbalance 역전 체크
             if entry_mode == "probe":
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                # 🔧 Phase 1: 25초 조기 모멘텀 확인 (MFE 0.08% 못 찍으면 즉시 철수)
+                if alive_sec_now >= 25 and mfe_now < 0.0008 and cur_gain_check <= 0:
+                    close_auto_position(m, f"probe조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (조기모멘텀부재)")
+                    _already_closed = True
+                    verdict = "probe 스크래치"
+                    break
+                # 🔧 Phase 2: 기존 60초 스크래치 (MFE 0.15% 미만)
                 if alive_sec_now >= 60 and mfe_now < 0.0015 and cur_gain_check <= 0:
-                    # 60초 경과, MFE 0.15% 미만, 현재 수익 0 이하 → 스크래치 청산
                     close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
