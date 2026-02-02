@@ -4246,19 +4246,19 @@ def _pct(a, b):
 
 
 def inter_arrival_stats(ticks, sec=30):
-    if not ticks: return {"cv": 9.9, "count": 0}
+    """틱 도착간격 CV. 데이터 부족시 cv=None 반환 (센티넬 9.9 제거)"""
+    if not ticks: return {"cv": None, "count": 0}
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
         newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
-        return {"cv": 9.9, "count": 0}
+        return {"cv": None, "count": 0}
     cutoff = newest_ts - sec * 1000
     ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
     ts = sorted(ts)
-    if len(ts) < 4: return {"cv": 9.9, "count": len(ts)}
+    if len(ts) < 4: return {"cv": None, "count": len(ts)}
     gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
     mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": 9.9, "count": len(ts)}
+    if mu <= 0: return {"cv": None, "count": len(ts)}
     var = sum((g - mu)**2 for g in gaps) / len(gaps)
     cv = (var**0.5) / mu
     return {"cv": cv, "count": len(ts)}
@@ -4895,7 +4895,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if not momentum_ok:
             return False, f"강돌파+모멘텀부족 consec{consecutive_buys}<{GATE_STRONGBREAK_CONSEC_MIN} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
         # 🔧 회전율 과열 조합 컷: turn>25% AND (cv>2.2 OR overheat>3.0)
-        if turn_pct > GATE_STRONGBREAK_TURN_MAX and (cv > 2.2 or overheat > 3.0):
+        if turn_pct > GATE_STRONGBREAK_TURN_MAX and ((cv is not None and cv > 2.2) or overheat > 3.0):
             return False, f"강돌파+과열 turn{turn_pct:.0f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}% cv{cv:.1f} oh{overheat:.1f} | {metrics}"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
@@ -5167,13 +5167,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
-    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv >= 2.5:
+    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
     # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
     shadow_flags = []
-    if cv > 2.2:
+    if cv is not None and cv > 2.2:
         shadow_flags.append("CV22")
     if turn_pct >= 12 and (cons_buys > 18 or overheat > 3):
         shadow_flags.append("TURNxCONS/HEAT")
@@ -5188,7 +5188,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
     # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
-    if cv > GATE_CV_MAX and ia["count"] >= 4:
+    if cv is not None and cv > GATE_CV_MAX and ia["count"] >= 4:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
 
@@ -5247,7 +5247,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
         cur_price=cur["trade_price"],  # 🔧 스프레드 가격대별 분리용
         consecutive_buys=cons_buys,
-        cv=cv,
+        cv=cv if cv is not None else 0.0,  # 🔧 None → 0.0 (gate 내부 포맷팅 안전)
         overheat=overheat,
         pstd=(pstd10 * 100) if pstd10 is not None else None,  # 소수→% 변환, 데이터 부족시 None
         market=m,
@@ -5689,7 +5689,7 @@ def postcheck_6s(m, pre):
         # ★ 가변 임계치 적용
         pass_now = (t10["buy_ratio"] >= pc_min_buy
                     and t10["rate"] >= pc_min_rate and pstd <= pc_max_pstd
-                    and ia["cv"] <= pc_max_cv and dd >= -pc_max_dd)
+                    and (ia["cv"] is None or ia["cv"] <= pc_max_cv) and dd >= -pc_max_dd)
 
         if pass_now:
             ok_streak += 1
@@ -5723,7 +5723,7 @@ def postcheck_6s(m, pre):
         return False, f"BUY_LOW({t10['buy_ratio']:.2f})"
     if t10["rate"] < pc_min_rate: return False, f"RATE_LOW({t10['rate']:.2f})"
     if pstd > pc_max_pstd: return False, f"PSTD_HIGH({pstd:.4f})"
-    if ia["cv"] > pc_max_cv: return False, f"CV_HIGH({ia['cv']:.2f})"
+    if ia["cv"] is not None and ia["cv"] > pc_max_cv: return False, f"CV_HIGH({ia['cv']:.2f})"
     if dd2 < -pc_max_dd: return False, f"DD_TOO_DEEP({dd2:.4f})"
     return True, "OK"
 
