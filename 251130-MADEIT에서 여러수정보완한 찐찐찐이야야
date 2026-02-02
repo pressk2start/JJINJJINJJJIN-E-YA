@@ -2684,6 +2684,37 @@ GATE_VOL_VS_MA_MIN = 0.3  # 🔧 MA 대비 거래량 하한 - 0.5→0.3 (무알�
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
+# 🔧 동적 임계치 하한 (점화 완화 시 최저선)
+# ========================================
+GATE_RELAX_SURGE_FLOOR = 0.1      # 급등배수 하한
+GATE_RELAX_VOL_MA_FLOOR = 0.2     # MA대비 거래량 하한
+GATE_RELAX_TURN_FLOOR = 0.5       # 회전율 하한 (%)
+GATE_RELAX_BUY_FLOOR = 0.45       # 매수비 하한
+GATE_RELAX_IMB_FLOOR = 0.35       # 임밸런스 하한
+GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
+
+# ========================================
+# 🔧 스프레드 가격대별 스케일링
+# ========================================
+SPREAD_SCALE_LOW = 1.0             # 100원 미만: GATE_SPREAD_MAX × 1.0
+SPREAD_CAP_LOW = 0.80              # 100원 미만 캡 (%)
+SPREAD_SCALE_MID = 0.30            # 100~1000원: GATE_SPREAD_MAX × 0.30
+SPREAD_CAP_MID = 0.45              # 100~1000원 캡 (%)
+SPREAD_SCALE_HIGH = 0.17           # 1000원 이상: GATE_SPREAD_MAX × 0.17
+SPREAD_CAP_HIGH = 0.25             # 1000원 이상 캡 (%)
+
+# ========================================
+# 🔧 Ignition 내부 임계치
+# ========================================
+IGN_TPS_MULTIPLIER = 4             # 평시 대비 N배 이상 = 틱 폭주
+IGN_TPS_MIN_TICKS = 15             # 최소 틱 수
+IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
+IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
+IGN_UP_COUNT_MIN = 4               # 최근 6틱 중 최소 상승 수
+IGN_VOL_BURST_RATIO = 0.40         # 10초 거래량 >= 1분평균 × 이 비율
+IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
+
+# ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
 # ========================================
 PREBREAK_ENABLED = False              # Pre-break 비활성화 (stage1_gate로 통합)
@@ -4490,12 +4521,12 @@ def ignition_detected(
 
     t10 = micro_tape_stats_from_ticks(ticks, 10)
     # 🔧 강화: 평시의 4배 이상, 최소 15틱 (폭발적 급등 감지)
-    tps_threshold = max(15, 4 * baseline_tps * 10)
+    tps_threshold = max(IGN_TPS_MIN_TICKS, IGN_TPS_MULTIPLIER * baseline_tps * 10)
     tps_burst = t10["n"] >= tps_threshold
 
     # ---- 2) 연속 매수 (10초 윈도우) ----
     # 🔧 강화: 5회 → 7회 (폭발적 매수세만 감지)
-    consec_buys = calc_consecutive_buys(window, 10) >= 7
+    consec_buys = calc_consecutive_buys(window, 10) >= IGN_CONSEC_BUY_MIN
 
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
     prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
@@ -4503,22 +4534,21 @@ def ignition_detected(
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
         up_count = sum(1 for a, b in zip(prices[-6:-1], prices[-5:]) if b > a)
-        mostly_up = up_count >= 4
-        # 🔧 강화: 0.3% → 0.5% (폭발적 급등만 감지)
-        price_impulse = (ret >= 0.005) and mostly_up  # 0.5% 이상 + 대부분 상승
+        mostly_up = up_count >= IGN_UP_COUNT_MIN
+        price_impulse = (ret >= IGN_PRICE_IMPULSE_MIN) and mostly_up
     else:
         ret = 0
         price_impulse = False
 
     # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40%) ----
     # 🔧 강화: 25% → 40% (폭발적 거래량만 감지)
-    vol_burst = t10["krw"] >= 0.40 * avg_candle_volume if avg_candle_volume > 0 else False
+    vol_burst = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
     if ob and ob.get("spread", 0) > 0:
         # 🔧 0.5% → 0.40% 강화 (점화 구간은 슬립 커지므로 더 엄격히)
-        spread_ok = ob["spread"] <= 0.40
+        spread_ok = ob["spread"] <= IGN_SPREAD_MAX
 
     # ---- 점수 계산 ----
     score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
@@ -4769,21 +4799,21 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         relax = 0.0
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
-    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.7→0.53 (4점)
-    eff_vol_vs_ma = max(0.2, GATE_VOL_VS_MA_MIN * (1 - relax))   # 🔧 상수→전역변수 기반
-    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
-    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0→1.5 (4점)
-    eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.58→0.51 (4점)
-    eff_imb_min = max(0.35, GATE_IMBALANCE_MIN * (1 - relax * 0.3))  # 🔧 거의 안 풀기 (0.50→0.46)
+    eff_surge_min = max(GATE_RELAX_SURGE_FLOOR, GATE_SURGE_MIN * (1 - relax))
+    eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN * (1 - relax))
+    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))
+    eff_turn_min = max(GATE_RELAX_TURN_FLOOR, GATE_TURN_MIN * (1 - relax))
+    eff_buy_min = max(GATE_RELAX_BUY_FLOOR, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))
+    eff_imb_min = max(GATE_RELAX_IMB_FLOOR, GATE_IMBALANCE_MIN * (1 - relax * 0.3))
     # 🔧 FIX: 스프레드 가격대별 상한 (GATE_SPREAD_MAX 학습값 기반 + 가격대 스케일링)
     # GATE_SPREAD_MAX를 기준으로 가격대별 비율 적용 → 학습 결과가 실제 게이트에 반영됨
     if cur_price > 0 and cur_price < 100:
-        eff_spread_max = min(GATE_SPREAD_MAX, 0.80)        # 100원 미만: 학습값 or 0.80% 중 작은 값
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
     elif cur_price >= 100 and cur_price < 1000:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.30, 0.45)  # 100~1000원: 학습값×0.3 or 0.45%
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
     else:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.17, 0.25)  # 1000원 이상: 학습값×0.17 or 0.25%
-    eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
+    eff_accel_min = max(GATE_RELAX_ACCEL_FLOOR, GATE_ACCEL_MIN * (1 - relax))
 
     # 점화 여부 (로그용)
     is_ignition = (ignition_score >= 3)  # 🔧 4→3 완화 (개별조건 강화)
