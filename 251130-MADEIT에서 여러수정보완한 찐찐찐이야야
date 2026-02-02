@@ -4242,7 +4242,7 @@ def _pct(a, b):
     try:
         return abs(a / b - 1.0)
     except Exception:
-        return 0.0
+        return 9.9
 
 
 def inter_arrival_stats(ticks, sec=30):
@@ -5652,7 +5652,7 @@ def postcheck_6s(m, pre):
             seen.add(key)
             acc.appendleft(x)  # ✅ 최신이 index 0 유지
 
-        curp = ticks[0].get("trade_price", base_price)
+        curp = max(ticks, key=lambda x: x.get("timestamp", x.get("ts", 0))).get("trade_price", base_price)
 
         # ★★★ 가격 급등 필터 (조건부 허용)
         if base_price > 0:
@@ -5680,9 +5680,10 @@ def postcheck_6s(m, pre):
         # ✔ DD는 피크 대비 하락률(음수)로 체크
         dd = (curp / peak - 1.0)
 
-        t10 = micro_tape_stats_from_ticks(list(acc), 10)
-        ia = inter_arrival_stats(list(acc), 20)
-        pstd = price_band_std(list(acc), 20)
+        acc_list = list(acc)
+        t10 = micro_tape_stats_from_ticks(acc_list, 10)
+        ia = inter_arrival_stats(acc_list, 20)
+        pstd = price_band_std(acc_list, 20)
         pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
 
         # ★ 가변 임계치 적용
