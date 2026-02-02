@@ -5188,7 +5188,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
         return None
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
-    if cv > GATE_CV_MAX:
+    # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
+    if cv > GATE_CV_MAX and ia["count"] >= 4:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
 
