@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -280,7 +280,13 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
             lock_ts, lock_owner = _MEMORY_ENTRY_LOCKS[market]
             if time.time() - lock_ts < ttl_sec:
                 # 🔧 FIX: reentrant 모드는 **같은 스레드(소유자)**일 때만 True
+                # 🔧 FIX: TTL 갱신 (재진입 시 타임스탬프 리셋 → 장기 루틴에서 TTL 만료 방지)
                 if reentrant and lock_owner == current_owner:
+                    _MEMORY_ENTRY_LOCKS[market] = (time.time(), current_owner)
+                    try:
+                        os.utime(_entry_lock_path(market), None)
+                    except Exception:
+                        pass
                     return True
                 return False
         # 🔧 FIX: (타임스탬프, 소유자) 튜플로 저장
@@ -1105,8 +1111,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
-    # 🔧 FIX: reentrant=False (호출 전 락 해제됨 → 여기서 획득/해제 완결)
-    with entry_lock(m, ttl_sec=90, reentrant=False) as got_lock:
+    # 🔧 FIX: reentrant=True (스캔 루프가 이미 락 보유 → TTL 갱신만, 해제는 모니터 finally에서)
+    with entry_lock(m, ttl_sec=90, reentrant=True) as got_lock:
         if not got_lock:
             signal_skip("entry_lock 획득 실패")
             return
@@ -6671,7 +6677,7 @@ def tg_send(t, retry=1):
                         print(f"[TG][{cid}] HTML 파싱 실패 → plain text 재시도")
                         payload_plain = {
                             "chat_id": cid,
-                            "text": t.replace("<b>", "").replace("</b>", ""),
+                            "text": re.sub(r"<[^>]+>", "", t),
                             "disable_web_page_preview": True,
                         }
                         try:
@@ -6694,7 +6700,7 @@ def tg_send(t, retry=1):
             try:
                 payload_plain = {
                     "chat_id": cid,
-                    "text": t.replace("<b>", "").replace("</b>", ""),
+                    "text": re.sub(r"<[^>]+>", "", t),
                     "disable_web_page_preview": True,
                 }
                 r3 = SESSION.post(
@@ -7342,8 +7348,8 @@ def main():
                             _release_entry_lock(m)
                             continue  # 바로 진입하지 않고 다음 종목으로
 
-                    # 🔧 FIX: 스캔 루프에서 획득한 파일락 해제 (open_auto_position에서 다시 획득)
-                    _release_entry_lock(m)
+                    # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
+                    # open_auto_position이 reentrant=True로 재진입, 모니터 finally에서 최종 해제
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
