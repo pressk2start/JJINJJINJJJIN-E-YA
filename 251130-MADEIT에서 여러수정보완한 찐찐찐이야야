@@ -7240,7 +7240,9 @@ def main():
 
                 # 🚀 초단기 미세필터 지표 계산
                 ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
-                cv_val = ia_stats.get("cv", 0.0)
+                cv_val = ia_stats.get("cv")
+                if cv_val is None:
+                    cv_val = 0.0  # 🔧 FIX: inter_arrival_stats가 cv=None 반환 시 TypeError 방지
                 pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
                 if pstd_val is None:
                     pstd_val = 0.0  # 🔧 FIX: price_band_std가 None 반환 시 TypeError 방지
