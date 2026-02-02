@@ -4864,7 +4864,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.06%
     else:
         eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.08%
-    if pstd > eff_pstd_max and not mega:
+    if pstd is not None and pstd > eff_pstd_max and not mega:
         return False, f"pstd과다 {pstd:.2f}%>{eff_pstd_max:.2f}% | {metrics}"
 
     # === 🔧 과회전 상한 컷 (승38% vs 패312% - 노이즈/휩쏘 구간 차단) ===
@@ -5160,15 +5160,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     ia = inter_arrival_stats(ticks, 60)  # 60초 윈도우 (샘플 충분해야 CV 안정)
     cv = ia["cv"]
     pstd10 = price_band_std(ticks, 10)  # 10초 윈도우 (현재 순간 흔들림 감지)
-    if pstd10 is None:
-        pstd10 = 9.9  # 데이터 부족시 높은 기본값 → gate에서 pstd 필터에 의해 차단됨
+    # 🔧 FIX: None이면 None 유지 → gate에서 데이터 부족 시 pstd 체크 스킵
     cons_buys = calc_consecutive_buys(ticks, 15)
     overheat = accel * vol_surge
     spread = ob.get("spread", 9.9)
 
     # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
-    if twin["buy_ratio"] >= 0.98 and pstd10 <= 0.001 and cv >= 2.5:
+    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv >= 2.5:
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
@@ -5250,7 +5249,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         consecutive_buys=cons_buys,
         cv=cv,
         overheat=overheat,
-        pstd=pstd10 * 100,  # 소수→% 변환 (gate 내부는 % 단위, 0.0003→0.03%)
+        pstd=(pstd10 * 100) if pstd10 is not None else None,  # 소수→% 변환, 데이터 부족시 None
         market=m,
     )
     if not gate_ok:
