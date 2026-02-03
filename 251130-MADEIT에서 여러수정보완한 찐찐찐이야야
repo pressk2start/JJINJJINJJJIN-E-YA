@@ -2680,6 +2680,10 @@ GATE_FRESH_AGE_MAX = 5.0  # 🔧 틱 신선도 상한 (초) - 3.0→5.0 (무알�
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
 GATE_PSTD_MAX = 0.08      # pstd 상한 (%) - 승0.03 vs 패0.14 → 0.08 컷
 GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚임 방지
+# 🔧 pstd 가격대별 배율 (저가 코인은 틱 단위가 크므로 pstd 자연 상승 → 상한 완화)
+PSTD_TIER_MULT_LOW  = 2.5   # 100원 미만: pstd 상한 × 2.5
+PSTD_TIER_MULT_MID  = 1.5   # 100~1000원: pstd 상한 × 1.5
+PSTD_TIER_MULT_HIGH = 1.0   # 1000원 이상: 기본값
 GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회전 높을 수 있음
 GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
 GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
@@ -2703,9 +2707,9 @@ GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
 # 🔧 스프레드 가격대별 스케일링
 # ========================================
 SPREAD_SCALE_LOW = 1.0             # 100원 미만: GATE_SPREAD_MAX × 1.0
-SPREAD_CAP_LOW = 0.80              # 100원 미만 캡 (%)
-SPREAD_SCALE_MID = 0.30            # 100~1000원: GATE_SPREAD_MAX × 0.30
-SPREAD_CAP_MID = 0.45              # 100~1000원 캡 (%)
+SPREAD_CAP_LOW = 1.20              # 🔧 0.80→1.20% 완화 (저가 코인 틱단위 대비 스프레드 자연 상승)
+SPREAD_SCALE_MID = 0.40            # 🔧 0.30→0.40 완화 (100~1000원 구간)
+SPREAD_CAP_MID = 0.55              # 🔧 0.45→0.55% 완화
 SPREAD_SCALE_HIGH = 0.17           # 1000원 이상: GATE_SPREAD_MAX × 0.17
 SPREAD_CAP_HIGH = 0.25             # 1000원 이상 캡 (%)
 
@@ -4859,14 +4863,18 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {metrics}"
 
-    # === 과열 필터 (점화/mega 시 완화) ===
+    # === 과열 필터 (점화/mega/급등강도 비례 완화) ===
     overheated = accel * volume_surge
     # 🔧 FIX: 점화/mega는 과열 상한 완화 (폭발 초입 진입 허용)
-    eff_overheat_max = GATE_OVERHEAT_MAX
+    # 🔧 NEW: 급등 강도(surge)에 비례해 overheat 허용치 상향
+    #   surge 5x 이상이면 강한 신호 → overheat도 자연히 높아지므로 상한 확대
+    surge_mult = 1.0 + max(0.0, (volume_surge - 3.0)) * 0.15  # surge 3x 초과분 × 0.15
+    surge_mult = min(surge_mult, 2.0)  # 최대 2배까지
+    eff_overheat_max = GATE_OVERHEAT_MAX * surge_mult
     if mega:
         eff_overheat_max = GATE_OVERHEAT_MAX * 3.0  # mega: 사실상 무제한
     elif ignition_score >= 3:
-        eff_overheat_max = GATE_OVERHEAT_MAX * 2.0  # 점화: 2배 완화
+        eff_overheat_max = max(eff_overheat_max, GATE_OVERHEAT_MAX * 2.0)  # 점화: 최소 2배
     if overheated > eff_overheat_max:
         return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f} | {metrics}"
 
@@ -4895,11 +4903,18 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 🔧 pstd 상한 컷 (승0.03 vs 패0.14 - 가장 강한 승패 분리자) ===
     # pstd는 % 단위 (0.08 = 0.08%)
+    # 🔧 가격대별 차등: 저가 코인은 틱 단위가 크므로 pstd 상한 완화
     breakout_score = int(ema20_breakout) + int(high_breakout)
     if breakout_score == 2:
         eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.06%
     else:
         eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.08%
+    if cur_price > 0 and cur_price < 100:
+        eff_pstd_max *= PSTD_TIER_MULT_LOW      # 저가: ×2.5
+    elif cur_price >= 100 and cur_price < 1000:
+        eff_pstd_max *= PSTD_TIER_MULT_MID      # 중가: ×1.5
+    else:
+        eff_pstd_max *= PSTD_TIER_MULT_HIGH     # 고가: ×1.0
     if pstd is not None and pstd > eff_pstd_max and not mega:
         return False, f"pstd과다 {pstd:.2f}%>{eff_pstd_max:.2f}% | {metrics}"
 
