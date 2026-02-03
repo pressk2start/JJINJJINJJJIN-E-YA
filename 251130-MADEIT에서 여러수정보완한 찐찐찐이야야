@@ -3859,7 +3859,8 @@ def zscore_krw_1m(c1, win=30):
 
 
 def uptick_streak_from_ticks(ticks, need=2):
-    t = sorted(ticks[:need + 4], key=lambda x: x.get("timestamp", 0))
+    # 🔧 FIX: 틱 정렬 계약(과거→최신) 반영 — 최근 틱은 끝에서 슬라이싱, 이미 정렬됨
+    t = ticks[-(need + 4):]
     return sum(1 for a, b in zip(t, t[1:])
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
 
@@ -3885,8 +3886,8 @@ def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
         max_age = max(max_age, 4.0)   # 새벽~장전: 최소 4초
     # 9~24시(장중): GATE_FRESH_AGE_MAX 그대로 (3초)
     now = int(time.time() * 1000)
-    # 최근 2틱 중 가장 오래된 틱의 나이 계산
-    tick_ages = [(now - x.get("timestamp", 0)) / 1000.0 for x in ticks[:2]]
+    # 🔧 FIX: 틱 정렬 계약(과거→최신) 반영 — 최근 2틱은 끝에서 슬라이싱
+    tick_ages = [(now - x.get("timestamp", 0)) / 1000.0 for x in ticks[-2:]]
     max_tick_age = max(tick_ages) if tick_ages else 999.0
     is_fresh = all(age <= max_age for age in tick_ages)
 
@@ -3943,6 +3944,16 @@ class LRUCache:
 
 _TICKS_CACHE = LRUCache(maxsize=100)
 _TICKS_TTL = 4.5
+
+
+def normalize_ticks(ticks):
+    """틱 정렬 계약: 항상 과거→최신(timestamp 오름차순) 반환.
+    모든 tick 기반 함수는 이 계약을 따른다."""
+    if not ticks:
+        return []
+    return sorted(ticks, key=lambda t: t.get("timestamp", 0))
+
+
 _C5_CACHE = LRUCache(maxsize=300)
 
 
@@ -4079,7 +4090,8 @@ def get_recent_ticks(m, c=100, allow_network=True):
 
     if not js or not isinstance(js, list):
         return hit["ticks"] if hit else []
-    js_sorted = sorted(js, key=lambda t: t.get("timestamp", 0), reverse=True)
+    # 🔧 FIX: 틱 정렬 계약 통일 — 항상 과거→최신(오름차순) 반환
+    js_sorted = normalize_ticks(js)
     _TICKS_CACHE.set(m, {"ts": now_ms, "ticks": js_sorted})
     return js_sorted
 
@@ -4818,6 +4830,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     Returns: (allow, reason)
     """
+    # 🔧 FIX: None 방어 (inter_arrival_stats/price_band_std가 None 반환 시 안전화)
+    if cv is None:
+        cv = 0.0
+    if pstd is None:
+        pstd = 0.0
+
     # ============================================================
     # 🔥 점화 점수에 따른 동적 임계치 완화 (계단식 + 품질 필터 보호)
     # 🔧 FIX: score=3은 약한 완화(0.12), score=4만 강한 완화(0.25)
@@ -5366,7 +5384,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),  # 🔧 스파이크 방지용 보수적 매수비
         "fresh_ok": fresh_ok,  # 🔧 CRITICAL: fresh_ok 전달 (스코어 계산용)
         "mega": mega,
-        "filter_type": "stage1_gate",
+        "filter_type": "stage1_gate",      # 분류 키 (stage1_gate / prebreak)
+        "is_prebreak": False,               # 🔧 FIX: 불리언 분리 (filter_type 문자열 비교 대신 사용)
         "ignition_score": ignition_score,
         "gate_reason": gate_reason,
         # 🔥 경로 표시: signal_tag 하나로 통일 (점화3, EMA↑, 고점↑, 거래량↑ 등)
@@ -7251,74 +7270,95 @@ def main():
                     last_reason[m] = reason
 
                 # 동적 손절가
-                dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(pre['price'], c1)
-
-                # 스코어/임밸런스 표시
-                score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
-                imb_str = f"임밸 {payload.get('imbalance', 0):.2f}"
-                pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
-
-                # 🔥 경로 표시: signal_tag 하나로 간소화
-                filter_type = pre.get("filter_type", "stage1_gate")
-                if filter_type == "prebreak":
-                    path_str = "🚀선행진입"
-                else:
-                    path_str = pre.get("signal_tag", "기본")
-
-                # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
-                ticks_for_metrics = pre.get("ticks", [])
-                t15_for_avg = micro_tape_stats_from_ticks(ticks_for_metrics, 15)
-                cons_buys = calc_consecutive_buys(ticks_for_metrics, 15)
-                avg_krw = calc_avg_krw_per_tick(t15_for_avg)
-                flow_accel = calc_flow_acceleration(ticks_for_metrics)
-
-                # 가속도 이모지
-                accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "➡️")
-
-                # 🔥 GATE 핵심 지표
-                overheat = flow_accel * float(payload.get("volume_surge", 1.0))
-                fresh_age = 0.0
-                if ticks_for_metrics:
-                    now_ms = int(time.time() * 1000)
-                    # 🔧 FIX: ticks[0]이 최신이라는 가정 제거 → max로 최신 틱 찾기
-                    last_tick_ts = max(t.get("timestamp", 0) for t in ticks_for_metrics)
-                    if last_tick_ts == 0:
-                        last_tick_ts = now_ms
-                    fresh_age = (now_ms - last_tick_ts) / 1000.0
-
-                # 🚀 초단기 미세필터 지표 계산
-                ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
-                cv_val = ia_stats.get("cv")
-                if cv_val is None:
-                    cv_val = 0.0  # 🔧 FIX: inter_arrival_stats가 cv=None 반환 시 TypeError 방지
-                pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
-                if pstd_val is None:
-                    pstd_val = 0.0  # 🔧 FIX: price_band_std가 None 반환 시 TypeError 방지
-                prebreak_band_val = dynamic_prebreak_band(ticks_for_metrics) if ticks_for_metrics else PREBREAK_HIGH_PCT
-                is_prebreak = pre.get("filter_type") == "prebreak"
-                # 베스트호가 깊이
                 try:
-                    u0 = pre.get("ob", {}).get("raw", {}).get("orderbook_units", [])[0]
-                    best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
-                except Exception:
-                    best_ask_krw = 0.0
+                    dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(pre['price'], c1)
+                except Exception as _dsl_err:
+                    # 🔧 FIX: 락 해제 누락 방지 — 손절가 계산 실패 시 안전 정리
+                    print(f"[DSL_ERR] {m}: {_dsl_err}")
+                    with _POSITION_LOCK:
+                        pos = OPEN_POSITIONS.get(m)
+                        if pos and pos.get("pre_signal"):
+                            OPEN_POSITIONS.pop(m, None)
+                    _release_entry_lock(m)
+                    continue
 
-                # CV 이모지 (봇/사람 판단)
-                cv_emoji = "🤖" if cv_val <= 0.45 else ("⚔️" if cv_val >= 1.2 else "")
+                # 🔧 FIX: 메트릭 계산/알림 전체를 try로 보호 — 예외 시 락+pending 안전 정리
+                try:
+                    # 스코어/임밸런스 표시
+                    score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
+                    imb_str = f"임밸 {payload.get('imbalance', 0):.2f}"
+                    pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
 
-                txt = (
-                    f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
-                    f"💵 현재가 {fmt6(pre['price'])}원\n"
-                    f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
-                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
-                    f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
-                    f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
-                    f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
-                    f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
-                    f"🔍 경로: {path_str}\n"
-                    f"{link_for(m)}")
+                    # 🔥 경로 표시: signal_tag 하나로 간소화
+                    filter_type = pre.get("filter_type", "stage1_gate")
+                    if filter_type == "prebreak":
+                        path_str = "🚀선행진입"
+                    else:
+                        path_str = pre.get("signal_tag", "기본")
 
-                sent = tg_send(txt, retry=2)
+                    # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
+                    ticks_for_metrics = pre.get("ticks", [])
+                    t15_for_avg = micro_tape_stats_from_ticks(ticks_for_metrics, 15)
+                    cons_buys = calc_consecutive_buys(ticks_for_metrics, 15)
+                    avg_krw = calc_avg_krw_per_tick(t15_for_avg)
+                    flow_accel = calc_flow_acceleration(ticks_for_metrics)
+
+                    # 가속도 이모지
+                    accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "➡️")
+
+                    # 🔥 GATE 핵심 지표
+                    overheat = flow_accel * float(payload.get("volume_surge", 1.0))
+                    fresh_age = 0.0
+                    if ticks_for_metrics:
+                        now_ms = int(time.time() * 1000)
+                        # 🔧 FIX: ticks[0]이 최신이라는 가정 제거 → max로 최신 틱 찾기
+                        last_tick_ts = max(t.get("timestamp", 0) for t in ticks_for_metrics)
+                        if last_tick_ts == 0:
+                            last_tick_ts = now_ms
+                        fresh_age = (now_ms - last_tick_ts) / 1000.0
+
+                    # 🚀 초단기 미세필터 지표 계산
+                    ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
+                    cv_val = ia_stats.get("cv")
+                    if cv_val is None:
+                        cv_val = 0.0  # 🔧 FIX: inter_arrival_stats가 cv=None 반환 시 TypeError 방지
+                    pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
+                    if pstd_val is None:
+                        pstd_val = 0.0  # 🔧 FIX: price_band_std가 None 반환 시 TypeError 방지
+                    prebreak_band_val = dynamic_prebreak_band(ticks_for_metrics) if ticks_for_metrics else PREBREAK_HIGH_PCT
+                    is_prebreak = pre.get("filter_type") == "prebreak"
+                    # 베스트호가 깊이
+                    try:
+                        u0 = pre.get("ob", {}).get("raw", {}).get("orderbook_units", [])[0]
+                        best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+                    except Exception:
+                        best_ask_krw = 0.0
+
+                    # CV 이모지 (봇/사람 판단)
+                    cv_emoji = "🤖" if cv_val <= 0.45 else ("⚔️" if cv_val >= 1.2 else "")
+
+                    txt = (
+                        f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
+                        f"💵 현재가 {fmt6(pre['price'])}원\n"
+                        f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
+                        f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
+                        f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
+                        f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
+                        f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
+                        f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
+                        f"🔍 경로: {path_str}\n"
+                        f"{link_for(m)}")
+
+                    sent = tg_send(txt, retry=2)
+                except Exception as _metric_err:
+                    # 🔧 FIX: 메트릭/알림 예외 시 락+pending 안전 정리 (데드락 방지)
+                    print(f"[METRIC_ERR] {m}: {_metric_err}")
+                    with _POSITION_LOCK:
+                        pos = OPEN_POSITIONS.get(m)
+                        if pos and pos.get("pre_signal"):
+                            OPEN_POSITIONS.pop(m, None)
+                    _release_entry_lock(m)
+                    continue
 
                 if sent:
                     found += 1
