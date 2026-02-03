@@ -146,8 +146,10 @@ def zscore_krw_1m(c1, win=30):
 
 
 def uptick_streak_from_ticks(ticks, need=2):
-    """연속 상승틱 체크"""
-    t = sorted(ticks[: need + 4], key=lambda x: x.get("timestamp", 0))
+    """연속 상승틱 체크
+    🔧 FIX: 틱 정렬 계약(과거→최신) 반영 — 최근 틱은 끝에서 슬라이싱, 이미 정렬됨
+    """
+    t = ticks[-(need + 4):]
     return (
         sum(
             1

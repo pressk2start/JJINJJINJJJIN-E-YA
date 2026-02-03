@@ -285,11 +285,18 @@ _MEMORY_LOCK = threading.Lock()  # 메모리 락 보호용
 def _entry_lock_path(market: str) -> str:
     return f"/tmp/bot_entry_{market.replace('-', '_')}.lock"
 
-def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = False) -> bool:
-    """락 획득 시도. 성공하면 True, 이미 락 있으면 False
+def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = False):
+    """락 획득 시도.
+
+    Returns:
+        reentrant=False: bool (got)
+        reentrant=True:  (got: bool, acquired_new: bool)
+            - got=True, acquired_new=True  → 새로 락 생성 (해제 책임 있음)
+            - got=True, acquired_new=False → 기존 락에 재진입 (TTL 갱신만)
 
     🔧 FIX: 원자적 파일 생성 (O_CREAT | O_EXCL) + 메모리 락 이중 보호
     🔧 FIX: reentrant=True는 **같은 스레드**에서만 재진입 허용 (소유자 추적)
+    🔧 FIX: acquired_new 반환 → 컨텍스트 매니저에서 "새 락이면 reentrant라도 해제" 가능
     """
     current_owner = threading.current_thread().ident
 
@@ -306,8 +313,8 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
                         os.utime(_entry_lock_path(market), None)
                     except Exception:
                         pass
-                    return True
-                return False
+                    return (True, False) if reentrant else True  # 재진입 성공, 새 락 아님
+                return (False, False) if reentrant else False
         # 🔧 FIX: (타임스탬프, 소유자) 튜플로 저장
         _MEMORY_ENTRY_LOCKS[market] = (time.time(), current_owner)
 
@@ -320,7 +327,7 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
                 # 메모리 락 롤백
                 with _MEMORY_LOCK:
                     _MEMORY_ENTRY_LOCKS.pop(market, None)
-                return False
+                return (False, False) if reentrant else False
             # TTL 만료된 락 파일 제거
             try:
                 os.remove(path)
@@ -331,16 +338,16 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         os.write(fd, str(time.time()).encode())
         os.close(fd)
-        return True
+        return (True, True) if reentrant else True  # 새로 생성 성공
     except FileExistsError:
         # 다른 스레드/프로세스가 먼저 생성함
         with _MEMORY_LOCK:
             _MEMORY_ENTRY_LOCKS.pop(market, None)
-        return False
+        return (False, False) if reentrant else False
     except Exception:
         with _MEMORY_LOCK:
             _MEMORY_ENTRY_LOCKS.pop(market, None)
-        return False
+        return (False, False) if reentrant else False
 
 def _release_entry_lock(market: str):
     """락 해제 (파일 삭제 + 메모리 락 해제)"""
@@ -384,14 +391,21 @@ from contextlib import contextmanager
 def entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = False):
     """엔트리 락 컨텍스트 매니저 - 안전한 락 획득/해제
 
-    🔧 reentrant=True: 재진입 모드 (이미 락을 가지고 있으면 True, 해제 안 함)
+    🔧 reentrant=True: 재진입 모드
+       - 기존 락 재진입(TTL 갱신만) → 해제 안 함
+       - 새로 락 생성(acquired_new=True) → finally에서 해제 (누수 방지)
     """
-    got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec, reentrant=reentrant)
+    if reentrant:
+        result = _try_acquire_entry_lock(market, ttl_sec=ttl_sec, reentrant=True)
+        got, acquired_new = result
+    else:
+        got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec, reentrant=False)
+        acquired_new = got  # non-reentrant면 got=True일 때 항상 새 락
     try:
         yield got
     finally:
-        # 🔧 FIX: reentrant 모드에서는 락 해제 안 함 (원래 획득한 곳에서 해제)
-        if got and not reentrant:
+        # 🔧 FIX: reentrant 모드라도 "새로 생성한 락"이면 해제 (락 누수 방지)
+        if got and (not reentrant or acquired_new):
             _release_entry_lock(market)
 
 
@@ -7014,6 +7028,27 @@ def fetch_orderbook_cache(mkts):
 SHARD_SIZE = TOP_N
 _cursor = 0
 _last_learn_ts = 0  # 마지막 학습 시각
+
+
+# =========================
+# 🔧 FIX: 모듈 마이그레이션 — bot/ 패키지 로드 성공 시 인라인 함수를 모듈 버전으로 교체
+# bot/ 미설치 환경에서는 인라인 버전이 그대로 유지됨 (폴백)
+# 이렇게 하면 "인라인 vs 모듈" 양쪽이 동시에 살아있는 shadowing 문제 방지
+# =========================
+if _BOT_MODULES_LOADED:
+    _pct = _pct_mod
+    fmt6 = fmt6_mod
+    _safe_float = _safe_float_mod
+    inter_arrival_stats = inter_arrival_stats_mod
+    price_band_std = price_band_std_mod
+    calc_consecutive_buys = calc_consecutive_buys_mod
+    calc_avg_krw_per_tick = calc_avg_krw_per_tick_mod
+    calc_flow_acceleration = calc_flow_acceleration_mod
+    calc_orderbook_imbalance = calc_orderbook_imbalance_mod
+    vwap_from_candles_1m = vwap_from_candles_1m_mod
+    zscore_krw_1m = zscore_krw_1m_mod
+    body_ratio = body_ratio_mod
+    print("[MODULES] bot/ 패키지 함수 활성화 (인라인 → 모듈 교체 완료)")
 
 
 def main():
