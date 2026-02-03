@@ -2673,15 +2673,15 @@ def tg_send_mid(t):
         print("[SILENT]", t)
         return True
 
-MIN_RELATIVE_KRW_X = 1.08  # 1.18 -> 1.25 (과거대비 증가율)
+MIN_RELATIVE_KRW_X = 1.03  # 🔧 1.08 → 1.03 완화 (적출률 개선)
 
-# 틱/체결 기반
-MIN_TICKS_COUNT = 3
-MIN_TURNOVER = 0.018
-TICKS_BUY_RATIO = 0.56
+# 틱/체결 기반 (완화됨)
+MIN_TICKS_COUNT = 2        # 🔧 3 → 2 완화
+MIN_TURNOVER = 0.010       # 🔧 0.018 → 0.010 완화
+TICKS_BUY_RATIO = 0.50     # 🔧 0.56 → 0.50 완화
 
-# 위험 관리
-MIN_DEPTH_KRW = 6_000_000
+# 위험 관리 (완화됨)
+MIN_DEPTH_KRW = 3_000_000  # 🔧 6M → 3M 완화
 
 # ========================================
 # ★★★ 1단계 게이트 임계치 (자동학습 대상) ★★★
@@ -2692,49 +2692,50 @@ MIN_DEPTH_KRW = 6_000_000
 # 연속매수: 승 8.0 vs 패 4.43 → 하한 6
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
-GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 30.0      # 🔧 회전율 상한 (%) - 60→30 (이미 한참 달린 종목 차단)
-GATE_SPREAD_MAX = 1.50    # 🔧 HOTFIX: 저가 코인(100원 이하) 스프레드 허용 - 0.40→1.50%
-GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
-GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
-GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
-GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
-GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
-GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 0       # 🔧 연속매수 하한 - 1→0 완화 (무알람 대응, 매수비로 품질 보완)
-GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
-GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
-# 강돌파 전용 강화 임계치 (일반보다 빡세게)
-GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 8→6 완화
-GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
-GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
-GATE_CV_MAX = 6.0         # 🔧 CV 상한 - 4.0→6.0 (무알람 대응 완화)
-GATE_FRESH_AGE_MAX = 5.0  # 🔧 틱 신선도 상한 (초) - 3.0→5.0 (무알람 대응 완화)
-# 🔧 노이즈/과변동 필터 (승패 데이터 기반)
-GATE_PSTD_MAX = 0.08      # pstd 상한 (%) - 승0.03 vs 패0.14 → 0.08 컷
-GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚임 방지
+# 🔧 전면 완화 - 적출률 개선 (bot/config.py 동기화)
+GATE_TURN_MIN = 1.0       # 🔧 2.0 → 1.0 완화
+GATE_TURN_MAX = 50.0      # 🔧 30.0 → 50.0 완화
+GATE_SPREAD_MAX = 2.50    # 🔧 1.50 → 2.50 완화
+GATE_ACCEL_MIN = 0.1      # 🔧 0.3 → 0.1 완화
+GATE_ACCEL_MAX = 8.0      # 🔧 5.0 → 8.0 완화
+GATE_BUY_RATIO_MIN = 0.52 # 🔧 0.58 → 0.52 완화
+GATE_SURGE_MAX = 150.0    # 🔧 100.0 → 150.0 완화
+GATE_OVERHEAT_MAX = 30.0  # 🔧 20.0 → 30.0 완화
+GATE_IMBALANCE_MIN = 0.40 # 🔧 0.50 → 0.40 완화
+GATE_CONSEC_MIN = 0       # 유지
+GATE_CONSEC_MAX = 20      # 🔧 15 → 20 완화
+GATE_STRONGBREAK_OFF = False  # 유지
+# 강돌파 전용 임계치 (완화됨)
+GATE_STRONGBREAK_CONSEC_MIN = 4   # 🔧 6 → 4 완화
+GATE_STRONGBREAK_TURN_MAX = 35.0  # 🔧 25.0 → 35.0 완화
+GATE_STRONGBREAK_ACCEL_MAX = 5.0  # 🔧 3.5 → 5.0 완화
+GATE_CV_MAX = 8.0         # 🔧 6.0 → 8.0 완화
+GATE_FRESH_AGE_MAX = 8.0  # 🔧 5.0 → 8.0 완화
+# 노이즈/과변동 필터 (완화됨)
+GATE_PSTD_MAX = 0.12      # 🔧 0.08 → 0.12 완화
+GATE_PSTD_STRONGBREAK_MAX = 0.10  # 🔧 0.06 → 0.10 완화
 # 🔧 pstd 가격대별 배율 (저가 코인은 틱 단위가 크므로 pstd 자연 상승 → 상한 완화)
 PSTD_TIER_MULT_LOW  = 2.5   # 100원 미만: pstd 상한 × 2.5
 PSTD_TIER_MULT_MID  = 1.5   # 100~1000원: pstd 상한 × 1.5
 PSTD_TIER_MULT_HIGH = 1.0   # 1000원 이상: 기본값
-GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회전 높을 수 있음
-GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
-GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
-GATE_CONSEC_BUY_MIN_QUALITY = 8   # 연속매수 품질 하한 - 승37 vs 패24, 중간값 기준 (강돌파 consec≥6과 호환)
-GATE_VOL_MIN = 10_000_000  # 🔧 1천만원 (무알람 대응 완화)
-GATE_SURGE_MIN = 0.4      # 🔧 배수 하한 - 0.7→0.4 (무알람 대응 완화)
-GATE_VOL_VS_MA_MIN = 0.3  # 🔧 MA 대비 거래량 하한 - 0.5→0.3 (무알람 대응 완화)
-GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
+GATE_TURN_MAX_MAJOR = 500.0   # 🔧 400.0 → 500.0 완화
+GATE_TURN_MAX_ALT = 200.0     # 🔧 150.0 → 200.0 완화
+GATE_TURN_MAX_ALT_PROBE = 180.0  # 🔧 120.0 → 180.0 완화
+GATE_CONSEC_BUY_MIN_QUALITY = 5   # 🔧 8 → 5 완화
+GATE_VOL_MIN = 5_000_000   # 🔧 10M → 5M 완화
+GATE_SURGE_MIN = 0.2       # 🔧 0.4 → 0.2 완화
+GATE_VOL_VS_MA_MIN = 0.15  # 🔧 0.3 → 0.15 완화
+GATE_PRICE_MIN = 0.0001    # 🔧 0.0005 → 0.0001 완화
 
 # ========================================
-# 🔧 동적 임계치 하한 (점화 완화 시 최저선)
+# 🔧 동적 임계치 하한 (완화됨)
 # ========================================
-GATE_RELAX_SURGE_FLOOR = 0.1      # 급등배수 하한
-GATE_RELAX_VOL_MA_FLOOR = 0.2     # MA대비 거래량 하한
-GATE_RELAX_TURN_FLOOR = 0.5       # 회전율 하한 (%)
-GATE_RELAX_BUY_FLOOR = 0.45       # 매수비 하한
-GATE_RELAX_IMB_FLOOR = 0.35       # 임밸런스 하한
-GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
+GATE_RELAX_SURGE_FLOOR = 0.05     # 🔧 0.1 → 0.05 완화
+GATE_RELAX_VOL_MA_FLOOR = 0.10    # 🔧 0.2 → 0.10 완화
+GATE_RELAX_TURN_FLOOR = 0.3       # 🔧 0.5 → 0.3 완화
+GATE_RELAX_BUY_FLOOR = 0.40       # 🔧 0.45 → 0.40 완화
+GATE_RELAX_IMB_FLOOR = 0.25       # 🔧 0.35 → 0.25 완화
+GATE_RELAX_ACCEL_FLOOR = 0.05     # 🔧 0.1 → 0.05 완화
 
 # ========================================
 # 🔧 스프레드 가격대별 스케일링
@@ -2747,15 +2748,15 @@ SPREAD_SCALE_HIGH = 0.17           # 1000원 이상: GATE_SPREAD_MAX × 0.17
 SPREAD_CAP_HIGH = 0.25             # 1000원 이상 캡 (%)
 
 # ========================================
-# 🔧 Ignition 내부 임계치
+# 🔧 Ignition 내부 임계치 (완화됨)
 # ========================================
-IGN_TPS_MULTIPLIER = 4             # 평시 대비 N배 이상 = 틱 폭주
-IGN_TPS_MIN_TICKS = 15             # 최소 틱 수
-IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
-IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
-IGN_UP_COUNT_MIN = 4               # 최근 6틱 중 최소 상승 수
-IGN_VOL_BURST_RATIO = 0.40         # 10초 거래량 >= 1분평균 × 이 비율
-IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
+IGN_TPS_MULTIPLIER = 3             # 🔧 4 → 3 완화
+IGN_TPS_MIN_TICKS = 10             # 🔧 15 → 10 완화
+IGN_CONSEC_BUY_MIN = 5             # 🔧 7 → 5 완화
+IGN_PRICE_IMPULSE_MIN = 0.003      # 🔧 0.005 → 0.003 완화
+IGN_UP_COUNT_MIN = 3               # 🔧 4 → 3 완화
+IGN_VOL_BURST_RATIO = 0.30         # 🔧 0.40 → 0.30 완화
+IGN_SPREAD_MAX = 0.60              # 🔧 0.40 → 0.60 완화
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
@@ -2767,27 +2768,27 @@ PREBREAK_BUY_MIN = 0.60               # 최소 매수비 60%
 PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
-# 허수 방어
-MIN_REAL_TRADES = 10
+# 허수 방어 (완화됨)
+MIN_REAL_TRADES = 5  # 🔧 10 → 5 완화
 
 # 손절/모니터링
 STOP_LOSS_PCT = 0.008
 RECHECK_SEC = 5
 
-# Ignition
-IGN_BREAK_LOOKBACK = 12
-IGN_MIN_BODY = 0.006
-IGN_MIN_BUY = 0.60
+# Ignition (완화됨)
+IGN_BREAK_LOOKBACK = 15  # 🔧 12 → 15 완화 (더 넓은 범위)
+IGN_MIN_BODY = 0.004     # 🔧 0.006 → 0.004 완화
+IGN_MIN_BUY = 0.52       # 🔧 0.60 → 0.52 완화
 # USE_5M_CONTEXT 상단에서 일원화 (중복 제거)
 
-# Bot-aware
-BOT_PINGPONG_MAX_BAND = 0.0015
-BOT_PINGPONG_MIN_ALT = 0.90
-BOT_WASH_REPEAT_VOL_N = 5
-BOT_TWAP_MAX_CV = 0.48
-BOT_TWAP_MAX_PSTD = 0.0018
-BOT_ACCUM_MIN_BUY = 0.54
-BOT_ACCUM_MAX_BUY = 0.68
+# Bot-aware (완화됨)
+BOT_PINGPONG_MAX_BAND = 0.0025   # 🔧 0.0015 → 0.0025 완화
+BOT_PINGPONG_MIN_ALT = 0.85      # 🔧 0.90 → 0.85 완화
+BOT_WASH_REPEAT_VOL_N = 7        # 🔧 5 → 7 완화
+BOT_TWAP_MAX_CV = 0.60           # 🔧 0.48 → 0.60 완화
+BOT_TWAP_MAX_PSTD = 0.003        # 🔧 0.0018 → 0.003 완화
+BOT_ACCUM_MIN_BUY = 0.48         # 🔧 0.54 → 0.48 완화
+BOT_ACCUM_MAX_BUY = 0.75         # 🔧 0.68 → 0.75 완화
 
 # 트렌드 가드
 
@@ -2808,14 +2809,14 @@ REARM_PRICE_GAP = 0.009
 REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
-# 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
+# 포스트체크(허수 2차) - 완화됨
 # POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
-POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
-POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
-POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
-POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.018
+POSTCHECK_MIN_BUY = 0.40   # 🔧 0.46 → 0.40 완화
+POSTCHECK_MIN_RATE = 0.10  # 🔧 0.16 → 0.10 완화
+POSTCHECK_MAX_PSTD = 0.005 # 🔧 0.0028 → 0.005 완화
+POSTCHECK_MAX_CV = 1.0     # 🔧 0.72 → 1.0 완화
+POSTCHECK_MAX_DD = 0.025   # 🔧 0.018 → 0.025 완화
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거) - 익절키우기 적용
 ATR_PERIOD = 14
@@ -6341,8 +6342,8 @@ def monitor_position(m,
 
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
-            dd_now = (curp / best - 1.0)
-            cur_gain = (curp / entry_price - 1.0)
+            dd_now = (curp / best - 1.0) if best > 0 else 0  # 🔧 FIX: 0 나눗셈 방어
+            cur_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0  # 🔧 FIX: 0 나눗셈 방어
 
             # 🔧 FIX (D): 손절도 net 기준 정합성 (fee 마진 추가)
             # - 익절: ret_net = ret_pct - fee로 판단 (실제 수익 기준)
