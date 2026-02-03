@@ -8,94 +8,14 @@ import time
 import sys
 import os
 
-# 메인 모듈을 임포트하기 위해 경로 추가
-# 파일명이 한글이라 importlib 사용
-import importlib.util
-
-MODULE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "251130-MADEIT에서 여러수정보완한 찐찐찐이야야"
+# bot 패키지에서 분리된 함수 임포트
+sys.path.insert(0, os.path.dirname(__file__))
+from bot.utils import _pct
+from bot.indicators import (
+    inter_arrival_stats,
+    price_band_std,
+    micro_tape_stats as micro_tape_stats_from_ticks,
 )
-
-
-def _load_module():
-    """메인 모듈을 로드 (전역 부작용 없이 함수만 추출)"""
-    spec = importlib.util.spec_from_file_location("bot", MODULE_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    # 실행하면 메인루프가 돌아서, 함수 소스코드만 파싱해서 가져옴
-    # 대신 필요한 함수를 직접 정의
-    return None
-
-
-# ============================================================
-# 테스트용 함수 직접 정의 (메인 모듈 임포트 없이 독립 실행)
-# 메인 코드에서 복사한 순수 함수만 테스트
-# ============================================================
-
-def _pct(a, b):
-    try:
-        return abs(a / b - 1.0)
-    except Exception:
-        return 9.9
-
-
-def inter_arrival_stats(ticks, sec=30):
-    if not ticks: return {"cv": None, "count": 0}
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-    except Exception:
-        return {"cv": None, "count": 0}
-    cutoff = newest_ts - sec * 1000
-    ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
-    ts = sorted(ts)
-    if len(ts) < 4: return {"cv": None, "count": len(ts)}
-    gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
-    mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": None, "count": len(ts)}
-    var = sum((g - mu)**2 for g in gaps) / len(gaps)
-    cv = (var**0.5) / mu
-    return {"cv": cv, "count": len(ts)}
-
-
-def price_band_std(ticks, sec=30):
-    if not ticks: return None
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-    except Exception:
-        return None
-    cutoff = newest_ts - sec * 1000
-    ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
-    if len(ps) < 3: return None
-    m = sum(ps) / len(ps)
-    var = sum((p - m)**2 for p in ps) / len(ps)
-    std = (var**0.5) / max(m, 1)
-    return std
-
-
-def micro_tape_stats_from_ticks(ticks, sec):
-    if not ticks:
-        return {"krw": 0, "n": 0, "buy_ratio": 0, "age": 999, "rate": 0, "krw_per_sec": 0}
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-        cutoff = newest_ts - sec * 1000
-    except Exception:
-        return {"krw": 0, "n": 0, "buy_ratio": 0, "age": 999, "rate": 0, "krw_per_sec": 0}
-    n = 0; krw = 0.0; buys = 0; oldest_ts = newest_ts
-    for x in ticks:
-        ts = x.get("timestamp", 0)
-        if ts < cutoff: continue
-        p = x.get("trade_price", 0.0)
-        v = x.get("trade_volume", 0.0)
-        krw += p * v; n += 1
-        if x.get("ask_bid") == "BID": buys += 1
-        if ts < oldest_ts: oldest_ts = ts
-    if n == 0:
-        return {"krw": 0, "n": 0, "buy_ratio": 0, "age": 999, "rate": 0, "krw_per_sec": 0}
-    now_ms = int(time.time() * 1000)
-    age = (now_ms - newest_ts) / 1000.0 if newest_ts else 999
-    duration = max((newest_ts - (oldest_ts or newest_ts)) / 1000.0, 1.0)
-    return {"krw": krw, "n": n, "buy_ratio": buys / n, "age": age,
-            "rate": n / duration, "krw_per_sec": krw / duration}
 
 
 # ============================================================

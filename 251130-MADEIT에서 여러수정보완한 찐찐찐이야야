@@ -1,5 +1,24 @@
 # -*- coding: utf-8 -*-
 import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re
+
+# 모듈 분리된 순수 함수 (bot/ 패키지)
+# 원본 인라인 정의와 동일 — 점진적 마이그레이션용
+try:
+    from bot.utils import _pct as _pct_mod, fmt6 as fmt6_mod, _safe_float as _safe_float_mod
+    from bot.indicators import (
+        inter_arrival_stats as inter_arrival_stats_mod,
+        price_band_std as price_band_std_mod,
+        calc_consecutive_buys as calc_consecutive_buys_mod,
+        calc_avg_krw_per_tick as calc_avg_krw_per_tick_mod,
+        calc_flow_acceleration as calc_flow_acceleration_mod,
+        calc_orderbook_imbalance as calc_orderbook_imbalance_mod,
+        vwap_from_candles_1m as vwap_from_candles_1m_mod,
+        zscore_krw_1m as zscore_krw_1m_mod,
+        body_ratio as body_ratio_mod,
+    )
+    _BOT_MODULES_LOADED = True
+except ImportError:
+    _BOT_MODULES_LOADED = False
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
