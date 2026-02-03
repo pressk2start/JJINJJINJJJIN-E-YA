@@ -4544,6 +4544,9 @@ def ignition_detected(
     if len(window) < 6:
         return False, "10초윈도우부족", 0
 
+    # 🔧 FIX: 윈도우 시간순 정렬 (ticks 정렬 보장 없음 → reversed 오작동 방지)
+    window = sorted(window, key=lambda x: x.get("timestamp", x.get("ts", 0)))
+
     # ---- 1) 틱 폭주 (상대 임계치) ----
     with _IGNITION_LOCK:
         baseline_tps = _IGNITION_BASELINE_TPS.get(market, 0.5)  # 기본값 0.5 tps
@@ -4558,7 +4561,7 @@ def ignition_detected(
     consec_buys = calc_consecutive_buys(window, 10) >= IGN_CONSEC_BUY_MIN
 
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
-    prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
+    prices = [t["trade_price"] for t in window]  # 🔧 FIX: 정렬 후 reversed 불필요 (이미 오래된→최신)
     if len(prices) >= 6:
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
@@ -4944,8 +4947,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
 
     # === 🔧 조건부 스프레드 강화 (turn 높거나 pstd 높으면 더 엄격) ===
-    if (turn_pct > 100 or pstd > 0.06) and spread > 0.06:
-        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd:.2f}%) | {metrics}"
+    # 🔧 FIX: pstd=None 방어 (데이터 부족 시 TypeError 방지)
+    if (turn_pct > 100 or (pstd is not None and pstd > 0.06)) and spread > 0.06:
+        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd if pstd is not None else 'NA'}) | {metrics}"
 
     # === 🔧 연속매수 품질 하한 (승37 vs 패24 - 추세 지속력 확인) ===
     if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
@@ -5506,7 +5510,8 @@ def final_check_leader(m, pre, tight_mode=False):
         "score": score,
         "entry_mode": entry_mode,  # 🔥 스코어 기반 자동 매핑
         "is_precision_pocket": is_precision,
-        "filter_type": display_filter,
+        "filter_label": display_filter,  # 🔧 FIX: 표시용 키 분리 (filter_type 분류 키 보호)
+        "filter_type": filter_type,     # 🔧 FIX: 원본 분류 키 유지 ("stage1_gate"/"prebreak")
         "is_prebreak": filter_type == "prebreak",
     }
 
@@ -6310,6 +6315,15 @@ def monitor_position(m,
                 _already_closed = True
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
+                break
+
+            # === 🔧 FIX: base_stop 가격 기반 손절 (본절상향/부분익절 후 보호) ===
+            if base_stop > 0 and curp <= base_stop and base_stop > entry_price * (1 - eff_sl_pct):
+                bs_gain = (curp / entry_price - 1.0) * 100 if entry_price > 0 else 0
+                close_auto_position(m, f"본절손절 | 현재가{curp:.0f}≤손절선{base_stop:.0f} (수익{bs_gain:+.2f}%)")
+                _already_closed = True
+                verdict = "본절손절"
+                outcome_extra = f"(가격{curp:.0f}≤{base_stop:.0f})"
                 break
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
@@ -7176,7 +7190,7 @@ def main():
 
                 # 🔧 FIX: score/filter_type/entry_mode를 pre에 복사 (자동매수 알람에서 사용)
                 pre["score"] = payload.get("score", 0)
-                pre["filter_type"] = payload.get("filter_type", "기본통과")
+                pre["filter_label"] = payload.get("filter_label", "기본통과")  # 🔧 FIX: 표시용만 복사 (filter_type 분류 키 보호)
                 # 🔧 FIX: final_check_leader의 스코어/decay/레짐 다운그레이드 결과 반영
                 # 이전에는 entry_mode가 반영 안 되어 half 모드가 사실상 도달 불가능했음
                 pre["entry_mode"] = payload.get("entry_mode", pre.get("entry_mode", "confirm"))
@@ -7395,7 +7409,8 @@ def main():
                             pos = OPEN_POSITIONS.get(m)
                             if pos and pos.get("pre_signal"):
                                 OPEN_POSITIONS.pop(m, None)
-                        # 🔧 FIX: 락 해제는 모니터 스레드 finally에서 담당 (이중 해제 제거)
+                        # 🔧 FIX: 매수 실패 시 모니터 스레드가 안 뜨므로 여기서 락 해제 (데드락 방지)
+                        _release_entry_lock(m)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
