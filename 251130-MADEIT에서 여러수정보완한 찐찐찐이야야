@@ -4739,6 +4739,9 @@ def check_retest_entry(m):
         if not watch:
             return None
 
+        # 🔧 FIX: 상태 전이 직전에 최신 state 재읽기 (다른 스레드가 변경했을 수 있음)
+        state = watch["state"]
+
         if state == "watching":
             # 충분히 되돌림이 왔는지 체크
             if pullback_pct >= RETEST_PULLBACK_MIN:
@@ -4821,6 +4824,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  pstd=0.0, market=""):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
+
+    NOTE: pstd는 **퍼센트 단위** (0.08 = 0.08%). 호출부에서 소수→% 변환 후 전달.
 
     [🔥 점화 점수 = 가점/완화 요소]
     - ignition_score가 높으면 임계치가 동적으로 완화됨
@@ -5751,10 +5756,11 @@ def postcheck_6s(m, pre):
             continue
 
         # acc에 최신 틱만 중복없이 축적
-        # 🔧 FIX: appendleft 사용 - 새 틱을 왼쪽에 추가해야 acc[0]이 최신 유지
-        for x in reversed(ticks[:12]):  # 과거→최신 순으로 반복
+        # 🔧 FIX: 틱 정렬 계약(과거→최신) 반영 — 최근 12틱은 끝에서 슬라이싱
+        # 🔧 FIX: seen key에 ask_bid 추가 (같은 시각/가격/수량이어도 매수/매도 구분)
+        for x in reversed(ticks[-12:]):  # 최신→과거 순으로 반복 (appendleft니까)
             key = (x.get("timestamp"), x.get("trade_price"),
-                   x.get("trade_volume"))
+                   x.get("trade_volume"), x.get("ask_bid"))
             if key in seen:
                 continue
             seen.add(key)
@@ -6640,6 +6646,11 @@ def monitor_position(m,
             verdict = "시간 만료(모니터링 종료)"
 
     finally:
+        # 🔧 FIX: 모니터 종료 시 per-market 캐시 정리 (메모리 누수 방지)
+        if hasattr(monitor_position, '_ob_snap_ts'):
+            monitor_position._ob_snap_ts.pop(m, None)
+            monitor_position._ob_snap_cache.pop(m, None)
+
         # ================================
         # 1) 최신 상태 / 수익률 계산
         # ================================
