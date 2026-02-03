@@ -5132,7 +5132,7 @@ def calc_ema_slope(c1, period=20, lookback=5):
         if i == prev_idx:
             ema_prev = ema
 
-    if not ema_prev or ema_prev <= 0:
+    if ema_prev is None or ema_prev <= 0:
         return 0.0
 
     slope = (ema - ema_prev) / ema_prev
@@ -5652,7 +5652,7 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "hour": now_kst().hour,
         "dow": now_kst().weekday(),
         "two_green_break": 1 if flags.get("two_green_break") else 0,
-        "ignition_ok": 1 if flags.get("ign_ok") else 0,
+        "ignition_ok": 1 if flags.get("ignition_ok") else 0,
         "early_ok": 1 if flags.get("early_ok") else 0,
         "uptick_ok": 1 if flags.get("uptick_ok") else 0,
         # 🔥 새 지표
