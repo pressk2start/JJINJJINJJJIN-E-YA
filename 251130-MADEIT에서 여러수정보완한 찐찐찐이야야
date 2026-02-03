@@ -2995,29 +2995,28 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     last_trade_was_loss = globals().setdefault("last_trade_was_loss", {})
 
     # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
-    # entry_ts가 있으면 거래 ID로 사용, 없으면 market+현재시각 기준 (호환성)
-    if entry_ts is not None:
-        # 🔧 FIX: ms 단위로 변경 (1초 내 재진입 시 중복 판정 방지)
-        trade_id = (market, int(entry_ts * 1000))  # ms 단위
-        if trade_id in _reported_trades:
-            print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
-            return
-        _reported_trades.add(trade_id)
-        # 오래된 항목 정리 (1시간 이상 지난 거래)
-        # 🔧 FIX: discard()는 단일 원소만 제거 → difference_update() 사용
-        now = time.time()
-        _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
-        _reported_trades.difference_update(_old_trades)
-    else:
-        # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
-        # 🔧 FIX: ms 단위로 통일 (cleanup 로직과 단위 일치)
-        now_ts = time.time()
-        now_ms = int(now_ts * 1000)
-        recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] / 1000 < 30]
-        if recent:
-            print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
-            return
-        _reported_trades.add((market, now_ms))
+    # 🔧 FIX: _reported_trades를 _trade_log_lock으로 보호 (스레드 안전)
+    with _trade_log_lock:
+        if entry_ts is not None:
+            # 🔧 FIX: ms 단위로 변경 (1초 내 재진입 시 중복 판정 방지)
+            trade_id = (market, int(entry_ts * 1000))  # ms 단위
+            if trade_id in _reported_trades:
+                print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
+                return
+            _reported_trades.add(trade_id)
+            # 오래된 항목 정리 (1시간 이상 지난 거래)
+            now = time.time()
+            _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
+            _reported_trades.difference_update(_old_trades)
+        else:
+            # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
+            now_ts = time.time()
+            now_ms = int(now_ts * 1000)
+            recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] / 1000 < 30]
+            if recent:
+                print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
+                return
+            _reported_trades.add((market, now_ms))
 
     print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
 
@@ -4375,7 +4374,7 @@ def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
     except Exception:
         return 0.0
     cutoff = newest_ts - sec * 1000
-    win = [x for x in reversed(ticks) if x["timestamp"] >= cutoff]
+    win = [x for x in ticks if x["timestamp"] >= cutoff]
     if len(win) < 6: return 0.0
     prices = [x["trade_price"] for x in win]
     pr_min, pr_max = min(prices), max(prices)
@@ -5618,7 +5617,7 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
 
     # 🚀 초단기 미세필터 지표
     ia_stats = inter_arrival_stats(ticks, 60) if ticks else {"cv": 0.0}  # 60초 (detect와 동일)
-    cv = ia_stats.get("cv", 0.0)
+    cv = ia_stats.get("cv") or 0.0  # 🔧 FIX: key 존재하지만 None인 경우 방어
     pstd = price_band_std(ticks, sec=10) if ticks else None  # 10초 (detect와 동일)
     pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
     prebreak_band = dynamic_prebreak_band(ticks) if ticks else PREBREAK_HIGH_PCT
@@ -7497,6 +7496,7 @@ def main():
                                 OPEN_POSITIONS.pop(m, None)
                         # 🔧 FIX: 매수 실패 시 모니터 스레드가 안 뜨므로 여기서 락 해제 (데드락 방지)
                         _release_entry_lock(m)
+                        continue  # 🔧 FIX: 매수 실패 후 모니터 섹션 진입 방지 (이중 락 해제 방지)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
