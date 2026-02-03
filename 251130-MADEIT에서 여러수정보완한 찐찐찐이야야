@@ -3405,9 +3405,9 @@ def analyze_and_update_weights():
         if "spread" in stats:
             w, l = stats["spread"]["win"], stats["spread"]["lose"]
             if w < l:  # 승자가 더 낮은 스프레드
-                target = max(0.08, w * 1.2)  # 승자 평균의 120%
+                target = max(1.00, w * 1.2)  # 승자 평균의 120% (스케일링 후 합리적 범위)
                 new_val = round(GATE_SPREAD_MAX * (1 - BLEND) + target * BLEND, 3)
-                new_val = max(0.08, min(0.35, new_val))  # 바운드
+                new_val = max(1.00, min(2.00, new_val))  # 바운드 (가격대 스케일링 후에도 합리적 범위 유지)
                 changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
                 if AUTO_LEARN_APPLY:
                     GATE_SPREAD_MAX = new_val
