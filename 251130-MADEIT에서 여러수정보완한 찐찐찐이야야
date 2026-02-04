@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re
-
-# 모듈 분리된 순수 함수 (bot/ 패키지)
-# 원본 인라인 정의와 동일 — 점진적 마이그레이션용
-try:
-    from bot.utils import _pct as _pct_mod, fmt6 as fmt6_mod, _safe_float as _safe_float_mod
-    from bot.indicators import (
-        inter_arrival_stats as inter_arrival_stats_mod,
-        price_band_std as price_band_std_mod,
-        calc_consecutive_buys as calc_consecutive_buys_mod,
-        calc_avg_krw_per_tick as calc_avg_krw_per_tick_mod,
-        calc_flow_acceleration as calc_flow_acceleration_mod,
-        calc_orderbook_imbalance as calc_orderbook_imbalance_mod,
-        vwap_from_candles_1m as vwap_from_candles_1m_mod,
-        zscore_krw_1m as zscore_krw_1m_mod,
-        body_ratio as body_ratio_mod,
-    )
-    _BOT_MODULES_LOADED = True
-except ImportError:
-    _BOT_MODULES_LOADED = False
 from datetime import datetime, timedelta, timezone
+
+# =========================
+# bot/ 패키지 모듈 직접 import
+# =========================
+from bot.utils import _pct, fmt6, _safe_float, rnd, get_trimmed_mean as _get_trimmed_mean
+from bot.indicators import (
+    inter_arrival_stats,
+    price_band_std,
+    calc_consecutive_buys,
+    calc_avg_krw_per_tick,
+    calc_flow_acceleration,
+    calc_orderbook_imbalance,
+    vwap_from_candles_1m,
+    zscore_krw_1m,
+    body_ratio,
+    running_1m_bar,
+    micro_tape_stats as micro_tape_stats_from_ticks,  # 메인 코드 호환용 alias
+    uptick_streak_from_ticks,
+)
+from bot.config import *  # 모든 상수 import
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
@@ -40,30 +41,12 @@ except Exception as e:
     sys.exit(1)
 
 
-def rnd():
-    return random.random()  # ← 이 줄이 4칸(스페이스) 들여쓰기 되어야 함
-
-def fmt6(x):
-    """
-    숫자를 보기 좋게 표시:
-    - 정수는 소수점 없이
-    - 소수점이 있는 경우 최대 6자리까지 표시
-    """
-    if isinstance(x, (int, float)):
-        if abs(x - int(x)) < 1e-6:
-            return f"{int(x):,}"
-        else:
-            s = f"{x:,.6f}".rstrip('0').rstrip('.')
-            return s
-    return str(x)
+# rnd(), fmt6() → bot.utils에서 import됨
 
 # =========================
-# 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
+# 설정 (bot/config.py에서 import됨, 여기서는 런타임 설정만)
 # =========================
-TOP_N = 60
-SCAN_INTERVAL = 6
-COOLDOWN = 480
-PARALLEL_WORKERS = 12
+# TOP_N, SCAN_INTERVAL, COOLDOWN, PARALLEL_WORKERS → bot/config.py
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 진입 후 5초 웜업
@@ -80,16 +63,7 @@ _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
 _SLIP_HISTORY = deque(maxlen=50)  # 🔧 하위호환용 (점진 제거 예정)
 
-def _get_trimmed_mean(slip_deque, default=0.0008):
-    """슬립 deque에서 trimmed mean 계산 (상하위 10% 제거)"""
-    if len(slip_deque) >= 10:
-        sorted_slip = sorted(slip_deque)
-        trim_n = max(1, len(sorted_slip) // 10)
-        trimmed = sorted_slip[trim_n:-trim_n] if trim_n > 0 else sorted_slip
-        return statistics.mean(trimmed) if trimmed else default
-    elif len(slip_deque) >= 5:
-        return statistics.median(slip_deque)
-    return default
+# _get_trimmed_mean → bot.utils에서 import됨
 
 def get_dynamic_checkpoint():
     """수수료 + 슬리피지(trimmed mean) + 최소알파 기반 동적 체크포인트"""
@@ -2854,35 +2828,7 @@ SCORE_WEIGHTS = {
     "volume_surge": 10,   # 거래량 급증
 }
 
-def calc_orderbook_imbalance(ob):
-    """
-    1~3호가 가중 평균 임밸런스 계산
-    - 1호가 가중치 3, 2호가 2, 3호가 1
-    - 반환값: -1.0 ~ +1.0 (양수=매수우세)
-    """
-    try:
-        units = ob["raw"]["orderbook_units"][:3]
-        bid_weighted = sum(u["bid_size"] * u["bid_price"] * (3-i) for i, u in enumerate(units))
-        ask_weighted = sum(u["ask_size"] * u["ask_price"] * (3-i) for i, u in enumerate(units))
-        total = bid_weighted + ask_weighted
-        if total <= 0:
-            return 0.0
-        imbalance = (bid_weighted - ask_weighted) / total
-        return max(-1.0, min(1.0, imbalance))
-    except Exception:
-        return 0.0
-
-def _safe_float(x, default=0.0):
-    """NaN/inf 방지용 안전 변환"""
-    try:
-        if x is None:
-            return default
-        f = float(x)
-        if math.isnan(f) or math.isinf(f):
-            return default
-        return f
-    except Exception:
-        return default
+# calc_orderbook_imbalance, _safe_float → bot.indicators, bot.utils에서 import됨
 
 def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
     """
@@ -3856,28 +3802,7 @@ def aligned_sleep(interval):
 # =========================
 # 지표 유틸
 # =========================
-def vwap_from_candles_1m(c1, n=20):
-    seg = c1[-n:] if len(c1) >= n else c1[:]
-    pv = sum(x["trade_price"] * x["candle_acc_trade_volume"] for x in seg)
-    vol = sum(x["candle_acc_trade_volume"] for x in seg)
-    return pv / max(vol, 1e-12)
-
-
-def zscore_krw_1m(c1, win=30):
-    seg = c1[-win:] if len(c1) >= win else c1[:]
-    arr = [x["candle_acc_trade_price"] for x in seg]
-    if len(arr) < 3: return 0.0
-    m = sum(arr) / len(arr)
-    sd = (sum((a - m)**2 for a in arr) / max(len(arr) - 1, 1))**0.5
-    return (arr[-1] - m) / max(sd, 1e-9)
-
-
-def uptick_streak_from_ticks(ticks, need=2):
-    # 🔧 FIX: 틱 정렬 계약(과거→최신) 반영 — 최근 틱은 끝에서 슬라이싱, 이미 정렬됨
-    t = ticks[-(need + 4):]
-    return sum(1 for a, b in zip(t, t[1:])
-               if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
-
+# vwap_from_candles_1m, zscore_krw_1m, uptick_streak_from_ticks → bot.indicators에서 import됨
 
 def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
     """
@@ -3910,12 +3835,7 @@ def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
     return is_fresh
 
 
-def body_ratio(c):
-    try:
-        return max((c["trade_price"] - c["opening_price"]) /
-                   max(c["opening_price"], 1), 0)
-    except Exception:
-        return 0
+# body_ratio → bot.indicators에서 import됨
 
 
 # ---- 5분 컨텍스트: LRU 캐시 ----
@@ -4109,194 +4029,8 @@ def get_recent_ticks(m, c=100, allow_network=True):
     _TICKS_CACHE.set(m, {"ts": now_ms, "ticks": js_sorted})
     return js_sorted
 
-def micro_tape_stats_from_ticks(ticks, sec):
-    if not ticks:
-        return {
-            "krw": 0,
-            "n": 0,
-            "buy_ratio": 0,
-            "age": 999,
-            "rate": 0,
-            "krw_per_sec": 0
-        }
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-        cutoff = newest_ts - sec * 1000
-    except Exception:
-        return {
-            "krw": 0,
-            "n": 0,
-            "buy_ratio": 0,
-            "age": 999,
-            "rate": 0,
-            "krw_per_sec": 0
-        }
-
-    n = 0
-    krw = 0.0
-    buys = 0
-    oldest_ts = newest_ts
-    for x in ticks:
-        ts = x.get("timestamp", 0)
-        if ts < cutoff:
-            continue
-        p = x.get("trade_price", 0.0)
-        v = x.get("trade_volume", 0.0)
-        krw += p * v
-        n += 1
-        if x.get("ask_bid") == "BID": buys += 1
-        if ts < oldest_ts: oldest_ts = ts
-
-    if n == 0:
-        return {
-            "krw": 0,
-            "n": 0,
-            "buy_ratio": 0,
-            "age": 999,
-            "rate": 0,
-            "krw_per_sec": 0
-        }
-
-    now_ms = int(time.time() * 1000)
-    age = (now_ms - newest_ts) / 1000.0 if newest_ts else 999
-    duration = max((newest_ts - (oldest_ts or newest_ts)) / 1000.0, 1.0)
-    rate = n / duration
-    krw_per_sec = krw / duration
-    return {
-        "krw": krw,
-        "n": n,
-        "buy_ratio": buys / n,
-        "age": age,
-        "rate": rate,
-        "krw_per_sec": krw_per_sec
-    }
-
-
-def calc_consecutive_buys(ticks, sec=15):
-    """
-    체결강도: 최근 N초 내 연속 매수 체결 최대 횟수
-    → 5개 이상 연속 매수 = 강한 신호
-    """
-    if not ticks:
-        return 0
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-        cutoff = newest_ts - sec * 1000
-    except Exception:
-        return 0
-
-    max_streak = 0
-    current_streak = 0
-    for x in ticks:
-        if x.get("timestamp", 0) < cutoff:
-            continue
-        if x.get("ask_bid") == "BID":
-            current_streak += 1
-            max_streak = max(max_streak, current_streak)
-        else:
-            current_streak = 0
-    return max_streak
-
-
-def calc_avg_krw_per_tick(t_stats):
-    """
-    틱당 평균금액: 총 거래대금 / 틱수
-    → 높을수록 대형 체결 (고래 가능성)
-    """
-    if not t_stats or t_stats.get("n", 0) == 0:
-        return 0
-    return t_stats["krw"] / t_stats["n"]
-
-
-def calc_flow_acceleration(ticks):
-    """
-    체결 가속도: t5s / t15s 비율
-    → 1.5 이상 = 가속 중, 0.7 이하 = 감속 중
-    """
-    if not ticks:
-        return 1.0
-    t5s = micro_tape_stats_from_ticks(ticks, 5)
-    t15s = micro_tape_stats_from_ticks(ticks, 15)
-
-    _t15s_krw = t15s.get("krw_per_sec", 0)
-    if _t15s_krw <= 0:
-        return 1.0
-    return t5s.get("krw_per_sec", 0) / _t15s_krw
-
-
-# ========================================
-# 🚀 러닝 1분봉 (Running 1m Bar) - 종가 확정 전 실시간 계산
-# ========================================
-def running_1m_bar(ticks, last_candle=None):
-    """
-    틱 데이터로 현재 진행 중인 1분봉을 실시간 계산
-    - 종가 확정 전에도 현재 가격/거래량/변동폭 파악 가능
-    - last_candle이 있으면 이전 봉 기준으로 변동률 계산
-
-    Returns: {
-        'open': 시가,
-        'high': 고가,
-        'low': 저가,
-        'close': 현재가 (진행 중),
-        'volume_krw': 거래대금,
-        'tick_count': 틱 수,
-        'buy_ratio': 매수 비율,
-        'change_from_prev': 이전봉 대비 변동률,
-        'range_pct': 진행 중 봉의 변동폭 (high-low)/low
-    }
-    """
-    if not ticks:
-        return None
-
-    now_ms = int(time.time() * 1000)
-    minute_start = (now_ms // 60000) * 60000  # 현재 분의 시작 시점
-
-    # 현재 분 내의 틱만 필터
-    current_ticks = [t for t in ticks if t.get("timestamp", 0) >= minute_start]
-
-    if not current_ticks:
-        # 현재 분 틱이 없으면 최근 10초 틱으로 대체
-        fallback_cutoff = now_ms - 10000
-        current_ticks = [t for t in ticks if t.get("timestamp", 0) >= fallback_cutoff]
-        if not current_ticks:
-            return None
-
-    # 🔧 FIX: 정렬 전제 제거 — timestamp 기준 명시 정렬
-    current_ticks = sorted(current_ticks, key=lambda t: t.get("timestamp", 0))
-    prices = [t.get("trade_price", 0) for t in current_ticks if t.get("trade_price", 0) > 0]
-    if not prices:
-        return None
-
-    # OHLC 계산 (timestamp 정렬 완료 → 첫=시가, 끝=종가)
-    open_price = prices[0]
-    high_price = max(prices)
-    low_price = min(prices)
-    close_price = prices[-1]  # 가장 최근 가격
-
-    # 거래대금/매수비
-    volume_krw = sum(t.get("trade_price", 0) * t.get("trade_volume", 0) for t in current_ticks)
-    buys = sum(1 for t in current_ticks if t.get("ask_bid") == "BID")
-    buy_ratio = buys / len(current_ticks) if current_ticks else 0
-
-    # 이전봉 대비 변동률
-    change_from_prev = 0.0
-    if last_candle and last_candle.get("trade_price", 0) > 0:
-        change_from_prev = close_price / last_candle["trade_price"] - 1
-
-    # 진행 중 봉의 변동폭
-    range_pct = (high_price - low_price) / low_price if low_price > 0 else 0
-
-    return {
-        "open": open_price,
-        "high": high_price,
-        "low": low_price,
-        "close": close_price,
-        "volume_krw": volume_krw,
-        "tick_count": len(current_ticks),
-        "buy_ratio": buy_ratio,
-        "change_from_prev": change_from_prev,
-        "range_pct": range_pct,
-    }
+# micro_tape_stats_from_ticks, calc_consecutive_buys, calc_avg_krw_per_tick,
+# calc_flow_acceleration, running_1m_bar → bot.indicators에서 import됨
 
 
 # ========================================
@@ -4325,47 +4059,7 @@ def dynamic_prebreak_band(ticks):
 # ========================================
 # 🚀 Pre-break Probe 체크 (고점 근처 선행 진입)
 # ========================================
-def _pct(a, b):
-    try:
-        return abs(a / b - 1.0)
-    except Exception:
-        return 9.9
-
-
-def inter_arrival_stats(ticks, sec=30):
-    """틱 도착간격 CV. 데이터 부족시 cv=None 반환 (센티넬 9.9 제거)"""
-    if not ticks: return {"cv": None, "count": 0}
-    try:
-        newest_ts = max(t["timestamp"] for t in ticks)
-    except Exception:
-        return {"cv": None, "count": 0}
-    cutoff = newest_ts - sec * 1000
-    ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
-    ts = sorted(ts)
-    if len(ts) < 4: return {"cv": None, "count": len(ts)}
-    gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
-    mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": None, "count": len(ts)}
-    var = sum((g - mu)**2 for g in gaps) / len(gaps)
-    cv = (var**0.5) / mu
-    return {"cv": cv, "count": len(ts)}
-
-
-def price_band_std(ticks, sec=30):
-    """가격밴드 표준편차. 데이터 부족시 None 반환 (센티넬 9.9 제거)"""
-    if not ticks: return None
-    try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        newest_ts = max(t["timestamp"] for t in ticks)
-    except Exception:
-        return None
-    cutoff = newest_ts - sec * 1000
-    ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
-    if len(ps) < 3: return None
-    m = sum(ps) / len(ps)
-    var = sum((p - m)**2 for p in ps) / len(ps)
-    std = (var**0.5) / max(m, 1)
-    return std
+# _pct, inter_arrival_stats, price_band_std → bot.utils/indicators에서 import됨
 
 
 def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
@@ -7006,25 +6700,7 @@ _cursor = 0
 _last_learn_ts = 0  # 마지막 학습 시각
 
 
-# =========================
-# 🔧 FIX: 모듈 마이그레이션 — bot/ 패키지 로드 성공 시 인라인 함수를 모듈 버전으로 교체
-# bot/ 미설치 환경에서는 인라인 버전이 그대로 유지됨 (폴백)
-# 이렇게 하면 "인라인 vs 모듈" 양쪽이 동시에 살아있는 shadowing 문제 방지
-# =========================
-if _BOT_MODULES_LOADED:
-    _pct = _pct_mod
-    fmt6 = fmt6_mod
-    _safe_float = _safe_float_mod
-    inter_arrival_stats = inter_arrival_stats_mod
-    price_band_std = price_band_std_mod
-    calc_consecutive_buys = calc_consecutive_buys_mod
-    calc_avg_krw_per_tick = calc_avg_krw_per_tick_mod
-    calc_flow_acceleration = calc_flow_acceleration_mod
-    calc_orderbook_imbalance = calc_orderbook_imbalance_mod
-    vwap_from_candles_1m = vwap_from_candles_1m_mod
-    zscore_krw_1m = zscore_krw_1m_mod
-    body_ratio = body_ratio_mod
-    print("[MODULES] bot/ 패키지 함수 활성화 (인라인 → 모듈 교체 완료)")
+# 모든 함수는 상단에서 bot/ 패키지에서 직접 import됨
 
 
 def main():
