@@ -294,10 +294,22 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
             _MEMORY_ENTRY_LOCKS.pop(market, None)
         return (False, False) if reentrant else False
 
-def _release_entry_lock(market: str):
-    """락 해제 (파일 삭제 + 메모리 락 해제)"""
-    # 메모리 락 해제
+def _release_entry_lock(market: str, force: bool = False):
+    """락 해제 (파일 삭제 + 메모리 락 해제)
+
+    🔧 FIX: 소유자 확인 추가 — 자신이 잡은 락만 해제 (다른 스레드 락 오해제 방지)
+    force=True: 소유자 확인 없이 강제 해제 (비정상 종료 후 클린업용)
+    """
+    current_owner = threading.current_thread().ident
+
+    # 🔧 FIX: 메모리 락 해제 — 소유자 확인
     with _MEMORY_LOCK:
+        if market in _MEMORY_ENTRY_LOCKS:
+            lock_ts, lock_owner = _MEMORY_ENTRY_LOCKS[market]
+            if not force and lock_owner != current_owner:
+                # 다른 스레드의 락 → 해제하지 않음
+                print(f"[LOCK_WARN] {market} 락 해제 스킵 — 소유자({lock_owner}) ≠ 현재({current_owner})")
+                return
         _MEMORY_ENTRY_LOCKS.pop(market, None)
 
     # 파일 락 해제
@@ -3181,13 +3193,18 @@ def analyze_and_update_weights():
                     GATE_BUY_RATIO_MIN = new_val
 
         # 스프레드: 승자 < 패자면 하향 (더 엄격)
+        # 🔧 FIX: spread 단위 통일 — 학습 데이터의 spread는 % 단위 (예: 0.15 = 0.15%)
+        # GATE_SPREAD_MAX는 가격대별 스케일링 전 기준값 (예: 2.50 → 고가코인 eff_spread_max=0.25%)
+        # 바운드: 0.20~3.00 (스케일링 전 기준, 실제 eff_spread_max는 0.25~1.20% 범위)
         if "spread" in stats:
             w, l = stats["spread"]["win"], stats["spread"]["lose"]
             if w < l:  # 승자가 더 낮은 스프레드
-                target = max(1.00, w * 1.2)  # 승자 평균의 120% (스케일링 후 합리적 범위)
-                new_val = round(GATE_SPREAD_MAX * (1 - BLEND) + target * BLEND, 3)
-                new_val = max(1.00, min(2.00, new_val))  # 바운드 (가격대 스케일링 후에도 합리적 범위 유지)
-                changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
+                # 🔧 FIX: 승자 평균을 스케일링 전 기준으로 환산 (고가 기준 ÷ 0.17)
+                # 단, 저가 코인 데이터가 섞이면 과대추정되므로 상한 적용
+                target = max(0.20, min(w * 1.2 / 0.17, 3.00))  # 스케일링 역산 + 상한
+                new_val = round(GATE_SPREAD_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(0.20, min(3.00, new_val))  # 🔧 FIX: 바운드 수정 (0.20~3.00)
+                changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 2)
                 if AUTO_LEARN_APPLY:
                     GATE_SPREAD_MAX = new_val
 
@@ -3257,7 +3274,18 @@ def analyze_and_update_weights():
                 if AUTO_LEARN_APPLY:
                     GATE_FRESH_AGE_MAX = new_val
 
-        new_values = {
+        # 🔧 FIX: 그림자 모드 저장값 분리
+        # - computed_values: 학습으로 계산된 새 임계치 (AUTO_LEARN_APPLY 여부와 무관)
+        # - applied_values: 실제 적용된 임계치 (전역변수 현재값)
+        # - applied: AUTO_LEARN_APPLY 여부
+        computed_values = {}
+        for key in old_values:
+            if key in changes:
+                computed_values[key] = round(old_values[key] + changes[key], 3)
+            else:
+                computed_values[key] = old_values[key]
+
+        applied_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
             "GATE_TURN_MIN": GATE_TURN_MIN,
@@ -3274,20 +3302,28 @@ def analyze_and_update_weights():
         # 저장
         with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
             json.dump({
-                "gate_thresholds": new_values,
+                "gate_thresholds_computed": computed_values,  # 🔧 FIX: 계산된 값 (검증용)
+                "gate_thresholds_applied": applied_values,    # 🔧 FIX: 실제 적용된 값
+                "applied": AUTO_LEARN_APPLY,                  # 🔧 FIX: 적용 여부 플래그
                 "updated_at": now_kst_str(),
                 "sample_size": len(df),
                 "win_rate": win_rate,
-                "feature_stats": {k: {"win": round(v["win"], 3), "lose": round(v["lose"], 3)} for k, v in stats.items()}
+                "feature_stats": {k: {"win": round(v["win"], 3), "lose": round(v["lose"], 3)} for k, v in stats.items()},
+                # 🔧 하위호환: gate_thresholds도 유지 (기존 코드 호환)
+                "gate_thresholds": applied_values,
             }, f, ensure_ascii=False, indent=2)
 
-        print(f"[AUTO_LEARN] 게이트 임계치 업데이트: {new_values}")
+        mode_str = "APPLY" if AUTO_LEARN_APPLY else "SHADOW"
+        print(f"[AUTO_LEARN] [{mode_str}] 계산된 임계치: {computed_values}")
+        print(f"[AUTO_LEARN] [{mode_str}] 적용된 임계치: {applied_values}")
         print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {win_rate}%")
 
         return {
-            "thresholds": new_values,
+            "thresholds": applied_values,       # 🔧 FIX: 실제 적용된 값
+            "computed": computed_values,        # 🔧 FIX: 계산된 값 (검증용)
             "old_values": old_values,
             "changes": changes,
+            "applied": AUTO_LEARN_APPLY,        # 🔧 FIX: 적용 여부
             "win_rate": win_rate,
             "wins": len(wins),
             "loses": len(loses),
@@ -5744,18 +5780,24 @@ def monitor_position(m,
             last_price = curp
 
             # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
-            if not hasattr(monitor_position, '_ob_snap_ts'):
-                monitor_position._ob_snap_ts = {}
-                monitor_position._ob_snap_cache = {}
-            _ob_snap_age = time.time() - monitor_position._ob_snap_ts.get(m, 0)
-            if _ob_snap_age >= 10:
+            # 🔧 FIX: 스레드 안전성을 위해 _MONITOR_LOCK 사용 (레이스 컨디션 방지)
+            with _MONITOR_LOCK:
+                if not hasattr(monitor_position, '_ob_snap_ts'):
+                    monitor_position._ob_snap_ts = {}
+                    monitor_position._ob_snap_cache = {}
+                _ob_snap_age = time.time() - monitor_position._ob_snap_ts.get(m, 0)
+                should_refresh = _ob_snap_age >= 10
+                cached_ob = monitor_position._ob_snap_cache.get(m, pre.get("ob", {}))
+            if should_refresh:
                 try:
                     _ob_snap_raw = fetch_orderbook_cache([m])
-                    monitor_position._ob_snap_cache[m] = _ob_snap_raw.get(m, pre.get("ob", {}))
-                    monitor_position._ob_snap_ts[m] = time.time()
+                    with _MONITOR_LOCK:
+                        monitor_position._ob_snap_cache[m] = _ob_snap_raw.get(m, pre.get("ob", {}))
+                        monitor_position._ob_snap_ts[m] = time.time()
+                        cached_ob = monitor_position._ob_snap_cache[m]
                 except Exception:
                     pass
-            ob_snap = monitor_position._ob_snap_cache.get(m, pre.get("ob", {}))
+            ob_snap = cached_ob
 
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
@@ -6102,9 +6144,11 @@ def monitor_position(m,
 
     finally:
         # 🔧 FIX: 모니터 종료 시 per-market 캐시 정리 (메모리 누수 방지)
-        if hasattr(monitor_position, '_ob_snap_ts'):
-            monitor_position._ob_snap_ts.pop(m, None)
-            monitor_position._ob_snap_cache.pop(m, None)
+        # 🔧 FIX: 스레드 안전성을 위해 _MONITOR_LOCK 사용
+        with _MONITOR_LOCK:
+            if hasattr(monitor_position, '_ob_snap_ts'):
+                monitor_position._ob_snap_ts.pop(m, None)
+                monitor_position._ob_snap_cache.pop(m, None)
 
         # ================================
         # 1) 최신 상태 / 수익률 계산
