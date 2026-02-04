@@ -1,2 +1,36 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# 환경변수 (민감정보)
+.env
+.env.local
+.env.*.local
+
+# 로그
+*.log
+logs/
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 테스트/캐시
+.pytest_cache/
+.coverage
+htmlcov/
