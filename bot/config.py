@@ -83,6 +83,11 @@ SPREAD_CAP_MID = 0.55
 SPREAD_SCALE_HIGH = 0.17
 SPREAD_CAP_HIGH = 0.25
 
+# 조건부 스프레드 임계치 (% 단위, 0.06 = 0.06%)
+# 🔧 FIX: 하드코딩된 매직넘버를 상수로 추출
+SPREAD_CONDITIONAL_MAX_PCT = 0.06   # 조건부 스프레드 체크 임계치
+PSTD_CONDITIONAL_MAX = 0.06         # 조건부 pstd 체크 임계치 (소수 단위)
+
 # Ignition 내부 임계치 (완화됨)
 IGN_TPS_MULTIPLIER = 3           # 4 → 3 완화
 IGN_TPS_MIN_TICKS = 10           # 15 → 10 완화

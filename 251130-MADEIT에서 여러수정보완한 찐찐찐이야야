@@ -2752,6 +2752,18 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
     # 🔧 FIX: _reported_trades를 _trade_log_lock으로 보호 (스레드 안전)
     with _trade_log_lock:
+        now_ts = time.time()
+        now_ms = int(now_ts * 1000)
+
+        # 🔧 FIX: 메모리 누수 방지 — 모든 경로에서 오래된 항목 정리 + 크기 상한
+        # 1시간(3600초) 이상 지난 항목 제거
+        _old_trades = {t for t in _reported_trades if now_ts - t[1] / 1000 > 3600}
+        _reported_trades.difference_update(_old_trades)
+        # 크기 상한 (5000개 초과 시 전체 리셋)
+        if len(_reported_trades) > 5000:
+            print(f"[WARN] _reported_trades 크기 초과 ({len(_reported_trades)}) → 리셋")
+            _reported_trades.clear()
+
         if entry_ts is not None:
             # 🔧 FIX: ms 단위로 변경 (1초 내 재진입 시 중복 판정 방지)
             trade_id = (market, int(entry_ts * 1000))  # ms 단위
@@ -2759,14 +2771,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
                 return
             _reported_trades.add(trade_id)
-            # 오래된 항목 정리 (1시간 이상 지난 거래)
-            now = time.time()
-            _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
-            _reported_trades.difference_update(_old_trades)
         else:
             # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
-            now_ts = time.time()
-            now_ms = int(now_ts * 1000)
             recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] / 1000 < 30]
             if recent:
                 print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
@@ -3443,12 +3449,14 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
-            # 🔧 아래 4개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
-            # GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
+            # 🔧 FIX: 누락된 필드 로드 — 저장만 하고 로드 안 하면 학습이 무의미
+            # GATE_FRESH_AGE_MAX: 학습에서 실제로 업데이트되는 필드
+            GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
+            # 🔧 아래 3개는 저장은 되지만, 학습에서 업데이트하지 않으므로 로드 안 함 (코드값 우선)
             # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
             # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
             # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
-            print(f"[WEIGHTS] 게이트 임계치 로드 (VOL/PRICE는 코드값 우선): {thr}")
+            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
@@ -4512,8 +4520,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 🔧 조건부 스프레드 강화 (turn 높거나 pstd 높으면 더 엄격) ===
     # 🔧 FIX: pstd=None 방어 (데이터 부족 시 TypeError 방지)
-    if (turn_pct > 100 or (pstd is not None and pstd > 0.06)) and spread > 0.06:
-        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd if pstd is not None else 'NA'}) | {metrics}"
+    # 🔧 FIX: 하드코딩된 매직넘버 → 상수로 교체 (SPREAD_CONDITIONAL_MAX_PCT, PSTD_CONDITIONAL_MAX)
+    if (turn_pct > 100 or (pstd is not None and pstd > PSTD_CONDITIONAL_MAX)) and spread > SPREAD_CONDITIONAL_MAX_PCT:
+        return False, f"조건부스프레드 spread{spread:.2f}%>{SPREAD_CONDITIONAL_MAX_PCT}% (turn{turn_pct:.0f}% pstd{pstd if pstd is not None else 'NA'}) | {metrics}"
 
     # === 🔧 연속매수 품질 하한 (승37 vs 패24 - 추세 지속력 확인) ===
     if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
