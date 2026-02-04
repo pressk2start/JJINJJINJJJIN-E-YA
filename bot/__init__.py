@@ -519,7 +519,7 @@ def _gate_check_strongbreak_quality(
         return False, f"강돌파+모멘텀부족 consec{consecutive_buys}<{gate_strongbreak_consec_min} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
 
     if turn_pct > gate_strongbreak_turn_max and ((cv is not None and cv > 2.2) or overheat > 3.0):
-        return False, f"강돌파+과열 turn{turn_pct:.0f}%>{gate_strongbreak_turn_max:.0f}% cv{cv:.1f if cv else 0:.1f} oh{overheat:.1f} | {metrics}"
+        return False, f"강돌파+과열 turn{turn_pct:.0f}%>{gate_strongbreak_turn_max:.0f}% cv{(cv or 0):.1f} oh{overheat:.1f} | {metrics}"
 
     return True, ""
 
