@@ -16,7 +16,7 @@ import statistics
 from typing import Tuple, Optional, Dict, Any, List
 
 # 설정 상수 (명시적 import)
-from bot.config import (
+from .config import (
     # 수수료
     FEE_RATE_ROUNDTRIP,
     # MFE 부분익절
