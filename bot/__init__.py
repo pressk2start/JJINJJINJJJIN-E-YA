@@ -16,7 +16,8 @@ import statistics
 from typing import Tuple, Optional, Dict, Any, List
 
 # 설정 상수 (명시적 import)
-from .config import (
+try:
+    from .config import (
     # 수수료
     FEE_RATE_ROUNDTRIP,
     # MFE 부분익절
@@ -76,7 +77,60 @@ from .config import (
     MEGA_MIN_1M_CHG,
     MEGA_VOL_Z,
     MEGA_ABS_KRW,
-)
+    )
+except ImportError:
+    from config import (
+        FEE_RATE_ROUNDTRIP,
+        MFE_PARTIAL_TARGETS,
+        GATE_TURN_MIN,
+        GATE_SPREAD_MAX,
+        GATE_ACCEL_MIN,
+        GATE_BUY_RATIO_MIN,
+        GATE_SURGE_MAX,
+        GATE_OVERHEAT_MAX,
+        GATE_IMBALANCE_MIN,
+        GATE_STRONGBREAK_OFF,
+        GATE_STRONGBREAK_CONSEC_MIN,
+        GATE_STRONGBREAK_TURN_MAX,
+        GATE_STRONGBREAK_ACCEL_MAX,
+        GATE_FRESH_AGE_MAX,
+        GATE_PSTD_MAX,
+        GATE_PSTD_STRONGBREAK_MAX,
+        GATE_TURN_MAX_MAJOR,
+        GATE_TURN_MAX_ALT,
+        GATE_CONSEC_BUY_MIN_QUALITY,
+        GATE_VOL_MIN,
+        GATE_SURGE_MIN,
+        GATE_VOL_VS_MA_MIN,
+        GATE_PRICE_MIN,
+        GATE_RELAX_SURGE_FLOOR,
+        GATE_RELAX_VOL_MA_FLOOR,
+        GATE_RELAX_TURN_FLOOR,
+        GATE_RELAX_BUY_FLOOR,
+        GATE_RELAX_IMB_FLOOR,
+        GATE_RELAX_ACCEL_FLOOR,
+        SPREAD_SCALE_LOW,
+        SPREAD_CAP_LOW,
+        SPREAD_SCALE_MID,
+        SPREAD_CAP_MID,
+        SPREAD_SCALE_HIGH,
+        SPREAD_CAP_HIGH,
+        PSTD_TIER_MULT_LOW,
+        PSTD_TIER_MULT_MID,
+        PSTD_TIER_MULT_HIGH,
+        IGN_TPS_MULTIPLIER,
+        IGN_TPS_MIN_TICKS,
+        IGN_CONSEC_BUY_MIN,
+        IGN_PRICE_IMPULSE_MIN,
+        IGN_UP_COUNT_MIN,
+        IGN_VOL_BURST_RATIO,
+        IGN_SPREAD_MAX,
+        DYN_SL_MAX,
+        MEGA_BREAK_MIN_GAP,
+        MEGA_MIN_1M_CHG,
+        MEGA_VOL_Z,
+        MEGA_ABS_KRW,
+    )
 
 
 # =============================================================================
