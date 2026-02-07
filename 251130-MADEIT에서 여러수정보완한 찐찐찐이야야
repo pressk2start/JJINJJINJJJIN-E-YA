@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -93,41 +93,37 @@ def get_expected_exit_slip_pct():
 PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
 
 # 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
-# 🔧 익절키우기: 횡보 허용 시간 상향 → 더 오래 기다리며 큰 수익 추구
-SIDEWAYS_TIMEOUT = 90       # 횡보 판정 시간 (초) - 60→90 (익절키우기)
+SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - before1 기준
 
 # 🔧 스크래치 규칙 (초반 개선 없으면 빠른 탈출)
-# 🔧 익절키우기: 초반 탈출 기준 완화 → 더 오래 홀딩
-SCRATCH_TIMEOUT_SEC = 30    # 30초 내 개선 없으면 탈출 검토 (20→30 익절키우기)
-SCRATCH_MIN_GAIN = 0.0004   # 최소 +0.04% 이상 상승해야 유지 (0.06%→0.04% 완화)
+# 🔧 FIX: 승률 개선 - 시간 단축 + 최소 개선폭 상향 (before1 기준)
+SCRATCH_TIMEOUT_SEC = 20    # 20초 내 개선 없으면 탈출 검토
+SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 
 # 🔧 MFE 기반 부분익절 (경로별 동적 타겟) - 익절키우기 전략
 # 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 # 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.006,              # 0.6% MFE 시 50% 익절
-    "강돌파 (EMA↑+고점↑)": 0.005,  # 0.5% MFE 시 50% 익절
-    "EMA↑": 0.005,                 # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
-    "고점↑": 0.005,                # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
-    "거래량↑": 0.005,              # 🔧 0.3→0.5% (0.3%는 수수료 감안 시 실익 거의 0)
-    "기본": 0.005,                 # 🔧 0.4→0.5% (수수료/슬립 대비 실익 확보)
+    "🔥점화": 0.006,              # +0.6% MFE 시 50% 익절 (강신호, 높은 목표)
+    "강돌파 (EMA↑+고점↑)": 0.005,  # +0.5% MFE 시 50% 익절
+    "EMA↑": 0.004,                 # +0.4% MFE 시 50% 익절 (before1 기준)
+    "고점↑": 0.0035,               # +0.35% MFE 시 50% 익절 (before1 기준)
+    "거래량↑": 0.003,              # +0.3% MFE 시 50% 익절 (약신호, 빠른 익절)
+    "기본": 0.004,                 # +0.4% MFE 기본값 (before1 기준)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
-# 트레일링 손절 설정 - 익절키우기 적용
-# 🔧 트레일 간격을 MFE 타겟(0.5%)보다 넓게 → MFE 익절 우선 발동 보장
-TRAIL_ATR_MULT = 0.9  # ATR 기반 여유폭 (0.8→0.9 완화)
-TRAIL_DISTANCE_MIN_BASE = 0.0055  # 🔧 0.25%→0.55% (MFE 0.5% + 눌림 여유 0.05%)
+# 트레일링 손절 설정 (before1 기준 - 타이트)
+TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
+TRAIL_DISTANCE_MIN_BASE = 0.002  # 기본 최소 트레일 간격 0.2%
 
 def get_trail_distance_min():
-    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - MFE 익절 우선"""
-    # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 line 2171에서 정의됨)
+    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
+    # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 하단에서 정의됨)
     dyn_sl = globals().get("DYN_SL_MIN", 0.004)
-    # 🔧 FIX: EXIT_PROFILE 반영값 사용 (BASE 대신 TRAIL_DISTANCE_MIN 참조)
-    base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
-    # 🔧 FIX: 손절폭의 80%와 base 중 큰 값 (기존 60%→80%, MFE 보호)
-    return max(base, dyn_sl * 0.8)
+    # 손절폭의 60%를 트레일 최소 간격으로 (before1 기준)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -185,27 +181,27 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        # 🔧 익절키우기: strict도 트레일 완화 (조기 이탈 방지)
-        WARMUP_SEC = 5  # 3→5 (약간 여유)
-        HARD_STOP_DD = 0.015  # -1.2% → -1.5% (손절 완화)
-        EXIT_DEBOUNCE_SEC = 5
+        # before1 기준 (타이트, 빠른 반응)
+        WARMUP_SEC = 3  # 더 빠른 반응
+        HARD_STOP_DD = 0.012  # -1.2% 손절
+        EXIT_DEBOUNCE_SEC = 4
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.8  # 0.7→0.8 (완화)
-        TRAIL_DISTANCE_MIN = 0.002  # 0.15% → 0.2% (완화)
-        SPIKE_RECOVERY_WINDOW = 3
-        SPIKE_RECOVERY_MIN_BUY = 0.60
-        CTX_EXIT_THRESHOLD = 3  # 2→3 (완화)
+        TRAIL_ATR_MULT = 0.7
+        TRAIL_DISTANCE_MIN = 0.0015  # 0.15% 간격 (가장 타이트)
+        SPIKE_RECOVERY_WINDOW = 2
+        SPIKE_RECOVERY_MIN_BUY = 0.65
+        CTX_EXIT_THRESHOLD = 2  # 컨텍스트 역전 더 민감
 
-    else:  # balanced (현재 값에 근접) - 익절키우기 적용
-        WARMUP_SEC = 14  # 12→14 (약간 여유)
-        HARD_STOP_DD = 0.025  # 0.022 → 0.025 (손절 완화)
-        EXIT_DEBOUNCE_SEC = 10
+    else:  # balanced (before1 기준)
+        WARMUP_SEC = 12
+        HARD_STOP_DD = 0.022
+        EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.9  # 0.8→0.9 (완화)
-        TRAIL_DISTANCE_MIN = 0.0025  # 0.2% → 0.25% (완화)
-        SPIKE_RECOVERY_WINDOW = 4
-        SPIKE_RECOVERY_MIN_BUY = 0.55
-        CTX_EXIT_THRESHOLD = 4  # 3→4 (완화)
+        TRAIL_ATR_MULT = 0.8
+        TRAIL_DISTANCE_MIN = 0.002  # 0.2% 간격
+        SPIKE_RECOVERY_WINDOW = 3
+        SPIKE_RECOVERY_MIN_BUY = 0.58
+        CTX_EXIT_THRESHOLD = 3
 
 
 _apply_exit_profile()
@@ -280,7 +276,13 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 60, reentrant: bool = Fa
             lock_ts, lock_owner = _MEMORY_ENTRY_LOCKS[market]
             if time.time() - lock_ts < ttl_sec:
                 # 🔧 FIX: reentrant 모드는 **같은 스레드(소유자)**일 때만 True
+                # 🔧 FIX: TTL 갱신 (재진입 시 타임스탬프 리셋 → 장기 루틴에서 TTL 만료 방지)
                 if reentrant and lock_owner == current_owner:
+                    _MEMORY_ENTRY_LOCKS[market] = (time.time(), current_owner)
+                    try:
+                        os.utime(_entry_lock_path(market), None)
+                    except Exception:
+                        pass
                     return True
                 return False
         # 🔧 FIX: (타임스탬프, 소유자) 튜플로 저장
@@ -1105,8 +1107,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
-    # 🔧 FIX: reentrant=False (호출 전 락 해제됨 → 여기서 획득/해제 완결)
-    with entry_lock(m, ttl_sec=90, reentrant=False) as got_lock:
+    # 🔧 FIX: reentrant=True (스캔 루프가 이미 락 보유 → TTL 갱신만, 해제는 모니터 finally에서)
+    with entry_lock(m, ttl_sec=90, reentrant=True) as got_lock:
         if not got_lock:
             signal_skip("entry_lock 획득 실패")
             return
@@ -1259,10 +1261,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = base_qty * entry_price
 
-        # 🔧 FIX: 가용잔고 초과 방지 (알트 1종목 과집중 방지)
-        MAX_POSITION_RATIO = 0.35  # 🔧 0.95→0.35 (가용잔고의 35% 상한)
+        # 🔧 FIX: 가용잔고 초과 방지 (before1 기준)
+        MAX_POSITION_RATIO = 0.95  # 가용잔고의 95% 상한
         if krw_to_use > krw_bal * MAX_POSITION_RATIO:
-            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 35% → 캡")
+            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 95% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
 
         # 🔧 probe는 최소 7000원, confirm은 5000원
@@ -2654,23 +2656,23 @@ MIN_DEPTH_KRW = 6_000_000
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
 GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
-GATE_TURN_MAX = 30.0      # 🔧 회전율 상한 (%) - 60→30 (이미 한참 달린 종목 차단)
-GATE_SPREAD_MAX = 1.50    # 🔧 HOTFIX: 저가 코인(100원 이하) 스프레드 허용 - 0.40→1.50%
+GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 1       # 🔧 연속매수 하한 - 2→1 완화 (점심시간 대응, 매수비로 품질 보완)
+GATE_CONSEC_MIN = 1       # 🔧 연속매수 하한 - before1 기준 (매수비로 품질 보완)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 8→6 완화
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
-GATE_CV_MAX = 4.0         # 🔧 CV 상한 - 4.0 (급등주 진입 허용)
-GATE_FRESH_AGE_MAX = 3.0  # 🔧 틱 신선도 상한 (초) - 7.5→3.0 (장중 기본, 시간대별 동적 완화)
+GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
+GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
 GATE_PSTD_MAX = 0.08      # pstd 상한 (%) - 승0.03 vs 패0.14 → 0.08 컷
 GATE_PSTD_STRONGBREAK_MAX = 0.06  # 강돌파 pstd 상한 (%) - 스파이크 낚임 방지
@@ -2678,10 +2680,41 @@ GATE_TURN_MAX_MAJOR = 400.0   # BTC/ETH 과회전 상한 (%) - 메이저는 회�
 GATE_TURN_MAX_ALT = 150.0     # 알트 과회전 상한 (%) - 승38% vs 패312% 기반
 GATE_TURN_MAX_ALT_PROBE = 120.0  # 알트 probe 과회전 상한 (%) - 탐색은 더 엄격
 GATE_CONSEC_BUY_MIN_QUALITY = 8   # 연속매수 품질 하한 - 승37 vs 패24, 중간값 기준 (강돌파 consec≥6과 호환)
-GATE_VOL_MIN = 20_000_000  # 🔧 2천만원 (중소형 급등 초기 캐치)
-GATE_SURGE_MIN = 0.7      # 🔧 배수 하한 - 0.5→0.7 (가짜 초입/봇핑퐁 차단)
-GATE_VOL_VS_MA_MIN = 0.5  # 🔧 MA 대비 거래량 하한 (상수→전역변수화, 학습/튜닝 가능)
+GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
+GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
+GATE_VOL_VS_MA_MIN = 0.5  # 🔧 MA 대비 거래량 하한 - before1 기준
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
+
+# ========================================
+# 🔧 동적 임계치 하한 (점화 완화 시 최저선)
+# ========================================
+GATE_RELAX_SURGE_FLOOR = 0.1      # 급등배수 하한
+GATE_RELAX_VOL_MA_FLOOR = 0.2     # MA대비 거래량 하한
+GATE_RELAX_TURN_FLOOR = 0.5       # 회전율 하한 (%)
+GATE_RELAX_BUY_FLOOR = 0.45       # 매수비 하한
+GATE_RELAX_IMB_FLOOR = 0.35       # 임밸런스 하한
+GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
+
+# ========================================
+# 🔧 스프레드 가격대별 스케일링
+# ========================================
+SPREAD_SCALE_LOW = 1.0             # 100원 미만: GATE_SPREAD_MAX × 1.0
+SPREAD_CAP_LOW = 0.80              # 100원 미만 캡 (%)
+SPREAD_SCALE_MID = 0.30            # 100~1000원: GATE_SPREAD_MAX × 0.30
+SPREAD_CAP_MID = 0.45              # 100~1000원 캡 (%)
+SPREAD_SCALE_HIGH = 0.17           # 1000원 이상: GATE_SPREAD_MAX × 0.17
+SPREAD_CAP_HIGH = 0.25             # 1000원 이상 캡 (%)
+
+# ========================================
+# 🔧 Ignition 내부 임계치
+# ========================================
+IGN_TPS_MULTIPLIER = 4             # 평시 대비 N배 이상 = 틱 폭주
+IGN_TPS_MIN_TICKS = 15             # 최소 틱 수
+IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
+IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
+IGN_UP_COUNT_MIN = 4               # 최근 6틱 중 최소 상승 수
+IGN_VOL_BURST_RATIO = 0.40         # 10초 거래량 >= 1분평균 × 이 비율
+IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
 
 # ========================================
 # 🚀 Pre-break Probe 설정 (선행 진입)
@@ -4242,23 +4275,23 @@ def _pct(a, b):
     try:
         return abs(a / b - 1.0)
     except Exception:
-        return 0.0
+        return 9.9
 
 
 def inter_arrival_stats(ticks, sec=30):
-    if not ticks: return {"cv": 9.9, "count": 0}
+    """틱 도착간격 CV. 데이터 부족시 cv=None 반환 (센티넬 9.9 제거)"""
+    if not ticks: return {"cv": None, "count": 0}
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
         newest_ts = max(t["timestamp"] for t in ticks)
     except Exception:
-        return {"cv": 9.9, "count": 0}
+        return {"cv": None, "count": 0}
     cutoff = newest_ts - sec * 1000
     ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
     ts = sorted(ts)
-    if len(ts) < 4: return {"cv": 9.9, "count": len(ts)}
+    if len(ts) < 4: return {"cv": None, "count": len(ts)}
     gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
     mu = sum(gaps) / len(gaps)
-    if mu <= 0: return {"cv": 9.9, "count": len(ts)}
+    if mu <= 0: return {"cv": None, "count": len(ts)}
     var = sum((g - mu)**2 for g in gaps) / len(gaps)
     cv = (var**0.5) / mu
     return {"cv": cv, "count": len(ts)}
@@ -4490,12 +4523,12 @@ def ignition_detected(
 
     t10 = micro_tape_stats_from_ticks(ticks, 10)
     # 🔧 강화: 평시의 4배 이상, 최소 15틱 (폭발적 급등 감지)
-    tps_threshold = max(15, 4 * baseline_tps * 10)
+    tps_threshold = max(IGN_TPS_MIN_TICKS, IGN_TPS_MULTIPLIER * baseline_tps * 10)
     tps_burst = t10["n"] >= tps_threshold
 
     # ---- 2) 연속 매수 (10초 윈도우) ----
     # 🔧 강화: 5회 → 7회 (폭발적 매수세만 감지)
-    consec_buys = calc_consecutive_buys(window, 10) >= 7
+    consec_buys = calc_consecutive_buys(window, 10) >= IGN_CONSEC_BUY_MIN
 
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
     prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
@@ -4503,22 +4536,21 @@ def ignition_detected(
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
         up_count = sum(1 for a, b in zip(prices[-6:-1], prices[-5:]) if b > a)
-        mostly_up = up_count >= 4
-        # 🔧 강화: 0.3% → 0.5% (폭발적 급등만 감지)
-        price_impulse = (ret >= 0.005) and mostly_up  # 0.5% 이상 + 대부분 상승
+        mostly_up = up_count >= IGN_UP_COUNT_MIN
+        price_impulse = (ret >= IGN_PRICE_IMPULSE_MIN) and mostly_up
     else:
         ret = 0
         price_impulse = False
 
     # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40%) ----
     # 🔧 강화: 25% → 40% (폭발적 거래량만 감지)
-    vol_burst = t10["krw"] >= 0.40 * avg_candle_volume if avg_candle_volume > 0 else False
+    vol_burst = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
     if ob and ob.get("spread", 0) > 0:
         # 🔧 0.5% → 0.40% 강화 (점화 구간은 슬립 커지므로 더 엄격히)
-        spread_ok = ob["spread"] <= 0.40
+        spread_ok = ob["spread"] <= IGN_SPREAD_MAX
 
     # ---- 점수 계산 ----
     score = sum([tps_burst, consec_buys, price_impulse, vol_burst])
@@ -4761,32 +4793,28 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 FIX: score=3은 약한 완화(0.12), score=4만 강한 완화(0.25)
     # 🔧 FIX: 스프레드/임밸런스는 거의 안 풀기 (가짜 점화 방지)
     # ============================================================
-    if ignition_score >= 4:
-        relax = 0.25
-    elif ignition_score == 3:
-        relax = 0.12
-    else:
-        relax = 0.0
+    # 🔧 before1 기준: 4점 점화(확정)에서만 완화 - 애매한 1~3점은 완화 없음 (승률 개선)
+    relax = 0.30 if ignition_score >= 4 else 0
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
-    eff_surge_min = max(0.1, GATE_SURGE_MIN * (1 - relax))       # 0.7→0.53 (4점)
-    eff_vol_vs_ma = max(0.2, GATE_VOL_VS_MA_MIN * (1 - relax))   # 🔧 상수→전역변수 기반
-    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))     # 거의 0
-    eff_turn_min = max(0.5, GATE_TURN_MIN * (1 - relax))         # 2.0→1.5 (4점)
-    eff_buy_min = max(0.45, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))  # 0.58→0.51 (4점)
-    eff_imb_min = max(0.35, GATE_IMBALANCE_MIN * (1 - relax * 0.3))  # 🔧 거의 안 풀기 (0.50→0.46)
+    eff_surge_min = max(GATE_RELAX_SURGE_FLOOR, GATE_SURGE_MIN * (1 - relax))
+    eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN * (1 - relax))
+    eff_price_min = max(0, GATE_PRICE_MIN * (1 - relax * 2))
+    eff_turn_min = max(GATE_RELAX_TURN_FLOOR, GATE_TURN_MIN * (1 - relax))
+    eff_buy_min = max(GATE_RELAX_BUY_FLOOR, GATE_BUY_RATIO_MIN * (1 - relax * 0.5))
+    eff_imb_min = max(GATE_RELAX_IMB_FLOOR, GATE_IMBALANCE_MIN * (1 - relax * 0.3))
     # 🔧 FIX: 스프레드 가격대별 상한 (GATE_SPREAD_MAX 학습값 기반 + 가격대 스케일링)
     # GATE_SPREAD_MAX를 기준으로 가격대별 비율 적용 → 학습 결과가 실제 게이트에 반영됨
     if cur_price > 0 and cur_price < 100:
-        eff_spread_max = min(GATE_SPREAD_MAX, 0.80)        # 100원 미만: 학습값 or 0.80% 중 작은 값
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
     elif cur_price >= 100 and cur_price < 1000:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.30, 0.45)  # 100~1000원: 학습값×0.3 or 0.45%
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
     else:
-        eff_spread_max = min(GATE_SPREAD_MAX * 0.17, 0.25)  # 1000원 이상: 학습값×0.17 or 0.25%
-    eff_accel_min = max(0.1, GATE_ACCEL_MIN * (1 - relax))       # 0.3 → 0.1 (3점)
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
+    eff_accel_min = max(GATE_RELAX_ACCEL_FLOOR, GATE_ACCEL_MIN * (1 - relax))
 
     # 점화 여부 (로그용)
-    is_ignition = (ignition_score >= 3)  # 🔧 4→3 완화 (개별조건 강화)
+    is_ignition = (ignition_score >= 4)  # 🔧 before1 기준: 4점에서만 점화 확정
 
     # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
     metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
@@ -4817,28 +4845,28 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}% | {metrics}"
-    # 🔧 (제거됨) 과회전 상한 - 스프레드/임밸런스 게이트가 슬리피지 이미 필터링, 중복 제거
+    # 🔧 before1 기준: 과회전 상한
+    if turn_pct > GATE_TURN_MAX:
+        return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}% | {metrics}"
+    # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
+    if turn_pct > 50 and spread > 0.25:
+        return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25% | {metrics}"
 
     # === 스프레드 컷 (동적) ===
     if spread > eff_spread_max:
         return False, f"스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {metrics}"
 
-    # === 과열 필터 (점화/mega 시 완화) ===
+    # === 과열 필터 (before1 기준: 완화 없음 - 안전장치) ===
     overheated = accel * volume_surge
-    # 🔧 FIX: 점화/mega는 과열 상한 완화 (폭발 초입 진입 허용)
-    eff_overheat_max = GATE_OVERHEAT_MAX
-    if mega:
-        eff_overheat_max = GATE_OVERHEAT_MAX * 3.0  # mega: 사실상 무제한
-    elif ignition_score >= 3:
-        eff_overheat_max = GATE_OVERHEAT_MAX * 2.0  # 점화: 2배 완화
-    if overheated > eff_overheat_max:
-        return False, f"과열 {overheated:.1f}>{eff_overheat_max:.0f} | {metrics}"
+    if overheated > GATE_OVERHEAT_MAX:
+        return False, f"과열 {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
 
     # === 가속도 컷 (동적) ===
     if accel < eff_accel_min:
         return False, f"감속중 가속{accel:.1f}x<{eff_accel_min:.1f}x | {metrics}"
-    # 🔧 (제거됨) GATE_ACCEL_MAX 단독 컷 - 과열필터(accel*surge>OVERHEAT_MAX)와 중복
-    # if accel > GATE_ACCEL_MAX:
+    # before1 기준: GATE_ACCEL_MAX 단독 컷 복원
+    if accel > GATE_ACCEL_MAX:
+        return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
     #     return False, f"가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
 
     # === 매수비 컷 (동적) ===
@@ -4864,7 +4892,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.06%
     else:
         eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.08%
-    if pstd > eff_pstd_max and not mega:
+    if pstd is not None and pstd > eff_pstd_max and not mega:
         return False, f"pstd과다 {pstd:.2f}%>{eff_pstd_max:.2f}% | {metrics}"
 
     # === 🔧 과회전 상한 컷 (승38% vs 패312% - 노이즈/휩쏘 구간 차단) ===
@@ -4895,7 +4923,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if not momentum_ok:
             return False, f"강돌파+모멘텀부족 consec{consecutive_buys}<{GATE_STRONGBREAK_CONSEC_MIN} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
         # 🔧 회전율 과열 조합 컷: turn>25% AND (cv>2.2 OR overheat>3.0)
-        if turn_pct > GATE_STRONGBREAK_TURN_MAX and (cv > 2.2 or overheat > 3.0):
+        if turn_pct > GATE_STRONGBREAK_TURN_MAX and ((cv is not None and cv > 2.2) or overheat > 3.0):
             return False, f"강돌파+과열 turn{turn_pct:.0f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}% cv{cv:.1f} oh{overheat:.1f} | {metrics}"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
@@ -4921,12 +4949,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if imbalance < 0.50:
             return False, f"거래량↑ 임밸부족 {imbalance:.2f}<0.50 | {metrics}"
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 3점
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (before1 기준)
     # 🔧 FIX: 거래량↑ 경로는 vol_vs_ma 단독 진입 금지 (돌파/점화 필수)
     if cand_path == "거래량↑":
-        entry_signal = (breakout_score >= 1) or (ignition_score >= 3)
+        entry_signal = (breakout_score >= 1) or (ignition_score >= 4)
     else:
-        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
+        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 경로={cand_path} | {metrics}"
@@ -4966,9 +4994,9 @@ def is_sideways_regime(c1, lookback=20):
     # 🔧 가격대별 횡보 판정 (고정 임계값 — ATR 정규화는 저변동 코인에서 느슨해짐)
     cur_price = candles[-1].get("trade_price", 0)
     if cur_price < 1000:
-        sideways_thr = 0.008   # 1000원 미만: 0.8%
+        sideways_thr = 0.008   # 1000원 미만: 0.8% (before1 기준)
     else:
-        sideways_thr = 0.005   # 1000원 이상: 0.5%
+        sideways_thr = 0.005   # 1000원 이상: 0.5% (before1 기준)
     is_sideways = range_pct < sideways_thr
 
     return is_sideways, range_pct
@@ -5160,21 +5188,20 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     ia = inter_arrival_stats(ticks, 60)  # 60초 윈도우 (샘플 충분해야 CV 안정)
     cv = ia["cv"]
     pstd10 = price_band_std(ticks, 10)  # 10초 윈도우 (현재 순간 흔들림 감지)
-    if pstd10 is None:
-        pstd10 = 9.9  # 데이터 부족시 높은 기본값 → gate에서 pstd 필터에 의해 차단됨
+    # 🔧 FIX: None이면 None 유지 → gate에서 데이터 부족 시 pstd 체크 스킵
     cons_buys = calc_consecutive_buys(ticks, 15)
     overheat = accel * vol_surge
     spread = ob.get("spread", 9.9)
 
     # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
-    if twin["buy_ratio"] >= 0.98 and pstd10 <= 0.001 and cv >= 2.5:
+    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
     # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
     shadow_flags = []
-    if cv > 2.2:
+    if cv is not None and cv > 2.2:
         shadow_flags.append("CV22")
     if turn_pct >= 12 and (cons_buys > 18 or overheat > 3):
         shadow_flags.append("TURNxCONS/HEAT")
@@ -5188,7 +5215,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
         return None
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
-    if cv > GATE_CV_MAX:
+    # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
+    if cv is not None and cv > GATE_CV_MAX and ia["count"] >= 4:
         cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
         return None
 
@@ -5247,9 +5275,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
         cur_price=cur["trade_price"],  # 🔧 스프레드 가격대별 분리용
         consecutive_buys=cons_buys,
-        cv=cv,
+        cv=cv if cv is not None else 0.0,  # 🔧 None → 0.0 (gate 내부 포맷팅 안전)
         overheat=overheat,
-        pstd=pstd10 * 100,  # 소수→% 변환 (gate 내부는 % 단위, 0.0003→0.03%)
+        pstd=(pstd10 * 100) if pstd10 is not None else None,  # 소수→% 변환, 데이터 부족시 None
         market=m,
     )
     if not gate_ok:
@@ -5652,7 +5680,7 @@ def postcheck_6s(m, pre):
             seen.add(key)
             acc.appendleft(x)  # ✅ 최신이 index 0 유지
 
-        curp = ticks[0].get("trade_price", base_price)
+        curp = max(ticks, key=lambda x: x.get("timestamp", x.get("ts", 0))).get("trade_price", base_price)
 
         # ★★★ 가격 급등 필터 (조건부 허용)
         if base_price > 0:
@@ -5680,15 +5708,16 @@ def postcheck_6s(m, pre):
         # ✔ DD는 피크 대비 하락률(음수)로 체크
         dd = (curp / peak - 1.0)
 
-        t10 = micro_tape_stats_from_ticks(list(acc), 10)
-        ia = inter_arrival_stats(list(acc), 20)
-        pstd = price_band_std(list(acc), 20)
+        acc_list = list(acc)
+        t10 = micro_tape_stats_from_ticks(acc_list, 10)
+        ia = inter_arrival_stats(acc_list, 20)
+        pstd = price_band_std(acc_list, 20)
         pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
 
         # ★ 가변 임계치 적용
         pass_now = (t10["buy_ratio"] >= pc_min_buy
                     and t10["rate"] >= pc_min_rate and pstd <= pc_max_pstd
-                    and ia["cv"] <= pc_max_cv and dd >= -pc_max_dd)
+                    and (ia["cv"] is None or ia["cv"] <= pc_max_cv) and dd >= -pc_max_dd)
 
         if pass_now:
             ok_streak += 1
@@ -5722,7 +5751,7 @@ def postcheck_6s(m, pre):
         return False, f"BUY_LOW({t10['buy_ratio']:.2f})"
     if t10["rate"] < pc_min_rate: return False, f"RATE_LOW({t10['rate']:.2f})"
     if pstd > pc_max_pstd: return False, f"PSTD_HIGH({pstd:.4f})"
-    if ia["cv"] > pc_max_cv: return False, f"CV_HIGH({ia['cv']:.2f})"
+    if ia["cv"] is not None and ia["cv"] > pc_max_cv: return False, f"CV_HIGH({ia['cv']:.2f})"
     if dd2 < -pc_max_dd: return False, f"DD_TOO_DEEP({dd2:.4f})"
     return True, "OK"
 
@@ -6640,7 +6669,7 @@ def tg_send(t, retry=1):
                         print(f"[TG][{cid}] HTML 파싱 실패 → plain text 재시도")
                         payload_plain = {
                             "chat_id": cid,
-                            "text": t.replace("<b>", "").replace("</b>", ""),
+                            "text": re.sub(r"<[^>]+>", "", t),
                             "disable_web_page_preview": True,
                         }
                         try:
@@ -6663,7 +6692,7 @@ def tg_send(t, retry=1):
             try:
                 payload_plain = {
                     "chat_id": cid,
-                    "text": t.replace("<b>", "").replace("</b>", ""),
+                    "text": re.sub(r"<[^>]+>", "", t),
                     "disable_web_page_preview": True,
                 }
                 r3 = SESSION.post(
@@ -7203,7 +7232,9 @@ def main():
 
                 # 🚀 초단기 미세필터 지표 계산
                 ia_stats = inter_arrival_stats(ticks_for_metrics, 30) if ticks_for_metrics else {"cv": 0.0}
-                cv_val = ia_stats.get("cv", 0.0)
+                cv_val = ia_stats.get("cv")
+                if cv_val is None:
+                    cv_val = 0.0  # 🔧 FIX: inter_arrival_stats가 cv=None 반환 시 TypeError 방지
                 pstd_val = price_band_std(ticks_for_metrics, sec=10) if ticks_for_metrics else 0.0
                 if pstd_val is None:
                     pstd_val = 0.0  # 🔧 FIX: price_band_std가 None 반환 시 TypeError 방지
@@ -7311,8 +7342,8 @@ def main():
                             _release_entry_lock(m)
                             continue  # 바로 진입하지 않고 다음 종목으로
 
-                    # 🔧 FIX: 스캔 루프에서 획득한 파일락 해제 (open_auto_position에서 다시 획득)
-                    _release_entry_lock(m)
+                    # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
+                    # open_auto_position이 reentrant=True로 재진입, 모니터 finally에서 최종 해제
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
