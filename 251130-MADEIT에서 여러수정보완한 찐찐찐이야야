@@ -1529,8 +1529,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 fresh_age = 0.0
                 if ticks:
                     now_ms = int(time.time() * 1000)
-                    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-                    last_tick_ts = max(t.get("timestamp", 0) for t in ticks)
+                    # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+                    last_tick_ts = max(tick_ts_ms(t) for t in ticks)
                     if last_tick_ts == 0: last_tick_ts = now_ms
                     fresh_age = (now_ms - last_tick_ts) / 1000.0
                 # 베스트호가 깊이
@@ -3834,7 +3834,7 @@ def zscore_krw_1m(c1, win=30):
 
 
 def uptick_streak_from_ticks(ticks, need=2):
-    t = sorted(ticks[:need + 4], key=lambda x: x.get("timestamp", 0))
+    t = sorted(ticks[:need + 4], key=tick_ts_ms)
     return sum(1 for a, b in zip(t, t[1:])
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
 
@@ -3861,7 +3861,7 @@ def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
     # 9~24시(장중): GATE_FRESH_AGE_MAX 그대로 (3초)
     now = int(time.time() * 1000)
     # 최근 2틱 중 가장 오래된 틱의 나이 계산
-    tick_ages = [(now - x.get("timestamp", 0)) / 1000.0 for x in ticks[:2]]
+    tick_ages = [(now - tick_ts_ms(x)) / 1000.0 for x in ticks[:2]]
     max_tick_age = max(tick_ages) if tick_ages else 999.0
     is_fresh = all(age <= max_age for age in tick_ages)
 
@@ -4080,7 +4080,8 @@ def micro_tape_stats_from_ticks(ticks, sec):
             "krw_per_sec": 0
         }
     try:
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일 (timestamp/ts 키 + 초→ms 방어)
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
         cutoff = newest_ts - sec * 1000
     except Exception:
         return {
@@ -4097,7 +4098,7 @@ def micro_tape_stats_from_ticks(ticks, sec):
     buys = 0
     oldest_ts = newest_ts
     for x in ticks:
-        ts = x.get("timestamp", 0)
+        ts = tick_ts_ms(x)
         if ts < cutoff:
             continue
         p = x.get("trade_price", 0.0)
@@ -4300,11 +4301,12 @@ def inter_arrival_stats(ticks, sec=30):
     """틱 도착간격 CV. 데이터 부족시 cv=None 반환 (센티넬 9.9 제거)"""
     if not ticks: return {"cv": None, "count": 0}
     try:
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
     except Exception:
         return {"cv": None, "count": 0}
     cutoff = newest_ts - sec * 1000
-    ts = [x["timestamp"] for x in ticks if x["timestamp"] >= cutoff]
+    ts = [tick_ts_ms(x) for x in ticks if tick_ts_ms(x) >= cutoff]
     ts = sorted(ts)
     if len(ts) < 4: return {"cv": None, "count": len(ts)}
     gaps = [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
@@ -4319,12 +4321,12 @@ def price_band_std(ticks, sec=30):
     """가격밴드 표준편차. 데이터 부족시 None 반환 (센티넬 9.9 제거)"""
     if not ticks: return None
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
     except Exception:
         return None
     cutoff = newest_ts - sec * 1000
-    ps = [x["trade_price"] for x in ticks if x["timestamp"] >= cutoff]
+    ps = [x["trade_price"] for x in ticks if tick_ts_ms(x) >= cutoff]
     if len(ps) < 3: return None
     m = sum(ps) / len(ps)
     var = sum((p - m)**2 for p in ps) / len(ps)
@@ -4335,12 +4337,12 @@ def price_band_std(ticks, sec=30):
 def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
     if not ticks: return 0.0
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
     except Exception:
         return 0.0
     cutoff = newest_ts - sec * 1000
-    win = [x for x in reversed(ticks) if x["timestamp"] >= cutoff]
+    win = [x for x in reversed(ticks) if tick_ts_ms(x) >= cutoff]
     if len(win) < 6: return 0.0
     prices = [x["trade_price"] for x in win]
     pr_min, pr_max = min(prices), max(prices)
@@ -4354,15 +4356,15 @@ def bot_pingpong_score(ticks, sec=20, band=BOT_PINGPONG_MAX_BAND):
 def wash_trade_pattern(ticks, sec=30, repeats=BOT_WASH_REPEAT_VOL_N):
     if not ticks: return False
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
     except Exception:
         return False
     cutoff = newest_ts - sec * 1000
     vols = {}
     for x in ticks:
         # 🔧 FIX: break → continue (정렬 미보장 상태에서 break하면 데이터 누락)
-        if x["timestamp"] < cutoff: continue
+        if tick_ts_ms(x) < cutoff: continue
         v = round(x["trade_volume"], 6)
         vols[v] = vols.get(v, 0) + 1
     if not vols: return False
@@ -4374,13 +4376,13 @@ def _win_stats(ticks, start_s, end_s):
     if not ticks:
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     try:
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        newest_ts = max(t["timestamp"] for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
     except Exception:
         return {"n": 0, "buy_ratio": 0.0, "rate": 0.0, "krw_per_sec": 0.0}
     lo = newest_ts - end_s * 1000
     hi = newest_ts - start_s * 1000
-    win = [x for x in ticks if lo <= x.get("timestamp", 0) <= hi]
+    win = [x for x in ticks if lo <= tick_ts_ms(x) <= hi]
     if len(win) < 2:
         return {
             "n": len(win),
@@ -4388,8 +4390,8 @@ def _win_stats(ticks, start_s, end_s):
             "rate": 0.0,
             "krw_per_sec": 0.0
         }
-    win = sorted(win, key=lambda t: t["timestamp"])
-    dur = max((win[-1]["timestamp"] - win[0]["timestamp"]) / 1000.0, 1.0)
+    win = sorted(win, key=tick_ts_ms)
+    dur = max((tick_ts_ms(win[-1]) - tick_ts_ms(win[0])) / 1000.0, 1.0)
     buys = sum(1 for x in win if x.get("ask_bid") == "BID")
     krw = sum(x["trade_price"] * x["trade_volume"] for x in win)
     return {
@@ -5695,7 +5697,7 @@ def postcheck_6s(m, pre):
         # acc에 최신 틱만 중복없이 축적
         # 🔧 FIX: appendleft 사용 - 새 틱을 왼쪽에 추가해야 acc[0]이 최신 유지
         for x in reversed(ticks[:12]):  # 과거→최신 순으로 반복
-            key = (x.get("timestamp"), x.get("trade_price"),
+            key = (tick_ts_ms(x), x.get("trade_price"),
                    x.get("trade_volume"))
             if key in seen:
                 continue
@@ -6377,6 +6379,7 @@ def monitor_position(m,
                             pos["last_add_ts"] = time.time()
                             OPEN_POSITIONS[m] = pos
                         entry_mode = "confirm"  # 🔧 FIX: 로컬 변수 동기화 (probe scratch 오작동 방지)
+                        entry_price = new_entry  # 🔧 FIX: 로컬 entry_price 동기화 (이후 수익률/손절 계산이 새 평단 기준)
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
