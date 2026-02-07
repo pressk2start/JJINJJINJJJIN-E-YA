@@ -252,6 +252,39 @@ _RETEST_WATCHLIST = {}
 _RETEST_LOCK = threading.Lock()
 
 # =========================
+# 🐱 데드캣 바운스 (Dead Cat Bounce) 설정
+# =========================
+# 하락 후 반등을 먹는 역추세(mean-reversion) 전략
+# 기존 상승 모멘텀 로직과 완전 분리된 별도 경로
+DCB_ENABLED = True
+# 급락 감지
+DCB_LOOKBACK_CANDLES = 10      # 최근 10봉 내 급락 확인
+DCB_DROP_MIN_PCT = 0.02        # 최소 -2% 하락
+DCB_VOLUME_SURGE_MIN = 2.0     # 급락 시 거래량 평소 대비 2x
+# 반등 확인
+DCB_BODY_RATIO_MIN = 0.35      # 반등봉 몸통비 35% (윗꼬리 방지)
+DCB_BUY_RATIO_MIN = 0.55       # 매수비 55% 이상 (매수 회복)
+DCB_FLOW_ACCEL_MIN = 1.2       # 매도 감속 (5s/15s ≥ 1.2)
+DCB_CONSEC_BUY_MIN = 5         # 연속매수 5회
+# 하드컷 (3중 안전장치)
+DCB_SPREAD_MAX = 0.15          # 스프레드 ≤ 0.15%
+DCB_DEPTH_MIN = 8_000_000      # 호가깊이 ≥ 8백만원
+# 청산
+DCB_TP_RETRACEMENT = 0.35      # 낙폭 35% 되돌림 → 전량 익절
+DCB_MFE_PARTIAL_PCT = 0.004    # +0.4% MFE → 50% 부분익절
+DCB_SL_BELOW_LOW = 0.005       # 저점 -0.5% → 즉시 손절
+DCB_SCRATCH_SEC = 30            # 30초 내 MFE 0.1% 못 찍으면 스크래치
+DCB_SCRATCH_MFE = 0.001        # 스크래치 MFE 기준 0.1%
+DCB_MAX_HOLD_SEC = 120         # 최대 120초
+DCB_TRAIL_DIST = 0.002         # 트레일 간격 0.2%
+# 사이즈/리스크
+DCB_SIZE_RATIO = 0.5           # probe × 0.5 ≈ 자본 5%
+DCB_COOLDOWN_SEC = 300         # 같은 종목 5분 쿨다운
+DCB_MAX_CONCURRENT = 1         # 동시 DCB 포지션 1개
+_DCB_LAST_SIGNAL = {}          # {market: timestamp} DCB 쿨다운 추적
+_DCB_POSITIONS = set()         # 현재 DCB 포지션 종목 집합
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 # 🔧 FIX: 락에 소유자(스레드 ID) 추적 추가 - reentrant 버그 수정
@@ -2359,6 +2392,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     끝알람 이후 자동청산 신호가 나올 때까지 반복 모니터링
     🔧 FIX: 장기 보유 타임아웃 추가 (부분청산 후 정체 방지)
     """
+    # 🐱 DCB 포지션은 자체 모니터가 관리 → 재모니터링 스킵
+    with _POSITION_LOCK:
+        if OPEN_POSITIONS.get(m, {}).get("strategy") == "dcb":
+            print(f"[REMONITOR] {m} DCB 포지션 → 자체 모니터 관리, 스킵")
+            return False
+
     # 🔧 FIX: 진입 전 가드 - 이미 청산 중/완료된 포지션은 즉시 리턴
     with _POSITION_LOCK:
         if m in _CLOSING_MARKETS:
@@ -4992,6 +5031,148 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
 
 # =========================
+# 🐱 데드캣 바운스 감지 (Dead Cat Bounce Detection)
+# =========================
+def detect_dead_cat_bounce(m, c1, ticks, ob_entry):
+    """
+    급락 후 반등을 감지하는 역추세(mean-reversion) 전략.
+    기존 상승 모멘텀 로직(stage1_gate)과 완전 분리.
+
+    4요건: ①과매도 ②반등초입 ③매수회복 ④하드컷
+    Returns: dcb_pre dict or None
+    """
+    if not DCB_ENABLED:
+        return None
+    if not c1 or len(c1) < DCB_LOOKBACK_CANDLES + 7:
+        return None
+    if not ticks or len(ticks) < 10:
+        return None
+    if not ob_entry or not isinstance(ob_entry, dict):
+        return None
+
+    # 동시 DCB 포지션 수 제한
+    with _MONITOR_LOCK:
+        if len(_DCB_POSITIONS) >= DCB_MAX_CONCURRENT:
+            return None
+
+    # 쿨다운 체크
+    last_dcb = _DCB_LAST_SIGNAL.get(m, 0)
+    if time.time() - last_dcb < DCB_COOLDOWN_SEC:
+        return None
+
+    # 기존 포지션 보유 중이면 스킵
+    with _POSITION_LOCK:
+        if m in OPEN_POSITIONS:
+            return None
+
+    # 스테이블코인 제외
+    if any(s in m.upper() for s in ("USDT", "USDC", "DAI", "TUSD", "BUSD")):
+        return None
+
+    cur = c1[-1]
+    cur_price = cur["trade_price"]
+
+    # ========== ① 과매도: 급락 확인 ==========
+    lookback = c1[-DCB_LOOKBACK_CANDLES:]
+    high_in_window = max(c["high_price"] for c in lookback)
+    low_in_window = min(c["low_price"] for c in lookback)
+
+    # 고점 대비 현재가 하락폭
+    drop_pct = (cur_price / high_in_window - 1.0) if high_in_window > 0 else 0
+    if drop_pct > -DCB_DROP_MIN_PCT:
+        return None  # 하락폭 부족
+
+    # 저점 찾기 (현재봉 포함)
+    drop_low = low_in_window
+    drop_high = high_in_window
+
+    # 거래량 폭발 확인
+    past_vols = [c["candle_acc_trade_price"] for c in c1[-DCB_LOOKBACK_CANDLES - 5:-2]
+                 if c["candle_acc_trade_price"] > 0]
+    cur_vol = cur.get("candle_acc_trade_price", 0)
+    if past_vols:
+        avg_vol = statistics.mean(past_vols)
+        vol_surge = cur_vol / max(avg_vol, 1)
+    else:
+        vol_surge = 1.0
+    if vol_surge < DCB_VOLUME_SURGE_MIN:
+        return None  # 거래량 폭발 없음
+
+    # ========== ② 반등 초입: EMA5 회복 + 몸통비 ==========
+    closes = [c["trade_price"] for c in c1]
+    ema5 = ema_last(closes, 5) if len(closes) >= 5 else None
+    if not ema5 or cur_price <= ema5:
+        return None  # EMA5 아래 = 아직 하락 중
+
+    # 현재봉 몸통비 (윗꼬리 펌프 방지)
+    cur_open = cur.get("opening_price", cur_price)
+    cur_high = cur.get("high_price", cur_price)
+    cur_low = cur.get("low_price", cur_price)
+    wick_range = cur_high - cur_low
+    body = abs(cur_price - cur_open)
+    body_ratio = body / max(wick_range, 1e-9)
+    if body_ratio < DCB_BODY_RATIO_MIN:
+        return None  # 몸통 작음 = 윗꼬리 위험
+
+    # 양봉 확인 (종가 > 시가)
+    if cur_price <= cur_open:
+        return None  # 음봉이면 반등 아님
+
+    # ========== ③ 매수 회복: 테이프 지표 ==========
+    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    if t15["buy_ratio"] < DCB_BUY_RATIO_MIN:
+        return None  # 매수세 부족
+
+    accel = calc_flow_acceleration(ticks)
+    if accel < DCB_FLOW_ACCEL_MIN:
+        return None  # 매도 감속 안 됨
+
+    cons_buys = calc_consecutive_buys(ticks, 15)
+    if cons_buys < DCB_CONSEC_BUY_MIN:
+        return None  # 연속매수 부족
+
+    # ========== ④ 하드컷 3중 ==========
+    spread = ob_entry.get("spread", 9.9)
+    depth_krw = ob_entry.get("depth_krw", 0)
+    if spread > DCB_SPREAD_MAX:
+        return None  # 스프레드 과다
+    if depth_krw < DCB_DEPTH_MIN:
+        return None  # 호가깊이 부족
+
+    imbalance = calc_orderbook_imbalance(ob_entry)
+    if imbalance < 0:
+        return None  # 매도 우세 오더북 = 반등 지지 없음
+
+    # ========== 통과: dcb_pre 구성 ==========
+    tp_price = cur_price + (drop_high - drop_low) * DCB_TP_RETRACEMENT
+    sl_price = drop_low * (1 - DCB_SL_BELOW_LOW)
+
+    dcb_pre = {
+        "price": cur_price,
+        "strategy": "dcb",
+        "signal_tag": "🐱데드캣",
+        "entry_mode": "probe",
+        "ob": ob_entry,
+        "ticks": ticks,
+        "dcb_meta": {
+            "drop_high": drop_high,
+            "drop_low": drop_low,
+            "drop_pct": drop_pct,
+            "vol_surge": vol_surge,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+        },
+        "buy_ratio": t15["buy_ratio"],
+        "flow_accel": accel,
+        "consecutive_buys": cons_buys,
+        "spread": spread,
+        "imbalance": imbalance,
+        "body_ratio": body_ratio,
+    }
+    return dcb_pre
+
+
+# =========================
 # 🔧 레짐 필터 (횡보장 진입 차단)
 # =========================
 def is_sideways_regime(c1, lookback=20):
@@ -6064,6 +6245,137 @@ def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
 
 
 # =========================
+# 🐱 데드캣 모니터링 (별도 청산 로직)
+# =========================
+def monitor_dead_cat(m, entry_price, dcb_pre):
+    """
+    데드캣 전용 모니터: 짧고 빠르게 (120초 제한, 1초 루프)
+    기존 monitor_position과 완전 분리.
+
+    청산 5단계:
+    1. SL: 저점 -0.5% → 즉시 손절
+    2. 스크래치: 30초 MFE < 0.1% → 철수
+    3. MFE 부분익절: +0.4% → 50% 매도 + 트레일 무장
+    4. TP: 낙폭 35% 되돌림 → 전량 청산
+    5. 시간만료: 120초 → 전량 청산
+    + 매도 재가속(accel<0.7) → 즉시 탈출
+    """
+    if not entry_price or entry_price <= 0:
+        print(f"[DCB_MON_ERR] {m} entry_price 무효 ({entry_price})")
+        return
+
+    meta = dcb_pre.get("dcb_meta", {})
+    drop_low = meta.get("drop_low", entry_price * 0.97)
+    drop_high = meta.get("drop_high", entry_price * 1.03)
+    tp_price = meta.get("tp_price", entry_price * 1.005)
+    sl_price = meta.get("sl_price", drop_low * (1 - DCB_SL_BELOW_LOW))
+
+    start_ts = time.time()
+    best = entry_price
+    last_price = entry_price
+    mfe_partial_done = False
+    trail_armed = False
+    trail_stop = 0.0
+    verdict = None
+
+    try:
+        while time.time() - start_ts <= DCB_MAX_HOLD_SEC:
+            time.sleep(1)  # 1초 루프 (빠른 반응)
+
+            ticks = get_recent_ticks(m, 60)
+            if not ticks or len(ticks) < 3:
+                continue
+
+            curp = max(ticks, key=tick_ts_ms).get("trade_price", last_price)
+            last_price = curp
+            new_high = curp > best
+            best = max(best, curp)
+
+            cur_gain = (curp / entry_price - 1.0)
+            mfe_pct = (best / entry_price - 1.0)
+            alive_sec = time.time() - start_ts
+
+            # === 1) SL: 저점 밑으로 추가 하락 → 즉시 손절 ===
+            if curp <= sl_price:
+                close_auto_position(m, f"🐱DCB손절 | 현재{curp:.0f} ≤ SL{sl_price:.0f} (저점{drop_low:.0f} -{DCB_SL_BELOW_LOW*100:.1f}%)")
+                verdict = "DCB_SL"
+                break
+
+            # === 2) 매도 재가속 감지 → 즉시 탈출 (반등 실패) ===
+            if alive_sec >= 10:  # 최초 10초는 안정화 대기
+                accel = calc_flow_acceleration(ticks)
+                if accel < 0.7:
+                    close_auto_position(m, f"🐱DCB매도재가속 | accel={accel:.2f}<0.7 반등실패")
+                    verdict = "DCB_SELL_REACCEL"
+                    break
+
+            # === 3) 스크래치: 30초 내 MFE < 0.1% ===
+            if alive_sec >= DCB_SCRATCH_SEC and mfe_pct < DCB_SCRATCH_MFE and cur_gain <= 0:
+                close_auto_position(m, f"🐱DCB스크래치 | {alive_sec:.0f}초 MFE={mfe_pct*100:.2f}% 모멘텀부재")
+                verdict = "DCB_SCRATCH"
+                break
+
+            # === 4) MFE 부분익절: +0.4% → 50% 매도 + 트레일 ===
+            if not mfe_partial_done and mfe_pct >= DCB_MFE_PARTIAL_PCT:
+                ok, msg, sold = safe_partial_sell(
+                    m, 0.5, f"🐱DCB MFE익절 +{mfe_pct*100:.2f}%")
+                if ok:
+                    mfe_partial_done = True
+                    trail_armed = True
+                    trail_stop = curp * (1.0 - DCB_TRAIL_DIST)
+                    tg_send_mid(f"🐱 {m} DCB 50%익절 +{mfe_pct*100:.2f}% | 트레일 무장")
+
+            # === 5) TP: 낙폭 되돌림 달성 → 전량 청산 ===
+            if curp >= tp_price:
+                close_auto_position(m, f"🐱DCB목표달성 | 현재{curp:.0f} ≥ TP{tp_price:.0f} (되돌림{DCB_TP_RETRACEMENT*100:.0f}%)")
+                verdict = "DCB_TP"
+                break
+
+            # === 트레일링 업데이트 ===
+            if trail_armed:
+                if new_high:
+                    trail_stop = max(trail_stop, curp * (1.0 - DCB_TRAIL_DIST))
+                if curp < trail_stop:
+                    trail_gain = (curp / entry_price - 1.0)
+                    close_auto_position(m, f"🐱DCB트레일 +{trail_gain*100:.2f}% (트레일스탑{trail_stop:.0f})")
+                    verdict = "DCB_TRAIL"
+                    break
+
+        # 시간 만료
+        if verdict is None:
+            cur_gain = (last_price / entry_price - 1.0)
+            close_auto_position(m, f"🐱DCB시간만료 {DCB_MAX_HOLD_SEC}초 | 수익{cur_gain*100:+.2f}%")
+            verdict = "DCB_TIMEOUT"
+
+    except Exception as e:
+        print(f"[DCB_MON_ERR] {m}: {e}")
+        traceback.print_exc()
+        try:
+            close_auto_position(m, f"🐱DCB예외 | {e}")
+        except Exception:
+            pass
+        verdict = "DCB_ERROR"
+
+    finally:
+        # DCB 포지션 추적에서 제거
+        with _MONITOR_LOCK:
+            _DCB_POSITIONS.discard(m)
+            _ACTIVE_MONITORS.pop(m, None)
+        _release_entry_lock(m)
+
+        # 결과 기록
+        ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0 if entry_price > 0 else 0
+        mfe_final = (best / entry_price - 1.0) * 100.0 if entry_price > 0 else 0
+        print(f"[DCB_DONE] {m} {verdict} | ret={ret_pct:+.2f}% MFE={mfe_final:.2f}% {time.time()-start_ts:.0f}초")
+
+        if AUTO_LEARN_ENABLED:
+            try:
+                record_trade(m, ret_pct / 100.0)
+            except Exception:
+                pass
+
+
+# =========================
 # 모니터링(최종형)
 # =========================
 def monitor_position(m,
@@ -7083,7 +7395,98 @@ def main():
                 if not c1: continue
 
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
-                if not pre: continue
+                if not pre:
+                    # === 🐱 데드캣 바운스 감지 (상승 신호 없을 때만) ===
+                    if DCB_ENABLED:
+                        _dcb_ticks = get_recent_ticks(m, 100)
+                        _dcb_ob = obc.get(m)
+                        dcb_pre = detect_dead_cat_bounce(m, c1, _dcb_ticks, _dcb_ob)
+                        if dcb_pre:
+                            # 쿨다운/중복 체크
+                            with _POSITION_LOCK:
+                                if m in OPEN_POSITIONS:
+                                    continue
+                            if not _try_acquire_entry_lock(m):
+                                continue
+
+                            with _POSITION_LOCK:
+                                OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
+
+                            meta = dcb_pre["dcb_meta"]
+                            # 텔레그램 알림
+                            dcb_txt = (
+                                f"🐱 <b>데드캣 바운스</b> {m}\n"
+                                f"📉 낙폭: {meta['drop_pct']*100:.1f}% ({DCB_LOOKBACK_CANDLES}봉) | 거래폭발 {meta['vol_surge']:.1f}x\n"
+                                f"💵 저점 {fmt6(meta['drop_low'])}원 → 현재 {fmt6(dcb_pre['price'])}원\n"
+                                f"📊 매수비 {dcb_pre['buy_ratio']:.0%} | 감속 {dcb_pre['flow_accel']:.1f}x | "
+                                f"연속매수 {dcb_pre['consecutive_buys']}회 | 몸통 {dcb_pre['body_ratio']:.0%}\n"
+                                f"🎯 TP: {fmt6(meta['tp_price'])}원 (되돌림 {DCB_TP_RETRACEMENT*100:.0f}%)\n"
+                                f"🧯 SL: {fmt6(meta['sl_price'])}원 (저점 -{DCB_SL_BELOW_LOW*100:.1f}%)\n"
+                                f"⏱ 제한 {DCB_MAX_HOLD_SEC}초 | 사이즈 {DCB_SIZE_RATIO*100:.0f}%×probe\n"
+                                f"{link_for(m)}"
+                            )
+                            sent = tg_send(dcb_txt, retry=1)
+
+                            if sent:
+                                # DCB 전용 진입: probe × DCB_SIZE_RATIO
+                                dcb_pre["entry_mode"] = "probe"
+                                dcb_pre["_dcb_size_mult"] = DCB_SIZE_RATIO
+                                try:
+                                    dyn_stop = meta["sl_price"]
+                                    eff_sl_pct = DCB_SL_BELOW_LOW + abs(meta["drop_pct"]) * 0.1
+                                    open_auto_position(m, dcb_pre, dyn_stop, eff_sl_pct)
+
+                                    # 포지션에 DCB 메타 저장
+                                    with _POSITION_LOCK:
+                                        pos = OPEN_POSITIONS.get(m)
+                                        if pos and not pos.get("pre_signal"):
+                                            pos["strategy"] = "dcb"
+                                            pos["dcb_meta"] = meta
+                                            OPEN_POSITIONS[m] = pos
+
+                                    with _MONITOR_LOCK:
+                                        _DCB_POSITIONS.add(m)
+                                    _DCB_LAST_SIGNAL[m] = time.time()
+
+                                    # DCB 전용 모니터 스레드
+                                    with _POSITION_LOCK:
+                                        actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", dcb_pre["price"])
+
+                                    dcb_pre_copy = dict(dcb_pre)
+                                    def _run_dcb_monitor(market, entry, pre_data):
+                                        try:
+                                            monitor_dead_cat(market, entry, pre_data)
+                                        except Exception as e:
+                                            print(f"[DCB_MON_ERR] {market}: {e}")
+                                            traceback.print_exc()
+                                            with _MONITOR_LOCK:
+                                                _DCB_POSITIONS.discard(market)
+                                                _ACTIVE_MONITORS.pop(market, None)
+                                            _release_entry_lock(market)
+
+                                    dcb_thread = threading.Thread(
+                                        target=_run_dcb_monitor,
+                                        args=(m, actual_entry, dcb_pre_copy),
+                                        daemon=True
+                                    )
+                                    dcb_thread.start()
+                                    with _MONITOR_LOCK:
+                                        _ACTIVE_MONITORS[m] = dcb_thread
+
+                                except Exception as e:
+                                    print(f"[DCB_OPEN_ERR] {m}: {e}")
+                                    traceback.print_exc()
+                                    with _POSITION_LOCK:
+                                        if OPEN_POSITIONS.get(m, {}).get("pre_signal"):
+                                            OPEN_POSITIONS.pop(m, None)
+                                    with _MONITOR_LOCK:
+                                        _DCB_POSITIONS.discard(m)
+                                    _release_entry_lock(m)
+                            else:
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(m, None)
+                                _release_entry_lock(m)
+                    continue
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
                 # 🔧 킬러 조건: 모든 조건 충족 시에만 풀진입
