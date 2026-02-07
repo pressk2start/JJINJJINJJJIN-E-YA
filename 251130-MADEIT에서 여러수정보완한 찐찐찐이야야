@@ -4036,25 +4036,26 @@ def get_minutes_candles(u, m, c):
     return list(reversed(js)) if js else []
 
 def get_recent_ticks(m, c=100, allow_network=True):
+    _MAX_TICKS = 100  # 🔧 FIX: 항상 최대치로 요청, 캐시에 최대치 저장
     now_ms = int(time.time() * 1000)
     hit = _TICKS_CACHE.get(m)
     if hit and (now_ms - hit["ts"] <= _TICKS_TTL * 1000):
-        return hit["ticks"]
+        return hit["ticks"][:c]  # 🔧 요청 수만큼 slice 반환
     if not allow_network:
-        return hit["ticks"] if hit else []
+        return hit["ticks"][:c] if hit else []
 
-    # ✅ 안전 래퍼로 변경
+    # ✅ 안전 래퍼로 변경 — 항상 최대치 요청 (캐시 재활용 극대화)
     js = safe_upbit_get("https://api.upbit.com/v1/trades/ticks", {
         "market": m,
-        "count": c
+        "count": _MAX_TICKS
     },
                         timeout=6)
 
     if not js or not isinstance(js, list):
-        return hit["ticks"] if hit else []
+        return hit["ticks"][:c] if hit else []
     js_sorted = sorted(js, key=lambda t: t.get("timestamp", 0), reverse=True)
     _TICKS_CACHE.set(m, {"ts": now_ms, "ticks": js_sorted})
-    return js_sorted
+    return js_sorted[:c]  # 🔧 요청 수만큼 slice 반환
 
 def micro_tape_stats_from_ticks(ticks, sec):
     if not ticks:
@@ -4132,11 +4133,13 @@ def calc_consecutive_buys(ticks, sec=15):
     except Exception:
         return 0
 
+    # 🔧 FIX: 윈도우 필터 + 시간순 정렬 (틱 순서 보장 → 연속 의미 정확)
+    window = [t for t in ticks if t.get("timestamp", 0) >= cutoff]
+    window.sort(key=lambda t: t.get("timestamp", 0))
+
     max_streak = 0
     current_streak = 0
-    for x in ticks:
-        if x.get("timestamp", 0) < cutoff:
-            continue
+    for x in window:
         if x.get("ask_bid") == "BID":
             current_streak += 1
             max_streak = max(max_streak, current_streak)
@@ -4194,15 +4197,18 @@ def running_1m_bar(ticks, last_candle=None):
     if not ticks:
         return None
 
-    now_ms = int(time.time() * 1000)
-    minute_start = (now_ms // 60000) * 60000  # 현재 분의 시작 시점
+    # 🔧 FIX: 서버 시간 드리프트 방지 — 틱 timestamp 기준으로 분 경계 계산
+    newest_ts = max(t.get("timestamp", 0) for t in ticks)
+    if newest_ts == 0:
+        newest_ts = int(time.time() * 1000)
+    minute_start = (newest_ts // 60000) * 60000  # 최신 틱 기준 분의 시작 시점
 
     # 현재 분 내의 틱만 필터
     current_ticks = [t for t in ticks if t.get("timestamp", 0) >= minute_start]
 
     if not current_ticks:
         # 현재 분 틱이 없으면 최근 10초 틱으로 대체
-        fallback_cutoff = now_ms - 10000
+        fallback_cutoff = newest_ts - 10000
         current_ticks = [t for t in ticks if t.get("timestamp", 0) >= fallback_cutoff]
         if not current_ticks:
             return None
@@ -4793,8 +4799,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 FIX: score=3은 약한 완화(0.12), score=4만 강한 완화(0.25)
     # 🔧 FIX: 스프레드/임밸런스는 거의 안 풀기 (가짜 점화 방지)
     # ============================================================
-    # 🔧 before1 기준: 4점 점화(확정)에서만 완화 - 애매한 1~3점은 완화 없음 (승률 개선)
-    relax = 0.30 if ignition_score >= 4 else 0
+    # 🔧 점화 완화 통일: 3점=약완화(진입허용), 4점=강완화(임계치 대폭 완화)
+    relax = 0.30 if ignition_score >= 4 else (0.12 if ignition_score >= 3 else 0)
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(GATE_RELAX_SURGE_FLOOR, GATE_SURGE_MIN * (1 - relax))
@@ -4813,8 +4819,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
     eff_accel_min = max(GATE_RELAX_ACCEL_FLOOR, GATE_ACCEL_MIN * (1 - relax))
 
-    # 점화 여부 (로그용)
-    is_ignition = (ignition_score >= 4)  # 🔧 before1 기준: 4점에서만 점화 확정
+    # 점화 여부 (로그용 + 연속매수 예외 등 판정 기준 - 3점부터 점화 취급)
+    is_ignition = (ignition_score >= 3)  # 🔧 통일: 3점부터 점화 판정 (완화는 4점에서 강하게)
 
     # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
     metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
@@ -4949,12 +4955,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if imbalance < 0.50:
             return False, f"거래량↑ 임밸부족 {imbalance:.2f}<0.50 | {metrics}"
 
-    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 4점 (before1 기준)
+    # 진입 조건: 돌파 1개 OR vol_vs_ma OR 점화 3점 (통일: is_ignition과 동일 기준)
     # 🔧 FIX: 거래량↑ 경로는 vol_vs_ma 단독 진입 금지 (돌파/점화 필수)
     if cand_path == "거래량↑":
-        entry_signal = (breakout_score >= 1) or (ignition_score >= 4)
+        entry_signal = (breakout_score >= 1) or (ignition_score >= 3)
     else:
-        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 4)
+        entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
         return False, f"진입조건미달 EMA돌파={ema20_breakout} 고점돌파={high_breakout} MA{vol_vs_ma:.1f}x 경로={cand_path} | {metrics}"
@@ -6158,11 +6164,21 @@ def monitor_position(m,
                 continue
             consecutive_failures = 0
 
-            # 현재가
-            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-            if not cur_js or len(cur_js) == 0:
-                continue
-            curp = cur_js[0].get("trade_price", last_price)
+            # 현재가 — 🔧 FIX: ticker API throttle (10초마다만 호출, 나머지는 ticks에서 추출)
+            if not hasattr(monitor_position, '_ticker_ts'):
+                monitor_position._ticker_ts = {}
+            _ticker_age = time.time() - monitor_position._ticker_ts.get(m, 0)
+            if _ticker_age >= 10:
+                cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+                if cur_js and len(cur_js) > 0:
+                    curp = cur_js[0].get("trade_price", last_price)
+                    monitor_position._ticker_ts[m] = time.time()
+                else:
+                    # ticker 실패 시 ticks에서 최신 가격 추출
+                    curp = max(ticks, key=lambda t: t.get("timestamp", 0)).get("trade_price", last_price)
+            else:
+                # throttle 중: ticks에서 최신 가격 추출 (API 절약)
+                curp = max(ticks, key=lambda t: t.get("timestamp", 0)).get("trade_price", last_price)
             last_price = curp
 
             # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
