@@ -262,12 +262,12 @@ DCB_LOOKBACK_CANDLES = 10      # 최근 10봉 내 급락 확인
 DCB_DROP_MIN_PCT = 0.02        # 최소 -2% 하락
 DCB_VOLUME_SURGE_MIN = 2.0     # 급락 시 거래량 평소 대비 2x
 # 반등 확인
-DCB_BODY_RATIO_MIN = 0.35      # 반등봉 몸통비 35% (윗꼬리 방지)
+DCB_BODY_RATIO_MIN = 0.50      # 반등봉 몸통비 50% (윗꼬리 펌프 강력 차단)
 DCB_BUY_RATIO_MIN = 0.55       # 매수비 55% 이상 (매수 회복)
-DCB_FLOW_ACCEL_MIN = 1.2       # 매도 감속 (5s/15s ≥ 1.2)
+DCB_FLOW_ACCEL_MIN = 0.85      # 흐름 안정/회복 (5s/15s ≥ 0.85, 급감속 제외)
 DCB_CONSEC_BUY_MIN = 5         # 연속매수 5회
 # 하드컷 (3중 안전장치)
-DCB_SPREAD_MAX = 0.15          # 스프레드 ≤ 0.15%
+DCB_SPREAD_MAX = 0.12          # 스프레드 ≤ 0.12% (하락장 얇은호가 차단)
 DCB_DEPTH_MIN = 8_000_000      # 호가깊이 ≥ 8백만원
 # 청산
 DCB_TP_RETRACEMENT = 0.35      # 낙폭 35% 되돌림 → 전량 익절
@@ -4965,8 +4965,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
 
     # === 🔧 조건부 스프레드 강화 (turn 높거나 pstd 높으면 더 엄격) ===
-    if (turn_pct > 100 or pstd > 0.06) and spread > 0.06:
-        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{pstd:.2f}%) | {metrics}"
+    if (turn_pct > 100 or (pstd or 0) > 0.06) and spread > 0.06:
+        return False, f"조건부스프레드 spread{spread:.2f}%>0.06% (turn{turn_pct:.0f}% pstd{(pstd or 0):.2f}%) | {metrics}"
 
     # === 🔧 연속매수 품질 하한 (승37 vs 패24 - 추세 지속력 확인) ===
     if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
@@ -5125,7 +5125,7 @@ def detect_dead_cat_bounce(m, c1, ticks, ob_entry):
 
     accel = calc_flow_acceleration(ticks)
     if accel < DCB_FLOW_ACCEL_MIN:
-        return None  # 매도 감속 안 됨
+        return None  # 흐름 급감속(반등 실패) 제외
 
     cons_buys = calc_consecutive_buys(ticks, 15)
     if cons_buys < DCB_CONSEC_BUY_MIN:
