@@ -5144,7 +5144,8 @@ def detect_dead_cat_bounce(m, c1, ticks, ob_entry):
         return None  # 매도 우세 오더북 = 반등 지지 없음
 
     # ========== 통과: dcb_pre 구성 ==========
-    tp_price = cur_price + (drop_high - drop_low) * DCB_TP_RETRACEMENT
+    # TP = 저점 기준 되돌림 (drop_low + range × 35%)
+    tp_price = drop_low + (drop_high - drop_low) * DCB_TP_RETRACEMENT
     sl_price = drop_low * (1 - DCB_SL_BELOW_LOW)
 
     dcb_pre = {
