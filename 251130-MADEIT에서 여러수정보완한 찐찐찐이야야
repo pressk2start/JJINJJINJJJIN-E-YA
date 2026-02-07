@@ -1778,7 +1778,7 @@ def close_auto_position(m, reason=""):
         # 현재가(청산 전 기준) 조회 - ✅ 퍼블릭 API 사용
         # 🔧 FIX: IndexError 방어 (빈 리스트 체크)
         try:
-            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m}, retries=2)  # 🔧 FIX: 청산 경로 retries 강화
             cur_price = cur_js[0].get("trade_price", entry_price) if cur_js and len(cur_js) > 0 else entry_price
         except (IndexError, Exception):
             cur_price = entry_price
@@ -2018,15 +2018,17 @@ def close_auto_position(m, reason=""):
 
             result_emoji = "🟢" if ret_pct > 0 else "🔴"
             fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
+            # 🔧 FIX: 순손익을 실제 net(수수료 차감)으로 표시 (gross→net 왜곡 방지)
+            net_pl_value = pl_value - fee_total
 
             # 🔧 DEBUG: 청산 알람 발송 직전 로그
-            print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
+            print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={net_ret_pct:.2f}%(net) vol={vol:.6f} exit_price={exit_price_used}")
 
             tg_send(
                 f"====================================\n"
                 f"{result_emoji} <b>자동청산 완료</b> {m}\n"
                 f"====================================\n"
-                f"💰 순손익: {pl_value:+,.0f}원 ({ret_pct:+.2f}%)\n\n"
+                f"💰 순손익: {net_pl_value:+,.0f}원 ({net_ret_pct:+.2f}%)\n\n"
                 f"• 사유: {reason}\n"
                 f"• 매수평단: {fmt6(entry_price)}원\n"
                 f"• 실매도가: {fmt6(exit_price_used)}원\n"
@@ -4035,6 +4037,16 @@ def get_minutes_candles(u, m, c):
                    timeout=6)
     return list(reversed(js)) if js else []
 
+def tick_ts_ms(t):
+    """틱 타임스탬프 추출 (ms 단위, timestamp/ts 키 통일 + 초→ms 방어)"""
+    ts = t.get("timestamp")
+    if ts is None:
+        ts = t.get("ts", 0)
+    if ts and ts < 10_000_000_000:  # 10자리 = 초 단위 → ms 변환
+        ts *= 1000
+    return int(ts or 0)
+
+
 def get_recent_ticks(m, c=100, allow_network=True):
     _MAX_TICKS = 100  # 🔧 FIX: 항상 최대치로 요청, 캐시에 최대치 저장
     now_ms = int(time.time() * 1000)
@@ -4128,14 +4140,14 @@ def calc_consecutive_buys(ticks, sec=15):
     if not ticks:
         return 0
     try:
-        newest_ts = max(t["timestamp"] for t in ticks)
+        newest_ts = max(tick_ts_ms(t) for t in ticks)
         cutoff = newest_ts - sec * 1000
     except Exception:
         return 0
 
     # 🔧 FIX: 윈도우 필터 + 시간순 정렬 (틱 순서 보장 → 연속 의미 정확)
-    window = [t for t in ticks if t.get("timestamp", 0) >= cutoff]
-    window.sort(key=lambda t: t.get("timestamp", 0))
+    window = [t for t in ticks if tick_ts_ms(t) >= cutoff]
+    window.sort(key=tick_ts_ms)
 
     max_streak = 0
     current_streak = 0
@@ -4197,24 +4209,24 @@ def running_1m_bar(ticks, last_candle=None):
     if not ticks:
         return None
 
-    # 🔧 FIX: 서버 시간 드리프트 방지 — 틱 timestamp 기준으로 분 경계 계산
-    newest_ts = max(t.get("timestamp", 0) for t in ticks)
+    # 🔧 FIX: tick_ts_ms 헬퍼로 통일 (서버 시간 드리프트 방지 + 키/단위 방어)
+    newest_ts = max(tick_ts_ms(t) for t in ticks)
     if newest_ts == 0:
         newest_ts = int(time.time() * 1000)
     minute_start = (newest_ts // 60000) * 60000  # 최신 틱 기준 분의 시작 시점
 
     # 현재 분 내의 틱만 필터
-    current_ticks = [t for t in ticks if t.get("timestamp", 0) >= minute_start]
+    current_ticks = [t for t in ticks if tick_ts_ms(t) >= minute_start]
 
     if not current_ticks:
         # 현재 분 틱이 없으면 최근 10초 틱으로 대체
         fallback_cutoff = newest_ts - 10000
-        current_ticks = [t for t in ticks if t.get("timestamp", 0) >= fallback_cutoff]
+        current_ticks = [t for t in ticks if tick_ts_ms(t) >= fallback_cutoff]
         if not current_ticks:
             return None
 
     # 🔧 FIX: 정렬 전제 제거 — timestamp 기준 명시 정렬
-    current_ticks = sorted(current_ticks, key=lambda t: t.get("timestamp", 0))
+    current_ticks = sorted(current_ticks, key=tick_ts_ms)
     prices = [t.get("trade_price", 0) for t in current_ticks if t.get("trade_price", 0) > 0]
     if not prices:
         return None
@@ -4456,23 +4468,27 @@ def update_baseline_tps(market: str, ticks, window_sec: int = 300):
     if not ticks or len(ticks) < 10:
         return
 
-    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-    now_ts = max(t.get("timestamp", t.get("ts", 0)) for t in ticks)
+    # 🔧 FIX: tick_ts_ms 헬퍼로 통일 (timestamp/ts 키 + 초/ms 방어)
+    now_ts = max(tick_ts_ms(t) for t in ticks)
     cutoff = now_ts - (window_sec * 1000)
 
     # window_sec 내의 틱만 필터
-    window_ticks = [t for t in ticks if t.get("timestamp", t.get("ts", 0)) >= cutoff]
+    window_ticks = [t for t in ticks if tick_ts_ms(t) >= cutoff]
 
     if len(window_ticks) < 5:
         return
 
-    # 틱 수 / 시간(초) = TPS
-    ts_list = [t.get("timestamp", t.get("ts", 0)) for t in window_ticks]
+    # 🔧 FIX: 분모를 window_sec로 고정 (last-first 사용 시 틱 몰림→TPS 과대추정→점화 누락)
+    ts_list = [tick_ts_ms(t) for t in window_ticks]
     first_ts = min(ts_list)
     last_ts = max(ts_list)
-    duration_sec = max((last_ts - first_ts) / 1000, 1)
+    coverage = (last_ts - first_ts) / 1000.0
 
-    tps = len(window_ticks) / duration_sec
+    # 🔧 FIX: coverage 체크 — 데이터가 윈도우의 40% 미만이면 업데이트 스킵 (오염 방지)
+    if coverage < window_sec * 0.4:
+        return
+
+    tps = len(window_ticks) / max(window_sec, 1)
 
     with _IGNITION_LOCK:
         # 지수이동평균으로 부드럽게 업데이트
@@ -4505,8 +4521,8 @@ def ignition_detected(
     if not ticks or len(ticks) < 10:
         return False, "틱부족", 0
 
-    # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-    now_ts = max(t.get("timestamp", t.get("ts", 0)) for t in ticks)
+    # 🔧 FIX: tick_ts_ms 헬퍼로 통일 (timestamp/ts 키 + 초/ms 방어)
+    now_ts = max(tick_ts_ms(t) for t in ticks)
     if now_ts == 0:
         now_ts = int(time.time() * 1000)
 
@@ -4518,7 +4534,7 @@ def ignition_detected(
 
     # ---- 최근 10초 윈도우 추출 ----
     cutoff_10s = now_ts - 10000
-    window = [t for t in ticks if t.get("timestamp", t.get("ts", 0)) >= cutoff_10s]
+    window = [t for t in ticks if tick_ts_ms(t) >= cutoff_10s]
 
     if len(window) < 6:
         return False, "10초윈도우부족", 0
@@ -5532,8 +5548,8 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
     fresh_age = 0.0
     if ticks:
         now_ms = int(time.time() * 1000)
-        # 🔧 FIX: ticks[0] 최신 가정 제거 → max로 최신 틱 찾기
-        last_tick_ts = max(t.get("timestamp", 0) for t in ticks)
+        # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+        last_tick_ts = max(tick_ts_ms(t) for t in ticks)
         if last_tick_ts == 0: last_tick_ts = now_ms
         fresh_age = (now_ms - last_tick_ts) / 1000.0
 
@@ -5686,7 +5702,7 @@ def postcheck_6s(m, pre):
             seen.add(key)
             acc.appendleft(x)  # ✅ 최신이 index 0 유지
 
-        curp = max(ticks, key=lambda x: x.get("timestamp", x.get("ts", 0))).get("trade_price", base_price)
+        curp = max(ticks, key=tick_ts_ms).get("trade_price", base_price)
 
         # ★★★ 가격 급등 필터 (조건부 허용)
         if base_price > 0:
@@ -6175,10 +6191,10 @@ def monitor_position(m,
                     monitor_position._ticker_ts[m] = time.time()
                 else:
                     # ticker 실패 시 ticks에서 최신 가격 추출
-                    curp = max(ticks, key=lambda t: t.get("timestamp", 0)).get("trade_price", last_price)
+                    curp = max(ticks, key=tick_ts_ms).get("trade_price", last_price)
             else:
                 # throttle 중: ticks에서 최신 가격 추출 (API 절약)
-                curp = max(ticks, key=lambda t: t.get("timestamp", 0)).get("trade_price", last_price)
+                curp = max(ticks, key=tick_ts_ms).get("trade_price", last_price)
             last_price = curp
 
             # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
@@ -7240,8 +7256,8 @@ def main():
                 fresh_age = 0.0
                 if ticks_for_metrics:
                     now_ms = int(time.time() * 1000)
-                    # 🔧 FIX: ticks[0]이 최신이라는 가정 제거 → max로 최신 틱 찾기
-                    last_tick_ts = max(t.get("timestamp", 0) for t in ticks_for_metrics)
+                    # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+                    last_tick_ts = max(tick_ts_ms(t) for t in ticks_for_metrics)
                     if last_tick_ts == 0:
                         last_tick_ts = now_ms
                     fresh_age = (now_ms - last_tick_ts) / 1000.0
