@@ -7824,6 +7824,9 @@ def main():
                             # 첫 급등 → 워치리스트 등록, 바로 진입 X
                             add_to_retest_watchlist(m, cur_price, pre)
                             print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% → 리테스트 대기 (바로 진입 X)")
+                            # 🔧 FIX: pending 마킹 정리 (안 하면 ghost 포지션으로 남아 진입 차단)
+                            with _POSITION_LOCK:
+                                OPEN_POSITIONS.pop(m, None)
                             _release_entry_lock(m)
                             continue  # 바로 진입하지 않고 다음 종목으로
 
