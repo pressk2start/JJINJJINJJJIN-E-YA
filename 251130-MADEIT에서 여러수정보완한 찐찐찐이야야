@@ -2715,12 +2715,12 @@ GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
-GATE_PSTD_MAX = 999       # 🔧 비활성화 (데이터 수집 후 재조정)
-GATE_PSTD_STRONGBREAK_MAX = 999  # 🔧 비활성화 (데이터 수집 후 재조정)
-GATE_TURN_MAX_MAJOR = 999.0   # 🔧 비활성화 (before1에 없던 필터)
-GATE_TURN_MAX_ALT = 999.0     # 🔧 비활성화 (before1에 없던 필터)
-GATE_TURN_MAX_ALT_PROBE = 999.0  # 🔧 비활성화 (before1에 없던 필터)
-GATE_CONSEC_BUY_MIN_QUALITY = 0   # 🔧 비활성화 (before1에 없던 필터)
+GATE_PSTD_MAX = 0.50      # 🔧 대폭 완화 (0.10→0.50) 데이터 수집 후 재조정
+GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 수집 후 재조정
+GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
+GATE_TURN_MAX_ALT = 500.0     # 🔧 대폭 완화 (150→500) 데이터 수집 후 재조정
+GATE_TURN_MAX_ALT_PROBE = 500.0  # 🔧 대폭 완화 (120→500) 데이터 수집 후 재조정
+GATE_CONSEC_BUY_MIN_QUALITY = 1   # 🔧 대폭 완화 (5→1) 데이터 수집 후 재조정
 GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
@@ -4948,15 +4948,42 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if imbalance < eff_imb_min:
         return False, f"호가균형취약 임밸{imbalance:.2f}<{eff_imb_min:.2f} | {metrics}"
 
-    # === 진입 신호 체크 (동적) ===
+    # === pstd 상한 컷 (완화: 0.50%) ===
     breakout_score = int(ema20_breakout) + int(high_breakout)
+    if breakout_score == 2:
+        eff_pstd_max = GATE_PSTD_STRONGBREAK_MAX  # 강돌파: 0.30%
+    else:
+        eff_pstd_max = GATE_PSTD_MAX  # 일반: 0.50%
+    if pstd is not None and pstd > eff_pstd_max and not mega:
+        return False, f"pstd과다 {pstd:.2f}%>{eff_pstd_max:.2f}% | {metrics}"
 
-    # 🔧 before1 복원: 강돌파 품질 필터 (turn_max + accel_max만)
+    # === 과회전 상한 컷 (완화: ALT 500%, MAJOR 800%) ===
+    is_major = any(k in market.upper() for k in ("BTC", "ETH")) if market else False
+    eff_turn_max = GATE_TURN_MAX_MAJOR if is_major else GATE_TURN_MAX_ALT
+    if turn_pct > eff_turn_max:
+        return False, f"과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
+
+    # === 조건부 스프레드 (완화: spread > 0.25% 기준) ===
+    if (turn_pct > 100 or (pstd or 0) > 0.06) and spread > 0.25:
+        return False, f"조건부스프레드 spread{spread:.2f}%>0.25% (turn{turn_pct:.0f}% pstd{(pstd or 0):.2f}%) | {metrics}"
+
+    # === 연속매수 품질 하한 (완화: 1회) ===
+    if consecutive_buys < GATE_CONSEC_BUY_MIN_QUALITY and not is_ignition:
+        return False, f"연속매수부족 {consecutive_buys}<{GATE_CONSEC_BUY_MIN_QUALITY} | {metrics}"
+
+    # === 진입 신호 체크 (동적) ===
+
+    # 강돌파 전용 품질 필터 (완화된 복합 체크)
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
-        if turn_pct > GATE_STRONGBREAK_TURN_MAX:
-            return False, f"강돌파+과회전 {turn_pct:.0f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}% | {metrics}"
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
+        # 모멘텀 확인 (완화: 연속매수≥3 OR 매수비≥0.55+임밸≥0.40)
+        momentum_ok = (consecutive_buys >= 3
+                       or (buy_ratio >= 0.55 and imbalance >= 0.40))
+        if not momentum_ok:
+            return False, f"강돌파+모멘텀부족 consec{consecutive_buys} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
+        if turn_pct > GATE_STRONGBREAK_TURN_MAX and ((cv is not None and cv > 2.2) or overheat > 3.0):
+            return False, f"강돌파+과열 turn{turn_pct:.0f}%>{GATE_STRONGBREAK_TURN_MAX:.0f}% cv{cv:.1f} oh{overheat:.1f} | {metrics}"
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
 
@@ -4972,7 +4999,14 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         cand_path = "거래량↑"
 
-    # 🔧 before1 복원: 진입 조건 = 돌파 OR vol_vs_ma OR 점화
+    # === 거래량↑ 전용 게이트 (완화: turn<5%, imb<0.25) ===
+    if cand_path == "거래량↑":
+        if turn_pct < 5:
+            return False, f"거래량↑ 회전부족 {turn_pct:.1f}%<5% | {metrics}"
+        if imbalance < 0.25:
+            return False, f"거래량↑ 임밸부족 {imbalance:.2f}<0.25 | {metrics}"
+
+    # 진입 조건: 돌파 OR vol_vs_ma OR 점화
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
@@ -5550,8 +5584,61 @@ def final_check_leader(m, pre, tight_mode=False):
     else:
         entry_mode = "confirm"
 
-    # 🔧 before1 복원: 다운그레이드 로직 전부 제거 (데이터 수집 후 재조정)
-    # (regime_flat / 강돌파 / 매수세 둔화 / probe 알트 과회전 → 모두 비활성화)
+    # === 다운그레이드 로직 (완화된 임계치) ===
+
+    # FLAT_SLOPE 레짐 → 다운그레이드 (횡보장 리스크 축소)
+    if pre.get("regime_flat"):
+        old_mode = entry_mode
+        if entry_mode == "confirm":
+            entry_mode = "half"
+        elif entry_mode == "half":
+            entry_mode = "probe"
+        if entry_mode != old_mode:
+            print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
+
+    # 강돌파 다운그레이드 (완화: 연속매수≥3 OR 매수비≥0.55+임밸≥0.40이면 유지)
+    if "강돌파" in pre.get("signal_tag", ""):
+        sb_cons = pre.get("consecutive_buys", 0)
+        sb_br = pre.get("buy_ratio", 0)
+        sb_imb = pre.get("imbalance", 0)
+        consec_ok = sb_cons >= 3
+        supply_ok = (sb_br >= 0.55 and sb_imb >= 0.40)
+        if not (consec_ok and supply_ok):
+            old_mode = entry_mode
+            if entry_mode == "confirm":
+                entry_mode = "half"
+            elif entry_mode == "half":
+                entry_mode = "probe"
+            if entry_mode != old_mode:
+                print(f"[강돌파↓] {m} 편면모멘텀 consec{'✓' if consec_ok else '✗'} supply{'✓' if supply_ok else '✗'} → {old_mode}→{entry_mode}")
+
+    # 매수세 둔화 다운그레이드 (완화: t15 < t45 * 0.3 — 급감만)
+    if entry_mode in ("confirm", "half"):
+        _ticks_for_decay = pre.get("ticks")
+        if _ticks_for_decay:
+            _decay, _decay_info = buy_decay_flag(_ticks_for_decay)
+            _t15_st = micro_tape_stats_from_ticks(_ticks_for_decay, 15)
+            _t45_st = micro_tape_stats_from_ticks(_ticks_for_decay, 45)
+            # 완화: t15 거래속도가 t45의 30% 미만일 때만 (0.6→0.3)
+            _flow_fading = (
+                _decay
+                or (_t15_st.get("krw_per_sec", 0) < _t45_st.get("krw_per_sec", 1) * 0.3)
+            )
+            if _flow_fading:
+                old_mode = entry_mode
+                if entry_mode == "confirm":
+                    entry_mode = "half"
+                elif entry_mode == "half":
+                    entry_mode = "probe"
+                if entry_mode != old_mode:
+                    print(f"[DECAY↓] {m} 매수세둔화 → {old_mode}→{entry_mode}")
+
+    # probe 알트 과회전 필터 (완화: GATE_TURN_MAX_ALT_PROBE=500)
+    if entry_mode == "probe":
+        _is_major = any(k in m.upper() for k in ("BTC", "ETH")) if m else False
+        if not _is_major and pre.get("turn_pct", 0) > GATE_TURN_MAX_ALT_PROBE:
+            print(f"[PROBE_TURN↓] {m} 알트 probe 과회전 {pre.get('turn_pct',0):.0f}%>{GATE_TURN_MAX_ALT_PROBE:.0f}% → 진입 차단")
+            return None
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
     # 기존 호출 코드 호환을 위해 payload 형식으로 반환
