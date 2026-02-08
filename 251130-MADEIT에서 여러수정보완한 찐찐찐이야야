@@ -6606,8 +6606,15 @@ def monitor_position(m,
             # - 효과: 손절이 약간 완화되어 휩쏘 방지 + 익절과 정합성 확보
             fee_margin = FEE_RATE_ROUNDTRIP  # 왕복 0.1%
             eff_sl_with_fee = eff_sl_pct + fee_margin  # 손절선 완화
-            if cur_gain <= -eff_sl_with_fee:
-                close_auto_position(m, f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})")
+            # 🔧 FIX: base_stop 가격 기반 SL도 체크 (부분익절 후 본절 상향 반영)
+            hit_pct_sl = cur_gain <= -eff_sl_with_fee
+            hit_base_stop = (base_stop > 0 and curp <= base_stop)
+            if hit_pct_sl or hit_base_stop:
+                if hit_base_stop and not hit_pct_sl:
+                    sl_reason = f"본절SL | 현재 {curp:,.0f}원 ≤ base_stop {base_stop:,.0f}원 ({atr_info})"
+                else:
+                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})"
+                close_auto_position(m, sl_reason)
                 _already_closed = True
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
@@ -7330,6 +7337,16 @@ def main():
                     try:
                         retest_pre = check_retest_entry(wm)
                         if retest_pre:
+                            # 🔐 락 획득 (메인/DCB 경로와 동일 패턴)
+                            if not _try_acquire_entry_lock(wm):
+                                print(f"[RETEST] {wm} already locked → skip")
+                                continue
+                            with _POSITION_LOCK:
+                                if wm in OPEN_POSITIONS:
+                                    _release_entry_lock(wm)
+                                    continue
+                                OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True}
+
                             # 리테스트 조건 충족 → 진입
                             print(f"[RETEST] {wm} 🎯 리테스트 진입 시작!")
                             c1 = get_minutes_candles(1, wm, 20)
@@ -7337,9 +7354,42 @@ def main():
                             tg_send(f"🎯 <b>리테스트 진입</b> {wm}\n"
                                     f"• 첫 급등 후 되돌림 → 지지 확인\n"
                                     f"• 현재가: {retest_pre['price']:,.0f}원")
-                            open_auto_position(wm, retest_pre, dyn_stop, eff_sl_pct)
+                            try:
+                                open_auto_position(wm, retest_pre, dyn_stop, eff_sl_pct)
+                            except Exception as e2:
+                                print(f"[RETEST_OPEN_ERR] {wm}: {e2}")
+                                with _POSITION_LOCK:
+                                    pos = OPEN_POSITIONS.get(wm)
+                                    if pos and pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(wm, None)
+                                _release_entry_lock(wm)
+                                continue
+
+                            # 🔧 FIX: 모니터 스레드 시작 (기존엔 누락 → 포지션 방치)
+                            with _POSITION_LOCK:
+                                actual_entry = OPEN_POSITIONS.get(wm, {}).get("entry_price", retest_pre["price"])
+                            retest_pre_copy = dict(retest_pre)
+                            def _run_retest_monitor(market, entry, pre_data):
+                                try:
+                                    monitor_position(market, entry, pre_data, tight_mode=True)
+                                except Exception as e3:
+                                    print(f"[RETEST_MON_ERR] {market}: {e3}")
+                                    traceback.print_exc()
+                                finally:
+                                    _release_entry_lock(market)
+                                    with _MONITOR_LOCK:
+                                        _ACTIVE_MONITORS.pop(market, None)
+                            rt_thread = threading.Thread(
+                                target=_run_retest_monitor,
+                                args=(wm, actual_entry, retest_pre_copy),
+                                daemon=True
+                            )
+                            rt_thread.start()
+                            with _MONITOR_LOCK:
+                                _ACTIVE_MONITORS[wm] = rt_thread
                     except Exception as e:
                         print(f"[RETEST_ERR] {wm}: {e}")
+                        _release_entry_lock(wm)
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
