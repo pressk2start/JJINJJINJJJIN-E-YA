@@ -2027,9 +2027,9 @@ def close_auto_position(m, reason=""):
                 _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
             # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
-            # 🔧 FIX: net_ret_pct 사용 (수수료 반영)
+            # 🔧 before1 복원: gross ret_pct 사용 (adaptive risk가 더 낙관적으로 사이징)
             try:
-                record_trade(m, net_ret_pct / 100.0)  # 🔧 소수 단위 + 수수료 반영
+                record_trade(m, ret_pct)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
@@ -2312,15 +2312,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     # - "먹고 뱉는" 거래 방지
                     # - 🔧 FIX: 비교 기준을 alpha만으로 단순화 (slip은 gate/impact_cap으로 이미 관리)
                     # - ret_net에 slip 없으니 cp에서도 slip 제거 → 일관된 비교
-                    cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1% (alpha만)
-                    if net_ret_pct >= cp_alpha and not pos2.get("breakeven_set"):
+                    # 🔧 before1 복원: 본절 = 정확히 entry_price
+                    if ret_pct > 0 and not pos2.get("breakeven_set"):
                         old_stop = pos2.get("stop", 0)
-                        # 🔧 FIX: 진짜 본절 = 수수료 커버 (entry에서 청산하면 수수료로 손실)
-                        BREAKEVEN_BUFFER = 0.0003  # 0.03% 추가 버퍼
-                        real_breakeven = entry_price * (1 + FEE_RATE_ROUNDTRIP + BREAKEVEN_BUFFER)
-                        pos2["stop"] = real_breakeven
+                        pos2["stop"] = entry_price
                         pos2["breakeven_set"] = True
-                        print(f"[BREAKEVEN] {m} 진짜 본절: 손절 {old_stop:.0f} → {real_breakeven:.0f} (수수료커버, net:{net_ret_pct:.2f}%)")
+                        print(f"[BREAKEVEN] {m} 부분익절 후 본절 설정: 손절 {old_stop:.0f} → {entry_price:.0f}")
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
@@ -2499,7 +2496,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                     # 🔧 부분익절 후 타임스탑: 3분간 횡보 시 잔량 정리
                     # - 부분익절 후 추가 상승 없이 시간만 경과 → 기회비용 낭비 방지
                     partial_elapsed = time.time() - partial_ts
-                    if partial_elapsed >= 180 and entry_price > 0:
+                    if partial_elapsed >= 900 and entry_price > 0:  # before1에 없음, 180→900 대폭 완화 (15분)
                         ret_from_entry = (cur_price / entry_price - 1.0)
                         # 진입가 대비 +0.3% 이하면 더 이상 기대 어려움 → 잔량 정리
                         if ret_from_entry <= 0.003:
@@ -2561,7 +2558,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif verdict and verdict.startswith("청산 권고("):
             # 🔧 FIX: 컨텍스트 청산 권고가 계속 반복되면 손실을 시간으로 키움
             # - 3회 연속이면 전량 청산으로 승격
-            CONTEXT_CLOSE_THRESHOLD = 3
+            CONTEXT_CLOSE_THRESHOLD = 999  # 🔧 비활성화 (before1: 컨텍스트 청산 무시)
             with _POSITION_LOCK:
                 pos_ctx = OPEN_POSITIONS.get(m, {})
                 ctx_count = pos_ctx.get("ctx_close_count", 0) + 1
@@ -2591,21 +2588,22 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif ret_pct is not None:
             # signal_tag별 익절 목표 (% 단위) - 익절키우기 적용
             # 🔧 TP 앞당기기: 부분익절을 빨리 → 승률 안정화, 남은 물량은 트레일로 길게
+            # 🔧 before1 TP 테이블 복원
             TP_FULL = {
-                "🔥점화": 1.8,              # 3.0% → 1.8% (강신호도 현실적으로)
-                "강돌파 (EMA↑+고점↑)": 1.5,  # 2.5% → 1.5%
-                "EMA↑": 1.2,                 # 2.0% → 1.2%
-                "고점↑": 1.0,                # 1.6% → 1.0%
-                "거래량↑": 0.8,              # 1.3% → 0.8%
-                "기본": 0.9,                 # 1.5% → 0.9%
+                "🔥점화": 2.2,
+                "강돌파 (EMA↑+고점↑)": 1.8,
+                "EMA↑": 1.4,
+                "고점↑": 1.2,
+                "거래량↑": 1.0,
+                "기본": 1.2,
             }
             TP_PART = {
-                "🔥점화": 0.6,              # 0.6% (강신호)
-                "강돌파 (EMA↑+고점↑)": 0.5,  # 0.5%
-                "EMA↑": 0.50,                # 🔧 0.45→0.50% (수수료/슬립 감안 실익 확보)
-                "고점↑": 0.50,               # 🔧 0.40→0.50% (수수료/슬립 감안 실익 확보)
-                "거래량↑": 0.50,             # 🔧 0.35→0.50% (0.35%는 net 0.15% 수준)
-                "기본": 0.50,                # 🔧 0.40→0.50% (수수료/슬립 감안 실익 확보)
+                "🔥점화": 1.2,
+                "강돌파 (EMA↑+고점↑)": 1.0,
+                "EMA↑": 0.8,
+                "고점↑": 0.7,
+                "거래량↑": 0.6,
+                "기본": 0.7,
             }
 
             # 현재 포지션의 signal_tag 가져오기
@@ -2625,23 +2623,11 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
             # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
 
-            # 🔧 TP 변동성 연동: ATR(sl_pct) 기반으로 TP 바닥을 동적으로 설정
-            # 변동성 큰 종목: TP가 너무 빨리 닿아서 잘게 먹고 끝 → 바닥 올림
-            # 변동성 작은 종목: TP가 너무 멀어서 도달 못함 → 기본값 유지
-            atr_pct_100 = pos_for_tag.get("sl_pct", 0.005) * 100  # 예: 0.5%
-            part_tp = max(part_tp, cp_alpha + 0.15, 0.6 * atr_pct_100)
-            full_tp = max(full_tp, cp_alpha + 0.45, 1.2 * atr_pct_100)
-
-            # 🔧 FIX: TP 판단을 net 기준으로 (수수료 + 예상 exit 슬립 반영)
-            # - gross로 비교하면 수수료/슬립 때문에 사실상 본절~미세손익 구간에서 익절 발생
-            # - 슬립은 여기서만 한 번 차감 (A안: ret_net 차감 유지)
-            expected_exit_slip = avg_exit_slip_pct  # exit 슬립만 (entry는 이미 반영됨)
-            ret_net = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0) - expected_exit_slip
-
-            if ret_net >= full_tp:
+            # 🔧 before1 복원: TP 비교 = gross ret_pct 직접 비교 (ATR TP floor 제거)
+            if ret_pct >= full_tp:
                 should_close = True
-                reason = f"{tag} 목표수익 net:{ret_net:.2f}% ≥ {full_tp:.1f}% 전량청산"
-            elif ret_net >= part_tp:
+                reason = f"{tag} 목표수익 {ret_pct:.2f}% ≥ {full_tp:.1f}% 전량청산"
+            elif ret_pct >= part_tp:
                 # 부분익절: 50% 매도 후 계속 보유 (30%→50%로 상향)
                 ok, msg, executed = safe_partial_sell(
                     m, sell_ratio=0.5, reason=f"{tag} net:{ret_net:.2f}% ≥ {part_tp:.1f}% 50% 부분익절")
@@ -6028,10 +6014,8 @@ def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
 
     # 💎 약상승/횡보 시 청산 점수 완화
     gain_now = (last_price / entry_price - 1.0)
-    # 🔧 FIX: 완화 범위 축소 (±0.4%~+0.8% → ±0.2%~+0.3%)
-    # - 기존: +0.8%까지 완화 → 꼭대기에서 내려올 때 청산 지연
-    # - 변경: 본절 부근만 완화, 수익 구간에서는 정상 청산 판단
-    if -0.002 <= gain_now <= 0.003:
+    # 🔧 before1 복원: 약상승/횡보 시 청산 점수 완화 (범위 확대)
+    if -0.004 <= gain_now <= 0.008:
         score = max(0, score - 1)
         reasons.append("MILD_GAIN_RELAX")
 
@@ -6464,7 +6448,7 @@ def monitor_position(m,
         return _c1_cache
 
     try:
-        while time.time() - start_ts <= MAX_RUNTIME:
+        while time.time() - start_ts <= horizon:  # 🔧 before1 복원 (MAX_RUNTIME→horizon)
             time.sleep(RECHECK_SEC)
 
             ticks = get_recent_ticks(m, 100)
@@ -6525,35 +6509,33 @@ def monitor_position(m,
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                # 🔧 Phase 1: 25초 조기 모멘텀 확인 (MFE 0.08% 못 찍으면 즉시 철수)
-                if alive_sec_now >= 25 and mfe_now < 0.0008 and cur_gain_check <= 0:
+                # 🔧 Phase 1: 조기 모멘텀 확인 (비활성화: 999초 → before1 수준)
+                if alive_sec_now >= 999 and mfe_now < 0.0008 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (조기모멘텀부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
                     break
-                # 🔧 Phase 2: 기존 60초 스크래치 (MFE 0.15% 미만)
-                if alive_sec_now >= 60 and mfe_now < 0.0015 and cur_gain_check <= 0:
+                # 🔧 Phase 2: 기존 스크래치 (비활성화: 999초 → before1 수준)
+                if alive_sec_now >= 999 and mfe_now < 0.0015 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
                     break
 
-            # 🔧 Half/Confirm 초반 모멘텀 가드 (큰 사이즈 진입 후 흐름 부재 시 조기 탈출)
-            # - 점화/mega/강돌파 등 강한 신호는 바이패스 (충분한 모멘텀 기대)
+            # 🔧 Half/Confirm 초반 모멘텀 가드 (비활성화: 999초 → before1 수준)
             if entry_mode in ("half", "confirm") and not pre.get("mega_ok") and not pre.get("ign_ok"):
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
 
-                # 모드별 시간/MFE/수익 임계값
                 if entry_mode == "half":
-                    _es_timeout = 90    # 90초
-                    _es_mfe_thr = 0.0025  # MFE 0.25% 미만
-                    _es_gain_thr = 0.0005  # 현재 수익 +0.05% 이하
+                    _es_timeout = 999   # 🔧 비활성화 (before1에 없음)
+                    _es_mfe_thr = 0.0025
+                    _es_gain_thr = 0.0005
                 else:  # confirm
-                    _es_timeout = 120   # 120초
-                    _es_mfe_thr = 0.0035  # MFE 0.35% 미만
-                    _es_gain_thr = 0.0010  # 현재 수익 +0.10% 이하
+                    _es_timeout = 999   # 🔧 비활성화 (before1에 없음)
+                    _es_mfe_thr = 0.0035
+                    _es_gain_thr = 0.0010
 
                 if alive_sec_now >= _es_timeout and mfe_now < _es_mfe_thr and cur_gain_check <= _es_gain_thr:
                     # 테이프 흐름 확인: 매수세가 살아있으면 바이패스
@@ -6589,20 +6571,15 @@ def monitor_position(m,
             dd_now = (curp / best - 1.0)
             cur_gain = (curp / entry_price - 1.0)
 
-            # 🔧 FIX (D): 손절도 net 기준 정합성 (fee 마진 추가)
-            # - 익절: ret_net = ret_pct - fee로 판단 (실제 수익 기준)
-            # - 손절: 손절선에 fee 마진 추가 → 청산 후 실손실이 의도한 손절선에 근접
-            # - 효과: 손절이 약간 완화되어 휩쏘 방지 + 익절과 정합성 확보
-            fee_margin = FEE_RATE_ROUNDTRIP  # 왕복 0.1%
-            eff_sl_with_fee = eff_sl_pct + fee_margin  # 손절선 완화
-            # 🔧 FIX: base_stop 가격 기반 SL도 체크 (부분익절 후 본절 상향 반영)
-            hit_pct_sl = cur_gain <= -eff_sl_with_fee
+            # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
+            # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
+            hit_pct_sl = cur_gain <= -eff_sl_pct
             hit_base_stop = (base_stop > 0 and curp <= base_stop)
             if hit_pct_sl or hit_base_stop:
                 if hit_base_stop and not hit_pct_sl:
                     sl_reason = f"본절SL | 현재 {curp:,.0f}원 ≤ base_stop {base_stop:,.0f}원 ({atr_info})"
                 else:
-                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_with_fee*100:.2f}% (net기준, {atr_info})"
+                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% ({atr_info})"
                 close_auto_position(m, sl_reason)
                 _already_closed = True
                 verdict = "ATR손절"
