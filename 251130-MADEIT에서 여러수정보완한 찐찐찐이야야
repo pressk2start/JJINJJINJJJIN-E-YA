@@ -2630,7 +2630,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             elif ret_pct >= part_tp:
                 # 부분익절: 50% 매도 후 계속 보유 (30%→50%로 상향)
                 ok, msg, executed = safe_partial_sell(
-                    m, sell_ratio=0.5, reason=f"{tag} net:{ret_net:.2f}% ≥ {part_tp:.1f}% 50% 부분익절")
+                    m, sell_ratio=0.5, reason=f"{tag} {ret_pct:.2f}% ≥ {part_tp:.1f}% 50% 부분익절")
                 if ok and executed > 0:
                     print(msg)
                 # 부분익절 후에는 계속 재모니터링
@@ -6583,7 +6583,7 @@ def monitor_position(m,
                 close_auto_position(m, sl_reason)
                 _already_closed = True
                 verdict = "ATR손절"
-                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
+                outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
@@ -7355,6 +7355,8 @@ def main():
                                 _ACTIVE_MONITORS[wm] = rt_thread
                     except Exception as e:
                         print(f"[RETEST_ERR] {wm}: {e}")
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(wm, None)
                         _release_entry_lock(wm)
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
