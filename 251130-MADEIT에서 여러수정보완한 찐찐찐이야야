@@ -2032,10 +2032,10 @@ def close_auto_position(m, reason=""):
                 _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
             # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
-            # 🔧 FIX: ret_pct는 % 단위(예: 2.3) → 소수 단위(0.023)로 변환 필수
+            # 🔧 FIX: net_ret_pct 사용 — gross/net 혼용 제거 (지연청산/DCB와 통일)
             # (방어코드가 record_trade 내부에도 있지만, 호출부에서도 정확히 넣기)
             try:
-                record_trade(m, ret_pct / 100.0)
+                record_trade(m, net_ret_pct / 100.0)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
@@ -2336,7 +2336,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
             f"====================================\n"
-            f"💰 순손익: {pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n\n"
+            f"💰 순손익: {pl_value - fee_total:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
@@ -4577,7 +4577,7 @@ def ignition_detected(
     with _IGNITION_LOCK:
         baseline_tps = _IGNITION_BASELINE_TPS.get(market, 0.5)  # 기본값 0.5 tps
 
-    t10 = micro_tape_stats_from_ticks(ticks, 10)
+    t10 = micro_tape_stats_from_ticks(window, 10)  # 🔧 FIX: ticks→window (10초 윈도우 단일 기준)
     # 🔧 강화: 평시의 4배 이상, 최소 15틱 (폭발적 급등 감지)
     tps_threshold = max(IGN_TPS_MIN_TICKS, IGN_TPS_MULTIPLIER * baseline_tps * 10)
     tps_burst = t10["n"] >= tps_threshold
