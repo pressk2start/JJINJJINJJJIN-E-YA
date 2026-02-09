@@ -2279,45 +2279,15 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
             _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
-        # 🔧 찌꺼기 방지: 체결 후 잔여금액 < DUST_PREVENT_KRW 이면 즉시 추가 매도
-        # - 사전 체크(pre-check)를 통과했더라도 부분체결/가격변동으로 잔량이 소액이 될 수 있음
-        # - 이 시점에서 바로 추가 매도하여 찌꺼기 잔류 원천 차단
+        # 찌꺼기 방지: 체결 후 잔여금액 < MIN_ORDER_KRW 이면 매도 불가 → orphan 등록
+        # - pre-check(2211줄)에서 잔여 < DUST_PREVENT_KRW(6000원)은 이미 전량청산 전환됨
+        # - 여기는 체결 중 가격변동으로 잔여가 최소주문금액 미만이 된 경우만 처리
         remaining_price_ref = exit_price_used if exit_price_used > 0 else cur_price
         remaining_krw_post = remaining_volume * remaining_price_ref
-        if remaining_volume > 1e-10 and remaining_krw_post < DUST_PREVENT_KRW and not was_full:
-            print(f"[DUST_PREVENT] {m} 체결 후 잔여 {remaining_volume:.6f} ({remaining_krw_post:.0f}원) < {DUST_PREVENT_KRW}원 → 추가 매도 시도")
-            try:
-                time.sleep(0.3)  # 거래소 잔고 반영 대기
-                dust_bal = get_actual_balance(m)
-                if dust_bal > 1e-12:
-                    dust_val = dust_bal * remaining_price_ref
-                    if dust_val >= MIN_ORDER_KRW:
-                        # 최소주문금액 이상 → 추가 매도 시도
-                        dust_res = place_market_sell(m, dust_bal, price_hint=remaining_price_ref)
-                        dust_uuid = dust_res.get("uuid") if isinstance(dust_res, dict) else None
-                        if dust_uuid:
-                            dust_od = get_order_result(dust_uuid, timeout_sec=8.0)
-                            dust_exec = 0.0
-                            if dust_od:
-                                try:
-                                    dust_exec = float(dust_od.get("executed_volume") or "0")
-                                except Exception:
-                                    dust_exec = 0.0
-                            if dust_exec > 0:
-                                executed += dust_exec
-                                remaining_volume = max(remaining_volume - dust_exec, 0.0)
-                                print(f"[DUST_PREVENT] {m} 추가 매도 성공: {dust_exec:.6f} → 잔여 {remaining_volume:.6f}")
-                    else:
-                        # 최소주문금액 미만 → 매도 불가, orphan 등록 + 포지션에서 제거
-                        _ORPHAN_HANDLED.add(m)
-                        remaining_volume = 0.0
-                        print(f"[DUST_PREVENT] {m} 잔여 {dust_val:.0f}원 < {MIN_ORDER_KRW}원 매도불가 → orphan 등록")
-                else:
-                    # 거래소에 잔고 없음 → 이미 정리됨
-                    remaining_volume = 0.0
-                    print(f"[DUST_PREVENT] {m} 거래소 잔고 0 → 이미 정리됨")
-            except Exception as _dust_e:
-                print(f"[DUST_PREVENT_ERR] {m}: {_dust_e}")
+        if remaining_volume > 1e-10 and remaining_krw_post < MIN_ORDER_KRW and not was_full:
+            _ORPHAN_HANDLED.add(m)
+            remaining_volume = 0.0
+            print(f"[DUST_PREVENT] {m} 잔여 {remaining_krw_post:.0f}원 < {MIN_ORDER_KRW}원 매도불가 → orphan 등록")
 
         # 손익 계산
         est_entry_value = entry_price * executed
