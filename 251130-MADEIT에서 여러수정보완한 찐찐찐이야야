@@ -7236,7 +7236,7 @@ def start_watchdogs():
         while True:
             time.sleep(600)  # 10분
             try:
-                cleanup_stale_entry_locks(300)  # 5분 이상 된 락 삭제
+                cleanup_stale_entry_locks(900)  # 🔧 FIX: 300→900초 (모니터 최대 540초+여유 — 실행 중 파일락 오삭제 방지)
             except Exception as e:
                 print(f"[LOCK_CLEANER_ERR] {e}")
 
