@@ -1466,11 +1466,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             }
 
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
-        # 🔧 FIX: 슬리피지 기록 - 절댓값 사용 (음수=유리한 슬리피지도 포함)
-        # 기존: slip_pct > 0만 기록 → 샘플 왜곡
-        # 수정: 절댓값 + 1% 캡 (이상치 방지, 실제 트림은 percentile로)
-        slip_abs = min(0.01, abs(slip_pct))  # 1% 캡
-        _ENTRY_SLIP_HISTORY.append(slip_abs)  # 🔧 FIX: entry 전용
+        # 🔧 FIX: 불리한 슬리피지만 기록 (abs()는 유리한 체결도 비용으로 취급 → 체크포인트 과대)
+        # 유리한 체결(음수) → 0, 불리한 체결(양수) → 그대로, 1% 캡
+        slip_cost = min(0.01, max(0.0, slip_pct))  # 불리한 것만 반영
+        _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
         _SLIP_HISTORY.append(slip_abs)  # 하위호환
 
         # 진입 사유 한 줄 생성 (디테일 포함)
@@ -5381,8 +5380,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         else:
             vol_surge = vol_surge_ema
     else:
-        # 🔧 before1 복원: 과거 거래량 없으면 8.0 (데이터 부족 시 통과 허용)
-        vol_surge = 8.0
+        # 🔧 FIX: 데이터 부족 시 중립값 (8.0은 무조건 통과 티켓 → 오진입 유발)
+        vol_surge = 1.0
     accel = calc_flow_acceleration(ticks)
     turn_pct = turn * 100  # decimal → %
     imbalance = calc_orderbook_imbalance(ob)
@@ -5492,12 +5491,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🔥 BTC 역풍 시 추가 요건 체크 (게이트 통과 후)
     if btc_headwind:
         headwind_fail = []
-        if accel < 0.1:
-            headwind_fail.append(f"accel={accel:.2f}<0.1")
-        if turn_pct < 1.5:
-            headwind_fail.append(f"turn={turn_pct:.2f}<1.5")
-        if twin["buy_ratio"] < 0.55:
-            headwind_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.55")
+        if accel < 0.3:
+            headwind_fail.append(f"accel={accel:.2f}<0.3")
+        if turn_pct < 2.5:
+            headwind_fail.append(f"turn={turn_pct:.2f}<2.5")
+        if twin["buy_ratio"] < 0.60:
+            headwind_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.60")
 
         if headwind_fail:
             cut("BTC_HEADWIND", f"{m} BTC역풍({btc5*100:.2f}%) 추가요건 미달: {', '.join(headwind_fail)}", near_miss=False)
@@ -6547,14 +6546,14 @@ def monitor_position(m,
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                # 🔧 Phase 1: 조기 모멘텀 확인 (비활성화: 999초 → before1 수준)
-                if alive_sec_now >= 999 and mfe_now < 0.0008 and cur_gain_check <= 0:
+                # 🔧 Phase 1: 조기 모멘텀 확인 (25초 내 MFE 0.08% 미만이면 탈출)
+                if alive_sec_now >= 25 and mfe_now < 0.0008 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (조기모멘텀부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
                     break
-                # 🔧 Phase 2: 기존 스크래치 (비활성화: 999초 → before1 수준)
-                if alive_sec_now >= 999 and mfe_now < 0.0015 and cur_gain_check <= 0:
+                # 🔧 Phase 2: 기존 스크래치 (35초 내 MFE 0.15% 미만이면 탈출)
+                if alive_sec_now >= 35 and mfe_now < 0.0015 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
@@ -6567,7 +6566,7 @@ def monitor_position(m,
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
 
                 if entry_mode == "half":
-                    _es_timeout = 999   # 🔧 비활성화 (before1에 없음)
+                    _es_timeout = 90    # 🔧 half: 90초 모멘텀 가드 (flow_alive 면제 있으므로 좋은 포지션 영향 없음)
                     _es_mfe_thr = 0.0025
                     _es_gain_thr = 0.0005
                 else:  # confirm
@@ -6651,15 +6650,16 @@ def monitor_position(m,
             #             outcome_extra = f"(MFE {max_gain*100:.3f}%, flow={flow_accel:.2f})"
             #             break
 
-            # === 🔧 횡보 탈출 로직 - 비활성화 (진입 타이트하므로 청산은 루즈하게) ===
-            # if alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
-            #     sideways_peak = max(sideways_peak, cur_gain)
-            #     SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
-            #     if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
-            #         close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
-            #         verdict = "횡보탈출"
-            #         outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
-            #         break
+            # === 🔧 횡보 탈출 로직 - probe/half 한정 재활성화 (자본 회전율 보호) ===
+            if entry_mode in ("probe", "half") and alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
+                sideways_peak = max(sideways_peak, cur_gain)
+                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
+                if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
+                    close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
+                    _already_closed = True
+                    verdict = "횡보탈출"
+                    outcome_extra = f"(고점{sideways_peak*100:.2f}%→{cur_gain*100:.2f}%, {alive_sec:.0f}초)"
+                    break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
