@@ -5363,7 +5363,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 if i >= 2:
                     s = sum(c["candle_acc_trade_price"] for c in c1[i-2:i+1])
                     past_sums.append(s)
-            vol_surge_3m = (sum_3 / statistics.mean(past_sums)) if past_sums else vol_surge_ema
+            vol_surge_3m = (sum_3 / max(statistics.mean(past_sums), 1)) if past_sums else vol_surge_ema  # 🔧 FIX: mean=0 방어
             vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
         else:
             vol_surge = vol_surge_ema
@@ -5560,7 +5560,8 @@ def final_check_leader(m, pre, tight_mode=False):
     buy_ratio = pre.get("buy_ratio", 0.5)
     spread = pre.get("spread", 0.5)
     # 🔧 CRITICAL: turn 단위 보정 (퍼센트 → 소수)
-    turn = (pre.get("turn_pct", 1.0) or 1.0) / 100.0
+    _tp = pre.get("turn_pct")
+    turn = (_tp if _tp is not None else 1.0) / 100.0  # 🔧 FIX: turn_pct=0 마스킹 방지 (or→is not None)
     imbalance = pre.get("imbalance", 0.0)
     volume_surge = pre.get("volume_surge", 1.0)
     fresh_ok = pre.get("fresh_ok", True)
