@@ -121,9 +121,10 @@ TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 승률개선: 0.2→0.25% (정상 풀�
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
     # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 하단에서 정의됨)
-    dyn_sl = globals().get("DYN_SL_MIN", 0.004)
-    # 손절폭의 60%를 트레일 최소 간격으로 (before1 기준)
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
+    dyn_sl = globals().get("DYN_SL_MIN", 0.005)
+    # 🔧 FIX: 연동비율 0.6→0.5 (DYN_SL_MIN=0.5%일 때 실효 0.25% 트레일)
+    # 기존 0.6이면 0.30%로 과도 확대됨
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.5)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -4585,7 +4586,9 @@ def ignition_detected(
     consec_buys = calc_consecutive_buys(window, 10) >= IGN_CONSEC_BUY_MIN
 
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
-    prices = [t["trade_price"] for t in reversed(window)]  # 오래된 → 최신
+    # 🔧 FIX: 명시적 시간순 정렬 (API 순서 의존 제거 → 오탐/누락 방지)
+    sorted_window = sorted(window, key=tick_ts_ms)
+    prices = [t["trade_price"] for t in sorted_window]  # 오래된 → 최신
     if len(prices) >= 6:
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
@@ -4899,9 +4902,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 회전율 컷 (동적) ===
     if turn_pct < eff_turn_min:
         return False, f"회전율부족 {turn_pct:.1f}%<{eff_turn_min:.1f}% | {metrics}"
-    # 🔧 before1 기준: 과회전 상한
-    if turn_pct > GATE_TURN_MAX:
-        return False, f"과회전 {turn_pct:.1f}%>{GATE_TURN_MAX:.0f}% | {metrics}"
+    # 🔧 FIX: GATE_TURN_MAX 이중체크 제거 — 메이저/알트별 상한(L4953)이 실제 컷 담당
+    # GATE_TURN_MAX=40이면 MAJOR=800/ALT=500이 도달 전에 잘려서 죽은 코드가 됨
+    # 절대 안전 상한은 max(MAJOR, ALT)로 자동 적용됨
     # 🔧 CRITICAL: 과회전 + 스프레드 넓음 = 슬리피지 위험
     if turn_pct > 50 and spread > 0.25:
         return False, f"과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25% | {metrics}"
@@ -5431,8 +5434,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cooldown_ms=15000
     )
 
-    # 🔧 before1 복원: 점화 여부 관계없이 wick 포함 고점 돌파 허용
-    high_breakout = high_breakout_wick
+    # 🔧 FIX: 점화시만 wick 허용, 비점화시 close+버퍼 (wick 페이크 감소 → 승률↑)
+    if ignition_score >= 3:
+        high_breakout = high_breakout_wick   # 점화: 폭발적 모멘텀이면 wick도 OK
+    else:
+        high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
     # === 🔥 BTC 역풍 가드 (게이트 통과 후 추가 요건 체크) ===
     btc5 = btc_5m_change()
@@ -5965,16 +5971,21 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
     pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
 
+    # 🔧 FIX: 신호별 동적 MAX (곱셈 후 원래 MAX에 막히는 버그 수정)
+    max_sl = DYN_SL_MAX
+
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
+        max_sl = max(max_sl, DYN_SL_MAX * 1.3)  # MAX도 같이 확대
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
-        pct *= 1.5  # 수익 중에는 SL을 더 멀리 둠
+        pct *= 1.5
+        max_sl = max(max_sl, DYN_SL_MAX * 1.5)  # MAX도 같이 확대
 
-    # 🔧 FIX: 곱셈 후 재클램프 (DYN_SL_MAX 초과 방지)
-    pct = min(max(pct, DYN_SL_MIN), DYN_SL_MAX)
+    # 🔧 FIX: 동적 MAX로 재클램프 (신호별 완화가 실제로 작동)
+    pct = min(max(pct, DYN_SL_MIN), max_sl)
 
     # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
