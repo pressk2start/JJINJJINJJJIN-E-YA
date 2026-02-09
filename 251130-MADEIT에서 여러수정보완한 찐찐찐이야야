@@ -6349,7 +6349,7 @@ def monitor_dead_cat(m, entry_price, dcb_pre):
         with _MONITOR_LOCK:
             _DCB_POSITIONS.discard(m)
             _ACTIVE_MONITORS.pop(m, None)
-        _release_entry_lock(m)
+        # 🔧 FIX: 락 해제는 _run_dcb_monitor finally에서 단일 책임 (이중해제 방지)
 
         # 결과 기록
         ret_pct = ((last_price / entry_price - 1.0) - FEE_RATE) * 100.0 if entry_price > 0 else 0
@@ -7488,16 +7488,18 @@ def main():
                                         actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", dcb_pre["price"])
 
                                     dcb_pre_copy = dict(dcb_pre)
+                                    # 🔧 FIX: _run_monitor 패턴 통일 — finally에서 락 단일 해제
+                                    # (기존: monitor_dead_cat finally + except 이중해제 → 레이스 위험)
                                     def _run_dcb_monitor(market, entry, pre_data):
                                         try:
                                             monitor_dead_cat(market, entry, pre_data)
                                         except Exception as e:
                                             print(f"[DCB_MON_ERR] {market}: {e}")
                                             traceback.print_exc()
-                                            with _MONITOR_LOCK:
-                                                _DCB_POSITIONS.discard(market)
-                                                _ACTIVE_MONITORS.pop(market, None)
+                                        finally:
                                             _release_entry_lock(market)
+                                            with _MONITOR_LOCK:
+                                                _ACTIVE_MONITORS.pop(market, None)
 
                                     dcb_thread = threading.Thread(
                                         target=_run_dcb_monitor,
