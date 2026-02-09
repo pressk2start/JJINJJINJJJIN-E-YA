@@ -7426,6 +7426,7 @@ def main():
 
             found = 0
             for m in shard:
+              _lock_held = False  # 🔧 FIX: 락 획득 여부 추적 (미획득 상태에서 해제 방지)
               try:  # 🔧 심볼별 예외 격리 (한 심볼 에러가 전체 스캔 중단 방지)
                 c1 = c1_cache.get(m, [])
                 if not c1: continue
@@ -7444,6 +7445,7 @@ def main():
                                     continue
                             if not _try_acquire_entry_lock(m):
                                 continue
+                            _lock_held = True
 
                             with _POSITION_LOCK:
                                 OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
@@ -7510,6 +7512,7 @@ def main():
                                     dcb_thread.start()
                                     with _MONITOR_LOCK:
                                         _ACTIVE_MONITORS[m] = dcb_thread
+                                    _lock_held = False  # 모니터 스레드가 락 소유
 
                                 except Exception as e:
                                     print(f"[DCB_OPEN_ERR] {m}: {e}")
@@ -7656,6 +7659,7 @@ def main():
                 if not _try_acquire_entry_lock(m):
                     print(f"[LOCK] {m} already locked → skip")
                     continue
+                _lock_held = True
 
                 # 🔧 FIX: 파일락 획득 후 OPEN_POSITIONS만 재확인 (recent_alerts는 이미 위에서 마킹됨)
                 with _POSITION_LOCK:
@@ -7834,6 +7838,7 @@ def main():
                                 OPEN_POSITIONS.pop(m, None)
                         # 🔧 FIX: 모니터 미생성이므로 락 직접 해제 (안 풀면 90초간 진입 차단)
                         _release_entry_lock(m)
+                        _lock_held = False
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
@@ -7901,6 +7906,7 @@ def main():
                     # 🔧 FIX: 스레드 객체 저장 (ident 대신)
                     with _MONITOR_LOCK:
                         _ACTIVE_MONITORS[m] = mon_thread
+                    _lock_held = False  # 모니터 스레드가 락 소유
                 else:
                     # 🔧 FIX: 신호 발송 실패 시 pre_signal pending 정리 + 락 해제
                     with _POSITION_LOCK:
@@ -7913,7 +7919,9 @@ def main():
                 # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
                 print(f"[SYMBOL_ERR][{m}] {e}")
                 traceback.print_exc()
-                _release_entry_lock(m)
+                # 🔧 FIX: 락 획득한 경우에만 해제 (미획득 시 모니터 스레드 락 삭제 방지)
+                if _lock_held:
+                    _release_entry_lock(m)
                 with _POSITION_LOCK:
                     if OPEN_POSITIONS.get(m, {}).get("state") == "pending":
                         OPEN_POSITIONS.pop(m, None)
