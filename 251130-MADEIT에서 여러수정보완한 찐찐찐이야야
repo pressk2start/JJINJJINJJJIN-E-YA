@@ -2318,13 +2318,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     # - "먹고 뱉는" 거래 방지
                     # - 🔧 FIX: 비교 기준을 alpha만으로 단순화 (slip은 gate/impact_cap으로 이미 관리)
                     # - ret_net에 slip 없으니 cp에서도 slip 제거 → 일관된 비교
-                    # 🔧 본절 = entry_price + 0.05% 여유 (호가노이즈 불필요 청산 방지)
+                    # 🔧 본절 = entry_price + 수수료 + 여유 (수수료 미포함 시 net 손실 발생)
                     if ret_pct > 0 and not pos2.get("breakeven_set"):
                         old_stop = pos2.get("stop", 0)
-                        be_price = entry_price * (1 + 0.0005)  # +0.05% 여유
+                        be_price = entry_price * (1 + FEE_RATE_ROUNDTRIP + 0.0005)  # 수수료(0.1%) + 여유(0.05%) = +0.15%
                         pos2["stop"] = be_price
                         pos2["breakeven_set"] = True
-                        print(f"[BREAKEVEN] {m} 부분익절 후 본절 설정: 손절 {old_stop:.0f} → {be_price:.0f} (entry+0.05%)")
+                        print(f"[BREAKEVEN] {m} 부분익절 후 본절 설정: 손절 {old_stop:.0f} → {be_price:.0f} (entry+{(FEE_RATE_ROUNDTRIP+0.0005)*100:.2f}%)")
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
