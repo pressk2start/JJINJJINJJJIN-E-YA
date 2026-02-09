@@ -2123,6 +2123,7 @@ def close_auto_position(m, reason=""):
 
 
 PARTIAL_PENDING_TIMEOUT = 30.0  # 🔧 FIX: pending 상태 타임아웃 (초)
+DUST_PREVENT_KRW = 6000  # 🔧 찌꺼기 방지 버퍼: 잔량이 이 금액 미만이면 전량청산 (최소주문 5000 + 여유 1000)
 
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
@@ -2203,11 +2204,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     remaining_volume = current_volume - sell_volume
     remaining_krw = remaining_volume * cur_price
 
-    # 매도금액 또는 잔여금액이 5000원 미만이면 → 전량청산으로 전환
+    # 매도금액이 5000원 미만 또는 잔여금액이 DUST_PREVENT_KRW 미만이면 → 전량청산으로 전환
+    # 🔧 FIX: 잔여 기준을 DUST_PREVENT_KRW(6000원)로 상향 → 가격 변동 시 찌꺼기 방지
     # 🔧 FIX: was_full 플래그로 전량청산 시도 여부 추적 (부분체결 시 재시도용)
     was_full = False
-    if sell_krw < MIN_ORDER_KRW or remaining_krw < MIN_ORDER_KRW:
-        print(f"[PARTIAL→FULL] {m} 최소금액 미달 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원) → 전량청산")
+    if sell_krw < MIN_ORDER_KRW or remaining_krw < DUST_PREVENT_KRW:
+        print(f"[PARTIAL→FULL] {m} 찌꺼기방지 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원 < {DUST_PREVENT_KRW}원) → 전량청산")
         # 🔧 FIX: 전량 전환 시 거래소 실잔고 사용 (찌꺼기 방지)
         actual_bal = get_actual_balance(m)
         sell_volume = actual_bal if actual_bal > 0 else current_volume
@@ -2276,6 +2278,46 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
             _SLIP_HISTORY.append(exit_slip)  # 하위호환
+
+        # 🔧 찌꺼기 방지: 체결 후 잔여금액 < DUST_PREVENT_KRW 이면 즉시 추가 매도
+        # - 사전 체크(pre-check)를 통과했더라도 부분체결/가격변동으로 잔량이 소액이 될 수 있음
+        # - 이 시점에서 바로 추가 매도하여 찌꺼기 잔류 원천 차단
+        remaining_price_ref = exit_price_used if exit_price_used > 0 else cur_price
+        remaining_krw_post = remaining_volume * remaining_price_ref
+        if remaining_volume > 1e-10 and remaining_krw_post < DUST_PREVENT_KRW and not was_full:
+            print(f"[DUST_PREVENT] {m} 체결 후 잔여 {remaining_volume:.6f} ({remaining_krw_post:.0f}원) < {DUST_PREVENT_KRW}원 → 추가 매도 시도")
+            try:
+                time.sleep(0.3)  # 거래소 잔고 반영 대기
+                dust_bal = get_actual_balance(m)
+                if dust_bal > 1e-12:
+                    dust_val = dust_bal * remaining_price_ref
+                    if dust_val >= MIN_ORDER_KRW:
+                        # 최소주문금액 이상 → 추가 매도 시도
+                        dust_res = place_market_sell(m, dust_bal, price_hint=remaining_price_ref)
+                        dust_uuid = dust_res.get("uuid") if isinstance(dust_res, dict) else None
+                        if dust_uuid:
+                            dust_od = get_order_result(dust_uuid, timeout_sec=8.0)
+                            dust_exec = 0.0
+                            if dust_od:
+                                try:
+                                    dust_exec = float(dust_od.get("executed_volume") or "0")
+                                except Exception:
+                                    dust_exec = 0.0
+                            if dust_exec > 0:
+                                executed += dust_exec
+                                remaining_volume = max(remaining_volume - dust_exec, 0.0)
+                                print(f"[DUST_PREVENT] {m} 추가 매도 성공: {dust_exec:.6f} → 잔여 {remaining_volume:.6f}")
+                    else:
+                        # 최소주문금액 미만 → 매도 불가, orphan 등록 + 포지션에서 제거
+                        _ORPHAN_HANDLED.add(m)
+                        remaining_volume = 0.0
+                        print(f"[DUST_PREVENT] {m} 잔여 {dust_val:.0f}원 < {MIN_ORDER_KRW}원 매도불가 → orphan 등록")
+                else:
+                    # 거래소에 잔고 없음 → 이미 정리됨
+                    remaining_volume = 0.0
+                    print(f"[DUST_PREVENT] {m} 거래소 잔고 0 → 이미 정리됨")
+            except Exception as _dust_e:
+                print(f"[DUST_PREVENT_ERR] {m}: {_dust_e}")
 
         # 손익 계산
         est_entry_value = entry_price * executed
@@ -6469,6 +6511,13 @@ def monitor_position(m,
     try:
         while time.time() - start_ts <= horizon:  # 🔧 before1 복원 (MAX_RUNTIME→horizon)
             time.sleep(RECHECK_SEC)
+
+            # 🔧 찌꺼기 방지: 부분청산→전량청산 전환 시 루프 조기 종료
+            with _POSITION_LOCK:
+                if m not in OPEN_POSITIONS:
+                    verdict = "부분청산→전량청산"
+                    _already_closed = True
+                    break
 
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
