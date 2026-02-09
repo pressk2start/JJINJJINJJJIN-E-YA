@@ -524,6 +524,10 @@ def record_trade(market: str, pnl_pct: float):
     🔧 FIX: streak도 여기서 일원화 (update_trade_result 누락/중복 스킵 영향 제거)
     """
     global _lose_streak, _win_streak
+    # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
+    # 실무상 단일 거래에서 ±50% 이상은 비정상 → 1.0 초과면 %로 간주
+    if abs(pnl_pct) > 1.0:
+        pnl_pct = pnl_pct / 100.0
     is_win = pnl_pct > 0
 
     TRADE_HISTORY.append({
@@ -2027,9 +2031,10 @@ def close_auto_position(m, reason=""):
                 _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
             # ✅ 거래 결과 기록 (승률 기반 리스크 튜닝에 사용)
-            # 🔧 before1 복원: gross ret_pct 사용 (adaptive risk가 더 낙관적으로 사이징)
+            # 🔧 FIX: ret_pct는 % 단위(예: 2.3) → 소수 단위(0.023)로 변환 필수
+            # (방어코드가 record_trade 내부에도 있지만, 호출부에서도 정확히 넣기)
             try:
-                record_trade(m, ret_pct)
+                record_trade(m, ret_pct / 100.0)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
@@ -6898,6 +6903,8 @@ def monitor_position(m,
         # ================================
         # 2) 끝알람 문구 생성
         # ================================
+        # 🔧 FIX: 루프 종료 후 c1 갱신 (stale 데이터로 끝알람/ctx 판단 왜곡 방지)
+        c1 = _get_c1_cached() or c1
         action, rationale = _end_reco(entry_price,
                                       last_price,
                                       c1,
@@ -7824,7 +7831,8 @@ def main():
                             # 🔧 FIX: 스레드가 살아있는지 확인 (is_alive)
                             if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
                                 print(f"[MON_SKIP] {m} 이미 모니터링 중 → 스레드 생성 스킵")
-                                _release_entry_lock(m)
+                                # 🔧 FIX: 락 해제하지 않음 — 기존 모니터 finally가 해제 담당
+                                # 여기서 풀면 중복진입 가능한 갭이 생김
                                 continue
                             # 죽은 스레드면 정리하고 새로 시작
                             print(f"[MON_CLEANUP] {m} 죽은 모니터 스레드 정리")
