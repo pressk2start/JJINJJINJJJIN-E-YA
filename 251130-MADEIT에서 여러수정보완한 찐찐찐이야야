@@ -120,11 +120,11 @@ TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 승률개선: 0.2→0.25% (정상 풀�
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
-    # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 하단에서 정의됨)
     dyn_sl = globals().get("DYN_SL_MIN", 0.005)
-    # 🔧 FIX: 연동비율 0.6→0.5 (DYN_SL_MIN=0.5%일 때 실효 0.25% 트레일)
-    # 기존 0.6이면 0.30%로 과도 확대됨
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.5)
+    # 🔧 FIX: 프로파일이 TRAIL_DISTANCE_MIN을 바꾸면 반영되도록 수정
+    # 기존: TRAIL_DISTANCE_MIN_BASE만 참조 → 프로파일(strict/balanced/relaxed) 무력화
+    base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
+    return max(base, dyn_sl * 0.5)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -4096,7 +4096,8 @@ def get_recent_ticks(m, c=100, allow_network=True):
 
     if not js or not isinstance(js, list):
         return hit["ticks"][:c] if hit else []
-    js_sorted = sorted(js, key=lambda t: t.get("timestamp", 0), reverse=True)
+    # 🔧 FIX: tick_ts_ms 통일 (timestamp/ts 키 혼재 + 초/ms 방어)
+    js_sorted = sorted(js, key=tick_ts_ms, reverse=True)
     _TICKS_CACHE.set(m, {"ts": now_ms, "ticks": js_sorted})
     return js_sorted[:c]  # 🔧 요청 수만큼 slice 반환
 
@@ -7827,7 +7828,8 @@ def main():
                             pos = OPEN_POSITIONS.get(m)
                             if pos and pos.get("pre_signal"):
                                 OPEN_POSITIONS.pop(m, None)
-                        # 🔧 FIX: 락 해제는 모니터 스레드 finally에서 담당 (이중 해제 제거)
+                        # 🔧 FIX: 모니터 미생성이므로 락 직접 해제 (안 풀면 90초간 진입 차단)
+                        _release_entry_lock(m)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
