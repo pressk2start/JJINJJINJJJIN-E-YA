@@ -82,8 +82,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 왕복 수수료(0.1%) + 왕복슬리피지 + 최소알파(0.1%)
     dynamic_cp = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 🔧 승률개선: 최소 0.35%, 최대 0.70% (손절폭 확대에 맞춰 얇은수익 기준 상향)
-    return max(0.0035, min(0.0070, dynamic_cp))
+    # 🔧 최소 0.30%, 최대 0.50% (before1=0.25~0.45%, SL 0.4~0.6% 대비 적정 체크포인트)
+    # 천정 0.70→0.50%: 변동성 높을 때 체크포인트 과대 → 트레일 무장 지연 방지
+    return max(0.0030, min(0.0050, dynamic_cp))
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -105,12 +106,12 @@ SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 # 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.010,              # 🔧 R:R개선: 0.6→1.0% (SL 1.5% 대비 R:R 1:0.67 확보, 추세 충분히 먹기)
-    "강돌파 (EMA↑+고점↑)": 0.008,  # 🔧 R:R개선: 0.5→0.8% (강돌파는 더 큰 수익 기대)
-    "EMA↑": 0.007,                 # 🔧 R:R개선: 0.5→0.7% (SL 1.5% 대비 수익폭 확보)
-    "고점↑": 0.006,                # 🔧 R:R개선: 0.45→0.6% (고점돌파 모멘텀 충분히 활용)
-    "거래량↑": 0.006,              # 🔧 R:R개선: 0.4→0.6% (SL 1.5% 대비 최소 R:R 1:0.4 확보)
-    "기본": 0.007,                 # 🔧 R:R개선: 0.5→0.7% (기본 경로도 SL 대비 적정 R:R)
+    "🔥점화": 0.008,              # 🔧 1.0→0.8% (SL 0.6% 대비 R:R 1:1.3, 더 자주 부분익절)
+    "강돌파 (EMA↑+고점↑)": 0.007,  # 🔧 0.8→0.7% (강돌파 모멘텀 활용, 빈도↑)
+    "EMA↑": 0.006,                 # 🔧 0.7→0.6% (SL 0.6% 대비 R:R 1:1, 적정 빈도)
+    "고점↑": 0.005,                # 🔧 0.6→0.5% (고점돌파 빠른 수익 확보)
+    "거래량↑": 0.005,              # 🔧 0.6→0.5% (거래량 급증 시 빠른 수익 확보)
+    "기본": 0.006,                 # 🔧 0.7→0.6% (기본 경로도 SL 대비 R:R 1:1 확보)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
@@ -119,12 +120,13 @@ TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
 TRAIL_DISTANCE_MIN_BASE = 0.002  # 🔧 before1 복원: 0.2% (타이트한 트레일 = 수익 보존 극대화)
 
 def get_trail_distance_min():
-    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
-    dyn_sl = globals().get("DYN_SL_MIN", 0.005)
-    # 🔧 FIX: 프로파일이 TRAIL_DISTANCE_MIN을 바꾸면 반영되도록 수정
-    # 기존: TRAIL_DISTANCE_MIN_BASE만 참조 → 프로파일(strict/balanced/relaxed) 무력화
-    base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
-    return max(base, dyn_sl * 0.5)
+    """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소
+    🔧 FIX: before1 방식 복원 — TRAIL_DISTANCE_MIN_BASE 기준 (프로파일 override 무시)
+    프로파일이 TRAIL을 0.35%로 덮어쓰면 수익 보존 능력 저하 → BASE 고정
+    """
+    dyn_sl = globals().get("DYN_SL_MIN", 0.004)
+    # before1: max(BASE, dyn_sl * 0.6) → max(0.002, 0.004*0.6=0.0024) = 0.24%
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -182,24 +184,24 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        # 🔧 승률개선: strict도 DYN_SL 확대에 맞춰 조정
-        WARMUP_SEC = 5  # 🔧 3→5초 (슬리피지 안정화 시간 확보)
-        HARD_STOP_DD = 0.018  # 🔧 1.2→1.8% (DYN_SL_MAX 1.5%와 밸런스)
-        EXIT_DEBOUNCE_SEC = 5  # 🔧 4→5초 (휩쏘 1~2틱 무시)
+        # 🔧 before1 기준 strict 복원 + 디바운스 개선 유지
+        WARMUP_SEC = 5  # before1=3 → 5초 (슬리피지 안정화 확보)
+        HARD_STOP_DD = 0.015  # 🔧 before1=0.012→절충 1.5% (DYN_SL 0.6% 대비 안전망)
+        EXIT_DEBOUNCE_SEC = 5  # before1=4 → 5초 (휩쏘 무시 개선 유지)
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.8  # 🔧 0.7→0.8 (정상 눌림 허용)
-        TRAIL_DISTANCE_MIN = 0.0035  # 🔧 0.15→0.35% (휩쏘 트레일컷 방지)
+        TRAIL_ATR_MULT = 0.75  # 🔧 before1=0.7→절충 0.75 (타이트 트레일 + 눌림 허용)
+        TRAIL_DISTANCE_MIN = 0.002  # 🔧 FIX: 0.35→0.2% (before1 기준 복원, 수익 보존 핵심)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
-        CTX_EXIT_THRESHOLD = 3  # 🔧 2→3 (컨텍스트 청산 민감도 완화, 좋은 포지션 유지)
+        CTX_EXIT_THRESHOLD = 2  # 🔧 before1=2 복원 (컨텍스트 역전 빠른 반응)
 
-    else:  # balanced (DYN_SL 확대 반영)
+    else:  # balanced (before1 기준 + 소폭 완화)
         WARMUP_SEC = 8  # 🔧 12→8초 (진입 후 빠른 모니터링)
-        HARD_STOP_DD = 0.025  # 🔧 2.2→2.5% (DYN_SL_MAX 1.5%와 밸런스)
+        HARD_STOP_DD = 0.020  # 🔧 2.5→2.0% (before1=2.2%, DYN_SL 0.6% 대비 적정 안전망)
         EXIT_DEBOUNCE_SEC = 6  # 🔧 8→6초 (적당한 확인 시간)
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.9  # 🔧 0.8→0.9 (정상 눌림 여유 확보)
-        TRAIL_DISTANCE_MIN = 0.004  # 🔧 0.2→0.4% (휩쏘 트레일컷 방지)
+        TRAIL_ATR_MULT = 0.85  # 🔧 0.9→0.85 (타이트 트레일 + 눌림 허용 절충)
+        TRAIL_DISTANCE_MIN = 0.0025  # 🔧 0.4→0.25% (before1=0.2%, balanced는 소폭 여유)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -7140,6 +7142,22 @@ def monitor_position(m,
                 trail_armed = True
                 trail_stop = curp * (1.0 - get_trail_distance_min())
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
+
+            # === 🔧 수익 래칫 (Ratcheting Profit Lock) ===
+            # before1 수익률 0 수렴 근본 해결: 수익이 오를수록 base_stop 단계적 상향
+            # trail 청산보다 먼저 base_stop이 수익을 잠궈 되돌림 시에도 수익 확보
+            if trail_armed and gain_from_entry > 0:
+                _ratchet_lock = 0
+                if gain_from_entry >= 0.012:      # +1.2% → 최소 +0.6% 확보
+                    _ratchet_lock = entry_price * (1.0 + 0.006)
+                elif gain_from_entry >= 0.008:    # +0.8% → 최소 +0.35% 확보
+                    _ratchet_lock = entry_price * (1.0 + 0.0035)
+                elif gain_from_entry >= 0.005:    # +0.5% → 최소 +0.15% 확보
+                    _ratchet_lock = entry_price * (1.0 + 0.0015)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트 → 본절 확보
+                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.0005)
+                if _ratchet_lock > base_stop:
+                    base_stop = _ratchet_lock
 
             # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
             if USE_PYRAMIDING and AUTO_TRADE:
