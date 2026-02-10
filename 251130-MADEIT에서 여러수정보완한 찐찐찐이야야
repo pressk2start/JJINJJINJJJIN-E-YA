@@ -2755,7 +2755,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 # =========================
 # 얼럿 정책
 # =========================
-SILENT_MIDDLE_ALERTS = True
+SILENT_MIDDLE_ALERTS = False  # 🔧 중간 알림 활성화 (트레일/MFE/부분청산 등)
 
 
 def tg_send_mid(t):
@@ -7218,7 +7218,8 @@ def monitor_position(m,
 # =========================
 # 알림
 # =========================
-def tg_send(t, retry=1):
+def tg_send(t, retry=3):
+    """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)"""
     # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력
     if not TG_TOKEN or not CHAT_IDS:
         print(t)
@@ -7233,12 +7234,12 @@ def tg_send(t, retry=1):
             "disable_web_page_preview": True,
         }
         sent = False
-        for _ in range(retry + 1):
+        for attempt in range(retry + 1):
             try:
                 r = SESSION.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload,
-                    timeout=4,
+                    timeout=8,
                 )
                 if r.status_code == 200:
                     js = r.json()
@@ -7246,6 +7247,15 @@ def tg_send(t, retry=1):
                         ok_any = True
                         sent = True
                         break
+                # 🔧 429 Too Many Requests → Retry-After 만큼 대기
+                elif r.status_code == 429:
+                    try:
+                        retry_after = r.json().get("parameters", {}).get("retry_after", 1)
+                    except Exception:
+                        retry_after = 1
+                    print(f"[TG][{cid}] 429 rate-limit → {retry_after}초 대기 (시도 {attempt+1}/{retry+1})")
+                    time.sleep(retry_after + 0.1)
+                    continue  # 백오프 sleep 건너뜀 (이미 대기함)
                 else:
                     # 디버깅용
                     print(f"[TG][{cid}] status={r.status_code} body={r.text}")
@@ -7261,7 +7271,7 @@ def tg_send(t, retry=1):
                             r2 = SESSION.post(
                                 f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                                 json=payload_plain,
-                                timeout=4,
+                                timeout=8,
                             )
                             if r2.status_code == 200 and r2.json().get("ok"):
                                 ok_any = True
@@ -7271,7 +7281,9 @@ def tg_send(t, retry=1):
                             pass
             except Exception as e:
                 print(f"[TG][{cid}] exception: {e}")
-            time.sleep(0.25 + rnd() * 0.25)
+            # 🔧 지수 백오프: 0.5s → 1s → 2s → 4s
+            backoff = min(4, 0.5 * (2 ** attempt)) + rnd() * 0.3
+            time.sleep(backoff)
         # 🔧 FIX: 모든 시도 실패 시 마지막으로 plain text 시도
         if not sent:
             try:
@@ -7283,13 +7295,59 @@ def tg_send(t, retry=1):
                 r3 = SESSION.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload_plain,
-                    timeout=4,
+                    timeout=8,
                 )
                 if r3.status_code == 200 and r3.json().get("ok"):
                     ok_any = True
+                else:
+                    # 🔧 최종 실패 → 큐에 저장
+                    _tg_fail_queue.append((time.time(), cid, t))
+                    print(f"[TG][{cid}] 전송 실패 → 큐 저장 (큐 크기: {len(_tg_fail_queue)})")
             except Exception as e:
                 print(f"[TG][{cid}] final plain fallback failed: {e}")
+                _tg_fail_queue.append((time.time(), cid, t))
     return ok_any
+
+
+# 🔧 실패 메시지 재전송 큐
+_tg_fail_queue = deque(maxlen=50)  # 최대 50개 보관
+_tg_flush_lock = threading.Lock()
+
+
+def tg_flush_failed():
+    """실패한 메시지 재전송 시도 (메인 루프에서 주기적 호출)"""
+    if not _tg_fail_queue:
+        return
+    with _tg_flush_lock:
+        retried = 0
+        while _tg_fail_queue and retried < 5:  # 한 번에 최대 5개
+            ts, cid, msg = _tg_fail_queue[0]
+            # 10분 이상 된 메시지는 버림
+            if time.time() - ts > 600:
+                _tg_fail_queue.popleft()
+                continue
+            try:
+                payload = {
+                    "chat_id": cid,
+                    "text": f"[지연] {re.sub(r'<[^>]+>', '', msg)}",
+                    "disable_web_page_preview": True,
+                }
+                r = SESSION.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json=payload,
+                    timeout=8,
+                )
+                if r.status_code == 200 and r.json().get("ok"):
+                    _tg_fail_queue.popleft()
+                    retried += 1
+                    print(f"[TG_FLUSH] 재전송 성공 ({retried}건)")
+                elif r.status_code == 429:
+                    break  # rate-limit면 다음 기회에
+                else:
+                    _tg_fail_queue.popleft()  # 복구 불가 오류면 버림
+            except Exception:
+                break  # 네트워크 오류면 다음 기회에
+            time.sleep(0.3)
 
 
 # =========================
@@ -7547,6 +7605,10 @@ def main():
     # 🔧 FIX: ThreadPoolExecutor를 루프 밖에서 1회 생성 (매 루프 생성/소멸 오버헤드 제거)
     _candle_executor = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
 
+    # 🔧 주기적 헬스체크 텔레그램 알림 (30분마다)
+    _last_heartbeat_ts = time.time()
+    _HEARTBEAT_INTERVAL = 1800  # 30분
+
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
@@ -7555,6 +7617,19 @@ def main():
                     hf.write(f"{time.time()}\n")
             except Exception:
                 pass
+
+            # 🔧 실패 메시지 큐 재전송
+            tg_flush_failed()
+
+            # 🔧 30분마다 텔레그램 헬스체크 알림
+            if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
+                _last_heartbeat_ts = time.time()
+                with _POSITION_LOCK:
+                    pos_count = len([p for p in OPEN_POSITIONS.values() if p.get("state") == "open"])
+                tg_send(
+                    f"💓 봇 생존 확인 | {now_kst_str()}\n"
+                    f"📊 보유 {pos_count}개 | 큐 {len(_tg_fail_queue)}건"
+                )
 
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
