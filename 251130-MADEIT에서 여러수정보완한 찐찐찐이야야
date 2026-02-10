@@ -48,7 +48,7 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 진입 후 5초 웜업
-HARD_STOP_DD = 0.015  # -1.5% 급락 시 즉시 컷 (strict 기준)
+HARD_STOP_DD = 0.020  # 🔧 승률개선: 1.5→2.0% 급락 시 즉시 컷 (DYN_SL_MAX 확대에 맞춤)
 EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
 EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
 
@@ -82,8 +82,8 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 왕복 수수료(0.1%) + 왕복슬리피지 + 최소알파(0.1%)
     dynamic_cp = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 최소 0.28%, 최대 0.50% (왕복 슬리피지 반영으로 상향)
-    return max(0.0028, min(0.0050, dynamic_cp))
+    # 🔧 승률개선: 최소 0.35%, 최대 0.70% (손절폭 확대에 맞춰 얇은수익 기준 상향)
+    return max(0.0035, min(0.0070, dynamic_cp))
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -105,18 +105,18 @@ SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 # 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
 # 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.006,              # +0.6% MFE 시 50% 익절 (강신호, 높은 목표)
-    "강돌파 (EMA↑+고점↑)": 0.005,  # +0.5% MFE 시 50% 익절
-    "EMA↑": 0.005,                 # 🔧 R:R개선: 0.4→0.5% (손절 대비 익절폭 확보)
-    "고점↑": 0.0045,               # 🔧 R:R개선: 0.35→0.45% (손절 대비 익절폭 확보)
-    "거래량↑": 0.004,              # 🔧 R:R개선: 0.3→0.4% (SL 0.6% 대비 MFE 너무 얕았음)
-    "기본": 0.005,                 # 🔧 R:R개선: 0.4→0.5% (손절 대비 익절폭 확보)
+    "🔥점화": 0.010,              # 🔧 R:R개선: 0.6→1.0% (SL 1.5% 대비 R:R 1:0.67 확보, 추세 충분히 먹기)
+    "강돌파 (EMA↑+고점↑)": 0.008,  # 🔧 R:R개선: 0.5→0.8% (강돌파는 더 큰 수익 기대)
+    "EMA↑": 0.007,                 # 🔧 R:R개선: 0.5→0.7% (SL 1.5% 대비 수익폭 확보)
+    "고점↑": 0.006,                # 🔧 R:R개선: 0.45→0.6% (고점돌파 모멘텀 충분히 활용)
+    "거래량↑": 0.006,              # 🔧 R:R개선: 0.4→0.6% (SL 1.5% 대비 최소 R:R 1:0.4 확보)
+    "기본": 0.007,                 # 🔧 R:R개선: 0.5→0.7% (기본 경로도 SL 대비 적정 R:R)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
 # 트레일링 손절 설정 (before1 기준 - 타이트)
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN_BASE = 0.0035  # 🔧 승률개선: 0.25→0.35% (정상 리트레이스 허용, 휩쏘 트레일컷 감소)
+TRAIL_DISTANCE_MIN_BASE = 0.0050  # 🔧 승률개선: 0.35→0.50% (손절폭 확대에 맞춰 트레일도 여유확보, 휩쏘 트레일컷 대폭 감소)
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
@@ -182,24 +182,24 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        # before1 기준 (타이트, 빠른 반응)
-        WARMUP_SEC = 3  # 더 빠른 반응
-        HARD_STOP_DD = 0.012  # -1.2% 손절
-        EXIT_DEBOUNCE_SEC = 4
+        # 🔧 승률개선: strict도 DYN_SL 확대에 맞춰 조정
+        WARMUP_SEC = 5  # 🔧 3→5초 (슬리피지 안정화 시간 확보)
+        HARD_STOP_DD = 0.018  # 🔧 1.2→1.8% (DYN_SL_MAX 1.5%와 밸런스)
+        EXIT_DEBOUNCE_SEC = 5  # 🔧 4→5초 (휩쏘 1~2틱 무시)
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.7
-        TRAIL_DISTANCE_MIN = 0.0015  # 0.15% 간격 (가장 타이트)
+        TRAIL_ATR_MULT = 0.8  # 🔧 0.7→0.8 (정상 눌림 허용)
+        TRAIL_DISTANCE_MIN = 0.0035  # 🔧 0.15→0.35% (휩쏘 트레일컷 방지)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
-        CTX_EXIT_THRESHOLD = 2  # 컨텍스트 역전 더 민감
+        CTX_EXIT_THRESHOLD = 3  # 🔧 2→3 (컨텍스트 청산 민감도 완화, 좋은 포지션 유지)
 
-    else:  # balanced (before1 기준)
-        WARMUP_SEC = 12
-        HARD_STOP_DD = 0.022
-        EXIT_DEBOUNCE_SEC = 8
+    else:  # balanced (DYN_SL 확대 반영)
+        WARMUP_SEC = 8  # 🔧 12→8초 (진입 후 빠른 모니터링)
+        HARD_STOP_DD = 0.025  # 🔧 2.2→2.5% (DYN_SL_MAX 1.5%와 밸런스)
+        EXIT_DEBOUNCE_SEC = 6  # 🔧 8→6초 (적당한 확인 시간)
         EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.8
-        TRAIL_DISTANCE_MIN = 0.002  # 0.2% 간격
+        TRAIL_ATR_MULT = 0.9  # 🔧 0.8→0.9 (정상 눌림 여유 확보)
+        TRAIL_DISTANCE_MIN = 0.004  # 🔧 0.2→0.4% (휩쏘 트레일컷 방지)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -272,9 +272,9 @@ DCB_SPREAD_MAX = 0.12          # 스프레드 ≤ 0.12% (하락장 얇은호가 
 DCB_DEPTH_MIN = 8_000_000      # 호가깊이 ≥ 8백만원
 # 청산
 DCB_TP_RETRACEMENT = 0.35      # 낙폭 35% 되돌림 → 전량 익절
-DCB_MFE_PARTIAL_PCT = 0.004    # +0.4% MFE → 50% 부분익절
-DCB_SL_BELOW_LOW = 0.005       # 저점 -0.5% → 즉시 손절
-DCB_SCRATCH_SEC = 30            # 30초 내 MFE 0.1% 못 찍으면 스크래치
+DCB_MFE_PARTIAL_PCT = 0.006    # 🔧 R:R개선: 0.4→0.6% (SL 0.8% 대비 적정 R:R)
+DCB_SL_BELOW_LOW = 0.008       # 🔧 승률개선: 0.5→0.8% (반등 과정 정상 흔들림 허용)
+DCB_SCRATCH_SEC = 45            # 🔧 승률개선: 30→45초 (반등 확인에 충분한 시간)
 DCB_SCRATCH_MFE = 0.001        # 스크래치 MFE 기준 0.1%
 DCB_MAX_HOLD_SEC = 120         # 최대 120초
 DCB_TRAIL_DIST = 0.002         # 트레일 간격 0.2%
@@ -2544,7 +2544,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             mark_position_closed(m, "remonitor entry - balance zero")
             return False
 
-    CYCLE_SEC = 300
+    CYCLE_SEC = 60  # 🔧 승률개선: 300→60초 (빠른 하락 대응, 5분 방치→1분 반응)
     cycle = 0
 
     # 🔧 시간 기반 타임아웃 제거 - 가격 조건으로만 매도
@@ -2829,7 +2829,7 @@ GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
-GATE_ACCEL_MAX = 5.0      # 🔧 가속도 상한 (x) - 2.5→5.0 완화 (무알람 대응)
+GATE_ACCEL_MAX = 3.0      # 🔧 승률개선: 5.0→3.0 (펌프앤덤프 고점진입 차단, 정상 가속은 3배 이내)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
@@ -2847,8 +2847,8 @@ GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (�
 GATE_PSTD_MAX = 0.50      # 🔧 대폭 완화 (0.10→0.50) 데이터 수집 후 재조정
 GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 수집 후 재조정
 GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
-GATE_TURN_MAX_ALT = 500.0     # 🔧 대폭 완화 (150→500) 데이터 수집 후 재조정
-GATE_TURN_MAX_ALT_PROBE = 500.0  # 🔧 대폭 완화 (120→500) 데이터 수집 후 재조정
+GATE_TURN_MAX_ALT = 250.0     # 🔧 승률개선: 500→250 (고회전=워시트레이딩 리스크 차단)
+GATE_TURN_MAX_ALT_PROBE = 200.0  # 🔧 승률개선: 500→200 (probe에서 과회전 알트 차단 강화)
 GATE_CONSEC_BUY_MIN_QUALITY = 1   # 🔧 대폭 완화 (5→1) 데이터 수집 후 재조정
 GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
@@ -2900,7 +2900,7 @@ PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위
 MIN_REAL_TRADES = 10
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.008
+STOP_LOSS_PCT = 0.015  # 🔧 승률개선: 0.8→1.5% (DYN_SL_MAX와 일치시켜 정적/동적 SL 일관성)
 RECHECK_SEC = 5
 
 # Ignition
@@ -2948,9 +2948,9 @@ POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거) - 익절키우기 적용
 ATR_PERIOD = 14
-ATR_MULT = 0.45           # 🔧 승률개선: 0.35→0.45 (추세 포지션 거짓손절 감소)
-DYN_SL_MIN = 0.005        # 🔧 승률개선: 0.4→0.5% (정상 흔들림 stop-out 감소)
-DYN_SL_MAX = 0.006        # 🔧 R:R개선: 0.8→0.6% 원복 (손절 크고 익절 얇은 문제 해결)
+ATR_MULT = 1.0            # 🔧 승률개선: 0.45→1.0 (ATR 1배 = 정상 변동 허용, 거짓손절 대폭 감소)
+DYN_SL_MIN = 0.008        # 🔧 승률개선: 0.5→0.8% (스프레드+정상흔들림 stop-out 방지)
+DYN_SL_MAX = 0.015        # 🔧 승률개선: 0.6→1.5% (정상 눌림 허용, 추세 유지 → 수익 극대화)
 
 # =========================
 # 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
@@ -3062,7 +3062,7 @@ TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
 # 🔧 자동학습 ON - 건수 기반 (매수만 학습, 매도는 고정)
 AUTO_LEARN_ENABLED = True   # 학습 활성화 (로그 수집)
-AUTO_LEARN_APPLY = False    # 🔧 학습 결과 실제 적용 OFF (그림자 모드)
+AUTO_LEARN_APPLY = True     # 🔧 승률개선: 학습 결과 실제 적용 ON (데이터 기반 임계치 자동 조정)
 AUTO_LEARN_MIN_TRADES = 100 # 분석 시 최소 샘플
 AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
 AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
@@ -5725,13 +5725,13 @@ def final_check_leader(m, pre, tight_mode=False):
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
 
     # === 🔥 스코어 기반 진입모드 자동 매핑 (기대값 우선) ===
-    # 🔧 FIX: confirm 문턱 상향 (70→78) - 손실 빈도/크기 감소
-    # score < 60: probe (소액 탐색) → 추격 진입 방지
-    # score 60~78: half (절반)
-    # score >= 78: confirm (풀 사이즈)
-    if score < 60:
+    # 🔧 승률개선: 손절폭 확대 → confirm/half 문턱 약간 완화 (좋은 진입 기회 확보)
+    # score < 55: probe (소액 탐색) → 추격 진입 방지
+    # score 55~72: half (절반) → 넓은 범위로 안정적 진입
+    # score >= 72: confirm (풀 사이즈) → 강한 신호만
+    if score < 55:
         entry_mode = "probe"
-    elif score < 78:
+    elif score < 72:
         entry_mode = "half"
     else:
         entry_mode = "confirm"
@@ -6625,7 +6625,7 @@ def monitor_position(m,
 
     # === 🔧 고점 갱신 기반 시간손절 (페이크 돌파 조기 탈출) ===
     peak_update_count = 0        # 고점 갱신 횟수
-    NO_PEAK_TIMEOUT_SEC = 45     # 45초 내 고점 갱신 없으면 페이크로 간주
+    NO_PEAK_TIMEOUT_SEC = 60     # 🔧 승률개선: 45→60초 (눌림 후 재상승에 충분한 시간 제공)
     MIN_PEAK_UPDATES = 1         # 최소 1회 고점 갱신 필요
 
     # === 🔧 MFE 기반 부분익절 상태 ===
@@ -6725,14 +6725,14 @@ def monitor_position(m,
                 alive_sec_now = time.time() - start_ts
                 mfe_now = (best / entry_price - 1.0) if entry_price > 0 else 0
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                # 🔧 Phase 1: 조기 모멘텀 확인 (25초 내 MFE 0.08% 미만이면 탈출)
-                if alive_sec_now >= 25 and mfe_now < 0.0008 and cur_gain_check <= 0:
+                # 🔧 Phase 1: 조기 모멘텀 확인 (30초 내 MFE 0.10% 미만이면 탈출)
+                if alive_sec_now >= 30 and mfe_now < 0.0010 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe조기철수 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (조기모멘텀부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
                     break
-                # 🔧 Phase 2: 기존 스크래치 (35초 내 MFE 0.15% 미만이면 탈출)
-                if alive_sec_now >= 35 and mfe_now < 0.0015 and cur_gain_check <= 0:
+                # 🔧 Phase 2: 기존 스크래치 (45초 내 MFE 0.20% 미만이면 탈출)
+                if alive_sec_now >= 45 and mfe_now < 0.0020 and cur_gain_check <= 0:
                     close_auto_position(m, f"probe스크래치 | {alive_sec_now:.0f}초 MFE={mfe_now*100:.2f}% (모멘텀 부재)")
                     _already_closed = True
                     verdict = "probe 스크래치"
@@ -6745,13 +6745,13 @@ def monitor_position(m,
                 cur_gain_check = (curp / entry_price - 1.0) if entry_price > 0 else 0
 
                 if entry_mode == "half":
-                    _es_timeout = 90    # 🔧 half: 90초 모멘텀 가드 (flow_alive 면제 있으므로 좋은 포지션 영향 없음)
-                    _es_mfe_thr = 0.0025
-                    _es_gain_thr = 0.0005
+                    _es_timeout = 120   # 🔧 승률개선: 90→120초 (눌림 후 회복 시간 확보)
+                    _es_mfe_thr = 0.003
+                    _es_gain_thr = 0.001
                 else:  # confirm
-                    _es_timeout = 180   # 🔧 240→180초 단축 (flow_alive 면제 있으므로 좋은 포지션 영향 없음, 자본 회전↑)
-                    _es_mfe_thr = 0.0035
-                    _es_gain_thr = 0.0010
+                    _es_timeout = 240   # 🔧 승률개선: 180→240초 (confirm은 추세 여유 충분히)
+                    _es_mfe_thr = 0.004
+                    _es_gain_thr = 0.0015
 
                 if alive_sec_now >= _es_timeout and mfe_now < _es_mfe_thr and cur_gain_check <= _es_gain_thr:
                     # 테이프 흐름 확인: 매수세가 살아있으면 바이패스
@@ -6853,7 +6853,7 @@ def monitor_position(m,
             # === 🔧 횡보 탈출 로직 - probe/half 한정 재활성화 (자본 회전율 보호) ===
             if entry_mode in ("probe", "half") and alive_sec >= SIDEWAYS_TIMEOUT and not trail_armed:
                 sideways_peak = max(sideways_peak, cur_gain)
-                SIDEWAYS_TRAIL_DROP = 0.0003  # 0.03%
+                SIDEWAYS_TRAIL_DROP = 0.0008  # 🔧 승률개선: 0.03→0.08% (횡보 중 미세 흔들림에 조기탈출 방지)
                 if cur_gain < sideways_peak - SIDEWAYS_TRAIL_DROP:
                     close_auto_position(m, f"횡보탈출 | {alive_sec:.0f}초 고점{sideways_peak*100:.2f}%→현재{cur_gain*100:.2f}%")
                     _already_closed = True
@@ -7129,10 +7129,10 @@ def monitor_position(m,
                     if ok:
                         mfe_partial_done = True
                         last_exit_event_ts = time.time()
-                        # 🔧 승률개선: 본절→MFE*30% 수익 락인 (잔여 50%도 의미있는 수익 확보)
-                        # 기존: 수수료+0.05%만 보호 → 잔량이 본절 근처에서 손절되는 문제
-                        # 변경: MFE의 30%를 확보하여 부분익절 후 되돌림에도 수익 유지
-                        mfe_lock_pct = max(FEE_RATE + 0.0005, max_gain * 0.3)
+                        # 🔧 승률개선: 본절→MFE*50% 수익 락인 (잔여 50%도 확실한 수익 확보)
+                        # 기존: MFE 30% → 되돌림 시 수익 증발
+                        # 변경: MFE의 50%를 확보하여 부분익절 후 되돌림에도 안정 수익 유지
+                        mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.5)
                         be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
                         tg_send_mid(f"🎯 {m} MFE익절 {int(MFE_PARTIAL_RATIO*100)}% | +{max_gain*100:.2f}% ({signal_tag}) | 손절선→+{mfe_lock_pct*100:.2f}% 상향")
@@ -7141,7 +7141,7 @@ def monitor_position(m,
             # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
             # 🔧 승률개선: entry_mode별 Plateau 시간 차등화
             # - confirm: 40초 (추세 여유), half: 30초, probe: 20초 (빠른 탈출)
-            PLATEAU_SEC = 40 if entry_mode == "confirm" else (30 if entry_mode == "half" else 20)
+            PLATEAU_SEC = 60 if entry_mode == "confirm" else (45 if entry_mode == "half" else 30)  # 🔧 승률개선: Plateau 시간 확대 (정상 눌림에서 조기 부분익절 방지)
             # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
             BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
 
