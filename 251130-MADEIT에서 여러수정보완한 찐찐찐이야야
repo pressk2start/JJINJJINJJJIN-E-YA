@@ -39,7 +39,7 @@ def fmt6(x):
     return str(x)
 
 # =========================
-# 설정 (24시간 단타 최적화 + Bot-aware, 3.2.7-hh+peakcut+perf+fix-final2+patch+postcheck6s+dynSL+ctxExit+netRetry)
+# 설정 (24시간 단타 최적화 + Bot-aware, 3.3.0-sigmoid+vwap+btcRegime+cascadeDecay+rsiDCB+smartTrail+bayesML)
 # =========================
 TOP_N = 60
 SCAN_INTERVAL = 6
@@ -3014,8 +3014,9 @@ def _safe_float(x, default=0.0):
 
 def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
     """
-    리스크 스코어 계산 (0~100)
-    - 각 피처를 정규화해서 가중합
+    리스크 스코어 계산 (0~100+)
+    - 비선형 정규화 (S-curve) + 교차 피처 시너지 보너스
+    - 시간대별 가중치 조정
     """
     # 🔧 안전 패치: NaN/inf 방지
     buy_ratio = _safe_float(buy_ratio, 0.5)
@@ -3030,28 +3031,61 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 
     score = 0.0
 
-    # 매수비: 0.50~0.70 → 0~100
-    buy_norm = max(0, min(1, (buy_ratio - 0.50) / 0.20))
+    # === 비선형 정규화 (S-curve: 중간값 부근에서 변별력 극대화) ===
+    def _sigmoid_norm(val, center, width):
+        """S-curve 정규화: center 기준 ±width에서 0~1 매핑"""
+        x = (val - center) / max(width, 0.001)
+        return 1.0 / (1.0 + math.exp(-x * 4))  # 기울기 4로 완만한 S-curve
+
+    # 매수비: 중심 0.60, 폭 0.10 (0.50~0.70에서 변별)
+    buy_norm = _sigmoid_norm(buy_ratio, 0.60, 0.10)
     score += SCORE_WEIGHTS["buy_ratio"] * buy_norm
 
-    # 스프레드: 0.0~1.0% → 100~0 (낮을수록 좋음)
-    spread_norm = max(0, min(1, 1.0 - spread / 1.0))
+    # 스프레드: 낮을수록 좋음 (역방향 S-curve)
+    spread_norm = 1.0 - _sigmoid_norm(spread, 0.20, 0.15)
     score += SCORE_WEIGHTS["spread"] * spread_norm
 
-    # 회전율: 0~0.05 → 0~100
-    turn_norm = max(0, min(1, turn / 0.05))
+    # 회전율: 중심 0.03, 폭 0.02
+    turn_norm = _sigmoid_norm(turn, 0.03, 0.02)
     score += SCORE_WEIGHTS["turn"] * turn_norm
 
-    # 임밸런스: -0.3~+0.3 → 0~100
-    imb_norm = max(0, min(1, (imbalance + 0.3) / 0.6))
+    # 임밸런스: 중심 0.15, 폭 0.20
+    imb_norm = _sigmoid_norm(imbalance, 0.15, 0.20)
     score += SCORE_WEIGHTS["imbalance"] * imb_norm
 
     # 틱 신선도: bool → 0 or 100
     score += SCORE_WEIGHTS["fresh"] * (1.0 if fresh_ok else 0.0)
 
-    # 거래량 급증: 1.0~2.5 → 0~100
-    surge_norm = max(0, min(1, (volume_surge - 1.0) / 1.5))
+    # 거래량 급증: 중심 1.5, 폭 0.5
+    surge_norm = _sigmoid_norm(volume_surge, 1.5, 0.5)
     score += SCORE_WEIGHTS["volume_surge"] * surge_norm
+
+    # === 교차 피처 시너지 보너스 (핵심 개선) ===
+    # 매수비 + 임밸런스 동시 강세 → 진짜 수급 (최대 +8점)
+    if buy_ratio >= 0.62 and imbalance >= 0.35:
+        synergy_buy_imb = min(8.0, (buy_ratio - 0.55) * (imbalance - 0.10) * 200)
+        score += synergy_buy_imb
+
+    # 가속 + 회전 동시 강세 → 폭발적 유입 (최대 +5점)
+    if volume_surge >= 1.5 and turn >= 0.03:
+        synergy_flow = min(5.0, (volume_surge - 1.0) * turn * 100)
+        score += synergy_flow
+
+    # 스프레드 좁고 + 임밸런스 강함 → 진입 최적 환경 (최대 +4점)
+    if spread <= 0.15 and imbalance >= 0.40:
+        score += min(4.0, (0.20 - spread) * imbalance * 100)
+
+    # === 시간대별 가중치 조정 (장초/활성시간 보너스) ===
+    try:
+        h = now_kst().hour
+        if 9 <= h <= 10:      # 장초 급등 빈발 → +3점
+            score += 3.0
+        elif 14 <= h <= 16:   # 오후 활성 → +1점
+            score += 1.0
+        elif 0 <= h < 6:      # 야간 → -2점 (노이즈 많음)
+            score -= 2.0
+    except Exception:
+        pass
 
     return round(score, 1)
 
@@ -3547,8 +3581,21 @@ def analyze_and_update_weights():
             except Exception:
                 pass
 
-        # 조절 로직 (10% 블렌딩, 하드바운드 적용)
-        BLEND = 0.10
+        # 조절 로직 (신뢰도 기반 동적 블렌딩)
+        # 🔧 베이지안 스무딩: 샘플 수에 따라 블렌딩 강도 조절
+        # 100건 미만: 매우 보수적 (5%), 100~300건: 표준 (10%), 300건 이상: 적극적 (15%)
+        _n_total = len(df)
+        if _n_total < 150:
+            BLEND = 0.05
+        elif _n_total < 300:
+            BLEND = 0.10
+        else:
+            BLEND = 0.15
+        # 승/패 샘플 불균형 보정: 소수 그룹이 전체의 20% 미만이면 블렌딩 절반
+        _minority_ratio = min(len(wins), len(loses)) / max(_n_total, 1)
+        if _minority_ratio < 0.20:
+            BLEND *= 0.5
+            print(f"[AUTO_LEARN] 승/패 불균형 ({_minority_ratio*100:.0f}% minority) → 블렌딩 절반 적용")
         old_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
@@ -3717,16 +3764,18 @@ SOFT_GUARD_SEC = 30              # 초기 30초간 컨텍스트 청산 조건 �
 
 def is_strong_momentum(ticks, ob):
     """
-    체크포인트 도달 시점에 강세 여부 판단 (점수 기반)
-    - 약세 점수 2점 이상이면 약세 → 즉시 매도
-    - 약세 점수 1점 이하면 강세 → 홀딩 (트레일링 모드)
+    체크포인트 도달 시점에 강세 여부 판단 (점수 기반 + 가속도)
+    - 약세 점수 3점 이상이면 약세 → 즉시 매도
+    - 약세 점수 2점 이하면 강세 → 홀딩 (트레일링 모드)
+    - 🔧 NEW: 가속도 추가, BTC 레짐 참조
     """
     try:
         t15 = micro_tape_stats_from_ticks(ticks or [], 15)
+        t5 = micro_tape_stats_from_ticks(ticks or [], 5)
         imb = calc_orderbook_imbalance(ob) if ob else 0.0
         fresh = uptick_streak_from_ticks(ticks, need=2) if ticks else False
 
-        # 약세 점수 계산 (0~4점)
+        # 약세 점수 계산 (0~6점)
         weak_score = 0
 
         # 1) 매수비 낮음
@@ -3745,7 +3794,16 @@ def is_strong_momentum(ticks, ob):
         if not fresh:
             weak_score += 1
 
-        # 약세 점수 3점 이상이면 약세 판정 → False 반환 (🔧 2→3 강화: 확실한 약세만 스캘핑)
+        # 🔧 NEW: 5) 최근 5초가 15초 대비 급감 (모멘텀 소진)
+        if (t5["krw_per_sec"] > 0 and t15["krw_per_sec"] > 0
+                and t5["krw_per_sec"] < t15["krw_per_sec"] * 0.40):
+            weak_score += 1
+
+        # 🔧 NEW: 강세 보너스 (매수비 + 임밸런스 동시 강하면 약세 점수 감산)
+        if t5["buy_ratio"] >= 0.65 and imb >= 0.30:
+            weak_score = max(0, weak_score - 1)
+
+        # 약세 점수 3점 이상이면 약세 판정 → False 반환
         return weak_score < 3
     except Exception:
         return False
@@ -4580,14 +4638,51 @@ def _win_stats(ticks, start_s, end_s):
 
 
 def buy_decay_flag(ticks):
+    """
+    3단계 모멘텀 감쇄 감지 (개선):
+    - Window 1 (20~30초 전): 초기 모멘텀
+    - Window 2 (5~15초 전): 중간 상태
+    - Window 3 (0~5초): 현재 상태
+    → 3단계 연속 하락 패턴 감지 (단순 2-window 대비 정확도 향상)
+    """
+    w1 = _win_stats(ticks, start_s=20, end_s=30)  # 초기
+    w2 = _win_stats(ticks, start_s=5, end_s=15)   # 중간
+    w3 = _win_stats(ticks, start_s=0, end_s=5)    # 현재
+
+    # 기존 호환 변수
     early = _win_stats(ticks, start_s=10, end_s=20)
-    now = _win_stats(ticks, start_s=0, end_s=5)
+    now = w3
+
     if early["n"] < 4 or now["n"] < 2:
         return False, {"early": early, "now": now}
+
     drop_buy = early["buy_ratio"] - now["buy_ratio"]
-    cond = (drop_buy >= 0.12 and now["rate"] <= early["rate"] * 0.80
-            and now["krw_per_sec"] <= early["krw_per_sec"] * 0.70)
-    return cond, {"early": early, "now": now, "drop_buy": drop_buy}
+
+    # 기존 조건 (2-window)
+    basic_decay = (drop_buy >= 0.12
+                   and now["rate"] <= early["rate"] * 0.80
+                   and now["krw_per_sec"] <= early["krw_per_sec"] * 0.70)
+
+    # 3단계 연속 감쇄 (더 정확한 추세 역전 감지)
+    cascade_decay = False
+    if w1["n"] >= 3 and w2["n"] >= 3 and w3["n"] >= 2:
+        # 매수비 연속 하락: w1 > w2 > w3
+        buy_cascade = (w1["buy_ratio"] > w2["buy_ratio"] > w3["buy_ratio"])
+        # 거래속도 연속 감소: w1 > w2 > w3
+        flow_cascade = (w1["krw_per_sec"] > w2["krw_per_sec"] * 1.1
+                        and w2["krw_per_sec"] > w3["krw_per_sec"] * 1.1)
+        # 매수비 하락폭이 유의미 (총 10% 이상)
+        total_drop = w1["buy_ratio"] - w3["buy_ratio"]
+        cascade_decay = (buy_cascade and flow_cascade and total_drop >= 0.10)
+
+    cond = basic_decay or cascade_decay
+    return cond, {
+        "early": early, "now": now, "drop_buy": drop_buy,
+        "cascade": cascade_decay,
+        "w1_buy": round(w1["buy_ratio"], 2) if w1["n"] > 0 else 0,
+        "w2_buy": round(w2["buy_ratio"], 2) if w2["n"] > 0 else 0,
+        "w3_buy": round(w3["buy_ratio"], 2) if w3["n"] > 0 else 0,
+    }
 
 
 # =========================
@@ -4597,6 +4692,48 @@ def btc_5m_change():
     c = get_minutes_candles(5, "KRW-BTC", 3)
     if len(c) < 2: return 0.0
     return c[-1]["trade_price"] / max(c[-2]["trade_price"], 1) - 1
+
+# === BTC 변동성 레짐 감지 (진입 품질 향상) ===
+_BTC_REGIME_CACHE = {"regime": "normal", "ts": 0, "atr_pct": 0.0}
+
+def btc_volatility_regime():
+    """
+    BTC 1분봉 ATR 기반 변동성 레짐 판단:
+    - "calm"   : ATR < 0.08% → 낮은 변동성, 알트코인 모멘텀 유리 (공격적 진입)
+    - "normal" : 0.08~0.25% → 표준 상태
+    - "storm"  : ATR > 0.25% → 높은 변동성, 알트 연쇄 청산 위험 (보수적 진입)
+
+    10초 캐시로 API 절약.
+    Returns: (regime: str, atr_pct: float)
+    """
+    now = time.time()
+    if now - _BTC_REGIME_CACHE["ts"] < 10:
+        return _BTC_REGIME_CACHE["regime"], _BTC_REGIME_CACHE["atr_pct"]
+
+    try:
+        c1_btc = get_minutes_candles(1, "KRW-BTC", 20)
+        if not c1_btc or len(c1_btc) < 15:
+            return "normal", 0.0
+
+        atr = atr14_from_candles(c1_btc, 14)
+        if not atr or atr <= 0:
+            return "normal", 0.0
+
+        btc_price = c1_btc[-1].get("trade_price", 1)
+        atr_pct = (atr / max(btc_price, 1)) * 100  # %로 환산
+
+        if atr_pct < 0.08:
+            regime = "calm"
+        elif atr_pct > 0.25:
+            regime = "storm"
+        else:
+            regime = "normal"
+
+        _BTC_REGIME_CACHE.update({"regime": regime, "ts": now, "atr_pct": atr_pct})
+        return regime, atr_pct
+
+    except Exception:
+        return "normal", 0.0
 
 # =========================
 # 보조: 캔들/ATR/EMA
@@ -4615,6 +4752,27 @@ def ema_series(vals, period):
 def ema_last(vals, period):
     if len(vals) == 0: return None
     return ema_series(vals, period)[-1]
+
+
+def calc_vwap_from_candles(candles, lookback=20):
+    """
+    캔들 기반 VWAP 계산 (Volume Weighted Average Price)
+    - 최근 N봉의 거래량 가중 평균가
+    - VWAP 위: 강세 편향 / VWAP 아래: 약세 편향
+    Returns: vwap_price (float) or None
+    """
+    target = candles[-lookback:] if len(candles) >= lookback else candles
+    if not target:
+        return None
+    total_vp = 0.0
+    total_vol = 0.0
+    for c in target:
+        # 대표가 = (고+저+종)/3
+        typical = (c.get("high_price", 0) + c.get("low_price", 0) + c.get("trade_price", 0)) / 3
+        vol = c.get("candle_acc_trade_price", 0)
+        total_vp += typical * vol
+        total_vol += vol
+    return total_vp / max(total_vol, 1) if total_vol > 0 else None
 
 
 def vol_ma_from_candles(candles, period=20):
@@ -5222,6 +5380,28 @@ def detect_dead_cat_bounce(m, c1, ticks, ob_entry):
     drop_low = low_in_window
     drop_high = high_in_window
 
+    # RSI 기반 과매도 확인 (14봉 RSI ≤ 35 → 진짜 과매도)
+    if len(c1) >= 16:
+        _dcb_closes = [c["trade_price"] for c in c1[-16:]]
+        _dcb_gains = []
+        _dcb_losses = []
+        for i in range(1, len(_dcb_closes)):
+            delta = _dcb_closes[i] - _dcb_closes[i-1]
+            if delta > 0:
+                _dcb_gains.append(delta)
+                _dcb_losses.append(0)
+            else:
+                _dcb_gains.append(0)
+                _dcb_losses.append(abs(delta))
+        if len(_dcb_gains) >= 14:
+            avg_gain = sum(_dcb_gains[-14:]) / 14
+            avg_loss = sum(_dcb_losses[-14:]) / 14
+            if avg_loss > 0:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+                if rsi > 35:
+                    return None  # RSI > 35 → 과매도 아님 (반등 확신 부족)
+
     # 거래량 폭발 확인
     past_vols = [c["candle_acc_trade_price"] for c in c1[-DCB_LOOKBACK_CANDLES - 5:-2]
                  if c["candle_acc_trade_price"] > 0]
@@ -5233,6 +5413,14 @@ def detect_dead_cat_bounce(m, c1, ticks, ob_entry):
         vol_surge = 1.0
     if vol_surge < DCB_VOLUME_SURGE_MIN:
         return None  # 거래량 폭발 없음
+
+    # 거래량 회복 기울기 확인 (최근 3봉 거래량 증가 추세)
+    if len(c1) >= 5:
+        _dcb_recent_vols = [c["candle_acc_trade_price"] for c in c1[-3:]]
+        if len(_dcb_recent_vols) >= 3 and _dcb_recent_vols[0] > 0:
+            _vol_slope = (_dcb_recent_vols[-1] / max(_dcb_recent_vols[0], 1)) - 1.0
+            if _vol_slope < -0.3:
+                return None  # 거래량 급감 → 반등 에너지 부족
 
     # ========== ② 반등 초입: EMA5 회복 + 몸통비 ==========
     closes = [c["trade_price"] for c in c1]
@@ -5592,9 +5780,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
-    # === 🔥 BTC 역풍 가드 (게이트 통과 후 추가 요건 체크) ===
+    # === 🔥 BTC 역풍 가드 + 변동성 레짐 (게이트 통과 후 추가 요건 체크) ===
     btc5 = btc_5m_change()
     btc_headwind = btc5 <= -0.003  # -0.3%
+
+    # 🔧 BTC 폭풍 레짐: 높은 변동성 → 추가 요건 강화
+    btc_regime, btc_atr_pct = btc_volatility_regime()
+    if btc_regime == "storm":
+        # BTC 고변동성 시 추가 요건 (수급/모멘텀 강해야만 진입)
+        _storm_fail = []
+        if twin["buy_ratio"] < 0.62:
+            _storm_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.62")
+        if imbalance < 0.40:
+            _storm_fail.append(f"imb={imbalance:.2f}<0.40")
+        if accel < 0.8:
+            _storm_fail.append(f"accel={accel:.1f}<0.8")
+        if _storm_fail:
+            cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
+            return None
 
     gate_ok, gate_reason = stage1_gate(
         spread=ob["spread"],
@@ -5642,6 +5845,23 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             return None
         print(f"[BTC_HEADWIND] {m} BTC 5분 {btc5*100:.2f}% → 추가요건 통과")
 
+    # === VWAP 기반 진입 품질 계산 ===
+    vwap = calc_vwap_from_candles(c1, 20)
+    vwap_score_bonus = 0
+    if vwap and cur_price > 0:
+        vwap_gap = (cur_price / vwap - 1.0) * 100  # % 단위
+        # VWAP 근처(±0.3%) 진입 = 최적 (지지 가까움)
+        if abs(vwap_gap) <= 0.3:
+            vwap_score_bonus = 5  # +5점 보너스
+        # VWAP 위 0.3~1.0% = 양호 (추세 확인)
+        elif 0.3 < vwap_gap <= 1.0:
+            vwap_score_bonus = 2
+        # VWAP 위 1.0% 이상 = 추격 위험 (-3점)
+        elif vwap_gap > 1.5:
+            vwap_score_bonus = -3
+    else:
+        vwap_gap = 0.0
+
     # === 결과 패키징 ===
     # 🔥 signal_tag 추출 (gate_reason: "{signal_tag} PASS | {metrics}")
     signal_tag = gate_reason.split(" PASS")[0] if " PASS" in gate_reason else "기본"
@@ -5678,6 +5898,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 🔧 FIX: postcheck bypass 정합성 (ign_ok/mega_ok 키 누락 → bypass 항상 실패하던 버그)
         "ign_ok": (ignition_score >= 3),
         "mega_ok": mega,
+        # 🔧 VWAP 기반 진입 품질
+        "vwap_score_bonus": vwap_score_bonus,
+        "vwap_gap": round(vwap_gap, 2),
     }
 
     return pre
@@ -5720,6 +5943,8 @@ def final_check_leader(m, pre, tight_mode=False):
     score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
     # 🔧 FIX(I3): killer 통과 가산점 반영 (entry_mode 이중결정 → score 단일 시스템)
     score += pre.get("killer_bonus", 0)
+    # 🔧 VWAP 기반 진입 품질 보너스 (VWAP 근처: +5, 추격: -3)
+    score += pre.get("vwap_score_bonus", 0)
 
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
@@ -6182,9 +6407,10 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
 # =========================
 def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
     """
-    휘핑 방지형 컨텍스트 점수:
+    휘핑 방지형 컨텍스트 점수 (개선):
     - 단일 신호로 청산 유도 금지 (복합 조건 누적)
     - 추세 역전(EMA5/VWAP 이탈 + uptick 부재) 쪽에 가중치
+    - 🔧 NEW: 볼륨 확인 + 호가 임밸런스 교차검증 + 3단계 감쇄
     """
     score = 0
     reasons = []
@@ -6192,7 +6418,7 @@ def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
     # 테이프 변화
     w_now = _win_stats(ticks, 0, 10)
     w_early = _win_stats(ticks, 10, 30)
-    decay, _ = buy_decay_flag(ticks)
+    decay, decay_info = buy_decay_flag(ticks)
 
     if w_now["krw_per_sec"] < w_early["krw_per_sec"] * 0.60:
         score += 1
@@ -6203,6 +6429,26 @@ def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
     if w_now["rate"] < 0.25:  # 너무 느리면 1점
         score += 1
         reasons.append("RATE_SLOW")
+
+    # 🔧 NEW: 3단계 cascade 감쇄 감지 시 추가 +1점 (더 확실한 추세 역전 신호)
+    if decay_info.get("cascade", False):
+        score += 1
+        reasons.append("CASCADE_DECAY")
+
+    # 🔧 NEW: 호가 임밸런스 교차검증 (매도 우세 + 흐름 감소 = 강한 청산 신호)
+    try:
+        _ctx_ob = fetch_orderbook_cache([m]).get(m)
+        if _ctx_ob:
+            _ctx_imb = calc_orderbook_imbalance(_ctx_ob)
+            if _ctx_imb < -0.20:  # 매도 압도적 우세
+                score += 1
+                reasons.append(f"OB_SELL_HEAVY({_ctx_imb:.2f})")
+            elif _ctx_imb >= 0.40 and w_now.get("buy_ratio", 0) >= 0.60:
+                # 호가도 매수우세 + 테이프도 매수 → 청산 억제
+                score = max(0, score - 1)
+                reasons.append("OB_BUY_SUPPORT")
+    except Exception:
+        pass
 
     # 가격/컨텍스트
     vwap = vwap_from_candles_1m(c1, 20) if c1 else 0
@@ -6221,10 +6467,22 @@ def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
         score = max(0, score - 1)
         reasons.append("MILD_GAIN_RELAX")
 
+    # 🔧 NEW: 수익 구간(+1% 이상)에서는 청산 문턱 상향 (수익을 더 키우기)
+    if gain_now >= 0.010:
+        score = max(0, score - 1)
+        reasons.append("PROFIT_HOLD_RELAX")
+
     # 수익 구간에서의 급감
     if last_price > entry_price * 1.008 and decay:
         score += 1
         reasons.append("DECAY_AFTER_GAIN")
+
+    # 🔧 NEW: 거래량 확인 (볼륨 급감 시 청산 신호 강화)
+    if w_now["n"] >= 2 and w_early["n"] >= 3:
+        _vol_ratio = w_now["krw_per_sec"] / max(w_early["krw_per_sec"], 1)
+        if _vol_ratio < 0.30:  # 거래량 70% 이상 급감
+            score += 1
+            reasons.append(f"VOL_CRASH({_vol_ratio:.1%})")
 
     return score, reasons
 
@@ -7014,14 +7272,24 @@ def monitor_position(m,
                             c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
 
-            # 🔧 FIX: 트레일 업데이트 - new_high 사용 (curp > best는 best 갱신 후라 항상 False)
+            # 🔧 모멘텀 기반 동적 트레일 업데이트 (강세→넓게, 약세→좁게)
             if trail_armed and new_high:
                 atr = atr14_from_candles(_get_c1_cached(), 14)
                 if atr and atr > 0:
-                    trail_dist = max(trail_dist_min,
+                    base_trail = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
-                    trail_dist = trail_dist_min
+                    base_trail = trail_dist_min
+
+                # 현재 모멘텀 강도 측정 (매수비 + 거래속도)
+                _trail_t10 = micro_tape_stats_from_ticks(ticks, 10)
+                _trail_momentum = 1.0
+                if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
+                    _trail_momentum = 1.4  # 강세: 트레일 40% 확대 → 큰 추세 유지
+                elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
+                    _trail_momentum = 0.7  # 약세: 트레일 30% 축소 → 빠른 수익 확보
+
+                trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
             # 🔧 트레일링 손절 실제 청산 트리거 (디바운스 적용)
