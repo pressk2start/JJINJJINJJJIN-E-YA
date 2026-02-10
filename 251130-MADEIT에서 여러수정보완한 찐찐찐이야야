@@ -1764,6 +1764,10 @@ def add_auto_position(m, cur_price, reason=""):
         pos["last_add_ts"] = time.time()
         pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
 
+        # 🔧 FIX: 평단 변경 시 MFE/MAE 리셋 (구 평단 기준 잔상 제거)
+        pos["mfe_pct"] = 0.0
+        pos["mae_pct"] = 0.0
+
         # 🔧 FIX: 추매 후 손절가 재계산 (평단이 바뀌었으므로)
         try:
             c1_for_sl = get_minutes_candles(1, m, 20)
@@ -2619,6 +2623,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # - 3회 연속이면 전량 청산으로 승격
             # 🔧 FIX(0-2): entry_mode별 컨텍스트 청산 재활성화
             # probe/half은 약신호이므로 나쁜 흐름에서 빠르게 청산
+            with _POSITION_LOCK:
+                pos_ctx = OPEN_POSITIONS.get(m, {})
             _ctx_em = pos_ctx.get("entry_mode", "confirm")
             if _ctx_em == "probe":
                 CONTEXT_CLOSE_THRESHOLD = 2   # probe: 2회 연속이면 청산
@@ -6507,6 +6513,9 @@ def monitor_position(m,
     # 컨텍스트 청산 디바운스용
     ctx_first_seen_ts = 0.0
     ctx_hits = 0
+    # 트레일 디바운스용
+    trail_db_first_ts = 0.0
+    trail_db_hits = 0
 
     trail_armed = False
     trail_stop = 0.0
@@ -6724,7 +6733,10 @@ def monitor_position(m,
                 _sl_duration = time.time() - stop_first_seen_ts
                 # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
                 _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
-                if not _is_hard_stop and stop_hits < 2 and _sl_duration < 2.0:
+                # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업 중 더 둔하게
+                _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0)
+                _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0)
+                if not _is_hard_stop and stop_hits < _db_n and _sl_duration < _db_sec:
                     continue  # 디바운스 대기
                 # 디바운스 통과 → 실제 청산
                 if hit_base_stop and not hit_pct_sl:
@@ -6819,8 +6831,9 @@ def monitor_position(m,
                             OPEN_POSITIONS[m] = pos
                         entry_mode = "confirm"  # 🔧 FIX: 로컬 변수 동기화 (probe scratch 오작동 방지)
                         entry_price = new_entry  # 🔧 FIX: 로컬 entry_price 동기화 (이후 수익률/손절 계산이 새 평단 기준)
-                        best = new_entry   # 🔧 FIX(C2): 추매 후 MFE/MAE를 새 평단 기준으로 리셋
-                        worst = new_entry  # (구 평단 best/worst가 트레일/익절 왜곡하는 문제 해결)
+                        # 🔧 FIX: best/worst를 현재가 기준 리셋 (new_entry와 다를 수 있음)
+                        best = curp if curp > 0 else new_entry
+                        worst = curp if curp > 0 else new_entry
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
@@ -6831,11 +6844,19 @@ def monitor_position(m,
                         _c1_cache = None; _c1_cache_ts = 0.0
                         c1_for_sl = _get_c1_cached()
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
-                        # 🔧 FIX: 추매 후 트레일/체크포인트 상태 확장 리셋
+                        # 🔧 FIX: 추매 후 전체 상태 리셋 (새 트레이드처럼 추적)
                         trail_armed = False
                         trail_stop = 0.0
                         checkpoint_reached = False
                         peak_update_count = 0
+                        mfe_partial_done = False
+                        plateau_partial_done = False
+                        last_peak_ts = time.time()
+                        sideways_peak = 0.0
+                        stop_first_seen_ts = 0.0
+                        stop_hits = 0
+                        trail_db_first_ts = 0.0
+                        trail_db_hits = 0
 
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
@@ -6893,13 +6914,22 @@ def monitor_position(m,
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
-                            best = new_entry   # 🔧 FIX(C2): 추매 후 MFE/MAE 새 평단 기준 리셋
-                            worst = new_entry
-                            # 🔧 FIX: 추매 후 트레일/체크포인트 상태 확장 리셋
+                            # 🔧 FIX: best/worst를 현재가 기준 리셋
+                            best = curp if curp > 0 else new_entry
+                            worst = curp if curp > 0 else new_entry
+                            # 🔧 FIX: 추매 후 전체 상태 리셋 (새 트레이드처럼 추적)
                             trail_armed = False
                             trail_stop = 0.0
                             checkpoint_reached = False
                             peak_update_count = 0
+                            mfe_partial_done = False
+                            plateau_partial_done = False
+                            last_peak_ts = time.time()
+                            sideways_peak = 0.0
+                            stop_first_seen_ts = 0.0
+                            stop_hits = 0
+                            trail_db_first_ts = 0.0
+                            trail_db_hits = 0
                             _c1_cache = None; _c1_cache_ts = 0.0  # 캐시 강제 갱신
                             c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
@@ -6914,16 +6944,33 @@ def monitor_position(m,
                     trail_dist = trail_dist_min
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
 
-            # 🔧 [신규] 트레일링 손절 실제 청산 트리거
+            # 🔧 트레일링 손절 실제 청산 트리거 (디바운스 적용)
             if trail_armed and curp < trail_stop:
-                # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
-                trail_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
-                drop_pct = (best - curp) / best * 100 if best > 0 else 0
-                close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락)")
-                _already_closed = True
-                verdict = "TRAIL_STOP"
-                break
+                # 디바운스: 연속 N회 또는 T초 유지 시에만 실제 청산
+                if trail_db_first_ts == 0.0:
+                    trail_db_first_ts = time.time()
+                    trail_db_hits = 1
+                else:
+                    trail_db_hits += 1
+                _trail_dur = time.time() - trail_db_first_ts
+                _tdb_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0)
+                _tdb_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0)
+                if trail_db_hits >= _tdb_n or _trail_dur >= _tdb_sec:
+                    # 디바운스 통과 → 실제 청산
+                    # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
+                    trail_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                    peak_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
+                    drop_pct = (best - curp) / best * 100 if best > 0 else 0
+                    close_auto_position(m, f"트레일링손절 +{trail_gain*100:.2f}% (고점+{peak_gain*100:.2f}%에서 -{drop_pct:.2f}% 하락, 디바운스 {trail_db_hits}회/{_trail_dur:.1f}초)")
+                    _already_closed = True
+                    verdict = "TRAIL_STOP"
+                    break
+                # else: 디바운스 대기 중 → 다음 체크로 진행
+            elif trail_armed:
+                # 트레일 조건 해제(가격 회복) → 디바운스 리셋
+                if trail_db_first_ts > 0:
+                    trail_db_first_ts = 0.0
+                    trail_db_hits = 0
 
             # 🔧 [제거됨] 브레이크이븐 → 트레일링 0.4% 발동으로 대체
             # 트레일링이 +0.4%에서 발동되면 트레일스탑이 자동으로 본절 이상이 됨
