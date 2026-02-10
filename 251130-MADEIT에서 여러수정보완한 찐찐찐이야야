@@ -1470,7 +1470,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 유리한 체결(음수) → 0, 불리한 체결(양수) → 그대로, 1% 캡
         slip_cost = min(0.01, max(0.0, slip_pct))  # 불리한 것만 반영
         _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
-        _SLIP_HISTORY.append(slip_abs)  # 하위호환
+        _SLIP_HISTORY.append(abs(slip_pct))  # 하위호환
 
         # 진입 사유 한 줄 생성 (디테일 포함)
         kd = pre.get("killer_details", {})
@@ -3066,7 +3066,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
 
     # 🔧 건수 기반 학습 트리거 (매수만 학습)
     if AUTO_LEARN_ENABLED:
-        _trade_count_since_learn += 1
+        with _trade_log_lock:
+            _trade_count_since_learn += 1
 
         # 🔧 FIX: streak 업데이트는 record_trade()에서만 (중복 방지)
         # - 여기서 또 업데이트하면 거래 1번에 streak 2번 올라감
@@ -3079,15 +3080,17 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             print(f"[LOSE_STREAK] 연속 {_lose_streak}패 → Pre-break 10분 중지")
 
         # 학습 조건: 10건마다 OR 연속 3패
-        should_learn = (
-            _trade_count_since_learn >= AUTO_LEARN_INTERVAL or
-            _lose_streak >= AUTO_LEARN_STREAK_TRIGGER
-        )
+        with _trade_log_lock:
+            should_learn = (
+                _trade_count_since_learn >= AUTO_LEARN_INTERVAL or
+                _lose_streak >= AUTO_LEARN_STREAK_TRIGGER
+            )
 
         if should_learn:
-            trigger_reason = f"연속 {_lose_streak}패" if _lose_streak >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
+            with _trade_log_lock:
+                trigger_reason = f"연속 {_lose_streak}패" if _lose_streak >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
+                _trade_count_since_learn = 0  # 리셋
             print(f"[AUTO_LEARN] 학습 트리거: {trigger_reason}")
-            _trade_count_since_learn = 0  # 리셋
 
             try:
                 learn_result = analyze_and_update_weights()
@@ -3119,10 +3122,13 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 print(f"[AUTO_LEARN_ERR] {e}")
 
     # 🔍 경로 리포트 (20건마다 자동 발송)
-    _path_report_count += 1
-    print(f"[PATH_REPORT] 카운트: {_path_report_count}/{PATH_REPORT_INTERVAL}")
-    if _path_report_count >= PATH_REPORT_INTERVAL:
-        _path_report_count = 0
+    with _trade_log_lock:
+        _path_report_count += 1
+        _current_report_count = _path_report_count
+    print(f"[PATH_REPORT] 카운트: {_current_report_count}/{PATH_REPORT_INTERVAL}")
+    if _current_report_count >= PATH_REPORT_INTERVAL:
+        with _trade_log_lock:
+            _path_report_count = 0
         try:
             # 경로 통계 + 상세 거래 목록 합쳐서 발송
             path_report = get_path_statistics(50)  # 최근 50건 경로 분석
@@ -7216,7 +7222,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server(port=8080):
     for p in range(port, port + 5):
         try:
-            server = HTTPServer(("0.0.0.0", p), HealthHandler)
+            server = HTTPServer(("127.0.0.1", p), HealthHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             print(f"🏥 Health check server: http://localhost:{p}/health")
