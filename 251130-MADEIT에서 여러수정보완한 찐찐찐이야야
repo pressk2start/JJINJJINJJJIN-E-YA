@@ -2577,7 +2577,15 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif verdict and verdict.startswith("청산 권고("):
             # 🔧 FIX: 컨텍스트 청산 권고가 계속 반복되면 손실을 시간으로 키움
             # - 3회 연속이면 전량 청산으로 승격
-            CONTEXT_CLOSE_THRESHOLD = 999  # 🔧 비활성화 (before1: 컨텍스트 청산 무시)
+            # 🔧 FIX(0-2): entry_mode별 컨텍스트 청산 재활성화
+            # probe/half은 약신호이므로 나쁜 흐름에서 빠르게 청산
+            _ctx_em = pos_ctx.get("entry_mode", "confirm")
+            if _ctx_em == "probe":
+                CONTEXT_CLOSE_THRESHOLD = 2   # probe: 2회 연속이면 청산
+            elif _ctx_em == "half":
+                CONTEXT_CLOSE_THRESHOLD = 3   # half: 3회 연속이면 청산
+            else:
+                CONTEXT_CLOSE_THRESHOLD = 5   # confirm: 5회 연속이면 청산
             with _POSITION_LOCK:
                 pos_ctx = OPEN_POSITIONS.get(m, {})
                 ctx_count = pos_ctx.get("ctx_close_count", 0) + 1
@@ -4871,8 +4879,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔧 FIX: score=3은 약한 완화(0.12), score=4만 강한 완화(0.25)
     # 🔧 FIX: 스프레드/임밸런스는 거의 안 풀기 (가짜 점화 방지)
     # ============================================================
-    # 🔧 점화 완화 통일: 3점=약완화(진입허용), 4점=강완화(임계치 대폭 완화)
-    relax = 0.30 if ignition_score >= 4 else (0.12 if ignition_score >= 3 else 0)
+    # 🔧 FIX(I1): 점화 구간 완화 제거 (고점추격 방지)
+    # 점화=급등+스프레드확장+되돌림 구간이므로 임계치 완화는 승률을 깎음
+    # 진입 자체는 허용하되, 조건은 동일하게 유지
+    relax = 0
 
     # 동적 임계치 계산 (점화 점수 높으면 조건 완화)
     eff_surge_min = max(GATE_RELAX_SURGE_FLOOR, GATE_SURGE_MIN * (1 - relax))
@@ -4890,6 +4900,10 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
     eff_accel_min = max(GATE_RELAX_ACCEL_FLOOR, GATE_ACCEL_MIN * (1 - relax))
+
+    # 🔧 FIX(I1): 점화 구간 스프레드 강화 (슬리피지 방어 — 가장 위험한 순간)
+    if ignition_score >= 3:
+        eff_spread_max = min(eff_spread_max, 0.25)
 
     # 점화 여부 (로그용 + 연속매수 예외 등 판정 기준 - 3점부터 점화 취급)
     is_ignition = (ignition_score >= 3)  # 🔧 통일: 3점부터 점화 판정 (완화는 4점에서 강하게)
@@ -5587,6 +5601,8 @@ def final_check_leader(m, pre, tight_mode=False):
     fresh_ok = pre.get("fresh_ok", True)
 
     score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
+    # 🔧 FIX(I3): killer 통과 가산점 반영 (entry_mode 이중결정 → score 단일 시스템)
+    score += pre.get("killer_bonus", 0)
 
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
@@ -5602,6 +5618,18 @@ def final_check_leader(m, pre, tight_mode=False):
         entry_mode = "half"
     else:
         entry_mode = "confirm"
+
+    # === 🔧 FIX(I2): entry_mode별 pstd 상한 분리 (confirm/half 품질 강화) ===
+    _pstd_val = pre.get("pstd", 0)  # % 단위
+    if _pstd_val:
+        if entry_mode == "confirm" and _pstd_val > 0.25:
+            old_mode = entry_mode
+            entry_mode = "half"
+            print(f"[PSTD↓] {m} pstd {_pstd_val:.2f}%>0.25% → {old_mode}→{entry_mode}")
+        if entry_mode == "half" and _pstd_val > 0.35:
+            old_mode = entry_mode
+            entry_mode = "probe"
+            print(f"[PSTD↓] {m} pstd {_pstd_val:.2f}%>0.35% → {old_mode}→{entry_mode}")
 
     # === 다운그레이드 로직 (완화된 임계치) ===
 
@@ -5820,9 +5848,28 @@ def postcheck_6s(m, pre):
 
     if not POSTCHECK_ENABLED:
         return True, "SKIP"
-    # 🔥 점화 진입은 바이패스
+    # 🔧 FIX(I4): 점화도 최소 스프레드/매수비 체크 (완전 바이패스 금지)
+    # 점화=가장 위험한 순간(급등+스프레드확장+되돌림)이므로 안전장치 유지
     if is_ignition:
-        return True, "BYPASS_IGNITION"
+        _ign_spread = pre.get("spread", 0)
+        _ign_buy = pre.get("buy_ratio", 0)
+        if _ign_spread > 0.40:
+            return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%)"
+        if _ign_buy < 0.48:
+            return False, f"IGN_BUY_LOW({_ign_buy:.2f})"
+        # 단축 postcheck: 1.5초 대기 후 되돌림/매수비만 확인
+        time.sleep(1.5)
+        _ign_ticks = get_recent_ticks(m, 50, allow_network=True)
+        if _ign_ticks:
+            _ign_curp = max(_ign_ticks, key=tick_ts_ms).get("trade_price", pre["price"])
+            if pre["price"] > 0:
+                _ign_dd = _ign_curp / pre["price"] - 1.0
+                if _ign_dd < -0.008:
+                    return False, f"IGN_DD({_ign_dd*100:.2f}%)"
+            _ign_t5 = micro_tape_stats_from_ticks(_ign_ticks, 5)
+            if _ign_t5.get("buy_ratio", 0) < 0.45:
+                return False, f"IGN_BUY_FADE({_ign_t5.get('buy_ratio',0):.2f})"
+        return True, "BYPASS_IGNITION_CHECKED"
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
@@ -6708,6 +6755,8 @@ def monitor_position(m,
                             OPEN_POSITIONS[m] = pos
                         entry_mode = "confirm"  # 🔧 FIX: 로컬 변수 동기화 (probe scratch 오작동 방지)
                         entry_price = new_entry  # 🔧 FIX: 로컬 entry_price 동기화 (이후 수익률/손절 계산이 새 평단 기준)
+                        best = new_entry   # 🔧 FIX(C2): 추매 후 MFE/MAE를 새 평단 기준으로 리셋
+                        worst = new_entry  # (구 평단 best/worst가 트레일/익절 왜곡하는 문제 해결)
 
                         tg_send_mid(
                             f"🔥 {m} 상승 확정 → probe ➜ confirm 전환\n"
@@ -6776,6 +6825,8 @@ def monitor_position(m,
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
+                            best = new_entry   # 🔧 FIX(C2): 추매 후 MFE/MAE 새 평단 기준 리셋
+                            worst = new_entry
                             _c1_cache = None; _c1_cache_ts = 0.0  # 캐시 강제 갱신
                             c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
@@ -7626,14 +7677,17 @@ def main():
                     f"{'✓' if killer_imb else '✗'}체결{imbalance:.2f}≥{K_IMB}",
                 ])
 
+                # 🔧 FIX(I3): killer를 entry_mode 직접 설정 대신 score 가산점으로 통합
+                # → final_check_leader의 score 기반 entry_mode가 유일한 결정자
+                killer_pass_count = sum([killer_buy, killer_turn, killer_consec,
+                                        killer_vol_base, killer_vol_surge, killer_imb])
                 if all_killer:
-                    pre["entry_mode"] = "confirm"
-                    print(f"[CONFIRM] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
+                    pre["killer_bonus"] = 25  # 6/6 통과 → score +25 (confirm 도달 보장)
+                    print(f"[KILLER✓] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
                 else:
-                    pre["entry_mode"] = "probe"
-                    fail_cnt = sum([not killer_buy, not killer_turn, not killer_consec,
-                                    not killer_vol_base, not killer_vol_surge, not killer_imb])
-                    print(f"[PROBE] {m} {pre.get('signal_tag', '?')} | {killer_vals} ({fail_cnt}개 탈락으로 confirm 실패)")
+                    pre["killer_bonus"] = max(0, (killer_pass_count - 3) * 5)  # 4/6=+5, 5/6=+10
+                    fail_cnt = 6 - killer_pass_count
+                    print(f"[KILLER] {m} {killer_pass_count}/6 통과 (+{pre['killer_bonus']}점) | {killer_vals}")
 
                 payload = final_check_leader(m, pre, tight_mode=tight_mode)
                 if not payload: continue
@@ -7929,7 +7983,16 @@ def main():
                         args=(m, actual_entry, pre_copy, tight_mode),
                         daemon=True
                     )
-                    mon_thread.start()
+                    # 🔧 FIX(0-1): 스레드 spawn 실패 시 락 orphan 방지
+                    try:
+                        mon_thread.start()
+                    except Exception as thread_err:
+                        print(f"[THREAD_ERR] {m} 모니터 스레드 생성 실패: {thread_err}")
+                        _release_entry_lock(m)
+                        _lock_held = False
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(m, None)
+                        continue
                     # 🔧 FIX: 스레드 객체 저장 (ident 대신)
                     with _MONITOR_LOCK:
                         _ACTIVE_MONITORS[m] = mon_thread
