@@ -514,6 +514,7 @@ TRADE_HISTORY = _deque_for_risk(maxlen=30)  # 최근 30개 거래 기록
 # 🔧 크리티컬 핫픽스: streak 전역변수 상단 선언 (NameError 방지)
 _lose_streak = 0              # 연속 패배 수
 _win_streak = 0               # 연속 승리 수
+_STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안전 보장
 
 
 def record_trade(market: str, pnl_pct: float):
@@ -538,27 +539,28 @@ def record_trade(market: str, pnl_pct: float):
         "time": time.time(),
     })
 
-    # 🔧 FIX: streak도 여기서 최신화 (사이징 안정성)
-    if is_win:
-        _lose_streak = 0
-        _win_streak += 1
-        # 🔧 FIX: 연승 시 진입 제한 해제
-        _ENTRY_MAX_MODE = None
-    else:
-        _lose_streak += 1
-        _win_streak = 0
-        # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
-        if _lose_streak >= 5:
-            _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 30분 진입 금지
-            _ENTRY_MAX_MODE = "probe"
-            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 30분 전체 진입 금지")
-        elif _lose_streak >= 4:
-            _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 10분 진입 금지
-            _ENTRY_MAX_MODE = "probe"
-            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
-        elif _lose_streak >= 3:
-            _ENTRY_MAX_MODE = "probe"  # probe만 허용
-            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → probe만 허용")
+    # 🔧 FIX H1: streak 카운터를 락으로 보호 (2개 스레드 동시 record_trade → 연패 카운터 오작동 방지)
+    with _STREAK_LOCK:
+        if is_win:
+            _lose_streak = 0
+            _win_streak += 1
+            # 🔧 FIX: 연승 시 진입 제한 해제
+            _ENTRY_MAX_MODE = None
+        else:
+            _lose_streak += 1
+            _win_streak = 0
+            # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
+            if _lose_streak >= 5:
+                _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 30분 진입 금지
+                _ENTRY_MAX_MODE = "probe"
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 30분 전체 진입 금지")
+            elif _lose_streak >= 4:
+                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 10분 진입 금지
+                _ENTRY_MAX_MODE = "probe"
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
+            elif _lose_streak >= 3:
+                _ENTRY_MAX_MODE = "probe"  # probe만 허용
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → probe만 허용")
 
 
 def get_adaptive_risk() -> float:
@@ -583,10 +585,14 @@ def get_adaptive_risk() -> float:
         elif win_rate >= 0.50:
             base_risk = RISK_PER_TRADE * 1.2
 
+    # 🔧 FIX H1: streak 읽기도 락으로 보호 (스레드 안전 읽기)
+    with _STREAK_LOCK:
+        _ls = _lose_streak
+        _ws = _win_streak
     # 🔧 FIX: streak 기반 추가 조정 (연패 시 줄이고, 연승 시 늘림)
-    if _lose_streak >= 3:
+    if _ls >= 3:
         base_risk *= 0.85  # 연패 3회 → 리스크 15% 감소
-    elif _win_streak >= 3:
+    elif _ws >= 3:
         base_risk *= 1.15  # 연승 3회 → 리스크 15% 증가
 
     # 🔧 FIX: 리스크 상한 (연승 시에도 과도한 리스크 방지)
@@ -616,22 +622,54 @@ def _make_auth_headers(query: dict = None):
 
 
 def upbit_private_get(path, params=None, timeout=7):
+    """🔧 FIX C1: 429/500 재시도 추가 (최대 3회, 지수 백오프)"""
     url = f"https://api.upbit.com{path}"
-    headers = _make_auth_headers(params or {})
-    _throttle()
-    r = SESSION.get(url, headers=headers, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    _max_retries = 3
+    for _attempt in range(_max_retries + 1):
+        headers = _make_auth_headers(params or {})
+        _throttle()
+        try:
+            r = SESSION.get(url, headers=headers, params=params, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
+                _wait = 0.5 * (2 ** _attempt)  # 0.5s, 1s, 2s
+                print(f"[API_RETRY] GET {path} → {r.status_code}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                time.sleep(_wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.ConnectionError as e:
+            if _attempt < _max_retries:
+                _wait = 0.5 * (2 ** _attempt)
+                print(f"[API_RETRY] GET {path} → ConnectionError, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                time.sleep(_wait)
+                continue
+            raise
 
 
 def upbit_private_post(path, body=None, timeout=7):
+    """🔧 FIX C1: 429/500 재시도 추가 (최대 3회, 지수 백오프) — 매도 실패 = 돈 잃음 방지"""
     url = f"https://api.upbit.com{path}"
     body = body or {}
-    headers = _make_auth_headers(body)
-    _throttle()
-    r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    _max_retries = 3
+    for _attempt in range(_max_retries + 1):
+        headers = _make_auth_headers(body)
+        _throttle()
+        try:
+            r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
+                _wait = 0.5 * (2 ** _attempt)
+                print(f"[API_RETRY] POST {path} → {r.status_code}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                time.sleep(_wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.ConnectionError as e:
+            if _attempt < _max_retries:
+                _wait = 0.5 * (2 ** _attempt)
+                print(f"[API_RETRY] POST {path} → ConnectionError, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                time.sleep(_wait)
+                continue
+            raise
 
 
 def get_order_result(uuid_str, timeout_sec=10.0):
@@ -2401,6 +2439,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                         _trail_stop = cur_price * (1.0 - _trail_min) if cur_price > 0 else 0
                         # 본절 보호 + 상승 중 트레일 중 높은 값
                         combined_stop = max(be_price, _trail_stop)
+                        # 🔧 FIX C5: old_stop과 비교하여 손절가 하향 방지 (기존 스탑이 더 높으면 유지)
+                        combined_stop = max(combined_stop, old_stop)
                         pos2["stop"] = combined_stop
                         pos2["breakeven_set"] = True
                         print(f"[BREAKEVEN] {m} 부분익절 후 합성스탑: 손절 {old_stop:.0f} → {combined_stop:.0f} (본절{be_price:.0f} 트레일{_trail_stop:.0f})")
@@ -2613,9 +2653,10 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         should_close = False
         reason = verdict or action or "모니터링 종료"
 
-        # 🔧 FIX: monitor_position 내부에서 이미 청산 완료된 경우 중복 청산 방지
-        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치"}
-        if verdict in _ALREADY_CLOSED_VERDICTS:
+        # 🔧 FIX C2: monitor_position 내부에서 이미 청산 완료된 경우 중복 청산 방지
+        # 🔧 FIX: "정보탈출", "half 스크래치", "confirm 스크래치", "횡보탈출", "부분청산→전량청산" 등 누락 verdict 보완
+        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치", "횡보탈출", "부분청산→전량청산"}
+        if verdict in _ALREADY_CLOSED_VERDICTS or (verdict and "스크래치" in verdict):
             # 내부에서 close_auto_position 이미 호출됨 → remonitor 종료
             print(f"[REMONITOR] {m} 내부청산 완료 ({verdict}) → remonitor 종료")
             return True
@@ -7194,14 +7235,22 @@ def monitor_position(m,
 
         # ===========================================
         # 3) probe 손절 후 빠른 재진입 허용 로직
+        # 🔧 FIX C3: 이미 청산된 포지션에 remonitor 재호출 방지 (무한 루프 + entry lock 영구 점유 방지)
         # ===========================================
         if AUTO_TRADE and verdict and "손절" in verdict:
             # 🔧 FIX: close_auto_position이 이미 OPEN_POSITIONS에서 삭제했으므로
             # pre["entry_mode"]로 probe 여부 판단 (기존: 항상 None이어서 사문화)
             if pre.get("entry_mode") == "probe":
-                REMONITOR_QUICK_COOLDOWN_SEC = 120  # 2분 쿨다운
-                time.sleep(REMONITOR_QUICK_COOLDOWN_SEC)
-                remonitor_until_close(m, entry_price, pre, tight_mode)
+                # 🔧 FIX C3: 포지션이 이미 청산 완료 → remonitor 재진입 차단
+                with _POSITION_LOCK:
+                    _still_open = m in OPEN_POSITIONS and OPEN_POSITIONS[m].get("state") != "closed"
+                if not _still_open:
+                    print(f"[REMONITOR] {m} probe 손절 후 포지션 이미 청산 완료 → remonitor 스킵")
+                    _release_entry_lock(m)
+                else:
+                    REMONITOR_QUICK_COOLDOWN_SEC = 120  # 2분 쿨다운
+                    time.sleep(REMONITOR_QUICK_COOLDOWN_SEC)
+                    remonitor_until_close(m, entry_price, pre, tight_mode)
 
         # 👇 이 return 은 if 바깥에서 항상 실행되게
         return (
@@ -7710,7 +7759,9 @@ def main():
                 CUT_COUNTER[k] = 0
 
             cleanup_expired(recent_alerts, ALERT_TTL)
-            cleanup_expired(last_signal_at, COOLDOWN)
+            # 🔧 FIX H2: 동적 쿨다운 최대값(COOLDOWN*2=960초) 사용
+            # 기존: 고정 COOLDOWN(480) → 시간대별 180~960초와 불일치 → 조기 삭제
+            cleanup_expired(last_signal_at, COOLDOWN * 2)
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
 
