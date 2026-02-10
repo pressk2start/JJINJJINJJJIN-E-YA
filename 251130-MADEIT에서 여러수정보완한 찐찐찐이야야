@@ -524,7 +524,7 @@ def record_trade(market: str, pnl_pct: float):
     - update_trade_result()와 동일한 단위 사용
     🔧 FIX: streak도 여기서 일원화 (update_trade_result 누락/중복 스킵 영향 제거)
     """
-    global _lose_streak, _win_streak
+    global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL, _ENTRY_MAX_MODE
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
     # 실무상 단일 거래에서 ±50% 이상은 비정상 → 1.0 초과면 %로 간주
     if abs(pnl_pct) > 1.0:
@@ -542,9 +542,23 @@ def record_trade(market: str, pnl_pct: float):
     if is_win:
         _lose_streak = 0
         _win_streak += 1
+        # 🔧 FIX: 연승 시 진입 제한 해제
+        _ENTRY_MAX_MODE = None
     else:
         _lose_streak += 1
         _win_streak = 0
+        # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
+        if _lose_streak >= 5:
+            _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 30분 진입 금지
+            _ENTRY_MAX_MODE = "probe"
+            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 30분 전체 진입 금지")
+        elif _lose_streak >= 4:
+            _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 10분 진입 금지
+            _ENTRY_MAX_MODE = "probe"
+            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
+        elif _lose_streak >= 3:
+            _ENTRY_MAX_MODE = "probe"  # probe만 허용
+            print(f"[LOSE_GATE] 연속 {_lose_streak}패 → probe만 허용")
 
 
 def get_adaptive_risk() -> float:
@@ -1365,6 +1379,26 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     break
         except Exception:
             prev_balance = 0.0
+
+        # 🔧 FIX: 매수 직전 스프레드/깊이 재체크 (가격가드→주문 사이 호가 변동 방어)
+        try:
+            _ob_recheck = fetch_orderbook_cache([m]).get(m, {})
+            _spread_now = _ob_recheck.get("spread", 0)
+            _depth_now = _ob_recheck.get("depth_krw", 0)
+            _spread_limit = 0.25 if is_chase else 0.40
+            _depth_min = 15_000_000 if is_chase else 5_000_000
+            if _spread_now > _spread_limit:
+                signal_skip(f"매수직전 스프레드 악화 {_spread_now:.2f}%>{_spread_limit:.2f}%")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+            if _depth_now > 0 and _depth_now < _depth_min:
+                signal_skip(f"매수직전 호가깊이 부족 {_depth_now/1e6:.1f}M<{_depth_min/1e6:.0f}M")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+        except Exception as _ob_err:
+            print(f"[OB_RECHECK] {m} 호가 재체크 실패 (진행): {_ob_err}")
 
         try:
             # 🔧 FIX: 매수 주문 전에 _RECENT_BUY_TS 선제 기록 (유령 오탐 방지)
@@ -2331,12 +2365,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     # - 🔧 FIX: 비교 기준을 alpha만으로 단순화 (slip은 gate/impact_cap으로 이미 관리)
                     # - ret_net에 slip 없으니 cp에서도 slip 제거 → 일관된 비교
                     # 🔧 본절 = entry_price + 수수료 + 여유 (수수료 미포함 시 net 손실 발생)
+                    # 🔧 FIX: 본절 + 트레일 합성 스탑 (큰 수익 꼬리 살리기)
                     if ret_pct > 0 and not pos2.get("breakeven_set"):
                         old_stop = pos2.get("stop", 0)
                         be_price = entry_price * (1 + FEE_RATE_ROUNDTRIP + 0.0005)  # 수수료(0.1%) + 여유(0.05%) = +0.15%
-                        pos2["stop"] = be_price
+                        # 🔧 FIX: 현재가 기준 트레일 최소폭과 합성 (상승 중엔 트레일 유지)
+                        _trail_min = get_trail_distance_min()
+                        _trail_stop = cur_price * (1.0 - _trail_min) if cur_price > 0 else 0
+                        # 본절 보호 + 상승 중 트레일 중 높은 값
+                        combined_stop = max(be_price, _trail_stop)
+                        pos2["stop"] = combined_stop
                         pos2["breakeven_set"] = True
-                        print(f"[BREAKEVEN] {m} 부분익절 후 본절 설정: 손절 {old_stop:.0f} → {be_price:.0f} (entry+{(FEE_RATE_ROUNDTRIP+0.0005)*100:.2f}%)")
+                        print(f"[BREAKEVEN] {m} 부분익절 후 합성스탑: 손절 {old_stop:.0f} → {combined_stop:.0f} (본절{be_price:.0f} 트레일{_trail_stop:.0f})")
 
         msg = (f"[REMONITOR] {m} 부분 청산 실행 {sell_ratio*100:.0f}% "
                f"(체결 {executed:.6f}) 잔여 {remaining_volume:.6f}")
@@ -2650,15 +2690,19 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
             # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
 
-            # 🔧 before1 복원: TP 비교 = gross ret_pct 직접 비교 (ATR TP floor 제거)
-            if ret_pct >= full_tp:
+            # 🔧 FIX: TP 비교를 net 기준으로 통일 (gross→net)
+            # gross로 TP 도달처럼 보여도 수수료+슬립 포함하면 net이 마이너스인 케이스 제거
+            _fee_pct = FEE_RATE_ROUNDTRIP * 100.0  # 왕복 0.1%
+            _exit_slip_pct = get_expected_exit_slip_pct()  # 예상 청산 슬립 (동적)
+            net_ret_for_tp = ret_pct - _fee_pct - _exit_slip_pct
+            if net_ret_for_tp >= full_tp:
                 should_close = True
-                reason = f"{tag} 목표수익 {ret_pct:.2f}% ≥ {full_tp:.1f}% 전량청산"
-            elif ret_pct >= part_tp:
+                reason = f"{tag} 목표수익 net{net_ret_for_tp:.2f}%(gross{ret_pct:.2f}%) ≥ {full_tp:.1f}% 전량청산"
+            elif net_ret_for_tp >= part_tp:
                 # 🔧 약신호는 부분매도 비율 상향 (50→60%) — 상승 지속력 약해서 확정 수익↑
                 _sell_ratio = 0.6 if tag in ("거래량↑", "고점↑") else 0.5
                 ok, msg, executed = safe_partial_sell(
-                    m, sell_ratio=_sell_ratio, reason=f"{tag} {ret_pct:.2f}% ≥ {part_tp:.1f}% {int(_sell_ratio*100)}% 부분익절")
+                    m, sell_ratio=_sell_ratio, reason=f"{tag} net{net_ret_for_tp:.2f}% ≥ {part_tp:.1f}% {int(_sell_ratio*100)}% 부분익절")
                 if ok and executed > 0:
                     print(msg)
                 # 부분익절 후에는 계속 재모니터링
@@ -4328,6 +4372,8 @@ def running_1m_bar(ticks, last_candle=None):
 # 🚀 Pre-break 동적 대역 (변동성 기반)
 # ========================================
 _PREBREAK_SUSPEND_UNTIL = 0.0  # 연패 시 일시 중지 타임스탬프
+_ENTRY_SUSPEND_UNTIL = 0.0     # 🔧 FIX: 연패 시 전체 진입 중지 타임스탬프
+_ENTRY_MAX_MODE = None         # 🔧 FIX: 연패 시 entry_mode 상한 (None=제한없음, "probe"/"half")
 
 def dynamic_prebreak_band(ticks):
     """
@@ -6668,15 +6714,33 @@ def monitor_position(m,
             hit_pct_sl = cur_gain <= -eff_sl_pct
             hit_base_stop = (base_stop > 0 and curp <= base_stop)
             if hit_pct_sl or hit_base_stop:
+                # 🔧 FIX: SL 디바운스 — 틱 1~2번 휩쏘에 즉시 손절 방지
+                # 연속 2회 이상 또는 2초 이상 유지 시에만 실제 청산
+                if stop_first_seen_ts == 0.0:
+                    stop_first_seen_ts = time.time()
+                    stop_hits = 1
+                else:
+                    stop_hits += 1
+                _sl_duration = time.time() - stop_first_seen_ts
+                # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
+                _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
+                if not _is_hard_stop and stop_hits < 2 and _sl_duration < 2.0:
+                    continue  # 디바운스 대기
+                # 디바운스 통과 → 실제 청산
                 if hit_base_stop and not hit_pct_sl:
                     sl_reason = f"본절SL | 현재 {curp:,.0f}원 ≤ base_stop {base_stop:,.0f}원 ({atr_info})"
                 else:
-                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% ({atr_info})"
+                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% (디바운스 {stop_hits}회/{_sl_duration:.1f}초) ({atr_info})"
                 close_auto_position(m, sl_reason)
                 _already_closed = True
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
+            else:
+                # SL 조건 해제 → 디바운스 리셋
+                if stop_first_seen_ts > 0:
+                    stop_first_seen_ts = 0.0
+                    stop_hits = 0
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
@@ -6767,7 +6831,11 @@ def monitor_position(m,
                         _c1_cache = None; _c1_cache_ts = 0.0
                         c1_for_sl = _get_c1_cached()
                         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(new_entry, c1_for_sl)
-                        trail_armed = False  # 새 기준으로 트레일링 리셋
+                        # 🔧 FIX: 추매 후 트레일/체크포인트 상태 확장 리셋
+                        trail_armed = False
+                        trail_stop = 0.0
+                        checkpoint_reached = False
+                        peak_update_count = 0
 
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
@@ -6827,6 +6895,11 @@ def monitor_position(m,
                             entry_price = new_entry
                             best = new_entry   # 🔧 FIX(C2): 추매 후 MFE/MAE 새 평단 기준 리셋
                             worst = new_entry
+                            # 🔧 FIX: 추매 후 트레일/체크포인트 상태 확장 리셋
+                            trail_armed = False
+                            trail_stop = 0.0
+                            checkpoint_reached = False
+                            peak_update_count = 0
                             _c1_cache = None; _c1_cache_ts = 0.0  # 캐시 강제 갱신
                             c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
@@ -7728,6 +7801,15 @@ def main():
                     pre["entry_mode"] = "probe"
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
+
+                # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
+                if _ENTRY_SUSPEND_UNTIL > time.time():
+                    _remain = int(_ENTRY_SUSPEND_UNTIL - time.time())
+                    cut("LOSE_SUSPEND", f"{m} 연패 진입중지 (잔여 {_remain}초)")
+                    continue
+                if _ENTRY_MAX_MODE == "probe" and pre.get("entry_mode") != "probe":
+                    pre["entry_mode"] = "probe"
+                    print(f"[LOSE_GATE] {m} 연패 모드제한 → probe 강제")
 
                 reason = "ign" if pre.get("ign_ok") else (
                     "early" if pre.get("early_ok") else
