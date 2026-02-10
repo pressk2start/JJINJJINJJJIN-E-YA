@@ -116,7 +116,7 @@ MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 
 # 트레일링 손절 설정 (before1 기준 - 타이트)
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
-TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 승률개선: 0.2→0.25% (정상 풀백 허용, 꼬리 잘림 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.0035  # 🔧 승률개선: 0.25→0.35% (정상 리트레이스 허용, 휩쏘 트레일컷 감소)
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - 휩쏘 컷 감소"""
@@ -2674,9 +2674,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
                 "🔥점화": 1.2,              # 강신호: 유지
                 "강돌파 (EMA↑+고점↑)": 1.0,  # 강신호: 유지
                 "EMA↑": 0.9,               # 🔧 R:R개선: 0.8→0.9 (net 0.8% 확보)
-                "고점↑": 0.8,              # 🔧 R:R개선: 0.7→0.8 (net 0.7% 확보)
-                "거래량↑": 0.8,            # 🔧 R:R개선: 0.6→0.8 (net 0.7% 확보)
-                "기본": 0.8,               # 🔧 R:R개선: 0.7→0.8 (net 0.7% 확보)
+                "고점↑": 1.0,              # 🔧 R:R개선: 0.8→1.0 (SL 0.5% 기준 R:R 1:2 확보)
+                "거래량↑": 1.0,            # 🔧 R:R개선: 0.8→1.0 (SL 0.5% 기준 R:R 1:2 확보)
+                "기본": 1.0,               # 🔧 R:R개선: 0.8→1.0 (SL 0.5% 기준 R:R 1:2 확보)
             }
 
             # 현재 포지션의 signal_tag 가져오기
@@ -2769,7 +2769,7 @@ GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC �
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 1       # 🔧 연속매수 하한 - before1 기준 (매수비로 품질 보완)
+GATE_CONSEC_MIN = 3       # 🔧 승률개선: 1→3 (단일틱 노이즈 진입 차단, 최소 3연속 매수 요구)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
@@ -2883,7 +2883,7 @@ POSTCHECK_MAX_DD = 0.018
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거) - 익절키우기 적용
 ATR_PERIOD = 14
-ATR_MULT = 0.35           # 🔧 손절폭 축소: 0.40 → 0.35
+ATR_MULT = 0.45           # 🔧 승률개선: 0.35→0.45 (추세 포지션 거짓손절 감소)
 DYN_SL_MIN = 0.005        # 🔧 승률개선: 0.4→0.5% (정상 흔들림 stop-out 감소)
 DYN_SL_MAX = 0.006        # 🔧 R:R개선: 0.8→0.6% 원복 (손절 크고 익절 얇은 문제 해결)
 
@@ -7033,10 +7033,12 @@ def monitor_position(m,
                         mfe_target = mfe_base
                 except Exception:
                     mfe_target = mfe_base
-                # 🔧 FIX: BTC 역풍 시 TP 보수화 (목표 낮춤)
+                # 🔧 FIX: BTC 방향별 MFE 타겟 조정 (역풍↓ + 순풍↑ 대칭화)
                 btc5_now = btc_5m_change()
                 if btc5_now <= -0.003:  # BTC -0.3% 역풍
                     mfe_target *= 0.75  # 목표 25% 하향
+                elif btc5_now >= 0.005:  # BTC +0.5% 순풍
+                    mfe_target *= 1.25  # 목표 25% 상향 (큰 수익 노림)
                 if max_gain >= mfe_target:
                     ok, msg, sold = safe_partial_sell(
                         m, MFE_PARTIAL_RATIO,
@@ -7044,15 +7046,19 @@ def monitor_position(m,
                     )
                     if ok:
                         mfe_partial_done = True
-                        # 🔥 본절 상향: 남은 50%는 손해 방지
-                        BE_OFFSET_MFE = FEE_RATE + 0.0005  # 본절 여유
-                        be_stop = entry_price * (1.0 + BE_OFFSET_MFE)
+                        # 🔧 승률개선: 본절→MFE*30% 수익 락인 (잔여 50%도 의미있는 수익 확보)
+                        # 기존: 수수료+0.05%만 보호 → 잔량이 본절 근처에서 손절되는 문제
+                        # 변경: MFE의 30%를 확보하여 부분익절 후 되돌림에도 수익 유지
+                        mfe_lock_pct = max(FEE_RATE + 0.0005, max_gain * 0.3)
+                        be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
-                        tg_send_mid(f"🎯 {m} MFE익절 {int(MFE_PARTIAL_RATIO*100)}% | +{max_gain*100:.2f}% ({signal_tag}) | 손절선→본절 상향")
+                        tg_send_mid(f"🎯 {m} MFE익절 {int(MFE_PARTIAL_RATIO*100)}% | +{max_gain*100:.2f}% ({signal_tag}) | 손절선→+{mfe_lock_pct*100:.2f}% 상향")
 
             # === 🔥 (B) Plateau + 모멘텀 약화 → 부분익절 + 본절상향 ===
             # 조건: 고점 갱신 20초 없음 + buy_decay + 수익 중 + 아직 부분익절 안함
-            PLATEAU_SEC = 20  # 고점 갱신 없이 버틴 시간
+            # 🔧 승률개선: entry_mode별 Plateau 시간 차등화
+            # - confirm: 40초 (추세 여유), half: 30초, probe: 20초 (빠른 탈출)
+            PLATEAU_SEC = 40 if entry_mode == "confirm" else (30 if entry_mode == "half" else 20)
             # 🔧 [통합됨] PLATEAU_MIN_GAIN → PROFIT_CHECKPOINT (상단 정의)
             BE_OFFSET = FEE_RATE + 0.0005  # 본절 = 수수료(0.1%) + 여유(0.05%) = 0.15%
 
