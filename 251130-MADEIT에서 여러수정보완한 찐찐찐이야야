@@ -2925,8 +2925,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     """
     global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
-    # 🔧 방어: last_trade_was_loss가 아직 없으면 초기화 (로컬 바인딩)
-    last_trade_was_loss = globals().setdefault("last_trade_was_loss", {})
+    global last_trade_was_loss
 
     # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
     # entry_ts가 있으면 거래 ID로 사용, 없으면 market+현재시각 기준 (호환성)
