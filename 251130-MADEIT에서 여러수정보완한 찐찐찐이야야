@@ -7159,7 +7159,10 @@ def monitor_position(m,
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
-            # === 2-1) 피라미딩(추매): 완화형 로직 (부분청산 후 재상승 대응) ===
+            # === 2-1) 🔧 변경안D: 피라미딩(추매) — 눌림→재돌파 기반 + best/worst 보존 ===
+            # 기존: gain + flow + EMA 기반 → 고점 추격 추매 위험
+            # 변경: 반드시 0.4% 이상 눌림 후 고점 근처 재탈환에서만 추매
+            #       best/worst 리셋하지 않아 MAE/MFE 왜곡 방지
             if USE_PYRAMIDING and AUTO_TRADE:
                 t15_now = micro_tape_stats_from_ticks(ticks, 15)
 
@@ -7167,64 +7170,67 @@ def monitor_position(m,
                 ob_pyr = ob_snap
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
-                # 💡 조건 완화 — 약상승에서도 반응하도록
+                # 🔧 변경안D: 눌림→재돌파 조건
+                # (1) 고점 대비 0.4% 이상 눌림이 있었어야 함
+                _pyr_drop = (best - curp) / best if best > 0 else 0
+                _pyr_peak_drop = (best - worst) / best if best > 0 else 0
+                add_cond_pullback = _pyr_peak_drop >= 0.004  # 진입 후 0.4% 이상 눌림 경험
+
+                # (2) 고점 근처 재탈환 (고점의 99.5% 이상 회복)
+                add_cond_rebreak = curp >= best * 0.995
+
+                # (3) 최소 수익 기준
                 add_cond_price = gain_from_entry >= max(0.005, PYRAMID_ADD_MIN_GAIN * 0.8)
+
+                # (4) 매수세 + 호가 임밸런스 확인
                 add_cond_flow = (
                     t15_now["buy_ratio"] >= 0.55 and
                     t15_now["krw_per_sec"] >= PYRAMID_ADD_FLOW_MIN_KRWPSEC * 0.8 and
                     last_two_ticks_fresh(ticks) and
-                    imb_pyr >= 0.40  # 🔧 호가 임밸런스 조건 추가
+                    imb_pyr >= 0.40
                 )
-
-                # 📊 단기 EMA 기준으로 단기 상승 전환 감지 (1분봉)
-                c1m = _get_c1_cached()
-                if c1m and len(c1m) >= 8:
-                    ema3 = ema_last([c["trade_price"] for c in c1m], 3)
-                    ema8 = ema_last([c["trade_price"] for c in c1m], 8)
-                    short_term_up = ema3 > ema8
-                else:
-                    short_term_up = False  # 🔧 FIX: 캔들 부족 시 보수적 처리
 
                 # 🔧 MAE/MFE 게이트: 흔들린 포지션엔 추매 금지
                 mae_now = (worst / entry_price - 1.0) if entry_price > 0 else -1
                 mfe_now_add = (best / entry_price - 1.0) if entry_price > 0 else 0
                 add_cond_mfe = mae_now > -0.0025 and mfe_now_add > 0.007  # MAE>-0.25%, MFE>0.7%
 
-                if add_cond_price and add_cond_flow and short_term_up and add_cond_mfe:
+                if add_cond_price and add_cond_flow and add_cond_pullback and add_cond_rebreak and add_cond_mfe:
                     with _POSITION_LOCK:
                         pos = OPEN_POSITIONS.get(m)
                         already_added = pos.get("added") if pos else True
                         last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
 
-                    # 쿨다운을 40% 단축해 재진입성 향상
                     cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
 
                     if pos and (not already_added) and cooldown_ok:
-                        add_reason = f"재상승EMA (수익+{gain_from_entry*100:.1f}% 매수비{t15_now['buy_ratio']:.0%} EMA3>EMA8)"
+                        add_reason = f"눌림재돌파 (수익+{gain_from_entry*100:.1f}% 눌림{_pyr_peak_drop*100:.1f}%→재탈환 매수비{t15_now['buy_ratio']:.0%})"
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
                             entry_price = new_entry
-                            # 🔧 FIX: best/worst를 현재가 기준 리셋
-                            best = curp if curp > 0 else new_entry
-                            worst = curp if curp > 0 else new_entry
-                            # 🔧 FIX: 추매 후 전체 상태 리셋 (새 트레이드처럼 추적)
-                            trail_armed = False
-                            trail_stop = 0.0
-                            checkpoint_reached = False
-                            peak_update_count = 0
-                            mfe_partial_done = False
+                            # 🔧 변경안D: best/worst 보존 (MAE/MFE 왜곡 방지)
+                            # 기존: best=worst=curp 리셋 → 리스크 추적 초기화로 왜곡
+                            # 변경: entry_price만 새 평단으로, best/worst는 전체 트레이드 기준 유지
+                            # best, worst 리셋하지 않음
+
+                            # 추매 후 부분 상태만 리셋 (트레일/체크포인트는 유지)
+                            checkpoint_reached = False  # 새 평단 기준 체크포인트 재평가
+                            mfe_partial_done = False    # 새 기회 허용
                             plateau_partial_done = False
                             last_peak_ts = time.time()
-                            sideways_peak = 0.0
                             stop_first_seen_ts = 0.0
                             stop_hits = 0
                             trail_db_first_ts = 0.0
                             trail_db_hits = 0
-                            _c1_cache = None; _c1_cache_ts = 0.0  # 캐시 강제 갱신
+                            _c1_cache = None; _c1_cache_ts = 0.0
                             c1_for_sl = _get_c1_cached()
                             base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
+                            # trail은 유지 (이미 무장된 상태면 새 평단 기준으로 계속)
+                            tg_send_mid(f"🔧 {m} 추매(눌림재돌파) 평단→{fmt6(new_entry)} | best/worst 보존")
 
-            # 🔧 모멘텀 기반 동적 트레일 업데이트 (강세→넓게, 약세→좁게)
+            # 🔧 변경안C: 모멘텀 기반 동적 트레일 업데이트 + 러너 모드
+            # 러너(max_gain >= 2*CP): 약세에도 트레일 넓게 유지 (추세 중간 눌림 허용)
+            # 비러너: 기존 강세→넓게, 약세→좁게
             if trail_armed and new_high:
                 atr = atr14_from_candles(_get_c1_cached(), 14)
                 if atr and atr > 0:
@@ -7233,13 +7239,30 @@ def monitor_position(m,
                 else:
                     base_trail = trail_dist_min
 
+                # 러너 판정: MFE가 체크포인트의 2배 이상
+                _trail_max_gain = (best / entry_price - 1.0) if entry_price > 0 else 0
+                _is_trail_runner = _trail_max_gain >= (dyn_checkpoint * 2.0)
+
                 # 현재 모멘텀 강도 측정 (매수비 + 거래속도)
                 _trail_t10 = micro_tape_stats_from_ticks(ticks, 10)
                 _trail_momentum = 1.0
-                if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
-                    _trail_momentum = 1.4  # 강세: 트레일 40% 확대 → 큰 추세 유지
-                elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
-                    _trail_momentum = 0.7  # 약세: 트레일 30% 축소 → 빠른 수익 확보
+
+                if _is_trail_runner:
+                    # 🔧 러너 모드: 약세에도 트레일 최소 1.0x 유지 (추세 눌림 허용)
+                    # 강세면 1.4x 확대, 약세여도 1.0x (축소 안 함)
+                    if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
+                        _trail_momentum = 1.4
+                    else:
+                        _trail_momentum = 1.0  # 러너: 약세에도 축소 없이 기본 유지
+                    # 래칫 강화: 러너는 MFE의 45%를 base_stop으로 확보
+                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.45))
+                    base_stop = max(base_stop, _runner_lock)
+                else:
+                    # 비러너: 기존 로직 (강세 확대, 약세 축소)
+                    if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
+                        _trail_momentum = 1.4  # 강세: 트레일 40% 확대
+                    elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
+                        _trail_momentum = 0.7  # 약세: 트레일 30% 축소
 
                 trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
@@ -7281,6 +7304,8 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             # 🔧 FIX: 루프 상단 오더북 스냅샷 재사용 (API 중복 호출 제거)
             ob_now = ob_snap
+            # 🔧 변경안A: max_gain 조기 계산 (러너 판정용)
+            _max_gain_now = (best / entry_price - 1.0) if entry_price > 0 else 0
 
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
@@ -7296,7 +7321,7 @@ def monitor_position(m,
 
             if not checkpoint_reached and cur_gain >= dyn_checkpoint:
                 checkpoint_reached = True
-                # 🔧 [변경] 강세/약세 판단 → 약세만 25% 부분익절, 강세는 트레일링에 맡김
+                # 🔧 [변경] 강세/약세 판단 → 약세만 부분익절, 강세는 트레일링에 맡김
                 if is_strong_momentum(ticks, ob_now):
                     # 강세 → 부분익절 없이 트레일만 (꼬리 먹기)
                     trail_armed = True
@@ -7314,12 +7339,27 @@ def monitor_position(m,
                         # 초기 30초 + ±0.15% 박스 → 홀딩 (휩쏘 방지)
                         tg_send_mid(f"⏳ {m} 약세 판정이나 소프트가드 구간 → 관찰 유지")
                     else:
-                        # 약세 → 25% 부분익절 (MFE/Plateau 미완료 + 쿨다운 확인)
-                        if not mfe_partial_done and not plateau_partial_done and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
-                            ok, msg, sold = safe_partial_sell(m, 0.25, f"얇은수익 스캘핑 +{cur_gain*100:.2f}% 약세판정")
+                        # 🔧 변경안A: 이미 달리는 애(러너)는 약세 판정이어도 스캘핑 스킵
+                        # 조건: 고점 1회 이상 갱신 + MFE가 체크포인트의 2배 이상 = 추세 가능성
+                        _is_runner_now = (peak_update_count >= 1) and (_max_gain_now >= dyn_checkpoint * 2.0)
+                        if _is_runner_now:
+                            # 🔧 러너: 부분익절 없이 넓은 트레일 + 래칫으로 수익 락인
+                            trail_armed = True
+                            atr = atr14_from_candles(_get_c1_cached(), 14)
+                            if atr and atr > 0:
+                                trail_dist = max(trail_dist_min, (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                            else:
+                                trail_dist = trail_dist_min
+                            trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+                            # 래칫: 최소 수수료+알파 확보
+                            be_stop = entry_price * (1.0 + FEE_RATE + 0.0010)
+                            base_stop = max(base_stop, be_stop)
+                            tg_send_mid(f"🏃 {m} +{cur_gain*100:.2f}% 러너 판정 (고점{peak_update_count}회, MFE+{_max_gain_now*100:.2f}%) → 스캘핑 스킵, 트레일 유지")
+                        elif not mfe_partial_done and not plateau_partial_done and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
+                            # 🔧 변경안A: 러너 아닌 약세 → 15% 소량 수확 (기존 25%→15% 축소)
+                            ok, msg, sold = safe_partial_sell(m, 0.15, f"약세수확 +{cur_gain*100:.2f}% 약세판정")
                             if ok:
                                 last_exit_event_ts = time.time()
-                                # 🔧 러너 모드: 적정 트레일 + 본절 상향 (0.6→0.8: 과도한 타이트 방지)
                                 trail_armed = True
                                 atr = atr14_from_candles(_get_c1_cached(), 14)
                                 if atr and atr > 0:
@@ -7330,7 +7370,7 @@ def monitor_position(m,
                                 trail_stop = curp * (1.0 - trail_dist)
                                 be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
                                 base_stop = max(base_stop, be_stop)
-                                tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 25% 스캘핑 + 러너트레일 (dist={trail_dist*100:.2f}%, 본절상향)")
+                                tg_send_mid(f"💰 {m} +{cur_gain*100:.2f}% 약세 → 15% 수확 + 러너트레일 (dist={trail_dist*100:.2f}%, 본절상향)")
 
             # 🔧 [제거됨] 강세모드 동적 트레일링 → 일반 트레일링(0.2% 간격)으로 대체
 
@@ -7361,16 +7401,26 @@ def monitor_position(m,
                 elif btc5_now >= 0.004:  # 🔧 FIX: BTC +0.4% 순풍 (대칭화: +0.5→+0.4)
                     mfe_target *= 1.30  # 🔧 FIX: 30% 상향 (25→30%: 순풍 시 수익 극대화)
                 if max_gain >= mfe_target and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
+                    # 🔧 변경안B: 신호 강도 기반 MFE 익절 비율 동적화
+                    # 강한 신호(score≥85 or precision_pocket) → 25%만 수확, 나머지 러너
+                    # 보통 신호(score≥75) → 35% 수확
+                    # 약한 신호 → 50% 수확 (기존)
+                    _entry_score = float(pre.get("score", 0))
+                    _is_pocket = bool(pre.get("is_precision_pocket", False))
+                    if _is_pocket or _entry_score >= 85:
+                        _mfe_ratio = 0.25
+                    elif _entry_score >= 75:
+                        _mfe_ratio = 0.35
+                    else:
+                        _mfe_ratio = 0.50
                     ok, msg, sold = safe_partial_sell(
-                        m, MFE_PARTIAL_RATIO,
-                        f"MFE익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
+                        m, _mfe_ratio,
+                        f"MFE익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%, 비율:{int(_mfe_ratio*100)}%)"
                     )
                     if ok:
                         mfe_partial_done = True
                         last_exit_event_ts = time.time()
-                        # 🔧 승률개선: 본절→MFE*50% 수익 락인 (잔여 50%도 확실한 수익 확보)
-                        # 기존: MFE 30% → 되돌림 시 수익 증발
-                        # 변경: MFE의 50%를 확보하여 부분익절 후 되돌림에도 안정 수익 유지
+                        # 🔧 승률개선: MFE*50% 수익 락인 (부분익절 후 되돌림에도 안정 수익 유지)
                         mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.5)
                         be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
@@ -7410,8 +7460,59 @@ def monitor_position(m,
                     trail_stop = max(trail_stop, curp * (1.0 - max(trail_dist_min * 0.8, 0.0025)))
                     tg_send_mid(f"🔧 {m} 재상승 감지 → 트레일 강화")
         
+        # === 🔧 변경안E: 시간 만료 2단계화 ===
+        # 손실 중 → 즉시 청산 (추가 손실 방지)
+        # 수익/본절 중 → 90초 연장하여 러너 트레일로 추가 수익 기회
         if verdict is None:
-            verdict = "시간 만료(모니터링 종료)"
+            _final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+            if _final_gain <= -FEE_RATE:
+                # 손실 상태 → 즉시 청산
+                close_auto_position(m, f"시간만료 손실컷 {_final_gain*100:.2f}%")
+                _already_closed = True
+                verdict = "시간만료_손실컷"
+            elif trail_armed and _final_gain > FEE_RATE:
+                # 수익 상태 + 트레일 무장 → 90초 연장 (러너 기회)
+                tg_send_mid(f"⏰ {m} 시간만료 but 수익중 +{_final_gain*100:.2f}% → 90초 연장 러너모드")
+                _ext_start = time.time()
+                _ext_horizon = 90  # 연장 시간 (초)
+                while time.time() - _ext_start <= _ext_horizon:
+                    time.sleep(RECHECK_SEC)
+                    # 포지션 존재 확인
+                    with _POSITION_LOCK:
+                        if m not in OPEN_POSITIONS:
+                            _already_closed = True
+                            verdict = "연장중_전량청산"
+                            break
+                    ticks = get_recent_ticks(m, 100)
+                    if not ticks:
+                        continue
+                    curp = max(ticks, key=tick_ts_ms).get("trade_price", curp)
+                    last_price = curp
+                    best = max(best, curp)
+
+                    # 트레일 체크
+                    if curp < trail_stop:
+                        _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                        close_auto_position(m, f"연장트레일컷 +{_ext_gain*100:.2f}%")
+                        _already_closed = True
+                        verdict = "연장_TRAIL_STOP"
+                        break
+                    # base_stop 체크
+                    if base_stop > 0 and curp <= base_stop:
+                        _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                        close_auto_position(m, f"연장래칫컷 +{_ext_gain*100:.2f}%")
+                        _already_closed = True
+                        verdict = "연장_RATCHET_STOP"
+                        break
+                    # 신고점 → 트레일 갱신
+                    if curp > best:
+                        best = curp
+                        trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min))
+
+                if verdict is None:
+                    verdict = "연장만료(모니터링 종료)"
+            else:
+                verdict = "시간 만료(모니터링 종료)"
 
     finally:
         # ================================
