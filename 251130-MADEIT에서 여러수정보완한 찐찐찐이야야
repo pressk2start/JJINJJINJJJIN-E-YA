@@ -74,8 +74,8 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
 
 def get_dynamic_checkpoint():
     """수수료 + 슬리피지(trimmed mean) + 최소알파 기반 동적 체크포인트"""
-    # 🔧 CRITICAL FIX: 안전한 전역 참조 (NameError 방지)
-    fee = globals().get("FEE_RATE", 0.001)
+    # 🔧 FIX: 런타임 호출이므로 FEE_RATE는 항상 정의됨 → 직접 참조 (globals().get 제거)
+    fee = FEE_RATE
     # 🔧 FIX: entry/exit 분리 사용 (정확한 왕복 추정)
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
     avg_exit_slip = _get_trimmed_mean(_EXIT_SLIP_HISTORY, 0.0008)
@@ -122,10 +122,9 @@ TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 0.55%→0.25% (MFE 0.25% 현실화, 소
 
 def get_trail_distance_min():
     """🔧 트레일 간격을 손절폭(DYN_SL_MIN)과 연동 - MFE 익절 우선"""
-    # 🔧 CRITICAL FIX: 안전한 전역 참조 (DYN_SL_MIN은 line 2171에서 정의됨)
-    dyn_sl = globals().get("DYN_SL_MIN", 0.004)
-    # 🔧 FIX: EXIT_PROFILE 반영값 사용 (BASE 대신 TRAIL_DISTANCE_MIN 참조)
-    base = globals().get("TRAIL_DISTANCE_MIN", TRAIL_DISTANCE_MIN_BASE)
+    # 🔧 FIX: 런타임 호출이므로 전역변수 항상 정의됨 → 직접 참조 (globals().get 제거)
+    dyn_sl = DYN_SL_MIN
+    base = TRAIL_DISTANCE_MIN
     # 🔧 FIX: 손절폭의 80%와 base 중 큰 값 (기존 60%→80%, MFE 보호)
     return max(base, dyn_sl * 0.8)
 
@@ -2495,7 +2494,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         reason = verdict or action or "모니터링 종료"
 
         # 🔧 FIX: monitor_position 내부에서 이미 청산 완료된 경우 중복 청산 방지
-        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치"}
+        # 🔧 FIX: half/confirm 스크래치 누락 수정 (entry_mode별 verdict 모두 포함)
+        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치", "half 스크래치", "confirm 스크래치"}
         if verdict in _ALREADY_CLOSED_VERDICTS:
             # 내부에서 close_auto_position 이미 호출됨 → remonitor 종료
             print(f"[REMONITOR] {m} 내부청산 완료 ({verdict}) → remonitor 종료")
@@ -3644,6 +3644,7 @@ def _new_session():
 
 
 SESSION = _new_session()
+_SESSION_LOCK = threading.Lock()  # 🔧 FIX: 세션 교체 시 레이스 컨디션 방지
 KST = timezone(timedelta(hours=9))
 
 def now_kst():
@@ -3701,12 +3702,14 @@ def _throttle():
 
 def _refresh_session():
     global SESSION, _CONSEC_CONN_ERR
-    try:
-        SESSION.close()
-    except Exception:
-        pass
-    SESSION = _new_session()
-    _CONSEC_CONN_ERR = 0
+    # 🔧 FIX: 락으로 보호 (다른 스레드가 닫힌 세션 사용하는 레이스 컨디션 방지)
+    with _SESSION_LOCK:
+        try:
+            SESSION.close()
+        except Exception:
+            pass
+        SESSION = _new_session()
+        _CONSEC_CONN_ERR = 0
     print("[NET] session refreshed")
 
 
@@ -6099,6 +6102,10 @@ def monitor_position(m,
     # === 🔧 횡보 탈출 미니트레일 상태 ===
     sideways_peak = 0.0          # 60초 이후 고점 추적
 
+    # === 🔧 FIX: 오더북 스냅샷 스레드 로컬 캐시 (함수 레벨 공유 → 레이스 컨디션 해결) ===
+    _local_ob_snap_ts = 0.0
+    _local_ob_snap = pre.get("ob", {})
+
     # === 🔥 실패 브레이크아웃 감지 상태 ===
     breakout_reached = False     # +0.15% 이상 돌파 여부
     breakout_ts = 0.0            # 돌파 시점 타임스탬프
@@ -6146,18 +6153,16 @@ def monitor_position(m,
             last_price = curp
 
             # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
-            if not hasattr(monitor_position, '_ob_snap_ts'):
-                monitor_position._ob_snap_ts = {}
-                monitor_position._ob_snap_cache = {}
-            _ob_snap_age = time.time() - monitor_position._ob_snap_ts.get(m, 0)
+            # 🔧 FIX: 스레드 로컬 캐시 사용 (기존 함수 레벨 공유 → 멀티스레드 레이스 컨디션 해결)
+            _ob_snap_age = time.time() - _local_ob_snap_ts
             if _ob_snap_age >= 10:
                 try:
                     _ob_snap_raw = fetch_orderbook_cache([m])
-                    monitor_position._ob_snap_cache[m] = _ob_snap_raw.get(m, pre.get("ob", {}))
-                    monitor_position._ob_snap_ts[m] = time.time()
+                    _local_ob_snap = _ob_snap_raw.get(m, pre.get("ob", {}))
+                    _local_ob_snap_ts = time.time()
                 except Exception:
                     pass
-            ob_snap = monitor_position._ob_snap_cache.get(m, pre.get("ob", {}))
+            ob_snap = _local_ob_snap
 
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
@@ -6613,6 +6618,12 @@ def monitor_position(m,
 # =========================
 # 알림
 # =========================
+import re as _re_for_tg
+
+def _strip_html(text):
+    """🔧 FIX: 모든 HTML 태그 제거 (기존 <b>만 제거 → <code>, <pre> 등 누락 수정)"""
+    return _re_for_tg.sub(r'<[^>]+>', '', text)
+
 def tg_send(t, retry=1):
     # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력
     if not TG_TOKEN or not CHAT_IDS:
@@ -6649,7 +6660,7 @@ def tg_send(t, retry=1):
                         print(f"[TG][{cid}] HTML 파싱 실패 → plain text 재시도")
                         payload_plain = {
                             "chat_id": cid,
-                            "text": t.replace("<b>", "").replace("</b>", ""),
+                            "text": _strip_html(t),
                             "disable_web_page_preview": True,
                         }
                         try:
@@ -6672,7 +6683,7 @@ def tg_send(t, retry=1):
             try:
                 payload_plain = {
                     "chat_id": cid,
-                    "text": t.replace("<b>", "").replace("</b>", ""),
+                    "text": _strip_html(t),
                     "disable_web_page_preview": True,
                 }
                 r3 = SESSION.post(
@@ -6945,8 +6956,11 @@ def main():
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
+            # 🔧 FIX: 하드코딩 경로 → 환경변수 폴백 (이식성 개선)
             try:
-                with open("/home/ubuntu/bot/health.log", "w") as hf:
+                _health_path = os.getenv("HEALTH_LOG_PATH", "/home/ubuntu/bot/health.log")
+                os.makedirs(os.path.dirname(_health_path), exist_ok=True)
+                with open(_health_path, "w") as hf:
                     hf.write(f"{time.time()}\n")
             except Exception:
                 pass
