@@ -2014,9 +2014,11 @@ def close_auto_position(m, reason=""):
                 except Exception as _e:
                     print(f"[FEATURE_UPDATE_ERR] {_e}")
 
-            fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
-            net_pl_value = pl_value - fee_total  # 🔧 FIX: 수수료 반영 순손익(원)
-            result_emoji = "🟢" if net_ret_pct > 0 else "🔴"  # 🔧 FIX: net 기준 판정
+            fee_buy = est_entry_value * FEE_RATE_ONEWAY
+            fee_sell = est_exit_value * FEE_RATE_ONEWAY
+            fee_total = fee_buy + fee_sell
+            net_pl_value = pl_value - fee_total  # 수수료 반영 순손익(원)
+            result_emoji = "🟢" if net_ret_pct > 0 else "🔴"  # net 기준 판정
 
             # 🔧 DEBUG: 청산 알람 발송 직전 로그
             print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={ret_pct:.2f}% net={net_ret_pct:.2f}% vol={vol:.6f} exit_price={exit_price_used}")
@@ -2025,14 +2027,15 @@ def close_auto_position(m, reason=""):
                 f"====================================\n"
                 f"{result_emoji} <b>자동청산 완료</b> {m}\n"
                 f"====================================\n"
-                f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n\n"
+                f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
+                f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
                 f"• 사유: {reason}\n"
                 f"• 매수평단: {fmt6(entry_price)}원\n"
                 f"• 실매도가: {fmt6(exit_price_used)}원\n"
                 f"• 체결수량: {vol:.6f}\n"
                 f"• 매수금액: {est_entry_value:,.0f}원\n"
                 f"• 청산금액: {est_exit_value:,.0f}원\n"
-                f"• 수수료: {fee_total:,.0f}원\n"
+                f"• 수수료: {fee_total:,.0f}원 (매수 {fee_buy:,.0f} + 매도 {fee_sell:,.0f})\n"
                 f"====================================\n"
                 f"{link_for(m)}"
             )
@@ -2240,7 +2243,10 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         est_exit_value = exit_price_used * executed
         pl_value = est_exit_value - est_entry_value
         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
+        fee_buy = est_entry_value * FEE_RATE_ONEWAY
+        fee_sell = est_exit_value * FEE_RATE_ONEWAY
+        fee_total = fee_buy + fee_sell
+        net_pl_value = pl_value - fee_total  # 수수료 반영 순손익(원)
 
         # 🔧 FIX: net 기준으로 통일 (수수료 반영) - 모든 분기에서 사용
         net_ret_pct = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
@@ -2296,14 +2302,15 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
             f"====================================\n"
-            f"💰 순손익: {pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n\n"
+            f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
+            f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
             f"• 체결수량: {executed:.6f}\n"
             f"• 매수금액: {est_entry_value:,.0f}원\n"
             f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원 (매수 {fee_buy:,.0f} + 매도 {fee_sell:,.0f})\n"
             f"• 잔여수량: {remaining_volume:.6f}\n"
             f"===================================="
         )
