@@ -579,6 +579,155 @@ def upbit_private_post(path, body=None, timeout=7):
     return r.json()
 
 
+def upbit_private_delete(path, params=None, timeout=7):
+    """업비트 DELETE API (주문 취소용)"""
+    url = f"https://api.upbit.com{path}"
+    params = params or {}
+    headers = _make_auth_headers(params)
+    _throttle()
+    r = SESSION.delete(url, headers=headers, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def cancel_order(uuid_str):
+    """미체결 주문 취소 (업비트 DELETE /v1/order)"""
+    try:
+        return upbit_private_delete("/v1/order", {"uuid": uuid_str})
+    except Exception as e:
+        print(f"[CANCEL_ERR] {uuid_str}: {e}")
+        return None
+
+
+def place_limit_buy(market, price, volume):
+    """지정가 매수 (ord_type=limit)
+    - price: 매수 희망 가격 (원)
+    - volume: 매수 수량
+    """
+    volume = round(float(volume), 8)
+    price = float(price)
+    if price <= 0 or volume <= 0:
+        print(f"[LIMIT_BUY_ERR] {market} 가격/수량 무효: price={price}, vol={volume}")
+        return None
+    # 최소주문금액 체크
+    if price * volume < 5000:
+        print(f"[LIMIT_BUY_ERR] {market} 최소주문금액 미달: {price*volume:.0f}원")
+        return None
+    body = {
+        "market": market,
+        "side": "bid",
+        "ord_type": "limit",
+        "price": str(int(price)),
+        "volume": f"{volume:.8f}",
+    }
+    return upbit_private_post("/v1/orders", body)
+
+
+def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
+    """
+    하이브리드 매수: 지정가 → 타임아웃 → 시장가 전환
+    1) 최우선 매도호가(ask1) 지정가로 주문
+    2) timeout_sec 동안 체결 대기
+    3) 미체결/부분체결 시 → 취소 → 잔여분 시장가 매수
+    반환: place_market_buy와 동일한 형태의 주문 결과 dict (또는 None)
+    """
+    # 최우선 매도호가 추출 (오더북에서)
+    ask1_price = None
+    try:
+        if ob_data:
+            units = ob_data.get("raw", {}).get("orderbook_units", [])
+            if units:
+                ask1_price = float(units[0].get("ask_price", 0))
+    except Exception:
+        pass
+
+    if not ask1_price or ask1_price <= 0:
+        # 오더북 없으면 시장가 폴백
+        print(f"[HYBRID] {market} 호가 정보 없음 → 시장가 폴백")
+        return place_market_buy(market, krw_amount)
+
+    # KRW → 수량 변환 (지정가는 수량 기반)
+    buy_volume = krw_amount / ask1_price
+    buy_volume = round(buy_volume, 8)
+
+    if buy_volume <= 0 or ask1_price * buy_volume < 5000:
+        print(f"[HYBRID] {market} 주문금액 부족 → 시장가 폴백")
+        return place_market_buy(market, krw_amount)
+
+    # 1) 지정가 주문
+    try:
+        limit_res = place_limit_buy(market, ask1_price, buy_volume)
+        if not limit_res or not isinstance(limit_res, dict):
+            print(f"[HYBRID] {market} 지정가 주문 실패 → 시장가 폴백")
+            return place_market_buy(market, krw_amount)
+
+        order_uuid = limit_res.get("uuid")
+        if not order_uuid:
+            print(f"[HYBRID] {market} 지정가 UUID 없음 → 시장가 폴백")
+            return place_market_buy(market, krw_amount)
+
+        print(f"[HYBRID] {market} 지정가 매수 @ {ask1_price:,.0f}원 × {buy_volume:.6f} | 대기 {timeout_sec}초")
+
+    except Exception as e:
+        print(f"[HYBRID] {market} 지정가 예외: {e} → 시장가 폴백")
+        return place_market_buy(market, krw_amount)
+
+    # 2) 체결 대기 (짧은 폴링)
+    deadline = time.time() + timeout_sec
+    od = None
+    while time.time() < deadline:
+        time.sleep(0.3)
+        try:
+            od = upbit_private_get("/v1/order", {"uuid": order_uuid})
+            state = od.get("state", "")
+            if state == "done":
+                # 전량 체결됨
+                print(f"[HYBRID] {market} 지정가 전량체결!")
+                return limit_res  # 원래 주문 결과 반환
+            if state == "cancel":
+                break
+        except Exception:
+            pass
+
+    # 3) 미체결/부분체결 → 취소 → 잔여분 시장가
+    executed_vol = 0.0
+    try:
+        if od:
+            executed_vol = float(od.get("executed_volume") or "0")
+    except Exception:
+        pass
+
+    remaining_vol = buy_volume - executed_vol
+    remaining_krw = int(remaining_vol * ask1_price)
+
+    # 취소 시도
+    cancel_order(order_uuid)
+
+    if executed_vol > 0:
+        print(f"[HYBRID] {market} 부분체결 {executed_vol:.6f} / 잔여 {remaining_vol:.6f}")
+
+    # 잔여분 시장가 매수
+    if remaining_krw >= 5000:
+        print(f"[HYBRID] {market} 잔여분 시장가 매수 {remaining_krw:,}원")
+        try:
+            mkt_res = place_market_buy(market, remaining_krw)
+            # 두 주문을 합치려면 복잡하므로, 지정가 결과를 기본으로 반환
+            # (체결 확인은 get_order_result + 잔고 재검증에서 처리)
+            return limit_res
+        except Exception as e:
+            print(f"[HYBRID] {market} 잔여분 시장가 실패: {e}")
+            # 부분체결만이라도 있으면 반환
+            if executed_vol > 0:
+                return limit_res
+            return None
+    else:
+        if executed_vol > 0:
+            print(f"[HYBRID] {market} 잔여분 소액({remaining_krw}원) → 부분체결만 유지")
+            return limit_res
+        print(f"[HYBRID] {market} 체결 0 + 잔여 소액 → 실패")
+        return None
+
+
 def get_order_result(uuid_str, timeout_sec=10.0):
     """
     주문 uuid 로 최종 체결 결과 조회
@@ -1201,12 +1350,27 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 OPEN_POSITIONS.pop(m, None)
             return
 
-        # 🔧 추격진입 시 사이즈 다운: probe 강제
-        if is_chase and entry_mode != "probe":
-            print(f"[CHASE_SIZE_DOWN] {m} 추격진입 감지 → entry_mode={entry_mode}→probe (10%)")
-            entry_mode = "probe"
-            entry_fraction = 0.10
-            mode_emoji = "🧭"
+        # 🔧 추격진입 → 리테스트 전환 (전 시간대 적용)
+        # 추격은 직접 진입하지 않고 리테스트 워치리스트에 등록 → 되돌림 후 재돌파 시에만 진입
+        if is_chase:
+            print(f"[CHASE→RETEST] {m} 추격 감지 → 진입 금지, 리테스트 등록")
+            # RETEST_MODE_ENABLED 상관없이 무조건 등록 (추격 분리 정책)
+            with _RETEST_LOCK:
+                if m not in _RETEST_WATCHLIST:
+                    _RETEST_WATCHLIST[m] = {
+                        "peak_price": current_price,
+                        "peak_ts": time.time(),
+                        "pullback_low": current_price,
+                        "state": "watching",
+                        "pre": pre,
+                        "entry_price": signal_price,
+                    }
+            tg_send_mid(f"🔄 {m} 추격진입 차단 → 리테스트 대기\n"
+                        f"• 신호가: {fmt6(signal_price)} → 현재가: {fmt6(current_price)}\n"
+                        f"• 되돌림 후 재돌파 시 진입 예정")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            return
 
         # === 계좌 & 주문금액 계산 ===
         accounts = get_account_info()
@@ -1330,7 +1494,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             # - 주문~체결 사이에 sync_orphan이 돌면 잔고 발견 → 유령으로 오판
             # - 주문 전에 기록해두면 sync에서 300초 보호에 걸려 스킵됨
             _RECENT_BUY_TS[m] = time.time()
-            res = place_market_buy(m, krw_to_use)
+            # 🔧 하이브리드 매수: 지정가(ask1) → 1.2초 대기 → 미체결 시 시장가 전환
+            _ob_for_hybrid = pre.get("ob")
+            res = hybrid_buy(m, krw_to_use, ob_data=_ob_for_hybrid, timeout_sec=1.2)
             print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
             oid = res.get("uuid") if isinstance(res, dict) else None
             od = get_order_result(oid, timeout_sec=12) if oid else None
@@ -1637,7 +1803,9 @@ def add_auto_position(m, cur_price, reason=""):
     avg_price_add = cur_price
 
     try:
-        res = place_market_buy(m, krw_to_use)
+        # 🔧 추매도 하이브리드 매수 적용
+        _ob_add = fetch_orderbook_cache([m]).get(m) if m else None
+        res = hybrid_buy(m, krw_to_use, ob_data=_ob_add, timeout_sec=1.0)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid, timeout_sec=12.0) if order_uuid else None
 
@@ -6109,6 +6277,11 @@ def monitor_position(m,
     breakout_reached = False     # +0.15% 이상 돌파 여부
     breakout_ts = 0.0            # 돌파 시점 타임스탬프
 
+    # === 🔧 흐름 붕괴 감지 상태 (진입 후 buy_ratio/imb 급변 → 즉시 부분청산) ===
+    _prev_buy_ratio = None       # 이전 루프의 buy_ratio (급변 감지용)
+    _prev_imbalance = None       # 이전 루프의 imbalance (부호 전환 감지용)
+    _flow_collapse_done = False  # 흐름 붕괴 부분청산 완료 여부
+
     # === 포지션 모드 (probe / confirm) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -6253,6 +6426,50 @@ def monitor_position(m,
                 verdict = "ATR손절"
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_with_fee*100:.2f}%)"
                 break
+
+            # === 🔧 흐름 붕괴 감지 → TP 이전 즉시 부분청산 + 본절 올리기 ===
+            # 조건: buy_ratio 급락 + imbalance 부호전환(+→-) + krw_per_sec 급감 동시 발생
+            # 효과: "수익 난 걸 다시 토해내는" 구간 방지
+            if not _flow_collapse_done and alive_sec >= 10:
+                _fc_t15 = micro_tape_stats_from_ticks(ticks, 15)
+                _fc_buy_ratio = _fc_t15["buy_ratio"]
+                _fc_krw_per_sec = _fc_t15["krw_per_sec"]
+                _fc_imbalance = calc_orderbook_imbalance(ob_snap) if ob_snap else 0.0
+
+                # 급변 감지 (이전 대비 비교)
+                _fc_ratio_drop = (_prev_buy_ratio is not None
+                                  and _prev_buy_ratio >= 0.58
+                                  and _fc_buy_ratio < 0.48)       # 매수비 58%→48% 이하 급락
+                _fc_imb_flip = (_prev_imbalance is not None
+                                and _prev_imbalance > 0.05
+                                and _fc_imbalance <= -0.05)        # imb +→- 전환
+                _fc_flow_dry = _fc_krw_per_sec < 8000              # 거래속도 급감
+
+                # 3가지 중 2가지 이상 동시 충족 시 흐름 붕괴
+                _fc_signals = sum([_fc_ratio_drop, _fc_imb_flip, _fc_flow_dry])
+                _fc_prev_br_log = _prev_buy_ratio  # 갱신 전 값 보존 (로그용)
+                _fc_prev_imb_log = _prev_imbalance
+
+                # 이전 값 갱신 (다음 루프용)
+                _prev_buy_ratio = _fc_buy_ratio
+                _prev_imbalance = _fc_imbalance
+
+                if _fc_signals >= 2 and cur_gain > FEE_RATE:
+                    # 수익 중일 때만 부분청산 (손실 중이면 ATR 손절에 맡김)
+                    _fc_ok, _fc_msg, _fc_sold = safe_partial_sell(
+                        m, 0.50,
+                        f"흐름붕괴 부분청산 | br={_fc_buy_ratio:.0%}(←{_fc_prev_br_log}) "
+                        f"imb={_fc_imbalance:.2f} krw/s={_fc_krw_per_sec:.0f}"
+                    )
+                    if _fc_ok:
+                        _flow_collapse_done = True
+                        # 본절 근처로 base_stop 올리기
+                        be_stop = entry_price * (1.0 + FEE_RATE + 0.0003)
+                        base_stop = max(base_stop, be_stop)
+                        tg_send_mid(f"⚠️ {m} 흐름붕괴 50%청산 | "
+                                    f"br={_fc_buy_ratio:.0%} imb={_fc_imbalance:.2f} "
+                                    f"→ 손절→본절({fmt6(base_stop)})")
+                        print(f"[FLOW_COLLAPSE] {m} 부분청산 완료, base_stop→{base_stop:.0f}")
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
