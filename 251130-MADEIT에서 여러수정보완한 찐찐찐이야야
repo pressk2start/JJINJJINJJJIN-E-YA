@@ -2578,10 +2578,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         if cur_price > 0 and exit_price_used > 0:
             exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
-            _SLIP_HISTORY.append(exit_slip)  # 하위호환
 
         # 찌꺼기 방지: 체결 후 잔여금액 < MIN_ORDER_KRW 이면 매도 불가 → orphan 등록
-        # - pre-check(2211줄)에서 잔여 < DUST_PREVENT_KRW(6000원)은 이미 전량청산 전환됨
+        # - pre-check에서 잔여 < DUST_PREVENT_KRW(6000원)은 이미 전량청산 전환됨
         # - 여기는 체결 중 가격변동으로 잔여가 최소주문금액 미만이 된 경우만 처리
         remaining_price_ref = exit_price_used if exit_price_used > 0 else cur_price
         remaining_krw_post = remaining_volume * remaining_price_ref
@@ -3140,7 +3139,7 @@ REARM_PULLBACK_MAX = 0.004
 REARM_REBREAK_MIN = 0.0028
 
 # 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
-# POSTCHECK_ENABLED = False  # ❌ 제거: 상단(56줄)에서 정의됨
+# POSTCHECK_ENABLED: 상단(L148)에서 정의됨
 POSTCHECK_WINDOW_SEC = 3
 POSTCHECK_MIN_BUY = 0.46  # 0.52 -> 0.54
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
@@ -3157,9 +3156,7 @@ DYN_SL_MAX = 0.006        # 🔧 before1 복원: 0.6% (정상 변동 허용하�
 # =========================
 # 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
 # =========================
-MIN_TICK_DIST = 3                # (미사용)
-ATR_TICKS_MULT = 0.6             # (미사용)
-SPREAD_TICKS_PAD = 1             # (미사용)
+                                 # (틱기반 트레일링 관련 상수 제거됨 — ATR 단일 스탑 사용)
 # 🔧 HARD_STOP_DD는 상단 프로파일에서만 설정 (이중정의 제거)
 
 # 메가 브레이크아웃 (우회 엄격화)
@@ -3417,11 +3414,16 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         rows[i]["mae_pct"] = f"{mae_pct:.4f}"
                         break
 
-                # 다시 쓰기
-                with open(TRADE_LOG_PATH, "w", newline="", encoding="utf-8") as f:
-                    w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
+                # 🔧 FIX: 원자적 쓰기 (임시파일 → rename, 크래시 시 원본 보존)
+                import tempfile
+                _dir = os.path.dirname(TRADE_LOG_PATH)
+                with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
+                                                  dir=_dir, suffix=".tmp", delete=False) as tf:
+                    w = csv.DictWriter(tf, fieldnames=FEATURE_FIELDS)
                     w.writeheader()
                     w.writerows(rows)
+                    _tmp_path = tf.name
+                os.replace(_tmp_path, TRADE_LOG_PATH)
             except Exception as e:
                 print(f"[TRADE_LOG_UPDATE_ERR] {e}")
 
@@ -5402,11 +5404,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 5) 🔧 승률개선: 과열 = 매수비 62%+ 동반이면 half 허용, 미달이면 거부
     # 60%는 너무 느슨 → 62%+ 엄격화, MEGA 승격 대신 half 진입으로 리스크 제한
     overheated = accel * volume_surge
+    _overheat_half = False  # 🔧 FIX: OVERHEAT→HALF 플래그 (호출부에서 entry_mode 제한용)
     if overheated > GATE_OVERHEAT_MAX:
         if buy_ratio >= 0.62:
             # 강한 매수세 동반 과열 → half 모드로 허용 (MEGA 승격은 과도)
             print(f"  [OVERHEAT→HALF] {market} 과열({overheated:.1f}) + 매수비({buy_ratio:.0%}) → half 허용")
-            # mega = True 대신 half 플래그 (점수 보너스 없음, 진입량 제한)
+            _overheat_half = True  # 🔧 FIX: half 플래그 설정 (reason에 마킹)
         else:
             # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부
             return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
@@ -5543,7 +5546,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 통과 ===
     signal_tag = cand_path
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
-    return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}"
+    # 🔧 FIX: OVERHEAT→HALF 마킹 (호출부에서 entry_mode 제한용)
+    oh_tag = " [OVERHEAT_HALF]" if _overheat_half else ""
+    return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
 
 
 # (DCB detect_dead_cat_bounce 함수 제거됨 — 비활성 전략 코드 정리)
@@ -5981,6 +5986,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 🔧 FIX: postcheck bypass 정합성 (ign_ok/mega_ok 키 누락 → bypass 항상 실패하던 버그)
         "ign_ok": (ignition_score >= 3),
         "mega_ok": mega,
+        # 🔧 FIX: OVERHEAT→HALF 플래그 전달 (메인루프에서 entry_mode 제한)
+        "_overheat_half": "[OVERHEAT_HALF]" in gate_reason,
         # 🔧 VWAP 기반 진입 품질
         "vwap_score_bonus": vwap_score_bonus,
         "vwap_gap": round(vwap_gap, 2),
@@ -6887,6 +6894,11 @@ def monitor_position(m,
             _c1_cache_ts = now
         return _c1_cache
 
+    # 🔧 FIX: ticker/오더북 throttle을 로컬 변수로 관리 (함수 속성 race condition 방지)
+    _local_ticker_ts = 0.0
+    _local_ob_snap_ts = 0.0
+    _local_ob_snap_cache = pre.get("ob", {})
+
     try:
         while time.time() - start_ts <= horizon:  # 🔧 before1 복원 (MAX_RUNTIME→horizon)
             time.sleep(RECHECK_SEC)
@@ -6912,14 +6924,13 @@ def monitor_position(m,
             consecutive_failures = 0
 
             # 현재가 — 🔧 FIX: ticker API throttle (10초마다만 호출, 나머지는 ticks에서 추출)
-            if not hasattr(monitor_position, '_ticker_ts'):
-                monitor_position._ticker_ts = {}
-            _ticker_age = time.time() - monitor_position._ticker_ts.get(m, 0)
+            # 🔧 FIX: 함수 속성 대신 로컬 변수 사용 (스레드 간 race condition 방지)
+            _ticker_age = time.time() - _local_ticker_ts
             if _ticker_age >= 10:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
                 if cur_js and len(cur_js) > 0:
                     curp = cur_js[0].get("trade_price", last_price)
-                    monitor_position._ticker_ts[m] = time.time()
+                    _local_ticker_ts = time.time()
                 else:
                     # ticker 실패 시 ticks에서 최신 가격 추출
                     curp = max(ticks, key=tick_ts_ms).get("trade_price", last_price)
@@ -6929,18 +6940,16 @@ def monitor_position(m,
             last_price = curp
 
             # 🔧 FIX: 오더북 스냅샷 (루프당 1회, 10초 throttle — API 429 방지)
-            if not hasattr(monitor_position, '_ob_snap_ts'):
-                monitor_position._ob_snap_ts = {}
-                monitor_position._ob_snap_cache = {}
-            _ob_snap_age = time.time() - monitor_position._ob_snap_ts.get(m, 0)
+            # 🔧 FIX: 함수 속성 대신 로컬 변수 사용 (스레드 간 race condition 방지)
+            _ob_snap_age = time.time() - _local_ob_snap_ts
             if _ob_snap_age >= 10:
                 try:
                     _ob_snap_raw = fetch_orderbook_cache([m])
-                    monitor_position._ob_snap_cache[m] = _ob_snap_raw.get(m, pre.get("ob", {}))
-                    monitor_position._ob_snap_ts[m] = time.time()
+                    _local_ob_snap_cache = _ob_snap_raw.get(m, pre.get("ob", {}))
+                    _local_ob_snap_ts = time.time()
                 except Exception:
                     pass
-            ob_snap = monitor_position._ob_snap_cache.get(m, pre.get("ob", {}))
+            ob_snap = _local_ob_snap_cache
 
             # ✅ 트레일링 래칫 버그 수정: 신고점 판정 먼저
             new_high = curp > best
@@ -7220,9 +7229,6 @@ def monitor_position(m,
                     trail_db_first_ts = 0.0
                     trail_db_hits = 0
 
-            # 🔧 [제거됨] 브레이크이븐 → 트레일링 0.4% 발동으로 대체
-            # 트레일링이 +0.4%에서 발동되면 트레일스탑이 자동으로 본절 이상이 됨
-            in_breakeven_box = abs(gain_from_entry) <= BREAKEVEN_BOX  # ±0.15% 박스 내 (다른 곳에서 사용)
 
             # === 🔥 심플 체크포인트 매도 로직 ===
             cur_gain = (curp / entry_price - 1.0)
@@ -7987,6 +7993,11 @@ def main():
                             def _run_retest_monitor(market, entry, pre_data):
                                 try:
                                     monitor_position(market, entry, pre_data, tight_mode=True)
+                                    # 🔧 FIX: 모니터 종료 후 포지션 잔존 시 remonitor (방치 방지)
+                                    with _POSITION_LOCK:
+                                        _pos_after = OPEN_POSITIONS.get(market)
+                                    if _pos_after and _pos_after.get("state") == "open":
+                                        remonitor_until_close(market, entry, pre_data, tight_mode=True)
                                 except Exception as e3:
                                     print(f"[RETEST_MON_ERR] {market}: {e3}")
                                     traceback.print_exc()
@@ -8183,6 +8194,9 @@ def main():
 
                 # 🔧 승률개선: 급등 허용 시 half 강제 (리스크 제한)
                 if pre.get("_surge_probe"):
+                    pre["entry_mode"] = "half"
+                # 🔧 FIX: 과열+매수세 동반 → half 강제 (stage1_gate에서 마킹)
+                if pre.get("_overheat_half"):
                     pre["entry_mode"] = "half"
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
