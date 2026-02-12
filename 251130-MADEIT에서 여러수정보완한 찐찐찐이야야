@@ -1426,7 +1426,87 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             entry_fraction = 0.50
             mode_emoji = "⚡"
 
-        # === 계좌 & 주문금액 계산 ===
+        # ============================================================
+        # ★★★ 구조 변경 1: 풀백 진입 (Pullback Entry)
+        # 기존: 모멘텀 감지 → 즉시 매수 (=고점 매수)
+        # 변경: 모멘텀 감지 → 0.15~0.3% 되돌림 대기 → 지지 확인 후 매수
+        # 효과: 진입가 0.2~0.4% 개선 = R:R 자동 상승
+        # ============================================================
+        PULLBACK_WAIT_SEC = 20      # 풀백 대기 최대 시간 (초)
+        PULLBACK_MIN_DIP = 0.0015   # 피크 대비 최소 0.15% 하락 필요
+        PULLBACK_MAX_DIP = 0.008    # 0.8% 이상 하락하면 모멘텀 소멸로 판단
+        PULLBACK_BOUNCE_TICKS = 3   # 바닥에서 3틱 연속 상승 = 지지 확인
+
+        _pb_peak = current_price
+        _pb_trough = current_price
+        _pb_bounce_cnt = 0
+        _pb_dipped = False
+        _pb_entry_price = current_price  # 풀백 없으면 원래 가격 사용
+        _pb_start = time.time()
+
+        while time.time() - _pb_start < PULLBACK_WAIT_SEC:
+            _pb_ticks = get_recent_ticks(m, 30, allow_network=True)
+            if not _pb_ticks:
+                time.sleep(0.5)
+                continue
+            _pb_now = max(_pb_ticks, key=tick_ts_ms).get("trade_price", current_price)
+
+            # 피크 갱신
+            if _pb_now > _pb_peak:
+                _pb_peak = _pb_now
+                _pb_trough = _pb_now
+                _pb_bounce_cnt = 0
+
+            # 트로프 갱신
+            if _pb_now < _pb_trough:
+                _pb_trough = _pb_now
+                _pb_bounce_cnt = 0
+
+            # 풀백 깊이 체크
+            _pb_dip_pct = (_pb_peak - _pb_trough) / _pb_peak if _pb_peak > 0 else 0
+
+            # 너무 깊은 하락 = 모멘텀 소멸 → 진입 포기
+            if _pb_dip_pct >= PULLBACK_MAX_DIP:
+                signal_skip(f"풀백 과대 ({_pb_dip_pct*100:.2f}% 하락, 모멘텀 소멸)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+
+            # 최소 풀백 달성 여부
+            if _pb_dip_pct >= PULLBACK_MIN_DIP:
+                _pb_dipped = True
+
+            # 풀백 후 바운스 감지 (지지 확인)
+            if _pb_dipped and _pb_now > _pb_trough:
+                _pb_bounce_cnt += 1
+                if _pb_bounce_cnt >= PULLBACK_BOUNCE_TICKS:
+                    # ★ 풀백 진입 성공! 트로프 근처에서 매수
+                    _pb_entry_price = _pb_now
+                    _pb_saved = (current_price - _pb_entry_price) / current_price * 100
+                    print(f"[PULLBACK_ENTRY] {m} 풀백 진입! "
+                          f"피크{fmt6(_pb_peak)}→저점{fmt6(_pb_trough)}→현재{fmt6(_pb_now)} "
+                          f"(절약 {_pb_saved:.2f}%)")
+                    break
+            else:
+                _pb_bounce_cnt = max(0, _pb_bounce_cnt - 1)
+
+            time.sleep(0.5)
+        else:
+            # 타임아웃: 풀백 없이 계속 상승 → 원래 가격으로 진입 (강한 모멘텀)
+            _pb_ticks_final = get_recent_ticks(m, 10, allow_network=True)
+            if _pb_ticks_final:
+                _pb_entry_price = max(_pb_ticks_final, key=tick_ts_ms).get("trade_price", current_price)
+            # 모멘텀 재확인: 계속 오르고 있으면 진입, 꺾이면 포기
+            _pb_t10 = micro_tape_stats_from_ticks(_pb_ticks_final or [], 10)
+            if _pb_t10.get("buy_ratio", 0) < 0.50:
+                signal_skip(f"풀백 타임아웃 + 매수세 약화 ({_pb_t10.get('buy_ratio',0):.0%})")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+            print(f"[PULLBACK_TIMEOUT] {m} 풀백 없이 상승 지속 → 현재가 {fmt6(_pb_entry_price)} 진입")
+
+        # 풀백 이후 현재가를 진입가로 갱신
+        current_price = _pb_entry_price
         accounts = get_account_info()
         if not accounts:
             signal_skip("계좌 조회 실패")
@@ -5311,10 +5391,20 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if abs(buy_ratio - 1.0) < 1e-6:
         return False, f"[하드컷] 매수비100%(스푸핑) | {metrics}"
 
-    # 5) 과열 안전장치 (accel * surge > 20 = 꼭대기)
+    # 5) ★ 구조 변경 3: 과열 = 거부 → MEGA 신호 전환
+    # 핵심: accel×surge>20은 "폭발적 초기 모멘텀"을 의미
+    # 기존: 이걸 거부 → 결과적으로 모멘텀이 성숙한 후에만 진입 (=고점 매수)
+    # 변경: 매수비 60%+ 동반이면 진정한 강세 → MEGA 플래그로 보너스
+    #        매수비 50% 미만이면 스푸핑/덤핑 → 여전히 거부
     overheated = accel * volume_surge
     if overheated > GATE_OVERHEAT_MAX:
-        return False, f"[하드컷] 과열 {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
+        if buy_ratio >= 0.60:
+            # 강한 매수세 동반 과열 = 진정한 폭발 모멘텀 → MEGA 신호로 승격
+            print(f"  [OVERHEAT→MEGA] {market} 과열({overheated:.1f}) + 매수비({buy_ratio:.0%}) → MEGA 승격")
+            mega = True  # MEGA 플래그 활성화 (점수 보너스 적용)
+        else:
+            # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부 유지
+            return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
 
     # 6) 급등 상한 안전장치
     if volume_surge > GATE_SURGE_MAX:
@@ -5594,6 +5684,34 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
     # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
     regime_flat = (regime_reason == "FLAT_SLOPE")
+
+    # ============================================================
+    # ★★★ 구조 변경 2: 5분봉 추세 정렬 필터
+    # 핵심: 5분봉 EMA5 < EMA20이면 하락 추세 → 여기서 매수는 바운스 잡기
+    # 바운스 잡기는 80%가 손실 → 상승 추세에서만 진입
+    # ============================================================
+    try:
+        _c5 = get_minutes_candles(5, m, 21)  # 5분봉 21개 = EMA20 계산용
+        if _c5 and len(_c5) >= 20:
+            _c5_closes = [x["trade_price"] for x in _c5]
+            # EMA5 계산
+            _ema5_mult = 2 / (5 + 1)
+            _ema5 = _c5_closes[0]
+            for _p in _c5_closes[1:]:
+                _ema5 = _p * _ema5_mult + _ema5 * (1 - _ema5_mult)
+            # EMA20 계산
+            _ema20_mult = 2 / (20 + 1)
+            _ema20 = _c5_closes[0]
+            for _p in _c5_closes[1:]:
+                _ema20 = _p * _ema20_mult + _ema20 * (1 - _ema20_mult)
+
+            _trend_gap = (_ema5 - _ema20) / _ema20 if _ema20 > 0 else 0
+            if _ema5 < _ema20 and _trend_gap < -0.003:
+                # EMA5가 EMA20보다 0.3% 이상 아래 = 명확한 하락추세
+                cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_gap*100:.2f}%) 하락추세 진입 차단")
+                return None
+    except Exception:
+        pass  # API 실패 시 필터 스킵 (진입 기회 보존)
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
