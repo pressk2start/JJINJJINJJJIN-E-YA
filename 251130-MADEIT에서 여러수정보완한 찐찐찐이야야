@@ -51,14 +51,14 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 진입 후 5초 웜업
-HARD_STOP_DD = 0.020  # 🔧 승률개선: 1.5→2.0% 급락 시 즉시 컷 (DYN_SL_MAX 확대에 맞춤)
-EXIT_DEBOUNCE_SEC = 8  # 청산 신호 지속 확인 시간
-EXIT_DEBOUNCE_N = 4  # 연속 N회 조건 충족 필요
+HARD_STOP_DD = 0.012  # ★ 개선: 2.0→1.2% (SL 0.6%의 2배 = 비상 최종방어선)
+EXIT_DEBOUNCE_SEC = 5  # ★ 개선: 8→5초 (손실 확인 빨리, 휩쏘는 체크포인트가 방어)
+EXIT_DEBOUNCE_N = 2  # ★ 개선: 4→2회 (2번 연속이면 진짜 하락으로 판단)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 동적화: 수수료 + 슬리피지 + 최소알파 기반
-PROFIT_CHECKPOINT_BASE = 0.0025  # 기본값 0.25% (폴백용)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.0010  # 최소 알파 0.10%
+PROFIT_CHECKPOINT_BASE = 0.006  # ★ 개선: 0.25→0.6% (의미 있는 수익에서만 트레일 무장)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0020  # ★ 개선: 0.10→0.20% (최소 알파 상향)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -85,9 +85,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 왕복 수수료(0.1%) + 왕복슬리피지 + 최소알파(0.1%)
     dynamic_cp = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 🔧 최소 0.30%, 최대 0.50% (before1=0.25~0.45%, SL 0.4~0.6% 대비 적정 체크포인트)
-    # 천정 0.70→0.50%: 변동성 높을 때 체크포인트 과대 → 트레일 무장 지연 방지
-    return max(0.0030, min(0.0050, dynamic_cp))
+    # ★ 개선: 최소 0.50%, 최대 0.80% (SL 0.4~0.6% 대비 의미있는 수익에서만 트레일)
+    # 이전 0.30~0.50%는 정상 변동에도 트레일이 무장 → 조기 스탑아웃 빈발
+    return max(0.0050, min(0.0080, dynamic_cp))
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -104,19 +104,21 @@ SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - before1 기준
 SCRATCH_TIMEOUT_SEC = 20    # 20초 내 개선 없으면 탈출 검토
 SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 
-# 🔧 MFE 기반 부분익절 (경로별 동적 타겟) - 익절키우기 전략
-# 신호 강도에 따라 목표 MFE 도달 시 50% 부분익절
-# 🔧 익절키우기: MFE 목표 상향 → 더 큰 수익 확보 후 부분익절
-# 🔧 MFE 타겟 앞당기기: 빠른 부분익절로 승률 안정화
+# 🔧 MFE 기반 부분익절 (경로별 동적 타겟) — R:R 2:1 이상 확보
+# ★ 핵심 개선: 타겟을 SL(0.4~0.6%)의 2배 이상으로 설정
+# → 승률 45%만 되어도 기대값 양수 (0.45×1.2% - 0.55×0.5% = +0.27%)
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.008,              # 🔧 1.0→0.8% (SL 0.6% 대비 R:R 1:1.3, 더 자주 부분익절)
-    "강돌파 (EMA↑+고점↑)": 0.007,  # 🔧 0.8→0.7% (강돌파 모멘텀 활용, 빈도↑)
-    "EMA↑": 0.006,                 # 🔧 0.7→0.6% (SL 0.6% 대비 R:R 1:1, 적정 빈도)
-    "고점↑": 0.005,                # 🔧 0.6→0.5% (고점돌파 빠른 수익 확보)
-    "거래량↑": 0.005,              # 🔧 0.6→0.5% (거래량 급증 시 빠른 수익 확보)
-    "기본": 0.006,                 # 🔧 0.7→0.6% (기본 경로도 SL 대비 R:R 1:1 확보)
+    "🔥점화": 0.015,              # 1.5% (점화=최강 모멘텀, R:R 1:2.5+)
+    "강돌파 (EMA↑+고점↑)": 0.013,  # 1.3% (강돌파, R:R 1:2.2)
+    "EMA↑": 0.011,                 # 1.1% (EMA 추세, R:R 1:1.8)
+    "고점↑": 0.010,                # 1.0% (고점돌파, R:R 1:1.7)
+    "거래량↑": 0.010,              # 1.0% (거래량 급증, R:R 1:1.7)
+    "기본": 0.010,                 # 1.0% (기본, R:R 1:1.7)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
+# ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
+SCALP_TO_RUNNER_MIN_BUY = 0.58   # 매수비 58% 이상이면 러너 전환
+SCALP_TO_RUNNER_MIN_ACCEL = 0.8  # 가속도 0.8 이상이면 러너 전환
 
 # 트레일링 손절 설정 (before1 기준 - 타이트)
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
@@ -177,9 +179,9 @@ def _apply_exit_profile():
     prof = EXIT_PROFILE
 
     if prof == "gentle":
-        WARMUP_SEC = 14
-        HARD_STOP_DD = 0.024
-        EXIT_DEBOUNCE_SEC = 10
+        WARMUP_SEC = 10
+        HARD_STOP_DD = 0.018  # ★ 개선: 2.4→1.8%
+        EXIT_DEBOUNCE_SEC = 7
         EXIT_DEBOUNCE_N = 2
         TRAIL_ATR_MULT = 1.0
         TRAIL_DISTANCE_MIN_BASE = 0.0025  # FIX [H2]: BASE도 함께 변경 (get_trail_distance_min 정합성)
@@ -189,10 +191,9 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        # 🔧 before1 기준 strict 복원 + 디바운스 개선 유지
-        WARMUP_SEC = 5  # before1=3 → 5초 (슬리피지 안정화 확보)
-        HARD_STOP_DD = 0.015  # 🔧 before1=0.012→절충 1.5% (DYN_SL 0.6% 대비 안전망)
-        EXIT_DEBOUNCE_SEC = 5  # before1=4 → 5초 (휩쏘 무시 개선 유지)
+        WARMUP_SEC = 5
+        HARD_STOP_DD = 0.010  # ★ 개선: 1.5→1.0% (strict=가장 빠른 손절)
+        EXIT_DEBOUNCE_SEC = 4
         EXIT_DEBOUNCE_N = 2
         TRAIL_ATR_MULT = 0.75  # 🔧 before1=0.7→절충 0.75 (타이트 트레일 + 눌림 허용)
         TRAIL_DISTANCE_MIN_BASE = 0.002  # FIX [H2]: BASE도 함께 변경
@@ -201,10 +202,10 @@ def _apply_exit_profile():
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2  # 🔧 before1=2 복원 (컨텍스트 역전 빠른 반응)
 
-    else:  # balanced (before1 기준 + 소폭 완화)
-        WARMUP_SEC = 8  # 🔧 12→8초 (진입 후 빠른 모니터링)
-        HARD_STOP_DD = 0.020  # 🔧 2.5→2.0% (before1=2.2%, DYN_SL 0.6% 대비 적정 안전망)
-        EXIT_DEBOUNCE_SEC = 6  # 🔧 8→6초 (적당한 확인 시간)
+    else:  # balanced
+        WARMUP_SEC = 5
+        HARD_STOP_DD = 0.012  # ★ 개선: 2.0→1.2%
+        EXIT_DEBOUNCE_SEC = 5
         EXIT_DEBOUNCE_N = 2
         TRAIL_ATR_MULT = 0.85  # 🔧 0.9→0.85 (타이트 트레일 + 눌림 허용 절충)
         TRAIL_DISTANCE_MIN_BASE = 0.0025  # FIX [H2]: BASE도 함께 변경
@@ -6257,22 +6258,20 @@ def postcheck_6s(m, pre):
 
         curp = max(ticks, key=tick_ts_ms).get("trade_price", base_price)
 
-        # ★★★ 가격 급등 필터 (조건부 허용)
+        # ★ 개선: 급등은 모멘텀 확인 신호 — 매수비+거래속도 충분하면 다운그레이드 없이 통과
         if base_price > 0:
             surge = (curp / base_price - 1.0)
             if surge >= MAX_SURGE:
-                # 급등이지만 강한 돌파 조건 충족 시 허용
                 t_surge = micro_tape_stats_from_ticks(list(acc), 10) if len(acc) >= 3 else {}
-                strong_break = (
-                    t_surge.get("buy_ratio", 0) >= 0.62
-                    and t_surge.get("krw_per_sec", 0) >= 20000
-                    and (peak - trough_after_peak) / max(peak, 1) < 0.003  # 되돌림 0.3% 미만
+                # ★ 완화: 매수비 55% + 거래속도 15K 이상이면 통과 (기존: 62%+20K)
+                momentum_ok = (
+                    t_surge.get("buy_ratio", 0) >= 0.55
+                    and t_surge.get("krw_per_sec", 0) >= 15000
                 )
-                if not strong_break:
+                if not momentum_ok:
                     return False, f"SURGE_IN_POST({surge*100:.2f}%)"
-                # 강한 돌파 → probe로 강제 다운그레이드하고 통과
-                print(f"[POSTCHECK] {surge*100:.1f}% 급등이나 강돌파 조건 충족 → probe 허용")
-                pre["_surge_probe"] = True  # 호출부에서 probe 강제용 플래그
+                # ★ 개선: 모멘텀 동반 급등 → 다운그레이드 없이 원래 모드 유지
+                print(f"[POSTCHECK] {surge*100:.1f}% 급등 + 모멘텀 확인 → 원래 모드 유지")
 
         if curp > peak:
             peak = curp
@@ -6934,27 +6933,24 @@ def monitor_position(m,
                 trail_stop = curp * (1.0 - get_trail_distance_min())
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
 
-            # === 🔧 특단조치: 수익 래칫 세밀화 (0.2% 단위, 수익의 ~70% 잠금) ===
-            # 기존: 0.3~0.4% 간격 + 수익의 50% 잠금 → 되돌림에서 수익 대부분 반납
-            # 변경: 0.2% 간격 + 수익의 70% 잠금 → 되돌림에서 수익 70% 보존
+            # === ★ 수익 래칫: 수익의 80% 잠금 (기존 70% → 개선) ===
+            # 핵심: 힘들게 번 수익을 되돌림에서 80% 보존
             if trail_armed and gain_from_entry > 0:
                 _ratchet_lock = 0
-                if gain_from_entry >= 0.014:      # +1.4% → 최소 +1.0% 확보 (71%)
-                    _ratchet_lock = entry_price * (1.0 + 0.010)
-                elif gain_from_entry >= 0.012:    # +1.2% → 최소 +0.85% 확보 (71%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0085)
-                elif gain_from_entry >= 0.010:    # +1.0% → 최소 +0.70% 확보 (70%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0070)
-                elif gain_from_entry >= 0.008:    # +0.8% → 최소 +0.55% 확보 (69%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0055)
-                elif gain_from_entry >= 0.006:    # +0.6% → 최소 +0.40% 확보 (67%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0040)
-                elif gain_from_entry >= 0.005:    # +0.5% → 최소 +0.30% 확보 (60%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0030)
-                elif gain_from_entry >= 0.003:    # +0.3% → 최소 +0.15% 확보 (50%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0015)
-                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트 → 본절 확보
-                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.0005)
+                if gain_from_entry >= 0.020:      # +2.0% → 최소 +1.6% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.016)
+                elif gain_from_entry >= 0.015:    # +1.5% → 최소 +1.2% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.012)
+                elif gain_from_entry >= 0.012:    # +1.2% → 최소 +0.96% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0096)
+                elif gain_from_entry >= 0.010:    # +1.0% → 최소 +0.80% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0080)
+                elif gain_from_entry >= 0.008:    # +0.8% → 최소 +0.64% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0064)
+                elif gain_from_entry >= 0.006:    # +0.6% → 최소 +0.48% 확보 (80%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0048)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트 → 본절+α 확보
+                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.001)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -7053,15 +7049,15 @@ def monitor_position(m,
                         _trail_momentum = 1.4
                     else:
                         _trail_momentum = 1.0  # 러너: 약세에도 축소 없이 기본 유지
-                    # 래칫 강화: 러너는 MFE의 45%를 base_stop으로 확보
-                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.45))
+                    # ★ 개선: 러너 래칫 45%→65% (MFE의 65%를 base_stop으로 확보)
+                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.65))
                     base_stop = max(base_stop, _runner_lock)
                 else:
                     # 비러너: 기존 로직 (강세 확대, 약세 축소)
                     if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
                         _trail_momentum = 1.4  # 강세: 트레일 40% 확대
                     elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
-                        _trail_momentum = 0.7  # 약세: 트레일 30% 축소
+                        _trail_momentum = 0.85  # ★ 개선: 0.7→0.85 (약세에도 15%만 축소, 과도 압축 방지)
 
                 trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
@@ -7168,13 +7164,31 @@ def monitor_position(m,
                     mfe_target *= 0.80
                 elif btc5_now >= 0.004:
                     mfe_target *= 1.30
-                # 스캘프: MFE 도달 시 100% 전량 청산
+                # ★ 개선: 스캘프 MFE 도달 시 모멘텀 확인 → 러너 전환 or 전량익절
                 if not mfe_partial_done and max_gain >= mfe_target and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
-                    close_auto_position(m, f"스캘프TP +{cur_gain_now*100:.2f}% (MFE+{max_gain*100:.2f}% 타겟{mfe_target*100:.2f}%)")
-                    _already_closed = True
-                    verdict = "스캘프_TP"
-                    tg_send_mid(f"💰 {m} 스캘프 전량익절 +{cur_gain_now*100:.2f}% | MFE+{max_gain*100:.2f}% (타겟{mfe_target*100:.2f}%)")
-                    break
+                    # 현재 모멘텀 체크: 매수비+가속도 충분하면 러너로 전환
+                    _tp_t10 = micro_tape_stats_from_ticks(ticks, 10)
+                    _tp_buy_r = _tp_t10.get("buy_ratio", 0)
+                    _tp_accel = calc_flow_acceleration(ticks)
+                    _momentum_alive = (_tp_buy_r >= SCALP_TO_RUNNER_MIN_BUY and _tp_accel >= SCALP_TO_RUNNER_MIN_ACCEL)
+
+                    if _momentum_alive:
+                        # ★ 스캘프→러너 자동전환: 50% 익절 + 50% 러너 트레일
+                        ok, msg, sold = safe_partial_sell(
+                            m, 0.50,
+                            reason=f"스캘프→러너전환 +{cur_gain_now*100:.2f}% (매수{_tp_buy_r:.0%} 가속{_tp_accel:.1f}x)")
+                        if ok and sold > 0:
+                            mfe_partial_done = True
+                            last_exit_event_ts = time.time()
+                            trade_type = "runner"  # ★ 러너로 승격
+                            tg_send_mid(f"🚀 {m} 스캘프→러너 전환! 50% 익절 +{cur_gain_now*100:.2f}% | 나머지 트레일링")
+                    else:
+                        # 모멘텀 소진 → 전량 익절
+                        close_auto_position(m, f"스캘프TP +{cur_gain_now*100:.2f}% (MFE+{max_gain*100:.2f}% 타겟{mfe_target*100:.2f}%)")
+                        _already_closed = True
+                        verdict = "스캘프_TP"
+                        tg_send_mid(f"💰 {m} 스캘프 전량익절 +{cur_gain_now*100:.2f}% | MFE+{max_gain*100:.2f}%")
+                        break
                 # 스캘프 Plateau: 90초 횡보+매수둔화 시 전량 익절
                 PLATEAU_SEC = 90 if entry_mode == "confirm" else 60
                 time_since_peak = time.time() - last_peak_ts
@@ -8018,9 +8032,7 @@ def main():
                         recent_alerts.pop(m, None)
                     continue
 
-                # 🔧 급등 허용 시 half 강제 (리스크 제한, probe 폐지)
-                if pre.get("_surge_probe"):
-                    pre["entry_mode"] = "half"
+                # ★ 개선: _surge_probe 다운그레이드 제거 (모멘텀 동반 급등은 강세 신호)
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
