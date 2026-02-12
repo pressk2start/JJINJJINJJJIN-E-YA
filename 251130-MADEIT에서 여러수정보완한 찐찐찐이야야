@@ -51,14 +51,14 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 진입 후 5초 웜업
-HARD_STOP_DD = 0.012  # ★ 개선: 2.0→1.2% (SL 0.6%의 2배 = 비상 최종방어선)
-EXIT_DEBOUNCE_SEC = 5  # ★ 개선: 8→5초 (손실 확인 빨리, 휩쏘는 체크포인트가 방어)
-EXIT_DEBOUNCE_N = 2  # ★ 개선: 4→2회 (2번 연속이면 진짜 하락으로 판단)
+HARD_STOP_DD = 0.018  # 🔧 승률개선: 1.2→1.8% (1.2%는 정상 눌림도 손절 → 타이트한 SL에 맡기고 비상용은 넓게)
+EXIT_DEBOUNCE_SEC = 6  # 🔧 승률개선: 5→6초 (1틱 변동에 즉시 반응 방지, 진짜 하락만 잡기)
+EXIT_DEBOUNCE_N = 3  # 🔧 승률개선: 2→3회 (3회 연속이면 진짜 하락, 2회는 휩쏘 많음)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 동적화: 수수료 + 슬리피지 + 최소알파 기반
-PROFIT_CHECKPOINT_BASE = 0.006  # ★ 개선: 0.25→0.6% (의미 있는 수익에서만 트레일 무장)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.0020  # ★ 개선: 0.10→0.20% (최소 알파 상향)
+PROFIT_CHECKPOINT_BASE = 0.0035  # 🔧 승률개선: 0.6→0.35% (트레일 무장이 빨리 걸려야 수익 보존 가능)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0012  # 🔧 승률개선: 0.20→0.12% (최소 알파 낮춰 트레일 빨리 무장)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -85,9 +85,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 왕복 수수료(0.1%) + 왕복슬리피지 + 최소알파(0.1%)
     dynamic_cp = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # ★ 개선: 최소 0.50%, 최대 0.80% (SL 0.4~0.6% 대비 의미있는 수익에서만 트레일)
-    # 이전 0.30~0.50%는 정상 변동에도 트레일이 무장 → 조기 스탑아웃 빈발
-    return max(0.0050, min(0.0080, dynamic_cp))
+    # 🔧 승률개선: 최소 0.30%, 최대 0.55% (빨리 트레일 무장 → 수익 보존)
+    # 0.50~0.80%는 체크포인트 도달 자체가 안됨 → 트레일 무장 불발 → 손절만 맞음
+    return max(0.0030, min(0.0055, dynamic_cp))
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -104,21 +104,21 @@ SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - before1 기준
 SCRATCH_TIMEOUT_SEC = 20    # 20초 내 개선 없으면 탈출 검토
 SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 
-# 🔧 MFE 기반 부분익절 (경로별 동적 타겟) — R:R 2:1 이상 확보
-# ★ 핵심 개선: 타겟을 SL(0.4~0.6%)의 2배 이상으로 설정
-# → 승률 45%만 되어도 기대값 양수 (0.45×1.2% - 0.55×0.5% = +0.27%)
+# 🔧 MFE 기반 부분익절 (경로별 동적 타겟) — 승률 극대화 전략
+# 핵심: 타겟이 높으면 도달 못하고 손절만 맞음 → 현실적 타겟으로 하향
+# SL 0.4~0.6% 대비 R:R 1:1.2~1.5 유지하되 도달 빈도 2배+ 증가
 MFE_PARTIAL_TARGETS = {
-    "🔥점화": 0.015,              # 1.5% (점화=최강 모멘텀, R:R 1:2.5+)
-    "강돌파 (EMA↑+고점↑)": 0.013,  # 1.3% (강돌파, R:R 1:2.2)
-    "EMA↑": 0.011,                 # 1.1% (EMA 추세, R:R 1:1.8)
-    "고점↑": 0.010,                # 1.0% (고점돌파, R:R 1:1.7)
-    "거래량↑": 0.010,              # 1.0% (거래량 급증, R:R 1:1.7)
-    "기본": 0.010,                 # 1.0% (기본, R:R 1:1.7)
+    "🔥점화": 0.009,              # 🔧 1.5→0.9% (점화=최강이라도 현실적 타겟)
+    "강돌파 (EMA↑+고점↑)": 0.008,  # 🔧 1.3→0.8% (강돌파 R:R 1:1.3)
+    "EMA↑": 0.007,                 # 🔧 1.1→0.7% (EMA 추세 R:R 1:1.2)
+    "고점↑": 0.006,                # 🔧 1.0→0.6% (고점돌파 R:R 1:1.0, 수수료 커버)
+    "거래량↑": 0.006,              # 🔧 1.0→0.6% (거래량 급증)
+    "기본": 0.006,                 # 🔧 1.0→0.6% (기본)
 }
 MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
 # ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
-SCALP_TO_RUNNER_MIN_BUY = 0.58   # 매수비 58% 이상이면 러너 전환
-SCALP_TO_RUNNER_MIN_ACCEL = 0.8  # 가속도 0.8 이상이면 러너 전환
+SCALP_TO_RUNNER_MIN_BUY = 0.56   # 🔧 0.58→0.56 (러너 전환 기회 확대)
+SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 
 # 트레일링 손절 설정 (before1 기준 - 타이트)
 TRAIL_ATR_MULT = 0.8  # ATR 기반 여유폭 (타이트)
@@ -180,11 +180,11 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 10
-        HARD_STOP_DD = 0.018  # ★ 개선: 2.4→1.8%
-        EXIT_DEBOUNCE_SEC = 7
-        EXIT_DEBOUNCE_N = 2
+        HARD_STOP_DD = 0.022  # 🔧 승률개선: 1.8→2.2% (gentle은 넓은 방어선)
+        EXIT_DEBOUNCE_SEC = 8
+        EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0025  # FIX [H2]: BASE도 함께 변경 (get_trail_distance_min 정합성)
+        TRAIL_DISTANCE_MIN_BASE = 0.0025  # FIX [H2]: BASE도 함께 변경
         TRAIL_DISTANCE_MIN = 0.0025  # 0.25% 간격
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
@@ -192,24 +192,24 @@ def _apply_exit_profile():
 
     elif prof == "strict":
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.010  # ★ 개선: 1.5→1.0% (strict=가장 빠른 손절)
-        EXIT_DEBOUNCE_SEC = 4
-        EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.75  # 🔧 before1=0.7→절충 0.75 (타이트 트레일 + 눌림 허용)
+        HARD_STOP_DD = 0.014  # 🔧 승률개선: 1.0→1.4% (너무 타이트하면 정상변동도 손절)
+        EXIT_DEBOUNCE_SEC = 5
+        EXIT_DEBOUNCE_N = 3  # 🔧 승률개선: 2→3 (디바운스 강화)
+        TRAIL_ATR_MULT = 0.75
         TRAIL_DISTANCE_MIN_BASE = 0.002  # FIX [H2]: BASE도 함께 변경
-        TRAIL_DISTANCE_MIN = 0.002  # 🔧 FIX: 0.35→0.2% (before1 기준 복원, 수익 보존 핵심)
+        TRAIL_DISTANCE_MIN = 0.002
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
-        CTX_EXIT_THRESHOLD = 2  # 🔧 before1=2 복원 (컨텍스트 역전 빠른 반응)
+        CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.012  # ★ 개선: 2.0→1.2%
-        EXIT_DEBOUNCE_SEC = 5
-        EXIT_DEBOUNCE_N = 2
-        TRAIL_ATR_MULT = 0.85  # 🔧 0.9→0.85 (타이트 트레일 + 눌림 허용 절충)
+        HARD_STOP_DD = 0.018  # 🔧 승률개선: 1.2→1.8% (정상 눌림 허용)
+        EXIT_DEBOUNCE_SEC = 6  # 🔧 승률개선: 5→6초
+        EXIT_DEBOUNCE_N = 3  # 🔧 승률개선: 2→3
+        TRAIL_ATR_MULT = 0.85
         TRAIL_DISTANCE_MIN_BASE = 0.0025  # FIX [H2]: BASE도 함께 변경
-        TRAIL_DISTANCE_MIN = 0.0025  # 🔧 0.4→0.25% (before1=0.2%, balanced는 소폭 여유)
+        TRAIL_DISTANCE_MIN = 0.0025
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -2072,7 +2072,8 @@ def close_auto_position(m, reason=""):
     try:
         if not pos:
             print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
-            # 🔧 FIX: 이미 청산된 포지션에 대한 중복 알람 제거 (동시 모니터링 시 노이즈 방지)
+            # 🔧 FIX: 조용한 리턴 방지 — 최소한의 알림 발송
+            tg_send_mid(f"⚠️ {m} 청산 스킵 (포지션 없음)\n• 사유: {reason}")
             return
 
         # 🔧 FIX: 실제 잔고 먼저 체크 (race condition 방지 - 동시 모니터링 시 중복 청산 방지)
@@ -2081,11 +2082,13 @@ def close_auto_position(m, reason=""):
         # 🔧 FIX: -1 = 조회 실패 → 청산 진행하지 않음 (오탐 방지)
         if actual_vol < 0:
             print(f"[AUTO] {m} 잔고 조회 실패 → 청산 스킵 (reason={reason})")
+            tg_send_mid(f"⚠️ {m} 청산 스킵 (잔고 조회 실패)\n• 사유: {reason}")
             return
         if actual_vol <= 1e-12:
             print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
             # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
             mark_position_closed(m, f"already_zero:{reason}")
+            tg_send(f"🧹 {m} 이미 청산됨 (잔고=0 확인)\n• 사유: {reason}")
             return
 
         # 실제 보유량 사용
@@ -4102,6 +4105,11 @@ def _new_session():
 
 
 SESSION = _new_session()
+# 🔧 FIX: 텔레그램 전용 세션 분리 (SESSION 리프레시 중 청산알림 유실 방지)
+# - SESSION은 업비트 API + 텔레그램 공유 → _refresh_session() 시 close→재생성 gap에서 tg_send 실패
+# - _TG_SESSION은 텔레그램 전용, 별도 라이프사이클 → API 세션 리프레시 영향 없음
+_TG_SESSION = _new_session()
+_TG_SESSION_LOCK = threading.Lock()
 KST = timezone(timedelta(hours=9))
 
 def now_kst():
@@ -5391,19 +5399,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if abs(buy_ratio - 1.0) < 1e-6:
         return False, f"[하드컷] 매수비100%(스푸핑) | {metrics}"
 
-    # 5) ★ 구조 변경 3: 과열 = 거부 → MEGA 신호 전환
-    # 핵심: accel×surge>20은 "폭발적 초기 모멘텀"을 의미
-    # 기존: 이걸 거부 → 결과적으로 모멘텀이 성숙한 후에만 진입 (=고점 매수)
-    # 변경: 매수비 60%+ 동반이면 진정한 강세 → MEGA 플래그로 보너스
-    #        매수비 50% 미만이면 스푸핑/덤핑 → 여전히 거부
+    # 5) 🔧 승률개선: 과열 = 매수비 62%+ 동반이면 half 허용, 미달이면 거부
+    # 60%는 너무 느슨 → 62%+ 엄격화, MEGA 승격 대신 half 진입으로 리스크 제한
     overheated = accel * volume_surge
     if overheated > GATE_OVERHEAT_MAX:
-        if buy_ratio >= 0.60:
-            # 강한 매수세 동반 과열 = 진정한 폭발 모멘텀 → MEGA 신호로 승격
-            print(f"  [OVERHEAT→MEGA] {market} 과열({overheated:.1f}) + 매수비({buy_ratio:.0%}) → MEGA 승격")
-            mega = True  # MEGA 플래그 활성화 (점수 보너스 적용)
+        if buy_ratio >= 0.62:
+            # 강한 매수세 동반 과열 → half 모드로 허용 (MEGA 승격은 과도)
+            print(f"  [OVERHEAT→HALF] {market} 과열({overheated:.1f}) + 매수비({buy_ratio:.0%}) → half 허용")
+            # mega = True 대신 half 플래그 (점수 보너스 없음, 진입량 제한)
         else:
-            # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부 유지
+            # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부
             return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
 
     # 6) 급등 상한 안전장치
@@ -6376,20 +6381,22 @@ def postcheck_6s(m, pre):
 
         curp = max(ticks, key=tick_ts_ms).get("trade_price", base_price)
 
-        # ★ 개선: 급등은 모멘텀 확인 신호 — 매수비+거래속도 충분하면 다운그레이드 없이 통과
+        # 🔧 승률개선: 급등 필터 강화 (55%/15K → 58%/18K + 되돌림 체크)
+        # 55%는 가짜 돌파도 통과 → 매수비+거래속도+되돌림 3중 확인
         if base_price > 0:
             surge = (curp / base_price - 1.0)
             if surge >= MAX_SURGE:
                 t_surge = micro_tape_stats_from_ticks(list(acc), 10) if len(acc) >= 3 else {}
-                # ★ 완화: 매수비 55% + 거래속도 15K 이상이면 통과 (기존: 62%+20K)
                 momentum_ok = (
-                    t_surge.get("buy_ratio", 0) >= 0.55
-                    and t_surge.get("krw_per_sec", 0) >= 15000
+                    t_surge.get("buy_ratio", 0) >= 0.58
+                    and t_surge.get("krw_per_sec", 0) >= 18000
+                    and (peak - trough_after_peak) / max(peak, 1) < 0.004  # 되돌림 0.4% 미만
                 )
                 if not momentum_ok:
                     return False, f"SURGE_IN_POST({surge*100:.2f}%)"
-                # ★ 개선: 모멘텀 동반 급등 → 다운그레이드 없이 원래 모드 유지
-                print(f"[POSTCHECK] {surge*100:.1f}% 급등 + 모멘텀 확인 → 원래 모드 유지")
+                # 모멘텀 확인 → half 모드로 다운그레이드 (리스크 제한)
+                pre["_surge_probe"] = True
+                print(f"[POSTCHECK] {surge*100:.1f}% 급등 + 모멘텀 확인 → half 다운그레이드")
 
         if curp > peak:
             peak = curp
@@ -7051,24 +7058,27 @@ def monitor_position(m,
                 trail_stop = curp * (1.0 - get_trail_distance_min())
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
 
-            # === ★ 수익 래칫: 수익의 80% 잠금 (기존 70% → 개선) ===
-            # 핵심: 힘들게 번 수익을 되돌림에서 80% 보존
+            # === 🔧 수익 래칫: 수익의 65~70% 잠금 (0.2% 단위 세밀화) ===
+            # 80%는 정상 눌림 후 재상승 기회까지 박탈 → 65~70%로 완화
+            # 0.2% 단위로 세밀한 구간 → 되돌림에서 의미있는 수익 보존
             if trail_armed and gain_from_entry > 0:
                 _ratchet_lock = 0
-                if gain_from_entry >= 0.020:      # +2.0% → 최소 +1.6% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.016)
-                elif gain_from_entry >= 0.015:    # +1.5% → 최소 +1.2% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.012)
-                elif gain_from_entry >= 0.012:    # +1.2% → 최소 +0.96% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0096)
-                elif gain_from_entry >= 0.010:    # +1.0% → 최소 +0.80% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0080)
-                elif gain_from_entry >= 0.008:    # +0.8% → 최소 +0.64% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0064)
-                elif gain_from_entry >= 0.006:    # +0.6% → 최소 +0.48% 확보 (80%)
-                    _ratchet_lock = entry_price * (1.0 + 0.0048)
-                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트 → 본절+α 확보
-                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.001)
+                if gain_from_entry >= 0.020:      # +2.0% → 최소 +1.4% 확보 (70%)
+                    _ratchet_lock = entry_price * (1.0 + 0.014)
+                elif gain_from_entry >= 0.016:    # +1.6% → 최소 +1.1% 확보 (69%)
+                    _ratchet_lock = entry_price * (1.0 + 0.011)
+                elif gain_from_entry >= 0.012:    # +1.2% → 최소 +0.85% 확보 (71%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0085)
+                elif gain_from_entry >= 0.010:    # +1.0% → 최소 +0.70% 확보 (70%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0070)
+                elif gain_from_entry >= 0.008:    # +0.8% → 최소 +0.55% 확보 (69%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0055)
+                elif gain_from_entry >= 0.006:    # +0.6% → 최소 +0.40% 확보 (67%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0040)
+                elif gain_from_entry >= 0.004:    # +0.4% → 최소 +0.25% 확보 (63%)
+                    _ratchet_lock = entry_price * (1.0 + 0.0025)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트 → 본절 확보
+                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.0005)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -7167,15 +7177,16 @@ def monitor_position(m,
                         _trail_momentum = 1.4
                     else:
                         _trail_momentum = 1.0  # 러너: 약세에도 축소 없이 기본 유지
-                    # ★ 개선: 러너 래칫 45%→65% (MFE의 65%를 base_stop으로 확보)
-                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.65))
+                    # 🔧 승률개선: 러너 래칫 65→50% (MFE의 50% 확보, 나머지는 추세에 태우기)
+                    # 65%는 눌림에서 너무 빨리 청산 → 러너 수익 축소
+                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.50))
                     base_stop = max(base_stop, _runner_lock)
                 else:
                     # 비러너: 기존 로직 (강세 확대, 약세 축소)
                     if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
                         _trail_momentum = 1.4  # 강세: 트레일 40% 확대
                     elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
-                        _trail_momentum = 0.85  # ★ 개선: 0.7→0.85 (약세에도 15%만 축소, 과도 압축 방지)
+                        _trail_momentum = 0.8  # 🔧 승률개선: 0.85→0.8 (약세 시 트레일 적절히 축소)
 
                 trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
@@ -7494,11 +7505,41 @@ def monitor_position(m,
 # 알림
 # =========================
 def tg_send(t, retry=3):
-    """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)"""
+    """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)
+    🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
+    🔧 FIX: 4096자 초과 메시지 자동 분할 (Telegram API 제한)
+    """
     # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력
     if not TG_TOKEN or not CHAT_IDS:
         print(t)
         return True
+
+    # 🔧 FIX: Telegram 4096자 제한 → 초과 시 잘라서 전송 (청산 reason이 길면 잘림 방지)
+    if len(t) > 4000:
+        t = t[:3950] + "\n...(잘림)"
+
+    def _tg_post(payload):
+        """_TG_SESSION으로 전송, 실패 시 새 세션 시도"""
+        global _TG_SESSION
+        try:
+            with _TG_SESSION_LOCK:
+                sess = _TG_SESSION
+            return sess.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json=payload, timeout=10,
+            )
+        except Exception:
+            # 세션 문제 → 새 세션 생성 후 재시도
+            try:
+                with _TG_SESSION_LOCK:
+                    _TG_SESSION = _new_session()
+                    sess = _TG_SESSION
+                return sess.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json=payload, timeout=10,
+                )
+            except Exception as e2:
+                raise e2
 
     ok_any = False
     for cid in CHAT_IDS:
@@ -7511,11 +7552,7 @@ def tg_send(t, retry=3):
         sent = False
         for attempt in range(retry + 1):
             try:
-                r = SESSION.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json=payload,
-                    timeout=8,
-                )
+                r = _tg_post(payload)
                 if r.status_code == 200:
                     js = r.json()
                     if js.get("ok") is True:
@@ -7533,7 +7570,7 @@ def tg_send(t, retry=3):
                     continue  # 백오프 sleep 건너뜀 (이미 대기함)
                 else:
                     # 디버깅용
-                    print(f"[TG][{cid}] status={r.status_code} body={r.text}")
+                    print(f"[TG][{cid}] status={r.status_code} body={r.text[:200]}")
                     # 🔧 FIX: HTML 파싱 실패 시 plain text로 재시도
                     if r.status_code == 400 and "parse" in r.text.lower():
                         print(f"[TG][{cid}] HTML 파싱 실패 → plain text 재시도")
@@ -7543,11 +7580,7 @@ def tg_send(t, retry=3):
                             "disable_web_page_preview": True,
                         }
                         try:
-                            r2 = SESSION.post(
-                                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                                json=payload_plain,
-                                timeout=8,
-                            )
+                            r2 = _tg_post(payload_plain)
                             if r2.status_code == 200 and r2.json().get("ok"):
                                 ok_any = True
                                 sent = True
@@ -7567,11 +7600,7 @@ def tg_send(t, retry=3):
                     "text": re.sub(r"<[^>]+>", "", t),
                     "disable_web_page_preview": True,
                 }
-                r3 = SESSION.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json=payload_plain,
-                    timeout=8,
-                )
+                r3 = _tg_post(payload_plain)
                 if r3.status_code == 200 and r3.json().get("ok"):
                     ok_any = True
                 else:
@@ -7607,7 +7636,9 @@ def tg_flush_failed():
                     "text": f"[지연] {re.sub(r'<[^>]+>', '', msg)}",
                     "disable_web_page_preview": True,
                 }
-                r = SESSION.post(
+                with _TG_SESSION_LOCK:
+                    _tg_sess = _TG_SESSION
+                r = _tg_sess.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json=payload,
                     timeout=8,
@@ -8150,7 +8181,9 @@ def main():
                         recent_alerts.pop(m, None)
                     continue
 
-                # ★ 개선: _surge_probe 다운그레이드 제거 (모멘텀 동반 급등은 강세 신호)
+                # 🔧 승률개선: 급등 허용 시 half 강제 (리스크 제한)
+                if pre.get("_surge_probe"):
+                    pre["entry_mode"] = "half"
 
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
