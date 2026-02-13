@@ -6887,6 +6887,10 @@ def monitor_position(m,
     # === 🔧 MFE 기반 부분익절 상태 ===
     mfe_partial_done = False     # MFE 부분익절 완료 여부
 
+    # === 🔧 매수세 감쇄 사전 익절 상태 ===
+    _flow_decay_count = 0        # buy_ratio < 0.45 연속 감지 횟수
+    _flow_decay_sold = False     # 감쇄 익절 완료 여부
+
     # === 🔧 횡보 탈출 미니트레일 상태 ===
     sideways_peak = 0.0          # 60초 이후 고점 추적
 
@@ -7292,6 +7296,41 @@ def monitor_position(m,
             cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
 
             # ============================================================
+            # 🔧 매수세 감쇄 사전 익절: 수익 중 + 매수세 3연속 약화 → 선제 익절
+            # 핵심: MFE 타겟 도달 전에 모멘텀이 죽으면 수익 반납 방지
+            # ============================================================
+            if not _flow_decay_sold and not _already_closed and cur_gain_now >= 0.003:
+                _fd_t10 = micro_tape_stats_from_ticks(ticks, 10)
+                _fd_buy = _fd_t10.get("buy_ratio", 0.5)
+                _fd_flow = _fd_t10.get("krw_per_sec", 0)
+                if _fd_buy < 0.45 and _fd_flow < 30000:
+                    _flow_decay_count += 1
+                else:
+                    _flow_decay_count = max(0, _flow_decay_count - 1)
+
+                if _flow_decay_count >= 3 and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
+                    if trail_armed:
+                        # 트레일 무장 상태: 50% 부분 익절 + 트레일 타이트닝
+                        ok, msg, sold = safe_partial_sell(
+                            m, 0.50,
+                            reason=f"매수세감쇄익절 +{cur_gain_now*100:.2f}% (매수{_fd_buy:.0%} 유속{_fd_flow:.0f})")
+                        if ok and sold > 0:
+                            _flow_decay_sold = True
+                            last_exit_event_ts = time.time()
+                            # 트레일 강화: 거리 40% 축소
+                            trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min * 0.6))
+                            tg_send_mid(f"📉 {m} 매수세감쇄 50%익절 +{cur_gain_now*100:.2f}% | 트레일 강화")
+                    else:
+                        # 트레일 미무장 + 소액 수익: 전량 익절
+                        close_auto_position(m, f"매수세감쇄전량익절 +{cur_gain_now*100:.2f}% (매수{_fd_buy:.0%})")
+                        _already_closed = True
+                        verdict = "매수세감쇄_TP"
+                        tg_send_mid(f"📉 {m} 매수세감쇄 전량익절 +{cur_gain_now*100:.2f}%")
+                        break
+            elif cur_gain_now < 0.002:
+                _flow_decay_count = 0  # 수익 미달 시 카운터 리셋
+
+            # ============================================================
             # 🔧 특단조치: trade_type 기반 청산 (스캘프 vs 러너 이진분류)
             # 스캘프: MFE 타겟 도달 시 100% 전량 익절 (깔끔한 수익 확정)
             # 러너: MFE 타겟 도달 시 30%만 익절, 나머지 70% 넓은 트레일
@@ -7299,7 +7338,10 @@ def monitor_position(m,
             # ============================================================
             if trade_type == "scalp":
                 # === 스캘프 모드: 빠른 전량 익절 ===
-                # 🔧 구조개선: R:R 연동 — SL × 배수가 바닥, ATR은 상향만 가능
+                # 🔧 구조개선: R:R 연동 + 코인별 변동성 맞춤 MFE
+                # 핵심: 코인의 실제 ATR%를 기준 ATR(0.5%) 대비 비율로 MFE 스케일링
+                # - 저변동 코인(ATR 0.3%): vol_factor=0.7 → 타겟 축소 → 도달 가능한 목표
+                # - 고변동 코인(ATR 1.0%): vol_factor=1.8 → 타겟 확대 → 큰 수익 포착
                 _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 1.3)
                 mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.008))
                 try:
@@ -7307,8 +7349,9 @@ def monitor_position(m,
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
                     if atr_raw and curp > 0:
                         atr_pct = atr_raw / curp
-                        # 🔧 구조개선: mfe_base를 바닥으로 사용 (기존은 캡이라 ATR이 올려도 못 씀)
-                        mfe_target = max(mfe_base, dyn_checkpoint + 0.002, 2.5 * atr_pct)
+                        # 🔧 코인별 변동성 팩터: 기준 ATR 0.5% 대비 비율
+                        _vol_factor = max(0.7, min(1.8, atr_pct / 0.005))
+                        mfe_target = max(mfe_base * _vol_factor, dyn_checkpoint + 0.002)
                     else:
                         mfe_target = mfe_base
                 except Exception:
@@ -7360,7 +7403,7 @@ def monitor_position(m,
 
             else:
                 # === 러너 모드: 30% 익절 + 70% 넓은 트레일 ===
-                # 🔧 구조개선: R:R 연동 — 러너는 배수 +0.3 추가 (더 높은 목표)
+                # 🔧 구조개선: R:R 연동 + 코인별 변동성 맞춤 MFE (러너는 더 넓게)
                 _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 1.3) + 0.3
                 mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.008))
                 try:
@@ -7368,7 +7411,9 @@ def monitor_position(m,
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
                     if atr_raw and curp > 0:
                         atr_pct = atr_raw / curp
-                        mfe_target = max(mfe_base, dyn_checkpoint + 0.003, 3.0 * atr_pct)
+                        # 🔧 코인별 변동성 팩터: 러너는 0.8~2.0 (스캘프보다 넓은 범위)
+                        _vol_factor = max(0.8, min(2.0, atr_pct / 0.005))
+                        mfe_target = max(mfe_base * _vol_factor, dyn_checkpoint + 0.003)
                     else:
                         mfe_target = mfe_base
                 except Exception:
