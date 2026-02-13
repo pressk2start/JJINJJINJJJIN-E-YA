@@ -2855,8 +2855,14 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         reason = verdict or action or "모니터링 종료"
 
         # 🔧 FIX C2: monitor_position 내부에서 이미 청산 완료된 경우 중복 청산 방지
-        # 🔧 FIX: "정보탈출", "half 스크래치", "confirm 스크래치", "횡보탈출", "부분청산→전량청산" 등 누락 verdict 보완
-        _ALREADY_CLOSED_VERDICTS = {"ATR손절", "TRAIL_STOP", "probe 스크래치", "횡보탈출", "부분청산→전량청산"}
+        # 🔧 FIX: 모든 close_auto_position 호출 verdict 반영 (누락 시 중복청산/무한루프)
+        _ALREADY_CLOSED_VERDICTS = {
+            "ATR손절", "TRAIL_STOP", "probe 스크래치", "횡보탈출", "부분청산→전량청산",
+            "스캘프_TP", "스캘프_Plateau",             # 스캘프 익절
+            "시간만료_손실컷",                          # 시간만료 손실 즉시청산
+            "연장_TRAIL_STOP", "연장_RATCHET_STOP",    # 연장 중 트레일/래칫 컷
+            "연장중_전량청산",                          # 연장 중 외부 청산
+        }
         if verdict in _ALREADY_CLOSED_VERDICTS or (verdict and "스크래치" in verdict):
             # 내부에서 close_auto_position 이미 호출됨 → remonitor 종료
             print(f"[REMONITOR] {m} 내부청산 완료 ({verdict}) → remonitor 종료")
@@ -2984,8 +2990,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         elif action == "유지 권고":
             continue
 
-        # 7) 그냥 시간 만료면 → 다시 한 번 사이클
-        elif verdict == "시간 만료(모니터링 종료)":
+        # 7) 시간/연장 만료 → 다시 한 번 사이클
+        # 🔧 FIX: "연장만료(모니터링 종료)" 누락으로 should_close=False 무한루프 방지
+        elif verdict in ("시간 만료(모니터링 종료)", "연장만료(모니터링 종료)", "데이터 수신 실패"):
             continue
 
         if should_close:
@@ -6796,6 +6803,10 @@ def monitor_position(m,
     # 🔧 FIX: entry_price 유효성 검증 (Division by Zero 방지)
     if not entry_price or entry_price <= 0:
         print(f"[MONITOR_ERR] {m} entry_price 무효 ({entry_price}) → 모니터링 중단")
+        # 🔧 FIX: 알림 발송 + 포지션 정리 (무알림 방치 방지)
+        tg_send(f"🚨 {m} entry_price 무효 ({entry_price}) → 모니터링 중단\n• 잔고 확인 필요")
+        with _POSITION_LOCK:
+            OPEN_POSITIONS.pop(m, None)
         return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
 
     c1 = get_minutes_candles(1, m, 20)
@@ -7475,13 +7486,17 @@ def monitor_position(m,
                                       ctx_thr=CTX_EXIT_THRESHOLD)
 
         # ===========================================
-        # 끝알람 / 재모니터링 알림 비활성화
-        #  (실제 로직은 유지하지만 텔레그램 메시지 과다 방지)
+        # 🔧 FIX: 청산 없이 모니터 종료 → 재모니터 전환 알림
+        #  (진입 알림만 오고 청산 알림이 안 오는 문제 해결)
         # ===========================================
-        if not reentry:
-            pass  # 끝알람 비활성화
-        else:
-            pass  # 재모니터링 요약 비활성화
+        if not _already_closed and verdict in (
+            "시간 만료(모니터링 종료)", "연장만료(모니터링 종료)",
+            "데이터 수신 실패",
+        ):
+            _g = (last_price / entry_price - 1.0) * 100 if entry_price > 0 else 0
+            tg_send(f"🔄 {m} {verdict} → 재모니터 전환\n"
+                    f"• 현재가 {last_price:,.0f} ({_g:+.2f}%)\n"
+                    f"• 자동 청산까지 계속 감시합니다")
 
         # ===========================================
         # 재모니터링 루프 시작
@@ -8001,6 +8016,20 @@ def main():
                                 except Exception as e3:
                                     print(f"[RETEST_MON_ERR] {market}: {e3}")
                                     traceback.print_exc()
+                                    # 🔧 FIX: 리테스트 모니터 예외 시 알림 + 잔고 확인 후 정리
+                                    try:
+                                        actual = get_balance_with_locked(market)
+                                        if actual < 0:
+                                            tg_send(f"⚠️ {market} 리테스트 모니터 오류 (잔고 조회 실패)\n• 예외: {e3}\n• 포지션 유지")
+                                        elif actual <= 1e-12:
+                                            tg_send(f"⚠️ {market} 리테스트 모니터 오류 (잔고=0, 이미 청산)\n• 예외: {e3}")
+                                            with _POSITION_LOCK:
+                                                OPEN_POSITIONS.pop(market, None)
+                                        else:
+                                            tg_send(f"🚨 {market} 리테스트 모니터 오류 → 청산 시도\n• 예외: {e3}")
+                                            close_auto_position(market, f"리테스트모니터예외 | {e3}")
+                                    except Exception as _cleanup_err:
+                                        tg_send(f"🚨 {market} 리테스트 모니터 오류 (청산 시도 실패)\n• 예외: {e3}")
                                 finally:
                                     _release_entry_lock(market)
                                     with _MONITOR_LOCK:
@@ -8015,6 +8044,8 @@ def main():
                                 _ACTIVE_MONITORS[wm] = rt_thread
                     except Exception as e:
                         print(f"[RETEST_ERR] {wm}: {e}")
+                        # 🔧 FIX: 리테스트 진입 오류 시 알림 발송 (무알림 포지션 유실 방지)
+                        tg_send(f"🚨 {wm} 리테스트 진입 오류\n• 예외: {e}\n• 포지션 정리됨")
                         with _POSITION_LOCK:
                             OPEN_POSITIONS.pop(wm, None)
                         _release_entry_lock(wm)
