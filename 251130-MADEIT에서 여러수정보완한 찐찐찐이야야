@@ -423,7 +423,7 @@ if os.getenv("DEBUG_KEYS") == "1":
 
 # AUTO_TRADE = 1 이면 실제 주문, 0이면 알림 + 모니터링만
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.002"))  # 🔧 구조개선: 0.3→0.2% (SL 0.6%로 넓힌 만큼 축소 → 동일 KRW 리스크)
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.002"))  # 🔧 구조개선: 0.3→0.2% (SL 1.0%로 넓힌 만큼 축소 → 동일 KRW 리스크)
 
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
@@ -439,7 +439,7 @@ SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
 ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
 # 추매 트리거 조건
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.008"))  # +0.8% 이상에서 추매
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.010"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
 PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
@@ -7302,7 +7302,7 @@ def monitor_position(m,
             # 🔧 매수세 감쇄 사전 익절: 수익 중 + 매수세 3연속 약화 → 선제 익절
             # 핵심: MFE 타겟 도달 전에 모멘텀이 죽으면 수익 반납 방지
             # ============================================================
-            if not _flow_decay_sold and not _already_closed and cur_gain_now >= 0.003:
+            if not _flow_decay_sold and not _already_closed and cur_gain_now >= 0.005:
                 _fd_t10 = micro_tape_stats_from_ticks(ticks, 10)
                 _fd_buy = _fd_t10.get("buy_ratio", 0.5)
                 _fd_flow = _fd_t10.get("krw_per_sec", 0)
@@ -7330,8 +7330,8 @@ def monitor_position(m,
                         verdict = "매수세감쇄_TP"
                         tg_send_mid(f"📉 {m} 매수세감쇄 전량익절 +{cur_gain_now*100:.2f}%")
                         break
-            elif cur_gain_now < 0.002:
-                _flow_decay_count = 0  # 수익 미달 시 카운터 리셋
+            elif cur_gain_now < 0.003:
+                _flow_decay_count = 0  # 🔧 SL연동: 0.2→0.3% (SL 1.0% 대비 카운터 리셋 구간 확대)
 
             # ============================================================
             # 🔧 특단조치: trade_type 기반 청산 (스캘프 vs 러너 이진분류)
@@ -7345,8 +7345,8 @@ def monitor_position(m,
                 # 핵심: 코인의 실제 ATR%를 기준 ATR(0.5%) 대비 비율로 MFE 스케일링
                 # - 저변동 코인(ATR 0.3%): vol_factor=0.7 → 타겟 축소 → 도달 가능한 목표
                 # - 고변동 코인(ATR 1.0%): vol_factor=1.8 → 타겟 확대 → 큰 수익 포착
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 1.3)
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.008))
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0)  # 🔧 SL연동: fallback 1.3→2.0 (SL 1.0% 기준 R:R 2.0)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # 🔧 SL연동: fallback 0.8→2.0% (SL 1.0%×2.0)
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
@@ -7407,8 +7407,8 @@ def monitor_position(m,
             else:
                 # === 러너 모드: 30% 익절 + 70% 넓은 트레일 ===
                 # 🔧 구조개선: R:R 연동 + 코인별 변동성 맞춤 MFE (러너는 더 넓게)
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 1.3) + 0.3
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.008))
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0) + 0.3  # 🔧 SL연동: fallback 1.3→2.0 (러너 +0.3 보너스 유지)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # 🔧 SL연동: fallback 0.8→2.0%
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
