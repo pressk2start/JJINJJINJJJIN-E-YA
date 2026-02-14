@@ -2035,6 +2035,14 @@ def add_auto_position(m, cur_price, reason=""):
     volume_filled = 0.0
     avg_price_add = cur_price
 
+    # 🔧 FIX: hybrid_buy 잔여 시장가 체결분 보정용 사전 잔고 (open_auto_position과 동일)
+    coin = m.split("-")[1] if "-" in m else m
+    _prev_bal_add = 0.0
+    for _a in (accounts or []):
+        if _a.get("currency") == coin:
+            _prev_bal_add = float(_a.get("balance") or "0")
+            break
+
     try:
         # 추매도 하이브리드 매수 적용
         _ob_add = fetch_orderbook_cache([m]).get(m) if m else None
@@ -2062,6 +2070,29 @@ def add_auto_position(m, cur_price, reason=""):
             else:
                 if volume_filled > 0:
                     avg_price_add = krw_to_use / volume_filled
+
+        # 🔧 FIX: hybrid_buy 잔여 시장가 체결분 보정 (open_auto_position HYBRID_VOL_FIX와 동일)
+        # - hybrid_buy는 limit_res UUID만 반환 → 시장가 추가분 누락 가능
+        # - 잔고 차이로 실제 총 체결량/평단 보정
+        if volume_filled > 0:
+            try:
+                time.sleep(0.3)
+                _post_acc_add = get_account_info()
+                _post_bal_add = 0.0
+                _post_avg_add = 0.0
+                for _a in (_post_acc_add or []):
+                    if _a.get("currency") == coin:
+                        _post_bal_add = float(_a.get("balance") or "0")
+                        _post_avg_add = float(_a.get("avg_buy_price") or "0")
+                        break
+                _bal_diff_add = _post_bal_add - _prev_bal_add
+                if _bal_diff_add > volume_filled * 1.05:
+                    print(f"[ADD_VOL_FIX] {m} od.executed={volume_filled:.8f} < 잔고증가={_bal_diff_add:.8f} → 보정")
+                    volume_filled = _bal_diff_add
+                    if _post_avg_add > 0:
+                        avg_price_add = _post_avg_add
+            except Exception as _avf_err:
+                print(f"[ADD_VOL_FIX_ERR] {m}: {_avf_err}")
 
         if volume_filled <= 0:
             msg = f"[AUTO_ADD] {m} 추매 체결 0 → 무시"
@@ -6742,7 +6773,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
 # =========================
 # 끝알람 권고 생성 (END RECO)
 # =========================
-def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
+def _end_reco(m, entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
     """
     끝알람용 권고 생성:
       - 수익/손실, 컨텍스트, 테이프 흐름 종합으로
@@ -6756,7 +6787,7 @@ def _end_reco(entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
     # 컨텍스트 스코어(추세역전 신호들)
     try:
         ctx_score, ctx_reasons = context_exit_score(
-            "KRW-XXX",
+            m,
             ticks or [],
             ob_depth_krw or 10_000_000,
             entry_price,
@@ -7531,7 +7562,13 @@ def monitor_position(m,
                     # - 기존 순서: best=max(best,curp) → if curp>best: (절대 True 불가)
                     # - 수정: 신고점 판정 → trail 갱신 → best 갱신
                     if curp > best:
-                        trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min))
+                        # 🔧 FIX: ATR 기반 trail_dist 사용 (trail_dist_min 고정 → 본루프와 동일 ATR 반영)
+                        _ext_atr = atr14_from_candles(_get_c1_cached(), 14)
+                        if _ext_atr and _ext_atr > 0:
+                            _ext_trail_dist = max(trail_dist_min, (_ext_atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                        else:
+                            _ext_trail_dist = trail_dist_min
+                        trail_stop = max(trail_stop, curp * (1.0 - _ext_trail_dist))
                     best = max(best, curp)
 
                     # 트레일 체크
@@ -7587,7 +7624,8 @@ def monitor_position(m,
         # ================================
         # 🔧 FIX: 루프 종료 후 c1 갱신 (stale 데이터로 끝알람/ctx 판단 왜곡 방지)
         c1 = _get_c1_cached() or c1
-        action, rationale = _end_reco(entry_price,
+        action, rationale = _end_reco(m,
+                                      entry_price,
                                       last_price,
                                       c1,
                                       ticks,
