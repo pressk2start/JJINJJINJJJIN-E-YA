@@ -1708,6 +1708,29 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                         OPEN_POSITIONS.pop(m, None)
                     return
 
+            # 🔧 FIX C2: hybrid_buy 잔여분 시장가 체결분 반영
+            # - hybrid_buy는 limit_res(지정가 UUID)만 반환 → 시장가 추가분 누락
+            # - 잔고 차이로 실제 총 체결량 보정 (volume_filled 과소 방지)
+            if volume_filled > 0:
+                try:
+                    time.sleep(0.3)
+                    _post_accounts = get_account_info()
+                    _post_balance = 0.0
+                    _post_avg_price = 0.0
+                    for _acc in (_post_accounts or []):
+                        if _acc.get("currency") == coin:
+                            _post_balance = float(_acc.get("balance") or "0")
+                            _post_avg_price = float(_acc.get("avg_buy_price") or "0")
+                            break
+                    _balance_diff = _post_balance - prev_balance
+                    if _balance_diff > volume_filled * 1.05:  # 5% 이상 차이 = 추가 체결 존재
+                        print(f"[HYBRID_VOL_FIX] {m} od.executed={volume_filled:.8f} < 잔고증가={_balance_diff:.8f} → 보정")
+                        volume_filled = _balance_diff
+                        if _post_avg_price > 0:
+                            avg_price = _post_avg_price
+                except Exception as _vf_err:
+                    print(f"[HYBRID_VOL_FIX_ERR] {m}: {_vf_err}")
+
             # 평균가 계산 (체결 정보가 있으면)
             if avg_price is None:
                 trades = od.get("trades") or [] if od else []
@@ -4210,9 +4233,10 @@ def upbit_get(url, params=None, timeout=7):
                 # 지수적 백오프 + 버킷 속도 하향(보다 공격적으로)
                 backoff = min(1.2 * (2**attempt), 6.0)
                 time.sleep(backoff)
-                # ↓ rate를 더 강하게 줄이고, cap도 잠깐 줄여 폭주 억제
-                _BUCKET["rate"] = max(3.0, _BUCKET["rate"] - 0.4)
-                _BUCKET["cap"] = max(4.0, _BUCKET["cap"] - 0.5)
+                # 🔧 FIX H2: 락 보호 (멀티스레드 429 캐스케이드 방지)
+                with _req_lock:
+                    _BUCKET["rate"] = max(3.0, _BUCKET["rate"] - 0.4)
+                    _BUCKET["cap"] = max(4.0, _BUCKET["cap"] - 0.5)
                 continue
             if 500 <= r.status_code < 600:
                 REQ_STATS["http5xx"] += 1
@@ -4222,8 +4246,10 @@ def upbit_get(url, params=None, timeout=7):
             REQ_STATS["ok"] += 1
             _CONSEC_CONN_ERR = 0
             # ✅ 429 후 점진 회복 (장기 성능 저하 방지)
-            _BUCKET["rate"] = min(4.5, float(_BUCKET.get("rate", 3.0)) + 0.10)
-            _BUCKET["cap"]  = min(6.0, float(_BUCKET.get("cap", 4.0)) + 0.10)
+            # 🔧 FIX H2: 락 보호 (멀티스레드 동시 수정 방지)
+            with _req_lock:
+                _BUCKET["rate"] = min(4.5, float(_BUCKET.get("rate", 3.0)) + 0.10)
+                _BUCKET["cap"]  = min(6.0, float(_BUCKET.get("cap", 4.0)) + 0.10)
             return r.json()
         except requests.exceptions.Timeout:
             if attempt == 2: return None
@@ -7039,10 +7065,14 @@ def monitor_position(m,
                 outcome_extra = f"({cur_gain*100:.2f}%, SL-{eff_sl_pct*100:.2f}%)"
                 break
             else:
-                # SL 조건 해제 → 디바운스 리셋
+                # 🔧 FIX C4: SL 디바운스도 partial decay 적용 (풀 리셋 방지)
                 if stop_first_seen_ts > 0:
-                    stop_first_seen_ts = 0.0
-                    stop_hits = 0
+                    _sl_recovery = -cur_gain / eff_sl_pct if eff_sl_pct > 0 else 0
+                    if _sl_recovery < 0.5:  # SL선의 50% 이내로 회복 = 진짜 반등
+                        stop_first_seen_ts = 0.0
+                        stop_hits = 0
+                    else:
+                        stop_hits = max(0, stop_hits - 1)
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
@@ -7244,10 +7274,17 @@ def monitor_position(m,
                     break
                 # else: 디바운스 대기 중 → 다음 체크로 진행
             elif trail_armed:
-                # 트레일 조건 해제(가격 회복) → 디바운스 리셋
+                # 🔧 FIX C4: 트레일 디바운스 partial decay (풀 리셋 → 점진 감소)
+                # - 기존: 가격 회복 시 즉시 0으로 리셋 → 노이즈 진동 시 영원히 미발동
+                # - 개선: 0.2% 이상 회복 시에만 풀 리셋, 그 외엔 hits -1 (최소 0)
                 if trail_db_first_ts > 0:
-                    trail_db_first_ts = 0.0
-                    trail_db_hits = 0
+                    _recovery_margin = curp / trail_stop - 1.0 if trail_stop > 0 else 0
+                    if _recovery_margin >= 0.002:  # 0.2% 이상 회복 = 진짜 반등
+                        trail_db_first_ts = 0.0
+                        trail_db_hits = 0
+                    else:
+                        # 미세 회복: 점진 감소 (노이즈 진동에 강건)
+                        trail_db_hits = max(0, trail_db_hits - 1)
 
 
             # === 🔥 심플 체크포인트 매도 로직 ===
@@ -7580,7 +7617,8 @@ def tg_send(t, retry=3):
                     json=payload, timeout=10,
                 )
             except Exception as e2:
-                raise e2
+                print(f"[TG] _tg_post 재시도도 실패: {e2}")
+                return None
 
     ok_any = False
     for cid in CHAT_IDS:
@@ -7594,6 +7632,8 @@ def tg_send(t, retry=3):
         for attempt in range(retry + 1):
             try:
                 r = _tg_post(payload)
+                if r is None:
+                    raise ConnectionError("_tg_post returned None")
                 if r.status_code == 200:
                     js = r.json()
                     if js.get("ok") is True:
@@ -7622,7 +7662,7 @@ def tg_send(t, retry=3):
                         }
                         try:
                             r2 = _tg_post(payload_plain)
-                            if r2.status_code == 200 and r2.json().get("ok"):
+                            if r2 and r2.status_code == 200 and r2.json().get("ok"):
                                 ok_any = True
                                 sent = True
                                 break
@@ -7642,7 +7682,7 @@ def tg_send(t, retry=3):
                     "disable_web_page_preview": True,
                 }
                 r3 = _tg_post(payload_plain)
-                if r3.status_code == 200 and r3.json().get("ok"):
+                if r3 and r3.status_code == 200 and r3.json().get("ok"):
                     ok_any = True
                 else:
                     # 🔧 최종 실패 → 큐에 저장
@@ -7918,8 +7958,10 @@ def fetch_orderbook_cache(mkts):
                     "depth_krw": askv + bidv,
                     "raw": ob
                 }
-            except Exception:
-                pass
+            except Exception as _ob_err:
+                # 🔧 FIX H4: 오더북 파싱 실패 로깅 (silent 무시 → 누락 데이터 가시성 확보)
+                _ob_market = ob.get("market", "?") if isinstance(ob, dict) else "?"
+                print(f"[OB_PARSE_ERR] {_ob_market}: {_ob_err}")
     return cache
 
 
@@ -7980,6 +8022,21 @@ def main():
 
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
+
+            # 🔧 FIX H3: pending 상태 타임아웃 세이프가드 (60초 초과 시 자동 제거)
+            # - 진입 중 예외 발생 시 pending 마킹만 남아 해당 코인 영구 차단되는 버그 방지
+            _PENDING_TIMEOUT_SEC = 60
+            with _POSITION_LOCK:
+                _stale_pending = []
+                for _pm, _pv in list(OPEN_POSITIONS.items()):
+                    if _pv.get("state") == "pending" and _pv.get("pre_signal"):
+                        # pending에는 entry_ts가 없으므로 last_signal_at 또는 현재-60초 비교
+                        _sig_ts = last_signal_at.get(_pm, 0)
+                        if _sig_ts > 0 and (time.time() - _sig_ts) > _PENDING_TIMEOUT_SEC:
+                            _stale_pending.append(_pm)
+                for _sp in _stale_pending:
+                    OPEN_POSITIONS.pop(_sp, None)
+                    print(f"[PENDING_TIMEOUT] {_sp} pending 상태 {_PENDING_TIMEOUT_SEC}초 초과 → 자동 제거")
 
             # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
             sync_orphan_positions()
