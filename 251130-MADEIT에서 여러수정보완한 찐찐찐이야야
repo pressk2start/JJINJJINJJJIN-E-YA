@@ -7509,7 +7509,7 @@ def monitor_position(m,
         # 🔧 FIX: 청산 없이 모니터 종료 → 재모니터 전환 알림
         #  (진입 알림만 오고 청산 알림이 안 오는 문제 해결)
         # ===========================================
-        if not _already_closed and verdict in (
+        if not _already_closed and not reentry and verdict in (
             "시간 만료(모니터링 종료)", "연장만료(모니터링 종료)",
             "데이터 수신 실패",
         ):
