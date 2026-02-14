@@ -898,10 +898,13 @@ def place_market_sell(market, volume, price_hint=None):
             price_hint = 0
 
     # 최소 주문금액 체크 (5,000원)
+    # 🔧 FIX: 4500원 이상이면 시도 허용 (price_hint 지연/오차 감안, 거래소가 최종 판단)
     if price_hint and price_hint > 0:
         est_value = volume * price_hint
-        if est_value < 5000:
+        if est_value < 4500:
             raise ValueError(f"최소주문금액 미달: {est_value:.0f}원 < 5000원")
+        elif est_value < 5000:
+            print(f"[SELL_BORDERLINE] {volume:.8f} × {price_hint:,.0f} = {est_value:,.0f}원 (5000원 미만이지만 시도)")
 
     body = {
         "market": market,
@@ -1613,11 +1616,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 50% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
 
-        # 🔧 특단조치: probe 폐지 → 최소 주문금액 5000원 통일
-        min_order_krw = 5000
+        # 🔧 FIX: 최소 진입금액 6000원 (매도최소 5000원 + 버퍼 1000원)
+        # 딱 5000원 매수 시 소폭 하락만으로 매도 불가 → 6000원으로 상향하여 해결
+        min_order_krw = 6000
         if krw_to_use < min_order_krw:
             # 🔧 FIX: 잔고가 최소주문금액 이상이면 최소주문금액으로 올려서 진입 (소액 계좌 지원)
-            if krw_bal >= min_order_krw * 2:  # 잔고가 최소주문금액의 2배(10,000원) 이상이면
+            if krw_bal >= min_order_krw * 2:  # 잔고가 최소주문금액의 2배(12,000원) 이상이면
                 print(f"[SIZE_BUMP] {m} 리스크계산 {krw_to_use:,.0f}원 < 최소주문 {min_order_krw:,}원 → {min_order_krw:,}원으로 상향")
                 krw_to_use = min_order_krw
             else:
@@ -1649,11 +1653,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = int(krw_to_use)
 
-        # 🔧 FIX: 임팩트캡 후 최소주문금액 재검증 (probe 폐지 → 5000원 통일)
-        if krw_to_use < 5000:
-            if krw_bal >= 5000 * 2:  # 잔고 충분하면 최소주문금액으로 상향
-                print(f"[SIZE_BUMP] {m} 임팩트캡 후 {krw_to_use:,.0f}원 < 5000원 → 5000원 상향")
-                krw_to_use = 5000
+        # 🔧 FIX: 임팩트캡 후 최소주문금액 재검증 (매도가능 보장 → 6000원 통일)
+        if krw_to_use < min_order_krw:
+            if krw_bal >= min_order_krw * 2:  # 잔고 충분하면 최소주문금액으로 상향
+                print(f"[SIZE_BUMP] {m} 임팩트캡 후 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → {min_order_krw:,}원 상향")
+                krw_to_use = min_order_krw
             else:
                 signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
                 tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
