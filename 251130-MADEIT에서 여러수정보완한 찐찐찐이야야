@@ -130,17 +130,18 @@ SCALP_TO_RUNNER_MIN_BUY = 0.56   # 🔧 0.58→0.56 (러너 전환 기회 확대
 SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 
 # 트레일링 손절 설정
-# 🔧 손익분기개선: SL 연동 — 트레일 거리 = SL × 0.5 (SL 1.0% → 트레일 0.50%)
-TRAIL_ATR_MULT = 1.0  # 🔧 0.8→1.0 (ATR 기반 여유폭 확대, 정상 눌림에서 트레일 트립 방지)
-TRAIL_DISTANCE_MIN_BASE = 0.005  # 🔧 손익분기개선: 0.3→0.5% (SL 1.0% × 0.5, 정상 눌림 허용)
+# 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
+# 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
+TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
+TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 매도구조개선: 0.5→0.8% (정상 눌림 완전 허용)
 
 def get_trail_distance_min():
-    """🔧 구조개선: 트레일 거리를 SL의 50%로 연동
-    SL 0.6% → 트레일 0.30%, SL 1.0% → 트레일 0.50%
-    트레일이 너무 빡빡하면 정상 눌림에서 트립 → 수익 날아감
+    """🔧 매도구조개선: 트레일 거리를 SL의 80%로 연동
+    SL 1.0% → 트레일 0.80%
+    0.5%는 알트 1분봉 눌림에 걸림 → 0.8%로 확대하여 큰 수익 보존
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.5)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.8)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -188,36 +189,36 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 10
-        HARD_STOP_DD = 0.030  # 🔧 손익분기개선: 2.2→3.0% (SL 1.0% 대비 gentle 비상용)
+        HARD_STOP_DD = 0.030
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
-        TRAIL_ATR_MULT = 1.2  # 🔧 1.0→1.2 (SL 확대 연동)
-        TRAIL_DISTANCE_MIN_BASE = 0.005  # 🔧 손익분기개선: 0.25→0.5%
-        TRAIL_DISTANCE_MIN = 0.005
+        TRAIL_ATR_MULT = 1.2
+        TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 매도구조개선: 0.5→1.0% (gentle은 최대 여유)
+        TRAIL_DISTANCE_MIN = 0.010
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.020  # 🔧 손익분기개선: 1.4→2.0% (SL 1.0% 대비 strict 비상용)
+        HARD_STOP_DD = 0.020
         EXIT_DEBOUNCE_SEC = 5
         EXIT_DEBOUNCE_N = 3
-        TRAIL_ATR_MULT = 0.90  # 🔧 0.75→0.90 (SL 확대 연동)
-        TRAIL_DISTANCE_MIN_BASE = 0.004  # 🔧 손익분기개선: 0.2→0.4%
-        TRAIL_DISTANCE_MIN = 0.004
+        TRAIL_ATR_MULT = 0.90
+        TRAIL_DISTANCE_MIN_BASE = 0.006  # 🔧 매도구조개선: 0.4→0.6% (strict도 최소 0.6%)
+        TRAIL_DISTANCE_MIN = 0.006
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.025  # 🔧 손익분기개선: 1.8→2.5% (SL 1.0% 대비 비상용)
+        HARD_STOP_DD = 0.025
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
-        TRAIL_ATR_MULT = 1.0  # 🔧 0.85→1.0 (SL 확대 연동)
-        TRAIL_DISTANCE_MIN_BASE = 0.005  # 🔧 손익분기개선: 0.25→0.5%
-        TRAIL_DISTANCE_MIN = 0.005
+        TRAIL_ATR_MULT = 1.0
+        TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 매도구조개선: 0.5→0.8% (기본값과 일치)
+        TRAIL_DISTANCE_MIN = 0.008
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -7095,21 +7096,16 @@ def monitor_position(m,
                 trail_stop = curp * (1.0 - get_trail_distance_min())
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
 
-            # === 🔧 손익분기개선: 수익 래칫 — SL 연동 (SL 1.0% 기준) ===
-            # 체크포인트 1.5% 이후부터 래칫 시작, 수익의 50~70% 잠금
-            # SL 넓힌 만큼 래칫도 넓게 → 정상 눌림에서 트립 방지
+            # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
+            # 기존: 6단계 → +2.0%에서 55% 잠금 (0.9%만 눌림 허용 = 트레일과 충돌)
+            # 변경: 3단계 → 큰 수익에서만 안전망, 나머지는 트레일(0.8%)이 처리
+            # 트레일 0.8%가 메인 보호 → 래칫은 큰 수익 최저보장만 담당
             if trail_armed and gain_from_entry > 0:
                 _ratchet_lock = 0
-                if gain_from_entry >= 0.050:      # +5.0% → 최소 +3.5% 확보 (70%)
-                    _ratchet_lock = entry_price * (1.0 + 0.035)
-                elif gain_from_entry >= 0.040:    # +4.0% → 최소 +2.7% 확보 (68%)
-                    _ratchet_lock = entry_price * (1.0 + 0.027)
-                elif gain_from_entry >= 0.030:    # +3.0% → 최소 +1.9% 확보 (63%)
-                    _ratchet_lock = entry_price * (1.0 + 0.019)
-                elif gain_from_entry >= 0.025:    # +2.5% → 최소 +1.5% 확보 (60%)
-                    _ratchet_lock = entry_price * (1.0 + 0.015)
-                elif gain_from_entry >= 0.020:    # +2.0% → 최소 +1.1% 확보 (55%)
-                    _ratchet_lock = entry_price * (1.0 + 0.011)
+                if gain_from_entry >= 0.050:      # +5.0% → 최소 +3.0% 확보 (60%)
+                    _ratchet_lock = entry_price * (1.0 + 0.030)
+                elif gain_from_entry >= 0.035:    # +3.5% → 최소 +1.8% 확보 (51%)
+                    _ratchet_lock = entry_price * (1.0 + 0.018)
                 elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(1.5%) → 본절+α
                     _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.002)
                 if _ratchet_lock > base_stop:
@@ -7299,39 +7295,12 @@ def monitor_position(m,
             cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
 
             # ============================================================
-            # 🔧 매수세 감쇄 사전 익절: 수익 중 + 매수세 3연속 약화 → 선제 익절
-            # 핵심: MFE 타겟 도달 전에 모멘텀이 죽으면 수익 반납 방지
+            # 🔧 매도구조개선: 매수세감쇄 익절 제거
+            # 이유: SL 1.0%까지 참겠다고 해놓고 +0.5%에서 자르면 R:R 0.5:1.0
+            #       SL이 보호해주는데 +0.5%에서 또 보호할 필요 없음
+            #       트레일링 + SL이 알아서 처리 → 중간 청산 제거로 큰 수익 보존
             # ============================================================
-            if not _flow_decay_sold and not _already_closed and cur_gain_now >= 0.005:
-                _fd_t10 = micro_tape_stats_from_ticks(ticks, 10)
-                _fd_buy = _fd_t10.get("buy_ratio", 0.5)
-                _fd_flow = _fd_t10.get("krw_per_sec", 0)
-                if _fd_buy < 0.45 and _fd_flow < 30000:
-                    _flow_decay_count += 1
-                else:
-                    _flow_decay_count = max(0, _flow_decay_count - 1)
-
-                if _flow_decay_count >= 3 and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
-                    if trail_armed:
-                        # 트레일 무장 상태: 50% 부분 익절 + 트레일 타이트닝
-                        ok, msg, sold = safe_partial_sell(
-                            m, 0.50,
-                            reason=f"매수세감쇄익절 +{cur_gain_now*100:.2f}% (매수{_fd_buy:.0%} 유속{_fd_flow:.0f})")
-                        if ok and sold > 0:
-                            _flow_decay_sold = True
-                            last_exit_event_ts = time.time()
-                            # 트레일 강화: 거리 40% 축소
-                            trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min * 0.6))
-                            tg_send_mid(f"📉 {m} 매수세감쇄 50%익절 +{cur_gain_now*100:.2f}% | 트레일 강화")
-                    else:
-                        # 트레일 미무장 + 소액 수익: 전량 익절
-                        close_auto_position(m, f"매수세감쇄전량익절 +{cur_gain_now*100:.2f}% (매수{_fd_buy:.0%})")
-                        _already_closed = True
-                        verdict = "매수세감쇄_TP"
-                        tg_send_mid(f"📉 {m} 매수세감쇄 전량익절 +{cur_gain_now*100:.2f}%")
-                        break
-            elif cur_gain_now < 0.003:
-                _flow_decay_count = 0  # 🔧 SL연동: 0.2→0.3% (SL 1.0% 대비 카운터 리셋 구간 확대)
+            # (매수세감쇄 익절 비활성화 — 트레일링/SL에 위임)
 
             # ============================================================
             # 🔧 특단조치: trade_type 기반 청산 (스캘프 vs 러너 이진분류)
@@ -7390,19 +7359,11 @@ def monitor_position(m,
                         verdict = "스캘프_TP"
                         tg_send_mid(f"💰 {m} 스캘프 전량익절 +{cur_gain_now*100:.2f}% | MFE+{max_gain*100:.2f}%")
                         break
-                # 스캘프 Plateau: 90초 횡보+매수둔화 시 전량 익절
-                PLATEAU_SEC = 90 if entry_mode == "confirm" else 60
-                time_since_peak = time.time() - last_peak_ts
-                if (not mfe_partial_done
-                    and cur_gain_now >= dyn_checkpoint
-                    and time_since_peak >= PLATEAU_SEC):
-                    decay_flag, decay_info = buy_decay_flag(ticks)
-                    if decay_flag and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
-                        close_auto_position(m, f"스캘프Plateau +{cur_gain_now*100:.2f}% ({time_since_peak:.0f}초횡보)")
-                        _already_closed = True
-                        verdict = "스캘프_Plateau"
-                        tg_send_mid(f"📉 {m} 스캘프 Plateau 전량익절 +{cur_gain_now*100:.2f}%")
-                        break
+                # 🔧 매도구조개선: Plateau 전량익절 제거
+                # 이유: 횡보는 거래의 자연스러운 과정 (숨고르기)
+                #       +1.5%에서 90초 쉬다가 +3.0% 가는 거래를 +1.5%에서 잘라먹음
+                #       트레일링이 알아서 하락 시 처리 → 횡보 자체는 문제 아님
+                # (Plateau 비활성화 — 트레일링에 위임)
 
             else:
                 # === 러너 모드: 30% 익절 + 70% 넓은 트레일 ===
