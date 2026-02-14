@@ -154,7 +154,7 @@ FEE_RATE = FEE_RATE_ROUNDTRIP  # 하위 호환용
 
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
-POSTCHECK_ENABLED = False     # 초입 단계 포스트체크 비활성화
+POSTCHECK_ENABLED = True      # 🔧 승률개선: 포스트체크 활성화 (가짜 돌파 3~6초 검증)
 EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
 
 # --- 환경변수(.env 지원) ---
