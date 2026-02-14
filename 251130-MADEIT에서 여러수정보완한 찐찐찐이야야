@@ -1616,11 +1616,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 특단조치: probe 폐지 → 최소 주문금액 5000원 통일
         min_order_krw = 5000
         if krw_to_use < min_order_krw:
-            signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
-            tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
+            # 🔧 FIX: 잔고가 최소주문금액 이상이면 최소주문금액으로 올려서 진입 (소액 계좌 지원)
+            if krw_bal >= min_order_krw * 2:  # 잔고가 최소주문금액의 2배(10,000원) 이상이면
+                print(f"[SIZE_BUMP] {m} 리스크계산 {krw_to_use:,.0f}원 < 최소주문 {min_order_krw:,}원 → {min_order_krw:,}원으로 상향")
+                krw_to_use = min_order_krw
+            else:
+                signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
         # 🔧 체결충격(impact) 기반 사이징 댐퍼
         # 상위 3호가 합계의 15% 초과 사용 시 과도 → 캡 (슬리피지 방지)
@@ -1646,11 +1651,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # 🔧 FIX: 임팩트캡 후 최소주문금액 재검증 (probe 폐지 → 5000원 통일)
         if krw_to_use < 5000:
-            signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
-            tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
+            if krw_bal >= 5000 * 2:  # 잔고 충분하면 최소주문금액으로 상향
+                print(f"[SIZE_BUMP] {m} 임팩트캡 후 {krw_to_use:,.0f}원 < 5000원 → 5000원 상향")
+                krw_to_use = 5000
+            else:
+                signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
         # === 매수 ===
         # 🔧 FIX: 매수 전 보유량 저장 (체결 재검증용)
