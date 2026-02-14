@@ -8657,6 +8657,13 @@ def main():
                     def _run_monitor(market, entry, pre_data, tight):
                         try:
                             monitor_position(market, entry, pre_data, tight_mode=tight)
+                            # 🔧 FIX: monitor_position 종료 후 포지션 잔존 시 remonitor 연결
+                            # 기존: orphan_sync 30초 후에야 감지 → 무감시 갭 존재
+                            # 변경: 리테스트 모니터와 동일하게 즉시 remonitor 연결
+                            with _POSITION_LOCK:
+                                _pos_after = OPEN_POSITIONS.get(market)
+                            if _pos_after and _pos_after.get("state") == "open":
+                                remonitor_until_close(market, entry, pre_data, tight_mode=tight)
                         except Exception as e:
                             print(f"[MON_ERR] {market}: {e}")
                             import traceback
