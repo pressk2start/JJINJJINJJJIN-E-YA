@@ -845,15 +845,15 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                 return limit_res
             if state == "cancel":
                 break
-        except Exception:
-            pass
+        except Exception as _poll_e:
+            print(f"[HYBRID] {market} 주문조회 실패: {_poll_e}")
 
     executed_vol = 0.0
     try:
         if od:
             executed_vol = float(od.get("executed_volume") or "0")
-    except Exception:
-        pass
+    except Exception as _vol_e:
+        print(f"[HYBRID] {market} 체결량 파싱 실패: {_vol_e}")
 
     remaining_vol = buy_volume - executed_vol
     remaining_krw = int(remaining_vol * ask1_price)
@@ -3030,14 +3030,6 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # 목표값 조회 (없으면 기본값)
             full_tp = TP_FULL.get(tag, 0.9)
             part_tp = TP_PART.get(tag, 0.6)
-
-            # 🔧 TP 바닥값 = alpha만 (수수료/슬립은 ret_net에서 이미 차감됨 — 이중반영 방지)
-            cp_alpha = PROFIT_CHECKPOINT_MIN_ALPHA * 100.0  # 0.1%
-
-            # 🔧 FIX: exit 슬립은 ret_net에서만 반영 (이중 차감 방지)
-            avg_exit_slip_pct = get_expected_exit_slip_pct()  # exit 전용 trimmed mean
-            # slip_extra 제거: TP 바닥값 + ret_net 슬립 차감은 이중 페널티
-            # → 고슬립 종목에서 익절이 늦어져 수익 기회 감소하는 문제 해결
 
             # 🔧 FIX: TP 비교를 net 기준으로 통일 (gross→net)
             # gross로 TP 도달처럼 보여도 수수료+슬립 포함하면 net이 마이너스인 케이스 제거
@@ -6382,8 +6374,6 @@ from collections import deque
 def postcheck_6s(m, pre):
     # 🔥 점화 진입은 포스트체크 바이패스 (signal_tag에 "점화" 포함 시)
     is_ignition = "점화" in pre.get("signal_tag", "")
-    # ✅ FIX: tick-burst 경로 제거에 맞춰 안전 기본값 (NameError 방지)
-    is_tick_burst = "틱버스트" in pre.get("signal_tag", "")
 
     if not POSTCHECK_ENABLED:
         return True, "SKIP"
@@ -6443,9 +6433,8 @@ def postcheck_6s(m, pre):
     peak = base_price
     trough_after_peak = base_price  # 피크 이후 최저가 추적
 
-    # ★★★ 여기 한 줄 추가 (postcheck 중 최대 허용 급등)
-    # 🔥 틱버스트는 더 보수적으로 (1.0%), 일반 경로는 1.5%
-    MAX_SURGE = 0.010 if is_tick_burst else 0.015
+    # ★★★ postcheck 중 최대 허용 급등 (1.5%)
+    MAX_SURGE = 0.015
 
     while True:
         now = time.time()
