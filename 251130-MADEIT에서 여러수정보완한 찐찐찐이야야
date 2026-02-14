@@ -1560,7 +1560,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # - 기존: dyn_stop은 신호 시점 가격 기준 → 현재가로 진입 시 손절폭 불일치
         # - 개선: final_price_guard 통과 후 현재가 기준으로 dynamic_stop_loss 재계산
         c1_for_sl = pre.get("c1")
-        signal_type = pre.get("signal_type", None)
+        # 🔧 FIX: signal_type 파생 (pre에 signal_type 키가 없어 항상 None이었음)
+        signal_type = (
+            "ign" if pre.get("ign_ok") else
+            "mega" if pre.get("mega_ok") else
+            "early" if pre.get("early_ok") else
+            "normal"
+        )
         if c1_for_sl:
             new_stop, new_sl_pct, sl_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type, entry_price)
             stop_price = new_stop
@@ -1776,6 +1782,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # - 기존: dyn_stop은 신호 시점 가격(signal_price) 기준 → 체결가와 괴리 발생 가능
         # - 변경: 실제 체결가(avg_price) 기준으로 손절가 재계산
         adjusted_stop = avg_price * (1 - eff_sl_pct)
+        # 🔧 FIX: signal_type 파생 (ign/early/mega/normal → dynamic_stop_loss 신호별 완화용)
+        _derived_signal_type = (
+            "ign" if pre.get("ign_ok") else
+            "mega" if pre.get("mega_ok") else
+            "early" if pre.get("early_ok") else
+            "normal"
+        )
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
                 "entry_price": avg_price,
@@ -1787,6 +1800,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_mode": entry_mode,  # 🔧 FIX: IMPACT_CAP 전환 반영 (pre 대신 로컬 변수)
                 "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
                 "signal_tag": pre.get("signal_tag", "기본"),  # 🔧 MFE 익절 경로용
+                "signal_type": _derived_signal_type,  # 🔧 FIX: SL 신호별 완화용
                 "trade_type": pre.get("trade_type", "scalp"),  # 🔧 특단조치: 스캘프/러너 진입 시 결정
             }
 
@@ -6965,6 +6979,8 @@ def monitor_position(m,
     entry_mode = pos.get("entry_mode", "confirm")
     trade_type = pos.get("trade_type", "scalp")  # 🔧 특단조치: 진입 시 결정된 스캘프/러너
     signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
+    # 🔧 FIX: signal_type 로드 (dynamic_stop_loss 신호별 완화용 — signal_tag와 별도)
+    signal_type_for_sl = pos.get("signal_type", "normal")
 
     # === 🔧 1분봉 캐시 (10초 스로틀 — 루프 내 다중 호출 방지) ===
     _c1_cache = None
@@ -7066,7 +7082,7 @@ def monitor_position(m,
             if time.time() - _last_sl_refresh_ts >= 5:
                 _c1_for_sl_refresh = _get_c1_cached()
                 _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
-                    entry_price, _c1_for_sl_refresh, signal_type=signal_tag, current_price=curp
+                    entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp
                 )
                 # base_stop은 래칫/본절잠금과 충돌하니 max로만 갱신 (하향 방지)
                 base_stop = max(base_stop, _new_stop)
@@ -7521,6 +7537,12 @@ def monitor_position(m,
                         continue
                     curp = max(ticks, key=tick_ts_ms).get("trade_price", curp)
                     last_price = curp
+
+                    # 🔧 FIX: 신고점 판정을 best 갱신 전에 수행 (기존: best 먼저 갱신 → 조건 항상 False)
+                    # - 기존 순서: best=max(best,curp) → if curp>best: (절대 True 불가)
+                    # - 수정: 신고점 판정 → trail 갱신 → best 갱신
+                    if curp > best:
+                        trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min))
                     best = max(best, curp)
 
                     # 트레일 체크
@@ -7537,10 +7559,6 @@ def monitor_position(m,
                         _already_closed = True
                         verdict = "연장_RATCHET_STOP"
                         break
-                    # 신고점 → 트레일 갱신
-                    if curp > best:
-                        best = curp
-                        trail_stop = max(trail_stop, curp * (1.0 - trail_dist_min))
 
                 if verdict is None:
                     verdict = "연장만료(모니터링 종료)"
