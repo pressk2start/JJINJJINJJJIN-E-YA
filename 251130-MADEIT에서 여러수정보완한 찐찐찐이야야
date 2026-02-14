@@ -1330,6 +1330,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
+        tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
@@ -1444,9 +1445,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         #              약한 모멘텀만 풀백 잡힘→역선택 구조
         #   개선: 5초 이내 빠른 눌림만 잡고, 없으면 즉시 진입
         # ============================================================
-        PULLBACK_WAIT_SEC = 5       # 🔧 손익분기개선: 20→5초 (역선택 제거, 빠른 진입)
+        PULLBACK_WAIT_SEC = 3       # 🔧 FIX: 5→3초 (과도한 대기→가격 드리프트→매수 불발 방지)
         PULLBACK_MIN_DIP = 0.001    # 🔧 0.15→0.1% (미세 눌림도 인정)
-        PULLBACK_MAX_DIP = 0.006    # 🔧 0.8→0.6% (모멘텀 소멸 기준 축소)
+        PULLBACK_MAX_DIP = 0.012    # 🔧 FIX: 0.6→1.2% (변동성 큰 코인에서 0.6%는 정상 눌림도 차단)
         PULLBACK_BOUNCE_TICKS = 2   # 🔧 3→2틱 (빠른 확인)
 
         _pb_peak = current_price
@@ -1480,6 +1481,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             # 너무 깊은 하락 = 모멘텀 소멸 → 진입 포기
             if _pb_dip_pct >= PULLBACK_MAX_DIP:
                 signal_skip(f"풀백 과대 ({_pb_dip_pct*100:.2f}% 하락, 모멘텀 소멸)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 풀백 과대 ({_pb_dip_pct*100:.2f}% 하락)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
@@ -1510,8 +1512,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 _pb_entry_price = max(_pb_ticks_final, key=tick_ts_ms).get("trade_price", current_price)
             # 모멘텀 재확인: 계속 오르고 있으면 진입, 꺾이면 포기
             _pb_t10 = micro_tape_stats_from_ticks(_pb_ticks_final or [], 10)
-            if _pb_t10.get("buy_ratio", 0) < 0.50:
+            if _pb_t10.get("buy_ratio", 0) < 0.42:
                 signal_skip(f"풀백 타임아웃 + 매수세 약화 ({_pb_t10.get('buy_ratio',0):.0%})")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 풀백 후 매수세 약화 ({_pb_t10.get('buy_ratio',0):.0%})")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
@@ -1520,23 +1523,33 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 풀백 이후 현재가를 진입가로 갱신
         current_price = _pb_entry_price
 
-        # 🔧 FIX: 풀백 대기 후 가격가드 재검증 (5초 간 가격 드리프트 방어)
-        # - 기존: 풀백 전 1회만 가드 → 풀백 중 급등/급락 시 불리한 가격으로 진입
-        # - 수정: 풀백 종료 후 현재가 기준으로 한 번 더 가드
-        _pb_ticks_guard = get_recent_ticks(m, 50, allow_network=True)
-        ok_guard2, cur_price2, is_chase2 = final_price_guard(m, current_price, ticks=_pb_ticks_guard)
-        if not ok_guard2:
-            _drift2 = (cur_price2 / current_price - 1) * 100
-            signal_skip(f"풀백 후 가격가드 실패 (풀백가→현재가 {_drift2:+.2f}%)")
-            tg_send(
-                f"⚠️ <b>진입 취소</b> {m}\n"
-                f"• 풀백 후 현재가: {fmt6(cur_price2)}원\n"
-                f"• 사유: 풀백 대기 중 추가 급등"
-            )
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
-        current_price = cur_price2  # 최신 가격으로 갱신
+        # 🔧 FIX: 풀백 후 가격가드 완화 — 급등/급락만 차단 (1.2% 상한)
+        # - 기존: final_price_guard 재호출 (0.5% 임계치) → 풀백 자체가 가격 이동이라 대부분 실패
+        # - 수정: 단순 상하한만 체크 (이미 1차 가드 통과한 신호이므로 2차는 느슨하게)
+        try:
+            _pb_ticker = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+            if _pb_ticker:
+                cur_price2 = _pb_ticker[0].get("trade_price", current_price)
+                _drift2 = (cur_price2 / current_price - 1.0)
+                if _drift2 > 0.012:  # 1.2% 이상 급등 → 추격 위험
+                    signal_skip(f"풀백 후 급등 ({_drift2*100:+.2f}%)")
+                    tg_send(
+                        f"⚠️ <b>진입 취소</b> {m}\n"
+                        f"• 풀백 후 현재가: {fmt6(cur_price2)}원\n"
+                        f"• 사유: 풀백 대기 중 {_drift2*100:.2f}% 급등"
+                    )
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                    return
+                if _drift2 < -0.010:  # 1.0% 이상 급락 → 모멘텀 소멸
+                    signal_skip(f"풀백 후 급락 ({_drift2*100:+.2f}%)")
+                    tg_send_mid(f"⚠️ {m} 매수 스킵: 풀백 후 급락 ({_drift2*100:.2f}%)")
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                    return
+                current_price = cur_price2  # 최신 가격으로 갱신
+        except Exception as _pb_guard_err:
+            print(f"[PB_GUARD] {m} 풀백 후 가격 체크 실패 (진행): {_pb_guard_err}")
 
         accounts = get_account_info()
         if not accounts:
@@ -1550,6 +1563,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         if krw_bal < 6000:
             signal_skip(f"KRW 부족 ({krw_bal:,.0f}원)")
+            tg_send_mid(f"⚠️ {m} 매수 스킵: KRW 잔고 부족 ({krw_bal:,.0f}원)")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             return
@@ -1603,6 +1617,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         min_order_krw = 5000
         if krw_to_use < min_order_krw:
             signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+            tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             return
@@ -1632,6 +1647,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX: 임팩트캡 후 최소주문금액 재검증 (probe 폐지 → 5000원 통일)
         if krw_to_use < 5000:
             signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
+            tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
             with _POSITION_LOCK:
                 OPEN_POSITIONS.pop(m, None)
             return
@@ -1659,11 +1675,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             _depth_min = 15_000_000 if is_chase else 5_000_000
             if _spread_now > _spread_limit:
                 signal_skip(f"매수직전 스프레드 악화 {_spread_now:.2f}%>{_spread_limit:.2f}%")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 스프레드 악화 ({_spread_now:.2f}%>{_spread_limit:.2f}%)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
             if _depth_now > 0 and _depth_now < _depth_min:
                 signal_skip(f"매수직전 호가깊이 부족 {_depth_now/1e6:.1f}M<{_depth_min/1e6:.0f}M")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 호가깊이 부족 ({_depth_now/1e6:.1f}M)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
