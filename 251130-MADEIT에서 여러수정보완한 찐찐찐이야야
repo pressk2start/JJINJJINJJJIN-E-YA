@@ -3570,22 +3570,20 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         # - 여기서 또 업데이트하면 거래 1번에 streak 2번 올라감
         # - record_trade()가 streak의 단일 진실 공급원(SSOT)
 
-        # 🔧 연패 3회 시 Pre-break 10분간 중지 (streak 값은 참조만)
-        global _PREBREAK_SUSPEND_UNTIL
-        if _lose_streak >= 3:
-            _PREBREAK_SUSPEND_UNTIL = time.time() + 600  # 10분
-            print(f"[LOSE_STREAK] 연속 {_lose_streak}패 → Pre-break 10분 중지")
+        # 🔧 FIX: _lose_streak 읽기를 _STREAK_LOCK 아래서 수행 (스레드 안전 읽기)
+        with _STREAK_LOCK:
+            _ls_snap = _lose_streak
 
         # 학습 조건: 10건마다 OR 연속 3패
         with _trade_log_lock:
             should_learn = (
                 _trade_count_since_learn >= AUTO_LEARN_INTERVAL or
-                _lose_streak >= AUTO_LEARN_STREAK_TRIGGER
+                _ls_snap >= AUTO_LEARN_STREAK_TRIGGER
             )
 
         if should_learn:
             with _trade_log_lock:
-                trigger_reason = f"연속 {_lose_streak}패" if _lose_streak >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
+                trigger_reason = f"연속 {_ls_snap}패" if _ls_snap >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
                 _trade_count_since_learn = 0  # 리셋
             print(f"[AUTO_LEARN] 학습 트리거: {trigger_reason}")
 
@@ -4846,7 +4844,7 @@ def running_1m_bar(ticks, last_candle=None):
 # ========================================
 # 🚀 Pre-break 동적 대역 (변동성 기반)
 # ========================================
-_PREBREAK_SUSPEND_UNTIL = 0.0  # 연패 시 일시 중지 타임스탬프
+# (_PREBREAK_SUSPEND_UNTIL 제거됨 — PREBREAK_ENABLED=False이며 체크 코드 없었음)
 _ENTRY_SUSPEND_UNTIL = 0.0     # 🔧 FIX: 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 🔧 FIX: 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
 
@@ -8070,9 +8068,12 @@ def fetch_orderbook_cache(mkts):
                 spread = (ask - bid) / max((ask + bid) / 2, 1) * 100
                 askv = sum(u["ask_price"] * u["ask_size"] for u in units)
                 bidv = sum(u["bid_price"] * u["bid_size"] for u in units)
+                # 🔧 FIX: best_ask_krw 포함 (detect_leader_stock→stage1_gate에서 참조)
+                best_ask_krw = units[0]["ask_price"] * units[0]["ask_size"]
                 cache[ob["market"]] = {
                     "spread": spread,
                     "depth_krw": askv + bidv,
+                    "best_ask_krw": best_ask_krw,
                     "raw": ob
                 }
             except Exception as _ob_err:
