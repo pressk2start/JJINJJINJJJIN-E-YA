@@ -1118,9 +1118,11 @@ def sync_orphan_positions():
             # 🔧 처리 완료 표시 (반복 알림 방지) - 먼저 표시
             _ORPHAN_HANDLED.add(market)
 
-            # 🔧 즉시 손절 체크 (이미 손절선 이하면 바로 청산)
-            # DYN_SL_MAX = 0.6%, 현재 손실이 그 이상이면 즉시 청산
-            if pnl_pct <= -0.6:
+            # 🔧 FIX: orphan 즉시 손절 → DYN_SL_MIN 연동 (0.6% 하드코딩 제거)
+            # - 기존: -0.6% 고정 → 정상 눌림도 강제청산 (승률 하락)
+            # - 수정: DYN_SL_MIN(1.0%) 기준으로 판단 (본전략 SL과 일관)
+            _orphan_sl_pct = DYN_SL_MIN * 100  # 1.0%
+            if pnl_pct <= -_orphan_sl_pct:
                 print(f"[ORPHAN] {market} 이미 손절선 이하 ({pnl_pct:.2f}%) → 즉시 청산")
                 try:
                     close_auto_position(market, f"유령포지션 손절 | 감지 즉시 {pnl_pct:.2f}%")
@@ -1517,6 +1519,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # 풀백 이후 현재가를 진입가로 갱신
         current_price = _pb_entry_price
+
+        # 🔧 FIX: 풀백 대기 후 가격가드 재검증 (5초 간 가격 드리프트 방어)
+        # - 기존: 풀백 전 1회만 가드 → 풀백 중 급등/급락 시 불리한 가격으로 진입
+        # - 수정: 풀백 종료 후 현재가 기준으로 한 번 더 가드
+        _pb_ticks_guard = get_recent_ticks(m, 50, allow_network=True)
+        ok_guard2, cur_price2, is_chase2 = final_price_guard(m, current_price, ticks=_pb_ticks_guard)
+        if not ok_guard2:
+            _drift2 = (cur_price2 / current_price - 1) * 100
+            signal_skip(f"풀백 후 가격가드 실패 (풀백가→현재가 {_drift2:+.2f}%)")
+            tg_send(
+                f"⚠️ <b>진입 취소</b> {m}\n"
+                f"• 풀백 후 현재가: {fmt6(cur_price2)}원\n"
+                f"• 사유: 풀백 대기 중 추가 급등"
+            )
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            return
+        current_price = cur_price2  # 최신 가격으로 갱신
+
         accounts = get_account_info()
         if not accounts:
             signal_skip("계좌 조회 실패")
@@ -6128,7 +6149,10 @@ def final_check_leader(m, pre, tight_mode=False):
         sb_imb = pre.get("imbalance", 0)
         consec_ok = sb_cons >= 3
         supply_ok = (sb_br >= 0.55 and sb_imb >= 0.40)
-        if not (consec_ok and supply_ok):
+        # 🔧 FIX: AND → OR (주석 의도와 코드 불일치 수정)
+        # - 기존: consec AND supply 둘 다 만족해야 유지 → 강돌파 과도한 차단
+        # - 수정: 연속매수만 좋아도 OR 수급만 좋아도 유지 (의도대로)
+        if not (consec_ok or supply_ok):
             old_mode = entry_mode
             if entry_mode == "confirm":
                 entry_mode = "half"
@@ -6940,6 +6964,8 @@ def monitor_position(m,
     # === 🔧 1분봉 캐시 (10초 스로틀 — 루프 내 다중 호출 방지) ===
     _c1_cache = None
     _c1_cache_ts = 0.0
+    # 🔧 FIX: SL 주기적 갱신용 타임스탬프 (수익 중 손절 완화 반영)
+    _last_sl_refresh_ts = 0.0
 
     def _get_c1_cached():
         nonlocal _c1_cache, _c1_cache_ts
@@ -7028,6 +7054,20 @@ def monitor_position(m,
                     pos_now["mfe_pct"] = mfe_pct
                     pos_now["mae_pct"] = mae_pct
                     OPEN_POSITIONS[m] = pos_now
+
+            # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
+            # - 기존: 진입 시 1회만 호출 → 수익 중에도 타이트한 SL 유지 → 불필요 손절
+            # - 수정: 5초마다 current_price 반영하여 재계산 (수익 시 SL 1.5배 완화)
+            if time.time() - _last_sl_refresh_ts >= 5:
+                _c1_for_sl_refresh = _get_c1_cached()
+                _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
+                    entry_price, _c1_for_sl_refresh, signal_type=signal_tag, current_price=curp
+                )
+                # base_stop은 래칫/본절잠금과 충돌하니 max로만 갱신 (하향 방지)
+                base_stop = max(base_stop, _new_stop)
+                eff_sl_pct = _new_sl_pct
+                atr_info = _new_atr_info
+                _last_sl_refresh_ts = time.time()
 
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
