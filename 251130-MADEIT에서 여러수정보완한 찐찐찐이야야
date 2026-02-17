@@ -293,6 +293,7 @@ CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body
 CIRCLE_REBREAK_CONFIRM = True          # 재돌파 시 플로우 확인 필수
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
+CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
 
 # 동그라미 재돌파 품질 필터
 CIRCLE_REBREAK_BUY_RATIO_MIN = 0.52    # 재돌파 시 최소 매수비
@@ -5826,6 +5827,8 @@ def circle_check_entry(m):
         return None
 
     # --- 과도한 눌림 체크 ---
+    # NOTE: peak = peak_after_ign (점화 이후 최고점, 점화 고점보다 높을 수 있음)
+    # 즉, "점화 후 확장 포함한 고점" 대비 눌림을 측정 (점화 캔들 기준 아님)
     pullback_pct = (peak - pullback_low) / peak if peak > 0 else 0
     if pullback_pct > CIRCLE_PULLBACK_MAX_PCT:
         with _CIRCLE_LOCK:
@@ -8883,28 +8886,23 @@ def main():
                                 continue
                             OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
 
+                        # 🔧 FIX: ready 재시도 쿨다운 (텔레그램 스팸 방지)
+                        with _CIRCLE_LOCK:
+                            _cw = _CIRCLE_WATCHLIST.get(cm)
+                            if _cw:
+                                _last_try = _cw.get("last_try_ts", 0)
+                                if time.time() - _last_try < CIRCLE_RETRY_COOLDOWN_SEC:
+                                    _release_entry_lock(cm)
+                                    with _POSITION_LOCK:
+                                        _pp = OPEN_POSITIONS.get(cm)
+                                        if _pp and _pp.get("pre_signal"):
+                                            OPEN_POSITIONS.pop(cm, None)
+                                    continue
+                                _cw["last_try_ts"] = time.time()
+
                         circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
                         c1_circle = get_minutes_candles(1, cm, 20)
                         dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
-
-                        # ⭕ 동그라미 텔레그램 알람
-                        _c_candles = circle_pre.get('circle_candles', '?')
-                        _c_ign_high = circle_pre.get('circle_ign_high', 0)
-                        _c_pb_pct = circle_pre.get('circle_pullback_pct', 0)
-                        _c_reclaim = circle_pre.get('circle_reclaim_price', 0)
-                        tg_send(
-                            f"⭕ <b>동그라미 진입</b> {cm} ⚡{CIRCLE_ENTRY_MODE.upper()}\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"🔥 점화고점: {fmt6(_c_ign_high)}원\n"
-                            f"📉 눌림: -{_c_pb_pct*100:.2f}% ({_c_candles}봉)\n"
-                            f"📈 리클레임: {fmt6(_c_reclaim)}원\n"
-                            f"🚀 재돌파: {fmt6(circle_pre['price'])}원\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"🧯 손절: {fmt6(dyn_stop_c)} (SL {eff_sl_pct_c*100:.2f}%)\n"
-                            f"📊 경로: 점화→{_c_candles}봉눌림→리클레임→재돌파\n"
-                            f"💰 모드: {CIRCLE_ENTRY_MODE} (리스크 제한)\n"
-                            f"{link_for(cm)}"
-                        )
 
                         try:
                             open_auto_position(cm, circle_pre, dyn_stop_c, eff_sl_pct_c)
@@ -8917,8 +8915,42 @@ def main():
                             _release_entry_lock(cm)
                             continue
 
-                        # ✅ 진입 성공 → 워치리스트에서 확정 제거
-                        circle_confirm_entry(cm)
+                        # 🔧 FIX: 진입 성공 확인 (예외 없음 ≠ 성공)
+                        # open_auto_position이 예외 없이 return해도 실제 포지션이 안 열렸을 수 있음
+                        # (잔고부족, MAX_POSITIONS, API키 미설정 등)
+                        with _POSITION_LOCK:
+                            _circle_pos = OPEN_POSITIONS.get(cm, {})
+                            _circle_opened = (_circle_pos.get("state") == "open")
+
+                        if _circle_opened:
+                            # ✅ 진입 성공 → 워치리스트에서 확정 제거 + 텔레그램 알림
+                            circle_confirm_entry(cm)
+                            _c_candles = circle_pre.get('circle_candles', '?')
+                            _c_ign_high = circle_pre.get('circle_ign_high', 0)
+                            _c_pb_pct = circle_pre.get('circle_pullback_pct', 0)
+                            _c_reclaim = circle_pre.get('circle_reclaim_price', 0)
+                            tg_send(
+                                f"⭕ <b>동그라미 진입 성공</b> {cm} ⚡{CIRCLE_ENTRY_MODE.upper()}\n"
+                                f"━━━━━━━━━━━━━━━━\n"
+                                f"🔥 점화고점: {fmt6(_c_ign_high)}원\n"
+                                f"📉 눌림: -{_c_pb_pct*100:.2f}% ({_c_candles}봉)\n"
+                                f"📈 리클레임: {fmt6(_c_reclaim)}원\n"
+                                f"🚀 재돌파: {fmt6(circle_pre['price'])}원\n"
+                                f"━━━━━━━━━━━━━━━━\n"
+                                f"🧯 손절: {fmt6(dyn_stop_c)} (SL {eff_sl_pct_c*100:.2f}%)\n"
+                                f"📊 경로: 점화→{_c_candles}봉눌림→리클레임→재돌파\n"
+                                f"💰 모드: {CIRCLE_ENTRY_MODE} (리스크 제한)\n"
+                                f"{link_for(cm)}"
+                            )
+                        else:
+                            # ⚠️ 진입 실패 (예외 없이 return) → 워치리스트 유지, 쿨다운 적용
+                            print(f"[CIRCLE] {cm} open_auto_position 완료했으나 state!=open → 워치리스트 유지 (쿨다운 {CIRCLE_RETRY_COOLDOWN_SEC}초)")
+                            with _POSITION_LOCK:
+                                _pp = OPEN_POSITIONS.get(cm)
+                                if _pp and _pp.get("pre_signal"):
+                                    OPEN_POSITIONS.pop(cm, None)
+                            _release_entry_lock(cm)
+                            continue
 
                         # 모니터 스레드 시작
                         with _POSITION_LOCK:
