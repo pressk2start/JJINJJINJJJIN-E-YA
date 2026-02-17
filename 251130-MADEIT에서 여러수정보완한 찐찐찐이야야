@@ -301,6 +301,7 @@ CIRCLE_REBREAK_BUY_RATIO_MIN = 0.52    # 재돌파 시 최소 매수비
 CIRCLE_REBREAK_IMBALANCE_MIN = 0.25    # 재돌파 시 최소 임밸런스
 CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 재돌파 시 스프레드 상한 (%)
 CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 재돌파 시 최소 체결강도
+CIRCLE_REBREAK_MIN_SCORE = 3           # 재돌파 품질 게이트 (5개 중 N개 이상 통과)
 
 # 동그라미 워치리스트
 # state: "armed" → "pullback" → "reclaim" → "ready"
@@ -6024,7 +6025,6 @@ def circle_check_entry(m):
                 # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
                 rebreak_score = 0
                 rebreak_details = []
-                CIRCLE_REBREAK_MIN_SCORE = 3  # 5개 중 3개 이상 통과
 
                 try:
                     ticks = get_recent_ticks(m, 100)
@@ -7656,7 +7656,7 @@ def monitor_position(m,
         tg_send(f"🚨 {m} entry_price 무효 ({entry_price}) → 모니터링 중단\n• 잔고 확인 필요")
         with _POSITION_LOCK:
             OPEN_POSITIONS.pop(m, None)
-        return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
+        return "유효하지 않은 entry_price", "전량 청산 권고", "entry_price 무효", 0.0, 0, 0.0, 0.0
 
     c1 = get_minutes_candles(1, m, 20)
     base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1)
@@ -7695,10 +7695,6 @@ def monitor_position(m,
     last_price = entry_price
     best = entry_price
     worst = entry_price
-
-    # 실제 보유 수량 확보 (익절 시 매도용)
-    with _POSITION_LOCK:
-        entry_volume = OPEN_POSITIONS.get(m, {}).get("volume", 0.0)
 
     verdict = None
     outcome_extra = ""
@@ -8321,6 +8317,20 @@ def monitor_position(m,
                             _ext_trail_dist = trail_dist_min
                         trail_stop = max(trail_stop, curp * (1.0 - _ext_trail_dist))
                     best = max(best, curp)
+                    worst = min(worst, curp)  # 🔧 FIX: 연장 루프에서도 MAE 추적
+
+                    # 🔧 FIX: 연장 루프에서도 래칫 업데이트 (큰 수익 보호)
+                    _ext_gain_from_entry = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                    if trail_armed and _ext_gain_from_entry > 0:
+                        _ext_ratchet = 0
+                        if _ext_gain_from_entry >= 0.050:
+                            _ext_ratchet = entry_price * (1.0 + 0.030)
+                        elif _ext_gain_from_entry >= 0.035:
+                            _ext_ratchet = entry_price * (1.0 + 0.018)
+                        elif _ext_gain_from_entry >= dyn_checkpoint:
+                            _ext_ratchet = entry_price * (1.0 + FEE_RATE + 0.002)
+                        if _ext_ratchet > base_stop:
+                            base_stop = _ext_ratchet
 
                     # 트레일 체크
                     if curp < trail_stop:
@@ -8393,7 +8403,8 @@ def monitor_position(m,
         #  (진입 알림만 오고 청산 알림이 안 오는 문제 해결)
         # ===========================================
         if not _already_closed and not reentry and verdict in (
-            "시간 만료(모니터링 종료)", "연장만료(모니터링 종료)",
+            "시간만료_손실컷", "시간만료_본절컷",
+            "연장만료(모니터링 종료)",
             "데이터 수신 실패",
         ):
             _g = (last_price / entry_price - 1.0) * 100 if entry_price > 0 else 0
@@ -9652,6 +9663,7 @@ def main():
 
         except KeyboardInterrupt:
             print("Stopped by user.")
+            _candle_executor.shutdown(wait=False)  # 🔧 FIX: ThreadPoolExecutor 정리
             break
         except Exception as e:
             print("[MAIN_ERR]", e)
