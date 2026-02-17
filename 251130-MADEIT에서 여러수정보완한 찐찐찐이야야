@@ -280,6 +280,32 @@ _RETEST_LOCK = threading.Lock()
 # (DCB 데드캣바운스 전략 제거됨 — 비활성 상태였으며 코드 정리)
 
 # =========================
+# ⭕ 동그라미 엔트리 V1 (Circle Entry - 눌림 재돌파 전용 엔진)
+# =========================
+# 패턴: Ignition → 1~6봉 첫 눌림 → 리클레임 → 재돌파
+# 기존 retest와 독립 운영, 동시 감시 가능
+CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
+CIRCLE_MAX_CANDLES = 6                 # 점화 후 최대 6봉 이내 눌림 필요
+CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + 여유)
+CIRCLE_PULLBACK_MIN_PCT = 0.003        # 최소 0.3% 눌림 (고점 대비)
+CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
+CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
+CIRCLE_REBREAK_CONFIRM = True          # 재돌파 시 플로우 확인 필수
+CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
+CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
+
+# 동그라미 재돌파 품질 필터
+CIRCLE_REBREAK_BUY_RATIO_MIN = 0.52    # 재돌파 시 최소 매수비
+CIRCLE_REBREAK_IMBALANCE_MIN = 0.25    # 재돌파 시 최소 임밸런스
+CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 재돌파 시 스프레드 상한 (%)
+CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 재돌파 시 최소 체결강도
+
+# 동그라미 워치리스트
+# state: "armed" → "pullback" → "reclaim" → "ready"
+_CIRCLE_WATCHLIST = {}
+_CIRCLE_LOCK = threading.Lock()
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 # 🔧 FIX: 락에 소유자(스레드 ID) 추적 추가 - reentrant 버그 수정
@@ -5628,6 +5654,389 @@ def is_morning_session():
         return False
 
 
+# =====================================================
+# ⭕ 동그라미 엔트리 V1 (Circle Entry Engine)
+# =====================================================
+# 패턴: Ignition → 1~6봉 첫 눌림 → 리클레임 → 재돌파
+# 상태: armed → pullback → reclaim → ready
+# 기존 로직과 완전 독립 — 별도 워치리스트/상태머신
+# =====================================================
+
+def circle_register(m, pre, c1):
+    """
+    ⭕ 동그라미 워치리스트 등록
+    점화 감지 후 호출 — 눌림→리클레임→재돌파 감시 시작
+
+    등록 조건:
+    - ignition_score >= CIRCLE_MIN_IGN_SCORE
+    - 1분봉 데이터 충분 (최소 3개)
+    - 5분 EMA 추세 정렬 (EMA5 > EMA20)
+    """
+    if not CIRCLE_ENTRY_ENABLED:
+        return
+
+    ign_score = pre.get("ignition_score", 0)
+    if ign_score < CIRCLE_MIN_IGN_SCORE:
+        return
+
+    if not c1 or len(c1) < 3:
+        return
+
+    # 이미 등록되어 있으면 스킵
+    with _CIRCLE_LOCK:
+        if m in _CIRCLE_WATCHLIST:
+            return
+
+    # 5분 EMA 추세 정렬 확인
+    try:
+        c5 = get_minutes_candles(5, m, 25)
+        if c5 and len(c5) >= 20:
+            closes_5m = [x["trade_price"] for x in reversed(c5)]
+            ema5_val = ema_last(closes_5m, 5)
+            ema20_val = ema_last(closes_5m, 20)
+            if ema5_val and ema20_val and ema5_val < ema20_val:
+                print(f"[CIRCLE] {m} 5분 EMA 역배열 → 등록 거부")
+                return
+        else:
+            print(f"[CIRCLE] {m} 5분 캔들 부족 → 등록 거부")
+            return
+    except Exception as e:
+        print(f"[CIRCLE] {m} 5분 EMA 조회 실패: {e} → 등록 거부")
+        return
+
+    # 점화 캔들 정보 추출 (현재 캔들 = 점화 캔들)
+    ign_candle = c1[-1]
+    ign_high = ign_candle["high_price"]
+    ign_low = ign_candle["low_price"]
+    ign_open = ign_candle["opening_price"]
+    ign_close = ign_candle["trade_price"]
+    ign_body_top = max(ign_open, ign_close)
+    ign_body_bot = min(ign_open, ign_close)
+    ign_body_mid = (ign_body_top + ign_body_bot) / 2
+
+    with _CIRCLE_LOCK:
+        if m in _CIRCLE_WATCHLIST:
+            return
+        _CIRCLE_WATCHLIST[m] = {
+            "state": "armed",
+            "reg_ts": time.time(),
+            "candle_count": 0,           # 점화 후 경과 봉 수
+            "last_candle_ts": ign_candle.get("candle_date_time_kst", ""),
+            # 점화 캔들 레벨 (핵심 기준선)
+            "ign_high": ign_high,
+            "ign_low": ign_low,
+            "ign_body_top": ign_body_top,
+            "ign_body_bot": ign_body_bot,
+            "ign_body_mid": ign_body_mid,
+            # 추적 변수
+            "peak_after_ign": ign_high,   # 점화 이후 최고점
+            "pullback_low": ign_high,     # 눌림 저점
+            "reclaim_price": 0,           # 리클레임 확인 가격
+            # 원본 pre (진입 시 재사용)
+            "pre": pre,
+            # 메타데이터 (디버그용)
+            "reg_ign_score": ign_score,
+            "reg_buy_ratio": pre.get("buy_ratio", 0),
+            "reg_volume_surge": pre.get("volume_surge", 0),
+        }
+        print(
+            f"[CIRCLE] ⭕ {m} 워치리스트 등록 | ign={ign_score} "
+            f"| 고점={ign_high:,.0f} 몸통중심={ign_body_mid:,.0f} 저점={ign_low:,.0f} "
+            f"| br={pre.get('buy_ratio',0):.2f} surge={pre.get('volume_surge',0):.1f}x "
+            f"| 눌림→리클레임→재돌파 감시 시작"
+        )
+
+
+def circle_check_entry(m):
+    """
+    ⭕ 동그라미 상태 전이 체크 → 진입 가능하면 pre 반환, 아니면 None
+
+    상태 전이:
+    armed    → pullback : 고점 대비 CIRCLE_PULLBACK_MIN_PCT 이상 하락
+    pullback → reclaim  : 점화몸통중심 위로 회복 + 매수세 확인
+    reclaim  → ready    : 점화고점 재돌파 + 플로우 품질 확인
+    ready    → (진입)   : pre dict 반환
+
+    안전 필터 (모든 상태에서):
+    - 6봉 초과 시 폐기
+    - 과도한 눌림 (CIRCLE_PULLBACK_MAX_PCT 초과) 시 폐기
+    - 거래량 사망 시 폐기
+    """
+    if not CIRCLE_ENTRY_ENABLED:
+        return None
+
+    with _CIRCLE_LOCK:
+        watch = _CIRCLE_WATCHLIST.get(m)
+        if not watch:
+            return None
+
+        elapsed = time.time() - watch["reg_ts"]
+        if elapsed > CIRCLE_TIMEOUT_SEC:
+            print(f"[CIRCLE] {m} 타임아웃 ({elapsed:.0f}초) → 폐기")
+            _CIRCLE_WATCHLIST.pop(m, None)
+            return None
+
+        state = watch["state"]
+        ign_high = watch["ign_high"]
+        ign_body_mid = watch["ign_body_mid"]
+        ign_body_bot = watch["ign_body_bot"]
+
+    # 현재 1분봉 조회 (봉 수 카운트 + 현재가)
+    try:
+        c1 = get_minutes_candles(1, m, 10)
+        if not c1 or len(c1) < 2:
+            return None
+    except Exception:
+        return None
+
+    cur_candle = c1[-1]
+    cur_price = cur_candle["trade_price"]
+    cur_high = cur_candle["high_price"]
+    cur_low = cur_candle["low_price"]
+
+    if cur_price <= 0:
+        return None
+
+    # 봉 수 카운트 업데이트 (새 캔들이면 +1)
+    cur_candle_ts = cur_candle.get("candle_date_time_kst", "")
+    with _CIRCLE_LOCK:
+        watch = _CIRCLE_WATCHLIST.get(m)
+        if not watch:
+            return None
+        if cur_candle_ts and cur_candle_ts != watch["last_candle_ts"]:
+            watch["candle_count"] += 1
+            watch["last_candle_ts"] = cur_candle_ts
+
+        candle_count = watch["candle_count"]
+
+        # 최고점/최저점 업데이트
+        if cur_high > watch["peak_after_ign"]:
+            watch["peak_after_ign"] = cur_high
+        if cur_low < watch["pullback_low"]:
+            watch["pullback_low"] = cur_low
+
+        peak = watch["peak_after_ign"]
+        pullback_low = watch["pullback_low"]
+
+    # --- 봉 수 초과 체크 ---
+    if candle_count > CIRCLE_MAX_CANDLES:
+        with _CIRCLE_LOCK:
+            _CIRCLE_WATCHLIST.pop(m, None)
+        print(f"[CIRCLE] {m} {candle_count}봉 초과 (최대 {CIRCLE_MAX_CANDLES}) → 폐기")
+        return None
+
+    # --- 과도한 눌림 체크 ---
+    pullback_pct = (peak - pullback_low) / peak if peak > 0 else 0
+    if pullback_pct > CIRCLE_PULLBACK_MAX_PCT:
+        with _CIRCLE_LOCK:
+            _CIRCLE_WATCHLIST.pop(m, None)
+        print(f"[CIRCLE] {m} 과도한 눌림 -{pullback_pct*100:.2f}% > {CIRCLE_PULLBACK_MAX_PCT*100:.1f}% → 폐기")
+        return None
+
+    # --- 거래량 사망 체크 (pullback/reclaim 상태에서) ---
+    if state in ("pullback", "reclaim"):
+        try:
+            ticks = get_recent_ticks(m, 100)
+            if ticks and len(ticks) >= 5:
+                t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+                if t15_stats["krw_per_sec"] < CIRCLE_REBREAK_KRW_PER_SEC_MIN * 0.5:
+                    with _CIRCLE_LOCK:
+                        _CIRCLE_WATCHLIST.pop(m, None)
+                    print(f"[CIRCLE] {m} 거래량 사망 (krw/s={t15_stats['krw_per_sec']:,.0f}) → 폐기")
+                    return None
+        except Exception:
+            pass
+
+    # --- 5분 EMA 추세 이탈 체크 (pullback/reclaim 상태에서) ---
+    if state in ("pullback", "reclaim"):
+        try:
+            c5 = get_minutes_candles(5, m, 25)
+            if c5 and len(c5) >= 20:
+                closes_5m = [x["trade_price"] for x in reversed(c5)]
+                ema5_val = ema_last(closes_5m, 5)
+                ema20_val = ema_last(closes_5m, 20)
+                if ema5_val and ema20_val and ema5_val < ema20_val:
+                    with _CIRCLE_LOCK:
+                        _CIRCLE_WATCHLIST.pop(m, None)
+                    print(f"[CIRCLE] {m} 5분 EMA 추세 이탈 → 폐기")
+                    return None
+        except Exception:
+            pass
+
+    # =====================================================
+    # 상태 전이 로직
+    # =====================================================
+    with _CIRCLE_LOCK:
+        watch = _CIRCLE_WATCHLIST.get(m)
+        if not watch:
+            return None
+
+        if state == "armed":
+            # -----------------------------------------------
+            # armed → pullback: 고점 대비 충분한 눌림 발생
+            # -----------------------------------------------
+            if pullback_pct >= CIRCLE_PULLBACK_MIN_PCT:
+                watch["state"] = "pullback"
+                print(
+                    f"[CIRCLE] ⭕ {m} 눌림 감지 | -{pullback_pct*100:.2f}% "
+                    f"| 고점 {peak:,.0f} → 저점 {pullback_low:,.0f} "
+                    f"| {candle_count}봉째 | state→pullback"
+                )
+
+        elif state == "pullback":
+            # -----------------------------------------------
+            # pullback → reclaim: 점화 몸통 중심선 위로 회복
+            # 리클레임 = 핵심 레벨 재탈환 (떨어지는 칼 아님 확인)
+            # -----------------------------------------------
+            reclaim_level = ign_body_mid  # 기본: 몸통 중심
+            if CIRCLE_RECLAIM_LEVEL == "body_low":
+                reclaim_level = ign_body_bot
+
+            if cur_price >= reclaim_level:
+                # 리클레임 시 최소 매수세 확인
+                reclaim_ok = True
+                try:
+                    ticks = get_recent_ticks(m, 100)
+                    if ticks and len(ticks) >= 5:
+                        t10 = micro_tape_stats_from_ticks(ticks, 10)
+                        if t10["buy_ratio"] < 0.48:
+                            reclaim_ok = False
+                except Exception:
+                    pass
+
+                if reclaim_ok:
+                    watch["state"] = "reclaim"
+                    watch["reclaim_price"] = cur_price
+                    print(
+                        f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
+                        f"| {candle_count}봉째 | state→reclaim"
+                    )
+
+        elif state == "reclaim":
+            # -----------------------------------------------
+            # reclaim → ready: 점화 고점 재돌파 + 플로우 품질 확인
+            # 이것이 "동그라미" 진입 시점
+            # -----------------------------------------------
+            if cur_price >= ign_high:
+                # 재돌파 품질 게이트
+                rebreak_ok = True
+                reject_reasons = []
+
+                try:
+                    ticks = get_recent_ticks(m, 100)
+                    ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                    ob = None
+                    if ob_raw and len(ob_raw) > 0:
+                        _units = ob_raw[0].get("orderbook_units", [])
+                        if _units:
+                            ob = {
+                                "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
+                                           ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
+                                          if _units[0]["ask_price"] > 0 else 999,
+                                "raw": ob_raw[0],
+                            }
+
+                    if ticks and len(ticks) >= 5:
+                        t10_stats = micro_tape_stats_from_ticks(ticks, 10)
+
+                        # (1) 매수비 체크
+                        if t10_stats["buy_ratio"] < CIRCLE_REBREAK_BUY_RATIO_MIN:
+                            rebreak_ok = False
+                            reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{CIRCLE_REBREAK_BUY_RATIO_MIN}")
+
+                        # (2) 체결강도 체크
+                        if t10_stats["krw_per_sec"] < CIRCLE_REBREAK_KRW_PER_SEC_MIN:
+                            rebreak_ok = False
+                            reject_reasons.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}<{CIRCLE_REBREAK_KRW_PER_SEC_MIN:,}")
+
+                        # (3) uptick 확인 (재돌파 모멘텀)
+                        if not uptick_streak_from_ticks(ticks, need=2):
+                            rebreak_ok = False
+                            reject_reasons.append("no_uptick")
+                    else:
+                        rebreak_ok = False
+                        reject_reasons.append("ticks_insufficient")
+
+                    # (4) 임밸런스 체크
+                    if ob and ob.get("raw"):
+                        imb_val = calc_orderbook_imbalance(ob)
+                        if imb_val < CIRCLE_REBREAK_IMBALANCE_MIN:
+                            rebreak_ok = False
+                            reject_reasons.append(f"imb={imb_val:.2f}<{CIRCLE_REBREAK_IMBALANCE_MIN}")
+
+                    # (5) 스프레드 체크
+                    if ob and ob.get("spread", 999) > CIRCLE_REBREAK_SPREAD_MAX:
+                        rebreak_ok = False
+                        reject_reasons.append(f"spread={ob['spread']:.2f}>{CIRCLE_REBREAK_SPREAD_MAX}")
+
+                except Exception as e:
+                    rebreak_ok = False
+                    reject_reasons.append(f"api_err:{e}")
+
+                if rebreak_ok:
+                    watch["state"] = "ready"
+                    print(
+                        f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
+                        f"| 품질 ALL PASS | {candle_count}봉째 | state→ready"
+                    )
+                else:
+                    print(
+                        f"[CIRCLE] {m} 재돌파 품질 미달 [{', '.join(reject_reasons)}] | reclaim 유지"
+                    )
+
+        elif state == "ready":
+            # -----------------------------------------------
+            # ready → 진입 신호 발생!
+            # pre dict를 구성하여 반환
+            # -----------------------------------------------
+            original_pre = watch.get("pre", {})
+            entry_pre = dict(original_pre)
+            entry_pre["circle_entry"] = True
+            entry_pre["circle_state_path"] = "armed→pullback→reclaim→rebreak"
+            entry_pre["circle_candles"] = candle_count
+            entry_pre["circle_pullback_pct"] = pullback_pct
+            entry_pre["circle_ign_high"] = ign_high
+            entry_pre["circle_reclaim_price"] = watch.get("reclaim_price", 0)
+            entry_pre["price"] = cur_price
+            entry_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+
+            _CIRCLE_WATCHLIST.pop(m, None)
+            print(
+                f"[CIRCLE] ⭕ {m} 🎯 동그라미 진입 신호! "
+                f"| 점화고점 {ign_high:,.0f} → 눌림 {pullback_low:,.0f} (-{pullback_pct*100:.2f}%) "
+                f"→ 리클레임 → 재돌파 {cur_price:,.0f} "
+                f"| {candle_count}봉 | {CIRCLE_ENTRY_MODE} 강제"
+            )
+            return entry_pre
+
+    return None
+
+
+def circle_cleanup():
+    """⭕ 타임아웃/만료된 동그라미 워치리스트 정리"""
+    if not CIRCLE_ENTRY_ENABLED:
+        return
+    with _CIRCLE_LOCK:
+        now = time.time()
+        expired = [m for m, w in _CIRCLE_WATCHLIST.items()
+                   if now - w["reg_ts"] > CIRCLE_TIMEOUT_SEC]
+        for m in expired:
+            print(f"[CIRCLE] {m} 타임아웃 → 워치리스트 제거")
+            _CIRCLE_WATCHLIST.pop(m, None)
+
+
+def circle_watchlist_status():
+    """⭕ 현재 동그라미 워치리스트 상태 요약 (디버그/텔레그램용)"""
+    with _CIRCLE_LOCK:
+        if not _CIRCLE_WATCHLIST:
+            return ""
+        parts = []
+        for m, w in _CIRCLE_WATCHLIST.items():
+            elapsed = time.time() - w["reg_ts"]
+            parts.append(f"{m}({w['state']},{w['candle_count']}봉,{elapsed:.0f}초)")
+        return " | ".join(parts)
+
+
 # =========================
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
@@ -8442,6 +8851,101 @@ def main():
                             OPEN_POSITIONS.pop(wm, None)
                         _release_entry_lock(wm)
 
+            # ⭕ 동그라미 워치리스트 체크 (눌림→리클레임→재돌파 진입)
+            if CIRCLE_ENTRY_ENABLED:
+                circle_cleanup()
+                with _CIRCLE_LOCK:
+                    circle_markets = list(_CIRCLE_WATCHLIST.keys())
+                for cm in circle_markets:
+                    try:
+                        circle_pre = circle_check_entry(cm)
+                        if circle_pre:
+                            # 락 획득
+                            if not _try_acquire_entry_lock(cm):
+                                print(f"[CIRCLE] {cm} already locked → skip")
+                                continue
+                            with _POSITION_LOCK:
+                                if cm in OPEN_POSITIONS:
+                                    _release_entry_lock(cm)
+                                    continue
+                                OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
+
+                            circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+                            print(f"[CIRCLE] {cm} ⭕ 동그라미 진입 시작! ({CIRCLE_ENTRY_MODE} 강제)")
+                            c1_circle = get_minutes_candles(1, cm, 20)
+                            dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
+                            tg_send(
+                                f"⭕ <b>동그라미 진입</b> {cm} ⚡{CIRCLE_ENTRY_MODE.upper()}\n"
+                                f"• 점화 → {circle_pre.get('circle_candles', '?')}봉 눌림 → 리클레임 → 재돌파\n"
+                                f"• 현재가: {circle_pre['price']:,.0f}원\n"
+                                f"• 점화고점: {circle_pre.get('circle_ign_high', 0):,.0f}원\n"
+                                f"• 눌림폭: -{circle_pre.get('circle_pullback_pct', 0)*100:.2f}%\n"
+                                f"• 모드: {CIRCLE_ENTRY_MODE} (리스크 제한)"
+                            )
+                            try:
+                                open_auto_position(cm, circle_pre, dyn_stop_c, eff_sl_pct_c)
+                            except Exception as ce:
+                                print(f"[CIRCLE_OPEN_ERR] {cm}: {ce}")
+                                with _POSITION_LOCK:
+                                    pos = OPEN_POSITIONS.get(cm)
+                                    if pos and pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(cm, None)
+                                _release_entry_lock(cm)
+                                continue
+
+                            # 모니터 스레드 시작
+                            with _POSITION_LOCK:
+                                actual_entry_c = OPEN_POSITIONS.get(cm, {}).get("entry_price", circle_pre["price"])
+                            circle_pre_copy = dict(circle_pre)
+                            def _run_circle_monitor(market, entry, pre_data):
+                                try:
+                                    monitor_position(market, entry, pre_data, tight_mode=True)
+                                    with _POSITION_LOCK:
+                                        _pos_after = OPEN_POSITIONS.get(market)
+                                    if _pos_after and _pos_after.get("state") == "open":
+                                        remonitor_until_close(market, entry, pre_data, tight_mode=True)
+                                except Exception as ce2:
+                                    print(f"[CIRCLE_MON_ERR] {market}: {ce2}")
+                                    traceback.print_exc()
+                                    try:
+                                        actual = get_balance_with_locked(market)
+                                        if actual < 0:
+                                            tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고 조회 실패)\n• 예외: {ce2}")
+                                        elif actual <= 1e-12:
+                                            tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고=0)\n• 예외: {ce2}")
+                                            with _POSITION_LOCK:
+                                                OPEN_POSITIONS.pop(market, None)
+                                        else:
+                                            tg_send(f"🚨 {market} 동그라미 모니터 오류 → 청산 시도\n• 예외: {ce2}")
+                                            close_auto_position(market, f"동그라미모니터예외 | {ce2}")
+                                    except Exception as _cleanup_err:
+                                        tg_send(f"🚨 {market} 동그라미 모니터 오류 (청산 실패)\n• 예외: {ce2}")
+                                finally:
+                                    _release_entry_lock(market)
+                                    with _MONITOR_LOCK:
+                                        _ACTIVE_MONITORS.pop(market, None)
+                            ct_thread = threading.Thread(
+                                target=_run_circle_monitor,
+                                args=(cm, actual_entry_c, circle_pre_copy),
+                                daemon=True
+                            )
+                            try:
+                                ct_thread.start()
+                            except Exception as ct_thread_err:
+                                print(f"[CIRCLE_THREAD_ERR] {cm} 동그라미 모니터 스레드 생성 실패: {ct_thread_err}")
+                                _release_entry_lock(cm)
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(cm, None)
+                                continue
+                            with _MONITOR_LOCK:
+                                _ACTIVE_MONITORS[cm] = ct_thread
+                    except Exception as ce:
+                        print(f"[CIRCLE_ERR] {cm}: {ce}")
+                        tg_send(f"🚨 {cm} 동그라미 진입 오류\n• 예외: {ce}\n• 포지션 정리됨")
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(cm, None)
+                        _release_entry_lock(cm)
+
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
             # 매도 파라미터는 고정 (매수만 학습)
@@ -8498,6 +9002,14 @@ def main():
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre:
                     continue
+
+                # ⭕ 동그라미 워치리스트 등록 (점화 감지 시)
+                # 즉시 진입과 별개로, 눌림→리클레임→재돌파 패턴 감시 시작
+                if CIRCLE_ENTRY_ENABLED and pre.get("ign_ok"):
+                    try:
+                        circle_register(m, pre, c1)
+                    except Exception as _cr_err:
+                        print(f"[CIRCLE_REG_ERR] {m}: {_cr_err}")
 
                 # === 하이브리드 진입 모드 추가 (probe/confirm 분리) ===
                 # 🔧 킬러 조건: 모든 조건 충족 시에만 풀진입
