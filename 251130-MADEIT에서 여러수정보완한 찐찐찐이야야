@@ -1637,8 +1637,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # - 기존: dyn_stop은 신호 시점 가격 기준 → 현재가로 진입 시 손절폭 불일치
         # - 개선: final_price_guard 통과 후 현재가 기준으로 dynamic_stop_loss 재계산
         c1_for_sl = pre.get("c1")
-        # 🔧 FIX: signal_type 파생 (pre에 signal_type 키가 없어 항상 None이었음)
-        signal_type = (
+        # 🔧 FIX: signal_type 파생 (pre에 명시적 signal_type 있으면 우선 사용)
+        signal_type = pre.get("signal_type") or (
             "ign" if pre.get("ign_ok") else
             "mega" if pre.get("mega_ok") else
             "early" if pre.get("early_ok") else
@@ -1873,8 +1873,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # - 기존: dyn_stop은 신호 시점 가격(signal_price) 기준 → 체결가와 괴리 발생 가능
         # - 변경: 실제 체결가(avg_price) 기준으로 손절가 재계산
         adjusted_stop = avg_price * (1 - eff_sl_pct)
-        # 🔧 FIX: signal_type 파생 (ign/early/mega/normal → dynamic_stop_loss 신호별 완화용)
-        _derived_signal_type = (
+        # 🔧 FIX: signal_type 파생 (pre에 명시적 signal_type 있으면 우선 사용)
+        _derived_signal_type = pre.get("signal_type") or (
             "ign" if pre.get("ign_ok") else
             "mega" if pre.get("mega_ok") else
             "early" if pre.get("early_ok") else
@@ -8946,7 +8946,8 @@ def main():
                         # 🔧 FIX: setdefault — circle_check_entry에서 이미 설정된 경우 덮어쓰지 않음
                         circle_pre.setdefault("entry_mode", CIRCLE_ENTRY_MODE)
                         c1_circle = get_minutes_candles(1, cm, 20)
-                        dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
+                        # 🔧 FIX: 동그라미 signal_type 전달 (circle SL 완화 적용)
+                        dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle, signal_type=circle_pre.get("signal_type"))
 
                         try:
                             open_auto_position(cm, circle_pre, dyn_stop_c, eff_sl_pct_c)
