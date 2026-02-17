@@ -216,8 +216,8 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 매도구조개선: 0.5→0.8% (기본값과 일치)
-        TRAIL_DISTANCE_MIN = 0.008
+        TRAIL_DISTANCE_MIN_BASE = 0.006  # 🔧 FIX: 0.8→0.6% 통일 (get_trail_distance_min 의도와 일치)
+        TRAIL_DISTANCE_MIN = 0.006
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -2707,7 +2707,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         # 🔧 FIX: 청산 슬립 기록 (진입 슬립만 기록하면 과소추정됨)
         # 🔧 FIX: 상한 캡 추가 (0.5%) - 가격이동이 슬립으로 섞이면 TP 과도 상승
         if cur_price > 0 and exit_price_used > 0:
-            exit_slip = min(0.005, abs(exit_price_used / cur_price - 1.0))  # 0.5% 캡
+            exit_slip = min(0.0025, abs(exit_price_used / cur_price - 1.0))  # 🔧 FIX: 0.5→0.25% 캡 (close_auto_position과 통일)
             _EXIT_SLIP_HISTORY.append(exit_slip)  # 🔧 FIX: exit 전용
 
         # 찌꺼기 방지: 체결 후 잔여금액 < MIN_ORDER_KRW 이면 매도 불가 → orphan 등록
@@ -7239,7 +7239,7 @@ def monitor_position(m,
             # 🔧 before1 복원: 독립 trail_armed 블록 (단순 체크포인트 기반 무장)
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                trail_stop = curp * (1.0 - get_trail_distance_min())
+                trail_stop = curp * (1.0 - trail_dist_min)  # 🔧 FIX: 이중 호출 제거, 이미 계산된 값 사용
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
