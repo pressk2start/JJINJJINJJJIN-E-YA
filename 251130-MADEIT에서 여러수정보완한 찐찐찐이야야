@@ -8887,18 +8887,23 @@ def main():
                             OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
 
                         # 🔧 FIX: ready 재시도 쿨다운 (텔레그램 스팸 방지)
+                        # NOTE: _CIRCLE_LOCK 안에서 읽기만, 정리는 밖에서 (락 네스팅 방지)
+                        _circle_in_cooldown = False
                         with _CIRCLE_LOCK:
                             _cw = _CIRCLE_WATCHLIST.get(cm)
                             if _cw:
                                 _last_try = _cw.get("last_try_ts", 0)
                                 if time.time() - _last_try < CIRCLE_RETRY_COOLDOWN_SEC:
-                                    _release_entry_lock(cm)
-                                    with _POSITION_LOCK:
-                                        _pp = OPEN_POSITIONS.get(cm)
-                                        if _pp and _pp.get("pre_signal"):
-                                            OPEN_POSITIONS.pop(cm, None)
-                                    continue
-                                _cw["last_try_ts"] = time.time()
+                                    _circle_in_cooldown = True
+                                else:
+                                    _cw["last_try_ts"] = time.time()
+                        if _circle_in_cooldown:
+                            _release_entry_lock(cm)
+                            with _POSITION_LOCK:
+                                _pp = OPEN_POSITIONS.get(cm)
+                                if _pp and _pp.get("pre_signal"):
+                                    OPEN_POSITIONS.pop(cm, None)
+                            continue
 
                         circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
                         c1_circle = get_minutes_candles(1, cm, 20)
