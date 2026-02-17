@@ -5893,24 +5893,14 @@ def circle_check_entry(m):
                 reclaim_level = ign_body_bot
 
             if cur_price >= reclaim_level:
-                # 리클레임 시 최소 매수세 확인
-                reclaim_ok = True
-                try:
-                    ticks = get_recent_ticks(m, 100)
-                    if ticks and len(ticks) >= 5:
-                        t10 = micro_tape_stats_from_ticks(ticks, 10)
-                        if t10["buy_ratio"] < 0.48:
-                            reclaim_ok = False
-                except Exception:
-                    pass
-
-                if reclaim_ok:
-                    watch["state"] = "reclaim"
-                    watch["reclaim_price"] = cur_price
-                    print(
-                        f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
-                        f"| {candle_count}봉째 | state→reclaim"
-                    )
+                # 리클레임 = 가격이 핵심 레벨 위로 회복한 것 자체가 강한 신호
+                # buy_ratio 체크 제거 — 재돌파 단계에서 품질 확인하면 충분
+                watch["state"] = "reclaim"
+                watch["reclaim_price"] = cur_price
+                print(
+                    f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
+                    f"| {candle_count}봉째 | state→reclaim"
+                )
 
         elif state == "reclaim":
             # -----------------------------------------------
@@ -5918,9 +5908,11 @@ def circle_check_entry(m):
             # 이것이 "동그라미" 진입 시점
             # -----------------------------------------------
             if cur_price >= ign_high:
-                # 재돌파 품질 게이트
-                rebreak_ok = True
-                reject_reasons = []
+                # 재돌파 품질 게이트 — 3/5 점수제 (ALL PASS 아님!)
+                # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
+                rebreak_score = 0
+                rebreak_details = []
+                CIRCLE_REBREAK_MIN_SCORE = 3  # 5개 중 3개 이상 통과
 
                 try:
                     ticks = get_recent_ticks(m, 100)
@@ -5939,55 +5931,66 @@ def circle_check_entry(m):
                     if ticks and len(ticks) >= 5:
                         t10_stats = micro_tape_stats_from_ticks(ticks, 10)
 
-                        # (1) 매수비 체크
-                        if t10_stats["buy_ratio"] < CIRCLE_REBREAK_BUY_RATIO_MIN:
-                            rebreak_ok = False
-                            reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{CIRCLE_REBREAK_BUY_RATIO_MIN}")
+                        # (1) 매수비
+                        if t10_stats["buy_ratio"] >= CIRCLE_REBREAK_BUY_RATIO_MIN:
+                            rebreak_score += 1
+                            rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✓")
+                        else:
+                            rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✗")
 
-                        # (2) 체결강도 체크
-                        if t10_stats["krw_per_sec"] < CIRCLE_REBREAK_KRW_PER_SEC_MIN:
-                            rebreak_ok = False
-                            reject_reasons.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}<{CIRCLE_REBREAK_KRW_PER_SEC_MIN:,}")
+                        # (2) 체결강도
+                        if t10_stats["krw_per_sec"] >= CIRCLE_REBREAK_KRW_PER_SEC_MIN:
+                            rebreak_score += 1
+                            rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✓")
+                        else:
+                            rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✗")
 
-                        # (3) uptick 확인 (재돌파 모멘텀)
-                        if not uptick_streak_from_ticks(ticks, need=2):
-                            rebreak_ok = False
-                            reject_reasons.append("no_uptick")
+                        # (3) uptick 모멘텀
+                        if uptick_streak_from_ticks(ticks, need=2):
+                            rebreak_score += 1
+                            rebreak_details.append("uptick✓")
+                        else:
+                            rebreak_details.append("uptick✗")
                     else:
-                        rebreak_ok = False
-                        reject_reasons.append("ticks_insufficient")
+                        rebreak_details.append("ticks_insufficient")
 
-                    # (4) 임밸런스 체크
+                    # (4) 임밸런스
                     if ob and ob.get("raw"):
                         imb_val = calc_orderbook_imbalance(ob)
-                        if imb_val < CIRCLE_REBREAK_IMBALANCE_MIN:
-                            rebreak_ok = False
-                            reject_reasons.append(f"imb={imb_val:.2f}<{CIRCLE_REBREAK_IMBALANCE_MIN}")
+                        if imb_val >= CIRCLE_REBREAK_IMBALANCE_MIN:
+                            rebreak_score += 1
+                            rebreak_details.append(f"imb={imb_val:.2f}✓")
+                        else:
+                            rebreak_details.append(f"imb={imb_val:.2f}✗")
 
-                    # (5) 스프레드 체크
-                    if ob and ob.get("spread", 999) > CIRCLE_REBREAK_SPREAD_MAX:
-                        rebreak_ok = False
-                        reject_reasons.append(f"spread={ob['spread']:.2f}>{CIRCLE_REBREAK_SPREAD_MAX}")
+                    # (5) 스프레드
+                    if ob and ob.get("spread", 999) <= CIRCLE_REBREAK_SPREAD_MAX:
+                        rebreak_score += 1
+                        rebreak_details.append(f"sp={ob['spread']:.2f}✓")
+                    elif ob:
+                        rebreak_details.append(f"sp={ob.get('spread',0):.2f}✗")
 
                 except Exception as e:
-                    rebreak_ok = False
-                    reject_reasons.append(f"api_err:{e}")
+                    rebreak_details.append(f"api_err:{e}")
 
-                if rebreak_ok:
+                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE:
                     watch["state"] = "ready"
                     print(
                         f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
-                        f"| 품질 ALL PASS | {candle_count}봉째 | state→ready"
+                        f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
+                        f"| {candle_count}봉째 | state→ready"
                     )
                 else:
                     print(
-                        f"[CIRCLE] {m} 재돌파 품질 미달 [{', '.join(reject_reasons)}] | reclaim 유지"
+                        f"[CIRCLE] {m} 재돌파 품질 미달 {rebreak_score}/5<{CIRCLE_REBREAK_MIN_SCORE} "
+                        f"[{','.join(rebreak_details)}] | reclaim 유지"
                     )
 
         elif state == "ready":
             # -----------------------------------------------
             # ready → 진입 신호 발생!
-            # pre dict를 구성하여 반환
+            # ⚠️ 여기서 pop 하지 않음 — 메인루프에서 진입 성공 후에만 pop
+            # (OPEN_POSITIONS 차단 시 다음 사이클에서 재시도 가능)
             # -----------------------------------------------
             original_pre = watch.get("pre", {})
             entry_pre = dict(original_pre)
@@ -6000,13 +6003,7 @@ def circle_check_entry(m):
             entry_pre["price"] = cur_price
             entry_pre["entry_mode"] = CIRCLE_ENTRY_MODE
 
-            _CIRCLE_WATCHLIST.pop(m, None)
-            print(
-                f"[CIRCLE] ⭕ {m} 🎯 동그라미 진입 신호! "
-                f"| 점화고점 {ign_high:,.0f} → 눌림 {pullback_low:,.0f} (-{pullback_pct*100:.2f}%) "
-                f"→ 리클레임 → 재돌파 {cur_price:,.0f} "
-                f"| {candle_count}봉 | {CIRCLE_ENTRY_MODE} 강제"
-            )
+            # pop은 메인루프 circle_confirm_entry()에서 수행
             return entry_pre
 
     return None
@@ -6035,6 +6032,12 @@ def circle_watchlist_status():
             elapsed = time.time() - w["reg_ts"]
             parts.append(f"{m}({w['state']},{w['candle_count']}봉,{elapsed:.0f}초)")
         return " | ".join(parts)
+
+
+def circle_confirm_entry(m):
+    """⭕ 동그라미 진입 확정 시 워치리스트에서 제거 (메인루프에서 호출)"""
+    with _CIRCLE_LOCK:
+        _CIRCLE_WATCHLIST.pop(m, None)
 
 
 # =========================
@@ -8859,91 +8862,116 @@ def main():
                 for cm in circle_markets:
                     try:
                         circle_pre = circle_check_entry(cm)
-                        if circle_pre:
-                            # 락 획득
-                            if not _try_acquire_entry_lock(cm):
-                                print(f"[CIRCLE] {cm} already locked → skip")
-                                continue
-                            with _POSITION_LOCK:
-                                if cm in OPEN_POSITIONS:
-                                    _release_entry_lock(cm)
-                                    continue
-                                OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
+                        if not circle_pre:
+                            continue
 
-                            circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
-                            print(f"[CIRCLE] {cm} ⭕ 동그라미 진입 시작! ({CIRCLE_ENTRY_MODE} 강제)")
-                            c1_circle = get_minutes_candles(1, cm, 20)
-                            dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
-                            tg_send(
-                                f"⭕ <b>동그라미 진입</b> {cm} ⚡{CIRCLE_ENTRY_MODE.upper()}\n"
-                                f"• 점화 → {circle_pre.get('circle_candles', '?')}봉 눌림 → 리클레임 → 재돌파\n"
-                                f"• 현재가: {circle_pre['price']:,.0f}원\n"
-                                f"• 점화고점: {circle_pre.get('circle_ign_high', 0):,.0f}원\n"
-                                f"• 눌림폭: -{circle_pre.get('circle_pullback_pct', 0)*100:.2f}%\n"
-                                f"• 모드: {CIRCLE_ENTRY_MODE} (리스크 제한)"
-                            )
-                            try:
-                                open_auto_position(cm, circle_pre, dyn_stop_c, eff_sl_pct_c)
-                            except Exception as ce:
-                                print(f"[CIRCLE_OPEN_ERR] {cm}: {ce}")
-                                with _POSITION_LOCK:
-                                    pos = OPEN_POSITIONS.get(cm)
-                                    if pos and pos.get("pre_signal"):
-                                        OPEN_POSITIONS.pop(cm, None)
-                                _release_entry_lock(cm)
+                        # ⚠️ OPEN_POSITIONS 차단 시 watchlist 유지 (다음 사이클 재시도)
+                        # → 리테스트가 죽었던 원인: ready에서 pop 해버려서 재시도 불가
+                        with _POSITION_LOCK:
+                            if cm in OPEN_POSITIONS:
+                                # 이미 포지션 보유 중 → watchlist 유지, 다음 사이클에 재확인
                                 continue
 
-                            # 모니터 스레드 시작
-                            with _POSITION_LOCK:
-                                actual_entry_c = OPEN_POSITIONS.get(cm, {}).get("entry_price", circle_pre["price"])
-                            circle_pre_copy = dict(circle_pre)
-                            def _run_circle_monitor(market, entry, pre_data):
-                                try:
-                                    monitor_position(market, entry, pre_data, tight_mode=True)
-                                    with _POSITION_LOCK:
-                                        _pos_after = OPEN_POSITIONS.get(market)
-                                    if _pos_after and _pos_after.get("state") == "open":
-                                        remonitor_until_close(market, entry, pre_data, tight_mode=True)
-                                except Exception as ce2:
-                                    print(f"[CIRCLE_MON_ERR] {market}: {ce2}")
-                                    traceback.print_exc()
-                                    try:
-                                        actual = get_balance_with_locked(market)
-                                        if actual < 0:
-                                            tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고 조회 실패)\n• 예외: {ce2}")
-                                        elif actual <= 1e-12:
-                                            tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고=0)\n• 예외: {ce2}")
-                                            with _POSITION_LOCK:
-                                                OPEN_POSITIONS.pop(market, None)
-                                        else:
-                                            tg_send(f"🚨 {market} 동그라미 모니터 오류 → 청산 시도\n• 예외: {ce2}")
-                                            close_auto_position(market, f"동그라미모니터예외 | {ce2}")
-                                    except Exception as _cleanup_err:
-                                        tg_send(f"🚨 {market} 동그라미 모니터 오류 (청산 실패)\n• 예외: {ce2}")
-                                finally:
-                                    _release_entry_lock(market)
-                                    with _MONITOR_LOCK:
-                                        _ACTIVE_MONITORS.pop(market, None)
-                            ct_thread = threading.Thread(
-                                target=_run_circle_monitor,
-                                args=(cm, actual_entry_c, circle_pre_copy),
-                                daemon=True
-                            )
-                            try:
-                                ct_thread.start()
-                            except Exception as ct_thread_err:
-                                print(f"[CIRCLE_THREAD_ERR] {cm} 동그라미 모니터 스레드 생성 실패: {ct_thread_err}")
+                        # 락 획득
+                        if not _try_acquire_entry_lock(cm):
+                            print(f"[CIRCLE] {cm} already locked → 다음 사이클 재시도")
+                            continue
+
+                        with _POSITION_LOCK:
+                            if cm in OPEN_POSITIONS:
                                 _release_entry_lock(cm)
-                                with _POSITION_LOCK:
+                                continue
+                            OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
+
+                        circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+                        c1_circle = get_minutes_candles(1, cm, 20)
+                        dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
+
+                        # ⭕ 동그라미 텔레그램 알람
+                        _c_candles = circle_pre.get('circle_candles', '?')
+                        _c_ign_high = circle_pre.get('circle_ign_high', 0)
+                        _c_pb_pct = circle_pre.get('circle_pullback_pct', 0)
+                        _c_reclaim = circle_pre.get('circle_reclaim_price', 0)
+                        tg_send(
+                            f"⭕ <b>동그라미 진입</b> {cm} ⚡{CIRCLE_ENTRY_MODE.upper()}\n"
+                            f"━━━━━━━━━━━━━━━━\n"
+                            f"🔥 점화고점: {fmt6(_c_ign_high)}원\n"
+                            f"📉 눌림: -{_c_pb_pct*100:.2f}% ({_c_candles}봉)\n"
+                            f"📈 리클레임: {fmt6(_c_reclaim)}원\n"
+                            f"🚀 재돌파: {fmt6(circle_pre['price'])}원\n"
+                            f"━━━━━━━━━━━━━━━━\n"
+                            f"🧯 손절: {fmt6(dyn_stop_c)} (SL {eff_sl_pct_c*100:.2f}%)\n"
+                            f"📊 경로: 점화→{_c_candles}봉눌림→리클레임→재돌파\n"
+                            f"💰 모드: {CIRCLE_ENTRY_MODE} (리스크 제한)\n"
+                            f"{link_for(cm)}"
+                        )
+
+                        try:
+                            open_auto_position(cm, circle_pre, dyn_stop_c, eff_sl_pct_c)
+                        except Exception as ce:
+                            print(f"[CIRCLE_OPEN_ERR] {cm}: {ce}")
+                            with _POSITION_LOCK:
+                                pos = OPEN_POSITIONS.get(cm)
+                                if pos and pos.get("pre_signal"):
                                     OPEN_POSITIONS.pop(cm, None)
-                                continue
-                            with _MONITOR_LOCK:
-                                _ACTIVE_MONITORS[cm] = ct_thread
+                            _release_entry_lock(cm)
+                            continue
+
+                        # ✅ 진입 성공 → 워치리스트에서 확정 제거
+                        circle_confirm_entry(cm)
+
+                        # 모니터 스레드 시작
+                        with _POSITION_LOCK:
+                            actual_entry_c = OPEN_POSITIONS.get(cm, {}).get("entry_price", circle_pre["price"])
+                        circle_pre_copy = dict(circle_pre)
+                        def _run_circle_monitor(market, entry, pre_data):
+                            try:
+                                monitor_position(market, entry, pre_data, tight_mode=True)
+                                with _POSITION_LOCK:
+                                    _pos_after = OPEN_POSITIONS.get(market)
+                                if _pos_after and _pos_after.get("state") == "open":
+                                    remonitor_until_close(market, entry, pre_data, tight_mode=True)
+                            except Exception as ce2:
+                                print(f"[CIRCLE_MON_ERR] {market}: {ce2}")
+                                traceback.print_exc()
+                                try:
+                                    actual = get_balance_with_locked(market)
+                                    if actual < 0:
+                                        tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고 조회 실패)\n• 예외: {ce2}")
+                                    elif actual <= 1e-12:
+                                        tg_send(f"⚠️ {market} 동그라미 모니터 오류 (잔고=0)\n• 예외: {ce2}")
+                                        with _POSITION_LOCK:
+                                            OPEN_POSITIONS.pop(market, None)
+                                    else:
+                                        tg_send(f"🚨 {market} 동그라미 모니터 오류 → 청산 시도\n• 예외: {ce2}")
+                                        close_auto_position(market, f"동그라미모니터예외 | {ce2}")
+                                except Exception as _cleanup_err:
+                                    tg_send(f"🚨 {market} 동그라미 모니터 오류 (청산 실패)\n• 예외: {ce2}")
+                            finally:
+                                _release_entry_lock(market)
+                                with _MONITOR_LOCK:
+                                    _ACTIVE_MONITORS.pop(market, None)
+                        ct_thread = threading.Thread(
+                            target=_run_circle_monitor,
+                            args=(cm, actual_entry_c, circle_pre_copy),
+                            daemon=True
+                        )
+                        try:
+                            ct_thread.start()
+                        except Exception as ct_thread_err:
+                            print(f"[CIRCLE_THREAD_ERR] {cm} 동그라미 모니터 스레드 생성 실패: {ct_thread_err}")
+                            _release_entry_lock(cm)
+                            with _POSITION_LOCK:
+                                OPEN_POSITIONS.pop(cm, None)
+                            continue
+                        with _MONITOR_LOCK:
+                            _ACTIVE_MONITORS[cm] = ct_thread
                     except Exception as ce:
                         print(f"[CIRCLE_ERR] {cm}: {ce}")
-                        tg_send(f"🚨 {cm} 동그라미 진입 오류\n• 예외: {ce}\n• 포지션 정리됨")
+                        tg_send(f"🚨 {cm} 동그라미 진입 오류\n• 예외: {ce}")
                         with _POSITION_LOCK:
-                            OPEN_POSITIONS.pop(cm, None)
+                            if OPEN_POSITIONS.get(cm, {}).get("pre_signal"):
+                                OPEN_POSITIONS.pop(cm, None)
                         _release_entry_lock(cm)
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
