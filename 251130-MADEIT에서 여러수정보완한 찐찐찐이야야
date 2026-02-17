@@ -55,9 +55,9 @@ HARD_STOP_DD = 0.025  # 🔧 승률개선: 1.8→2.5% (SL 1.0% 대비 비상용�
 EXIT_DEBOUNCE_SEC = 6  # 🔧 승률개선: 5→6초 (1틱 변동에 즉시 반응 방지, 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 승률개선: 2→3회 (3회 연속이면 진짜 하락, 2회는 휩쏘 많음)
 
-# 🔧 fix: SL 초기 선언 (하단 3169에서 재정의됨, 여기서는 MFE/체크포인트 계산용 기본값)
-DYN_SL_MIN = 0.010   # 동적 손절 최소 1.0%
-DYN_SL_MAX = 0.018   # 동적 손절 최대 1.8%
+# 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
+DYN_SL_MIN = 0.010   # 동적 손절 최소 1.0% (알트 1분봉 변동폭 0.5~1.5% 고려)
+DYN_SL_MAX = 0.018   # 동적 손절 최대 1.8% (고변동 코인 정상 눌림 허용)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -82,8 +82,8 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
 
 def get_dynamic_checkpoint():
     """🔧 구조개선: SL 연동 체크포인트 — 의미있는 수익에서만 트레일 무장
-    기존: 0.30~0.55% → 진입가 바로 위에서 트레일 트립 (수수료 뺴면 손실)
-    개선: SL × 1.5 = 0.9~1.5% → 트레일이 걸리면 확실한 수익 보존
+    기존: 0.30~0.55% → 진입가 바로 위에서 트레일 트립 (수수료 빼면 손실)
+    개선: SL × 0.7 = 0.7% → 조기 무장으로 트레일 발동 기회 확대 (평균MFE 대비 현실적)
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -389,14 +389,29 @@ from contextlib import contextmanager
 def entry_lock(market: str, ttl_sec: int = 300, reentrant: bool = False):
     """엔트리 락 컨텍스트 매니저 - 안전한 락 획득/해제
 
-    🔧 reentrant=True: 재진입 모드 (이미 락을 가지고 있으면 True, 해제 안 함)
+    🔧 reentrant=True: 재진입 모드
+      - 동일 스레드 재진입(기존 락 재사용) → 해제 안 함 (원래 획득한 곳에서 해제)
+      - 신규 획득(상위에서 락 없었음) → 해제함 (락 누수 방지)
     """
+    # 🔧 FIX: reentrant 모드에서 "기존 락 재사용인지 / 신규 획득인지" 판별
+    was_already_held = False
+    if reentrant:
+        current_tid = threading.current_thread().ident
+        with _MEMORY_LOCK:
+            existing = _MEMORY_ENTRY_LOCKS.get(market)
+            if existing:
+                _, lock_owner = existing
+                was_already_held = (lock_owner == current_tid)
+
     got = _try_acquire_entry_lock(market, ttl_sec=ttl_sec, reentrant=reentrant)
     try:
         yield got
     finally:
-        # 🔧 FIX: reentrant 모드에서는 락 해제 안 함 (원래 획득한 곳에서 해제)
-        if got and not reentrant:
+        # 🔧 FIX: reentrant 모드라도 "신규 획득"이면 반드시 해제 (락 누수 방지)
+        # - reentrant=False → 항상 해제
+        # - reentrant=True + 기존 재사용(was_already_held) → 해제 안 함
+        # - reentrant=True + 신규 획득(!was_already_held) → 해제함
+        if got and not (reentrant and was_already_held):
             _release_entry_lock(market)
 
 
@@ -508,6 +523,9 @@ TRADE_HISTORY = deque(maxlen=30)  # 최근 30개 거래 기록
 _lose_streak = 0              # 연속 패배 수
 _win_streak = 0               # 연속 승리 수
 _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안전 보장
+# 🔧 FIX: 연패 게이트 전역변수 상단 선언 (record_trade()에서 사용, 선언 순서 보장)
+_ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
+_ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
 
 
 def record_trade(market: str, pnl_pct: float):
@@ -3294,8 +3312,7 @@ POSTCHECK_MAX_DD = 0.025  # 🔧 손익분기개선: 1.8→2.5% (SL 확대 연�
 #   → 0.6% 최소로 올려 노이즈 손절 -50%, R:R은 TP 연동으로 보전
 ATR_PERIOD = 14
 ATR_MULT = 0.70           # 🔧 손익분기개선: 0.55→0.70 (≈2.3 ATR 여유, 알트 노이즈 완전 필터)
-DYN_SL_MIN = 0.010        # 🔧 손익분기개선: 0.6→1.0% (알트 1분봉 변동폭 0.5~1.5% 고려)
-DYN_SL_MAX = 0.018        # 🔧 손익분기개선: 1.0→1.8% (고변동 코인 정상 눌림 확실히 허용)
+# 🔧 FIX: DYN_SL_MIN/MAX → 상단(line 59-60)에서 단일 선언 (중복 제거, 한쪽만 바꾸는 사고 방지)
 
 # =========================
 # 🎯 틱 기반 트레일링 스탑 (비활성화 - ATR 단일 스탑 사용)
@@ -3333,8 +3350,9 @@ def calc_orderbook_imbalance(ob):
     """
     try:
         units = ob["raw"]["orderbook_units"][:3]
-        bid_weighted = sum(u["bid_size"] * u["bid_price"] * (3-i) for i, u in enumerate(units))
-        ask_weighted = sum(u["ask_size"] * u["ask_price"] * (3-i) for i, u in enumerate(units))
+        # 🔧 FIX: float 캐스팅 (업비트 응답이 string으로 올 경우 곱셈 TypeError 방지)
+        bid_weighted = sum(float(u.get("bid_size", 0) or 0) * float(u.get("bid_price", 0) or 0) * (3-i) for i, u in enumerate(units))
+        ask_weighted = sum(float(u.get("ask_size", 0) or 0) * float(u.get("ask_price", 0) or 0) * (3-i) for i, u in enumerate(units))
         total = bid_weighted + ask_weighted
         if total <= 0:
             return 0.0
@@ -4855,8 +4873,7 @@ def running_1m_bar(ticks, last_candle=None):
 # 🚀 Pre-break 동적 대역 (변동성 기반)
 # ========================================
 # (_PREBREAK_SUSPEND_UNTIL 제거됨 — PREBREAK_ENABLED=False이며 체크 코드 없었음)
-_ENTRY_SUSPEND_UNTIL = 0.0     # 🔧 FIX: 연패 시 전체 진입 중지 타임스탬프
-_ENTRY_MAX_MODE = None         # 🔧 FIX: 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
+# 🔧 FIX: _ENTRY_SUSPEND_UNTIL / _ENTRY_MAX_MODE → 상단(line ~527)으로 이동 (단일 선언)
 
 def dynamic_prebreak_band(ticks):
     """
@@ -6242,7 +6259,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # VWAP 위 0.3~1.0% = 양호 (추세 확인)
         elif 0.3 < vwap_gap <= 1.0:
             vwap_score_bonus = 2
-        # VWAP 위 1.0% 이상 = 추격 위험 (-3점)
+        # VWAP 위 1.5% 이상 = 추격 위험 (-3점)
         elif vwap_gap > 1.5:
             vwap_score_bonus = -3
     else:
@@ -8406,7 +8423,15 @@ def main():
                                 args=(wm, actual_entry, retest_pre_copy),
                                 daemon=True
                             )
-                            rt_thread.start()
+                            # 🔧 FIX: 스레드 start 실패 시 락/pending orphan 방지 (일반 진입과 동일 패턴)
+                            try:
+                                rt_thread.start()
+                            except Exception as rt_thread_err:
+                                print(f"[RT_THREAD_ERR] {wm} 리테스트 모니터 스레드 생성 실패: {rt_thread_err}")
+                                _release_entry_lock(wm)
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(wm, None)
+                                continue
                             with _MONITOR_LOCK:
                                 _ACTIVE_MONITORS[wm] = rt_thread
                     except Exception as e:
@@ -8783,7 +8808,14 @@ def main():
                             # 🔧 FIX: pending 마킹 정리 (안 하면 ghost 포지션으로 남아 진입 차단)
                             with _POSITION_LOCK:
                                 OPEN_POSITIONS.pop(m, None)
+                            # 🔧 FIX: 워치리스트만 등록하고 진입 안 한 경우 cooldown 되돌리기
+                            # (진입 안 했는데 cooldown 걸리면 리테스트/재탐지 기회 손실)
+                            last_signal_at.pop(m, None)
+                            last_price_at_alert.pop(m, None)
+                            last_reason.pop(m, None)
+                            # recent_alerts는 유지 (10초 이내 동일 종목 중복 신호 방지)
                             _release_entry_lock(m)
+                            _lock_held = False
                             continue  # 바로 진입하지 않고 다음 종목으로
 
                     # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
