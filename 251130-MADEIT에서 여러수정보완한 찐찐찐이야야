@@ -258,14 +258,21 @@ _IGNITION_LOCK = threading.Lock()
 # 장초 급등 → 첫 양봉 패스 → 되돌림 후 지지 확인 시 진입
 RETEST_MODE_ENABLED = True           # 리테스트 모드 활성화
 RETEST_PEAK_MIN_GAIN = 0.015         # 최소 1.5% 급등 시 워치리스트 등록
-RETEST_PULLBACK_MIN = 0.003          # 최소 0.3% 되돌림 필요 (고점 대비)
+RETEST_PULLBACK_MIN = 0.006          # 🔧 최소 0.6% 되돌림 필요 (너무 얕으면 진짜 눌림 아님)
 RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
 RETEST_BOUNCE_MIN = 0.002            # 최소 0.2% 반등 확인
-RETEST_TIMEOUT_SEC = 180             # 3분 내 리테스트 없으면 제거
+RETEST_TIMEOUT_SEC = 900             # 🔧 15분 타임아웃 (3분→15분, 눌림 알파 소멸 전까지)
 RETEST_SUPPORT_EMA = 20              # EMA 지지 확인용
 RETEST_MORNING_HOURS = (8, 10)       # 장초 시간대 (08:00~10:00)
 
-# 리테스트 워치리스트: {market: {"peak_price", "peak_ts", "pullback_low", "state", "pre"}}
+# 🔧 리테스트 재진입 품질 필터 (떨어지는 칼 진입 구조적 차단)
+RETEST_BUY_RATIO_MIN = 0.55         # 재진입 시 최소 매수비
+RETEST_IMBALANCE_MIN = 0.35         # 재진입 시 최소 임밸런스
+RETEST_SPREAD_MAX = 0.40            # 재진입 시 스프레드 상한 (%)
+RETEST_KRW_PER_SEC_DEAD = 5000      # 눌림 중 거래량 사망 기준 (KRW/s)
+RETEST_EMA_GAP_MIN = 0.001          # 5분 EMA5>EMA20 최소 갭 (+0.1%)
+
+# 리테스트 워치리스트: {market: {"peak_price", "peak_ts", "pullback_low", "state", "pre", ...}}
 # state: "watching" → "pullback" → "bounce" → "ready"
 _RETEST_WATCHLIST = {}
 _RETEST_LOCK = threading.Lock()
@@ -5321,9 +5328,54 @@ def is_mega_breakout(c1):
 # 🎯 리테스트 진입 함수들
 # =========================
 def add_to_retest_watchlist(m, peak_price, pre):
-    """첫 급등 감지 시 워치리스트에 등록"""
+    """
+    첫 급등 감지 시 워치리스트에 등록
+    🔧 강화: 첫 파동 품질 검증 + 5분 EMA 추세 필수
+    """
     if not RETEST_MODE_ENABLED:
         return
+
+    # --- 첫 파동 품질 검증: ignition_score≥3 OR (turn/imb/buy_ratio 중 2개 이상 강함) ---
+    ign_score = pre.get("ignition_score", 0)
+    _br = pre.get("buy_ratio", 0)
+    _imb = pre.get("imbalance", 0)
+    _turn = pre.get("turn_pct", 0)
+
+    strong_count = 0
+    if _br >= 0.60:
+        strong_count += 1
+    if _imb >= 0.40:
+        strong_count += 1
+    if _turn >= 5.0:
+        strong_count += 1
+
+    first_wave_real = (ign_score >= 3) or (strong_count >= 2)
+    if not first_wave_real:
+        print(f"[RETEST] {m} 첫 파동 품질 미달 (ign={ign_score}, br={_br:.2f}, imb={_imb:.2f}, turn={_turn:.1f}) → 등록 거부")
+        return
+
+    # --- 5분 EMA 추세 정렬 확인: EMA5 > EMA20 + gap ≥ RETEST_EMA_GAP_MIN ---
+    try:
+        c5 = get_minutes_candles(5, m, 25)
+        if c5 and len(c5) >= 20:
+            closes_5m = [x["trade_price"] for x in reversed(c5)]  # oldest→newest
+            ema5_val = ema_last(closes_5m, 5)
+            ema20_val = ema_last(closes_5m, 20)
+            if ema5_val and ema20_val and ema20_val > 0:
+                ema_gap = (ema5_val - ema20_val) / ema20_val
+                if ema_gap < RETEST_EMA_GAP_MIN:
+                    print(f"[RETEST] {m} 5분 EMA 정렬 미달 (EMA5-EMA20 gap={ema_gap*100:.2f}% < {RETEST_EMA_GAP_MIN*100:.1f}%) → 등록 거부")
+                    return
+            else:
+                print(f"[RETEST] {m} 5분 EMA 계산 실패 → 등록 거부")
+                return
+        else:
+            print(f"[RETEST] {m} 5분 캔들 부족 → 등록 거부")
+            return
+    except Exception as e:
+        print(f"[RETEST] {m} 5분 EMA 조회 실패: {e} → 등록 거부")
+        return
+
     with _RETEST_LOCK:
         if m in _RETEST_WATCHLIST:
             return  # 이미 등록됨
@@ -5334,12 +5386,20 @@ def add_to_retest_watchlist(m, peak_price, pre):
             "state": "watching",  # watching → pullback → bounce → ready
             "pre": pre,
             "entry_price": pre.get("price", peak_price),  # 원래 신호 가격
+            # 🔧 첫 파동 메타데이터 (로그/디버그용)
+            "reg_ign_score": ign_score,
+            "reg_buy_ratio": _br,
+            "reg_imbalance": _imb,
+            "reg_turn_pct": _turn,
         }
-        print(f"[RETEST] {m} 워치리스트 등록 | 고점 {peak_price:,.0f}원 | 리테스트 대기")
+        print(f"[RETEST] {m} 워치리스트 등록 | 고점 {peak_price:,.0f}원 | ign={ign_score} br={_br:.2f} imb={_imb:.2f} turn={_turn:.1f} | 리테스트 대기")
 
 
 def check_retest_entry(m):
-    """리테스트 조건 체크 → 진입 가능하면 pre 반환, 아니면 None"""
+    """
+    리테스트 조건 체크 → 진입 가능하면 pre 반환, 아니면 None
+    🔧 강화: 5분 EMA 추세 이탈 폐기 / 거래량 사망 폐기 / 재돌파 확인형 진입
+    """
     if not RETEST_MODE_ENABLED:
         return None
 
@@ -5385,6 +5445,42 @@ def check_retest_entry(m):
     # 저점 대비 반등률
     bounce_pct = (cur_price - pullback_low) / pullback_low if pullback_low > 0 else 0
 
+    # =====================================================
+    # 🔧 공통 안전 필터: 5분 EMA 추세 이탈 → 즉시 폐기
+    # (눌림 중이든 반등 중이든, 5분 추세가 깨지면 알파 소멸)
+    # =====================================================
+    if state in ("pullback", "bounce"):
+        try:
+            c5 = get_minutes_candles(5, m, 25)
+            if c5 and len(c5) >= 20:
+                closes_5m = [x["trade_price"] for x in reversed(c5)]
+                ema5_val = ema_last(closes_5m, 5)
+                ema20_val = ema_last(closes_5m, 20)
+                if ema5_val and ema20_val and ema5_val < ema20_val:
+                    with _RETEST_LOCK:
+                        _RETEST_WATCHLIST.pop(m, None)
+                    print(f"[RETEST] {m} 5분 EMA 추세 이탈 (EMA5 {ema5_val:,.0f} < EMA20 {ema20_val:,.0f}) → 폐기")
+                    return None
+        except Exception:
+            pass  # API 에러 시 다음 사이클에서 재확인
+
+    # =====================================================
+    # 🔧 눌림 중 거래량 사망 체크 → 폐기
+    # (krw_per_sec 바닥이면 관심 소멸 = 재상승 기대 불가)
+    # =====================================================
+    if state in ("pullback", "bounce"):
+        try:
+            ticks = get_recent_ticks(m, 100)
+            if ticks and len(ticks) >= 5:
+                t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+                if t15_stats["krw_per_sec"] < RETEST_KRW_PER_SEC_DEAD:
+                    with _RETEST_LOCK:
+                        _RETEST_WATCHLIST.pop(m, None)
+                    print(f"[RETEST] {m} 거래량 사망 (krw/s={t15_stats['krw_per_sec']:,.0f} < {RETEST_KRW_PER_SEC_DEAD:,}) → 폐기")
+                    return None
+        except Exception:
+            pass
+
     # 상태 전이 로직
     with _RETEST_LOCK:
         watch = _RETEST_WATCHLIST.get(m)
@@ -5410,20 +5506,84 @@ def check_retest_entry(m):
                 print(f"[RETEST] {m} 반등 감지 | +{bounce_pct*100:.2f}% | state→bounce")
 
         elif state == "bounce":
-            # EMA/VWAP 지지 확인 (간단히 entry_price 위인지 체크)
+            # =====================================================
+            # 🔧 강화: "그냥 반등" 말고 재돌파 확인형 진입
+            # 직전 박스 상단 재탈환 + uptick + 품질 필터
+            # =====================================================
             support_ok = cur_price >= entry_price * 0.995  # 진입가 -0.5% 이상
 
             if support_ok and bounce_pct >= RETEST_BOUNCE_MIN:
-                watch["state"] = "ready"
-                print(f"[RETEST] {m} 지지 확인 | 현재가 {cur_price:,.0f} >= 진입가 {entry_price:,.0f} | state→ready")
+                # --- 재진입 품질 게이트 (떨어지는 칼 구조적 차단) ---
+                reentry_ok = True
+                reject_reasons = []
+
+                try:
+                    ticks = get_recent_ticks(m, 100)
+                    ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                    ob = None
+                    if ob_raw and len(ob_raw) > 0:
+                        _units = ob_raw[0].get("orderbook_units", [])
+                        if _units:
+                            ob = {
+                                "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
+                                           ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
+                                          if _units[0]["ask_price"] > 0 else 999,
+                                "raw": ob_raw[0],
+                            }
+
+                    if ticks and len(ticks) >= 5:
+                        t10_stats = micro_tape_stats_from_ticks(ticks, 10)
+
+                        # (1) 매수비 체크
+                        if t10_stats["buy_ratio"] < RETEST_BUY_RATIO_MIN:
+                            reentry_ok = False
+                            reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{RETEST_BUY_RATIO_MIN}")
+
+                        # (2) 틱 신선도 체크
+                        fresh_ok_rt = last_two_ticks_fresh(ticks)
+                        if not fresh_ok_rt:
+                            reentry_ok = False
+                            reject_reasons.append("fresh_fail")
+
+                        # (3) uptick 확인 (재돌파 시그널)
+                        if not uptick_streak_from_ticks(ticks, need=2):
+                            reentry_ok = False
+                            reject_reasons.append("no_uptick")
+                    else:
+                        reentry_ok = False
+                        reject_reasons.append("ticks_insufficient")
+
+                    # (4) 임밸런스 체크
+                    if ob and ob.get("raw"):
+                        imb_rt = calc_orderbook_imbalance(ob)
+                        if imb_rt < RETEST_IMBALANCE_MIN:
+                            reentry_ok = False
+                            reject_reasons.append(f"imb={imb_rt:.2f}<{RETEST_IMBALANCE_MIN}")
+
+                    # (5) 스프레드 체크
+                    if ob and ob.get("spread", 999) > RETEST_SPREAD_MAX:
+                        reentry_ok = False
+                        reject_reasons.append(f"spread={ob['spread']:.2f}>{RETEST_SPREAD_MAX}")
+
+                except Exception as e:
+                    reentry_ok = False
+                    reject_reasons.append(f"api_err:{e}")
+
+                if reentry_ok:
+                    watch["state"] = "ready"
+                    print(f"[RETEST] {m} 재돌파 확인 ✓ | 현재가 {cur_price:,.0f} | br/imb/fresh/uptick/spread 모두 통과 | state→ready")
+                else:
+                    # 품질 미달이면 bounce 상태 유지 (다음 사이클에서 재확인)
+                    print(f"[RETEST] {m} 재진입 품질 미달 [{', '.join(reject_reasons)}] | bounce 유지")
 
         elif state == "ready":
             # 진입 조건 충족!
             pre = watch.get("pre", {})
             pre["retest_entry"] = True  # 리테스트 진입 마킹
             pre["price"] = cur_price  # 현재가로 업데이트
+            pre["entry_mode"] = "half"  # 🔧 리테스트 진입은 half 강제 (burst와 리스크-리턴 구조 다름)
             _RETEST_WATCHLIST.pop(m, None)  # 워치리스트에서 제거
-            print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f}")
+            print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f} | half 강제")
             return pre
 
     return None
@@ -8188,13 +8348,15 @@ def main():
                                     continue
                                 OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True}
 
-                            # 리테스트 조건 충족 → 진입
-                            print(f"[RETEST] {wm} 🎯 리테스트 진입 시작!")
+                            # 리테스트 조건 충족 → 진입 (half 강제)
+                            retest_pre["entry_mode"] = "half"  # 🔧 이중 보장: 리테스트 = half 강제
+                            print(f"[RETEST] {wm} 🎯 리테스트 진입 시작! (half 강제)")
                             c1 = get_minutes_candles(1, wm, 20)
                             dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1)
-                            tg_send(f"🎯 <b>리테스트 진입</b> {wm}\n"
-                                    f"• 첫 급등 후 되돌림 → 지지 확인\n"
-                                    f"• 현재가: {retest_pre['price']:,.0f}원")
+                            tg_send(f"🎯 <b>리테스트 진입</b> {wm} ⚡HALF\n"
+                                    f"• 첫 급등 후 되돌림 → 재돌파 확인\n"
+                                    f"• 현재가: {retest_pre['price']:,.0f}원\n"
+                                    f"• 모드: half (리스크 제한)")
                             try:
                                 open_auto_position(wm, retest_pre, dyn_stop, eff_sl_pct)
                             except Exception as e2:
@@ -8615,9 +8777,9 @@ def main():
                         gain_pct = (cur_price / entry_price_base - 1.0) if entry_price_base > 0 else 0
 
                         if gain_pct >= RETEST_PEAK_MIN_GAIN:
-                            # 첫 급등 → 워치리스트 등록, 바로 진입 X
+                            # 첫 급등 → 워치리스트 등록 시도 (내부에서 품질 검증)
                             add_to_retest_watchlist(m, cur_price, pre)
-                            print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% → 리테스트 대기 (바로 진입 X)")
+                            print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% | ign={pre.get('ignition_score',0)} → 워치리스트 검토 완료")
                             # 🔧 FIX: pending 마킹 정리 (안 하면 ghost 포지션으로 남아 진입 차단)
                             with _POSITION_LOCK:
                                 OPEN_POSITIONS.pop(m, None)
