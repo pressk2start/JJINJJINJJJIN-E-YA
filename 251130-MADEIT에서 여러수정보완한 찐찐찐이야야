@@ -294,6 +294,7 @@ CIRCLE_REBREAK_CONFIRM = True          # 재돌파 시 플로우 확인 필수
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
+CIRCLE_STATE_MIN_DWELL_SEC = 15        # 상태 전이 최소 체류 시간 (초) — 동시 3단계 통과 방지
 
 # 동그라미 재돌파 품질 필터
 CIRCLE_REBREAK_BUY_RATIO_MIN = 0.52    # 재돌파 시 최소 매수비
@@ -5803,6 +5804,7 @@ def circle_register(m, pre, c1):
         _CIRCLE_WATCHLIST[m] = {
             "state": "armed",
             "reg_ts": time.time(),
+            "state_ts": time.time(),     # 🔧 FIX: 상태 전이 시각 추적 (동시 3단계 통과 방지)
             "candle_count": 0,           # 점화 후 경과 봉 수
             "last_candle_ts": ign_candle.get("candle_date_time_kst", ""),
             # 점화 캔들 레벨 (핵심 기준선)
@@ -5965,21 +5967,32 @@ def circle_check_entry(m):
 
         if state == "armed":
             # -----------------------------------------------
-            # armed → pullback: 고점 대비 충분한 눌림 발생
+            # armed → pullback: 현재가가 실제로 점화고점 아래에 있어야 "눌림"
+            # 🔧 FIX: 과거 pullback_low(윅) 기준 → 현재가 기준으로 변경
+            #   기존: pullback_pct(역대최저 기준) ≥ 0.3% → 가격이 올라가는 중에도 통과
+            #   수정: 현재가 < ign_high AND 고점 대비 0.3%+ 하락 → 실제 눌림만 인정
             # -----------------------------------------------
-            if pullback_pct >= CIRCLE_PULLBACK_MIN_PCT:
+            cur_drop_from_peak = (peak - cur_price) / peak if peak > 0 else 0
+            if cur_price < ign_high and cur_drop_from_peak >= CIRCLE_PULLBACK_MIN_PCT:
                 watch["state"] = "pullback"
+                watch["state_ts"] = time.time()
                 print(
-                    f"[CIRCLE] ⭕ {m} 눌림 감지 | -{pullback_pct*100:.2f}% "
-                    f"| 고점 {peak:,.0f} → 저점 {pullback_low:,.0f} "
+                    f"[CIRCLE] ⭕ {m} 눌림 감지 | 현재 {cur_price:,.0f} < 점화고점 {ign_high:,.0f} "
+                    f"| 고점대비 -{cur_drop_from_peak*100:.2f}% "
                     f"| {candle_count}봉째 | state→pullback"
                 )
+                return None  # 🔧 FIX: 한 사이클에 한 단계만 전이 (동시 3단계 방지)
 
         elif state == "pullback":
             # -----------------------------------------------
             # pullback → reclaim: 점화 몸통 중심선 위로 회복
             # 리클레임 = 핵심 레벨 재탈환 (떨어지는 칼 아님 확인)
+            # 🔧 FIX: 최소 체류 시간 CIRCLE_STATE_MIN_DWELL_SEC 경과 후에만 전이
             # -----------------------------------------------
+            dwell = time.time() - watch.get("state_ts", 0)
+            if dwell < CIRCLE_STATE_MIN_DWELL_SEC:
+                return None  # 🔧 체류 시간 미달 → 다음 사이클
+
             reclaim_level = ign_body_mid  # 기본: 몸통 중심
             if CIRCLE_RECLAIM_LEVEL == "body_low":
                 reclaim_level = ign_body_bot
@@ -5988,17 +6001,24 @@ def circle_check_entry(m):
                 # 리클레임 = 가격이 핵심 레벨 위로 회복한 것 자체가 강한 신호
                 # buy_ratio 체크 제거 — 재돌파 단계에서 품질 확인하면 충분
                 watch["state"] = "reclaim"
+                watch["state_ts"] = time.time()
                 watch["reclaim_price"] = cur_price
                 print(
                     f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
-                    f"| {candle_count}봉째 | state→reclaim"
+                    f"| 체류 {dwell:.0f}초 | {candle_count}봉째 | state→reclaim"
                 )
+                return None  # 🔧 FIX: 한 사이클에 한 단계만 전이
 
         elif state == "reclaim":
             # -----------------------------------------------
             # reclaim → ready: 점화 고점 재돌파 + 플로우 품질 확인
             # 이것이 "동그라미" 진입 시점
+            # 🔧 FIX: 최소 체류 시간 경과 후에만 재돌파 판정
             # -----------------------------------------------
+            dwell_r = time.time() - watch.get("state_ts", 0)
+            if dwell_r < CIRCLE_STATE_MIN_DWELL_SEC:
+                return None  # 🔧 체류 시간 미달 → 다음 사이클
+
             if cur_price >= ign_high:
                 # 재돌파 품질 게이트 — 3/5 점수제 (ALL PASS 아님!)
                 # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
@@ -6067,10 +6087,11 @@ def circle_check_entry(m):
 
                 if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE:
                     watch["state"] = "ready"
+                    watch["state_ts"] = time.time()
                     print(
                         f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
                         f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
-                        f"| {candle_count}봉째 | state→ready"
+                        f"| 체류 {dwell_r:.0f}초 | {candle_count}봉째 | state→ready"
                     )
                 else:
                     print(
