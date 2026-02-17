@@ -62,7 +62,7 @@ DYN_SL_MAX = 0.018   # 동적 손절 최대 1.8%
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.015  # 🔧 손익분기개선: 0.9→1.5% (SL 1.0% × 1.5 — 의미있는 수익에서만 무장)
+PROFIT_CHECKPOINT_BASE = 0.007  # 🔧 성과조정: 1.5→0.7% (평균MFE 0.09~0.47% 대비 1.5%는 도달 불가 → 트레일 조기 무장)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.003  # 🔧 구조개선: 0.12→0.3% (트레일 걸리면 확실히 수익)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -91,9 +91,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # SL 연동 체크포인트 = DYN_SL_MIN × 1.5
-    sl_linked = DYN_SL_MIN * 1.5  # 0.010 * 1.5 = 0.015 (1.5%)
-    # 둘 중 큰 값 사용, 최대 2.0% 캡 (🔧 손익분기개선: 1.2→2.0% SL 확대 연동)
+    # SL 연동 체크포인트 = DYN_SL_MIN × 0.7 (🔧 성과조정: ×1.5→×0.7)
+    sl_linked = DYN_SL_MIN * 0.7  # 0.010 * 0.7 = 0.007 (0.7%)
+    # 둘 중 큰 값 사용, 최대 2.0% 캡
     return max(cost_floor, min(0.020, sl_linked))
 
 def get_expected_exit_slip_pct():
@@ -115,12 +115,12 @@ SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 3.0,              # SL × 3.0 = 3.0% (강신호 → 큰 수익)
-    "강돌파 (EMA↑+고점↑)": 2.5,  # SL × 2.5 = 2.5%
-    "EMA↑": 2.0,                 # SL × 2.0 = 2.0%
-    "고점↑": 2.0,                # SL × 2.0 = 2.0%
-    "거래량↑": 2.0,              # SL × 2.0 = 2.0%
-    "기본": 2.0,                 # SL × 2.0 = 2.0%
+    "🔥점화": 2.0,              # 🔧 성과조정: 3.0→2.0 (SL×2.0=2.0%, 실MFE 대비 현실적 목표)
+    "강돌파 (EMA↑+고점↑)": 1.8,  # 🔧 성과조정: 2.5→1.8 (SL×1.8=1.8%)
+    "EMA↑": 1.5,                 # 🔧 성과조정: 2.0→1.5 (SL×1.5=1.5%)
+    "고점↑": 1.5,                # 🔧 성과조정: 2.0→1.5
+    "거래량↑": 1.2,              # 🔧 성과조정: 2.0→1.2 (SL×1.2=1.2%)
+    "기본": 1.2,                 # 🔧 성과조정: 2.0→1.2
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -133,15 +133,14 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 매도구조개선: 0.5→0.8% (정상 눌림 완전 허용)
+TRAIL_DISTANCE_MIN_BASE = 0.006  # 🔧 성과조정: 0.8→0.6% (이익구간을 더 빨리 승으로 확정)
 
 def get_trail_distance_min():
-    """🔧 매도구조개선: 트레일 거리를 SL의 80%로 연동
-    SL 1.0% → 트레일 0.80%
-    0.5%는 알트 1분봉 눌림에 걸림 → 0.8%로 확대하여 큰 수익 보존
+    """🔧 성과조정: 트레일 거리를 SL의 60%로 연동
+    SL 1.0% → 트레일 0.60% (🔧 0.8→0.6: 소익이라도 승으로 확정 빈도 증가)
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.8)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.6)
 
 # 하위 호환용
 TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
@@ -6175,18 +6174,25 @@ def final_check_leader(m, pre, tight_mode=False):
     # 🔧 VWAP 기반 진입 품질 보너스 (VWAP 근처: +5, 추격: -3)
     score += pre.get("vwap_score_bonus", 0)
 
+    # 🔧 성과조정: 임밸런스 필터 (매도우위 심할 때 진입 차단)
+    # 근거: 8개 스냅샷 전체에서 승리=임밸런스 양수, 패배=음수 일관
+    if imbalance < -0.3:
+        print(f"[IMB_CUT] {m} imbalance={imbalance:.2f}<-0.3 → 진입 차단 (매도우위)")
+        return None
+
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
     is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
 
     # === 🔥 스코어 기반 진입모드 자동 매핑 (이진 시스템) ===
     # 🔧 특단조치: probe 폐지 → 50% or 100% only (10% 소액 진입 = 수수료만 내는 구조)
     # score < 55: 진입 차단 (확신 없으면 안 치는 게 나음)
-    # score 55~72: half (50%) → 적정 사이즈로 R:R 확보
-    # score >= 72: confirm (100%) → 강한 신호에 풀 베팅
+    # score 55~78: half (50%) → 적정 사이즈로 R:R 확보
+    # score >= 78: confirm (100%) → 강한 신호에 풀 베팅
+    # 🔧 성과조정: 72→78 (confirm이 MFE를 깎는 데이터 — S5~S8 confirm승률 11~20% < half승률 22~30%)
     if score < 55:
         print(f"[SCORE_CUT] {m} score={score:.1f}<55 → 진입 차단 (probe 폐지)")
         return None
-    elif score < 72:
+    elif score < 78:
         entry_mode = "half"
     else:
         entry_mode = "confirm"
