@@ -565,8 +565,9 @@ def record_trade(market: str, pnl_pct: float):
     """
     global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL, _ENTRY_MAX_MODE
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
-    # 실무상 단일 거래에서 ±50% 이상은 비정상 → 1.0 초과면 %로 간주
-    if abs(pnl_pct) > 1.0:
+    # 소수점 비율(0.02 = 2%)이 정상 범위, 10 이상이면 확실히 % 단위
+    # 🔧 FIX: 기존 1.0 기준은 실제 100%+ 수익을 잘못 축소 — 10.0으로 상향
+    if abs(pnl_pct) > 10.0:
         pnl_pct = pnl_pct / 100.0
     is_win = pnl_pct > 0
 
@@ -1406,6 +1407,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             return
 
         # 🔧 pending 상태 원자화 (락 안에서만 조작)
+        _max_pos_blocked = False
         with _POSITION_LOCK:
             existing = OPEN_POSITIONS.get(m)
             if existing:
@@ -1415,13 +1417,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
             if active_count >= MAX_POSITIONS:
                 signal_skip(f"최대 포지션 {MAX_POSITIONS}개 도달")
-                tg_send_mid(f"⚠️ {m} 신규 진입 대기 (최대 {MAX_POSITIONS}개 포지션 보유 중)")
                 # 🔧 FIX: pending 상태인 경우에만 제거 (다른 상태 보호)
                 if existing and existing.get("state") == "pending":
                     OPEN_POSITIONS.pop(m, None)
-                return
-            if not existing:
+                _max_pos_blocked = True
+            if not _max_pos_blocked and not existing:
                 OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
+        # 🔧 FIX: tg_send_mid를 락 밖으로 이동 — 네트워크 I/O가 _POSITION_LOCK 차단 방지
+        if _max_pos_blocked:
+            tg_send_mid(f"⚠️ {m} 신규 진입 대기 (최대 {MAX_POSITIONS}개 포지션 보유 중)")
+            return
 
         signal_price = pre.get("price")
         if not signal_price:
@@ -1519,13 +1524,21 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _pb_dipped = False
         _pb_entry_price = current_price  # 풀백 없으면 원래 가격 사용
         _pb_start = time.time()
+        _pb_last_tick_ts = 0  # 🔧 FIX: 캐시 틱 중복 바운스 방지용
 
         while time.time() - _pb_start < PULLBACK_WAIT_SEC:
             _pb_ticks = get_recent_ticks(m, 30, allow_network=True)
             if not _pb_ticks:
                 time.sleep(0.5)
                 continue
-            _pb_now = max(_pb_ticks, key=tick_ts_ms).get("trade_price", current_price)
+            # 🔧 FIX: 최신 틱 타임스탬프 비교로 캐시 중복 카운트 방지
+            _pb_latest_tick = max(_pb_ticks, key=tick_ts_ms)
+            _pb_latest_ts = tick_ts_ms(_pb_latest_tick)
+            _pb_now = _pb_latest_tick.get("trade_price", current_price)
+            if _pb_latest_ts == _pb_last_tick_ts:
+                time.sleep(0.5)
+                continue  # 같은 틱이면 스킵 (캐시 중복 방지)
+            _pb_last_tick_ts = _pb_latest_ts
 
             # 피크 갱신
             if _pb_now > _pb_peak:
@@ -2085,6 +2098,7 @@ def add_auto_position(m, cur_price, reason=""):
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
         return False, None
 
+    # 🔧 FIX: pos dict를 락 안에서 필요한 값 모두 복사 (락 밖 읽기 레이스 방지)
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
         if not pos or pos.get("volume", 0) <= 0:
@@ -2093,6 +2107,8 @@ def add_auto_position(m, cur_price, reason=""):
             # 이미 한 번 추매한 포지션
             return False, None
         last_add_ts = pos.get("last_add_ts", 0.0)
+        entry_price_old = pos.get("entry_price", 0)
+        stop_price = pos.get("stop", 0)
 
     now = time.time()
     if (now - last_add_ts) < PYRAMID_ADD_COOLDOWN_SEC:
@@ -2109,9 +2125,6 @@ def add_auto_position(m, cur_price, reason=""):
     if krw_bal < 6000:
         print(f"[AUTO_ADD] KRW 부족({krw_bal:,.0f}) → 추매 스킵")
         return False, None
-
-    entry_price_old = pos["entry_price"]
-    stop_price = pos["stop"]
 
     # 추매도 적응형 리스크 적용 (연패/연승 반영)
     # 🔧 FIX: 추매에는 리스크 캡 적용 (연승 중 과도한 리스크 확대 방지)
@@ -2269,7 +2282,12 @@ def close_auto_position(m, reason=""):
             return
         _CLOSING_MARKETS.add(m)
         pos_raw = OPEN_POSITIONS.get(m)
-        pos = copy.deepcopy(pos_raw) if pos_raw else None  # 🔧 FIX: 깊은 복사 (nested dict 레이스 방지)
+        # 🔧 FIX: deepcopy를 try 안으로 이동 — deepcopy 예외 시 _CLOSING_MARKETS 영구 잠김 방지
+        try:
+            pos = copy.deepcopy(pos_raw) if pos_raw else None
+        except Exception:
+            _CLOSING_MARKETS.discard(m)
+            raise
 
     try:
         if not pos:
@@ -2477,6 +2495,12 @@ def close_auto_position(m, reason=""):
                             OPEN_POSITIONS.pop(m, None)
                             _ORPHAN_HANDLED.add(m)
                             print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
+                            # 🔧 FIX: 10분 후 자동 해제 — 코인 가격 급등 시 재감지 허용
+                            def _dust_expire(_m=m):
+                                time.sleep(600)
+                                _ORPHAN_HANDLED.discard(_m)
+                                print(f"[DUST_EXPIRE] {_m} _ORPHAN_HANDLED 만료 → 재감지 허용")
+                            threading.Thread(target=_dust_expire, daemon=True).start()
                         else:
                             pos2["volume"] = remaining
                             pos2["last_exit_ts"] = time.time()
@@ -2682,50 +2706,51 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
-    sell_volume = current_volume * sell_ratio
-    if sell_volume <= 0:
-        msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
-        print(msg)
-        # 🔧 FIX: 실패 시 partial_state 롤백
-        with _POSITION_LOCK:
-            pos2 = OPEN_POSITIONS.get(m)
-            if pos2:
-                pos2["partial_state"] = None
-                pos2.pop("partial_ts", None)
-            _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
-        return False, msg, 0.0
-
-    # 🔧 현재가 조회 (최소주문금액 체크용)
+    # 🔧 FIX: _CLOSING_MARKETS.add(m) ~ try 사이 코드 전체를 try/finally로 감싸기
+    # — 이 구간에서 예외 발생 시 _CLOSING_MARKETS 영구 잠김 방지
     try:
-        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-        cur_price = cur_js[0].get("trade_price", entry_price) if cur_js else entry_price
-    except Exception:
-        cur_price = entry_price
+        sell_volume = current_volume * sell_ratio
+        if sell_volume <= 0:
+            msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
+            print(msg)
+            # 🔧 FIX: 실패 시 partial_state 롤백
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["partial_state"] = None
+                    pos2.pop("partial_ts", None)
+                _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
+            return False, msg, 0.0
 
-    # 🔧 FIX: 최소주문금액(5000원) 사전검증
-    MIN_ORDER_KRW = 5000
-    sell_krw = sell_volume * cur_price
-    remaining_volume = current_volume - sell_volume
-    remaining_krw = remaining_volume * cur_price
+        # 🔧 현재가 조회 (최소주문금액 체크용)
+        try:
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+            cur_price = cur_js[0].get("trade_price", entry_price) if cur_js else entry_price
+        except Exception:
+            cur_price = entry_price
 
-    # 매도금액이 5000원 미만 또는 잔여금액이 DUST_PREVENT_KRW 미만이면 → 전량청산으로 전환
-    # 🔧 FIX: 잔여 기준을 DUST_PREVENT_KRW(6000원)로 상향 → 가격 변동 시 찌꺼기 방지
-    # 🔧 FIX: was_full 플래그로 전량청산 시도 여부 추적 (부분체결 시 재시도용)
-    was_full = False
-    if sell_krw < MIN_ORDER_KRW or remaining_krw < DUST_PREVENT_KRW:
-        print(f"[PARTIAL→FULL] {m} 찌꺼기방지 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원 < {DUST_PREVENT_KRW}원) → 전량청산")
-        # 🔧 FIX: 전량 전환 시 거래소 실잔고 사용 (찌꺼기 방지)
-        actual_bal = get_actual_balance(m)
-        sell_volume = actual_bal if actual_bal > 0 else current_volume
-        was_full = True  # 🔧 전량청산 시도 표시
-        # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
-        with _POSITION_LOCK:
-            pos2 = OPEN_POSITIONS.get(m)
-            if pos2:
-                pos2["partial_state"] = None
-                pos2.pop("partial_ts", None)
+        # 🔧 FIX: 최소주문금액(5000원) 사전검증
+        MIN_ORDER_KRW = 5000
+        sell_krw = sell_volume * cur_price
+        remaining_volume = current_volume - sell_volume
+        remaining_krw = remaining_volume * cur_price
 
-    try:
+        # 매도금액이 5000원 미만 또는 잔여금액이 DUST_PREVENT_KRW 미만이면 → 전량청산으로 전환
+        # 🔧 FIX: 잔여 기준을 DUST_PREVENT_KRW(6000원)로 상향 → 가격 변동 시 찌꺼기 방지
+        # 🔧 FIX: was_full 플래그로 전량청산 시도 여부 추적 (부분체결 시 재시도용)
+        was_full = False
+        if sell_krw < MIN_ORDER_KRW or remaining_krw < DUST_PREVENT_KRW:
+            print(f"[PARTIAL→FULL] {m} 찌꺼기방지 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원 < {DUST_PREVENT_KRW}원) → 전량청산")
+            # 🔧 FIX: 전량 전환 시 거래소 실잔고 사용 (찌꺼기 방지)
+            actual_bal = get_actual_balance(m)
+            sell_volume = actual_bal if actual_bal > 0 else current_volume
+            was_full = True  # 🔧 전량청산 시도 표시
+            # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
+            with _POSITION_LOCK:
+                pos2 = OPEN_POSITIONS.get(m)
+                if pos2:
+                    pos2["partial_state"] = None
+                    pos2.pop("partial_ts", None)
         res = place_market_sell(m, sell_volume, price_hint=cur_price)
         order_uuid = res.get("uuid") if isinstance(res, dict) else None
         od = get_order_result(order_uuid,
@@ -2912,6 +2937,17 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos2["partial_state"] = None
                 pos2.pop("partial_ts", None)
             _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
+        return False, msg, 0.0
+    except Exception as e_outer:
+        # 🔧 FIX: 외부 try — _CLOSING_MARKETS.add ~ 내부 try 사이 예외 시 cleanup
+        msg = f"[PARTIAL_SELL_OUTER_ERR] {m}: {e_outer}"
+        print(msg)
+        with _POSITION_LOCK:
+            pos2 = OPEN_POSITIONS.get(m)
+            if pos2:
+                pos2["partial_state"] = None
+                pos2.pop("partial_ts", None)
+            _CLOSING_MARKETS.discard(m)
         return False, msg, 0.0
 
 
@@ -3199,6 +3235,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         if should_close:
             print(f"[REMONITOR] {m} 자동청산 조건 충족 → 청산 ({reason})")
             close_auto_position(m, reason)
+            # 🔧 FIX: 부분체결 시 잔여 포지션이 남아있으면 remonitor 계속 (방치 방지)
+            with _POSITION_LOCK:
+                _still_open = m in OPEN_POSITIONS and OPEN_POSITIONS[m].get("state") == "open"
+            if _still_open:
+                print(f"[REMONITOR] {m} 부분체결 잔여 포지션 감지 → 재모니터링 계속")
+                continue
             return True
 
 
@@ -4376,15 +4418,19 @@ def _throttle():
         time.sleep(min(1.2, max(0.05, base_wait)) * (1.0 + 0.2 * rnd()))
 
 
+_SESSION_REFRESH_LOCK = threading.Lock()
+
 def _refresh_session():
     global SESSION, _CONSEC_CONN_ERR
-    try:
-        SESSION.close()
-    except Exception:
-        pass
-    SESSION = _new_session()
-    _CONSEC_CONN_ERR = 0
-    print("[NET] session refreshed")
+    # 🔧 FIX: 락 보호 — 다른 스레드가 SESSION 사용 중에 close/replace 방지
+    with _SESSION_REFRESH_LOCK:
+        try:
+            SESSION.close()
+        except Exception:
+            pass
+        SESSION = _new_session()
+        _CONSEC_CONN_ERR = 0
+        print("[NET] session refreshed")
 
 
 def upbit_get(url, params=None, timeout=7):
@@ -4774,7 +4820,10 @@ def micro_tape_stats_from_ticks(ticks, sec):
 
     now_ms = int(time.time() * 1000)
     age = (now_ms - newest_ts) / 1000.0 if newest_ts else 999
-    duration = max((newest_ts - (oldest_ts or newest_ts)) / 1000.0, 1.0)
+    # 🔧 FIX: duration을 윈도우 크기(sec)로 사용 — 기존 틱 간 시간차 기반은 버스트 시 폭등
+    # tick_span은 실제 틱 존재 구간, sec는 요청한 윈도우 크기
+    tick_span = max((newest_ts - (oldest_ts or newest_ts)) / 1000.0, 1.0)
+    duration = max(float(sec), tick_span)  # 윈도우 크기와 틱 span 중 큰 값 사용
     rate = n / duration
     krw_per_sec = krw / duration
     return {
@@ -5189,7 +5238,8 @@ def calc_vwap_from_candles(candles, lookback=20):
     for c in target:
         # 대표가 = (고+저+종)/3
         typical = (c.get("high_price", 0) + c.get("low_price", 0) + c.get("trade_price", 0)) / 3
-        vol = c.get("candle_acc_trade_price", 0)
+        # 🔧 FIX: VWAP은 코인수량(trade_volume) 가중 — 기존 trade_price(원화거래대금)은 price² 가중
+        vol = c.get("candle_acc_trade_volume", 0)
         total_vp += typical * vol
         total_vol += vol
     return total_vp / max(total_vol, 1) if total_vol > 0 else None
@@ -8254,7 +8304,12 @@ def monitor_position(m,
                 if verdict is None:
                     verdict = "연장만료(모니터링 종료)"
             else:
-                verdict = "시간 만료(모니터링 종료)"
+                # 🔧 FIX: 본절구간(-FEE~+FEE) 또는 trail 미무장 상태에서 시간만료
+                # — 기존: verdict만 세팅하고 포지션 방치 → remonitor에 의존
+                # — 수정: 즉시 청산하여 방치 방지 (reentry=True일 때 remonitor 안 돌아가므로)
+                close_auto_position(m, f"시간만료 본절컷 {_final_gain*100:+.2f}%")
+                _already_closed = True
+                verdict = "시간만료_본절컷"
 
     finally:
         # ================================
