@@ -1421,7 +1421,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     OPEN_POSITIONS.pop(m, None)
                 return
             if not existing:
-                OPEN_POSITIONS[m] = {"state": "pending"}
+                OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
 
         signal_price = pre.get("price")
         if not signal_price:
@@ -5424,7 +5424,7 @@ def add_to_retest_watchlist(m, peak_price, pre):
     try:
         c5 = get_minutes_candles(5, m, 25)
         if c5 and len(c5) >= 20:
-            closes_5m = [x["trade_price"] for x in reversed(c5)]  # oldest→newest
+            closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
             ema5_val = ema_last(closes_5m, 5)
             ema20_val = ema_last(closes_5m, 20)
             if ema5_val and ema20_val and ema20_val > 0:
@@ -5519,7 +5519,7 @@ def check_retest_entry(m):
         try:
             c5 = get_minutes_candles(5, m, 25)
             if c5 and len(c5) >= 20:
-                closes_5m = [x["trade_price"] for x in reversed(c5)]
+                closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
                 ema5_val = ema_last(closes_5m, 5)
                 ema20_val = ema_last(closes_5m, 20)
                 if ema5_val and ema20_val and ema5_val < ema20_val:
@@ -5714,7 +5714,7 @@ def circle_register(m, pre, c1):
     try:
         c5 = get_minutes_candles(5, m, 25)
         if c5 and len(c5) >= 20:
-            closes_5m = [x["trade_price"] for x in reversed(c5)]
+            closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
             ema5_val = ema_last(closes_5m, 5)
             ema20_val = ema_last(closes_5m, 20)
             if ema5_val and ema20_val and ema5_val < ema20_val:
@@ -5878,7 +5878,7 @@ def circle_check_entry(m):
         try:
             c5 = get_minutes_candles(5, m, 25)
             if c5 and len(c5) >= 20:
-                closes_5m = [x["trade_price"] for x in reversed(c5)]
+                closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
                 ema5_val = ema_last(closes_5m, 5)
                 ema20_val = ema_last(closes_5m, 20)
                 if ema5_val and ema20_val:
@@ -8783,13 +8783,14 @@ def main():
 
             # 🔧 FIX H3: pending 상태 타임아웃 세이프가드 (60초 초과 시 자동 제거)
             # - 진입 중 예외 발생 시 pending 마킹만 남아 해당 코인 영구 차단되는 버그 방지
+            # - 🔧 FIX: pending_ts 기반으로 변경 (last_signal_at은 리테스트/동그라미에서 미세팅)
             _PENDING_TIMEOUT_SEC = 60
             with _POSITION_LOCK:
                 _stale_pending = []
                 for _pm, _pv in list(OPEN_POSITIONS.items()):
                     if _pv.get("state") == "pending" and _pv.get("pre_signal"):
-                        # pending에는 entry_ts가 없으므로 last_signal_at 또는 현재-60초 비교
-                        _sig_ts = last_signal_at.get(_pm, 0)
+                        # pending_ts 우선, 없으면 last_signal_at 폴백
+                        _sig_ts = _pv.get("pending_ts") or last_signal_at.get(_pm, 0)
                         if _sig_ts > 0 and (time.time() - _sig_ts) > _PENDING_TIMEOUT_SEC:
                             _stale_pending.append(_pm)
                 for _sp in _stale_pending:
@@ -8816,7 +8817,7 @@ def main():
                                 if wm in OPEN_POSITIONS:
                                     _release_entry_lock(wm)
                                     continue
-                                OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True}
+                                OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
 
                             # 리테스트 조건 충족 → 진입 (half 강제)
                             retest_pre["entry_mode"] = "half"  # 🔧 이중 보장: 리테스트 = half 강제
@@ -8922,7 +8923,7 @@ def main():
                             if cm in OPEN_POSITIONS:
                                 _release_entry_lock(cm)
                                 continue
-                            OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True}
+                            OPEN_POSITIONS[cm] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
 
                         # 🔧 FIX: ready 재시도 쿨다운 (텔레그램 스팸 방지)
                         # NOTE: _CIRCLE_LOCK 안에서 읽기만, 정리는 밖에서 (락 네스팅 방지)
@@ -9271,7 +9272,7 @@ def main():
                         _release_entry_lock(m)
                         continue
                     # 미리 pending 마킹 (다른 스레드 차단)
-                    OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True}
+                    OPEN_POSITIONS[m] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
                     # recent_alerts는 postcheck 전에 이미 설정됨 (line 5684)
                     last_signal_at[m] = time.time()
                     last_price_at_alert[m] = pre['price']
