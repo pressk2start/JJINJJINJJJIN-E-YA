@@ -2244,8 +2244,9 @@ def add_auto_position(m, cur_price, reason=""):
         # 🔧 FIX: 추매 후 손절가 재계산 (평단이 바뀌었으므로)
         try:
             c1_for_sl = get_minutes_candles(1, m, 20)
-            # 🔧 FIX: 추매 시 current_price 전달 (수익 중 SL 완화 반영)
-            new_stop, new_sl_pct, _ = dynamic_stop_loss(new_entry_price, c1_for_sl, current_price=cur_price)
+            # 🔧 FIX: signal_type 전달 — 초기 진입과 SL 폭 일관성 유지 (ign 3%→normal 1.2% 급축소 방지)
+            _sig_type_for_sl = pos.get("signal_type", "normal")
+            new_stop, new_sl_pct, _ = dynamic_stop_loss(new_entry_price, c1_for_sl, _sig_type_for_sl, current_price=cur_price)
             pos["stop"] = new_stop
             pos["sl_pct"] = new_sl_pct
         except Exception as e:
@@ -2292,6 +2293,9 @@ def close_auto_position(m, reason=""):
     try:
         if not pos:
             print(f"[AUTO] OPEN_POSITIONS에 {m} 포지션 없음 → 청산 스킵 (reason={reason})")
+            # 🔧 FIX: _CLOSING_MARKETS cleanup — 여기서 리턴하면 영구 잠김
+            with _POSITION_LOCK:
+                _CLOSING_MARKETS.discard(m)
             # 🔧 FIX: 조용한 리턴 방지 — 최소한의 알림 발송
             tg_send_mid(f"⚠️ {m} 청산 스킵 (포지션 없음)\n• 사유: {reason}")
             return
@@ -2302,12 +2306,18 @@ def close_auto_position(m, reason=""):
         # 🔧 FIX: -1 = 조회 실패 → 청산 진행하지 않음 (오탐 방지)
         if actual_vol < 0:
             print(f"[AUTO] {m} 잔고 조회 실패 → 청산 스킵 (reason={reason})")
+            # 🔧 FIX: _CLOSING_MARKETS cleanup
+            with _POSITION_LOCK:
+                _CLOSING_MARKETS.discard(m)
             tg_send_mid(f"⚠️ {m} 청산 스킵 (잔고 조회 실패)\n• 사유: {reason}")
             return
         if actual_vol <= 1e-12:
             print(f"[AUTO] {m} 실잔고=0 → 이미 청산됨, 스킵 (reason={reason})")
             # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
             mark_position_closed(m, f"already_zero:{reason}")
+            # 🔧 FIX: _CLOSING_MARKETS cleanup
+            with _POSITION_LOCK:
+                _CLOSING_MARKETS.discard(m)
             tg_send(f"🧹 {m} 이미 청산됨 (잔고=0 확인)\n• 사유: {reason}")
             return
 
