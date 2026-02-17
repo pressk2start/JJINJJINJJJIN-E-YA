@@ -1288,12 +1288,13 @@ def cut_summary():
         print(f"[CUT_SUMMARY] {' , '.join(parts)}")
 
 
-def final_price_guard(m, initial_price, max_drift=None, ticks=None):
+def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=False):
     """
     주문 직전 가격 재확인 (동적 임계치)
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
     - max_drift: 신호가 대비 허용 상승률 (None이면 동적 계산)
     - ticks: 변동성 계산용 틱 데이터
+    - is_circle: 동그라미 재돌파 진입 여부 (True면 threshold 완화)
     - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.2% 구간은
       '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
@@ -1318,6 +1319,9 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None):
             if 0 <= hour < 6:
                 base += 0.001
             dyn = base + min(0.004, pstd * 0.5) + r * 0.002
+            # 🔧 FIX: 동그라미(재돌파)는 이미 눌림 검증 완료 → threshold +0.3% 완화
+            if is_circle:
+                dyn += 0.003
             thr = dyn
         else:
             thr = max_drift
@@ -1390,6 +1394,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
         signal_skip("API 키 미설정")
         return
+
+    # 🔧 FIX: pending 고착 방지 — open 전환 실패 시 pending 강제 제거
+    _entered_open = False
 
     # 🔐 프로세스 간 중복 진입 방지 (파일락+메모리락 컨텍스트)
     # 🔧 FIX: reentrant=True (스캔 루프가 이미 락 보유 → TTL 갱신만, 해제는 모니터 finally에서)
@@ -1470,7 +1477,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
-        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"))
+        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
             signal_skip(f"가격가드 실패 (신호가→현재가 {drift_pct:+.2f}%)")
@@ -1498,10 +1505,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         #   기존 문제: 강한 모멘텀은 풀백 안 옴→20초 후 더 높게 매수
         #              약한 모멘텀만 풀백 잡힘→역선택 구조
         #   개선: 5초 이내 빠른 눌림만 잡고, 없으면 즉시 진입
+        # 🔧 FIX: 동그라미(재돌파)는 이미 눌림→리클레임 거쳤으므로 대기 축소
         # ============================================================
-        PULLBACK_WAIT_SEC = 3       # 🔧 FIX: 5→3초 (과도한 대기→가격 드리프트→매수 불발 방지)
+        _is_circle_entry = pre.get("is_circle", False)
+        PULLBACK_WAIT_SEC = 1 if _is_circle_entry else 3   # 🔧 FIX: 동그라미 1초 / 일반 3초
         PULLBACK_MIN_DIP = 0.001    # 🔧 0.15→0.1% (미세 눌림도 인정)
-        PULLBACK_MAX_DIP = 0.012    # 🔧 FIX: 0.6→1.2% (변동성 큰 코인에서 0.6%는 정상 눌림도 차단)
+        PULLBACK_MAX_DIP = 0.015 if _is_circle_entry else 0.012  # 🔧 FIX: 동그라미 1.5% (재돌파 변동 허용) / 일반 1.2%
         PULLBACK_BOUNCE_TICKS = 2   # 🔧 3→2틱 (빠른 확인)
 
         _pb_peak = current_price
@@ -1885,6 +1894,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "signal_type": _derived_signal_type,  # 🔧 FIX: SL 신호별 완화용
                 "trade_type": pre.get("trade_type", "scalp"),  # 🔧 특단조치: 스캘프/러너 진입 시 결정
             }
+            _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
         # 🔧 FIX: 불리한 슬리피지만 기록 (abs()는 유리한 체결도 비용으로 취급 → 체크포인트 과대)
@@ -2030,6 +2040,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 print(f"[FEATURE_LOG_ERR] {e}")
 
         # 🔐 컨텍스트 종료 시 entry_lock 자동 해제
+
+    # 🔧 FIX: pending 고착 방지 — with 블록 종료 후 open 미전환 시 pending 강제 제거
+    # - 정상 return(각 분기에서 pop)은 이미 처리됨
+    # - 예외 발생 시 caller(main loop)에서 처리 + 여기서 이중 방어
+    if not _entered_open:
+        with _POSITION_LOCK:
+            _pos_check = OPEN_POSITIONS.get(m)
+            if _pos_check and _pos_check.get("state") == "pending":
+                OPEN_POSITIONS.pop(m, None)
+                print(f"[PENDING_CLEANUP] {m} open 미전환 → pending 제거")
 
 def _reset_pos_after_reprice(pos: dict, new_entry: float, curp: float):
     """
@@ -3120,6 +3140,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             #   개선: 리모니터TP = 스캘프TP × 1.5 수준 (현실적 도달 가능)
             TP_FULL = {
                 "🔥점화": 1.5,              # 🔧 구조개선: 2.2→1.5 (점화 프리미엄 유지)
+                "⭕동그라미": 1.6,           # 🔧 FIX: 재돌파는 추세연장 가능 → 점화보다 살짝 높은 풀TP
                 "강돌파 (EMA↑+고점↑)": 1.2,  # 🔧 구조개선: 1.8→1.2
                 "EMA↑": 1.0,               # 🔧 구조개선: 1.4→1.0
                 "고점↑": 0.9,              # 🔧 구조개선: 1.3→0.9
@@ -3128,6 +3149,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             }
             TP_PART = {
                 "🔥점화": 0.9,              # 🔧 구조개선: 1.2→0.9
+                "⭕동그라미": 0.9,           # 🔧 FIX: 재돌파 부분익절 = 점화와 동일 (눌림 검증 완료)
                 "강돌파 (EMA↑+고점↑)": 0.7,  # 🔧 구조개선: 1.0→0.7
                 "EMA↑": 0.6,               # 🔧 구조개선: 0.9→0.6
                 "고점↑": 0.6,              # 🔧 구조개선: 1.0→0.6
@@ -5851,6 +5873,7 @@ def circle_check_entry(m):
             pass
 
     # --- 5분 EMA 추세 이탈 체크 (pullback/reclaim 상태에서) ---
+    # 🔧 FIX: 진행 단계에서는 gap 완충 적용 (EMA5 ≈ EMA20 구간에서 불필요 폐기 방지)
     if state in ("pullback", "reclaim"):
         try:
             c5 = get_minutes_candles(5, m, 25)
@@ -5858,11 +5881,15 @@ def circle_check_entry(m):
                 closes_5m = [x["trade_price"] for x in reversed(c5)]
                 ema5_val = ema_last(closes_5m, 5)
                 ema20_val = ema_last(closes_5m, 20)
-                if ema5_val and ema20_val and ema5_val < ema20_val:
-                    with _CIRCLE_LOCK:
-                        _CIRCLE_WATCHLIST.pop(m, None)
-                    print(f"[CIRCLE] {m} 5분 EMA 추세 이탈 → 폐기")
-                    return None
+                if ema5_val and ema20_val:
+                    ema_gap_pct = (ema5_val - ema20_val) / ema20_val if ema20_val > 0 else 0
+                    # 등록 단계(circle_register)는 gap<0이면 즉시 거부
+                    # 진행 단계에서는 -0.2% 이하일 때만 폐기 (노이즈 완충)
+                    if ema_gap_pct < -0.002:
+                        with _CIRCLE_LOCK:
+                            _CIRCLE_WATCHLIST.pop(m, None)
+                        print(f"[CIRCLE] {m} 5분 EMA 추세 이탈 (gap={ema_gap_pct*100:.2f}%) → 폐기")
+                        return None
         except Exception:
             pass
 
@@ -5873,6 +5900,8 @@ def circle_check_entry(m):
         watch = _CIRCLE_WATCHLIST.get(m)
         if not watch:
             return None
+        # 🔧 FIX: 상태 전이 직전에 state 재읽기 (안전필터에서 변경 가능성)
+        state = watch["state"]
 
         if state == "armed":
             # -----------------------------------------------
@@ -5998,6 +6027,7 @@ def circle_check_entry(m):
             original_pre = watch.get("pre", {})
             entry_pre = dict(original_pre)
             entry_pre["circle_entry"] = True
+            entry_pre["is_circle"] = True  # 🔧 FIX: final_price_guard/pullback 분기용 플래그
             entry_pre["circle_state_path"] = "armed→pullback→reclaim→rebreak"
             entry_pre["circle_candles"] = candle_count
             entry_pre["circle_pullback_pct"] = pullback_pct
@@ -6005,6 +6035,10 @@ def circle_check_entry(m):
             entry_pre["circle_reclaim_price"] = watch.get("reclaim_price", 0)
             entry_pre["price"] = cur_price
             entry_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+            # 🔧 FIX: 동그라미 전용 메타데이터 (TP/SL/매도 로직 분기용)
+            entry_pre["signal_tag"] = "⭕동그라미"
+            entry_pre["trade_type"] = "runner"   # 재돌파는 추세연장 성향
+            entry_pre["signal_type"] = "circle"  # dynamic_stop_loss 완화 분기용
 
             # pop은 메인루프 circle_confirm_entry()에서 수행
             return entry_pre
@@ -7233,6 +7267,10 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
         max_sl = max(max_sl, DYN_SL_MAX * 1.3)  # MAX도 같이 확대
+    # ⭕ 동그라미(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
+    elif signal_type == "circle":
+        pct *= 1.3
+        max_sl = max(max_sl, DYN_SL_MAX * 1.3)
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
@@ -8905,7 +8943,8 @@ def main():
                                     OPEN_POSITIONS.pop(cm, None)
                             continue
 
-                        circle_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+                        # 🔧 FIX: setdefault — circle_check_entry에서 이미 설정된 경우 덮어쓰지 않음
+                        circle_pre.setdefault("entry_mode", CIRCLE_ENTRY_MODE)
                         c1_circle = get_minutes_candles(1, cm, 20)
                         dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle)
 
