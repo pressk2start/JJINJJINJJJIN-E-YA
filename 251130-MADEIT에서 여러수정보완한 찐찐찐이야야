@@ -1780,7 +1780,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                             _post_avg_price = float(_acc.get("avg_buy_price") or "0")
                             break
                     _balance_diff = _post_balance - prev_balance
-                    if _balance_diff > volume_filled * 1.05:  # 5% 이상 차이 = 추가 체결 존재
+                    if _balance_diff > volume_filled + 1e-12:  # 잔고 증가분이 조금이라도 크면 항상 보정
                         print(f"[HYBRID_VOL_FIX] {m} od.executed={volume_filled:.8f} < 잔고증가={_balance_diff:.8f} → 보정")
                         volume_filled = _balance_diff
                         if _post_avg_price > 0:
@@ -2116,7 +2116,7 @@ def add_auto_position(m, cur_price, reason=""):
                         _post_avg_add = float(_a.get("avg_buy_price") or "0")
                         break
                 _bal_diff_add = _post_bal_add - _prev_bal_add
-                if _bal_diff_add > volume_filled * 1.05:
+                if _bal_diff_add > volume_filled + 1e-12:  # 잔고 증가분이 조금이라도 크면 항상 보정
                     print(f"[ADD_VOL_FIX] {m} od.executed={volume_filled:.8f} < 잔고증가={_bal_diff_add:.8f} → 보정")
                     volume_filled = _bal_diff_add
                     if _post_avg_add > 0:
@@ -7431,7 +7431,7 @@ def monitor_position(m,
                     trail_dist = max(trail_dist_min, (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
                     trail_dist = trail_dist_min
-                trail_stop = curp * (1.0 - trail_dist)
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))  # 래칫: 느슨해지는 방향 덮어쓰기 방지
                 # 본절 확보 (래칫 기본)
                 be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
                 base_stop = max(base_stop, be_stop)
