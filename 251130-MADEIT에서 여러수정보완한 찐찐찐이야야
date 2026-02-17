@@ -2706,8 +2706,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         current_volume = pos["volume"]
         entry_price = pos.get("entry_price", 0)
 
-    # 🔧 FIX: _CLOSING_MARKETS.add(m) ~ try 사이 코드 전체를 try/finally로 감싸기
-    # — 이 구간에서 예외 발생 시 _CLOSING_MARKETS 영구 잠김 방지
+    # 🔧 FIX: _CLOSING_MARKETS 등록 후 전체를 try/except로 감싸기
+    # — lock 밖 ~ 내부 try 사이, 내부 try 안 모든 예외 시 cleanup 보장
     try:
         sell_volume = current_volume * sell_ratio
         if sell_volume <= 0:
@@ -2938,17 +2938,6 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos2.pop("partial_ts", None)
             _CLOSING_MARKETS.discard(m)  # 🔧 FIX: 청산 락 해제
         return False, msg, 0.0
-    except Exception as e_outer:
-        # 🔧 FIX: 외부 try — _CLOSING_MARKETS.add ~ 내부 try 사이 예외 시 cleanup
-        msg = f"[PARTIAL_SELL_OUTER_ERR] {m}: {e_outer}"
-        print(msg)
-        with _POSITION_LOCK:
-            pos2 = OPEN_POSITIONS.get(m)
-            if pos2:
-                pos2["partial_state"] = None
-                pos2.pop("partial_ts", None)
-            _CLOSING_MARKETS.discard(m)
-        return False, msg, 0.0
 
 
 def remonitor_until_close(m, entry_price, pre, tight_mode=False):
@@ -2998,6 +2987,9 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         with _POSITION_LOCK:
             pos_raw = OPEN_POSITIONS.get(m)
             pos = copy.deepcopy(pos_raw) if pos_raw else None  # 🔧 FIX: 깊은 복사 (nested dict 레이스 방지)
+        # 🔧 FIX: 피라미딩(추가매수) 후 entry_price 갱신 — 함수 인자 값은 최초 진입가
+        if pos and pos.get("entry_price"):
+            entry_price = pos["entry_price"]
         if not pos:
             print(f"[REMONITOR] {m} OPEN_POSITIONS에 없음 → 루프 종료")
             # 🔧 FIX: 포지션 없음 알람 추가
@@ -3098,7 +3090,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         _ALREADY_CLOSED_VERDICTS = {
             "ATR손절", "TRAIL_STOP", "probe 스크래치", "횡보탈출", "부분청산→전량청산",
             "스캘프_TP", "스캘프_Plateau",             # 스캘프 익절
-            "시간만료_손실컷",                          # 시간만료 손실 즉시청산
+            "시간만료_손실컷", "시간만료_본절컷",       # 시간만료 손실/본절 즉시청산
             "연장_TRAIL_STOP", "연장_RATCHET_STOP",    # 연장 중 트레일/래칫 컷
             "연장중_전량청산",                          # 연장 중 외부 청산
         }
@@ -4876,17 +4868,22 @@ def calc_avg_krw_per_tick(t_stats):
 
 def calc_flow_acceleration(ticks):
     """
-    체결 가속도: t5s / t15s 비율
+    체결 가속도: (최근5초 raw krw) / (최근15초 raw krw의 5/15 비례분)
     → 1.5 이상 = 가속 중, 0.7 이하 = 감속 중
+    🔧 FIX: krw_per_sec 사용 시 duration floor 비대칭(5 vs 15)으로 버스트 때 3x 편향
+    → raw krw를 동일 비율로 비교하여 편향 제거
     """
     if not ticks:
         return 1.0
     t5s = micro_tape_stats_from_ticks(ticks, 5)
     t15s = micro_tape_stats_from_ticks(ticks, 15)
 
-    if t15s["krw_per_sec"] <= 0:
+    # raw krw 비교: t5 구간이 t15의 1/3이면 비율 1.0이 기준
+    krw_15 = t15s["krw"]
+    if krw_15 <= 0:
         return 1.0
-    return t5s["krw_per_sec"] / t15s["krw_per_sec"]
+    # t5_krw / (t15_krw * 5/15) = t5_krw * 3 / t15_krw
+    return (t5s["krw"] * 3.0) / krw_15
 
 
 # ========================================
@@ -5095,7 +5092,10 @@ def _win_stats(ticks, start_s, end_s):
             "krw_per_sec": 0.0
         }
     win = sorted(win, key=tick_ts_ms)
-    dur = max((tick_ts_ms(win[-1]) - tick_ts_ms(win[0])) / 1000.0, 1.0)
+    # 🔧 FIX: micro_tape_stats와 동일 — 윈도우 크기(end_s - start_s)도 고려
+    tick_span = max((tick_ts_ms(win[-1]) - tick_ts_ms(win[0])) / 1000.0, 1.0)
+    window_size = max(end_s - start_s, 1.0)
+    dur = max(window_size, tick_span)
     buys = sum(1 for x in win if x.get("ask_bid") == "BID")
     krw = sum(x["trade_price"] * x["trade_volume"] for x in win)
     return {
@@ -8184,6 +8184,11 @@ def monitor_position(m,
                             mfe_partial_done = True
                             last_exit_event_ts = time.time()
                             trade_type = "runner"  # ★ 러너로 승격
+                            # 🔧 FIX: OPEN_POSITIONS에도 반영 — remonitor 재호출 시 trade_type 유지
+                            with _POSITION_LOCK:
+                                _pos_up = OPEN_POSITIONS.get(m)
+                                if _pos_up:
+                                    _pos_up["trade_type"] = "runner"
                             tg_send_mid(f"🚀 {m} 스캘프→러너 전환! 50% 익절 +{cur_gain_now*100:.2f}% | 나머지 트레일링")
                     else:
                         # 모멘텀 소진 → 전량 익절
