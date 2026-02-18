@@ -16,4 +16,6 @@ jobs:
           username: ubuntu
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
-            bash ~/bots/deploy_restart.sh
+            set -e
+            cd /home/ubuntu/bots
+            bash ./deploy_restart.sh
