@@ -3897,9 +3897,59 @@ def get_path_statistics(last_n: int = 100) -> str:
 
         # 📊 평균 MFE/MAE
         if "mfe_pct" in df.columns and "mae_pct" in df.columns:
-            avg_mfe = df["mfe_pct"].mean()
-            avg_mae = df["mae_pct"].mean()
+            avg_mfe = pd.to_numeric(df["mfe_pct"], errors="coerce").mean()
+            avg_mae = pd.to_numeric(df["mae_pct"], errors="coerce").mean()
             lines.append(f"  평균MFE: +{avg_mfe:.2f}% / 평균MAE: {avg_mae:.2f}%")
+
+        # 📊 손절폭/트레일 튜닝 요약 (데이터 있을 때만)
+        lines.append("")
+        lines.append("─" * 20)
+        lines.append("<b>🎚 SL/트레일 튜닝 데이터:</b>")
+
+        _tuning_cols = {
+            "entry_atr_pct": ("진입ATR", "%", 3),
+            "entry_pstd": ("진입pstd", "", 6),
+            "mfe_sec": ("MFE도달", "초", 0),
+            "hold_sec": ("보유시간", "초", 0),
+            "peak_drop": ("피크드롭", "%", 2),
+            "trail_dist": ("트레일간격", "%", 3),
+            "trail_stop_pct": ("트레일잠금", "%", 3),
+        }
+        _has_tuning = False
+        for col, (label, unit, dec) in _tuning_cols.items():
+            if col in df.columns:
+                vals = pd.to_numeric(df[col], errors="coerce").dropna()
+                if len(vals) >= 2:
+                    _has_tuning = True
+                    fmt = f"{{:.{dec}f}}"
+                    lines.append(f"  {label}: 평균{fmt.format(vals.mean())}{unit} (범위 {fmt.format(vals.min())}~{fmt.format(vals.max())}{unit})")
+
+        if not _has_tuning:
+            lines.append("  (아직 데이터 부족 — 거래 쌓이면 표시됩니다)")
+
+        # 📊 MFE 대비 실현 비율 (얼마나 잘 먹고 나왔나)
+        if "mfe_pct" in df.columns and "pnl_pct" in df.columns:
+            _mfe_s = pd.to_numeric(df["mfe_pct"], errors="coerce")
+            _pnl_s = pd.to_numeric(df["pnl_pct"], errors="coerce") * 100
+            _valid = (_mfe_s > 0) & _pnl_s.notna()
+            if _valid.sum() >= 2:
+                _capture = (_pnl_s[_valid] / _mfe_s[_valid]).mean() * 100
+                lines.append(f"  MFE캡처율: {_capture:.0f}% (100%=최고점 익절)")
+                if _capture < 40:
+                    lines.append(f"  💡 캡처율 낮음 → 트레일 간격 줄이기 검토")
+                elif _capture > 80:
+                    lines.append(f"  💡 캡처율 높음 → 현재 트레일 설정 양호")
+
+        # 📊 손절 분석 (MAE vs SL)
+        if "mae_pct" in df.columns:
+            _mae_s = pd.to_numeric(df["mae_pct"], errors="coerce").dropna()
+            _losses = df[df["result"] == "lose"]
+            if len(_losses) >= 2 and "mae_pct" in _losses.columns:
+                _loss_mae = pd.to_numeric(_losses["mae_pct"], errors="coerce").dropna()
+                if len(_loss_mae) >= 2:
+                    lines.append(f"  패배MAE: 평균{_loss_mae.mean():.2f}% (SL {DYN_SL_MIN*100:.1f}~{DYN_SL_MAX*100:.1f}%)")
+                    if abs(_loss_mae.mean()) < DYN_SL_MIN * 50:  # MAE가 SL의 절반 미만
+                        lines.append(f"  💡 손절이 SL 하한 전에 발생 → SL 줄여도 될 수 있음")
 
         return "\n".join(lines)
 
@@ -3970,6 +4020,19 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             best_ask_krw = row.get("best_ask_krw", 0) or 0
             is_prebreak = row.get("is_prebreak", 0) or 0
 
+            # 🔧 튜닝 데이터 (손절폭/트레일 간격 최적화용)
+            mfe_pct_val = float(row.get("mfe_pct", 0) or 0)
+            mae_pct_val = float(row.get("mae_pct", 0) or 0)
+            entry_atr = float(row.get("entry_atr_pct", 0) or 0)
+            entry_pstd_val = float(row.get("entry_pstd", 0) or 0)
+            entry_spread_val = float(row.get("entry_spread", 0) or 0)
+            entry_consec_val = float(row.get("entry_consec", 0) or 0)
+            mfe_sec_val = float(row.get("mfe_sec", 0) or 0)
+            trail_dist_val = float(row.get("trail_dist", 0) or 0)
+            trail_stop_val = float(row.get("trail_stop_pct", 0) or 0)
+            peak_drop_val = float(row.get("peak_drop", 0) or 0)
+            sl_pct_val = float(row.get("score", 0) or 0)  # score를 가져옴
+
             # 시간 (ts에서 시:분만 추출)
             ts = str(row.get("ts", ""))
             time_str = ts[11:16] if len(ts) >= 16 else "?"
@@ -3996,13 +4059,19 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             else:
                 mode_str = "✅확정"  # 처음부터 confirm 진입
 
+            # 🔧 MFE/MAE 이모지
+            mfe_emoji = "🎯" if mfe_pct_val >= 1.5 else ""
+            drop_emoji = "⚠️" if peak_drop_val >= 1.0 else ""
+
             lines.append(
                 f"{icon} {market} {time_str} {pnl_str} {pb_mark}\n"
                 f"   {mode_str} 경로:{signal_tag}\n"
-                f"   ⏹청산:{exit_reason}\n"
+                f"   ⏹청산:{exit_reason} ({hold:.0f}초)\n"
                 f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
                 f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
-                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}%"
+                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}%\n"
+                f"   📐MFE+{mfe_pct_val:.2f}%({mfe_sec_val:.0f}초){mfe_emoji} MAE{mae_pct_val:.2f}% 드롭{peak_drop_val:.2f}%{drop_emoji}\n"
+                f"   🎚ATR{entry_atr:.3f}% 트레일{trail_dist_val:.3f}% 잠금{trail_stop_val:+.3f}%"
             )
 
         # 임계치 힌트 (승리/패배 평균 비교)
@@ -4017,7 +4086,12 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
                               ("spread", "스프레드"), ("volume_surge", "배수"),
                               ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도"),
                               ("overheat", "과열"), ("fresh_age", "틱나이"),
-                              ("cv", "CV"), ("pstd", "pstd")]:
+                              ("cv", "CV"), ("pstd", "pstd"),
+                              # 🔧 튜닝 메트릭 승/패 비교
+                              ("entry_atr_pct", "진입ATR"), ("mfe_pct", "MFE"),
+                              ("mae_pct", "MAE"), ("peak_drop", "피크드롭"),
+                              ("mfe_sec", "MFE시간"), ("trail_dist", "트레일간격"),
+                              ("hold_sec", "보유시간")]:
                 if col in df.columns:
                     w_avg = wins[col].mean() if col in wins.columns else 0
                     l_avg = loses[col].mean() if col in loses.columns else 0
