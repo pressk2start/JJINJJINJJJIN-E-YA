@@ -907,7 +907,8 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
     # 🔧 FIX: 취소 후 최종 체결량 재조회 (취소 전 od는 stale → 과잉매수 위험)
     executed_vol = 0.0
     try:
-        od_final = get_order(order_uuid)
+        # 🔧 FIX: upbit_private_get 직접 호출 (get_order 미존재 NameError 수정)
+        od_final = upbit_private_get("/v1/order", {"uuid": order_uuid})
         if od_final:
             executed_vol = float(od_final.get("executed_volume") or "0")
         elif od:
