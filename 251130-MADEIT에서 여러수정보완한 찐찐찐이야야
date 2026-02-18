@@ -100,8 +100,7 @@ def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
     return _get_trimmed_mean(_EXIT_SLIP_HISTORY, 0.001) * 100.0
 
-# 하위 호환용
-PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
+# (PROFIT_CHECKPOINT 제거됨 — PROFIT_CHECKPOINT_BASE 직접 사용)
 
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
@@ -1165,7 +1164,8 @@ def sync_orphan_positions():
             )
 
             # 🔧 처리 완료 표시 (반복 알림 방지) - 먼저 표시
-            _ORPHAN_HANDLED.add(market)
+            with _ORPHAN_LOCK:
+                _ORPHAN_HANDLED.add(market)
 
             # 🔧 FIX: orphan 즉시 손절 → DYN_SL_MIN 연동 (0.6% 하드코딩 제거)
             # - 기존: -0.6% 고정 → 정상 눌림도 강제청산 (승률 하락)
@@ -1180,7 +1180,8 @@ def sync_orphan_positions():
                     # 🔧 청산 실패 시 OPEN_POSITIONS에서 제거 (다음 동기화에서 재시도)
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(market, None)
-                    _ORPHAN_HANDLED.discard(market)
+                    with _ORPHAN_LOCK:
+                        _ORPHAN_HANDLED.discard(market)
             else:
                 # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
                 with _MONITOR_LOCK:
@@ -1216,7 +1217,8 @@ def sync_orphan_positions():
                                 tg_send(f"⚠️ {m} 유령포지션 오류 (이미 청산됨)\n• 예외: {e}")
                                 with _POSITION_LOCK:
                                     OPEN_POSITIONS.pop(m, None)
-                                _ORPHAN_HANDLED.discard(m)
+                                with _ORPHAN_LOCK:
+                                    _ORPHAN_HANDLED.discard(m)
                             else:
                                 tg_send(f"🚨 {m} 유령포지션 오류 → 청산 시도\n• 예외: {e}")
                                 close_auto_position(m, f"유령모니터링예외 | {e}")
@@ -1888,13 +1890,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # - 기존: dyn_stop은 신호 시점 가격(signal_price) 기준 → 체결가와 괴리 발생 가능
         # - 변경: 실제 체결가(avg_price) 기준으로 손절가 재계산
         adjusted_stop = avg_price * (1 - eff_sl_pct)
-        # 🔧 FIX: signal_type 파생 (pre에 명시적 signal_type 있으면 우선 사용)
-        _derived_signal_type = pre.get("signal_type") or (
-            "ign" if pre.get("ign_ok") else
-            "mega" if pre.get("mega_ok") else
-            "early" if pre.get("early_ok") else
-            "normal"
-        )
+        # 🔧 FIX: signal_type 재사용 (위 1657에서 이미 파생됨 → 중복 로직 통합)
+        _derived_signal_type = signal_type
         # 🔧 데이터수집: 진입시점 ATR/pstd 저장 (나중에 손절폭/트레일 간격 최적화용)
         _entry_ticks = pre.get("ticks", [])
         _entry_pstd = price_band_std(_entry_ticks, sec=10) if _entry_ticks else 0.0
@@ -2527,7 +2524,8 @@ def close_auto_position(m, reason=""):
                             # 🔧 FIX: dust 잔여는 포지션 제거 + _ORPHAN_HANDLED에 등록
                             # → 유령으로 감지되지 않음 (부분청산 후 손절 방지)
                             OPEN_POSITIONS.pop(m, None)
-                            _ORPHAN_HANDLED.add(m)
+                            with _ORPHAN_LOCK:
+                                _ORPHAN_HANDLED.add(m)
                             print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
                             # 🔧 FIX: 10분 후 자동 해제 — 코인 가격 급등 시 재감지 허용
                             def _dust_expire(_m=m):
@@ -2567,7 +2565,8 @@ def close_auto_position(m, reason=""):
                             print(f"[DUST_CLEAN] {m} 잔여 {dust_bal:.8f} ({dust_krw:.0f}원) 추가 매도")
                         else:
                             # 5000원 미만이면 매도 불가 → 유령감지 제외만
-                            _ORPHAN_HANDLED.add(m)
+                            with _ORPHAN_LOCK:
+                                _ORPHAN_HANDLED.add(m)
                             print(f"[DUST_CLEAN] {m} 잔여 {dust_bal:.8f} ({dust_krw:.0f}원) → 최소금액 미달, 유령제외")
                 except Exception as _dust_err:
                     print(f"[DUST_CLEAN_ERR] {m}: {_dust_err}")
@@ -2671,7 +2670,8 @@ def close_auto_position(m, reason=""):
             if "최소주문금액" in str(e) or "5000" in str(e):
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
-                _ORPHAN_HANDLED.add(m)
+                with _ORPHAN_LOCK:
+                    _ORPHAN_HANDLED.add(m)
                 tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미달 dust)\n• 소량 잔여는 거래소에 보유 (유령감지 제외)")
                 # 🔧 FIX: 리포트 카운트 증가
                 if AUTO_LEARN_ENABLED:
@@ -2685,6 +2685,8 @@ def close_auto_position(m, reason=""):
             # 🔧 FIX: get_actual_balance → get_balance_with_locked (locked 포함, 유령 오탐 방지)
             if "400" in str(e) or "Bad Request" in str(e):
                 actual_check = get_balance_with_locked(m)
+                if actual_check < 0:
+                    return  # 🔧 FIX: API 실패(-1)를 잔고0으로 오판하여 실제 포지션 삭제 방지
                 if actual_check <= 1e-12:
                     print(f"[AUTO] {m} 잔고 0 확인 → 좀비 포지션 제거")
                     tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
@@ -2866,7 +2868,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         remaining_price_ref = exit_price_used if exit_price_used > 0 else cur_price
         remaining_krw_post = remaining_volume * remaining_price_ref
         if remaining_volume > 1e-10 and remaining_krw_post < MIN_ORDER_KRW and not was_full:
-            _ORPHAN_HANDLED.add(m)
+            with _ORPHAN_LOCK:
+                _ORPHAN_HANDLED.add(m)
             remaining_volume = 0.0
             print(f"[DUST_PREVENT] {m} 잔여 {remaining_krw_post:.0f}원 < {MIN_ORDER_KRW}원 매도불가 → orphan 등록")
 
@@ -5309,7 +5312,8 @@ def btc_volatility_regime():
             regime = "normal"
 
         with _BTC_REGIME_LOCK:
-            _BTC_REGIME_CACHE.update({"regime": regime, "ts": now, "atr_pct": atr_pct})
+            # 🔧 FIX: time.time() 사용 (now는 API 호출 전에 캡처됨 → 캐시 만료 오차 방지)
+            _BTC_REGIME_CACHE.update({"regime": regime, "ts": time.time(), "atr_pct": atr_pct})
         return regime, atr_pct
 
     except Exception:
@@ -5713,6 +5717,8 @@ def check_retest_entry(m):
         watch = _RETEST_WATCHLIST.get(m)
         if not watch:
             return None
+        # 🔧 FIX: 상태 전이 직전에 state 재읽기 (안전필터에서 다른 스레드가 변경 가능)
+        state = watch["state"]
 
         if state == "watching":
             # 충분히 되돌림이 왔는지 체크
@@ -6676,7 +6682,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if past_volumes and len(past_volumes) >= 3:
         vol_ema = ema_last(past_volumes, min(len(past_volumes), 10))
         vol_surge_ema = current_volume / max(vol_ema, 1) if vol_ema else 1.0
-        # 3분 누적 비교 추가 (c1[-4:-1] vs 과거 평균)
+        # 3분 누적 비교 추가 (c1[-3:] 최근 3분 vs 과거 평균)
         if len(c1) >= 6:
             sum_3 = sum(c["candle_acc_trade_price"] for c in c1[-3:])
             past_sums = []
@@ -7657,9 +7663,10 @@ def _end_reco(m, entry_price, last_price, c1, ticks, ob_depth_krw, ctx_thr=3):
         why_partial.append(f"매수비 {buy*100:.1f}% / 틱 {n}")
 
     # 🚀 거래둔화 시 자동 부분익절 권고
-    if ret_pct >= 1.5 and t15["krw_per_sec"] < 15000:
+    _kps = t15.get("krw_per_sec", 0)
+    if ret_pct >= 1.5 and _kps < 15000:
         partial_exit = True
-        why_partial.append(f"거래속도 둔화 {t15['krw_per_sec']:.0f} KRW/s")
+        why_partial.append(f"거래속도 둔화 {_kps:.0f} KRW/s")
 
     # VWAP/EMA 둘 다 하방일 때
     if not vwap_ok and not ema_ok:
@@ -9528,7 +9535,7 @@ def main():
                                          max(vwap_from_candles_1m(c1, 20), 1) -
                                          1) if len(c1) >= 1 else 0.0,
                             "turn":
-                            round((t15_now["krw"] / max(ob["depth_krw"], 1)) *
+                            round((t15_now.get("krw", 0) / max(ob.get("depth_krw", 0), 1)) *
                                   100, 2),
                             "two_green_break":
                             pre.get("two_green_break", False),
@@ -9585,6 +9592,7 @@ def main():
                         # 🔧 FIX: 모니터 미생성이므로 락 직접 해제 (안 풀면 90초간 진입 차단)
                         _release_entry_lock(m)
                         _lock_held = False
+                        continue  # 🔧 FIX: 매수 실패 시 모니터 생성 방지 (fall-through → 유령 모니터 방지)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
@@ -9599,8 +9607,9 @@ def main():
                             # 🔧 FIX: 스레드가 살아있는지 확인 (is_alive)
                             if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
                                 print(f"[MON_SKIP] {m} 이미 모니터링 중 → 스레드 생성 스킵")
-                                # 🔧 FIX: 락 해제하지 않음 — 기존 모니터 finally가 해제 담당
-                                # 여기서 풀면 중복진입 가능한 갭이 생김
+                                # 🔧 FIX: 새로 획득한 락 해제 (기존 모니터가 포지션 관리)
+                                _release_entry_lock(m)
+                                _lock_held = False
                                 continue
                             # 죽은 스레드면 정리하고 새로 시작
                             print(f"[MON_CLEANUP] {m} 죽은 모니터 스레드 정리")
