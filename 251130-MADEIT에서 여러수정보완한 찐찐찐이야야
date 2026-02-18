@@ -7748,6 +7748,7 @@ def monitor_position(m,
     ob = pre.get("ob")
 
     last_price = entry_price
+    curp = entry_price  # 🔧 FIX: 초기화 (틱 전부 실패 시 NameError 방지)
     best = entry_price
     worst = entry_price
 
@@ -8072,7 +8073,8 @@ def monitor_position(m,
                             trail_db_hits = 0
                             _c1_cache = None; _c1_cache_ts = 0.0
                             c1_for_sl = _get_c1_cached()
-                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달
+                            _new_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달
+                            base_stop = max(base_stop, _new_stop)  # 🔧 FIX: 래칫 보호 (추매 후 SL 하향 방지)
                             # trail은 유지 (이미 무장된 상태면 새 평단 기준으로 계속)
                             tg_send_mid(f"🔧 {m} 추매(눌림재돌파) 평단→{fmt6(new_entry)} | best/worst 보존")
 
@@ -9691,6 +9693,7 @@ def main():
                         if pos and pos.get("pre_signal"):
                             OPEN_POSITIONS.pop(m, None)
                     _release_entry_lock(m)
+                    _lock_held = False  # 🔧 FIX: 이중 해제 방지 (except 블록과 일관성)
 
               except Exception as e:
                 # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
