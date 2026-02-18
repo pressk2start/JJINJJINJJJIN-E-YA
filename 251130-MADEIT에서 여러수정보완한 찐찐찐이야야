@@ -5176,7 +5176,8 @@ def price_band_std(ticks, sec=30):
     except Exception:
         return None
     cutoff = newest_ts - sec * 1000
-    ps = [x["trade_price"] for x in ticks if tick_ts_ms(x) >= cutoff]
+    ps = [x.get("trade_price", 0) for x in ticks if tick_ts_ms(x) >= cutoff]
+    ps = [p for p in ps if p > 0]
     if len(ps) < 3: return None
     m = sum(ps) / len(ps)
     var = sum((p - m)**2 for p in ps) / len(ps)
@@ -5208,7 +5209,7 @@ def _win_stats(ticks, start_s, end_s):
     window_size = max(end_s - start_s, 1.0)
     dur = max(window_size, tick_span)
     buys = sum(1 for x in win if x.get("ask_bid") == "BID")
-    krw = sum(x["trade_price"] * x["trade_volume"] for x in win)
+    krw = sum(x.get("trade_price", 0) * x.get("trade_volume", 0) for x in win)
     return {
         "n": len(win),
         "buy_ratio": buys / max(len(win), 1),
@@ -5477,7 +5478,8 @@ def ignition_detected(
     # ---- 3) 가격 임펄스 (수익률 + 대부분 상승) ----
     # 🔧 FIX: 명시적 시간순 정렬 (API 순서 의존 제거 → 오탐/누락 방지)
     sorted_window = sorted(window, key=tick_ts_ms)
-    prices = [t["trade_price"] for t in sorted_window]  # 오래된 → 최신
+    prices = [t.get("trade_price", 0) for t in sorted_window]  # 오래된 → 최신
+    prices = [p for p in prices if p > 0]
     if len(prices) >= 6:
         ret = (prices[-1] / prices[0]) - 1 if prices[0] > 0 else 0
         # 🔧 완화: 5틱 중 4틱 이상 상승 (기존: 6틱 모두 상승)
@@ -6353,7 +6355,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"[하드컷] 급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x | {metrics}"
 
     # 7) 과회전 상한 (메이저/알트 구분)
-    is_major = any(k in market.upper() for k in ("BTC", "ETH")) if market else False
+    # 🔧 FIX: substring → exact match (ETHFI, BTCST 등 오탐 방지)
+    is_major = market.upper() in ("KRW-BTC", "KRW-ETH") if market else False
     eff_turn_max = GATE_TURN_MAX_MAJOR if is_major else GATE_TURN_MAX_ALT
     if turn_pct > eff_turn_max:
         return False, f"[하드컷] 과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
@@ -9347,6 +9350,8 @@ def main():
                 # 🔧 FIX: final_check_leader의 스코어/decay/레짐 다운그레이드 결과 반영
                 # 이전에는 entry_mode가 반영 안 되어 half 모드가 사실상 도달 불가능했음
                 pre["entry_mode"] = payload.get("entry_mode", pre.get("entry_mode", "confirm"))
+                # 🔧 FIX: trade_type (runner/scalp) 전파 — 미전파 시 항상 scalp 폴백되어 runner 감지 무효화
+                pre["trade_type"] = payload.get("trade_type", "scalp")
 
                 # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
                 # 조건: 임밸 >= 0.6 AND 매수비 >= 63.5% (정밀도 ~82%)
