@@ -5803,6 +5803,7 @@ def check_retest_entry(m):
             pre["retest_entry"] = True  # 리테스트 진입 마킹
             pre["price"] = cur_price  # 현재가로 업데이트
             pre["entry_mode"] = "half"  # 🔧 리테스트 진입은 half 강제 (burst와 리스크-리턴 구조 다름)
+            pre["signal_type"] = "retest"  # 🔧 FIX: SL 완화용 (circle과 동일 구조)
             _RETEST_WATCHLIST.pop(m, None)  # 워치리스트에서 제거
             print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f} | half 강제")
             return pre
@@ -7461,8 +7462,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
         _sl_mult *= 1.3
-    # ⭕ 동그라미(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
-    elif signal_type == "circle":
+    # ⭕ 동그라미/리테스트(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
+    elif signal_type in ("circle", "retest"):
         pct *= 1.3
         _sl_mult *= 1.3
 
@@ -9038,7 +9039,7 @@ def main():
                             retest_pre["entry_mode"] = "half"  # 🔧 이중 보장: 리테스트 = half 강제
                             print(f"[RETEST] {wm} 🎯 리테스트 진입 시작! (half 강제)")
                             c1 = get_minutes_candles(1, wm, 20)
-                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1)
+                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1, signal_type=retest_pre.get("signal_type", "normal"))  # 🔧 FIX: signal_type 전달
                             tg_send(f"🎯 <b>리테스트 진입</b> {wm} ⚡HALF\n"
                                     f"• 첫 급등 후 되돌림 → 재돌파 확인\n"
                                     f"• 현재가: {retest_pre['price']:,.0f}원\n"
