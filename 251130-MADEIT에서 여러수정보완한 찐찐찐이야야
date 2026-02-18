@@ -2917,7 +2917,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     # - ret_net에 slip 없으니 cp에서도 slip 제거 → 일관된 비교
                     # 🔧 본절 = entry_price + 수수료 + 여유 (수수료 미포함 시 net 손실 발생)
                     # 🔧 FIX: 본절 + 트레일 합성 스탑 (큰 수익 꼬리 살리기)
-                    if ret_pct > 0 and not pos2.get("breakeven_set"):
+                    if net_ret_pct > 0 and not pos2.get("breakeven_set"):  # 🔧 FIX: gross→net (수수료 차감 후 실제 수익 기준)
                         old_stop = pos2.get("stop", 0)
                         be_price = entry_price * (1 + FEE_RATE_ROUNDTRIP + 0.0005)  # 수수료(0.1%) + 여유(0.05%) = +0.15%
                         # 🔧 FIX: 현재가 기준 트레일 최소폭과 합성 (상승 중엔 트레일 유지)
@@ -3278,6 +3278,12 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         # 7) 시간/연장 만료 → 다시 한 번 사이클
         # 🔧 FIX: "연장만료(모니터링 종료)" 누락으로 should_close=False 무한루프 방지
         elif verdict in ("시간 만료(모니터링 종료)", "연장만료(모니터링 종료)", "데이터 수신 실패"):
+            continue
+
+        if not should_close:
+            # 🔧 FIX: 인식 불가 verdict → tight loop 방지 (fallback sleep)
+            print(f"[REMONITOR] {m} 미인식 verdict={verdict}, action={action} → 다음 사이클")
+            time.sleep(5)
             continue
 
         if should_close:
@@ -3703,8 +3709,9 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         rows[i]["mae_pct"] = f"{mae_pct:.4f}"
                         # 🔧 데이터수집: 포지션에서 튜닝 메트릭 가져와서 CSV에 기록
                         # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 제거됨)
+                        # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 이미 제거됨)
                         with _POSITION_LOCK:
-                            _pos_for_csv = OPEN_POSITIONS.get(market, pos_snapshot if pos_snapshot else {})
+                            _pos_for_csv = pos_snapshot if pos_snapshot else OPEN_POSITIONS.get(market, {})
                         rows[i]["mfe_sec"] = str(_pos_for_csv.get("mfe_sec", ""))
                         rows[i]["trail_dist"] = str(_pos_for_csv.get("trail_dist", ""))
                         rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
