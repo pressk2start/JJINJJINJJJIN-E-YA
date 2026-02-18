@@ -6455,8 +6455,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     elif breakout_score == 1:
         gate_score += 5.0   # 단일 돌파
 
-    # === 가중점수 통과 판정 (60점 이상) ===
-    GATE_SCORE_THRESHOLD = 65.0  # 🔧 손절억제: 60→65 (리포트: 저품질 진입→손절 과다, 더 확실한 셋업만 허용)
+    # === 가중점수 통과 판정 ===
+    GATE_SCORE_THRESHOLD = 70.0  # 🔧 손절억제: 65→70 (확실한 셋업만 진입, 저품질 손절 추가 차단)
     score_detail = (f"gate_score={gate_score:.0f} "
                     f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}]")
 
