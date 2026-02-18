@@ -1245,7 +1245,7 @@ def sync_orphan_positions():
 
         # 🔧 FIX: _RECENT_BUY_TS 오래된 항목 정리 (메모리 누수 방지)
         _now_cleanup = time.time()
-        _stale_keys = [k for k, v in _RECENT_BUY_TS.items() if _now_cleanup - v > 600]
+        _stale_keys = [k for k, v in list(_RECENT_BUY_TS.items()) if _now_cleanup - v > 600]
         for k in _stale_keys:
             _RECENT_BUY_TS.pop(k, None)
 
@@ -1868,7 +1868,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
             # 평균가 계산 (체결 정보가 있으면)
             if avg_price is None:
-                trades = od.get("trades") or [] if od else []
+                trades = (od.get("trades") or []) if od else []
                 if trades:
                     total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
                     total_vol = sum(float(tr["volume"]) for tr in trades)
