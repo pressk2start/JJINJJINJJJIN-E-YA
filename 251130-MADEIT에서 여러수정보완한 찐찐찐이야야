@@ -287,19 +287,20 @@ _RETEST_LOCK = threading.Lock()
 CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
 CIRCLE_MAX_CANDLES = 6                 # 점화 후 최대 6봉 이내 눌림 필요
 CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + 여유)
-CIRCLE_PULLBACK_MIN_PCT = 0.003        # 최소 0.3% 눌림 (고점 대비)
+CIRCLE_PULLBACK_MIN_PCT = 0.009        # 최소 0.9% 눌림 (고점 대비) — 0.3%는 윗꼬리 한번에 통과됨
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
 CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
 CIRCLE_REBREAK_CONFIRM = True          # 재돌파 시 플로우 확인 필수
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
+CIRCLE_STATE_MIN_DWELL_SEC = 15        # 상태별 최소 체류 시간 (초) — 순간통과 방지
 
 # 동그라미 재돌파 품질 필터
-CIRCLE_REBREAK_BUY_RATIO_MIN = 0.52    # 재돌파 시 최소 매수비
-CIRCLE_REBREAK_IMBALANCE_MIN = 0.25    # 재돌파 시 최소 임밸런스
-CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 재돌파 시 스프레드 상한 (%)
-CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 재돌파 시 최소 체결강도
+CIRCLE_REBREAK_BUY_RATIO_MIN = 0.55    # 재돌파 시 최소 매수비 (0.52→0.55)
+CIRCLE_REBREAK_IMBALANCE_MIN = 0.30    # 재돌파 시 최소 임밸런스 (0.25→0.30)
+CIRCLE_REBREAK_SPREAD_MAX = 0.25       # 재돌파 시 스프레드 상한 (%) (0.35→0.25)
+CIRCLE_REBREAK_KRW_PER_SEC_MIN = 12000 # 재돌파 시 최소 체결강도 (8000→12000)
 
 # 동그라미 워치리스트
 # state: "armed" → "pullback" → "reclaim" → "ready"
@@ -5933,6 +5934,7 @@ def circle_register(m, pre, c1):
         _CIRCLE_WATCHLIST[m] = {
             "state": "armed",
             "reg_ts": time.time(),
+            "state_ts": time.time(),     # 현재 상태 진입 시각 (최소 체류 시간 체크용)
             "candle_count": 0,           # 점화 후 경과 봉 수
             "last_candle_ts": ign_candle.get("candle_date_time_kst", ""),
             # 점화 캔들 레벨 (핵심 기준선)
@@ -5945,6 +5947,7 @@ def circle_register(m, pre, c1):
             "peak_after_ign": ign_high,   # 점화 이후 최고점
             "pullback_low": ign_high,     # 눌림 저점
             "reclaim_price": 0,           # 리클레임 확인 가격
+            "was_below_reclaim": False,   # pullback 중 body_mid 아래 경험 여부
             # 원본 pre (진입 시 재사용)
             "pre": pre,
             # 메타데이터 (디버그용)
@@ -6038,14 +6041,23 @@ def circle_check_entry(m):
         print(f"[CIRCLE] {m} {candle_count}봉 초과 (최대 {CIRCLE_MAX_CANDLES}) → 폐기")
         return None
 
-    # --- 과도한 눌림 체크 ---
-    # NOTE: peak = peak_after_ign (점화 이후 최고점, 점화 고점보다 높을 수 있음)
-    # 즉, "점화 후 확장 포함한 고점" 대비 눌림을 측정 (점화 캔들 기준 아님)
-    pullback_pct = (peak - pullback_low) / peak if peak > 0 else 0
-    if pullback_pct > CIRCLE_PULLBACK_MAX_PCT:
+    # --- 눌림 퍼센트 계산 ---
+    # pullback_pct_hist: 역대 최저점 기준 (구조 훼손 판정용 — MAX 체크)
+    # pullback_pct_now:  현재가 기준 (실제 눌림 상태 판정용 — MIN 체크, 상태전이)
+    pullback_pct_hist = (peak - pullback_low) / peak if peak > 0 else 0
+    pullback_pct_now = (peak - cur_price) / peak if peak > 0 else 0
+
+    # --- was_below_reclaim 추적 (pullback 상태에서 body_mid 아래 경험 기록) ---
+    with _CIRCLE_LOCK:
+        watch = _CIRCLE_WATCHLIST.get(m)
+        if watch and watch["state"] == "pullback" and cur_price < ign_body_mid:
+            watch["was_below_reclaim"] = True
+
+    # --- 과도한 눌림 체크 (역대 저점 기준 — 한번이라도 깊이 빠졌으면 구조 훼손) ---
+    if pullback_pct_hist > CIRCLE_PULLBACK_MAX_PCT:
         with _CIRCLE_LOCK:
             _CIRCLE_WATCHLIST.pop(m, None)
-        print(f"[CIRCLE] {m} 과도한 눌림 -{pullback_pct*100:.2f}% > {CIRCLE_PULLBACK_MAX_PCT*100:.1f}% → 폐기")
+        print(f"[CIRCLE] {m} 과도한 눌림 -{pullback_pct_hist*100:.2f}% > {CIRCLE_PULLBACK_MAX_PCT*100:.1f}% → 폐기")
         return None
 
     # --- 거래량 사망 체크 (pullback/reclaim 상태에서) ---
@@ -6093,35 +6105,42 @@ def circle_check_entry(m):
         # 🔧 FIX: 상태 전이 직전에 state 재읽기 (안전필터에서 변경 가능성)
         state = watch["state"]
 
+        # 상태 체류 시간 체크 (순간통과 방지)
+        state_dwell = time.time() - watch.get("state_ts", 0)
+
         if state == "armed":
             # -----------------------------------------------
-            # armed → pullback: 고점 대비 충분한 눌림 발생
+            # armed → pullback: 현재가 기준 고점 대비 충분한 눌림
+            # pullback_pct_now 사용 (현재가 기준) — 윅 한번으로 통과 방지
             # -----------------------------------------------
-            if pullback_pct >= CIRCLE_PULLBACK_MIN_PCT:
+            if state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and pullback_pct_now >= CIRCLE_PULLBACK_MIN_PCT:
                 watch["state"] = "pullback"
+                watch["state_ts"] = time.time()
                 print(
-                    f"[CIRCLE] ⭕ {m} 눌림 감지 | -{pullback_pct*100:.2f}% "
-                    f"| 고점 {peak:,.0f} → 저점 {pullback_low:,.0f} "
+                    f"[CIRCLE] ⭕ {m} 눌림 감지 | 현재가 기준 -{pullback_pct_now*100:.2f}% "
+                    f"| 고점 {peak:,.0f} → 현재 {cur_price:,.0f} (저점 {pullback_low:,.0f}) "
                     f"| {candle_count}봉째 | state→pullback"
                 )
 
         elif state == "pullback":
             # -----------------------------------------------
             # pullback → reclaim: 점화 몸통 중심선 위로 회복
-            # 리클레임 = 핵심 레벨 재탈환 (떨어지는 칼 아님 확인)
+            # 조건 추가: body_mid 아래를 한번은 경험해야 reclaim 허용
+            # (계속 위에 있었는데 reclaim 통과하는 것 방지)
             # -----------------------------------------------
             reclaim_level = ign_body_mid  # 기본: 몸통 중심
             if CIRCLE_RECLAIM_LEVEL == "body_low":
                 reclaim_level = ign_body_bot
 
-            if cur_price >= reclaim_level:
-                # 리클레임 = 가격이 핵심 레벨 위로 회복한 것 자체가 강한 신호
-                # buy_ratio 체크 제거 — 재돌파 단계에서 품질 확인하면 충분
+            if (state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC
+                    and watch.get("was_below_reclaim", False)
+                    and cur_price >= reclaim_level):
                 watch["state"] = "reclaim"
+                watch["state_ts"] = time.time()
                 watch["reclaim_price"] = cur_price
                 print(
                     f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
-                    f"| {candle_count}봉째 | state→reclaim"
+                    f"| 아래 체류 경험 ✓ | {candle_count}봉째 | state→reclaim"
                 )
 
         elif state == "reclaim":
@@ -6129,7 +6148,7 @@ def circle_check_entry(m):
             # reclaim → ready: 점화 고점 재돌파 + 플로우 품질 확인
             # 이것이 "동그라미" 진입 시점
             # -----------------------------------------------
-            if cur_price >= ign_high:
+            if state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= ign_high:
                 # 재돌파 품질 게이트 — 3/5 점수제 (ALL PASS 아님!)
                 # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
                 rebreak_score = 0
@@ -6220,7 +6239,7 @@ def circle_check_entry(m):
             entry_pre["is_circle"] = True  # 🔧 FIX: final_price_guard/pullback 분기용 플래그
             entry_pre["circle_state_path"] = "armed→pullback→reclaim→rebreak"
             entry_pre["circle_candles"] = candle_count
-            entry_pre["circle_pullback_pct"] = pullback_pct
+            entry_pre["circle_pullback_pct"] = pullback_pct_hist
             entry_pre["circle_ign_high"] = ign_high
             entry_pre["circle_reclaim_price"] = watch.get("reclaim_price", 0)
             entry_pre["price"] = cur_price
