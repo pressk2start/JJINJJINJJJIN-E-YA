@@ -3711,7 +3711,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 제거됨)
                         # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 이미 제거됨)
                         with _POSITION_LOCK:
-                            _pos_for_csv = pos_snapshot if pos_snapshot else OPEN_POSITIONS.get(market, {})
+                            _pos_for_csv = pos_snapshot if pos_snapshot else dict(OPEN_POSITIONS.get(market, {}))
                         rows[i]["mfe_sec"] = str(_pos_for_csv.get("mfe_sec", ""))
                         rows[i]["trail_dist"] = str(_pos_for_csv.get("trail_dist", ""))
                         rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
