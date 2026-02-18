@@ -3041,6 +3041,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         "연장_TRAIL_STOP", "연장_RATCHET_STOP",    # 연장 중 트레일/래칫 컷
         "연장_ATR_STOP",                            # 연장 ATR 손절
         "연장중_전량청산",                          # 연장 중 외부 청산
+        "유효하지 않은 entry_price",                # 🔧 FIX: 잘못된 진입가 → 포지션 제거 후 verdict
     }
 
     while True:
@@ -3277,7 +3278,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
         # 7) 시간/연장 만료 → 다시 한 번 사이클
         # 🔧 FIX: "연장만료(모니터링 종료)" 누락으로 should_close=False 무한루프 방지
-        elif verdict in ("시간 만료(모니터링 종료)", "연장만료(모니터링 종료)", "데이터 수신 실패"):
+        elif verdict in ("연장만료(모니터링 종료)", "데이터 수신 실패"):  # 🔧 FIX: "시간 만료(모니터링 종료)" 제거 (실제 설정되지 않는 verdict)
             continue
 
         if not should_close:
@@ -8100,7 +8101,7 @@ def monitor_position(m,
                             trail_db_hits = 0
                             _c1_cache = None; _c1_cache_ts = 0.0
                             c1_for_sl = _get_c1_cached()
-                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl)
+                            base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달
                             # trail은 유지 (이미 무장된 상태면 새 평단 기준으로 계속)
                             tg_send_mid(f"🔧 {m} 추매(눌림재돌파) 평단→{fmt6(new_entry)} | best/worst 보존")
 
@@ -8409,7 +8410,7 @@ def monitor_position(m,
                         verdict = "연장_RATCHET_STOP"
                         break
                     # 🔧 FIX: ATR 동적 손절 체크 (연장루프에서도 가격 폭락 방어)
-                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached())
+                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached(), signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달 (수익구간 SL 완화 적용)
                     if _ext_sl_price > 0 and curp <= _ext_sl_price:
                         _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
                         close_auto_position(m, f"연장ATR손절 {_ext_gain*100:.2f}% (SL {_ext_sl_pct*100:.2f}%)")
@@ -8473,7 +8474,7 @@ def monitor_position(m,
         #  (진입 알림만 오고 청산 알림이 안 오는 문제 해결)
         # ===========================================
         if not _already_closed and not reentry and verdict in (
-            "시간 만료(모니터링 종료)", "연장만료(모니터링 종료)",
+            "연장만료(모니터링 종료)",  # 🔧 FIX: "시간 만료(모니터링 종료)" 제거 (미사용 verdict)
             "데이터 수신 실패",
         ):
             _g = (last_price / entry_price - 1.0) * 100 if entry_price > 0 else 0
@@ -9549,7 +9550,7 @@ def main():
                                  1) if len(cbtc5) >= 2 else 0.0
 
                         t15_now = micro_tape_stats_from_ticks(pre["ticks"], 15)
-                        ob = pre["ob"]
+                        ob = pre.get("ob") or {}  # 🔧 FIX: None 방어 (orderbook 실패 시 TypeError 방지)
                         flags = {
                             "chg_1m":
                             chg_1m,
