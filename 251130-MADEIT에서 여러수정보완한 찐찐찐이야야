@@ -2243,6 +2243,9 @@ def add_auto_position(m, cur_price, reason=""):
         tg_send(f"⚠️ <b>추매 실패</b> {m}\n사유: {e}")
         return False, None
 
+    # 🔧 FIX: 네트워크 I/O를 락 바깥에서 수행 (_POSITION_LOCK 장기 점유 방지)
+    c1_for_sl = get_minutes_candles(1, m, 20)
+
     # 평균단가 갱신
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -2268,8 +2271,6 @@ def add_auto_position(m, cur_price, reason=""):
 
         # 🔧 FIX: 추매 후 손절가 재계산 (평단이 바뀌었으므로)
         try:
-            c1_for_sl = get_minutes_candles(1, m, 20)
-            # 🔧 FIX: signal_type 전달 — 초기 진입과 SL 폭 일관성 유지 (ign 3%→normal 1.2% 급축소 방지)
             _sig_type_for_sl = pos.get("signal_type", "normal")
             new_stop, new_sl_pct, _ = dynamic_stop_loss(new_entry_price, c1_for_sl, _sig_type_for_sl, current_price=cur_price)
             pos["stop"] = new_stop
@@ -2428,6 +2429,8 @@ def close_auto_position(m, reason=""):
                 for _retry in range(15):  # 15회 x 2초 = 30초
                     time.sleep(2.0)
                     actual_after = get_balance_with_locked(m)  # 🔧 locked 포함
+                    if actual_after < 0:
+                        continue  # 🔧 FIX: API 실패(-1)를 잔고 0으로 오판 방지
                     if actual_after <= 1e-12:
                         # 실잔고+locked 0 = 체결된 것으로 간주
                         with _POSITION_LOCK:
@@ -2477,17 +2480,24 @@ def close_auto_position(m, reason=""):
                     try:
                         for _ in range(120):  # 추가 4분 감시 (120회 x 2초)
                             time.sleep(2.0)
-                            if get_balance_with_locked(m) <= 1e-12:  # 🔧 locked 포함
+                            _fup_bal = get_balance_with_locked(m)  # 🔧 locked 포함
+                            if _fup_bal < 0:
+                                continue  # 🔧 FIX: API 실패(-1)를 잔고 0으로 오판 방지
+                            if _fup_bal <= 1e-12:
                                 with _POSITION_LOCK:
                                     OPEN_POSITIONS.pop(m, None)
                                 tg_send(f"🧹 <b>자동청산 완료(후속확인)</b> {m}\n• 사유: {reason}")
-                                # 🔧 FIX: 후속확인 청산에서도 trade result 기록 (누락 방지)
+                                # 🔧 FIX: 후속확인 청산에서도 record_trade + trade result 기록 (누락 방지)
+                                try:
+                                    _net_ret = (cur_price / entry_price - 1.0 - FEE_RATE_ROUNDTRIP) if entry_price > 0 else 0
+                                    record_trade(m, _net_ret)  # 🔧 FIX: 승률/연패 추적 누락 방지
+                                except Exception:
+                                    pass
                                 if AUTO_LEARN_ENABLED:
                                     try:
                                         _hold = time.time() - pos.get("entry_ts", time.time())
                                         _mfe = pos.get("mfe_pct", 0.0)
                                         _mae = pos.get("mae_pct", 0.0)
-                                        _net_ret = (cur_price / entry_price - 1.0 - FEE_RATE_ROUNDTRIP) if entry_price > 0 else 0
                                         update_trade_result(m, cur_price, _net_ret, _hold,
                                                             added=pos.get('added', False),
                                                             exit_reason=reason or "후속확인_청산",
