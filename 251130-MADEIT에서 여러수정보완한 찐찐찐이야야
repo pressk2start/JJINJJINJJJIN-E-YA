@@ -2618,7 +2618,7 @@ def close_auto_position(m, reason=""):
 
             # 🔧 FIX: net_ret_pct 기준 판정 (gross 기준 시 수수료 미반영으로 마이너스인데 🟢 표기 버그)
             result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
-            fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
+            fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 🔧 FIX: 편도요율×양쪽 = 왕복수수료
             # 🔧 FIX: 순손익을 실제 net(수수료 차감)으로 표시 (gross→net 왜곡 방지)
             net_pl_value = pl_value - fee_total
 
@@ -2878,7 +2878,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         est_exit_value = exit_price_used * executed
         pl_value = est_exit_value - est_entry_value
         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 편도 수수료
+        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY  # 🔧 FIX: 편도요율×양쪽 = 왕복수수료
 
         # 🔧 FIX: net 기준으로 통일 (수수료 반영) - 모든 분기에서 사용
         net_ret_pct = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
@@ -2892,6 +2892,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 pos_backup = OPEN_POSITIONS.get(m, {})
                 backup_entry_ts = pos_backup.get("entry_ts")
                 backup_added = pos_backup.get("added", False)
+                backup_pos_snapshot = dict(pos_backup)  # 🔧 FIX: pop 전 스냅샷 (update_trade_result 튜닝 데이터용)
                 OPEN_POSITIONS.pop(m, None)
             print(f"[PARTIAL→FULL_DONE] {m} 전량청산 완료 → 포지션 제거 (net:{net_ret_pct:+.2f}%)")
         else:
@@ -2969,7 +2970,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 if AUTO_LEARN_ENABLED:
                     update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                         added=backup_added, exit_reason=reason or "부분청산",
-                                        entry_ts=backup_entry_ts)
+                                        entry_ts=backup_entry_ts,
+                                        pos_snapshot=backup_pos_snapshot)  # 🔧 FIX: 튜닝 메트릭 전달
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
@@ -4682,6 +4684,8 @@ def zscore_krw_1m(c1, win=30):
 
 
 def uptick_streak_from_ticks(ticks, need=2):
+    if not ticks:  # 🔧 FIX: None/빈리스트 방어
+        return False
     t = sorted(ticks[:need + 4], key=tick_ts_ms)
     return sum(1 for a, b in zip(t, t[1:])
                if b.get("trade_price", 0) > a.get("trade_price", 0)) >= need
@@ -4859,10 +4863,11 @@ def get_top_krw_by_24h(n=TOP_N):
     if _MKTS_CACHE["mkts"] and (now - _MKTS_CACHE["ts"] <= MKTS_CACHE_TTL):
         mkts = _MKTS_CACHE["mkts"]
     else:
+        _raw_mkts = upbit_get("https://api.upbit.com/v1/market/all")
         allm = [
-            d["market"]
-            for d in upbit_get("https://api.upbit.com/v1/market/all") or []
-            if d["market"].startswith("KRW-")
+            d.get("market", "")  # 🔧 FIX: .get() 방어
+            for d in (_raw_mkts if isinstance(_raw_mkts, list) else [])
+            if d.get("market", "").startswith("KRW-")
         ]
         acc = []
         for i in range(0, len(allm), 50):
@@ -8373,6 +8378,7 @@ def monitor_position(m,
                             _ext_trail_dist = trail_dist_min
                         trail_stop = max(trail_stop, curp * (1.0 - _ext_trail_dist))
                     best = max(best, curp)
+                    worst = min(worst, curp)  # 🔧 FIX: 연장루프에서도 MAE 추적 (maxdd 정확도)
 
                     # 트레일 체크 (🔧 FIX: 2회 디바운스 — 메인루프와 동일 패턴)
                     if curp < trail_stop:
@@ -8775,7 +8781,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "last_scan":
                 now_kst_str(),
                 "req_stats":
-                REQ_STATS,
+                dict(REQ_STATS),  # 🔧 FIX: 스냅샷 (직렬화 중 concurrent mutation 방지)
                 "alerts_count":
                 len(last_signal_at),
                 "cache_size":
@@ -8994,8 +9000,16 @@ def main():
                                 continue
 
                             # 🔧 FIX: 모니터 스레드 시작 (기존엔 누락 → 포지션 방치)
+                            # 🔧 FIX: open 후 state 확인 (매수 실패 시 모니터 생성 방지)
                             with _POSITION_LOCK:
-                                actual_entry = OPEN_POSITIONS.get(wm, {}).get("entry_price", retest_pre["price"])
+                                _retest_pos = OPEN_POSITIONS.get(wm)
+                                if not _retest_pos or _retest_pos.get("state") != "open":
+                                    # 매수 실패 또는 pre_signal 상태 → 정리 후 스킵
+                                    if _retest_pos and _retest_pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(wm, None)
+                                    _release_entry_lock(wm)
+                                    continue
+                                actual_entry = _retest_pos.get("entry_price", retest_pre["price"])
                             retest_pre_copy = dict(retest_pre)
                             def _run_retest_monitor(market, entry, pre_data):
                                 try:
