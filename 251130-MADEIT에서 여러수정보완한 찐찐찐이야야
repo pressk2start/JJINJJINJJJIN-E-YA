@@ -1893,6 +1893,14 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "early" if pre.get("early_ok") else
             "normal"
         )
+        # 🔧 데이터수집: 진입시점 ATR/pstd 저장 (나중에 손절폭/트레일 간격 최적화용)
+        _entry_ticks = pre.get("ticks", [])
+        _entry_pstd = price_band_std(_entry_ticks, sec=10) if _entry_ticks else 0.0
+        _entry_pstd = _entry_pstd if _entry_pstd is not None else 0.0
+        _entry_c1 = get_minutes_candles(1, m, 20)
+        _entry_atr = atr14_from_candles(_entry_c1, 14) if _entry_c1 else None
+        _entry_atr_pct = (_entry_atr / avg_price * 100) if (_entry_atr and avg_price > 0) else 0.0
+
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
                 "entry_price": avg_price,
@@ -1906,6 +1914,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "signal_tag": pre.get("signal_tag", "기본"),  # 🔧 MFE 익절 경로용
                 "signal_type": _derived_signal_type,  # 🔧 FIX: SL 신호별 완화용
                 "trade_type": pre.get("trade_type", "scalp"),  # 🔧 특단조치: 스캘프/러너 진입 시 결정
+                # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 메트릭
+                "entry_atr_pct": round(_entry_atr_pct, 4),     # 진입시 ATR% (변동성 크기)
+                "entry_pstd": round(_entry_pstd, 6),           # 진입시 가격표준편차 (10초)
+                "entry_spread": round(pre.get("spread", 0), 4),  # 진입시 스프레드
+                "entry_consec": pre.get("consecutive_buys", 0),  # 진입시 연속매수
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -1976,7 +1989,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             f"• 슬리피지: {slip_pct*100:+.3f}%\n"
             f"• 주문금액: {krw_to_use:,.0f}원 ({actual_pct:.1f}%)\n"
             f"• 수량: {volume_filled:.6f}\n"
-            f"• 손절가: {safe_stop_str}원\n"
+            f"• 손절가: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
+            f"• ATR: {_entry_atr_pct:.3f}% | pstd: {_entry_pstd*100:.4f}% | 연속매수: {pre.get('consecutive_buys', 0)}회\n"
             f"{link_for(m)}"
         )
 
@@ -2048,6 +2062,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     "shadow_flags": pre.get("shadow_flags", ""),
                     "would_cut": 1 if pre.get("would_cut", False) else 0,
                     "is_prebreak": 1 if pre.get("is_prebreak", False) else 0,
+                    # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 (진입시 기록)
+                    "entry_atr_pct": round(_entry_atr_pct, 4),
+                    "entry_pstd": round(_entry_pstd, 6),
+                    "entry_spread": round(ob.get("spread", 0), 4),
+                    "entry_consec": cons_buys,
                 })
             except Exception as e:
                 print(f"[FEATURE_LOG_ERR] {e}")
@@ -2600,6 +2619,19 @@ def close_auto_position(m, reason=""):
             # 🔧 DEBUG: 청산 알람 발송 직전 로그
             print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={net_ret_pct:.2f}%(net) vol={vol:.6f} exit_price={exit_price_used}")
 
+            # 🔧 데이터수집: 청산 알람에 손절/트레일 튜닝용 메트릭 추가
+            _pos_data = pos or {}
+            _hold_sec = time.time() - _pos_data.get("entry_ts", time.time())
+            _mfe_val = _pos_data.get("mfe_pct", 0.0)
+            _mae_val = _pos_data.get("mae_pct", 0.0)
+            _mfe_sec_val = _pos_data.get("mfe_sec", 0)
+            _entry_atr_val = _pos_data.get("entry_atr_pct", 0)
+            _entry_pstd_val = _pos_data.get("entry_pstd", 0)
+            _trail_dist_val = _pos_data.get("trail_dist", 0)
+            _trail_stop_val = _pos_data.get("trail_stop_pct", 0)
+            # 피크→청산 드롭 (트레일이 얼마나 줬는지)
+            _peak_drop = _mfe_val - (net_ret_pct if net_ret_pct else 0)
+
             tg_send(
                 f"====================================\n"
                 f"{result_emoji} <b>자동청산 완료</b> {m}\n"
@@ -2613,6 +2645,10 @@ def close_auto_position(m, reason=""):
                 f"• 매수금액: {est_entry_value:,.0f}원\n"
                 f"• 청산금액: {est_exit_value:,.0f}원\n"
                 f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
+                f"-------- 튜닝 데이터 --------\n"
+                f"• 보유: {_hold_sec:.0f}초 | MFE: +{_mfe_val:.2f}% ({_mfe_sec_val:.0f}초) | MAE: {_mae_val:.2f}%\n"
+                f"• 피크드롭: {_peak_drop:.2f}% | 트레일: {_trail_dist_val:.3f}% (잠금 {_trail_stop_val:+.3f}%)\n"
+                f"• 진입ATR: {_entry_atr_val:.3f}% | pstd: {_entry_pstd_val*100:.4f}% | SL: {_pos_data.get('sl_pct', 0)*100:.2f}%\n"
                 f"====================================\n"
                 f"{link_for(m)}"
             )
@@ -3575,7 +3611,10 @@ FEATURE_FIELDS = [
     "added", "exit_reason",
     # 🔧 MFE/MAE (최고점/최저점 수익률) - 익절/손절 튜닝용
     "mfe_pct", "mae_pct",
-    "pnl_pct", "result", "hold_sec"
+    "pnl_pct", "result", "hold_sec",
+    # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 신규 필드
+    "entry_atr_pct", "entry_pstd", "entry_spread", "entry_consec",
+    "mfe_sec", "trail_dist", "trail_stop_pct", "peak_drop",
 ]
 
 def log_trade_features(entry_data: dict, exit_data: dict = None):
@@ -3667,6 +3706,14 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         # 🔧 MFE/MAE 기록 (익절/손절 튜닝용)
                         rows[i]["mfe_pct"] = f"{mfe_pct:.4f}"
                         rows[i]["mae_pct"] = f"{mae_pct:.4f}"
+                        # 🔧 데이터수집: 포지션에서 튜닝 메트릭 가져와서 CSV에 기록
+                        with _POSITION_LOCK:
+                            _pos_for_csv = OPEN_POSITIONS.get(market, {})
+                        rows[i]["mfe_sec"] = str(_pos_for_csv.get("mfe_sec", ""))
+                        rows[i]["trail_dist"] = str(_pos_for_csv.get("trail_dist", ""))
+                        rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
+                        _mfe_f = float(rows[i].get("mfe_pct", 0) or 0)
+                        rows[i]["peak_drop"] = f"{_mfe_f - pnl_pct * 100:.4f}" if _mfe_f else ""
                         break
 
                 # 🔧 FIX: 원자적 쓰기 (임시파일 → rename, 크래시 시 원본 보존)
@@ -7814,11 +7861,18 @@ def monitor_position(m,
             # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100 if entry_price > 0 else 0
             mae_pct = (worst / entry_price - 1.0) * 100 if entry_price > 0 else 0
+            # 🔧 데이터수집: MFE 도달 시간 기록 (트레일 간격 최적화용)
+            _mfe_sec = time.time() - start_ts if new_high else None
             with _POSITION_LOCK:
                 pos_now = OPEN_POSITIONS.get(m)
                 if pos_now:
                     pos_now["mfe_pct"] = mfe_pct
                     pos_now["mae_pct"] = mae_pct
+                    if _mfe_sec is not None:
+                        pos_now["mfe_sec"] = round(_mfe_sec, 1)  # 최고점 도달까지 걸린 시간
+                    if trail_armed:
+                        pos_now["trail_dist"] = round(trail_dist_min * 100, 3) if trail_dist_min else 0
+                        pos_now["trail_stop_pct"] = round((trail_stop / entry_price - 1.0) * 100, 3) if trail_stop > 0 and entry_price > 0 else 0
                     OPEN_POSITIONS[m] = pos_now
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
