@@ -5772,9 +5772,6 @@ def check_retest_entry(m):
         elif state == "bounce":
             # 🔧 FIX: API 호출은 락 바깥에서 수행 (아래에서 처리)
             pass
-                else:
-                    # 품질 미달이면 bounce 상태 유지 (다음 사이클에서 재확인)
-                    print(f"[RETEST] {m} 재진입 품질 미달 [{', '.join(reject_reasons)}] | bounce 유지")
 
         elif state == "ready":
             # 진입 조건 충족!
