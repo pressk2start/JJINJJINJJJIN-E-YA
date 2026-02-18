@@ -3034,8 +3034,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
     # 🔧 FIX: 루프 밖으로 이동 (매 반복 재생성 방지)
     _ALREADY_CLOSED_VERDICTS = {
-        "ATR손절", "TRAIL_STOP", "probe 스크래치", "횡보탈출", "부분청산→전량청산",
-        "스캘프_TP", "스캘프_Plateau",             # 스캘프 익절
+        "ATR손절", "TRAIL_STOP", "부분청산→전량청산",
+        "스캘프_TP",                                # 스캘프 익절
         "시간만료_손실컷", "시간만료_본절컷",       # 시간만료 손실/본절 즉시청산
         "연장_TRAIL_STOP", "연장_RATCHET_STOP",    # 연장 중 트레일/래칫 컷
         "연장_ATR_STOP",                            # 연장 ATR 손절
@@ -4167,6 +4167,9 @@ def analyze_and_update_weights():
             try:
                 w_avg = pd.to_numeric(wins[col], errors='coerce').mean()
                 l_avg = pd.to_numeric(loses[col], errors='coerce').mean()
+                # 🔧 FIX: NaN 방어 (json.dump 크래시 → 학습 결과 손실 방지)
+                if math.isnan(w_avg): w_avg = 0.0
+                if math.isnan(l_avg): l_avg = 0.0
                 stats[col] = {"win": w_avg, "lose": l_avg}
             except Exception:
                 pass
@@ -4301,15 +4304,20 @@ def analyze_and_update_weights():
             "GATE_PRICE_MIN": GATE_PRICE_MIN,
         }
 
-        # 저장
-        with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
+        # 🔧 FIX: 원자적 쓰기 (크래시 시 학습 데이터 손실 방지)
+        import tempfile
+        _wdir = os.path.dirname(WEIGHTS_PATH) or "."
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                          dir=_wdir, suffix=".tmp", delete=False) as _wf:
             json.dump({
                 "gate_thresholds": new_values,
                 "updated_at": now_kst_str(),
                 "sample_size": len(df),
                 "win_rate": win_rate,
                 "feature_stats": {k: {"win": round(v["win"], 3), "lose": round(v["lose"], 3)} for k, v in stats.items()}
-            }, f, ensure_ascii=False, indent=2)
+            }, _wf, ensure_ascii=False, indent=2)
+            _wf_path = _wf.name
+        os.replace(_wf_path, WEIGHTS_PATH)
 
         print(f"[AUTO_LEARN] 게이트 임계치 업데이트: {new_values}")
         print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {win_rate}%")
@@ -4765,11 +4773,13 @@ def five_min_context_ok(m):
     if not USE_5M_CONTEXT:
         return True
     hit = _C5_CACHE.get(m)
-    if hit and (time.time() - hit.get("ts", 0) <= 3.0):
+    # 🔧 FIX: ms 단위 통일 (purge_older_than이 ms 기준 → 기존 초 단위면 매번 전부 삭제됨)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= 3000):
         c5 = hit["c"]
     else:
         c5 = get_minutes_candles(5, m, 6)
-        _C5_CACHE.set(m, {"ts": time.time(), "c": c5})
+        _C5_CACHE.set(m, {"ts": _now_ms, "c": c5})
     if len(c5) < 4:
         return True
     try:
