@@ -137,7 +137,7 @@ def get_trail_distance_min():
     return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.65)
 
 # 하위 호환용
-TRAIL_DISTANCE_MIN = TRAIL_DISTANCE_MIN_BASE
+# TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 # 🔧 FIX: 변수명 명확화 - 왕복/편도 혼동 방지
@@ -174,7 +174,7 @@ def _apply_exit_profile():
     - strict  : 엄격(보수적, 손실축소 지향)
     """
     global WARMUP_SEC, HARD_STOP_DD, EXIT_DEBOUNCE_SEC, EXIT_DEBOUNCE_N
-    global TRAIL_ATR_MULT, TRAIL_DISTANCE_MIN, TRAIL_DISTANCE_MIN_BASE
+    global TRAIL_ATR_MULT, TRAIL_DISTANCE_MIN_BASE
     global SPIKE_RECOVERY_WINDOW, SPIKE_RECOVERY_MIN_BUY
     global CTX_EXIT_THRESHOLD
 
@@ -187,7 +187,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
         TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 매도구조개선: 0.5→1.0% (gentle은 최대 여유)
-        TRAIL_DISTANCE_MIN = 0.010
+        # TRAIL_DISTANCE_MIN 제거
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
@@ -199,7 +199,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
         TRAIL_DISTANCE_MIN_BASE = 0.007  # 🔧 손절억제: 0.6→0.7% (strict도 SL 연동 상향)
-        TRAIL_DISTANCE_MIN = 0.007
+        # TRAIL_DISTANCE_MIN 제거
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
@@ -211,7 +211,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_N = 4  # 🔧 손절억제: 3→4회
         TRAIL_ATR_MULT = 1.0
         TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 손절억제: 0.6→0.8% (SL 1.2% 연동)
-        TRAIL_DISTANCE_MIN = 0.008
+        # TRAIL_DISTANCE_MIN 제거
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -529,8 +529,6 @@ _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 
 # 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
-REMONITOR_COOLDOWN_SEC = 300  # 5분
-REMONITOR_LAST_ALERT = {}
 
 # =========================
 # 📈 최근 승률 기반 리스크 튜닝
@@ -1935,7 +1933,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # 진입 사유 한 줄 생성 (디테일 포함)
         kd = pre.get("killer_details", {})
-        checks = kd.get("checks", {})
         thr = kd.get("thresholds", {})  # 임계치
         score = pre.get("score", 0)
         vol_b = kd.get('vol_base', 0)
@@ -1943,7 +1940,6 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         buy_r = kd.get('buy_ratio', 0)
         turn_r = kd.get('turn', 0)
         imb = kd.get('imbalance', 0)
-        consec = kd.get('consecutive_buys', 0)
 
 
         # 🔧 대금/배수 표시 포맷
@@ -9414,12 +9410,16 @@ def main():
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
-                if _ENTRY_SUSPEND_UNTIL > time.time():
-                    _remain = int(_ENTRY_SUSPEND_UNTIL - time.time())
+                # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
+                with _STREAK_LOCK:
+                    _suspend_ts = _ENTRY_SUSPEND_UNTIL
+                    _max_mode = _ENTRY_MAX_MODE
+                if _suspend_ts > time.time():
+                    _remain = int(_suspend_ts - time.time())
                     cut("LOSE_SUSPEND", f"{m} 연패 진입중지 (잔여 {_remain}초)")
                     continue
                 # 🔧 특단조치: probe 폐지 → half 강제
-                if _ENTRY_MAX_MODE == "half" and pre.get("entry_mode") == "confirm":
+                if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[LOSE_GATE] {m} 연패 모드제한 → half 강제 (probe 폐지)")
 
