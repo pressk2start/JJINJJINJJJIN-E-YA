@@ -683,12 +683,17 @@ def upbit_private_post(path, body=None, timeout=7):
     url = f"https://api.upbit.com{path}"
     body = body or {}
     _max_retries = 3
+    # 🔧 FIX: 주문 POST는 500/502/503 재시도 금지 (멱등성 없음 → 중복 주문 위험)
+    _is_order = (path == "/v1/orders")
     for _attempt in range(_max_retries + 1):
         headers = _make_auth_headers(body)
         _throttle()
         try:
             r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
-            if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
+            # 429: 항상 재시도 (rate limit = 미처리 보장)
+            # 500/502/503: 주문이면 재시도 금지 (이미 처리됐을 수 있음)
+            _retry_codes = (429,) if _is_order else (429, 500, 502, 503)
+            if r.status_code in _retry_codes and _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
                 print(f"[API_RETRY] POST {path} → {r.status_code}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
                 time.sleep(_wait)
@@ -824,11 +829,15 @@ def place_limit_buy(market, price, volume):
     if price * volume < 5000:
         print(f"[LIMIT_BUY_ERR] {market} 최소주문금액 미달: {price*volume:.0f}원")
         return None
+    # 🔧 FIX: 호가 단위에 맞춘 가격 포맷 (int() 절삭 → 저가코인 오류 방지)
+    _tick = upbit_tick_size(price)
+    _rounded = round(round(price / _tick) * _tick, 8)  # 호가 단위로 반올림
+    _price_str = f"{_rounded:.8f}".rstrip('0').rstrip('.') if _tick < 1 else str(int(_rounded))
     body = {
         "market": market,
         "side": "bid",
         "ord_type": "limit",
-        "price": str(int(price)),
+        "price": _price_str,
         "volume": f"{volume:.8f}",
     }
     return upbit_private_post("/v1/orders", body)
@@ -893,17 +902,26 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
         except Exception as _poll_e:
             print(f"[HYBRID] {market} 주문조회 실패: {_poll_e}")
 
+    cancel_order(order_uuid)  # 🔧 FIX: 취소 먼저 → 체결량 확정 후 잔여 계산 (레이스 방지)
+
+    # 🔧 FIX: 취소 후 최종 체결량 재조회 (취소 전 od는 stale → 과잉매수 위험)
     executed_vol = 0.0
     try:
-        if od:
-            executed_vol = float(od.get("executed_volume") or "0")
+        od_final = get_order(order_uuid)
+        if od_final:
+            executed_vol = float(od_final.get("executed_volume") or "0")
+        elif od:
+            executed_vol = float(od.get("executed_volume") or "0")  # fallback
     except Exception as _vol_e:
         print(f"[HYBRID] {market} 체결량 파싱 실패: {_vol_e}")
+        if od:
+            try:
+                executed_vol = float(od.get("executed_volume") or "0")
+            except Exception:
+                pass
 
     remaining_vol = buy_volume - executed_vol
     remaining_krw = int(remaining_vol * ask1_price)
-
-    cancel_order(order_uuid)
 
     if executed_vol > 0:
         print(f"[HYBRID] {market} 부분체결 {executed_vol:.6f} / 잔여 {remaining_vol:.6f}")
@@ -6602,7 +6620,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
 
     # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
-    if any(stable in m.upper() for stable in ["USDT", "USDC", "DAI", "TUSD", "BUSD"]):
+    _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
+    if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
         return None
 
@@ -7114,9 +7133,10 @@ def append_csv(row: dict):
         with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=DL_FIELDS)
             if new: w.writeheader()
+            padded = dict(row)  # 🔧 FIX: 복사본에 패딩 (caller dict 오염 방지)
             for k in DL_FIELDS:
-                if k not in row: row[k] = ""
-            w.writerow(row)
+                if k not in padded: padded[k] = ""
+            w.writerow(padded)
 
 
 def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
@@ -7415,24 +7435,25 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
     pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
 
-    # 🔧 FIX: 신호별 동적 MAX (곱셈 후 원래 MAX에 막히는 버그 수정)
-    max_sl = DYN_SL_MAX
+    # 🔧 FIX: 복합 승수 추적 (신호+수익 동시 적용 시 max_sl도 복합으로)
+    _sl_mult = 1.0
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
         pct *= 1.3
-        max_sl = max(max_sl, DYN_SL_MAX * 1.3)  # MAX도 같이 확대
+        _sl_mult *= 1.3
     # ⭕ 동그라미(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
     elif signal_type == "circle":
         pct *= 1.3
-        max_sl = max(max_sl, DYN_SL_MAX * 1.3)
+        _sl_mult *= 1.3
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
         pct *= 1.5
-        max_sl = max(max_sl, DYN_SL_MAX * 1.5)  # MAX도 같이 확대
+        _sl_mult *= 1.5
 
-    # 🔧 FIX: 동적 MAX로 재클램프 (신호별 완화가 실제로 작동)
+    # 🔧 FIX: 동적 MAX = 기본MAX × 복합승수 (신호1.3 + 수익1.5 = 1.95x 정상 반영)
+    max_sl = DYN_SL_MAX * _sl_mult
     pct = min(max(pct, DYN_SL_MIN), max_sl)
 
     # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
@@ -7734,7 +7755,8 @@ def monitor_position(m,
         return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
 
     c1 = get_minutes_candles(1, m, 20)
-    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1)
+    # 🔧 FIX: 초기 SL에도 signal_type 전달 (래칫 max()로 인해 초기값이 영구 지배 → ign/circle 완화 무효화 방지)
+    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1, signal_type=pre.get("signal_type", "normal"))
 
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
