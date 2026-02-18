@@ -5272,6 +5272,7 @@ def btc_5m_change():
 
 # === BTC 변동성 레짐 감지 (진입 품질 향상) ===
 _BTC_REGIME_CACHE = {"regime": "normal", "ts": 0, "atr_pct": 0.0}
+_BTC_REGIME_LOCK = threading.Lock()  # 🔧 FIX: 캐시 TOCTOU 방지
 
 def btc_volatility_regime():
     """
@@ -5284,8 +5285,9 @@ def btc_volatility_regime():
     Returns: (regime: str, atr_pct: float)
     """
     now = time.time()
-    if now - _BTC_REGIME_CACHE["ts"] < 10:
-        return _BTC_REGIME_CACHE["regime"], _BTC_REGIME_CACHE["atr_pct"]
+    with _BTC_REGIME_LOCK:
+        if now - _BTC_REGIME_CACHE["ts"] < 10:
+            return _BTC_REGIME_CACHE["regime"], _BTC_REGIME_CACHE["atr_pct"]
 
     try:
         c1_btc = get_minutes_candles(1, "KRW-BTC", 20)
@@ -5306,7 +5308,8 @@ def btc_volatility_regime():
         else:
             regime = "normal"
 
-        _BTC_REGIME_CACHE.update({"regime": regime, "ts": now, "atr_pct": atr_pct})
+        with _BTC_REGIME_LOCK:
+            _BTC_REGIME_CACHE.update({"regime": regime, "ts": now, "atr_pct": atr_pct})
         return regime, atr_pct
 
     except Exception:
@@ -6241,18 +6244,6 @@ def circle_cleanup():
             _CIRCLE_WATCHLIST.pop(m, None)
 
 
-def circle_watchlist_status():
-    """⭕ 현재 동그라미 워치리스트 상태 요약 (디버그/텔레그램용)"""
-    with _CIRCLE_LOCK:
-        if not _CIRCLE_WATCHLIST:
-            return ""
-        parts = []
-        for m, w in _CIRCLE_WATCHLIST.items():
-            elapsed = time.time() - w["reg_ts"]
-            parts.append(f"{m}({w['state']},{w['candle_count']}봉,{elapsed:.0f}초)")
-        return " | ".join(parts)
-
-
 def circle_confirm_entry(m):
     """⭕ 동그라미 진입 확정 시 워치리스트에서 제거 (메인루프에서 호출)"""
     with _CIRCLE_LOCK:
@@ -6521,33 +6512,6 @@ def is_sideways_regime(c1, lookback=20):
     is_sideways = range_pct < sideways_thr
 
     return is_sideways, range_pct
-
-
-def near_box_boundary(price, c1, lookback=20, threshold=0.98):
-    """
-    박스 상단/하단 근처 판정
-    - 박스 상단 근처에서 진입하면 저항에 막힐 확률 높음
-    - threshold=0.98: 상단의 98% 이상이면 "근처"로 판정
-    """
-    if len(c1) < lookback:
-        return False, ""
-
-    candles = c1[-lookback:]
-    highs = [c["high_price"] for c in candles]
-    lows = [c["low_price"] for c in candles]
-
-    box_high = max(highs)
-    box_low = min(lows)
-
-    # 박스 상단 근처 (저항)
-    if price >= box_high * threshold:
-        return True, "BOX_TOP"
-
-    # 박스 하단 근처 (지지) - 이건 오히려 좋을 수 있어서 패스
-    # if price <= box_low * (2 - threshold):
-    #     return True, "BOX_BOTTOM"
-
-    return False, ""
 
 
 def calc_ema_slope(c1, period=20, lookback=5):
