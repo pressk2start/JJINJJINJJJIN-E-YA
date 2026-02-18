@@ -103,13 +103,7 @@ def get_expected_exit_slip_pct():
 # 하위 호환용
 PROFIT_CHECKPOINT = PROFIT_CHECKPOINT_BASE
 
-# 🔧 횡보 탈출 로직 (진입 후 일정시간 횡보 시 미니트레일링으로 탈출)
-SIDEWAYS_TIMEOUT = 60       # 횡보 판정 시간 (초) - before1 기준
-
-# 🔧 스크래치 규칙 (초반 개선 없으면 빠른 탈출)
-# 🔧 FIX: 승률 개선 - 시간 단축 + 최소 개선폭 상향 (before1 기준)
-SCRATCH_TIMEOUT_SEC = 30    # 🔧 손절억제: 20→30초 (리포트: 조기탈출 과다 → 더 기다려서 모멘텀 확인)
-SCRATCH_MIN_GAIN = 0.0006   # 최소 +0.06% 이상 상승해야 유지
+# SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
@@ -124,7 +118,7 @@ MFE_RR_MULTIPLIERS = {
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
-MFE_PARTIAL_RATIO = 0.5  # 부분익절 비율 (50%)
+# MFE_PARTIAL_RATIO 제거 (미사용 — 실제 비율은 하드코딩됨)
 # ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
 SCALP_TO_RUNNER_MIN_BUY = 0.56   # 🔧 0.58→0.56 (러너 전환 기회 확대)
 SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
@@ -262,7 +256,7 @@ RETEST_PULLBACK_MIN = 0.006          # 🔧 최소 0.6% 되돌림 필요 (너무
 RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
 RETEST_BOUNCE_MIN = 0.002            # 최소 0.2% 반등 확인
 RETEST_TIMEOUT_SEC = 900             # 🔧 15분 타임아웃 (3분→15분, 눌림 알파 소멸 전까지)
-RETEST_SUPPORT_EMA = 20              # EMA 지지 확인용
+# RETEST_SUPPORT_EMA 제거 (미사용 — EMA 지지 체크 미구현)
 RETEST_MORNING_HOURS = (8, 10)       # 장초 시간대 (08:00~10:00)
 
 # 🔧 리테스트 재진입 품질 필터 (떨어지는 칼 진입 구조적 차단)
@@ -290,7 +284,6 @@ CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + �
 CIRCLE_PULLBACK_MIN_PCT = 0.009        # 최소 0.9% 눌림 (고점 대비) — 0.3%는 윗꼬리 한번에 통과됨
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
 CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
-CIRCLE_REBREAK_CONFIRM = True          # 재돌파 시 플로우 확인 필수
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
@@ -300,6 +293,7 @@ CIRCLE_STATE_MIN_DWELL_SEC = 15        # 상태별 최소 체류 시간 (초) �
 CIRCLE_REBREAK_BUY_RATIO_MIN = 0.55    # 재돌파 시 최소 매수비 (0.52→0.55)
 CIRCLE_REBREAK_IMBALANCE_MIN = 0.30    # 재돌파 시 최소 임밸런스 (0.25→0.30)
 CIRCLE_REBREAK_SPREAD_MAX = 0.25       # 재돌파 시 스프레드 상한 (%) (0.35→0.25)
+CIRCLE_REBREAK_MIN_SCORE = 3           # 🔧 FIX: 상수화 (기존 로컬변수 → 설정에서 튜닝 가능)
 CIRCLE_REBREAK_KRW_PER_SEC_MIN = 12000 # 재돌파 시 최소 체결강도 (8000→12000)
 
 # 동그라미 워치리스트
@@ -345,35 +339,31 @@ def _try_acquire_entry_lock(market: str, ttl_sec: int = 300, reentrant: bool = F
         _MEMORY_ENTRY_LOCKS[market] = (time.time(), current_owner)
 
     # 2️⃣ 파일 락 (프로세스 간)
+    # 🔧 FIX: TOCTOU 방지 — O_CREAT|O_EXCL 먼저 시도, 실패 시 TTL 체크 후 재시도
     path = _entry_lock_path(market)
-    try:
-        # 기존 락 파일이 있으면 TTL 체크
-        if os.path.exists(path):
-            if (time.time() - os.path.getmtime(path)) < ttl_sec:
-                # 메모리 락 롤백
-                with _MEMORY_LOCK:
-                    _MEMORY_ENTRY_LOCKS.pop(market, None)
-                return False
-            # TTL 만료된 락 파일 제거
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-
-        # 원자적 파일 생성 시도 (O_CREAT | O_EXCL = 이미 존재하면 실패)
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.write(fd, str(time.time()).encode())
-        os.close(fd)
-        return True
-    except FileExistsError:
-        # 다른 스레드/프로세스가 먼저 생성함
-        with _MEMORY_LOCK:
-            _MEMORY_ENTRY_LOCKS.pop(market, None)
-        return False
-    except Exception:
-        with _MEMORY_LOCK:
-            _MEMORY_ENTRY_LOCKS.pop(market, None)
-        return False
+    for _fl_attempt in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(fd, str(time.time()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            if _fl_attempt == 0:
+                # 첫 실패: TTL 만료 여부 확인 후 제거 → 재시도
+                try:
+                    if (time.time() - os.path.getmtime(path)) >= ttl_sec:
+                        os.remove(path)
+                        continue  # 재시도
+                except Exception:
+                    pass
+            # TTL 미만이거나 제거 실패 → 락 획득 실패
+            with _MEMORY_LOCK:
+                _MEMORY_ENTRY_LOCKS.pop(market, None)
+            return False
+        except Exception:
+            with _MEMORY_LOCK:
+                _MEMORY_ENTRY_LOCKS.pop(market, None)
+            return False
 
 def _release_entry_lock(market: str):
     """락 해제 (파일 삭제 + 메모리 락 해제)"""
@@ -534,6 +524,7 @@ last_trade_was_loss = {}
 _LAST_ORPHAN_SYNC = 0
 ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
+_ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 
@@ -568,8 +559,12 @@ def record_trade(market: str, pnl_pct: float):
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
     # 소수점 비율(0.02 = 2%)이 정상 범위, 10 이상이면 확실히 % 단위
     # 🔧 FIX: 기존 1.0 기준은 실제 100%+ 수익을 잘못 축소 — 10.0으로 상향
+    # 🔧 FIX: 1~10 범위 경고 (호출부 단위 불일치 조기 발견)
     if abs(pnl_pct) > 10.0:
+        print(f"[RECORD_TRADE_WARN] {market} pnl_pct={pnl_pct:.4f} > 10.0 → 자동 /100 변환 (호출부 단위 확인 필요)")
         pnl_pct = pnl_pct / 100.0
+    elif abs(pnl_pct) > 1.0:
+        print(f"[RECORD_TRADE_WARN] {market} pnl_pct={pnl_pct:.4f} — 100%+ 수익? 호출부 단위 재확인")
     is_win = pnl_pct > 0
 
     TRADE_HISTORY.append({
@@ -1242,9 +1237,17 @@ def sync_orphan_positions():
                 print(f"[ORPHAN] {market} 모니터링 스레드 시작")
 
         # 🔧 청산된 포지션은 _ORPHAN_HANDLED에서 제거 (재매수 시 다시 감지 가능)
-        closed_markets = _ORPHAN_HANDLED - current_markets
-        for m in closed_markets:
-            _ORPHAN_HANDLED.discard(m)
+        # 🔧 FIX: 락 보호 (compound set 연산 원자성 보장)
+        with _ORPHAN_LOCK:
+            closed_markets = _ORPHAN_HANDLED - current_markets
+            for m in closed_markets:
+                _ORPHAN_HANDLED.discard(m)
+
+        # 🔧 FIX: _RECENT_BUY_TS 오래된 항목 정리 (메모리 누수 방지)
+        _now_cleanup = time.time()
+        _stale_keys = [k for k, v in _RECENT_BUY_TS.items() if _now_cleanup - v > 600]
+        for k in _stale_keys:
+            _RECENT_BUY_TS.pop(k, None)
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
@@ -2249,7 +2252,9 @@ def add_auto_position(m, cur_price, reason=""):
         new_vol = old_vol + volume_filled
         if new_vol <= 0:
             return False, None
-        new_entry_price = (entry_price_old * old_vol + avg_price_add * volume_filled) / new_vol
+        # 🔧 FIX: entry_price를 같은 락 내에서 재읽기 (초기 읽기와 여기 사이 변경 가능)
+        _ep_old = pos.get("entry_price", entry_price_old)
+        new_entry_price = (_ep_old * old_vol + avg_price_add * volume_filled) / new_vol
 
         pos["entry_price"] = new_entry_price
         pos["volume"] = new_vol
@@ -2607,7 +2612,8 @@ def close_auto_position(m, reason=""):
                     update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                         added=was_added, exit_reason=reason,
                                         mfe_pct=mfe, mae_pct=mae,
-                                        entry_ts=pos.get("entry_ts"))
+                                        entry_ts=pos.get("entry_ts"),
+                                        pos_snapshot=dict(pos))
                 except Exception as _e:
                     print(f"[FEATURE_UPDATE_ERR] {_e}")
 
@@ -3173,17 +3179,16 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # - 3회 연속이면 전량 청산으로 승격
             # 🔧 FIX(0-2): entry_mode별 컨텍스트 청산 재활성화
             # probe/half은 약신호이므로 나쁜 흐름에서 빠르게 청산
+            # 🔧 FIX: 단일 락 블록으로 통합 (TOCTOU 방지 — 읽기~증가 사이 변경 가능성 제거)
             with _POSITION_LOCK:
                 pos_ctx = OPEN_POSITIONS.get(m, {})
-            _ctx_em = pos_ctx.get("entry_mode", "confirm")
-            if _ctx_em == "probe":
-                CONTEXT_CLOSE_THRESHOLD = 2   # probe: 2회 연속이면 청산
-            elif _ctx_em == "half":
-                CONTEXT_CLOSE_THRESHOLD = 3   # half: 3회 연속이면 청산
-            else:
-                CONTEXT_CLOSE_THRESHOLD = 5   # confirm: 5회 연속이면 청산
-            with _POSITION_LOCK:
-                pos_ctx = OPEN_POSITIONS.get(m, {})
+                _ctx_em = pos_ctx.get("entry_mode", "confirm")
+                if _ctx_em == "probe":
+                    CONTEXT_CLOSE_THRESHOLD = 2   # probe: 2회 연속이면 청산
+                elif _ctx_em == "half":
+                    CONTEXT_CLOSE_THRESHOLD = 3   # half: 3회 연속이면 청산
+                else:
+                    CONTEXT_CLOSE_THRESHOLD = 5   # confirm: 5회 연속이면 청산
                 ctx_count = pos_ctx.get("ctx_close_count", 0) + 1
                 if pos_ctx:
                     pos_ctx["ctx_close_count"] = ctx_count
@@ -3338,8 +3343,7 @@ GATE_PSTD_MAX = 0.50      # 🔧 대폭 완화 (0.10→0.50) 데이터 수집 �
 GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 수집 후 재조정
 GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
 GATE_TURN_MAX_ALT = 150.0     # before2 기준 유지 (워시트레이딩 리스크 차단)
-GATE_TURN_MAX_ALT_PROBE = 120.0  # before2 기준 유지 (과회전 알트 차단)
-GATE_CONSEC_BUY_MIN_QUALITY = 1   # 🔧 대폭 완화 (5→1) 데이터 수집 후 재조정
+# GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
 GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
@@ -3401,12 +3405,8 @@ IGN_MIN_BUY = 0.60
 
 # Bot-aware
 BOT_PINGPONG_MAX_BAND = 0.0015
-BOT_PINGPONG_MIN_ALT = 0.90
 BOT_WASH_REPEAT_VOL_N = 5
-BOT_TWAP_MAX_CV = 0.48
-BOT_TWAP_MAX_PSTD = 0.0018
-BOT_ACCUM_MIN_BUY = 0.54
-BOT_ACCUM_MAX_BUY = 0.68
+# BOT_PINGPONG_MIN_ALT, BOT_TWAP_*, BOT_ACCUM_* 제거 (미사용 — TWAP/적립 봇 감지 함수 삭제됨)
 
 # 트렌드 가드
 
@@ -3637,7 +3637,7 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
                         mfe_pct: float = 0.0, mae_pct: float = 0.0,
-                        entry_ts: float = None):
+                        entry_ts: float = None, pos_snapshot: dict = None):
     """
     청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
     - added: 추매 여부 (probe → confirm 승격 시 True)
@@ -3708,8 +3708,9 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         rows[i]["mfe_pct"] = f"{mfe_pct:.4f}"
                         rows[i]["mae_pct"] = f"{mae_pct:.4f}"
                         # 🔧 데이터수집: 포지션에서 튜닝 메트릭 가져와서 CSV에 기록
+                        # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 제거됨)
                         with _POSITION_LOCK:
-                            _pos_for_csv = OPEN_POSITIONS.get(market, {})
+                            _pos_for_csv = OPEN_POSITIONS.get(market, pos_snapshot if pos_snapshot else {})
                         rows[i]["mfe_sec"] = str(_pos_for_csv.get("mfe_sec", ""))
                         rows[i]["trail_dist"] = str(_pos_for_csv.get("trail_dist", ""))
                         rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
@@ -4571,7 +4572,9 @@ def upbit_get(url, params=None, timeout=7):
     for attempt in range(3):  # 4 -> 3 유지
         try:
             _throttle()
-            r = SESSION.get(url, params=params, timeout=timeout)
+            # 🔧 FIX: SESSION 참조를 로컬에 캐시 (close/replace 레이스 방지)
+            _s = SESSION
+            r = _s.get(url, params=params, timeout=timeout)
             if r.status_code == 429:
                 REQ_STATS["http429"] += 1
                 # 지수적 백오프 + 버킷 속도 하향(보다 공격적으로)
@@ -4588,7 +4591,8 @@ def upbit_get(url, params=None, timeout=7):
                 continue
             r.raise_for_status()
             REQ_STATS["ok"] += 1
-            _CONSEC_CONN_ERR = 0
+            with _SESSION_REFRESH_LOCK:
+                _CONSEC_CONN_ERR = 0
             # ✅ 429 후 점진 회복 (장기 성능 저하 방지)
             # 🔧 FIX H2: 락 보호 (멀티스레드 동시 수정 방지)
             with _req_lock:
@@ -4601,8 +4605,11 @@ def upbit_get(url, params=None, timeout=7):
         except requests.exceptions.ConnectionError:
             REQ_STATS["errors"] += 1
             REQ_STATS["conn_err"] += 1
-            _CONSEC_CONN_ERR += 1
-            if _CONSEC_CONN_ERR >= 3:
+            # 🔧 FIX: 락 보호 (read-modify-write 레이스 방지)
+            with _SESSION_REFRESH_LOCK:
+                _CONSEC_CONN_ERR += 1
+                _should_refresh = _CONSEC_CONN_ERR >= 3
+            if _should_refresh:
                 _refresh_session()
                 time.sleep(0.6)
             else:
@@ -5763,72 +5770,8 @@ def check_retest_entry(m):
                 print(f"[RETEST] {m} 반등 감지 | +{bounce_pct*100:.2f}% | state→bounce")
 
         elif state == "bounce":
-            # =====================================================
-            # 🔧 강화: "그냥 반등" 말고 재돌파 확인형 진입
-            # 직전 박스 상단 재탈환 + uptick + 품질 필터
-            # =====================================================
-            support_ok = cur_price >= entry_price * 0.995  # 진입가 -0.5% 이상
-
-            if support_ok and bounce_pct >= RETEST_BOUNCE_MIN:
-                # --- 재진입 품질 게이트 (떨어지는 칼 구조적 차단) ---
-                reentry_ok = True
-                reject_reasons = []
-
-                try:
-                    ticks = get_recent_ticks(m, 100)
-                    ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
-                    ob = None
-                    if ob_raw and len(ob_raw) > 0:
-                        _units = ob_raw[0].get("orderbook_units", [])
-                        if _units:
-                            ob = {
-                                "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
-                                           ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
-                                          if _units[0]["ask_price"] > 0 else 999,
-                                "raw": ob_raw[0],
-                            }
-
-                    if ticks and len(ticks) >= 5:
-                        t10_stats = micro_tape_stats_from_ticks(ticks, 10)
-
-                        # (1) 매수비 체크
-                        if t10_stats["buy_ratio"] < RETEST_BUY_RATIO_MIN:
-                            reentry_ok = False
-                            reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{RETEST_BUY_RATIO_MIN}")
-
-                        # (2) 틱 신선도 체크
-                        fresh_ok_rt = last_two_ticks_fresh(ticks)
-                        if not fresh_ok_rt:
-                            reentry_ok = False
-                            reject_reasons.append("fresh_fail")
-
-                        # (3) uptick 확인 (재돌파 시그널)
-                        if not uptick_streak_from_ticks(ticks, need=2):
-                            reentry_ok = False
-                            reject_reasons.append("no_uptick")
-                    else:
-                        reentry_ok = False
-                        reject_reasons.append("ticks_insufficient")
-
-                    # (4) 임밸런스 체크
-                    if ob and ob.get("raw"):
-                        imb_rt = calc_orderbook_imbalance(ob)
-                        if imb_rt < RETEST_IMBALANCE_MIN:
-                            reentry_ok = False
-                            reject_reasons.append(f"imb={imb_rt:.2f}<{RETEST_IMBALANCE_MIN}")
-
-                    # (5) 스프레드 체크
-                    if ob and ob.get("spread", 999) > RETEST_SPREAD_MAX:
-                        reentry_ok = False
-                        reject_reasons.append(f"spread={ob['spread']:.2f}>{RETEST_SPREAD_MAX}")
-
-                except Exception as e:
-                    reentry_ok = False
-                    reject_reasons.append(f"api_err:{e}")
-
-                if reentry_ok:
-                    watch["state"] = "ready"
-                    print(f"[RETEST] {m} 재돌파 확인 ✓ | 현재가 {cur_price:,.0f} | br/imb/fresh/uptick/spread 모두 통과 | state→ready")
+            # 🔧 FIX: API 호출은 락 바깥에서 수행 (아래에서 처리)
+            pass
                 else:
                     # 품질 미달이면 bounce 상태 유지 (다음 사이클에서 재확인)
                     print(f"[RETEST] {m} 재진입 품질 미달 [{', '.join(reject_reasons)}] | bounce 유지")
@@ -5842,6 +5785,72 @@ def check_retest_entry(m):
             _RETEST_WATCHLIST.pop(m, None)  # 워치리스트에서 제거
             print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f} | half 강제")
             return pre
+
+    # -----------------------------------------------
+    # 🔧 FIX: bounce → ready API 호출을 락 바깥에서 수행 (네트워크 지연 시 블로킹 방지)
+    # -----------------------------------------------
+    if state == "bounce":
+        support_ok = cur_price >= entry_price * 0.995
+        if support_ok and bounce_pct >= RETEST_BOUNCE_MIN:
+            reentry_ok = True
+            reject_reasons = []
+
+            try:
+                ticks = get_recent_ticks(m, 100)
+                ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                ob = None
+                if ob_raw and len(ob_raw) > 0:
+                    _units = ob_raw[0].get("orderbook_units", [])
+                    if _units:
+                        ob = {
+                            "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
+                                       ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
+                                      if _units[0]["ask_price"] > 0 else 999,
+                            "raw": ob_raw[0],
+                        }
+
+                if ticks and len(ticks) >= 5:
+                    t10_stats = micro_tape_stats_from_ticks(ticks, 10)
+
+                    if t10_stats["buy_ratio"] < RETEST_BUY_RATIO_MIN:
+                        reentry_ok = False
+                        reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{RETEST_BUY_RATIO_MIN}")
+
+                    fresh_ok_rt = last_two_ticks_fresh(ticks)
+                    if not fresh_ok_rt:
+                        reentry_ok = False
+                        reject_reasons.append("fresh_fail")
+
+                    if not uptick_streak_from_ticks(ticks, need=2):
+                        reentry_ok = False
+                        reject_reasons.append("no_uptick")
+                else:
+                    reentry_ok = False
+                    reject_reasons.append("ticks_insufficient")
+
+                if ob and ob.get("raw"):
+                    imb_rt = calc_orderbook_imbalance(ob)
+                    if imb_rt < RETEST_IMBALANCE_MIN:
+                        reentry_ok = False
+                        reject_reasons.append(f"imb={imb_rt:.2f}<{RETEST_IMBALANCE_MIN}")
+
+                if ob and ob.get("spread", 999) > RETEST_SPREAD_MAX:
+                    reentry_ok = False
+                    reject_reasons.append(f"spread={ob['spread']:.2f}>{RETEST_SPREAD_MAX}")
+
+            except Exception as e:
+                reentry_ok = False
+                reject_reasons.append(f"api_err:{e}")
+
+            # 🔧 FIX: 상태 전이는 락 안에서 (API 후 상태 재검증)
+            with _RETEST_LOCK:
+                watch = _RETEST_WATCHLIST.get(m)
+                if watch and watch["state"] == "bounce":
+                    if reentry_ok:
+                        watch["state"] = "ready"
+                        print(f"[RETEST] {m} 재돌파 확인 ✓ | 현재가 {cur_price:,.0f} | br/imb/fresh/uptick/spread 모두 통과 | state→ready")
+                    else:
+                        print(f"[RETEST] {m} 재진입 품질 미달 [{', '.join(reject_reasons)}] | bounce 유지")
 
     return None
 
@@ -6042,10 +6051,11 @@ def circle_check_entry(m):
         return None
 
     # --- 눌림 퍼센트 계산 ---
-    # pullback_pct_hist: 역대 최저점 기준 (구조 훼손 판정용 — MAX 체크)
+    # pullback_pct_hist: 역대 최저점 기준 (구조 훼손 판정용 — MAX 체크, peak 기준)
     # pullback_pct_now:  현재가 기준 (실제 눌림 상태 판정용 — MIN 체크, 상태전이)
+    # 🔧 FIX: MIN 눌림은 ign_high 기준 (peak_after_ign이면 추가 상승 후 얕은 눌림도 통과 위험)
     pullback_pct_hist = (peak - pullback_low) / peak if peak > 0 else 0
-    pullback_pct_now = (peak - cur_price) / peak if peak > 0 else 0
+    pullback_pct_now = (ign_high - cur_price) / ign_high if ign_high > 0 else 0
 
     # --- was_below_reclaim 추적 (pullback 상태에서 body_mid 아래 경험 기록) ---
     with _CIRCLE_LOCK:
@@ -6145,87 +6155,9 @@ def circle_check_entry(m):
 
         elif state == "reclaim":
             # -----------------------------------------------
-            # reclaim → ready: 점화 고점 재돌파 + 플로우 품질 확인
-            # 이것이 "동그라미" 진입 시점
+            # reclaim → ready: 조건 충족 여부만 확인 (API 호출은 락 바깥)
             # -----------------------------------------------
-            if state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= ign_high:
-                # 재돌파 품질 게이트 — 3/5 점수제 (ALL PASS 아님!)
-                # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
-                rebreak_score = 0
-                rebreak_details = []
-                CIRCLE_REBREAK_MIN_SCORE = 3  # 5개 중 3개 이상 통과
-
-                try:
-                    ticks = get_recent_ticks(m, 100)
-                    ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
-                    ob = None
-                    if ob_raw and len(ob_raw) > 0:
-                        _units = ob_raw[0].get("orderbook_units", [])
-                        if _units:
-                            ob = {
-                                "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
-                                           ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
-                                          if _units[0]["ask_price"] > 0 else 999,
-                                "raw": ob_raw[0],
-                            }
-
-                    if ticks and len(ticks) >= 5:
-                        t10_stats = micro_tape_stats_from_ticks(ticks, 10)
-
-                        # (1) 매수비
-                        if t10_stats["buy_ratio"] >= CIRCLE_REBREAK_BUY_RATIO_MIN:
-                            rebreak_score += 1
-                            rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✓")
-                        else:
-                            rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✗")
-
-                        # (2) 체결강도
-                        if t10_stats["krw_per_sec"] >= CIRCLE_REBREAK_KRW_PER_SEC_MIN:
-                            rebreak_score += 1
-                            rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✓")
-                        else:
-                            rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✗")
-
-                        # (3) uptick 모멘텀
-                        if uptick_streak_from_ticks(ticks, need=2):
-                            rebreak_score += 1
-                            rebreak_details.append("uptick✓")
-                        else:
-                            rebreak_details.append("uptick✗")
-                    else:
-                        rebreak_details.append("ticks_insufficient")
-
-                    # (4) 임밸런스
-                    if ob and ob.get("raw"):
-                        imb_val = calc_orderbook_imbalance(ob)
-                        if imb_val >= CIRCLE_REBREAK_IMBALANCE_MIN:
-                            rebreak_score += 1
-                            rebreak_details.append(f"imb={imb_val:.2f}✓")
-                        else:
-                            rebreak_details.append(f"imb={imb_val:.2f}✗")
-
-                    # (5) 스프레드
-                    if ob and ob.get("spread", 999) <= CIRCLE_REBREAK_SPREAD_MAX:
-                        rebreak_score += 1
-                        rebreak_details.append(f"sp={ob['spread']:.2f}✓")
-                    elif ob:
-                        rebreak_details.append(f"sp={ob.get('spread',0):.2f}✗")
-
-                except Exception as e:
-                    rebreak_details.append(f"api_err:{e}")
-
-                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE:
-                    watch["state"] = "ready"
-                    print(
-                        f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
-                        f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
-                        f"| {candle_count}봉째 | state→ready"
-                    )
-                else:
-                    print(
-                        f"[CIRCLE] {m} 재돌파 품질 미달 {rebreak_score}/5<{CIRCLE_REBREAK_MIN_SCORE} "
-                        f"[{','.join(rebreak_details)}] | reclaim 유지"
-                    )
+            pass  # API 호출이 필요하므로 아래에서 락 해제 후 처리
 
         elif state == "ready":
             # -----------------------------------------------
@@ -6251,6 +6183,90 @@ def circle_check_entry(m):
 
             # pop은 메인루프 circle_confirm_entry()에서 수행
             return entry_pre
+
+    # -----------------------------------------------
+    # 🔧 FIX: reclaim → ready API 호출을 락 바깥에서 수행 (네트워크 지연 시 블로킹 방지)
+    # -----------------------------------------------
+    if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= ign_high:
+        rebreak_score = 0
+        rebreak_details = []
+
+        try:
+            ticks = get_recent_ticks(m, 100)
+            ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+            ob = None
+            if ob_raw and len(ob_raw) > 0:
+                _units = ob_raw[0].get("orderbook_units", [])
+                if _units:
+                    ob = {
+                        "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
+                                   ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
+                                  if _units[0]["ask_price"] > 0 else 999,
+                        "raw": ob_raw[0],
+                    }
+
+            if ticks and len(ticks) >= 5:
+                t10_stats = micro_tape_stats_from_ticks(ticks, 10)
+
+                # (1) 매수비
+                if t10_stats["buy_ratio"] >= CIRCLE_REBREAK_BUY_RATIO_MIN:
+                    rebreak_score += 1
+                    rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✓")
+                else:
+                    rebreak_details.append(f"br={t10_stats['buy_ratio']:.2f}✗")
+
+                # (2) 체결강도
+                if t10_stats["krw_per_sec"] >= CIRCLE_REBREAK_KRW_PER_SEC_MIN:
+                    rebreak_score += 1
+                    rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✓")
+                else:
+                    rebreak_details.append(f"krw/s={t10_stats['krw_per_sec']:,.0f}✗")
+
+                # (3) uptick 모멘텀
+                if uptick_streak_from_ticks(ticks, need=2):
+                    rebreak_score += 1
+                    rebreak_details.append("uptick✓")
+                else:
+                    rebreak_details.append("uptick✗")
+            else:
+                rebreak_details.append("ticks_insufficient")
+
+            # (4) 임밸런스
+            if ob and ob.get("raw"):
+                imb_val = calc_orderbook_imbalance(ob)
+                if imb_val >= CIRCLE_REBREAK_IMBALANCE_MIN:
+                    rebreak_score += 1
+                    rebreak_details.append(f"imb={imb_val:.2f}✓")
+                else:
+                    rebreak_details.append(f"imb={imb_val:.2f}✗")
+
+            # (5) 스프레드
+            if ob and ob.get("spread", 999) <= CIRCLE_REBREAK_SPREAD_MAX:
+                rebreak_score += 1
+                rebreak_details.append(f"sp={ob['spread']:.2f}✓")
+            elif ob:
+                rebreak_details.append(f"sp={ob.get('spread',0):.2f}✗")
+
+        except Exception as e:
+            rebreak_details.append(f"api_err:{e}")
+
+        # 🔧 FIX: 상태 전이는 락 안에서 (API 후 상태 재검증)
+        with _CIRCLE_LOCK:
+            watch = _CIRCLE_WATCHLIST.get(m)
+            if watch and watch["state"] == "reclaim":
+                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE:
+                    watch["state"] = "ready"
+                    watch["state_ts"] = time.time()
+                    print(
+                        f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
+                        f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
+                        f"| {candle_count}봉째 | state→ready"
+                    )
+                else:
+                    print(
+                        f"[CIRCLE] {m} 재돌파 품질 미달 {rebreak_score}/5<{CIRCLE_REBREAK_MIN_SCORE} "
+                        f"[{','.join(rebreak_details)}] | reclaim 유지"
+                    )
 
     return None
 
@@ -6490,7 +6506,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
-        momentum_ok = (consecutive_buys >= 3
+        momentum_ok = (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
                        or (buy_ratio >= 0.55 and imbalance >= 0.40))
         if not momentum_ok:
             return False, f"강돌파+모멘텀부족 consec{consecutive_buys} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
@@ -6510,7 +6526,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         cand_path = "거래량↑"
 
     # 진입 조건: 돌파 OR vol_vs_ma OR 점화 (기존 유지)
-    eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
+    # 🔧 FIX: min() 사용 (FLOOR=0.2이 하한이므로, 실효값은 둘 중 작은 값)
+    eff_vol_vs_ma = min(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
@@ -6960,7 +6977,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "ign_ok": (ignition_score >= 3),
         "mega_ok": mega,
         # 🔧 FIX: OVERHEAT→HALF 플래그 전달 (메인루프에서 entry_mode 제한)
-        "_overheat_half": "[OVERHEAT_HALF]" in gate_reason,
+        # 🔧 FIX: OVERHEAT→HALF 플래그 전달 (메인루프에서 entry_mode 제한)
+        "_overheat_half": gate_ok and "[OVERHEAT_HALF]" in gate_reason,
         # 🔧 VWAP 기반 진입 품질
         "vwap_score_bonus": vwap_score_bonus,
         "vwap_gap": round(vwap_gap, 2),
@@ -7059,7 +7077,7 @@ def final_check_leader(m, pre, tight_mode=False):
         sb_cons = pre.get("consecutive_buys", 0)
         sb_br = pre.get("buy_ratio", 0)
         sb_imb = pre.get("imbalance", 0)
-        consec_ok = sb_cons >= 3
+        consec_ok = sb_cons >= GATE_STRONGBREAK_CONSEC_MIN
         supply_ok = (sb_br >= 0.55 and sb_imb >= 0.40)
         # 🔧 FIX: AND → OR (주석 의도와 코드 불일치 수정)
         # - 기존: consec AND supply 둘 다 만족해야 유지 → 강돌파 과도한 차단
@@ -7461,7 +7479,8 @@ def upbit_tick_size(price: float) -> float:
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
     if not atr or atr <= 0:
-        return entry_price * (1 - STOP_LOSS_PCT), STOP_LOSS_PCT, None
+        # 🔧 FIX: 폴백도 DYN_SL_MIN 사용 (STOP_LOSS_PCT=1.5%와 불일치 해소)
+        return entry_price * (1 - DYN_SL_MIN), DYN_SL_MIN, None
 
     # 🔧 ATR 바닥값: 너무 작으면 휩쏘에 털림 방지 (최소 0.05% 또는 호가단위)
     atr = max(atr, entry_price * 0.0005, upbit_tick_size(entry_price))
@@ -7793,7 +7812,7 @@ def monitor_position(m,
     if horizon is None:
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
     start_ts = time.time()
-    MAX_RUNTIME = horizon * 1.5  # 최대 허용 실행시간 (정상시간의 1.5배)
+    # MAX_RUNTIME 제거 (미사용 — while 조건에서 horizon 직접 사용)
 
 
     # 디바운스/트레일 상태
@@ -8013,9 +8032,9 @@ def monitor_position(m,
                 _sl_duration = time.time() - stop_first_seen_ts
                 # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
                 _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
-                # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업 중 더 둔하게
-                _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0)
-                _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0)
+                # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업/소프트가드 중 더 둔하게
+                _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
+                _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
                 if not _is_hard_stop and stop_hits < _db_n and _sl_duration < _db_sec:
                     continue  # 디바운스 대기
                 # 디바운스 통과 → 실제 청산
@@ -8267,7 +8286,7 @@ def monitor_position(m,
             if checkpoint_reached and cur_gain < (dyn_checkpoint * 0.5):
                 checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
 
-            # 🔧 소프트 가드: 초기 30초간 청산 조건 강화
+            # 🔧 소프트 가드: 초기 30초간 손절/트레일 디바운스 강화 (false breakout 방어)
             in_soft_guard = alive_sec < SOFT_GUARD_SEC
 
             if not checkpoint_reached and cur_gain >= dyn_checkpoint:
@@ -8432,6 +8451,7 @@ def monitor_position(m,
                 tg_send_mid(f"⏰ {m} 시간만료 but 수익중 +{_final_gain*100:.2f}% → 90초 연장 러너모드")
                 _ext_start = time.time()
                 _ext_horizon = 90  # 연장 시간 (초)
+                _ext_trail_hits = 0  # 🔧 FIX: 트레일 디바운스 (1틱 노이즈 방지)
                 while time.time() - _ext_start <= _ext_horizon:
                     time.sleep(RECHECK_SEC)
                     # 포지션 존재 확인
@@ -8459,19 +8479,31 @@ def monitor_position(m,
                         trail_stop = max(trail_stop, curp * (1.0 - _ext_trail_dist))
                     best = max(best, curp)
 
-                    # 트레일 체크
+                    # 트레일 체크 (🔧 FIX: 2회 디바운스 — 메인루프와 동일 패턴)
                     if curp < trail_stop:
-                        _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                        close_auto_position(m, f"연장트레일컷 +{_ext_gain*100:.2f}%")
-                        _already_closed = True
-                        verdict = "연장_TRAIL_STOP"
-                        break
+                        _ext_trail_hits += 1
+                        if _ext_trail_hits >= 2:
+                            _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                            close_auto_position(m, f"연장트레일컷 +{_ext_gain*100:.2f}%")
+                            _already_closed = True
+                            verdict = "연장_TRAIL_STOP"
+                            break
+                    else:
+                        _ext_trail_hits = 0
                     # base_stop 체크
                     if base_stop > 0 and curp <= base_stop:
                         _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
                         close_auto_position(m, f"연장래칫컷 +{_ext_gain*100:.2f}%")
                         _already_closed = True
                         verdict = "연장_RATCHET_STOP"
+                        break
+                    # 🔧 FIX: ATR 동적 손절 체크 (연장루프에서도 가격 폭락 방어)
+                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached())
+                    if _ext_sl_price > 0 and curp <= _ext_sl_price:
+                        _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                        close_auto_position(m, f"연장ATR손절 {_ext_gain*100:.2f}% (SL {_ext_sl_pct*100:.2f}%)")
+                        _already_closed = True
+                        verdict = "연장_ATR_STOP"
                         break
 
                 if verdict is None:
