@@ -8309,14 +8309,21 @@ def monitor_position(m,
                             m, 0.50,
                             reason=f"스캘프→러너전환 +{cur_gain_now*100:.2f}% (매수{_tp_buy_r:.0%} 가속{_tp_accel:.1f}x)")
                         if ok and sold > 0:
+                            # 🔧 FIX: dust방지로 전량청산됐는지 확인 (오해 알림 방지)
+                            with _POSITION_LOCK:
+                                _pos_up = OPEN_POSITIONS.get(m)
+                            if not _pos_up:
+                                _already_closed = True
+                                verdict = "스캘프_TP_DUST"
+                                break
                             mfe_partial_done = True
                             last_exit_event_ts = time.time()
                             trade_type = "runner"  # ★ 러너로 승격
                             # 🔧 FIX: OPEN_POSITIONS에도 반영 — remonitor 재호출 시 trade_type 유지
                             with _POSITION_LOCK:
-                                _pos_up = OPEN_POSITIONS.get(m)
-                                if _pos_up:
-                                    _pos_up["trade_type"] = "runner"
+                                _pos_up2 = OPEN_POSITIONS.get(m)
+                                if _pos_up2:
+                                    _pos_up2["trade_type"] = "runner"
                             tg_send_mid(f"🚀 {m} 스캘프→러너 전환! 50% 익절 +{cur_gain_now*100:.2f}% | 나머지 트레일링")
                     else:
                         # 모멘텀 소진 → 전량 익절
@@ -8360,6 +8367,13 @@ def monitor_position(m,
                         f"러너30%익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
                     )
                     if ok:
+                        # 🔧 FIX: dust방지로 전량청산됐는지 확인 (오해 알림 방지)
+                        with _POSITION_LOCK:
+                            _pos_runner = OPEN_POSITIONS.get(m)
+                        if not _pos_runner:
+                            _already_closed = True
+                            verdict = "러너_TP_DUST"
+                            break
                         mfe_partial_done = True
                         last_exit_event_ts = time.time()
                         # 수익 70% 락인
