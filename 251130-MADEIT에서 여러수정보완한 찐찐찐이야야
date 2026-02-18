@@ -2585,11 +2585,26 @@ def close_auto_position(m, reason=""):
                     # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
                     mfe = pos.get("mfe_pct", 0.0)
                     mae = pos.get("mae_pct", 0.0)
+                    # 🔧 SL/Trail/Timing 전달 (monitor_position에서 실시간 저장됨)
+                    _sl = pos.get("eff_sl_pct", 0.0)
+                    _td = pos.get("trail_dist", 0.0)
+                    _atr_e = pos.get("atr_at_entry", 0.0)
+                    _hor = pos.get("horizon_sec", 0.0)
+                    _ext = pos.get("extended_sec", 0.0)
+                    _peak_t = pos.get("peak_time_sec", 0.0)
+                    # ATR 문자열이면 숫자 추출 시도
+                    if isinstance(_atr_e, str):
+                        import re as _re
+                        _atr_match = _re.search(r"ATR\s+([\d.]+)", _atr_e)
+                        _atr_e = float(_atr_match.group(1)) if _atr_match else 0.0
                     # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
                     update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                         added=was_added, exit_reason=reason,
                                         mfe_pct=mfe, mae_pct=mae,
-                                        entry_ts=pos.get("entry_ts"))
+                                        entry_ts=pos.get("entry_ts"),
+                                        eff_sl_pct=_sl, trail_dist=_td,
+                                        atr_at_entry=_atr_e, horizon_sec=_hor,
+                                        extended_sec=_ext, peak_time_sec=_peak_t)
                 except Exception as _e:
                     print(f"[FEATURE_UPDATE_ERR] {_e}")
 
@@ -2601,6 +2616,24 @@ def close_auto_position(m, reason=""):
 
             # 🔧 DEBUG: 청산 알람 발송 직전 로그
             print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={net_ret_pct:.2f}%(net) vol={vol:.6f} exit_price={exit_price_used}")
+
+            # 🔧 SL/Trail/Timing 데이터 (알람에 추가)
+            _tg_sl = pos.get("eff_sl_pct", 0)
+            _tg_td = pos.get("trail_dist", 0)
+            _tg_hor = pos.get("horizon_sec", 0)
+            _tg_ext = pos.get("extended_sec", 0)
+            _tg_peak = pos.get("peak_time_sec", 0)
+            _tg_mfe = pos.get("mfe_pct", 0)
+            _tg_mae = pos.get("mae_pct", 0)
+            _tg_params = (
+                f"• SL:{_tg_sl*100:.1f}% Trail:{_tg_td*100:.1f}% "
+                f"MFE:+{_tg_mfe:.2f}% MAE:{_tg_mae:.2f}%\n"
+                f"• 모니터:{_tg_hor:.0f}초"
+            )
+            if _tg_ext > 0:
+                _tg_params += f"(+연장{_tg_ext:.0f}초)"
+            if _tg_peak > 0:
+                _tg_params += f" 피크:{_tg_peak:.0f}초"
 
             tg_send(
                 f"====================================\n"
@@ -2615,6 +2648,7 @@ def close_auto_position(m, reason=""):
                 f"• 매수금액: {est_entry_value:,.0f}원\n"
                 f"• 청산금액: {est_exit_value:,.0f}원\n"
                 f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
+                f"{_tg_params}\n"
                 f"====================================\n"
                 f"{link_for(m)}"
             )
@@ -3577,6 +3611,9 @@ FEATURE_FIELDS = [
     "added", "exit_reason",
     # 🔧 MFE/MAE (최고점/최저점 수익률) - 익절/손절 튜닝용
     "mfe_pct", "mae_pct",
+    # 🔧 SL/Trail/Timing 데이터 (전략 파라미터 튜닝용)
+    "eff_sl_pct", "trail_dist", "atr_at_entry",
+    "horizon_sec", "extended_sec", "peak_time_sec",
     "pnl_pct", "result", "hold_sec"
 ]
 
@@ -3599,7 +3636,10 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
                         mfe_pct: float = 0.0, mae_pct: float = 0.0,
-                        entry_ts: float = None):
+                        entry_ts: float = None,
+                        eff_sl_pct: float = 0.0, trail_dist: float = 0.0,
+                        atr_at_entry: float = 0.0, horizon_sec: float = 0.0,
+                        extended_sec: float = 0.0, peak_time_sec: float = 0.0):
     """
     청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
     - added: 추매 여부 (probe → confirm 승격 시 True)
@@ -3607,6 +3647,9 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     - mfe_pct: 최고 수익률 (Maximum Favorable Excursion)
     - mae_pct: 최저 수익률 (Maximum Adverse Excursion)
     - entry_ts: 진입 시각 (중복 방지용 - 동일 거래 식별)
+    - eff_sl_pct: 실효 손절폭 (%), trail_dist: 트레일 간격 (%)
+    - atr_at_entry: 진입 시 ATR, horizon_sec: 모니터 horizon (초)
+    - extended_sec: 조건부연장 시간 (초), peak_time_sec: 진입→MFE 피크 시간 (초)
     """
     global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
 
@@ -3669,6 +3712,13 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         # 🔧 MFE/MAE 기록 (익절/손절 튜닝용)
                         rows[i]["mfe_pct"] = f"{mfe_pct:.4f}"
                         rows[i]["mae_pct"] = f"{mae_pct:.4f}"
+                        # 🔧 SL/Trail/Timing 데이터 (전략 파라미터 튜닝용)
+                        rows[i]["eff_sl_pct"] = f"{eff_sl_pct:.4f}"
+                        rows[i]["trail_dist"] = f"{trail_dist:.4f}"
+                        rows[i]["atr_at_entry"] = f"{atr_at_entry:.2f}"
+                        rows[i]["horizon_sec"] = str(int(horizon_sec))
+                        rows[i]["extended_sec"] = str(int(extended_sec))
+                        rows[i]["peak_time_sec"] = str(int(peak_time_sec))
                         break
 
                 # 🔧 FIX: 원자적 쓰기 (임시파일 → rename, 크래시 시 원본 보존)
@@ -7735,6 +7785,10 @@ def monitor_position(m,
     breakout_reached = False     # +0.15% 이상 돌파 여부
     breakout_ts = 0.0            # 돌파 시점 타임스탬프
 
+    # === 🔧 조건부 시간연장 상태 ===
+    _cond_ext_count = 0          # 연장 횟수 (최대 2회)
+    _cond_ext_total = 0          # 총 연장 시간 (초)
+
     # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -7828,7 +7882,7 @@ def monitor_position(m,
             # ATR 기반 동적 손절이 충분히 보호하므로 추가 스크래치 불필요
             # (before1에서는 스크래치 규칙이 비활성화 상태였음)
 
-            # 🔧 MFE/MAE 실시간 저장 (청산 시 로깅용)
+            # 🔧 MFE/MAE + SL/Trail/Timing 실시간 저장 (청산 시 로깅용)
             mfe_pct = (best / entry_price - 1.0) * 100 if entry_price > 0 else 0
             mae_pct = (worst / entry_price - 1.0) * 100 if entry_price > 0 else 0
             with _POSITION_LOCK:
@@ -7836,6 +7890,13 @@ def monitor_position(m,
                 if pos_now:
                     pos_now["mfe_pct"] = mfe_pct
                     pos_now["mae_pct"] = mae_pct
+                    # 🔧 SL/Trail/Timing 데이터 (전략 파라미터 튜닝용)
+                    pos_now["eff_sl_pct"] = eff_sl_pct
+                    pos_now["trail_dist"] = trail_dist_min
+                    pos_now["atr_at_entry"] = atr_info  # ATR 정보 문자열
+                    pos_now["horizon_sec"] = horizon
+                    pos_now["extended_sec"] = _cond_ext_total
+                    pos_now["peak_time_sec"] = last_peak_ts - start_ts if last_peak_ts > start_ts else 0
                     OPEN_POSITIONS[m] = pos_now
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
@@ -8275,7 +8336,28 @@ def monitor_position(m,
                     # 재진입 대신 트레일 간격 타이트하게 강화 (🔧 손절폭 연동)
                     trail_stop = max(trail_stop, curp * (1.0 - max(trail_dist_min * 0.8, 0.0025)))
                     tg_send_mid(f"🔧 {m} 재상승 감지 → 트레일 강화")
-        
+
+            # === 🔧 조건부 시간연장: 시간만료 직전 매수세/수익 체크 ===
+            # 무조건 시간만료 → 조건부 연장: 매수세 살아있으면 기회 더 줌 (최대 2회)
+            _elapsed = time.time() - start_ts
+            if _cond_ext_count < 2 and _elapsed > horizon - 10:
+                _ce_tape = micro_tape_stats_from_ticks(list(ticks)[:50], 10) if ticks else {}
+                _ce_br = _ce_tape.get("buy_ratio", 0.5)
+                _ce_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                _ce_bonus = 0
+                if _ce_gain > FEE_RATE and _ce_br >= 0.50:
+                    _ce_bonus = 120  # 수익 + 매수세 → 2분 연장
+                elif _ce_gain > 0 and _ce_br >= 0.55:
+                    _ce_bonus = 90   # 소익 + 양호 매수세 → 1.5분
+                elif _ce_gain > -FEE_RATE and _ce_br >= 0.58:
+                    _ce_bonus = 60   # 본절 + 강한 매수세 → 1분
+                if _ce_bonus > 0:
+                    horizon += _ce_bonus
+                    _cond_ext_count += 1
+                    _cond_ext_total += _ce_bonus
+                    tg_send_mid(f"⏰ {m} 조건부연장#{_cond_ext_count} +{_ce_bonus}초 "
+                                f"(gain:{_ce_gain*100:+.2f}% br:{_ce_br:.0%} 총+{_cond_ext_total}초)")
+
         # === 🔧 변경안E: 시간 만료 2단계화 ===
         # 손실 중 → 즉시 청산 (추가 손실 방지)
         # 수익/본절 중 → 90초 연장하여 러너 트레일로 추가 수익 기회
