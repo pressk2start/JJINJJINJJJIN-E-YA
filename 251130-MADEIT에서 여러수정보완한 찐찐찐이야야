@@ -1513,7 +1513,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX: 동그라미(재돌파)는 이미 눌림→리클레임 거쳤으므로 대기 축소
         # ============================================================
         _is_circle_entry = pre.get("is_circle", False)
-        PULLBACK_WAIT_SEC = 0.5 if _is_circle_entry else 1   # 🔧 조기진입: 동그라미0.5초/일반1초 (3초→1초, 풀백 대기중 가격 올라감 방지)
+        PULLBACK_WAIT_SEC = 1.0 if _is_circle_entry else 2.0   # 🔧 꼭대기방지: 0.5/1→1/2초 (눌림 확인 여유 확보, 꼭대기 매수 감소)
         PULLBACK_MIN_DIP = 0.001    # 🔧 0.15→0.1% (미세 눌림도 인정)
         PULLBACK_MAX_DIP = 0.015 if _is_circle_entry else 0.012  # 🔧 FIX: 동그라미 1.5% (재돌파 변동 허용) / 일반 1.2%
         PULLBACK_BOUNCE_TICKS = 2   # 🔧 3→2틱 (빠른 확인)
@@ -3323,11 +3323,11 @@ GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC �
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 3       # 🔧 조기진입: 4→3 (양봉 확인 빨리, 4회 기다리면 이미 꼭대기)
+GATE_CONSEC_MIN = 5       # 🔧 꼭대기방지: 3→5 (수급 확실히 확인 후 진입, 1~2회 매수는 허수 가능성)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
-GATE_STRONGBREAK_CONSEC_MIN = 4   # 🔧 조기진입: 6→4 (강돌파도 빨리 진입)
+GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
@@ -3428,7 +3428,7 @@ REARM_REBREAK_MIN = 0.0028
 
 # 포스트체크(허수 2차) - 상단에서 정의됨, 이중선언 제거
 # POSTCHECK_ENABLED: 상단(L148)에서 정의됨
-POSTCHECK_WINDOW_SEC = 1.5  # 🔧 조기진입: 3→1.5초 (꼭대기 진입 방지 — 확인시간 단축)
+POSTCHECK_WINDOW_SEC = 3.0  # 🔧 꼭대기방지: 1.5→3초 (OK streak 2회 확인 여유 확보)
 POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌파 차단 강화, 포스트체크 통과 기준 상향)
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
@@ -7388,7 +7388,7 @@ def postcheck_6s(m, pre):
 
         if pass_now:
             ok_streak += 1
-            if ok_streak >= 1:  # 🔧 조기진입: 2→1회 (첫 확인 즉시 통과 — 대기시간 1~2초 절약)
+            if ok_streak >= 2:  # 🔧 꼭대기방지: 1→2회 (연속 2회 OK 확인 후 통과 — 허수 급등 추가 필터)
                 return True, "OK_EARLY"
         else:
             ok_streak = 0
