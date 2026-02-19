@@ -51,13 +51,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
-HARD_STOP_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (SL 1.2% 대비 비상용은 넓게, 정상 눌림 확실히 허용)
-EXIT_DEBOUNCE_SEC = 8  # 🔧 손절억제: 6→8초 (리포트: 노이즈 손절 과다 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 4  # 🔧 손절억제: 3→4회 (4회 연속이면 진짜 하락, 3회까지는 휩쏘 가능)
+HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 대비 비상용 넓게, 정상 눌림 확실히 허용)
+EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
+EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.012   # 🔧 손절억제: 1.0→1.2% (리포트: 알트 1분봉 노이즈 0.5~1.5%에서 노이즈손절 과다 → 확대)
-DYN_SL_MAX = 0.022   # 🔧 손절억제: 1.8→2.2% (고변동 코인 정상 눌림 여유 확대)
+DYN_SL_MIN = 0.015   # 🔧 손절완화: 1.2→1.5% (알트 1분봉 노이즈 0.5~1.5% → 1.2%면 정상눌림에 계속 걸림)
+DYN_SL_MAX = 0.028   # 🔧 손절완화: 2.2→2.8% (고변동 코인 정상 눌림 + SL 1.5% 연동 확대)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -126,7 +126,7 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 손절억제: 0.6→0.8% (SL 1.2% 연동, 정상 눌림에 트레일 트립 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 손절완화: 0.8→1.0% (SL 1.5% 연동, 정상 눌림에 트레일 트립 방지)
 
 def get_trail_distance_min():
     """🔧 손절억제: 트레일 거리를 SL의 65%로 연동
@@ -205,11 +205,11 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 8  # 🔧 손절억제: 5→8 (초반 노이즈 무시 확대)
-        HARD_STOP_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (SL 1.2% 연동)
-        EXIT_DEBOUNCE_SEC = 8  # 🔧 손절억제: 6→8초
-        EXIT_DEBOUNCE_N = 4  # 🔧 손절억제: 3→4회
+        HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 연동)
+        EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초
+        EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 손절억제: 0.6→0.8% (SL 1.2% 연동)
+        TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 손절완화: 0.8→1.0% (SL 1.5%×0.65=0.975% 연동)
         # TRAIL_DISTANCE_MIN 제거
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
@@ -280,20 +280,20 @@ _RETEST_LOCK = threading.Lock()
 CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
 CIRCLE_MAX_CANDLES = 6                 # 점화 후 최대 6봉 이내 눌림 필요
 CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + 여유)
-CIRCLE_PULLBACK_MIN_PCT = 0.009        # 최소 0.9% 눌림 (고점 대비) — 0.3%는 윗꼬리 한번에 통과됨
+CIRCLE_PULLBACK_MIN_PCT = 0.004        # 🔧 완화: 0.9→0.4% (0.9%는 진입 불가 원인 — 대부분 0.3~0.5% 눌림 후 반등)
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
 CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
-CIRCLE_STATE_MIN_DWELL_SEC = 15        # 상태별 최소 체류 시간 (초) — 순간통과 방지
+CIRCLE_STATE_MIN_DWELL_SEC = 8         # 🔧 완화: 15→8초 (3단계×15=45초 → 3단계×8=24초, 빠른 코인 놓침 방지)
 
 # 동그라미 재돌파 품질 필터
-CIRCLE_REBREAK_BUY_RATIO_MIN = 0.55    # 재돌파 시 최소 매수비 (0.52→0.55)
-CIRCLE_REBREAK_IMBALANCE_MIN = 0.30    # 재돌파 시 최소 임밸런스 (0.25→0.30)
-CIRCLE_REBREAK_SPREAD_MAX = 0.25       # 재돌파 시 스프레드 상한 (%) (0.35→0.25)
-CIRCLE_REBREAK_MIN_SCORE = 3           # 🔧 FIX: 상수화 (기존 로컬변수 → 설정에서 튜닝 가능)
-CIRCLE_REBREAK_KRW_PER_SEC_MIN = 12000 # 재돌파 시 최소 체결강도 (8000→12000)
+CIRCLE_REBREAK_BUY_RATIO_MIN = 0.50    # 🔧 완화: 0.55→0.50 (재돌파 진입 허용 확대)
+CIRCLE_REBREAK_IMBALANCE_MIN = 0.20    # 🔧 완화: 0.30→0.20 (재돌파 진입 허용 확대)
+CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 🔧 원복: 0.25→0.35 (알트 스프레드 0.25% 초과 흔함)
+CIRCLE_REBREAK_MIN_SCORE = 2           # 🔧 완화: 3→2 (5개 중 2개 통과이면 재돌파 허용)
+CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 🔧 원복: 12000→8000 (중소형 코인 체결강도 허용)
 
 # 동그라미 워치리스트
 # state: "armed" → "pullback" → "reclaim" → "ready"
@@ -3457,7 +3457,7 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.015  # 🔧 손절억제: 1.2→1.5% (DYN_SL_MIN 1.2% 연동, 폴백용 여유 확대)
+STOP_LOSS_PCT = 0.018  # 🔧 손절완화: 1.5→1.8% (DYN_SL_MIN 1.5% 연동, 폴백용 여유 확대)
 RECHECK_SEC = 5
 
 # Ignition
@@ -3490,7 +3490,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (HARD_STOP_DD 3.0% 연동)
+POSTCHECK_MAX_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (HARD_STOP_DD 3.8% 연동)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
