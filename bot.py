@@ -51,19 +51,19 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
-HARD_STOP_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (SL 1.2% 대비 비상용은 넓게, 정상 눌림 확실히 허용)
-EXIT_DEBOUNCE_SEC = 8  # 🔧 손절억제: 6→8초 (리포트: 노이즈 손절 과다 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 4  # 🔧 손절억제: 3→4회 (4회 연속이면 진짜 하락, 3회까지는 휩쏘 가능)
+HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 대비 비상용 넓게, 정상 눌림 확실히 허용)
+EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
+EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.012   # 🔧 손절억제: 1.0→1.2% (리포트: 알트 1분봉 노이즈 0.5~1.5%에서 노이즈손절 과다 → 확대)
-DYN_SL_MAX = 0.022   # 🔧 손절억제: 1.8→2.2% (고변동 코인 정상 눌림 여유 확대)
+DYN_SL_MIN = 0.015   # 🔧 손절완화: 1.2→1.5% (알트 1분봉 노이즈 0.5~1.5% → 1.2%면 정상눌림에 계속 걸림)
+DYN_SL_MAX = 0.028   # 🔧 손절완화: 2.2→2.8% (고변동 코인 정상 눌림 + SL 1.5% 연동 확대)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.009  # 🔧 손절억제: 0.7→0.9% (SL 1.2% 연동, 트레일 무장점 상향 → 수수료 이하 조기청산 방지)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.003  # 🔧 구조개선: 0.12→0.3% (트레일 걸리면 확실히 수익)
+PROFIT_CHECKPOINT_BASE = 0.004  # 🔧 현실화: 0.9→0.4% (실제MFE +0.14%, 체크포인트는 MFE 2~3배에 설정)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.001  # 🔧 현실화: 0.3→0.1% (체크포인트 도달 시 최소 보장 수익 하향)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -81,9 +81,9 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
     return default
 
 def get_dynamic_checkpoint():
-    """🔧 손절억제: SL 연동 체크포인트 — 의미있는 수익에서만 트레일 무장
-    기존: SL × 0.7 = 0.7% → 너무 낮아 수수료 이하 조기청산
-    변경: SL × 0.75 = 0.9% → MFE 회복 위해 트레일 무장점 상향 (리포트 R3 반영)
+    """🔧 현실화: SL 연동 체크포인트 — 실제 MFE 데이터 기반 하향
+    기존: SL × 0.75 = 1.125% → 평균MFE 0.14%의 8배, 50건 중 트레일 0회 발동
+    변경: SL × 0.25 = 0.375% → MFE 0.14%의 2.5배, 승리 트레이드에서 발동 가능
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -91,8 +91,8 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # SL 연동 체크포인트 = DYN_SL_MIN × 0.75 (🔧 손절억제: ×0.7→×0.75)
-    sl_linked = DYN_SL_MIN * 0.75  # 0.012 * 0.75 = 0.009 (0.9%)
+    # SL 연동 체크포인트 = DYN_SL_MIN × 0.25 (🔧 현실화: ×0.75→×0.25, 실제MFE 0.14% 기준)
+    sl_linked = DYN_SL_MIN * 0.25  # 0.015 * 0.25 = 0.00375 (0.375%)
     # 둘 중 큰 값 사용, 최대 2.0% 캡
     return max(cost_floor, min(0.020, sl_linked))
 
@@ -108,12 +108,12 @@ def get_expected_exit_slip_pct():
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 2.5,              # 🔧 손절억제: 2.0→2.5 (SL 1.2%×2.5=3.0%, R:R 유지 위해 TP 상향)
-    "강돌파 (EMA↑+고점↑)": 2.2,  # 🔧 손절억제: 1.8→2.2 (SL 1.2%×2.2=2.64%)
-    "EMA↑": 1.8,                 # 🔧 손절억제: 1.5→1.8 (SL 1.2%×1.8=2.16%, EMA경로 S8 32% 승률 활용)
-    "고점↑": 1.8,                # 🔧 손절억제: 1.5→1.8
-    "거래량↑": 1.5,              # 🔧 손절억제: 1.2→1.5 (SL 1.2%×1.5=1.80%)
-    "기본": 1.5,                 # 🔧 손절억제: 1.2→1.5
+    "🔥점화": 0.8,              # 🔧 현실화: 2.5→0.8 (SL 1.5%×0.8=1.2%, 실제MFE 0.72% 최고 기준)
+    "강돌파 (EMA↑+고점↑)": 0.7,  # 🔧 현실화: 2.2→0.7 (SL 1.5%×0.7=1.05%)
+    "EMA↑": 0.6,                 # 🔧 현실화: 1.8→0.6 (SL 1.5%×0.6=0.90%)
+    "고점↑": 0.6,                # 🔧 현실화: 1.8→0.6
+    "거래량↑": 0.5,              # 🔧 현실화: 1.5→0.5 (SL 1.5%×0.5=0.75%)
+    "기본": 0.5,                 # 🔧 현실화: 1.5→0.5
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -126,14 +126,14 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 손절억제: 0.6→0.8% (SL 1.2% 연동, 정상 눌림에 트레일 트립 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 현실화: 1.0→0.25% (실제 피크드롭 0.24% 기준, 트레일이 실제로 작동하도록)
 
 def get_trail_distance_min():
-    """🔧 손절억제: 트레일 거리를 SL의 65%로 연동
-    SL 1.2% → 트레일 0.78% (🔧 60→65%: 정상 눌림에 트레일 트립 방지)
+    """🔧 현실화: 트레일 거리를 SL의 20%로 연동
+    SL 1.5% × 0.20 = 0.30% (실제 피크드롭 0.24% 수준)
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.65)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.20)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -185,32 +185,29 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 매도구조개선: 0.5→1.0% (gentle은 최대 여유)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 🔧 현실화: 1.0→0.30% (피크드롭 0.24% 기준, gentle은 살짝 여유)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 6  # 🔧 손절억제: 5→6 (strict도 최소 웜업 확대)
-        HARD_STOP_DD = 0.025  # 🔧 손절억제: 2.0→2.5% (strict에서도 노이즈 허용)
-        EXIT_DEBOUNCE_SEC = 6  # 🔧 손절억제: 5→6초
+        WARMUP_SEC = 6
+        HARD_STOP_DD = 0.025
+        EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.007  # 🔧 손절억제: 0.6→0.7% (strict도 SL 연동 상향)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 현실화: 0.7→0.20% (strict는 빡빡하게, 피크드롭 0.24% 이하)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
-        WARMUP_SEC = 8  # 🔧 손절억제: 5→8 (초반 노이즈 무시 확대)
-        HARD_STOP_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (SL 1.2% 연동)
-        EXIT_DEBOUNCE_SEC = 8  # 🔧 손절억제: 6→8초
-        EXIT_DEBOUNCE_N = 4  # 🔧 손절억제: 3→4회
+        WARMUP_SEC = 8
+        HARD_STOP_DD = 0.038
+        EXIT_DEBOUNCE_SEC = 10
+        EXIT_DEBOUNCE_N = 5
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.008  # 🔧 손절억제: 0.6→0.8% (SL 1.2% 연동)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 현실화: 1.0→0.25% (피크드롭 0.24% 수준)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -280,20 +277,20 @@ _RETEST_LOCK = threading.Lock()
 CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
 CIRCLE_MAX_CANDLES = 6                 # 점화 후 최대 6봉 이내 눌림 필요
 CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + 여유)
-CIRCLE_PULLBACK_MIN_PCT = 0.009        # 최소 0.9% 눌림 (고점 대비) — 0.3%는 윗꼬리 한번에 통과됨
+CIRCLE_PULLBACK_MIN_PCT = 0.004        # 🔧 완화: 0.9→0.4% (0.9%는 진입 불가 원인 — 대부분 0.3~0.5% 눌림 후 반등)
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
 CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
-CIRCLE_STATE_MIN_DWELL_SEC = 15        # 상태별 최소 체류 시간 (초) — 순간통과 방지
+CIRCLE_STATE_MIN_DWELL_SEC = 8         # 🔧 완화: 15→8초 (3단계×15=45초 → 3단계×8=24초, 빠른 코인 놓침 방지)
 
 # 동그라미 재돌파 품질 필터
-CIRCLE_REBREAK_BUY_RATIO_MIN = 0.55    # 재돌파 시 최소 매수비 (0.52→0.55)
-CIRCLE_REBREAK_IMBALANCE_MIN = 0.30    # 재돌파 시 최소 임밸런스 (0.25→0.30)
-CIRCLE_REBREAK_SPREAD_MAX = 0.25       # 재돌파 시 스프레드 상한 (%) (0.35→0.25)
-CIRCLE_REBREAK_MIN_SCORE = 3           # 🔧 FIX: 상수화 (기존 로컬변수 → 설정에서 튜닝 가능)
-CIRCLE_REBREAK_KRW_PER_SEC_MIN = 12000 # 재돌파 시 최소 체결강도 (8000→12000)
+CIRCLE_REBREAK_BUY_RATIO_MIN = 0.50    # 🔧 완화: 0.55→0.50 (재돌파 진입 허용 확대)
+CIRCLE_REBREAK_IMBALANCE_MIN = 0.20    # 🔧 완화: 0.30→0.20 (재돌파 진입 허용 확대)
+CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 🔧 원복: 0.25→0.35 (알트 스프레드 0.25% 초과 흔함)
+CIRCLE_REBREAK_MIN_SCORE = 2           # 🔧 완화: 3→2 (5개 중 2개 통과이면 재돌파 허용)
+CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 🔧 원복: 12000→8000 (중소형 코인 체결강도 허용)
 
 # 동그라미 워치리스트
 # state: "armed" → "pullback" → "reclaim" → "ready"
@@ -3457,7 +3454,7 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.015  # 🔧 손절억제: 1.2→1.5% (DYN_SL_MIN 1.2% 연동, 폴백용 여유 확대)
+STOP_LOSS_PCT = 0.018  # 🔧 손절완화: 1.5→1.8% (DYN_SL_MIN 1.5% 연동, 폴백용 여유 확대)
 RECHECK_SEC = 5
 
 # Ignition
@@ -3490,7 +3487,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.030  # 🔧 손절억제: 2.5→3.0% (HARD_STOP_DD 3.0% 연동)
+POSTCHECK_MAX_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (HARD_STOP_DD 3.8% 연동)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
@@ -3842,6 +3839,22 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                     )
                 else:
                     tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
+
+                # 🧠 SL/트레일 자동학습 (게이트 학습과 동시 실행)
+                exit_learn_result = auto_learn_exit_params()
+                if exit_learn_result:
+                    ep = exit_learn_result.get("exit_params", {})
+                    ec = exit_learn_result.get("changes", {})
+                    exit_change_detail = " | ".join(
+                        f"{k}:{v:+.3f}" for k, v in ec.items() if v != 0
+                    ) or "변화없음"
+                    tg_send(
+                        f"🎚 <b>SL/트레일 자동조정</b>\n"
+                        f"📉 변화: {exit_change_detail}\n"
+                        f"🧯 현재: SL {ep.get('DYN_SL_MIN',0)*100:.2f}~{ep.get('DYN_SL_MAX',0)*100:.2f}% "
+                        f"| 트레일 {ep.get('TRAIL_DISTANCE_MIN_BASE',0)*100:.2f}% "
+                        f"| 비상 {ep.get('HARD_STOP_DD',0)*100:.1f}%"
+                    )
             except Exception as e:
                 print(f"[AUTO_LEARN_ERR] {e}")
 
@@ -4409,6 +4422,207 @@ EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 # 🔧 hard_stop 제거 → 동적손절(ATR)로 대체 (DYN_SL_MIN~DYN_SL_MAX)
 DYNAMIC_EXIT_PARAMS = {}
 
+# =========================
+# 🧠 SL/트레일 자동학습 (데이터 기반 동적 조정)
+# =========================
+def auto_learn_exit_params():
+    """
+    📊 trade_features.csv의 MAE/MFE/트레일 데이터를 분석하여
+    DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE 등을 자동 조정
+
+    분석 항목:
+    1) 패배 MAE → SL 적정선 판단 (너무 넓으면 줄이고, 너무 좁으면 넓힘)
+    2) MFE 캡처율 → 트레일 간격 조정 (캡처율 낮으면 트레일 좁히기)
+    3) 승리 peak_drop → 트레일 거리 적정선
+
+    바운드:
+    - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
+    - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.005 ~ 0.015 (0.5% ~ 1.5%)
+    """
+    global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
+
+    if not os.path.exists(TRADE_LOG_PATH):
+        print("[EXIT_LEARN] 거래 로그 없음")
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        df = df[df["result"].isin(["win", "lose"])]
+        if len(df) < AUTO_LEARN_MIN_TRADES:
+            print(f"[EXIT_LEARN] 데이터 부족 ({len(df)}/{AUTO_LEARN_MIN_TRADES})")
+            return None
+
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+        if len(wins) < 5 or len(loses) < 5:
+            print(f"[EXIT_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
+            return None
+
+        # 🔧 베이지안 블렌딩 (샘플 수 기반)
+        _n = len(df)
+        BLEND = 0.08 if _n < 150 else (0.12 if _n < 300 else 0.18)
+        _minority = min(len(wins), len(loses)) / max(_n, 1)
+        if _minority < 0.20:
+            BLEND *= 0.5
+
+        old_sl_min = DYN_SL_MIN
+        old_sl_max = DYN_SL_MAX
+        old_trail = TRAIL_DISTANCE_MIN_BASE
+        old_hard = HARD_STOP_DD
+        changes = {}
+
+        # =====================================================
+        # 1) 패배 MAE 분석 → DYN_SL_MIN 조정
+        # =====================================================
+        # MAE = 해당 거래의 최대 역행폭 (얼마나 빠졌다가 손절됐는지)
+        # - 패배 MAE 평균이 SL보다 훨씬 작으면 → 다른 원인으로 손절 (SL은 적정)
+        # - 패배 MAE 평균이 SL 근처면 → SL에 맞고 나간 것 (노이즈 가능 → SL 넓히기)
+        # - 패배 MAE 평균이 SL보다 크면 → SL 이후 더 빠짐 (SL 적정 or 좁혀도 됨)
+        if "mae_pct" in df.columns:
+            loss_mae = pd.to_numeric(loses["mae_pct"], errors="coerce").dropna()
+            if len(loss_mae) >= 5:
+                avg_loss_mae = abs(loss_mae.mean())  # % 단위 (예: 1.2)
+                avg_loss_mae_dec = avg_loss_mae / 100  # 소수 단위 (예: 0.012)
+
+                current_sl_pct = DYN_SL_MIN * 100  # % 단위
+
+                # 패배 MAE가 SL의 80~120% 범위 = SL 경계에서 손절 (노이즈 가능 → 넓히기)
+                if avg_loss_mae >= current_sl_pct * 0.80:
+                    # SL 경계 손절 → SL을 패배MAE의 120%로 타겟
+                    target_sl = avg_loss_mae_dec * 1.20
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        print(f"[EXIT_LEARN] SL 넓힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL경계 손절)")
+
+                # 패배 MAE가 SL의 50% 미만 = SL 전에 다른 원인으로 청산 (SL 좁혀도 됨)
+                elif avg_loss_mae < current_sl_pct * 0.50:
+                    target_sl = avg_loss_mae_dec * 1.50  # MAE의 150% 정도로 축소
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        print(f"[EXIT_LEARN] SL 좁힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL전 청산)")
+
+        # =====================================================
+        # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.8~3.5%)
+        # =====================================================
+        new_sl_max = round(DYN_SL_MIN * 1.8, 4)
+        new_sl_max = max(0.018, min(0.035, new_sl_max))
+        if abs(new_sl_max - old_sl_max) > 0.0005:
+            changes["DYN_SL_MAX"] = round(new_sl_max - old_sl_max, 4)
+            if AUTO_LEARN_APPLY:
+                DYN_SL_MAX = new_sl_max
+
+        # =====================================================
+        # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 2.5~5.0%)
+        # =====================================================
+        new_hard = round(DYN_SL_MIN * 2.5, 4)
+        new_hard = max(0.025, min(0.050, new_hard))
+        if abs(new_hard - old_hard) > 0.001:
+            changes["HARD_STOP_DD"] = round(new_hard - old_hard, 4)
+            if AUTO_LEARN_APPLY:
+                HARD_STOP_DD = new_hard
+
+        # =====================================================
+        # 4) 트레일 간격 조정 (MFE 캡처율 + 승리 peak_drop 기반)
+        # =====================================================
+        _trail_adjusted = False
+        if "mfe_pct" in df.columns and "pnl_pct" in df.columns:
+            mfe_s = pd.to_numeric(wins["mfe_pct"], errors="coerce")
+            pnl_s = pd.to_numeric(wins["pnl_pct"], errors="coerce") * 100  # % 변환
+            valid = (mfe_s > 0) & pnl_s.notna()
+            if valid.sum() >= 5:
+                capture_rate = (pnl_s[valid] / mfe_s[valid]).mean()  # 0~1 비율
+
+                # 캡처율 40% 미만 → 트레일이 넓어서 수익 흘림 → 좁히기
+                if capture_rate < 0.40:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 좁힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+                # 캡처율 70% 이상 → 트레일 적정 or 살짝 넓혀도 됨 (눌림 허용)
+                elif capture_rate > 0.70:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 넓힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+        # 트레일 미조정 시: 승리 peak_drop으로 보조 조정
+        if not _trail_adjusted and "peak_drop" in df.columns:
+            win_drops = pd.to_numeric(wins["peak_drop"], errors="coerce").dropna()
+            if len(win_drops) >= 5:
+                avg_drop = abs(win_drops.mean()) / 100  # % → 소수
+                # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
+                target_trail = max(0.005, avg_drop * 0.80)
+                new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                if abs(new_trail - old_trail) > 0.0005:
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        print(f"[EXIT_LEARN] 트레일(피크드롭): {old_trail*100:.2f}%→{new_trail*100:.2f}% (승리avg_drop={avg_drop*100:.2f}%)")
+
+        # =====================================================
+        # 5) 결과 저장
+        # =====================================================
+        result_data = {
+            "DYN_SL_MIN": DYN_SL_MIN,
+            "DYN_SL_MAX": DYN_SL_MAX,
+            "HARD_STOP_DD": HARD_STOP_DD,
+            "TRAIL_DISTANCE_MIN_BASE": TRAIL_DISTANCE_MIN_BASE,
+        }
+
+        import tempfile
+        _wdir = os.path.dirname(EXIT_PARAMS_PATH) or "."
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                          dir=_wdir, suffix=".tmp", delete=False) as _wf:
+            json.dump({
+                "exit_params": result_data,
+                "updated_at": now_kst_str(),
+                "sample_size": len(df),
+                "win_rate": round(len(wins) / len(df) * 100, 1),
+            }, _wf, ensure_ascii=False, indent=2)
+            _wf_path = _wf.name
+        os.replace(_wf_path, EXIT_PARAMS_PATH)
+
+        win_rate = round(len(wins) / len(df) * 100, 1)
+        change_detail = " | ".join(
+            f"{k}:{v:+.4f}" for k, v in changes.items() if v != 0
+        ) or "변화없음"
+
+        print(f"[EXIT_LEARN] 완료: {result_data} | 변화: {change_detail}")
+        return {
+            "exit_params": result_data,
+            "changes": changes,
+            "win_rate": win_rate,
+            "sample_size": len(df),
+        }
+
+    except ImportError:
+        print("[EXIT_LEARN] pandas 미설치")
+        return None
+    except Exception as e:
+        print(f"[EXIT_LEARN_ERR] {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 # 부분청산 후 추가 손절 설정
 PARTIAL_EXIT_PROFIT_DROP = 0.002   # 익절 부분청산 후 -0.2% 추가 하락 시 청산
 PARTIAL_EXIT_LOSS_DROP = 0.001     # 손절 부분청산 후 -0.1% 추가 하락 시 청산
@@ -4526,6 +4740,23 @@ def load_learned_weights():
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
         print(f"[WEIGHTS_LOAD_ERR] {e}")
+
+    # 🧠 SL/트레일 학습 결과 복원
+    if os.path.exists(EXIT_PARAMS_PATH):
+        try:
+            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
+                ep_data = json.load(f)
+            ep = ep_data.get("exit_params")
+            if isinstance(ep, dict):
+                DYN_SL_MIN = ep.get("DYN_SL_MIN", DYN_SL_MIN)
+                DYN_SL_MAX = ep.get("DYN_SL_MAX", DYN_SL_MAX)
+                HARD_STOP_DD = ep.get("HARD_STOP_DD", HARD_STOP_DD)
+                TRAIL_DISTANCE_MIN_BASE = ep.get("TRAIL_DISTANCE_MIN_BASE", TRAIL_DISTANCE_MIN_BASE)
+                print(f"[WEIGHTS] SL/트레일 로드: SL {DYN_SL_MIN*100:.2f}~{DYN_SL_MAX*100:.2f}% "
+                      f"| 트레일 {TRAIL_DISTANCE_MIN_BASE*100:.2f}% | 비상 {HARD_STOP_DD*100:.1f}% "
+                      f"| {ep_data.get('updated_at', '?')}")
+        except Exception as e:
+            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
 
 # =========================
 # 세션/요청(네트워크 안정화)
