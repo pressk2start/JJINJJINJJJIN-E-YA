@@ -3842,6 +3842,22 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                     )
                 else:
                     tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
+
+                # 🧠 SL/트레일 자동학습 (게이트 학습과 동시 실행)
+                exit_learn_result = auto_learn_exit_params()
+                if exit_learn_result:
+                    ep = exit_learn_result.get("exit_params", {})
+                    ec = exit_learn_result.get("changes", {})
+                    exit_change_detail = " | ".join(
+                        f"{k}:{v:+.3f}" for k, v in ec.items() if v != 0
+                    ) or "변화없음"
+                    tg_send(
+                        f"🎚 <b>SL/트레일 자동조정</b>\n"
+                        f"📉 변화: {exit_change_detail}\n"
+                        f"🧯 현재: SL {ep.get('DYN_SL_MIN',0)*100:.2f}~{ep.get('DYN_SL_MAX',0)*100:.2f}% "
+                        f"| 트레일 {ep.get('TRAIL_DISTANCE_MIN_BASE',0)*100:.2f}% "
+                        f"| 비상 {ep.get('HARD_STOP_DD',0)*100:.1f}%"
+                    )
             except Exception as e:
                 print(f"[AUTO_LEARN_ERR] {e}")
 
@@ -4409,6 +4425,207 @@ EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
 # 🔧 hard_stop 제거 → 동적손절(ATR)로 대체 (DYN_SL_MIN~DYN_SL_MAX)
 DYNAMIC_EXIT_PARAMS = {}
 
+# =========================
+# 🧠 SL/트레일 자동학습 (데이터 기반 동적 조정)
+# =========================
+def auto_learn_exit_params():
+    """
+    📊 trade_features.csv의 MAE/MFE/트레일 데이터를 분석하여
+    DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE 등을 자동 조정
+
+    분석 항목:
+    1) 패배 MAE → SL 적정선 판단 (너무 넓으면 줄이고, 너무 좁으면 넓힘)
+    2) MFE 캡처율 → 트레일 간격 조정 (캡처율 낮으면 트레일 좁히기)
+    3) 승리 peak_drop → 트레일 거리 적정선
+
+    바운드:
+    - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
+    - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.005 ~ 0.015 (0.5% ~ 1.5%)
+    """
+    global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
+
+    if not os.path.exists(TRADE_LOG_PATH):
+        print("[EXIT_LEARN] 거래 로그 없음")
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        df = df[df["result"].isin(["win", "lose"])]
+        if len(df) < AUTO_LEARN_MIN_TRADES:
+            print(f"[EXIT_LEARN] 데이터 부족 ({len(df)}/{AUTO_LEARN_MIN_TRADES})")
+            return None
+
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+        if len(wins) < 5 or len(loses) < 5:
+            print(f"[EXIT_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
+            return None
+
+        # 🔧 베이지안 블렌딩 (샘플 수 기반)
+        _n = len(df)
+        BLEND = 0.08 if _n < 150 else (0.12 if _n < 300 else 0.18)
+        _minority = min(len(wins), len(loses)) / max(_n, 1)
+        if _minority < 0.20:
+            BLEND *= 0.5
+
+        old_sl_min = DYN_SL_MIN
+        old_sl_max = DYN_SL_MAX
+        old_trail = TRAIL_DISTANCE_MIN_BASE
+        old_hard = HARD_STOP_DD
+        changes = {}
+
+        # =====================================================
+        # 1) 패배 MAE 분석 → DYN_SL_MIN 조정
+        # =====================================================
+        # MAE = 해당 거래의 최대 역행폭 (얼마나 빠졌다가 손절됐는지)
+        # - 패배 MAE 평균이 SL보다 훨씬 작으면 → 다른 원인으로 손절 (SL은 적정)
+        # - 패배 MAE 평균이 SL 근처면 → SL에 맞고 나간 것 (노이즈 가능 → SL 넓히기)
+        # - 패배 MAE 평균이 SL보다 크면 → SL 이후 더 빠짐 (SL 적정 or 좁혀도 됨)
+        if "mae_pct" in df.columns:
+            loss_mae = pd.to_numeric(loses["mae_pct"], errors="coerce").dropna()
+            if len(loss_mae) >= 5:
+                avg_loss_mae = abs(loss_mae.mean())  # % 단위 (예: 1.2)
+                avg_loss_mae_dec = avg_loss_mae / 100  # 소수 단위 (예: 0.012)
+
+                current_sl_pct = DYN_SL_MIN * 100  # % 단위
+
+                # 패배 MAE가 SL의 80~120% 범위 = SL 경계에서 손절 (노이즈 가능 → 넓히기)
+                if avg_loss_mae >= current_sl_pct * 0.80:
+                    # SL 경계 손절 → SL을 패배MAE의 120%로 타겟
+                    target_sl = avg_loss_mae_dec * 1.20
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        print(f"[EXIT_LEARN] SL 넓힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL경계 손절)")
+
+                # 패배 MAE가 SL의 50% 미만 = SL 전에 다른 원인으로 청산 (SL 좁혀도 됨)
+                elif avg_loss_mae < current_sl_pct * 0.50:
+                    target_sl = avg_loss_mae_dec * 1.50  # MAE의 150% 정도로 축소
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        print(f"[EXIT_LEARN] SL 좁힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL전 청산)")
+
+        # =====================================================
+        # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.8~3.5%)
+        # =====================================================
+        new_sl_max = round(DYN_SL_MIN * 1.8, 4)
+        new_sl_max = max(0.018, min(0.035, new_sl_max))
+        if abs(new_sl_max - old_sl_max) > 0.0005:
+            changes["DYN_SL_MAX"] = round(new_sl_max - old_sl_max, 4)
+            if AUTO_LEARN_APPLY:
+                DYN_SL_MAX = new_sl_max
+
+        # =====================================================
+        # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 2.5~5.0%)
+        # =====================================================
+        new_hard = round(DYN_SL_MIN * 2.5, 4)
+        new_hard = max(0.025, min(0.050, new_hard))
+        if abs(new_hard - old_hard) > 0.001:
+            changes["HARD_STOP_DD"] = round(new_hard - old_hard, 4)
+            if AUTO_LEARN_APPLY:
+                HARD_STOP_DD = new_hard
+
+        # =====================================================
+        # 4) 트레일 간격 조정 (MFE 캡처율 + 승리 peak_drop 기반)
+        # =====================================================
+        _trail_adjusted = False
+        if "mfe_pct" in df.columns and "pnl_pct" in df.columns:
+            mfe_s = pd.to_numeric(wins["mfe_pct"], errors="coerce")
+            pnl_s = pd.to_numeric(wins["pnl_pct"], errors="coerce") * 100  # % 변환
+            valid = (mfe_s > 0) & pnl_s.notna()
+            if valid.sum() >= 5:
+                capture_rate = (pnl_s[valid] / mfe_s[valid]).mean()  # 0~1 비율
+
+                # 캡처율 40% 미만 → 트레일이 넓어서 수익 흘림 → 좁히기
+                if capture_rate < 0.40:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 좁힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+                # 캡처율 70% 이상 → 트레일 적정 or 살짝 넓혀도 됨 (눌림 허용)
+                elif capture_rate > 0.70:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 넓힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+        # 트레일 미조정 시: 승리 peak_drop으로 보조 조정
+        if not _trail_adjusted and "peak_drop" in df.columns:
+            win_drops = pd.to_numeric(wins["peak_drop"], errors="coerce").dropna()
+            if len(win_drops) >= 5:
+                avg_drop = abs(win_drops.mean()) / 100  # % → 소수
+                # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
+                target_trail = max(0.005, avg_drop * 0.80)
+                new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                if abs(new_trail - old_trail) > 0.0005:
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        print(f"[EXIT_LEARN] 트레일(피크드롭): {old_trail*100:.2f}%→{new_trail*100:.2f}% (승리avg_drop={avg_drop*100:.2f}%)")
+
+        # =====================================================
+        # 5) 결과 저장
+        # =====================================================
+        result_data = {
+            "DYN_SL_MIN": DYN_SL_MIN,
+            "DYN_SL_MAX": DYN_SL_MAX,
+            "HARD_STOP_DD": HARD_STOP_DD,
+            "TRAIL_DISTANCE_MIN_BASE": TRAIL_DISTANCE_MIN_BASE,
+        }
+
+        import tempfile
+        _wdir = os.path.dirname(EXIT_PARAMS_PATH) or "."
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                          dir=_wdir, suffix=".tmp", delete=False) as _wf:
+            json.dump({
+                "exit_params": result_data,
+                "updated_at": now_kst_str(),
+                "sample_size": len(df),
+                "win_rate": round(len(wins) / len(df) * 100, 1),
+            }, _wf, ensure_ascii=False, indent=2)
+            _wf_path = _wf.name
+        os.replace(_wf_path, EXIT_PARAMS_PATH)
+
+        win_rate = round(len(wins) / len(df) * 100, 1)
+        change_detail = " | ".join(
+            f"{k}:{v:+.4f}" for k, v in changes.items() if v != 0
+        ) or "변화없음"
+
+        print(f"[EXIT_LEARN] 완료: {result_data} | 변화: {change_detail}")
+        return {
+            "exit_params": result_data,
+            "changes": changes,
+            "win_rate": win_rate,
+            "sample_size": len(df),
+        }
+
+    except ImportError:
+        print("[EXIT_LEARN] pandas 미설치")
+        return None
+    except Exception as e:
+        print(f"[EXIT_LEARN_ERR] {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 # 부분청산 후 추가 손절 설정
 PARTIAL_EXIT_PROFIT_DROP = 0.002   # 익절 부분청산 후 -0.2% 추가 하락 시 청산
 PARTIAL_EXIT_LOSS_DROP = 0.001     # 손절 부분청산 후 -0.1% 추가 하락 시 청산
@@ -4526,6 +4743,23 @@ def load_learned_weights():
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
         print(f"[WEIGHTS_LOAD_ERR] {e}")
+
+    # 🧠 SL/트레일 학습 결과 복원
+    if os.path.exists(EXIT_PARAMS_PATH):
+        try:
+            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
+                ep_data = json.load(f)
+            ep = ep_data.get("exit_params")
+            if isinstance(ep, dict):
+                DYN_SL_MIN = ep.get("DYN_SL_MIN", DYN_SL_MIN)
+                DYN_SL_MAX = ep.get("DYN_SL_MAX", DYN_SL_MAX)
+                HARD_STOP_DD = ep.get("HARD_STOP_DD", HARD_STOP_DD)
+                TRAIL_DISTANCE_MIN_BASE = ep.get("TRAIL_DISTANCE_MIN_BASE", TRAIL_DISTANCE_MIN_BASE)
+                print(f"[WEIGHTS] SL/트레일 로드: SL {DYN_SL_MIN*100:.2f}~{DYN_SL_MAX*100:.2f}% "
+                      f"| 트레일 {TRAIL_DISTANCE_MIN_BASE*100:.2f}% | 비상 {HARD_STOP_DD*100:.1f}% "
+                      f"| {ep_data.get('updated_at', '?')}")
+        except Exception as e:
+            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
 
 # =========================
 # 세션/요청(네트워크 안정화)
