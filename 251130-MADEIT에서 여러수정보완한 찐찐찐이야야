@@ -2826,9 +2826,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         was_full = False
         if sell_krw < MIN_ORDER_KRW or remaining_krw < DUST_PREVENT_KRW:
             print(f"[PARTIAL→FULL] {m} 찌꺼기방지 (매도:{sell_krw:.0f}원, 잔여:{remaining_krw:.0f}원 < {DUST_PREVENT_KRW}원) → 전량청산")
-            # 🔧 FIX: 전량 전환 시 거래소 실잔고 사용 (찌꺼기 방지)
+            # 🔧 FIX 7차: get_actual_balance() 리턴값 -1(API 실패) 방어
+            # 기존: actual_bal > 0 else current_volume → -1 시 current_volume(stale) 사용
+            # 변경: -1(API 실패) 시 current_volume 폴백 + 경고 로그
             actual_bal = get_actual_balance(m)
-            sell_volume = actual_bal if actual_bal > 0 else current_volume
+            if actual_bal < 0:
+                print(f"[PARTIAL→FULL_WARN] {m} 잔고 조회 실패(API) → OPEN_POSITIONS 수량({current_volume:.6f}) 폴백")
+                sell_volume = current_volume
+            elif actual_bal > 0:
+                sell_volume = actual_bal
+            else:
+                print(f"[PARTIAL→FULL] {m} 실잔고=0 → 이미 청산됨")
+                sell_volume = 0.0
             was_full = True  # 🔧 전량청산 시도 표시
             # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
             with _POSITION_LOCK:
@@ -2915,14 +2924,18 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         # 💥 크리티컬 핫픽스: 잔여 0이면 포지션 제거 (좀비 방지)
         # 🔧 FIX: pop 전에 entry_ts, added 백업 (hold_sec 0 버그 방지)
+        # 🔧 FIX 7차: 백업 읽기를 락 안에서 수행 (TOCTOU 레이스 방지)
+        # 기존: pos_backup 읽기가 락 밖에서 시작 → 다른 스레드 삭제 시 데이터 손상
+        # 변경: 모든 백업 + 상태 변경을 단일 락 블록 내에서 수행
         backup_entry_ts = None
         backup_added = False
+        backup_pos_snapshot = {}
         if remaining_volume <= 1e-10:
             with _POSITION_LOCK:
                 pos_backup = OPEN_POSITIONS.get(m, {})
                 backup_entry_ts = pos_backup.get("entry_ts")
                 backup_added = pos_backup.get("added", False)
-                backup_pos_snapshot = dict(pos_backup)  # 🔧 FIX: pop 전 스냅샷 (update_trade_result 튜닝 데이터용)
+                backup_pos_snapshot = dict(pos_backup) if pos_backup else {}
                 # 🔧 FIX: state='closed' 마킹 후 pop (mark_position_closed와 일관성)
                 if pos_backup:
                     pos_backup["state"] = "closed"
@@ -3127,11 +3140,19 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             partial_ts = pos.get("partial_ts", 0)  # 🔧 FIX: 타임스탑용 타임스탬프
 
             # 현재가 조회
+            # 🔧 FIX 7차: cur_price=0 방어 (네트워크 장애 시 수익률 -100% 오판 → 잘못된 강제 청산 방지)
+            # 기존: except → cur_price=0 (로그 없이) → 후속 로직에서 수익률 -100%로 계산
+            # 변경: 실패 시 entry_price 폴백 + 로그 출력
             try:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
                 cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
-            except Exception:
+            except Exception as _cp_err:
+                print(f"[PARTIAL_POSTCHECK] {m} 현재가 조회 실패: {_cp_err}")
                 cur_price = 0
+
+            # 🔧 FIX 7차: cur_price=0이면 entry_price로 폴백 (0원 기준 청산 판단 방지)
+            if cur_price <= 0:
+                cur_price = entry_price if entry_price > 0 else partial_price
 
             if cur_price > 0 and partial_price > 0:
                 # 🔧 FIX: 드롭 기준을 변동성(trail_distance_min) 연동
@@ -4604,15 +4625,19 @@ _SESSION_REFRESH_LOCK = threading.Lock()
 
 def _refresh_session():
     global SESSION, _CONSEC_CONN_ERR
-    # 🔧 FIX: 락 보호 — 다른 스레드가 SESSION 사용 중에 close/replace 방지
+    # 🔧 FIX 7차: close 전에 새 세션 먼저 생성 (gap 제거)
+    # 기존: close() → _new_session() 사이에 다른 스레드가 닫힌 SESSION 사용 → ConnectionError
+    # 변경: 새 세션 생성 → SESSION 교체 → 구 세션 close (무중단)
     with _SESSION_REFRESH_LOCK:
-        try:
-            SESSION.close()
-        except Exception:
-            pass
+        old_session = SESSION
         SESSION = _new_session()
         _CONSEC_CONN_ERR = 0
         print("[NET] session refreshed")
+    # 구 세션은 락 밖에서 close (진행 중인 요청 완료 대기 불필요 — requests는 스레드세이프)
+    try:
+        old_session.close()
+    except Exception:
+        pass
 
 
 def upbit_get(url, params=None, timeout=7):
@@ -4620,8 +4645,9 @@ def upbit_get(url, params=None, timeout=7):
     for attempt in range(3):  # 4 -> 3 유지
         try:
             _throttle()
-            # 🔧 FIX: SESSION 참조를 로컬에 캐시 (close/replace 레이스 방지)
-            _s = SESSION
+            # 🔧 FIX 7차: SESSION 참조를 락으로 보호하여 캐시 (교체 중 닫힌 세션 사용 방지)
+            with _SESSION_REFRESH_LOCK:
+                _s = SESSION
             r = _s.get(url, params=params, timeout=timeout)
             if r.status_code == 429:
                 REQ_STATS["http429"] += 1
@@ -7455,24 +7481,27 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
     pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
 
-    # 🔧 FIX: 복합 승수 추적 (신호+수익 동시 적용 시 max_sl도 복합으로)
-    _sl_mult = 1.0
+    # 🔧 FIX 7차: SL 승수를 곱셈→최대값 선택으로 변경 (곱셈 폭발 방지)
+    # 기존: 신호1.3 × 수익1.5 = 1.95배 → DYN_SL_MAX 2.2%가 4.3%까지 확대 가능
+    # 변경: max(신호1.3, 수익1.5) = 1.5배 → 최대 3.3% (통제 가능)
+    _sl_signal_mult = 1.0
+    _sl_profit_mult = 1.0
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
-        pct *= 1.3
-        _sl_mult *= 1.3
+        _sl_signal_mult = 1.3
     # ⭕ 동그라미/리테스트(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
     elif signal_type in ("circle", "retest"):
-        pct *= 1.3
-        _sl_mult *= 1.3
+        _sl_signal_mult = 1.3
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
     if current_price and current_price > entry_price * 1.008:
-        pct *= 1.5
-        _sl_mult *= 1.5
+        _sl_profit_mult = 1.5
 
-    # 🔧 FIX: 동적 MAX = 기본MAX × 복합승수 (신호1.3 + 수익1.5 = 1.95x 정상 반영)
+    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.5배까지만)
+    _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
+    pct *= _sl_mult
+
     max_sl = DYN_SL_MAX * _sl_mult
     pct = min(max(pct, DYN_SL_MIN), max_sl)
 
@@ -8569,25 +8598,27 @@ def tg_send(t, retry=3):
         t = t[:3950] + "\n...(잘림)"
 
     def _tg_post(payload):
-        """_TG_SESSION으로 전송, 실패 시 새 세션 시도"""
+        """_TG_SESSION으로 전송, 실패 시 새 세션 시도
+        🔧 FIX 7차: 락 안에서 전송까지 완료 (세션 교체 레이스 컨디션 수정)
+        기존: 락 밖에서 sess.post() → 다른 스레드가 세션 교체 시 ConnectionError
+        변경: 락 안에서 sess.post()까지 수행 → 세션 일관성 보장
+        """
         global _TG_SESSION
         try:
             with _TG_SESSION_LOCK:
-                sess = _TG_SESSION
-            return sess.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json=payload, timeout=10,
-            )
+                return _TG_SESSION.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json=payload, timeout=10,
+                )
         except Exception:
             # 세션 문제 → 새 세션 생성 후 재시도
             try:
                 with _TG_SESSION_LOCK:
                     _TG_SESSION = _new_session()
-                    sess = _TG_SESSION
-                return sess.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json=payload, timeout=10,
-                )
+                    return _TG_SESSION.post(
+                        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                        json=payload, timeout=10,
+                    )
             except Exception as e2:
                 print(f"[TG] _tg_post 재시도도 실패: {e2}")
                 return None
