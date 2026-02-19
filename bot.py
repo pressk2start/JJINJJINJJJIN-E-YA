@@ -3639,8 +3639,8 @@ def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
 # 🔧 자동학습 ON - 건수 기반 (매수만 학습, 매도는 고정)
-AUTO_LEARN_ENABLED = True   # 학습 활성화 (로그 수집)
-AUTO_LEARN_APPLY = True     # 🔧 승률개선: 학습 결과 실제 적용 ON (데이터 기반 임계치 자동 조정)
+AUTO_LEARN_ENABLED = False  # 학습 비활성화 (과적합 방지 — 수동 판단 우선)
+AUTO_LEARN_APPLY = False    # 학습 결과 적용 OFF
 AUTO_LEARN_MIN_TRADES = 100 # 분석 시 최소 샘플
 AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
 AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
