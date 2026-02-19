@@ -62,8 +62,8 @@ DYN_SL_MAX = 0.028   # 🔧 손절완화: 2.2→2.8% (고변동 코인 정상 �
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.009  # 🔧 손절억제: 0.7→0.9% (SL 1.2% 연동, 트레일 무장점 상향 → 수수료 이하 조기청산 방지)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.003  # 🔧 구조개선: 0.12→0.3% (트레일 걸리면 확실히 수익)
+PROFIT_CHECKPOINT_BASE = 0.004  # 🔧 현실화: 0.9→0.4% (실제MFE +0.14%, 체크포인트는 MFE 2~3배에 설정)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.001  # 🔧 현실화: 0.3→0.1% (체크포인트 도달 시 최소 보장 수익 하향)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -81,9 +81,9 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
     return default
 
 def get_dynamic_checkpoint():
-    """🔧 손절억제: SL 연동 체크포인트 — 의미있는 수익에서만 트레일 무장
-    기존: SL × 0.7 = 0.7% → 너무 낮아 수수료 이하 조기청산
-    변경: SL × 0.75 = 0.9% → MFE 회복 위해 트레일 무장점 상향 (리포트 R3 반영)
+    """🔧 현실화: SL 연동 체크포인트 — 실제 MFE 데이터 기반 하향
+    기존: SL × 0.75 = 1.125% → 평균MFE 0.14%의 8배, 50건 중 트레일 0회 발동
+    변경: SL × 0.25 = 0.375% → MFE 0.14%의 2.5배, 승리 트레이드에서 발동 가능
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -91,8 +91,8 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # SL 연동 체크포인트 = DYN_SL_MIN × 0.75 (🔧 손절억제: ×0.7→×0.75)
-    sl_linked = DYN_SL_MIN * 0.75  # 0.012 * 0.75 = 0.009 (0.9%)
+    # SL 연동 체크포인트 = DYN_SL_MIN × 0.25 (🔧 현실화: ×0.75→×0.25, 실제MFE 0.14% 기준)
+    sl_linked = DYN_SL_MIN * 0.25  # 0.015 * 0.25 = 0.00375 (0.375%)
     # 둘 중 큰 값 사용, 최대 2.0% 캡
     return max(cost_floor, min(0.020, sl_linked))
 
@@ -108,12 +108,12 @@ def get_expected_exit_slip_pct():
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 2.5,              # 🔧 손절억제: 2.0→2.5 (SL 1.2%×2.5=3.0%, R:R 유지 위해 TP 상향)
-    "강돌파 (EMA↑+고점↑)": 2.2,  # 🔧 손절억제: 1.8→2.2 (SL 1.2%×2.2=2.64%)
-    "EMA↑": 1.8,                 # 🔧 손절억제: 1.5→1.8 (SL 1.2%×1.8=2.16%, EMA경로 S8 32% 승률 활용)
-    "고점↑": 1.8,                # 🔧 손절억제: 1.5→1.8
-    "거래량↑": 1.5,              # 🔧 손절억제: 1.2→1.5 (SL 1.2%×1.5=1.80%)
-    "기본": 1.5,                 # 🔧 손절억제: 1.2→1.5
+    "🔥점화": 0.8,              # 🔧 현실화: 2.5→0.8 (SL 1.5%×0.8=1.2%, 실제MFE 0.72% 최고 기준)
+    "강돌파 (EMA↑+고점↑)": 0.7,  # 🔧 현실화: 2.2→0.7 (SL 1.5%×0.7=1.05%)
+    "EMA↑": 0.6,                 # 🔧 현실화: 1.8→0.6 (SL 1.5%×0.6=0.90%)
+    "고점↑": 0.6,                # 🔧 현실화: 1.8→0.6
+    "거래량↑": 0.5,              # 🔧 현실화: 1.5→0.5 (SL 1.5%×0.5=0.75%)
+    "기본": 0.5,                 # 🔧 현실화: 1.5→0.5
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -126,14 +126,14 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.6  # 🔧 0.8→0.6 (러너 전환 기회 확대)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 손절완화: 0.8→1.0% (SL 1.5% 연동, 정상 눌림에 트레일 트립 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 현실화: 1.0→0.25% (실제 피크드롭 0.24% 기준, 트레일이 실제로 작동하도록)
 
 def get_trail_distance_min():
-    """🔧 손절억제: 트레일 거리를 SL의 65%로 연동
-    SL 1.2% → 트레일 0.78% (🔧 60→65%: 정상 눌림에 트레일 트립 방지)
+    """🔧 현실화: 트레일 거리를 SL의 20%로 연동
+    SL 1.5% × 0.20 = 0.30% (실제 피크드롭 0.24% 수준)
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.65)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.20)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -185,32 +185,29 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 매도구조개선: 0.5→1.0% (gentle은 최대 여유)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 🔧 현실화: 1.0→0.30% (피크드롭 0.24% 기준, gentle은 살짝 여유)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 6  # 🔧 손절억제: 5→6 (strict도 최소 웜업 확대)
-        HARD_STOP_DD = 0.025  # 🔧 손절억제: 2.0→2.5% (strict에서도 노이즈 허용)
-        EXIT_DEBOUNCE_SEC = 6  # 🔧 손절억제: 5→6초
+        WARMUP_SEC = 6
+        HARD_STOP_DD = 0.025
+        EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.007  # 🔧 손절억제: 0.6→0.7% (strict도 SL 연동 상향)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 현실화: 0.7→0.20% (strict는 빡빡하게, 피크드롭 0.24% 이하)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
-        WARMUP_SEC = 8  # 🔧 손절억제: 5→8 (초반 노이즈 무시 확대)
-        HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 연동)
-        EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초
-        EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회
+        WARMUP_SEC = 8
+        HARD_STOP_DD = 0.038
+        EXIT_DEBOUNCE_SEC = 10
+        EXIT_DEBOUNCE_N = 5
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.010  # 🔧 손절완화: 0.8→1.0% (SL 1.5%×0.65=0.975% 연동)
-        # TRAIL_DISTANCE_MIN 제거
+        TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 현실화: 1.0→0.25% (피크드롭 0.24% 수준)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
