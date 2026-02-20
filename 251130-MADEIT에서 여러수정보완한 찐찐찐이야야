@@ -1328,17 +1328,9 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             thr = max_drift
 
         if drift > thr:
-            # 평소라면 고점 추격으로 컷
-            # 하지만 공격 모드면 일정 구간까지는 허용
-            # 🔧 FIX: 추격 허용폭 0.5%→0.3% 축소 (기대값 개선)
-            if AGGRESSIVE_MODE and drift <= (thr + 0.003):
-                print(
-                    f"[GUARD][AGGR] {m} 가격 급등 {drift*100:.2f}% <= dyn+0.3% "
-                    f"→ 공격 모드: 추격 진입 허용 (probe 강제)"
-                )
-                return True, current_price, True  # chase=True → probe 강제
-
-            # 이 이상은 진짜 너무 튄 거라 컷 (signal_skip에서 로그 처리)
+            # 🔧 추격진입 예외 제거: AGGRESSIVE_MODE여도 drift 초과면 무조건 컷
+            # pullback 엔트리 로직이 있으므로 추격을 허용할 이유 없음
+            # (기존: AGGRESSIVE_MODE + 0.3% 밴드 → 역선택/휩쏘 급증)
             return False, current_price, False
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
@@ -1684,9 +1676,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         krw_to_use = base_qty * entry_price
 
         # 🔧 FIX: 가용잔고 초과 방지 (before1 기준)
-        MAX_POSITION_RATIO = 0.50  # 가용잔고의 50% 상한 (과집중 방지)
+        MAX_POSITION_RATIO = 0.25  # 🔧 0.50→0.25 (과집중 DD 방지, 연패 시 계좌 보호)
         if krw_to_use > krw_bal * MAX_POSITION_RATIO:
-            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 50% → 캡")
+            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 25% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
 
         # 🔧 FIX: 최소 진입금액 6000원 (매도최소 5000원 + 버퍼 1000원)
@@ -6000,6 +5992,30 @@ def circle_check_entry(m):
             # 이것이 "동그라미" 진입 시점
             # -----------------------------------------------
             if cur_price >= ign_high:
+                # 🔧 VWAP/EMA5 위치 필터: 재돌파가 추세연장인지 추격인지 구분
+                # VWAP/EMA5 밑 재돌파 = 대부분 되돌림 페이크
+                try:
+                    _c1_circle = get_minutes_candles(1, m, 20)
+                    _vwap_c = calc_vwap_from_candles(_c1_circle, 20) if _c1_circle else None
+                    _closes_c = [c.get("trade_price", 0) for c in _c1_circle] if _c1_circle else []
+                    _ema5_c = ema_last(_closes_c, 5) if len(_closes_c) >= 5 else None
+                    # VWAP 밑이면 재돌파 차단
+                    if _vwap_c and cur_price < _vwap_c:
+                        print(f"[CIRCLE] {m} 재돌파 but VWAP 하방 ({cur_price:,.0f}<VWAP{_vwap_c:,.0f}) → 차단")
+                        return None
+                    # EMA5 밑이면 재돌파 차단
+                    if _ema5_c and cur_price < _ema5_c:
+                        print(f"[CIRCLE] {m} 재돌파 but EMA5 하방 ({cur_price:,.0f}<EMA5{_ema5_c:,.0f}) → 차단")
+                        return None
+                    # VWAP 대비 0.8% 초과면 추격 (너무 위에서 진입)
+                    if _vwap_c and _vwap_c > 0:
+                        _vwap_gap_c = (cur_price / _vwap_c - 1.0) * 100
+                        if _vwap_gap_c > 0.8:
+                            print(f"[CIRCLE] {m} 재돌파 but VWAP갭 {_vwap_gap_c:.1f}%>0.8% → 추격차단")
+                            return None
+                except Exception:
+                    pass  # 캔들 데이터 없으면 필터 스킵
+
                 # 재돌파 품질 게이트 — 3/5 점수제 (ALL PASS 아님!)
                 # 리테스트가 ALL PASS로 죽었으므로, 여기선 유연하게 판정
                 rebreak_score = 0
@@ -6716,7 +6732,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         accel=accel,
         volume_surge=vol_surge,
         turn_pct=turn_pct,
-        buy_ratio=twin["buy_ratio"],
+        # 🔧 보수적 매수비 사용: min(t15,t45)로 순간 스파이크/스푸핑 방지
+        # 점화(ign>=3)일 때만 twin(순간 모멘텀) 허용
+        buy_ratio=twin["buy_ratio"] if ignition_score >= 3 else min(t15["buy_ratio"], t45["buy_ratio"]),
         imbalance=imbalance,
         fresh_ok=fresh_ok,
         fresh_age=fresh_age,
@@ -6860,10 +6878,11 @@ def final_check_leader(m, pre, tight_mode=False):
     # 🔧 VWAP 기반 진입 품질 보너스 (VWAP 근처: +5, 추격: -3)
     score += pre.get("vwap_score_bonus", 0)
 
-    # 🔧 성과조정: 임밸런스 필터 (매도우위 심할 때 진입 차단)
-    # 근거: 8개 스냅샷 전체에서 승리=임밸런스 양수, 패배=음수 일관
-    if imbalance < -0.3:
-        print(f"[IMB_CUT] {m} imbalance={imbalance:.2f}<-0.3 → 진입 차단 (매도우위)")
+    # 🔧 임밸런스 하드컷 강화: -0.3→0.0 (매도우위면 무조건 컷)
+    # 근거: 페이크는 "매수비 높아보이는데 호가 임밸 약/음수"가 핵심 패턴
+    # 기존 -0.3은 극단만 차단 → 0.0으로 올려서 매도우위 전체 차단
+    if imbalance < 0.0:
+        print(f"[IMB_CUT] {m} imbalance={imbalance:.2f}<0.0 → 진입 차단 (매도우위)")
         return None
 
     # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
@@ -7958,6 +7977,17 @@ def monitor_position(m,
                 ob_pyr = ob_snap
                 imb_pyr = calc_orderbook_imbalance(ob_pyr) if ob_pyr else 0.0
 
+                # 🔧 BTC 역풍 시 추매 금지 (알트 추세 + BTC 급락 = 큰 DD)
+                _pyr_btc5 = btc_5m_change()
+                add_cond_btc = True  # 기본: 통과
+                if _pyr_btc5 is not None and _pyr_btc5 <= -0.003:
+                    # BTC 5분 -0.3% 이하 → 초강한 매수세일 때만 예외 허용
+                    if t15_now["buy_ratio"] >= 0.63 and imb_pyr >= 0.55:
+                        print(f"[PYR_BTC] {m} BTC역풍{_pyr_btc5*100:.2f}% but 초강매수세 → 추매 허용")
+                    else:
+                        add_cond_btc = False
+                        print(f"[PYR_BTC] {m} BTC역풍{_pyr_btc5*100:.2f}% → 추매 차단")
+
                 # 🔧 변경안D: 눌림→재돌파 조건
                 # (1) 고점 대비 0.4% 이상 눌림이 있었어야 함
                 _pyr_drop = (best - curp) / best if best > 0 else 0
@@ -7983,7 +8013,7 @@ def monitor_position(m,
                 mfe_now_add = (best / entry_price - 1.0) if entry_price > 0 else 0
                 add_cond_mfe = mae_now > -0.0025 and mfe_now_add > 0.007  # MAE>-0.25%, MFE>0.7%
 
-                if add_cond_price and add_cond_flow and add_cond_pullback and add_cond_rebreak and add_cond_mfe:
+                if add_cond_btc and add_cond_price and add_cond_flow and add_cond_pullback and add_cond_rebreak and add_cond_mfe:
                     with _POSITION_LOCK:
                         pos = OPEN_POSITIONS.get(m)
                         already_added = pos.get("added") if pos else True
@@ -8235,20 +8265,28 @@ def monitor_position(m,
                     mfe_target *= 0.80
                 elif btc5_now >= 0.004:
                     mfe_target *= 1.30
-                # 러너: MFE 도달 시 30%만 익절
+                # 러너: MFE 도달 시 모멘텀에 따라 30% or 50% 익절
                 if not mfe_partial_done and max_gain >= mfe_target and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
+                    # 🔧 모멘텀 체크: 죽었으면 50%, 살았으면 30% (토해내기 방지)
+                    _run_t10 = micro_tape_stats_from_ticks(ticks, 10)
+                    _run_br = _run_t10.get("buy_ratio", 0)
+                    _run_krw = _run_t10.get("krw_per_sec", 0)
+                    _run_momentum = (_run_br >= 0.55 and _run_krw >= 12000 and uptick_streak_from_ticks(ticks, need=2))
+                    _run_pct = 0.30 if _run_momentum else 0.50
+                    _run_label = "30%" if _run_momentum else "50%(모멘텀↓)"
                     ok, msg, sold = safe_partial_sell(
-                        m, 0.30,
-                        f"러너30%익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
+                        m, _run_pct,
+                        f"러너{_run_label}익절 +{max_gain*100:.2f}% (경로:{signal_tag}, 타겟:{mfe_target*100:.2f}%)"
                     )
                     if ok:
                         mfe_partial_done = True
                         last_exit_event_ts = time.time()
-                        # 수익 70% 락인
-                        mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.70)
+                        # 수익 락인 (30%면 70% 락, 50%면 50% 락)
+                        _lock_ratio = 0.70 if _run_momentum else 0.50
+                        mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * _lock_ratio)
                         be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
-                        tg_send_mid(f"🏃 {m} 러너 30%익절 | +{max_gain*100:.2f}% | 70% 트레일중 | 손절→+{mfe_lock_pct*100:.2f}%")
+                        tg_send_mid(f"🏃 {m} 러너 {_run_label}익절 | +{max_gain*100:.2f}% | br:{_run_br:.0%} krw:{_run_krw:,.0f} | 손절→+{mfe_lock_pct*100:.2f}%")
                 # 러너: Plateau에서는 부분익절 안함 (트레일과 래칫에 맡김)
 
             # ④ 눌림 후 재상승 감지 → 트레일 강화 (재진입 대신)
@@ -9299,6 +9337,14 @@ def main():
                 if not ok_post:
                     cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
                     # 🔧 FIX: postcheck 실패 시 recent_alerts 제거 (다음 스캔에서 재시도 가능)
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
+                    continue
+
+                # 🔧 postcheck 통과 후 VWAP갭 하드컷 (추격매수 최종 차단)
+                _post_vwap_gap = pre.get("vwap_gap", 0)
+                if _post_vwap_gap > 1.0:
+                    cut("VWAP_GAP", f"{m} postcheck 통과했지만 VWAP갭 {_post_vwap_gap:.1f}%>1.0% → 추격차단")
                     with _POSITION_LOCK:
                         recent_alerts.pop(m, None)
                     continue
