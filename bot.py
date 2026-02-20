@@ -276,11 +276,11 @@ _RETEST_LOCK = threading.Lock()
 # 패턴: Ignition → 1~6봉 첫 눌림 → 리클레임 → 재돌파
 # 기존 retest와 독립 운영, 동시 감시 가능
 CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
-CIRCLE_MAX_CANDLES = 6                 # 점화 후 최대 6봉 이내 눌림 필요
-CIRCLE_TIMEOUT_SEC = 420               # 최대 7분 감시 (6봉 × ~60초 + 여유)
+CIRCLE_MAX_CANDLES = 10                # 🔧 완화: 6→10봉 (6봉 안에 풀사이클 거의 불가능)
+CIRCLE_TIMEOUT_SEC = 600               # 🔧 완화: 420→600초 (10봉×60초, 충분한 관찰 시간)
 CIRCLE_PULLBACK_MIN_PCT = 0.004        # 🔧 완화: 0.9→0.4% (0.9%는 진입 불가 원인 — 대부분 0.3~0.5% 눌림 후 반등)
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
-CIRCLE_RECLAIM_LEVEL = "body_mid"      # 리클레임 기준: "body_mid" | "body_low" | "ema"
+CIRCLE_RECLAIM_LEVEL = "body_low"      # 🔧 완화: body_mid → body_low (몸통 하단 회복만 확인)
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
 CIRCLE_ENTRY_MODE = "half"             # 동그라미 진입은 half 강제 (안전)
 CIRCLE_RETRY_COOLDOWN_SEC = 15         # ready 재시도 쿨다운 (텔레그램 스팸 방지)
@@ -6405,16 +6405,16 @@ def circle_check_entry(m):
 
         elif state == "pullback":
             # -----------------------------------------------
-            # pullback → reclaim: 점화 몸통 중심선 위로 회복
-            # 조건 추가: body_mid 아래를 한번은 경험해야 reclaim 허용
-            # (계속 위에 있었는데 reclaim 통과하는 것 방지)
+            # pullback → reclaim: 점화 몸통 하단 위로 회복
+            # 🔧 FIX: was_below_reclaim 제거 — pullback 상태 진입 자체가 이미
+            # 0.4% 눌림을 경험한 증거. body_mid 아래 요구는 과도 (진입 불가 원인)
+            # reclaim 기준도 body_mid → body_bot 완화 (회복 확인만 하면 충분)
             # -----------------------------------------------
-            reclaim_level = ign_body_mid  # 기본: 몸통 중심
-            if CIRCLE_RECLAIM_LEVEL == "body_low":
-                reclaim_level = ign_body_bot
+            reclaim_level = ign_body_bot  # 🔧 완화: body_mid → body_bot (몸통 하단)
+            if CIRCLE_RECLAIM_LEVEL == "body_mid":
+                reclaim_level = ign_body_mid  # 설정으로 되돌릴 수 있음
 
             if (state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC
-                    and watch.get("was_below_reclaim", False)
                     and cur_price >= reclaim_level):
                 watch["state"] = "reclaim"
                 watch["state_ts"] = time.time()
@@ -6458,7 +6458,13 @@ def circle_check_entry(m):
     # -----------------------------------------------
     # 🔧 FIX: reclaim → ready API 호출을 락 바깥에서 수행 (네트워크 지연 시 블로킹 방지)
     # -----------------------------------------------
-    if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= ign_high:
+    # 🔧 FIX: 재돌파 기준 ign_high → ign_body_top (위꼬리 고점까지 넘기는 건 과도)
+    # 점화 캔들의 몸통 상단만 넘기면 구조적 재돌파로 충분
+    with _CIRCLE_LOCK:
+        _w = _CIRCLE_WATCHLIST.get(m)
+        ign_body_top = _w["ign_body_top"] if _w else ign_high
+    rebreak_level = ign_body_top  # 몸통 상단 기준 재돌파
+    if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= rebreak_level:
         rebreak_score = 0
         rebreak_details = []
 
@@ -6561,7 +6567,7 @@ def circle_check_entry(m):
                     watch["state"] = "ready"
                     watch["state_ts"] = time.time()
                     print(
-                        f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 점화고점 {ign_high:,.0f} "
+                        f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 몸통상단 {rebreak_level:,.0f} "
                         f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
                         f"| {candle_count}봉째 | state→ready"
                     )
@@ -7133,6 +7139,32 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
             return None
 
+    # === 🔧 5분 EMA 추세 필터 (꼭대기 진입 방지) ===
+    # 5분 EMA5 < EMA20이면 중기 하락 추세 → 1분봉 서지는 반등(데드캣바운스) 가능성 높음
+    # 점화(ign>=3)는 추세 반전 가능하므로 면제
+    if ignition_score < 3:
+        try:
+            _c5_trend = get_minutes_candles(5, m, 25)
+            if _c5_trend and len(_c5_trend) >= 20:
+                _closes_5m = [x["trade_price"] for x in _c5_trend]
+                _ema5_trend = ema_last(_closes_5m, 5)
+                _ema20_trend = ema_last(_closes_5m, 20)
+                if _ema5_trend and _ema20_trend:
+                    _trend_gap = (_ema5_trend - _ema20_trend) / _ema20_trend
+                    if _trend_gap < -0.003:  # EMA5가 EMA20보다 0.3% 이상 아래
+                        cut("5M_DOWNTREND", f"{m} 5분EMA역배열 gap={_trend_gap*100:.2f}% (하락추세 진입 차단)", near_miss=False)
+                        return None
+        except Exception:
+            pass  # API 실패 시 필터 비활성
+
+    # === 🔧 매수비 페이드 감지 (꼭대기 진입 방지) ===
+    # t15 매수비는 높은데 t45 매수비가 50% 미만 → 직전 15초만 강한 "스파이크"
+    # 이미 피크를 지난 것이므로 진입하면 꼭대기에 물림
+    # 점화는 면제 (점화 자체가 짧은 구간에서 폭발)
+    if ignition_score < 3 and t15["buy_ratio"] >= 0.60 and t45["buy_ratio"] < 0.48:
+        cut("BUY_FADE", f"{m} 매수비페이드 t15={t15['buy_ratio']:.2f} t45={t45['buy_ratio']:.2f} (꼭대기)", near_miss=False)
+        return None
+
     # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
     # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
     _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
@@ -7193,8 +7225,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # VWAP 위 0.3~1.0% = 양호 (추세 확인)
         elif 0.3 < vwap_gap <= 1.0:
             vwap_score_bonus = 2
-        # VWAP 위 1.5% 이상 = 추격 위험 (-3점)
+        # VWAP 위 1.5% 이상 = 추격 위험
+        # 🔧 비점화는 하드컷 (꼭대기 추격이 손절 과다의 핵심 원인)
         elif vwap_gap > 1.5:
+            if ignition_score < 3:
+                cut("VWAP_CHASE", f"{m} VWAP+{vwap_gap:.1f}% 추격진입 차단 (비점화)", near_miss=False)
+                return None
             vwap_score_bonus = -3
     else:
         vwap_gap = 0.0
