@@ -1704,13 +1704,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 딱 5000원 매수 시 소폭 하락만으로 매도 불가 → 6000원으로 상향하여 해결
         min_order_krw = 6000
         if krw_to_use < min_order_krw:
-            # 🔧 리스크 존중: 리스크 계산 결과가 최소주문 미달이면 스킵 (강제진입 제거)
-            # 기존: 잔고 충분하면 6000원 강제진입 → 리스크 모델 무시
-            signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원, 리스크 계산 존중)")
-            tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
+            # 🔧 소액계좌 지원: 잔고 충분하면 최소주문금액으로 상향 (리스크 초소형이라 허용)
+            if krw_bal >= min_order_krw * 2:
+                print(f"[SIZE_BUMP] {m} 리스크계산 {krw_to_use:,.0f}원 < 최소주문 {min_order_krw:,}원 → {min_order_krw:,}원 상향 (⚠️ 리스크모델 초과)")
+                krw_to_use = min_order_krw
+            else:
+                signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
         # 🔧 체결충격(impact) 기반 사이징 댐퍼
         # 상위 3호가 합계의 15% 초과 사용 시 과도 → 캡 (슬리피지 방지)
@@ -1734,13 +1737,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = int(krw_to_use)
 
-        # 🔧 임팩트캡 후 최소주문금액 재검증 (강제상향 제거 → 스킵)
+        # 🔧 임팩트캡 후 최소주문금액 재검증
         if krw_to_use < min_order_krw:
-            signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
-            tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
-            with _POSITION_LOCK:
-                OPEN_POSITIONS.pop(m, None)
-            return
+            if krw_bal >= min_order_krw * 2:
+                print(f"[SIZE_BUMP] {m} 임팩트캡 후 {krw_to_use:,.0f}원 < {min_order_krw:,}원 → {min_order_krw:,}원 상향")
+                krw_to_use = min_order_krw
+            else:
+                signal_skip(f"임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 임팩트캡 후 주문금액 부족 ({krw_to_use:,.0f}원)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
 
         # === 매수 ===
         # 🔧 FIX: 매수 전 보유량 저장 (체결 재검증용)
@@ -6677,11 +6684,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
             # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부
             return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
 
-    # 6) 🔧 임밸런스 하드컷 (스푸핑/자전 필터 — 매도우위 거부)
-    # 기존: 점수 D에만 반영 → 페이크(매수비 높고 호가 임밸 약/음) 통과
+    # 6) 🔧 임밸런스 하드컷 (명확한 매도우위만 거부)
+    # 알트는 호가 얇아서 -0.05~0.0 구간이 정상 → -0.15 이하만 컷
     # mega는 유동성이 충분해 임밸이 자연적으로 낮을 수 있으므로 예외
-    if not mega and imbalance < 0.0:
-        return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<0.00 (매도우위) | {metrics}"
+    if not mega and imbalance < -0.15:
+        return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<-0.15 (매도우위) | {metrics}"
 
     # 7) 급등 상한 안전장치
     if volume_surge > GATE_SURGE_MAX:
@@ -7125,8 +7132,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
             return None
 
-    # 🔧 스푸핑 방지: 비점화는 보수 매수비(min(t15,t45)) 사용, 점화만 twin 허용
-    _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else min(t15["buy_ratio"], t45["buy_ratio"])
+    # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
+    # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
+    _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
     gate_ok, gate_reason = stage1_gate(
         spread=ob["spread"],
         accel=accel,
