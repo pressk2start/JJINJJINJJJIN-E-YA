@@ -8082,6 +8082,10 @@ def monitor_position(m,
     # 손절 디바운스용
     stop_first_seen_ts = 0.0
     stop_hits = 0
+    # 🔧 수급확인 손절: 감량 후 관망모드 상태
+    _sl_reduced = False          # 감량(50%) 매도 완료 여부
+    _sl_reduced_ts = 0.0         # 감량 시각
+    _sl_extended_pct = 0.0       # 감량 후 확장된 SL%
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -8254,8 +8258,10 @@ def monitor_position(m,
 
             # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
             # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
-            hit_pct_sl = cur_gain <= -eff_sl_pct
-            hit_base_stop = (base_stop > 0 and curp <= base_stop)
+            # 🔧 수급확인감량 후: 확장 SL% 사용 (원래 SL의 135%)
+            _active_sl_pct = _sl_extended_pct if _sl_reduced else eff_sl_pct
+            hit_pct_sl = cur_gain <= -_active_sl_pct
+            hit_base_stop = (base_stop > 0 and curp <= base_stop) if not _sl_reduced else False  # 감량 후 본절SL 비활성
             if hit_pct_sl or hit_base_stop:
                 # 🔧 FIX: SL 디바운스 — 틱 1~2번 휩쏘에 즉시 손절 방지
                 # 연속 2회 이상 또는 2초 이상 유지 시에만 실제 청산
@@ -8272,24 +8278,139 @@ def monitor_position(m,
                 _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
                 if not _is_hard_stop and stop_hits < _db_n and _sl_duration < _db_sec:
                     continue  # 디바운스 대기
-                # 디바운스 통과 → 실제 청산
+
+                # ================================================================
+                # 🔧 수급확인 손절 (Context-Aware Stop)
+                # 디바운스 통과 후 즉시 청산 대신, 수급을 보고 판단:
+                # - 추세 죽음 → 전량 청산 (기존과 동일)
+                # - 추세 살아있음 → 50% 감량 + 확장 SL로 20초 관찰
+                # - 하드스톱/본절SL은 수급확인 없이 즉시 청산
+                # ================================================================
+
+                # 하드스톱(SL×1.5)이면 수급확인 없이 즉시 전량 청산
+                if _is_hard_stop:
+                    sl_reason = f"하드스톱 | -{abs(cur_gain)*100:.2f}% (SL×1.5 초과, 즉시컷)"
+                    close_auto_position(m, sl_reason)
+                    _already_closed = True
+                    verdict = "하드스톱"
+                    break
+
+                # 본절SL(래칫)은 이미 수익 구간을 거쳤으므로 즉시 청산
                 if hit_base_stop and not hit_pct_sl:
                     sl_reason = f"본절SL | 현재 {curp:,.0f}원 ≤ base_stop {base_stop:,.0f}원 ({atr_info})"
+                    close_auto_position(m, sl_reason)
+                    _already_closed = True
+                    verdict = "본절SL"
+                    break
+
+                # === 수급 스캔: 추세가 살아있는지 확인 ===
+                _sl_ticks = get_recent_ticks(m, 80, allow_network=True)
+                _sl_t10 = micro_tape_stats_from_ticks(_sl_ticks, 10) if _sl_ticks and len(_sl_ticks) >= 3 else {}
+                _sl_ob = None
+                try:
+                    _sl_ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                    if _sl_ob_raw and len(_sl_ob_raw) > 0:
+                        _sl_ob = _sl_ob_raw[0]
+                except Exception:
+                    pass
+                _sl_imb = calc_orderbook_imbalance({"raw": _sl_ob}) if _sl_ob else -1.0
+
+                _sl_alive_signals = 0
+                _sl_buy_r = _sl_t10.get("buy_ratio", 0)
+                _sl_krw_s = _sl_t10.get("krw_per_sec", 0)
+                if _sl_buy_r >= 0.48:
+                    _sl_alive_signals += 1
+                if _sl_krw_s >= 8000:
+                    _sl_alive_signals += 1
+                if _sl_imb >= -0.10:
+                    _sl_alive_signals += 1
+
+                # 추세 죽음 (3개 중 1개 이하 통과) → 전량 청산
+                if _sl_alive_signals <= 1:
+                    sl_reason = (f"ATR손절(수급확인) | -{abs(cur_gain)*100:.2f}% "
+                                 f"매수비{_sl_buy_r:.0%} 체결{_sl_krw_s:,.0f}/s 임밸{_sl_imb:.2f} "
+                                 f"→ 추세사망({_sl_alive_signals}/3) 전량청산 ({atr_info})")
+                    close_auto_position(m, sl_reason)
+                    _already_closed = True
+                    verdict = "ATR손절"
+                    tg_send_mid(f"🛑 {m} 수급확인손절 | -{abs(cur_gain)*100:.2f}% | 추세사망({_sl_alive_signals}/3)")
+                    break
+
+                # 추세 살아있음 (3개 중 2개 이상 통과) → 50% 감량 + 확장 관찰
+                if not _sl_reduced:
+                    _reduce_ok, _reduce_msg, _reduce_sold = safe_partial_sell(
+                        m, 0.50,
+                        f"수급확인감량 | -{abs(cur_gain)*100:.2f}% 매수비{_sl_buy_r:.0%} "
+                        f"체결{_sl_krw_s:,.0f}/s 임밸{_sl_imb:.2f} → 추세생존({_sl_alive_signals}/3)"
+                    )
+                    if _reduce_ok:
+                        # 감량 후 포지션 존재 확인 (dust 전량청산 가능)
+                        with _POSITION_LOCK:
+                            _pos_chk = OPEN_POSITIONS.get(m)
+                        if not _pos_chk:
+                            _already_closed = True
+                            verdict = "수급감량_DUST"
+                            break
+                        _sl_reduced = True
+                        _sl_reduced_ts = time.time()
+                        _sl_extended_pct = eff_sl_pct * 1.35  # SL 35% 확장
+                        # 디바운스 리셋 (새 기준으로 관찰 시작)
+                        stop_first_seen_ts = 0.0
+                        stop_hits = 0
+                        tg_send_mid(
+                            f"🔄 {m} 수급확인감량 50% | -{abs(cur_gain)*100:.2f}% "
+                            f"| 추세생존({_sl_alive_signals}/3) "
+                            f"| 20초 관찰 (SL -{_sl_extended_pct*100:.1f}%)"
+                        )
+                    else:
+                        # 감량 실패 → 전량 청산
+                        sl_reason = f"ATR손절(감량실패) | -{abs(cur_gain)*100:.2f}% ({atr_info})"
+                        close_auto_position(m, sl_reason)
+                        _already_closed = True
+                        verdict = "ATR손절"
+                        break
                 else:
-                    sl_reason = f"ATR손절 | 현재 -{abs(cur_gain)*100:.2f}% < 손절선 -{eff_sl_pct*100:.2f}% (디바운스 {stop_hits}회/{_sl_duration:.1f}초) ({atr_info})"
-                close_auto_position(m, sl_reason)
-                _already_closed = True
-                verdict = "ATR손절"
-                break
+                    # 이미 감량된 상태에서 또 SL 터치 → 잔여분 전량 청산
+                    sl_reason = (f"잔여청산 | 감량 후 재하락 -{abs(cur_gain)*100:.2f}% "
+                                 f"매수비{_sl_buy_r:.0%} ({atr_info})")
+                    close_auto_position(m, sl_reason)
+                    _already_closed = True
+                    verdict = "잔여청산"
+                    tg_send_mid(f"🛑 {m} 잔여청산 | 감량 후 재하락 -{abs(cur_gain)*100:.2f}%")
+                    break
             else:
                 # 🔧 FIX C4: SL 디바운스도 partial decay 적용 (풀 리셋 방지)
+                _sl_recovery = -cur_gain / eff_sl_pct if eff_sl_pct > 0 else 0  # 항상 계산
                 if stop_first_seen_ts > 0:
-                    _sl_recovery = -cur_gain / eff_sl_pct if eff_sl_pct > 0 else 0
                     if _sl_recovery < 0.5:  # SL선의 50% 이내로 회복 = 진짜 반등
                         stop_first_seen_ts = 0.0
                         stop_hits = 0
                     else:
                         stop_hits = max(0, stop_hits - 1)
+
+                # 🔧 수급확인감량 후 관망 결과 처리
+                if _sl_reduced:
+                    _sl_observe_elapsed = time.time() - _sl_reduced_ts
+                    # 감량 후 20초 내 가격 회복 → 잔여 포지션 생존 (휩쏘 방어 성공)
+                    if _sl_recovery < 0.3 and _sl_observe_elapsed >= 5.0:
+                        # SL선에서 충분히 멀어짐(손실 30% 미만) + 5초 이상 유지
+                        print(f"[수급확인] {m} 감량 후 회복 확인 | {cur_gain*100:.2f}% | 잔여 포지션 유지")
+                        tg_send_mid(f"✅ {m} 휩쏘 방어 성공 | 감량50% 후 회복 | 잔여 트레일 전환")
+                        _sl_reduced = False  # 관망 종료, 일반 모드 복귀
+                    # 감량 후 20초 경과 + 아직 SL 근처 → 잔여 전량 청산
+                    elif _sl_observe_elapsed >= 20.0:
+                        _sl_final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                        if _sl_final_gain <= -eff_sl_pct * 0.7:
+                            # 20초 지나도 SL 70% 이상 손실 유지 → 추세 반전 확정
+                            close_auto_position(m, f"관망만료청산 | 20초 후 미회복 -{abs(_sl_final_gain)*100:.2f}%")
+                            _already_closed = True
+                            verdict = "관망만료"
+                            tg_send_mid(f"🛑 {m} 관망 만료 | 20초 미회복 -{abs(_sl_final_gain)*100:.2f}% → 잔여 청산")
+                            break
+                        else:
+                            # 20초 지나고 약간 회복 → 생존 (일반 모드 복귀)
+                            print(f"[수급확인] {m} 관망 만료 | 약간 회복 {_sl_final_gain*100:.2f}% → 잔여 유지")
+                            _sl_reduced = False
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
