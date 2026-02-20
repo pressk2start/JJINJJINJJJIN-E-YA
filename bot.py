@@ -56,8 +56,8 @@ EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 
 EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.015   # 🔧 손절완화: 1.2→1.5% (알트 1분봉 노이즈 0.5~1.5% → 1.2%면 정상눌림에 계속 걸림)
-DYN_SL_MAX = 0.028   # 🔧 손절완화: 2.2→2.8% (고변동 코인 정상 눌림 + SL 1.5% 연동 확대)
+DYN_SL_MIN = 0.018   # 🔧 손절완화: 1.5→1.8% (알트 1분봉 노이즈 0.5~1.5% → 1.5%에서도 정상눌림 걸림, 1.8%로 추가 완화)
+DYN_SL_MAX = 0.032   # 🔧 손절완화: 2.8→3.2% (고변동 코인 정상 눌림 + balanced 하드스톱 3.8%와 정합)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -157,7 +157,7 @@ except Exception:
     pass
 
 # ==== Exit Profile (gentle/ balanced / strict) ====
-EXIT_PROFILE = os.getenv("EXIT_PROFILE", "strict").lower()
+EXIT_PROFILE = os.getenv("EXIT_PROFILE", "balanced").lower()
 
 # 🔧 CRITICAL FIX: _apply_exit_profile() 호출 전 기본값 선언 (NameError 방지)
 SPIKE_RECOVERY_WINDOW = 3
@@ -7759,8 +7759,9 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
         _sl_signal_mult = 1.3
 
     # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
+    # 🔧 손절완화: 1.5→1.8배 (수익 구간에서 정상 눌림에 잘리는 문제 추가 완화)
     if current_price and current_price > entry_price * 1.008:
-        _sl_profit_mult = 1.5
+        _sl_profit_mult = 1.8
 
     # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.5배까지만)
     _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
@@ -8318,15 +8319,18 @@ def monitor_position(m,
                 _sl_alive_signals = 0
                 _sl_buy_r = _sl_t10.get("buy_ratio", 0)
                 _sl_krw_s = _sl_t10.get("krw_per_sec", 0)
-                if _sl_buy_r >= 0.48:
+                # 🔧 손절완화: 수급 생존 기준 하향 (더 쉽게 감량 기회 부여)
+                if _sl_buy_r >= 0.44:      # 🔧 0.48→0.44 (매수비 44%면 아직 살아있음)
                     _sl_alive_signals += 1
-                if _sl_krw_s >= 8000:
+                if _sl_krw_s >= 5000:      # 🔧 8000→5000 (소형코인도 거래속도 인정)
                     _sl_alive_signals += 1
-                if _sl_imb >= -0.10:
+                if _sl_imb >= -0.15:       # 🔧 -0.10→-0.15 (약간의 매도벽도 허용)
                     _sl_alive_signals += 1
 
-                # 추세 죽음 (3개 중 1개 이하 통과) → 전량 청산
-                if _sl_alive_signals <= 1:
+                # 🔧 손절완화: 추세 죽음 기준 완화 (1개 이하→0개만 즉시 전량 청산)
+                # 기존: 1개 이하 = 전량청산 → 매수비만 살아있어도 전량컷 (너무 빡빡)
+                # 변경: 0개일 때만 전량청산, 1개라도 통과하면 감량 기회 부여
+                if _sl_alive_signals == 0:
                     sl_reason = (f"ATR손절(수급확인) | -{abs(cur_gain)*100:.2f}% "
                                  f"매수비{_sl_buy_r:.0%} 체결{_sl_krw_s:,.0f}/s 임밸{_sl_imb:.2f} "
                                  f"→ 추세사망({_sl_alive_signals}/3) 전량청산 ({atr_info})")
@@ -8397,10 +8401,10 @@ def monitor_position(m,
                         print(f"[수급확인] {m} 감량 후 회복 확인 | {cur_gain*100:.2f}% | 잔여 포지션 유지")
                         tg_send_mid(f"✅ {m} 휩쏘 방어 성공 | 감량50% 후 회복 | 잔여 트레일 전환")
                         _sl_reduced = False  # 관망 종료, 일반 모드 복귀
-                    # 감량 후 20초 경과 + 아직 SL 근처 → 잔여 전량 청산
-                    elif _sl_observe_elapsed >= 20.0:
+                    # 🔧 손절완화: 관망 시간 20→30초, SL 기준 70→80% (더 오래 기다리고 더 깊이 허용)
+                    elif _sl_observe_elapsed >= 30.0:
                         _sl_final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                        if _sl_final_gain <= -eff_sl_pct * 0.7:
+                        if _sl_final_gain <= -eff_sl_pct * 0.8:
                             # 20초 지나도 SL 70% 이상 손실 유지 → 추세 반전 확정
                             close_auto_position(m, f"관망만료청산 | 20초 후 미회복 -{abs(_sl_final_gain)*100:.2f}%")
                             _already_closed = True
@@ -8583,16 +8587,16 @@ def monitor_position(m,
                         _trail_momentum = 1.4
                     else:
                         _trail_momentum = 1.0  # 러너: 약세에도 축소 없이 기본 유지
-                    # 🔧 승률개선: 러너 래칫 65→50% (MFE의 50% 확보, 나머지는 추세에 태우기)
-                    # 65%는 눌림에서 너무 빨리 청산 → 러너 수익 축소
-                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.50))
+                    # 🔧 익절극대화: 러너 래칫 50→40% (MFE의 40% 확보, 나머지 60%는 추세에 태우기)
+                    # 50%는 중간 눌림에서 너무 빨리 청산 → 러너 큰 수익 놓침
+                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.40))
                     base_stop = max(base_stop, _runner_lock)
                 else:
                     # 비러너: 기존 로직 (강세 확대, 약세 축소)
                     if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
                         _trail_momentum = 1.4  # 강세: 트레일 40% 확대
                     elif _trail_t10["buy_ratio"] < 0.50 or _trail_t10["krw_per_sec"] < 10000:
-                        _trail_momentum = 0.8  # 🔧 승률개선: 0.85→0.8 (약세 시 트레일 적절히 축소)
+                        _trail_momentum = 0.90  # 🔧 익절극대화: 0.8→0.90 (약세 시 트레일 축소 최소화, 숨고르기 허용)
 
                 trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
@@ -8606,9 +8610,9 @@ def monitor_position(m,
                 else:
                     trail_db_hits += 1
                 _trail_dur = time.time() - trail_db_first_ts
-                # 🔧 승률개선: 트레일 디바운스를 SL보다 강화 (+1회, +3초) — 트레일컷 과잉 방지
-                _tdb_n = EXIT_DEBOUNCE_N + 1 + (1 if alive_sec < WARMUP_SEC else 0)
-                _tdb_sec = EXIT_DEBOUNCE_SEC + 3 + (2 if alive_sec < WARMUP_SEC else 0)
+                # 🔧 익절극대화: 트레일 디바운스를 SL보다 강화 (+2회, +5초) — 트레일컷 과잉 방지
+                _tdb_n = EXIT_DEBOUNCE_N + 2 + (1 if alive_sec < WARMUP_SEC else 0)
+                _tdb_sec = EXIT_DEBOUNCE_SEC + 5 + (2 if alive_sec < WARMUP_SEC else 0)
                 if trail_db_hits >= _tdb_n or _trail_dur >= _tdb_sec:
                     # 디바운스 통과 → 실제 청산
                     # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
