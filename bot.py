@@ -6964,7 +6964,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
 
     # 매도 실행
     try:
-        sell_result = upbit_sell_market(m, volume)
+        sell_result = place_market_sell(m, volume)
         time.sleep(0.5)
 
         # 매도가 조회
@@ -7520,10 +7520,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
-    # 🛑 하드 컷: 거래량 서지 < 0.8x (평균 이하 = 아무것도 안 일어나고 있음)
+    # 🛑 하드 컷: 거래량 서지 < 0.65x (평균 대비 크게 부족 = 모멘텀 없음)
     # XRP 0.53x 횡보 진입 같은 케이스 방지. MEGA는 예외.
-    if not mega and vol_surge < 0.8:
-        cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.8x (평균이하, 모멘텀없음)", near_miss=False)
+    # 🔧 0.8→0.65 완화: 0.65~0.8 구간은 gate scoring이 다른 강점으로 보완 가능
+    if not mega and vol_surge < 0.65:
+        cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
         return None
 
     # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
@@ -7596,23 +7597,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
             return None
 
-    # === 🔧 5분 EMA 추세 필터 (꼭대기 진입 방지) ===
-    # 5분 EMA5 < EMA20이면 중기 하락 추세 → 1분봉 서지는 반등(데드캣바운스) 가능성 높음
-    # 점화(ign>=3)는 추세 반전 가능하므로 면제
-    if ignition_score < 3:
-        try:
-            _c5_trend = get_minutes_candles(5, m, 25)
-            if _c5_trend and len(_c5_trend) >= 20:
-                _closes_5m = [x["trade_price"] for x in _c5_trend]
-                _ema5_trend = ema_last(_closes_5m, 5)
-                _ema20_trend = ema_last(_closes_5m, 20)
-                if _ema5_trend and _ema20_trend:
-                    _trend_gap = (_ema5_trend - _ema20_trend) / _ema20_trend
-                    if _trend_gap < -0.003:  # EMA5가 EMA20보다 0.3% 이상 아래
-                        cut("5M_DOWNTREND", f"{m} 5분EMA역배열 gap={_trend_gap*100:.2f}% (하락추세 진입 차단)", near_miss=False)
-                        return None
-        except Exception:
-            pass  # API 실패 시 필터 비활성
+    # 🔧 5분 EMA 추세 필터: TREND_DOWN (line ~7423)에서 이미 처리
+    # (중복 API 호출 제거 — 점화 면제도 TREND_DOWN에서 불필요, 점화는 추세 반전이니 -0.3% gap 안 걸림)
 
     # === 🔧 매수비 페이드 감지 (꼭대기 진입 방지) ===
     # t15 매수비는 높은데 t45 매수비가 50% 미만 → 직전 15초만 강한 "스파이크"
