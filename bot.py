@@ -7,7 +7,6 @@ from urllib.parse import urlencode
 
 import uuid
 import hashlib
-import hmac
 import jwt
 
 # 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
@@ -696,10 +695,11 @@ def upbit_private_get(path, params=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.ConnectionError as e:
+        except (requests.exceptions.ConnectionError, ValueError) as e:
+            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
-                print(f"[API_RETRY] GET {path} → ConnectionError, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                print(f"[API_RETRY] GET {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
                 time.sleep(_wait)
                 continue
             raise
@@ -727,10 +727,11 @@ def upbit_private_post(path, body=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.ConnectionError as e:
+        except (requests.exceptions.ConnectionError, ValueError) as e:
+            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
-                print(f"[API_RETRY] POST {path} → ConnectionError, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                print(f"[API_RETRY] POST {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
                 time.sleep(_wait)
                 continue
             raise
@@ -828,10 +829,11 @@ def upbit_private_delete(path, params=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.ConnectionError as e:
+        except (requests.exceptions.ConnectionError, ValueError) as e:
+            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
-                print(f"[API_RETRY] DELETE {path} → ConnectionError, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
+                print(f"[API_RETRY] DELETE {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
                 time.sleep(_wait)
                 continue
             raise
@@ -1356,6 +1358,9 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             return True, initial_price, False
 
         current_price = js[0].get("trade_price", initial_price)
+        # 🔧 FIX: initial_price=0 방어 (ZeroDivisionError 방지)
+        if not initial_price or initial_price <= 0:
+            return True, current_price or initial_price, False
         drift = (current_price / initial_price - 1.0)
 
         # 🔧 동적 임계치: 변동성 + 장세 반영 (신호→주문 짧은 구간)
@@ -5162,31 +5167,34 @@ def relax_knob():
 # =========================
 MKTS_CACHE_TTL = 90
 _MKTS_CACHE = {"ts": 0.0, "mkts": []}
+_MKTS_CACHE_LOCK = threading.Lock()  # 🔧 FIX: TOCTOU 방어
 
 
 def get_top_krw_by_24h(n=TOP_N):
     now = time.time()
-    if _MKTS_CACHE["mkts"] and (now - _MKTS_CACHE["ts"] <= MKTS_CACHE_TTL):
-        mkts = _MKTS_CACHE["mkts"]
-    else:
-        _raw_mkts = upbit_get("https://api.upbit.com/v1/market/all")
-        allm = [
-            d.get("market", "")  # 🔧 FIX: .get() 방어
-            for d in (_raw_mkts if isinstance(_raw_mkts, list) else [])
-            if d.get("market", "").startswith("KRW-")
-        ]
-        acc = []
-        for i in range(0, len(allm), 50):
-            info = upbit_get("https://api.upbit.com/v1/ticker",
-                             {"markets": ",".join(allm[i:i + 50])})
-            if not info: continue
-            for t in info:
-                v = t.get("acc_trade_price_24h", 0)
-                if v > 0: acc.append((t["market"], v))
-        acc.sort(key=lambda x: x[1], reverse=True)
-        mkts = [m for m, _ in acc]
+    with _MKTS_CACHE_LOCK:
+        if _MKTS_CACHE["mkts"] and (now - _MKTS_CACHE["ts"] <= MKTS_CACHE_TTL):
+            return list(_MKTS_CACHE["mkts"][:n])  # 🔧 FIX: 복사본 반환 (락 밖 변경 방지)
+    # 캐시 미스 → API 호출 (락 밖에서 실행 — 블로킹 방지)
+    _raw_mkts = upbit_get("https://api.upbit.com/v1/market/all")
+    allm = [
+        d.get("market", "")  # 🔧 FIX: .get() 방어
+        for d in (_raw_mkts if isinstance(_raw_mkts, list) else [])
+        if d.get("market", "").startswith("KRW-")
+    ]
+    acc = []
+    for i in range(0, len(allm), 50):
+        info = upbit_get("https://api.upbit.com/v1/ticker",
+                         {"markets": ",".join(allm[i:i + 50])})
+        if not info: continue
+        for t in info:
+            v = t.get("acc_trade_price_24h", 0)
+            if v > 0: acc.append((t["market"], v))
+    acc.sort(key=lambda x: x[1], reverse=True)
+    mkts = [m for m, _ in acc]
+    with _MKTS_CACHE_LOCK:
         _MKTS_CACHE["mkts"] = mkts
-        _MKTS_CACHE["ts"] = now
+        _MKTS_CACHE["ts"] = time.time()  # 🔧 FIX: API 완료 시점 기준
     return mkts[:n]
 
 
@@ -5737,7 +5745,9 @@ def update_baseline_tps(market: str, ticks, window_sec: int = 300):
     with _IGNITION_LOCK:
         # 지수이동평균으로 부드럽게 업데이트
         old_tps = _IGNITION_BASELINE_TPS.get(market, tps)
-        _IGNITION_BASELINE_TPS[market] = old_tps * 0.8 + tps * 0.2
+        new_tps = old_tps * 0.8 + tps * 0.2
+        # 🔧 FIX: 바운드 제한 (점화 이벤트 시 baseline 과도 오염 방지)
+        _IGNITION_BASELINE_TPS[market] = max(0.1, min(new_tps, 50.0))
 
 
 def ignition_detected(
@@ -6664,7 +6674,8 @@ def detect_box_range(c1, lookback=None):
             variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
             std20 = variance ** 0.5
             bb_width = (4 * std20) / sma20  # BB width = (upper-lower)/middle
-    if bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
+    # 🔧 FIX: NaN/inf 방어 (corrupt candle → NaN 비교 항상 False → 필터 바이패스 방지)
+    if not math.isfinite(bb_width) or bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
         return False, {}
 
     # 상단/하단 터치 횟수 (박스 범위의 상하 20% 영역)
@@ -6986,6 +6997,11 @@ def box_monitor_position(m, entry_price, volume, box_info):
                 place_market_sell(m, partial_vol)
                 remaining_vol -= partial_vol
                 partial_sold = True
+                # 🔧 FIX: OPEN_POSITIONS volume 동기화 (크래시 복구 시 이중매도 방지)
+                with _POSITION_LOCK:
+                    _bp = OPEN_POSITIONS.get(m)
+                    if _bp:
+                        _bp["volume"] = remaining_vol
                 print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
                 tg_send(f"📦 {m} 상단 부분익절 70% | 나머지 돌파 대기")
             except Exception as pe:
@@ -8326,7 +8342,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if current_price and current_price > entry_price * 1.008:
         _sl_profit_mult = 1.8
 
-    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.5배까지만)
+    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.8배까지만)
     _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
@@ -8809,9 +8825,8 @@ def monitor_position(m,
                     OPEN_POSITIONS[m] = pos_now
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
-            # - 기존: 진입 시 1회만 호출 → 수익 중에도 타이트한 SL 유지 → 불필요 손절
-            # - 수정: 5초마다 current_price 반영하여 재계산 (수익 시 SL 1.5배 완화)
-            if time.time() - _last_sl_refresh_ts >= 5:
+            # - 박스 포지션은 고정 SL 유지 (refresh 스킵)
+            if not pre.get("is_box") and time.time() - _last_sl_refresh_ts >= 5:
                 _c1_for_sl_refresh = _get_c1_cached()
                 _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
                     entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp
@@ -9697,13 +9712,13 @@ def tg_flush_failed():
                     "text": f"[지연] {re.sub(r'<[^>]+>', '', msg)}",
                     "disable_web_page_preview": True,
                 }
+                # 🔧 FIX: 세션 사용도 락 안에서 (use-after-release 방지)
                 with _TG_SESSION_LOCK:
-                    _tg_sess = _TG_SESSION
-                r = _tg_sess.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json=payload,
-                    timeout=8,
-                )
+                    r = _TG_SESSION.post(
+                        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                        json=payload,
+                        timeout=8,
+                    )
                 if r.status_code == 200 and r.json().get("ok"):
                     _tg_fail_queue.popleft()
                     retried += 1
@@ -10397,6 +10412,9 @@ def main():
                                     with _POSITION_LOCK:
                                         OPEN_POSITIONS.pop(bm, None)
                                     _release_entry_lock(bm)
+                                    # 🔧 FIX: watchlist도 정리 (무한 재시도 방지)
+                                    with _BOX_LOCK:
+                                        _BOX_WATCHLIST.pop(bm, None)
                             else:
                                 with _POSITION_LOCK:
                                     _pp = OPEN_POSITIONS.get(bm)
@@ -10409,6 +10427,9 @@ def main():
                         except Exception as be:
                             print(f"[BOX_ERR] {bm}: {be}")
                             _release_entry_lock(bm)
+                            # 🔧 FIX: 예외 시 watchlist 정리 (무한 재시도 방지)
+                            with _BOX_LOCK:
+                                _BOX_WATCHLIST.pop(bm, None)
                 except Exception as box_scan_err:
                     print(f"[BOX_SCAN_ERR] {box_scan_err}")
 
@@ -10628,6 +10649,9 @@ def main():
                     "early" if pre.get("early_ok") else
                     ("mega" if pre.get("mega_ok") else "normal"))
                 if not cooldown_ok(m, pre['price'], reason=reason):
+                    # 🔧 FIX: cooldown 실패 시 recent_alerts 정리 (10초 재탐지 블록 방지)
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
                     continue
 
                 # 🔧 FIX: 초입 신호 발송 전 중복 진입 차단 (race condition 방지)
