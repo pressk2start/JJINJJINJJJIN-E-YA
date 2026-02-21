@@ -1936,16 +1936,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
         # FIX [M4]: _SLIP_HISTORY 제거됨 (entry/exit 분리로 대체)
 
-        # 진입 사유 한 줄 생성 (디테일 포함)
-        kd = pre.get("killer_details", {})
-        thr = kd.get("thresholds", {})  # 임계치
-        score = pre.get("score", 0)
-        vol_b = kd.get('vol_base', 0)
-        vol_s = kd.get('vol_surge', 1)
-        buy_r = kd.get('buy_ratio', 0)
-        turn_r = kd.get('turn', 0)
-        imb = kd.get('imbalance', 0)
-
+        # 진입 사유 한 줄 생성 (pre dict에서 직접 추출)
+        signal_tag = pre.get("signal_tag", "기본")
+        vol_b = pre.get("current_volume", 0)
+        vol_s = pre.get("volume_surge", 1.0)
+        _tape = pre.get("tape", {})
+        buy_r = _tape.get("buy_ratio", pre.get("buy_ratio", 0))
+        turn_r = pre.get("turn_pct", 0) / 100  # % → decimal
+        imb = pre.get("imbalance", 0)
+        cons = pre.get("consecutive_buys", 0)
 
         # 🔧 대금/배수 표시 포맷
         if vol_b >= 1e8:
@@ -1956,15 +1955,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             vol_str = f"{vol_b/1e4:.0f}만"
         surge_str = f"{vol_s:.1f}x" if vol_s >= 1.0 else f"{vol_s:.2f}x"
 
-        # 🔧 진입 사유: 값/기준 형태 (체크X 제거)
-        signal_tag = pre.get("signal_tag", "기본")
-        thr_buy = thr.get('buy', 0.7)
-        thr_turn = thr.get('turn', 0.08)
-        thr_imb = thr.get('imb', 0.3)
-
-        detail_str = (f"대금{vol_str} 배수{surge_str} "
-                      f"매수{buy_r:.0%}/{thr_buy:.0%} 회전{turn_r:.0%}/{thr_turn:.0%} "
-                      f"임밸{imb:.2f}/{thr_imb}")
+        detail_str = (f"대금{vol_str} 서지{surge_str} "
+                      f"매수{buy_r:.0%} 회전{turn_r:.0%} "
+                      f"임밸{imb:.2f} 연속{cons}회")
 
         # 🔧 이진 진입모드 라벨 (half/confirm only, probe 폐지)
         if entry_mode == "half":
@@ -1986,16 +1979,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # ✅ 손절가 None 방지
         safe_stop_str = fmt6(stop_price) if isinstance(stop_price, (int, float)) and stop_price > 0 else "계산중"
 
+        # 🔧 VWAP 표시
+        _vwap_gap_str = f" VWAP{pre.get('vwap_gap', 0):+.1f}%" if pre.get('vwap_gap') else ""
+
         tg_send(
             f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
-            f"• 사유: {entry_reason}\n"
-            f"• 신호가: {fmt6(signal_price)}원\n"
-            f"• 체결가: {fmt6(avg_price)}원\n"
-            f"• 슬리피지: {slip_pct*100:+.3f}%\n"
-            f"• 주문금액: {krw_to_use:,.0f}원 ({actual_pct:.1f}%)\n"
-            f"• 수량: {volume_filled:.6f}\n"
-            f"• 손절가: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
-            f"• ATR: {_entry_atr_pct:.3f}% | pstd: {_entry_pstd*100:.4f}% | 연속매수: {pre.get('consecutive_buys', 0)}회\n"
+            f"• 신호: {signal_tag}{_vwap_gap_str}\n"
+            f"• 지표: 서지{surge_str} 매수{buy_r:.0%} 임밸{imb:.2f} 연속{cons}회\n"
+            f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
+            f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
+            f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
             f"{link_for(m)}"
         )
 
@@ -6841,8 +6834,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 # =========================
 def is_sideways_regime(c1, lookback=20):
     """
-    횡보장 판정: 최근 N봉의 고저 범위가 좁으면 횡보
-    - 변동폭 1.5% 미만 = 횡보
+    횡보장 판정: 최근 N봉의 고저 범위 + 볼린저밴드 폭 복합 판정
+    - 변동폭이 좁으면 횡보
+    - 볼린저밴드 폭(BB width) < 1.0% = 횡보 (XRP 0.7% 같은 케이스 포착)
     - 횡보장에서 돌파 신호는 페이크 확률 높음
     """
     if len(c1) < lookback:
@@ -6851,6 +6845,7 @@ def is_sideways_regime(c1, lookback=20):
     candles = c1[-lookback:]
     highs = [c["high_price"] for c in candles]
     lows = [c["low_price"] for c in candles]
+    closes = [c["trade_price"] for c in candles]
 
     box_high = max(highs)
     box_low = min(lows)
@@ -6860,13 +6855,27 @@ def is_sideways_regime(c1, lookback=20):
 
     range_pct = (box_high - box_low) / box_low
 
-    # 🔧 가격대별 횡보 판정 (고정 임계값 — ATR 정규화는 저변동 코인에서 느슨해짐)
+    # 🔧 가격대별 횡보 판정 (고정 임계값)
     cur_price = candles[-1].get("trade_price", 0)
     if cur_price < 1000:
-        sideways_thr = 0.008   # 1000원 미만: 0.8% (before1 기준)
+        sideways_thr = 0.008   # 1000원 미만: 0.8%
     else:
-        sideways_thr = 0.005   # 1000원 이상: 0.5% (before1 기준)
-    is_sideways = range_pct < sideways_thr
+        sideways_thr = 0.005   # 1000원 이상: 0.5%
+
+    # 🔧 NEW: 볼린저밴드 폭 기반 횡보 판정 (range만으론 XRP 횡보 못 잡음)
+    # BB width = (upper - lower) / middle × 100
+    # 좁은 BB = 저변동 = 횡보 (돌파 신호는 페이크)
+    bb_sideways = False
+    if len(closes) >= 20:
+        sma20 = sum(closes[-20:]) / 20
+        if sma20 > 0:
+            variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
+            std20 = variance ** 0.5
+            bb_width_pct = (2 * std20 * 2) / sma20  # (upper - lower) / middle
+            if bb_width_pct < 0.010:  # BB 폭 1.0% 미만 = 횡보
+                bb_sideways = True
+
+    is_sideways = range_pct < sideways_thr or bb_sideways
 
     return is_sideways, range_pct
 
@@ -7067,6 +7076,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
     if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
+        return None
+
+    # 🛑 하드 컷: 거래량 서지 < 0.8x (평균 이하 = 아무것도 안 일어나고 있음)
+    # XRP 0.53x 횡보 진입 같은 케이스 방지. MEGA는 예외.
+    if not mega and vol_surge < 0.8:
+        cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.8x (평균이하, 모멘텀없음)", near_miss=False)
         return None
 
     # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
