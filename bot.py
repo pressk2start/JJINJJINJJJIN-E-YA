@@ -7,7 +7,6 @@ from urllib.parse import urlencode
 
 import uuid
 import hashlib
-import hmac
 import jwt
 
 # 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
@@ -5746,7 +5745,9 @@ def update_baseline_tps(market: str, ticks, window_sec: int = 300):
     with _IGNITION_LOCK:
         # 지수이동평균으로 부드럽게 업데이트
         old_tps = _IGNITION_BASELINE_TPS.get(market, tps)
-        _IGNITION_BASELINE_TPS[market] = old_tps * 0.8 + tps * 0.2
+        new_tps = old_tps * 0.8 + tps * 0.2
+        # 🔧 FIX: 바운드 제한 (점화 이벤트 시 baseline 과도 오염 방지)
+        _IGNITION_BASELINE_TPS[market] = max(0.1, min(new_tps, 50.0))
 
 
 def ignition_detected(
@@ -6673,7 +6674,8 @@ def detect_box_range(c1, lookback=None):
             variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
             std20 = variance ** 0.5
             bb_width = (4 * std20) / sma20  # BB width = (upper-lower)/middle
-    if bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
+    # 🔧 FIX: NaN/inf 방어 (corrupt candle → NaN 비교 항상 False → 필터 바이패스 방지)
+    if not math.isfinite(bb_width) or bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
         return False, {}
 
     # 상단/하단 터치 횟수 (박스 범위의 상하 20% 영역)
@@ -6995,6 +6997,11 @@ def box_monitor_position(m, entry_price, volume, box_info):
                 place_market_sell(m, partial_vol)
                 remaining_vol -= partial_vol
                 partial_sold = True
+                # 🔧 FIX: OPEN_POSITIONS volume 동기화 (크래시 복구 시 이중매도 방지)
+                with _POSITION_LOCK:
+                    _bp = OPEN_POSITIONS.get(m)
+                    if _bp:
+                        _bp["volume"] = remaining_vol
                 print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
                 tg_send(f"📦 {m} 상단 부분익절 70% | 나머지 돌파 대기")
             except Exception as pe:
@@ -8335,7 +8342,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
     if current_price and current_price > entry_price * 1.008:
         _sl_profit_mult = 1.8
 
-    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.5배까지만)
+    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.8배까지만)
     _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
@@ -10642,6 +10649,9 @@ def main():
                     "early" if pre.get("early_ok") else
                     ("mega" if pre.get("mega_ok") else "normal"))
                 if not cooldown_ok(m, pre['price'], reason=reason):
+                    # 🔧 FIX: cooldown 실패 시 recent_alerts 정리 (10초 재탐지 블록 방지)
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
                     continue
 
                 # 🔧 FIX: 초입 신호 발송 전 중복 진입 차단 (race condition 방지)
