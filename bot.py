@@ -2041,7 +2041,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         safe_stop_str = fmt6(stop_price) if isinstance(stop_price, (int, float)) and stop_price > 0 else "계산중"
 
         # 🔧 VWAP 표시
-        _vwap_gap_str = f" VWAP{pre.get('vwap_gap', 0):+.1f}%" if pre.get('vwap_gap') else ""
+        # 🔧 FIX: vwap_gap=0 도 유효값 → falsy 체크 대신 None 체크
+        _vwap_gap_str = f" VWAP{pre.get('vwap_gap', 0):+.1f}%" if pre.get('vwap_gap') is not None else ""
 
         tg_send(
             f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
@@ -7580,7 +7581,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 if i >= 2:
                     s = sum(c["candle_acc_trade_price"] for c in c1[i-2:i+1])
                     past_sums.append(s)
-            vol_surge_3m = (sum_3 / max(statistics.mean(past_sums), 1)) if past_sums else vol_surge_ema  # 🔧 FIX: mean=0 방어
+            # 🔧 FIX: 표본 3개 미만이면 mean 신뢰도 부족 → EMA 폴백 (노이즈성 vol_surge 방지)
+            vol_surge_3m = (sum_3 / max(statistics.mean(past_sums), 1)) if len(past_sums) >= 3 else vol_surge_ema
             vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
         else:
             vol_surge = vol_surge_ema
@@ -8671,6 +8673,15 @@ def monitor_position(m,
         # 🔧 FIX: 초기 SL에도 signal_type 전달 (래칫 max()로 인해 초기값이 영구 지배 → ign/circle 완화 무효화 방지)
         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1, signal_type=pre.get("signal_type", "normal"))
 
+    # 🔧 FIX: remonitor 시 래칫된 stop 복원 (본절잠금/트레일잠금이 ATR 재계산으로 상실 방지)
+    with _POSITION_LOCK:
+        _pos_stop = OPEN_POSITIONS.get(m)
+        if _pos_stop:
+            _persisted_stop = _pos_stop.get("stop", 0)
+            if _persisted_stop > base_stop:
+                base_stop = _persisted_stop
+                print(f"[REMONITOR_SL] {m} 래칫 stop 복원: {base_stop:,.0f} (ATR보다 높음)")
+
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
@@ -8685,7 +8696,8 @@ def monitor_position(m,
     # 🔧 수급확인 손절: 감량 후 관망모드 상태
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
-    _sl_extended_pct = eff_sl_pct * 1.35  # 🔧 FIX: 0.0→기본값 (감량 전에도 안전한 SL 보장)
+    # 🔧 FIX: SL 확장에 캡 적용 (eff_sl_pct에 이미 1.8x 적용 가능 → 1.35x 스태킹 시 7.78% 가능)
+    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 최대 4.8%
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -8955,7 +8967,7 @@ def monitor_position(m,
                             break
                         _sl_reduced = True
                         _sl_reduced_ts = time.time()
-                        _sl_extended_pct = eff_sl_pct * 1.35  # SL 35% 확장
+                        _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 🔧 FIX: 캡 적용 (최대 4.8%)
                         # 디바운스 리셋 (새 기준으로 관찰 시작)
                         stop_first_seen_ts = 0.0
                         stop_hits = 0
@@ -9190,6 +9202,11 @@ def monitor_position(m,
                     # 50%는 중간 눌림에서 너무 빨리 청산 → 러너 큰 수익 놓침
                     _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.40))
                     base_stop = max(base_stop, _runner_lock)
+                    # 🔧 FIX: 러너 래칫을 OPEN_POSITIONS에 저장
+                    with _POSITION_LOCK:
+                        _p_ratchet = OPEN_POSITIONS.get(m)
+                        if _p_ratchet:
+                            _p_ratchet["stop"] = base_stop
                 else:
                     # 비러너: 기존 로직 (강세 확대, 약세 축소)
                     if _trail_t10["buy_ratio"] >= 0.65 and _trail_t10["krw_per_sec"] >= 25000:
@@ -9269,6 +9286,11 @@ def monitor_position(m,
                 # 본절 확보 (래칫 기본)
                 be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
                 base_stop = max(base_stop, be_stop)
+                # 🔧 FIX: 래칫 stop을 OPEN_POSITIONS에 저장 (remonitor 복원용)
+                with _POSITION_LOCK:
+                    _p_ratchet = OPEN_POSITIONS.get(m)
+                    if _p_ratchet:
+                        _p_ratchet["stop"] = base_stop
                 if trade_type == "runner":
                     tg_send_mid(f"🏃 {m} +{cur_gain*100:.2f}% 러너 CP도달 → 트레일 무장 (dist={trail_dist*100:.2f}%, 부분익절 없음)")
                 else:
@@ -9415,6 +9437,11 @@ def monitor_position(m,
                         mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.70)
                         be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
+                        # 🔧 FIX: MFE 래칫을 OPEN_POSITIONS에 저장
+                        with _POSITION_LOCK:
+                            _p_ratchet = OPEN_POSITIONS.get(m)
+                            if _p_ratchet:
+                                _p_ratchet["stop"] = base_stop
                         _rn_remain = int((1 - _rn_sell_ratio) * 100)
                         tg_send_mid(f"🏃 {m} {_rn_label} | +{max_gain*100:.2f}% | {_rn_remain}% 트레일중 | 손절→+{mfe_lock_pct*100:.2f}%")
                 # 러너: Plateau에서는 부분익절 안함 (트레일과 래칫에 맡김)
@@ -10458,6 +10485,15 @@ def main():
             # 🔧 FIX H2: 동적 쿨다운 최대값(COOLDOWN*2=960초) 사용
             # 기존: 고정 COOLDOWN(480) → 시간대별 180~960초와 불일치 → 조기 삭제
             cleanup_expired(last_signal_at, COOLDOWN * 2 + 60)  # 🔧 FIX: 여유 60초 추가 (쿨다운 경계 jitter로 인한 조기삭제 방지)
+            # 🔧 FIX: last_price_at_alert / last_reason도 정리 (메모리 누수 방지)
+            # — 타임스탬프가 아니라 가격/문자열이므로 last_signal_at 키 기준으로 정리
+            _valid_signal_keys = set(last_signal_at.keys())
+            for _stale_k in list(last_price_at_alert.keys()):
+                if _stale_k not in _valid_signal_keys:
+                    last_price_at_alert.pop(_stale_k, None)
+            for _stale_k in list(last_reason.keys()):
+                if _stale_k not in _valid_signal_keys:
+                    last_reason.pop(_stale_k, None)
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
 
