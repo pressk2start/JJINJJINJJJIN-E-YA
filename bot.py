@@ -299,6 +299,35 @@ _CIRCLE_WATCHLIST = {}
 _CIRCLE_LOCK = threading.Lock()
 
 # =========================
+# 📦 박스권 매매 (Box Range Trading)
+# =========================
+# 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
+# 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
+BOX_ENABLED = True                     # 박스권 매매 활성화
+BOX_LOOKBACK = 30                      # 박스 감지용 캔들 수 (30분)
+BOX_MIN_RANGE_PCT = 0.005              # 최소 박스 폭 0.5% (너무 좁으면 수수료에 먹힘)
+BOX_MAX_RANGE_PCT = 0.030              # 최대 박스 폭 3.0% (넓으면 박스 아님)
+BOX_MIN_TOUCHES = 2                    # 상단/하단 각각 최소 터치 횟수
+BOX_TOUCH_ZONE_PCT = 0.20              # 터치 판정 영역 (박스 범위의 20%)
+BOX_ENTRY_ZONE_PCT = 0.25              # 진입 영역: 박스 하단 25% 이내
+BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
+BOX_SL_BUFFER_PCT = 0.003              # 손절: 박스 하단 -0.3% (이탈 확인)
+BOX_MIN_VOL_KRW = 50_000_000          # 최소 30분 거래대금 5천만원
+BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
+BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
+BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
+BOX_SCAN_INTERVAL = 30                 # 박스 스캔 주기 (30초마다)
+BOX_MIN_BB_WIDTH = 0.008               # BB 폭 최소 0.8% (너무 좁으면 수수료에 먹힘)
+BOX_MAX_BB_WIDTH = 0.025               # BB 폭 최대 2.5%
+BOX_CONFIRM_SEC = 3                    # 하단 체류 확인 시간 (3초)
+
+# 박스 워치리스트: { market: { box_high, box_low, ... } }
+_BOX_WATCHLIST = {}
+_BOX_LOCK = threading.Lock()
+_BOX_LAST_EXIT = {}                    # 쿨다운 추적: { market: timestamp }
+_BOX_LAST_SCAN_TS = 0                  # 마지막 스캔 시각
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 # 🔧 FIX: 락에 소유자(스레드 ID) 추적 추가 - reentrant 버그 수정
@@ -6594,6 +6623,419 @@ def circle_confirm_entry(m):
 
 
 # =========================
+# 📦 박스권 매매 엔진 (Box Range Trading Engine)
+# =========================
+
+def detect_box_range(c1, lookback=None):
+    """
+    📦 박스권 감지: N봉 캔들에서 박스 상단/하단 식별
+
+    Returns: (is_box, box_info) where box_info = {
+        "box_high": float, "box_low": float, "range_pct": float,
+        "top_touches": int, "bot_touches": int, "avg_vol": float,
+        "bb_width": float
+    }
+    """
+    lookback = lookback or BOX_LOOKBACK
+    if not c1 or len(c1) < lookback:
+        return False, {}
+
+    candles = c1[-lookback:]
+    highs = [c["high_price"] for c in candles]
+    lows = [c["low_price"] for c in candles]
+    closes = [c["trade_price"] for c in candles]
+    volumes = [c.get("candle_acc_trade_price", 0) for c in candles]
+
+    box_high = max(highs)
+    box_low = min(lows)
+    if box_low <= 0:
+        return False, {}
+
+    range_pct = (box_high - box_low) / box_low
+    box_range = box_high - box_low
+
+    # 범위 체크
+    if range_pct < BOX_MIN_RANGE_PCT or range_pct > BOX_MAX_RANGE_PCT:
+        return False, {}
+
+    # 볼린저밴드 폭 체크
+    bb_width = 0.0
+    if len(closes) >= 20:
+        sma20 = sum(closes[-20:]) / 20
+        if sma20 > 0:
+            variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
+            std20 = variance ** 0.5
+            bb_width = (4 * std20) / sma20  # BB width = (upper-lower)/middle
+    if bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
+        return False, {}
+
+    # 상단/하단 터치 횟수 (박스 범위의 상하 20% 영역)
+    touch_zone = box_range * BOX_TOUCH_ZONE_PCT
+    top_zone = box_high - touch_zone
+    bot_zone = box_low + touch_zone
+
+    top_touches = sum(1 for h in highs if h >= top_zone)
+    bot_touches = sum(1 for l in lows if l <= bot_zone)
+
+    if top_touches < BOX_MIN_TOUCHES or bot_touches < BOX_MIN_TOUCHES:
+        return False, {}
+
+    # 거래대금 체크 (30분 누적)
+    total_vol = sum(volumes)
+    avg_vol = total_vol / max(len(volumes), 1)
+    if total_vol < BOX_MIN_VOL_KRW:
+        return False, {}
+
+    # 현재가가 박스 안에 있는지 (마지막 캔들)
+    cur_price = closes[-1]
+    if cur_price < box_low or cur_price > box_high:
+        return False, {}
+
+    return True, {
+        "box_high": box_high,
+        "box_low": box_low,
+        "range_pct": range_pct,
+        "top_touches": top_touches,
+        "bot_touches": bot_touches,
+        "avg_vol": avg_vol,
+        "total_vol": total_vol,
+        "bb_width": bb_width,
+        "cur_price": cur_price,
+    }
+
+
+def box_scan_markets(c1_cache):
+    """
+    📦 박스권 종목 스캔 — 메인루프에서 주기적 호출
+    박스가 감지된 종목을 워치리스트에 등록
+    """
+    global _BOX_LAST_SCAN_TS
+    if not BOX_ENABLED:
+        return
+
+    now = time.time()
+    if now - _BOX_LAST_SCAN_TS < BOX_SCAN_INTERVAL:
+        return
+    _BOX_LAST_SCAN_TS = now
+
+    for m, c1 in c1_cache.items():
+        if not c1 or len(c1) < BOX_LOOKBACK:
+            continue
+
+        # 이미 돌파 포지션 보유 중이면 스킵
+        with _POSITION_LOCK:
+            if m in OPEN_POSITIONS:
+                continue
+
+        # 이미 박스 워치리스트에 있으면 스킵
+        with _BOX_LOCK:
+            if m in _BOX_WATCHLIST:
+                continue
+
+        # 쿨다운 체크
+        last_exit = _BOX_LAST_EXIT.get(m, 0)
+        if now - last_exit < BOX_COOLDOWN_SEC:
+            continue
+
+        # 스테이블코인 제외
+        ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
+        if ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:
+            continue
+
+        is_box, box_info = detect_box_range(c1)
+        if not is_box:
+            continue
+
+        # 박스 워치리스트 등록
+        with _BOX_LOCK:
+            if m in _BOX_WATCHLIST:
+                continue
+
+            # 박스 포지션 수 체크
+            box_pos_count = sum(1 for w in _BOX_WATCHLIST.values() if w.get("state") == "holding")
+            if box_pos_count >= BOX_MAX_POSITIONS:
+                continue
+
+            _BOX_WATCHLIST[m] = {
+                "state": "watching",  # watching → ready → holding
+                "reg_ts": now,
+                "box_high": box_info["box_high"],
+                "box_low": box_info["box_low"],
+                "range_pct": box_info["range_pct"],
+                "bb_width": box_info["bb_width"],
+                "avg_vol": box_info["avg_vol"],
+                "top_touches": box_info["top_touches"],
+                "bot_touches": box_info["bot_touches"],
+            }
+            print(
+                f"[BOX] 📦 {m} 박스 감지 | "
+                f"상단 {box_info['box_high']:,.0f} 하단 {box_info['box_low']:,.0f} "
+                f"({box_info['range_pct']*100:.1f}%) | "
+                f"터치 상{box_info['top_touches']}회 하{box_info['bot_touches']}회 | "
+                f"BB폭 {box_info['bb_width']*100:.1f}%"
+            )
+
+
+def box_check_entry(m):
+    """
+    📦 박스 하단 진입 체크 → 진입 가능하면 pre dict 반환
+
+    조건:
+    1. 현재가가 박스 하단 25% 영역 이내
+    2. 매수세 확인 (반등 시작)
+    3. 박스가 여전히 유효 (이탈 안 함)
+    """
+    if not BOX_ENABLED:
+        return None
+
+    with _BOX_LOCK:
+        watch = _BOX_WATCHLIST.get(m)
+        if not watch or watch["state"] != "watching":
+            return None
+
+        box_high = watch["box_high"]
+        box_low = watch["box_low"]
+
+    # 현재가 조회
+    try:
+        c1 = get_minutes_candles(1, m, 5)
+        if not c1 or len(c1) < 2:
+            return None
+    except Exception:
+        return None
+
+    cur_price = c1[-1]["trade_price"]
+    cur_low = c1[-1]["low_price"]
+    if cur_price <= 0:
+        return None
+
+    box_range = box_high - box_low
+    if box_range <= 0:
+        return None
+
+    # 박스 이탈 체크 (하방 돌파 → 폐기)
+    if cur_price < box_low * (1 - BOX_SL_BUFFER_PCT):
+        with _BOX_LOCK:
+            _BOX_WATCHLIST.pop(m, None)
+        print(f"[BOX] {m} 박스 하방 이탈 {cur_price:,.0f} < {box_low:,.0f} → 폐기")
+        return None
+
+    # 박스 상방 돌파 → 폐기 (돌파 전략이 처리)
+    if cur_price > box_high * 1.003:
+        with _BOX_LOCK:
+            _BOX_WATCHLIST.pop(m, None)
+        print(f"[BOX] {m} 박스 상방 돌파 {cur_price:,.0f} > {box_high:,.0f} → 폐기 (돌파전략으로)")
+        return None
+
+    # 진입 영역 체크: 박스 하단 25% 이내
+    entry_ceiling = box_low + box_range * BOX_ENTRY_ZONE_PCT
+    if cur_price > entry_ceiling:
+        return None  # 아직 하단 근처 아님
+
+    # 매수세 확인 (반등 징후)
+    try:
+        ticks = get_recent_ticks(m, 60)
+        if not ticks or len(ticks) < 5:
+            return None
+        t10 = micro_tape_stats_from_ticks(ticks, 10)
+
+        # 반등 조건: 매수비 > 50% AND 거래가 살아있음
+        if t10["buy_ratio"] < 0.50:
+            return None
+        if t10["krw_per_sec"] < 3000:
+            return None
+    except Exception:
+        return None
+
+    # 호가 확인 (스프레드)
+    try:
+        ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+        if not ob_raw or len(ob_raw) == 0:
+            return None
+        units = ob_raw[0].get("orderbook_units", [])
+        if not units:
+            return None
+        spread = ((units[0]["ask_price"] - units[0]["bid_price"]) /
+                  ((units[0]["ask_price"] + units[0]["bid_price"]) / 2) * 100)
+        if spread > 0.40:  # 스프레드 과다
+            return None
+    except Exception:
+        return None
+
+    # 진입 준비 완료
+    # 손절가: 박스 하단 -0.3%
+    box_stop = box_low * (1 - BOX_SL_BUFFER_PCT)
+    # 익절가: 박스 상단 근처 (상위 20% 영역 시작점)
+    box_tp = box_high - box_range * BOX_EXIT_ZONE_PCT
+
+    sl_pct = (cur_price - box_stop) / cur_price  # 손절 퍼센트
+
+    entry_pre = {
+        "price": cur_price,
+        "signal_tag": "📦박스하단",
+        "signal_type": "box",
+        "trade_type": "box",
+        "entry_mode": BOX_ENTRY_MODE,
+        "is_box": True,
+        "box_high": box_high,
+        "box_low": box_low,
+        "box_stop": box_stop,
+        "box_tp": box_tp,
+        "box_sl_pct": sl_pct,
+        "box_range_pct": watch.get("range_pct", 0),
+        "buy_ratio": t10["buy_ratio"],
+        "volume_surge": 1.0,
+        "spread": spread,
+        "tape": t10,
+        "ticks": ticks,
+        "ob": {"spread": spread, "depth_krw": 0, "raw": ob_raw[0] if ob_raw else {}},
+        "imbalance": 0,
+        "turn_pct": 0,
+        "current_volume": 0,
+        "filter_type": "box_range",
+    }
+
+    with _BOX_LOCK:
+        watch = _BOX_WATCHLIST.get(m)
+        if watch:
+            watch["state"] = "ready"
+            watch["ready_ts"] = time.time()
+            watch["entry_price"] = cur_price
+
+    print(
+        f"[BOX] 📦 {m} 하단 진입 신호! | "
+        f"현재 {cur_price:,.0f} (하단 {box_low:,.0f}~{entry_ceiling:,.0f}) | "
+        f"TP {box_tp:,.0f} SL {box_stop:,.0f} | "
+        f"매수비 {t10['buy_ratio']:.0%}"
+    )
+
+    return entry_pre
+
+
+def box_monitor_position(m, entry_price, volume, box_info):
+    """
+    📦 박스 포지션 모니터: 상단 익절 / 하단 손절 / 박스 이탈 감시
+
+    기존 monitor_position과 독립 — 박스 전용 간단 로직
+    """
+    box_high = box_info["box_high"]
+    box_low = box_info["box_low"]
+    box_tp = box_info["box_tp"]
+    box_stop = box_info["box_stop"]
+    box_range = box_high - box_low
+
+    start_ts = time.time()
+    max_hold_sec = 600  # 최대 10분 홀딩 (박스 깨지면 의미 없음)
+
+    print(f"[BOX_MON] 📦 {m} 모니터 시작 | 진입 {entry_price:,.0f} | TP {box_tp:,.0f} SL {box_stop:,.0f}")
+
+    sell_reason = ""
+    while time.time() - start_ts < max_hold_sec:
+        time.sleep(1.5)
+
+        try:
+            c1 = get_minutes_candles(1, m, 3)
+            if not c1:
+                continue
+            cur_price = c1[-1]["trade_price"]
+        except Exception:
+            continue
+
+        cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
+
+        # 1) 익절: 박스 상단 영역 도달
+        if cur_price >= box_tp:
+            sell_reason = f"📦 박스 상단 익절 (TP {box_tp:,.0f})"
+            break
+
+        # 2) 손절: 박스 하단 이탈
+        if cur_price <= box_stop:
+            sell_reason = f"📦 박스 하단 이탈 (SL {box_stop:,.0f})"
+            break
+
+        # 3) 박스 상방 돌파 (보너스 — 트레일 안 하고 바로 익절)
+        if cur_price > box_high * 1.002:
+            sell_reason = f"📦 박스 상방 돌파! ({cur_price:,.0f} > {box_high:,.0f})"
+            break
+
+    # 시간 초과
+    if not sell_reason:
+        sell_reason = f"📦 박스 시간초과 {max_hold_sec}초"
+
+    # 매도 실행
+    try:
+        sell_result = upbit_sell_market(m, volume)
+        time.sleep(0.5)
+
+        # 매도가 조회
+        try:
+            order_id = sell_result.get("uuid", "")
+            if order_id:
+                time.sleep(0.3)
+                order_detail = safe_upbit_get(f"https://api.upbit.com/v1/order?uuid={order_id}")
+                trades = order_detail.get("trades", []) if order_detail else []
+                if trades:
+                    total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
+                    total_vol = sum(float(tr["volume"]) for tr in trades)
+                    sell_price = total_krw / total_vol if total_vol > 0 else cur_price
+                else:
+                    sell_price = cur_price
+            else:
+                sell_price = cur_price
+        except Exception:
+            sell_price = cur_price
+
+        pnl_pct = (sell_price / entry_price - 1) * 100 if entry_price > 0 else 0
+        pnl_emoji = "💰" if pnl_pct > 0 else "📉"
+        hold_sec = time.time() - start_ts
+
+        tg_send(
+            f"{pnl_emoji} <b>[박스매매] 매도</b> {m}\n"
+            f"• 사유: {sell_reason}\n"
+            f"• 진입: {fmt6(entry_price)}원 → 매도: {fmt6(sell_price)}원\n"
+            f"• 수익률: {pnl_pct:+.2f}%\n"
+            f"• 보유시간: {hold_sec:.0f}초\n"
+            f"• 박스: {fmt6(box_low)}~{fmt6(box_high)} ({box_info.get('range_pct', 0)*100:.1f}%)\n"
+            f"{link_for(m)}"
+        )
+
+        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL {pnl_pct:+.2f}% | {hold_sec:.0f}초")
+
+    except Exception as e:
+        print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
+        tg_send(f"⚠️ 박스매매 매도 실패 {m}\n{e}")
+
+    # 정리
+    with _BOX_LOCK:
+        _BOX_WATCHLIST.pop(m, None)
+    _BOX_LAST_EXIT[m] = time.time()
+
+    with _POSITION_LOCK:
+        OPEN_POSITIONS.pop(m, None)
+
+
+def box_confirm_entry(m):
+    """📦 박스 진입 확정 → state를 holding으로 변경"""
+    with _BOX_LOCK:
+        watch = _BOX_WATCHLIST.get(m)
+        if watch:
+            watch["state"] = "holding"
+
+
+def box_cleanup():
+    """📦 오래된 박스 워치리스트 정리 (30분 이상 watching인 것)"""
+    if not BOX_ENABLED:
+        return
+    with _BOX_LOCK:
+        now = time.time()
+        expired = [m for m, w in _BOX_WATCHLIST.items()
+                   if w.get("state") == "watching" and now - w.get("reg_ts", 0) > 1800]
+        for m in expired:
+            print(f"[BOX] {m} 30분 초과 → 워치리스트 제거")
+            _BOX_WATCHLIST.pop(m, None)
+
+
+# =========================
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
 def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
@@ -9766,6 +10208,119 @@ def main():
                             if OPEN_POSITIONS.get(cm, {}).get("pre_signal"):
                                 OPEN_POSITIONS.pop(cm, None)
                         _release_entry_lock(cm)
+
+            # 📦 박스권 매매: 스캔 + 진입 체크
+            if BOX_ENABLED:
+                try:
+                    box_cleanup()
+                    box_scan_markets(c1_cache)
+
+                    with _BOX_LOCK:
+                        box_markets = [bm for bm, bw in _BOX_WATCHLIST.items()
+                                       if bw.get("state") == "watching"]
+                    for bm in box_markets:
+                        try:
+                            box_pre = box_check_entry(bm)
+                            if not box_pre:
+                                continue
+
+                            with _POSITION_LOCK:
+                                if bm in OPEN_POSITIONS:
+                                    continue
+
+                            if not _try_acquire_entry_lock(bm):
+                                continue
+
+                            with _POSITION_LOCK:
+                                if bm in OPEN_POSITIONS:
+                                    _release_entry_lock(bm)
+                                    continue
+                                active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
+                                if active_count >= MAX_POSITIONS:
+                                    _release_entry_lock(bm)
+                                    continue
+                                OPEN_POSITIONS[bm] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
+
+                            # 박스 전용 SL/TP
+                            box_stop = box_pre["box_stop"]
+                            box_sl_pct = box_pre["box_sl_pct"]
+
+                            try:
+                                open_auto_position(bm, box_pre, box_stop, box_sl_pct)
+                            except Exception as be:
+                                print(f"[BOX_OPEN_ERR] {bm}: {be}")
+                                with _POSITION_LOCK:
+                                    pos = OPEN_POSITIONS.get(bm)
+                                    if pos and pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(bm, None)
+                                _release_entry_lock(bm)
+                                continue
+
+                            with _POSITION_LOCK:
+                                _box_pos = OPEN_POSITIONS.get(bm, {})
+                                _box_opened = (_box_pos.get("state") == "open")
+
+                            if _box_opened:
+                                box_confirm_entry(bm)
+                                with _POSITION_LOCK:
+                                    actual_entry_b = OPEN_POSITIONS.get(bm, {}).get("entry_price", box_pre["price"])
+                                    actual_vol_b = OPEN_POSITIONS.get(bm, {}).get("volume", 0)
+
+                                _box_info = {
+                                    "box_high": box_pre["box_high"],
+                                    "box_low": box_pre["box_low"],
+                                    "box_tp": box_pre["box_tp"],
+                                    "box_stop": box_pre["box_stop"],
+                                    "range_pct": box_pre.get("box_range_pct", 0),
+                                }
+
+                                tg_send(
+                                    f"📦 <b>[박스매매] 하단 매수</b> {bm}\n"
+                                    f"• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
+                                    f"• 체결가: {fmt6(actual_entry_b)}원\n"
+                                    f"• 목표: {fmt6(_box_info['box_tp'])}원 | 손절: {fmt6(_box_info['box_stop'])}원\n"
+                                    f"• 매수비: {box_pre.get('buy_ratio', 0):.0%}\n"
+                                    f"{link_for(bm)}"
+                                )
+
+                                # 박스 전용 모니터 스레드
+                                def _run_box_monitor(market, entry, vol, binfo):
+                                    try:
+                                        box_monitor_position(market, entry, vol, binfo)
+                                    except Exception as bme:
+                                        print(f"[BOX_MON_ERR] {market}: {bme}")
+                                        traceback.print_exc()
+                                        try:
+                                            close_auto_position(market, f"박스모니터예외 | {bme}")
+                                        except Exception:
+                                            pass
+                                    finally:
+                                        _release_entry_lock(market)
+                                        with _MONITOR_LOCK:
+                                            _ACTIVE_MONITORS.pop(market, None)
+
+                                bt = threading.Thread(
+                                    target=_run_box_monitor,
+                                    args=(bm, actual_entry_b, actual_vol_b, _box_info),
+                                    daemon=True
+                                )
+                                bt.start()
+                                with _MONITOR_LOCK:
+                                    _ACTIVE_MONITORS[bm] = bt
+                            else:
+                                with _POSITION_LOCK:
+                                    _pp = OPEN_POSITIONS.get(bm)
+                                    if _pp and _pp.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(bm, None)
+                                _release_entry_lock(bm)
+                                with _BOX_LOCK:
+                                    _BOX_WATCHLIST.pop(bm, None)
+
+                        except Exception as be:
+                            print(f"[BOX_ERR] {bm}: {be}")
+                            _release_entry_lock(bm)
+                except Exception as box_scan_err:
+                    print(f"[BOX_SCAN_ERR] {box_scan_err}")
 
             # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
             # (10건마다 또는 연속 3패 시 즉시 학습)
