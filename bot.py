@@ -1374,7 +1374,10 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             hour = now_kst().hour
             if 0 <= hour < 6:
                 base += 0.001
-            dyn = base + min(0.004, pstd * 0.5) + r * 0.002
+            # 🔧 FIX: pstd 기여도 축소 (서지 중 고변동성 → 가드 넓어짐 → 꼭대기 체결)
+            # 기존: min(0.004, pstd*0.5) → 서지 시 최대 +0.4%
+            # 변경: min(0.002, pstd*0.3) → 서지 시 최대 +0.2% (변동성 클수록 조심)
+            dyn = base + min(0.002, pstd * 0.3) + r * 0.002
             # 🔧 FIX: 동그라미(재돌파)는 이미 눌림 검증 완료 → threshold +0.3% 완화
             if is_circle:
                 dyn += 0.003
@@ -1529,6 +1532,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
         ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
+
+        # 🔧 FIX: VWAP gap + drift 복합 체크 (가드 통과해도 총 괴리 과대 → 꼭대기 진입 차단)
+        # 예: VWAP+1.7% 신호 + 0.95% drift = 2.65% → 실질 VWAP+2.65% 진입은 과도
+        _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
+        _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
+        _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
+        if _total_gap > 2.0 and not pre.get("is_circle"):
+            ok_guard = False
+            print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
+                  f"= 총 {_total_gap:.1f}% > 2.0% → 꼭대기 진입 차단")
+
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
             signal_skip(f"가격가드 실패 (신호가→현재가 {drift_pct:+.2f}%)")
