@@ -305,7 +305,7 @@ _CIRCLE_LOCK = threading.Lock()
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
 BOX_LOOKBACK = 30                      # 박스 감지용 캔들 수 (30분)
-BOX_MIN_RANGE_PCT = 0.005              # 최소 박스 폭 0.5% (너무 좁으면 수수료에 먹힘)
+BOX_MIN_RANGE_PCT = 0.012              # 🔧 상향: 0.5→1.2% (수수료+슬립 감안 최소 수익 구간)
 BOX_MAX_RANGE_PCT = 0.030              # 최대 박스 폭 3.0% (넓으면 박스 아님)
 BOX_MIN_TOUCHES = 2                    # 상단/하단 각각 최소 터치 횟수
 BOX_TOUCH_ZONE_PCT = 0.20              # 터치 판정 영역 (박스 범위의 20%)
@@ -317,7 +317,7 @@ BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
 BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
 BOX_SCAN_INTERVAL = 30                 # 박스 스캔 주기 (30초마다)
-BOX_MIN_BB_WIDTH = 0.008               # BB 폭 최소 0.8% (너무 좁으면 수수료에 먹힘)
+BOX_MIN_BB_WIDTH = 0.010               # 🔧 상향: 0.8→1.0% (최소 박스폭과 정합)
 BOX_MAX_BB_WIDTH = 0.025               # BB 폭 최대 2.5%
 BOX_CONFIRM_SEC = 3                    # 하단 체류 확인 시간 (3초)
 
@@ -1698,7 +1698,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             "early" if pre.get("early_ok") else
             "normal"
         )
-        if c1_for_sl:
+        # 📦 박스 전략은 고정 SL/TP 사용 (dynamic_stop_loss 재계산 금지)
+        if pre.get("is_box"):
+            stop_price = pre["box_stop"]
+            eff_sl_pct = pre["box_sl_pct"]
+            print(f"[SL_BOX] {m} 박스 전용 SL: {eff_sl_pct*100:.2f}% (stop={fmt6(stop_price)})")
+        elif c1_for_sl:
             new_stop, new_sl_pct, sl_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type, entry_price)
             stop_price = new_stop
             eff_sl_pct = new_sl_pct
@@ -1955,6 +1960,14 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_pstd": round(_entry_pstd * 100, 4),     # 진입시 가격표준편차 (10초) — % 단위 (pstd 통일)
                 "entry_spread": round(pre.get("spread", 0), 4),  # 진입시 스프레드
                 "entry_consec": pre.get("consecutive_buys", 0),  # 진입시 연속매수
+                # 📦 전략 태그 (박스/돌파/동그라미 구분)
+                "strategy": "box" if pre.get("is_box") else
+                            "circle" if pre.get("is_circle") else "breakout",
+                # 📦 박스 전용 TP/SL (모니터에서 우선 적용)
+                "box_tp": pre.get("box_tp"),
+                "box_stop": pre.get("box_stop"),
+                "box_high": pre.get("box_high"),
+                "box_low": pre.get("box_low"),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -6830,7 +6843,23 @@ def box_check_entry(m):
     # 진입 영역 체크: 박스 하단 25% 이내
     entry_ceiling = box_low + box_range * BOX_ENTRY_ZONE_PCT
     if cur_price > entry_ceiling:
+        # 하단 영역 밖 → 체류 시간 초기화
+        with _BOX_LOCK:
+            w = _BOX_WATCHLIST.get(m)
+            if w:
+                w.pop("in_zone_since", None)
         return None  # 아직 하단 근처 아님
+
+    # 🔧 하단 체류 확인 (BOX_CONFIRM_SEC초 연속 하단 영역 유지)
+    with _BOX_LOCK:
+        w = _BOX_WATCHLIST.get(m)
+        if w:
+            if "in_zone_since" not in w:
+                w["in_zone_since"] = time.time()
+                return None  # 첫 진입 — 체류 시간 누적 시작
+            dwell = time.time() - w["in_zone_since"]
+            if dwell < BOX_CONFIRM_SEC:
+                return None  # 아직 체류 시간 미달
 
     # 매수세 확인 (반등 징후)
     try:
@@ -6844,6 +6873,11 @@ def box_check_entry(m):
             return None
         if t10["krw_per_sec"] < 3000:
             return None
+
+        # 🔧 반등 가속도 확인 (t10 > t30 = 최근 매수세 증가)
+        flow_accel = calc_flow_acceleration(ticks)
+        if flow_accel < 1.1:
+            return None  # 반등 가속 없음 → 하락 지속 가능성
     except Exception:
         return None
 
@@ -6930,6 +6964,11 @@ def box_monitor_position(m, entry_price, volume, box_info):
     print(f"[BOX_MON] 📦 {m} 모니터 시작 | 진입 {entry_price:,.0f} | TP {box_tp:,.0f} SL {box_stop:,.0f}")
 
     sell_reason = ""
+    partial_sold = False      # 부분 익절 여부
+    remaining_vol = volume    # 남은 수량
+    breakout_trail = False    # 돌파 트레일 모드
+    trail_peak = 0            # 트레일 최고점
+
     while time.time() - start_ts < max_hold_sec:
         time.sleep(1.5)
 
@@ -6943,38 +6982,70 @@ def box_monitor_position(m, entry_price, volume, box_info):
 
         cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
 
-        # 1) 익절: 박스 상단 영역 도달
-        if cur_price >= box_tp:
-            sell_reason = f"📦 박스 상단 익절 (TP {box_tp:,.0f})"
+        # === 돌파 트레일 모드 ===
+        if breakout_trail:
+            if cur_price > trail_peak:
+                trail_peak = cur_price
+            trail_drop = (trail_peak - cur_price) / trail_peak if trail_peak > 0 else 0
+            # 고점 대비 0.5% 하락하면 나머지 익절
+            if trail_drop >= 0.005:
+                sell_reason = f"📦 돌파 트레일 익절 (고점 {trail_peak:,.0f} → {cur_price:,.0f})"
+                break
+            continue
+
+        # 1) 익절: 박스 상단 영역 도달 → 70% 부분익절
+        if cur_price >= box_tp and not partial_sold:
+            partial_vol = remaining_vol * 0.70
+            try:
+                place_market_sell(m, partial_vol)
+                remaining_vol -= partial_vol
+                partial_sold = True
+                print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
+                tg_send(f"📦 {m} 상단 부분익절 70% | 나머지 돌파 대기")
+            except Exception as pe:
+                print(f"[BOX_MON] 부분매도 실패: {pe}")
+                sell_reason = f"📦 박스 상단 익절 (부분매도실패→전량)"
+                break
+            continue
+
+        # 2) 부분익절 후 박스 돌파 → 트레일 모드
+        if partial_sold and cur_price > box_high * 1.002:
+            breakout_trail = True
+            trail_peak = cur_price
+            print(f"[BOX_MON] 📦 {m} 돌파! 트레일 시작 | 고점 {cur_price:,.0f}")
+            continue
+
+        # 3) 부분익절 후 다시 하락 → 나머지도 청산
+        if partial_sold and cur_price < box_tp - box_range * 0.15:
+            sell_reason = f"📦 부분익절 후 하락 → 나머지 청산"
             break
 
-        # 2) 손절: 박스 하단 이탈
+        # 4) 손절: 박스 하단 이탈
         if cur_price <= box_stop:
             sell_reason = f"📦 박스 하단 이탈 (SL {box_stop:,.0f})"
-            break
-
-        # 3) 박스 상방 돌파 (보너스 — 트레일 안 하고 바로 익절)
-        if cur_price > box_high * 1.002:
-            sell_reason = f"📦 박스 상방 돌파! ({cur_price:,.0f} > {box_high:,.0f})"
             break
 
     # 시간 초과
     if not sell_reason:
         sell_reason = f"📦 박스 시간초과 {max_hold_sec}초"
 
-    # 매도 실행
+    # 나머지 수량 매도
     try:
-        sell_result = place_market_sell(m, volume)
+        if remaining_vol > 0:
+            sell_result = place_market_sell(m, remaining_vol)
+        else:
+            sell_result = {"uuid": ""}  # 이미 전량 부분매도됨
         time.sleep(0.5)
 
-        # 매도가 조회
+        # 매도가 조회 (Private API — get_order_result 사용)
         try:
             order_id = sell_result.get("uuid", "")
             if order_id:
-                time.sleep(0.3)
-                order_detail = safe_upbit_get(f"https://api.upbit.com/v1/order?uuid={order_id}")
-                trades = order_detail.get("trades", []) if order_detail else []
-                if trades:
+                od = get_order_result(order_id, timeout_sec=10.0)
+                if od and od.get("avg_price"):
+                    sell_price = float(od["avg_price"])
+                elif od and od.get("trades"):
+                    trades = od["trades"]
                     total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
                     total_vol = sum(float(tr["volume"]) for tr in trades)
                     sell_price = total_krw / total_vol if total_vol > 0 else cur_price
@@ -7256,8 +7327,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         cand_path = "거래량↑"
 
     # 진입 조건: 돌파 OR vol_vs_ma OR 점화 (기존 유지)
-    # 🔧 FIX: min() 사용 (FLOOR=0.2이 하한이므로, 실효값은 둘 중 작은 값)
-    eff_vol_vs_ma = min(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
+    # 🔧 FIX: max() — FLOOR(0.2)는 하한 보장, 실효값은 VOL_VS_MA_MIN(0.5) 이상
+    # min()이면 항상 0.2로 빠져서 거래량 MA 0.2배만 넘으면 통과 → 페이크 진입 증가
+    eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
     if not entry_signal:
@@ -7355,10 +7427,11 @@ def regime_filter(m, c1, cur_price):
     통합 레짐 필터: 횡보장/박스상단이면 진입 차단
     Returns: (pass: bool, reason: str)
     """
-    # 1) 횡보 판정
+    # 1) 횡보 판정 → 전면 차단 대신 "SIDEWAYS" 힌트 반환
+    # 호출부(detect_leader_stock)에서 점화/강돌파 예외 판단
     is_sw, range_pct = is_sideways_regime(c1, lookback=20)
     if is_sw:
-        return False, f"SIDEWAYS({range_pct*100:.1f}%)"
+        return True, f"SIDEWAYS({range_pct*100:.1f}%)"  # 🔧 차단→힌트 (예외 통과 가능)
 
     # 2) 박스 상단 근처 판정 - 🔧 비활성화 (돌파 전략에서 고점 진입은 정상)
     # near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
@@ -7578,6 +7651,25 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
+    # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
+    # regime_filter가 SIDEWAYS 힌트를 반환했으면, 여기서 예외 조건 판단
+    regime_sideways = ("SIDEWAYS" in regime_reason)
+    if regime_sideways:
+        _sw_allow = False
+        _sw_reason = ""
+        # 예외1: 만점 점화 (ignition_score >= 4) → 횡보 돌파 가능성
+        if ignition_score >= 4:
+            _sw_allow = True
+            _sw_reason = "점화만점"
+        # 예외2: 강점화 + 거래량 서지 2배 이상 + 고점 돌파 → 강한 돌파 신호
+        elif ignition_score >= 3 and vol_surge >= 2.0 and high_breakout:
+            _sw_allow = True
+            _sw_reason = "점화3+서지2x+고점돌파"
+        if not _sw_allow:
+            cut("SIDEWAYS_BLOCK", f"{m} 횡보장 {regime_reason} 예외미달 (ign={ignition_score}, surge={vol_surge:.1f}x)")
+            return None
+        print(f"[SIDEWAYS_ALLOW] {m} {regime_reason} 예외통과: {_sw_reason} → half 강제")
+
     # === 🔥 BTC 역풍 가드 + 변동성 레짐 (게이트 통과 후 추가 요건 체크) ===
     btc5 = btc_5m_change()
     btc_headwind = btc5 <= -0.003  # -0.3%
@@ -7711,6 +7803,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "consecutive_buys": cons_buys,
         "overheat": overheat,
         "regime_flat": regime_flat,
+        "regime_sideways": regime_sideways,  # 🔧 4-2: SIDEWAYS 예외 통과 시 half 강제용
         # 🔧 FIX: postcheck bypass 정합성 (ign_ok/mega_ok 키 누락 → bypass 항상 실패하던 버그)
         "ign_ok": (ignition_score >= 3),
         "mega_ok": mega,
@@ -7795,6 +7888,12 @@ def final_check_leader(m, pre, tight_mode=False):
     #     if entry_mode == "half" and _pstd_val > 0.35: entry_mode = "probe"
 
     # === 다운그레이드 로직 (완화된 임계치) ===
+
+    # 🔧 4-2. SIDEWAYS 레짐 → 무조건 half 강제 (예외 통과했으나 리스크 축소)
+    if pre.get("regime_sideways"):
+        if entry_mode == "confirm":
+            entry_mode = "half"
+            print(f"[SIDEWAYS_HALF] {m} 횡보장 예외통과 → confirm→half 다운그레이드")
 
     # FLAT_SLOPE 레짐 → 다운그레이드 (횡보장 리스크 축소)
     # 🔧 특단조치: probe 폐지 → half 이하는 진입 차단
