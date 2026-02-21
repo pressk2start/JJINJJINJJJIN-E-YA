@@ -1062,7 +1062,7 @@ def sell_all(market):
     # 🔧 현재가 조회
     try:
         cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
-        cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+        cur_price = cur_js[0].get("trade_price", 0) if cur_js and len(cur_js) > 0 else 0  # 🔧 FIX: 빈 배열 방어
     except Exception:
         cur_price = None
     print(f"[SELL_ALL] {market} 실제 보유량 {actual:.8f} 전량 매도")
@@ -1177,7 +1177,7 @@ def sync_orphan_positions():
             # 현재가 조회
             try:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
-                cur_price = cur_js[0].get("trade_price", avg_buy_price) if cur_js else avg_buy_price
+                cur_price = cur_js[0].get("trade_price", avg_buy_price) if cur_js and len(cur_js) > 0 else avg_buy_price  # 🔧 FIX: 빈 배열 방어
             except Exception:
                 cur_price = avg_buy_price
 
@@ -3169,7 +3169,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # 변경: 실패 시 entry_price 폴백 + 로그 출력
             try:
                 cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
-                cur_price = cur_js[0].get("trade_price", 0) if cur_js else 0
+                cur_price = cur_js[0].get("trade_price", 0) if cur_js and len(cur_js) > 0 else 0  # 🔧 FIX: 빈 배열 방어
             except Exception as _cp_err:
                 print(f"[PARTIAL_POSTCHECK] {m} 현재가 조회 실패: {_cp_err}")
                 cur_price = 0
@@ -3481,25 +3481,10 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.018  # 🔧 손절완화: 1.5→1.8% (DYN_SL_MIN 1.5% 연동, 폴백용 여유 확대)
+STOP_LOSS_PCT = 0.018  # 🔧 DYN_SL_MIN 1.8% 연동 (폴백용)
 RECHECK_SEC = 5
 
-# Ignition
-IGN_BREAK_LOOKBACK = 12
-IGN_MIN_BODY = 0.006
-IGN_MIN_BUY = 0.60
-# USE_5M_CONTEXT 상단에서 일원화 (중복 제거)
-
-# BOT_PINGPONG_MAX_BAND, BOT_WASH_REPEAT_VOL_N 제거 (bot_pingpong_score/wash_trade_pattern 함수 삭제됨)
-
-# 트렌드 가드
-
-# Early Entry
-# EARLY_FLOW_MIN_KRWPSEC 상단에서 일원화 (중복 제거)
-
-# 적응식 볼륨 서지
-ABS_SURGE_KRW = 2_200_000   # 절대 거래대금 서지 기준 (2.2M KRW)
-RELAXED_X = 1.08            # 과거대비 거래대금 완화 배율
+# (IGN_BREAK_LOOKBACK, IGN_MIN_BODY, IGN_MIN_BUY, ABS_SURGE_KRW, RELAXED_X 삭제 — 미사용 상수)
 
 # 쿨다운 히스테리시스
 REARM_MIN_SEC = 45
@@ -6746,7 +6731,8 @@ def box_scan_markets(c1_cache):
                 continue
 
         # 쿨다운 체크
-        last_exit = _BOX_LAST_EXIT.get(m, 0)
+        with _BOX_LOCK:
+            last_exit = _BOX_LAST_EXIT.get(m, 0)  # 🔧 FIX: _BOX_LOCK 안에서 읽기
         if now - last_exit < BOX_COOLDOWN_SEC:
             continue
 
@@ -7079,7 +7065,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
     # 정리
     with _BOX_LOCK:
         _BOX_WATCHLIST.pop(m, None)
-    _BOX_LAST_EXIT[m] = time.time()
+        _BOX_LAST_EXIT[m] = time.time()  # 🔧 FIX: _BOX_LOCK 안에서 쓰기 (레이스컨디션 방지)
 
     with _POSITION_LOCK:
         OPEN_POSITIONS.pop(m, None)
@@ -7465,10 +7451,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # === 🔧 레짐 필터: 횡보장/박스상단 진입 차단 ===
     cur_price = c1[-1]["trade_price"] if c1 else 0
-    regime_ok, regime_reason = regime_filter(m, c1, cur_price)
-    if not regime_ok:
-        cut("REGIME_FILTER", f"{m} {regime_reason}")
-        return None
+    _regime_ok, regime_reason = regime_filter(m, c1, cur_price)
+    # 🔧 regime_filter는 항상 True 반환 (SIDEWAYS/FLAT_SLOPE = 힌트, 호출부에서 예외 판단)
     # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
     regime_flat = (regime_reason == "FLAT_SLOPE")
 
@@ -8647,9 +8631,15 @@ def monitor_position(m,
             OPEN_POSITIONS.pop(m, None)
         return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
 
-    c1 = get_minutes_candles(1, m, 20)
-    # 🔧 FIX: 초기 SL에도 signal_type 전달 (래칫 max()로 인해 초기값이 영구 지배 → ign/circle 완화 무효화 방지)
-    base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1, signal_type=pre.get("signal_type", "normal"))
+    # 🔧 FIX: 박스 포지션은 고정 SL/TP 사용 (dynamic_stop_loss 덮어쓰기 방지)
+    if pre.get("is_box"):
+        base_stop = pre.get("box_stop", entry_price * (1 - DYN_SL_MIN))
+        eff_sl_pct = pre.get("box_sl_pct", DYN_SL_MIN)
+        atr_info = "box_fixed"
+    else:
+        c1 = get_minutes_candles(1, m, 20)
+        # 🔧 FIX: 초기 SL에도 signal_type 전달 (래칫 max()로 인해 초기값이 영구 지배 → ign/circle 완화 무효화 방지)
+        base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1, signal_type=pre.get("signal_type", "normal"))
 
     # horizon이 안 들어오면 자동 결정, 들어오면 그 값 사용
     if horizon is None:
@@ -8665,7 +8655,7 @@ def monitor_position(m,
     # 🔧 수급확인 손절: 감량 후 관망모드 상태
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
-    _sl_extended_pct = 0.0       # 감량 후 확장된 SL%
+    _sl_extended_pct = eff_sl_pct * 1.35  # 🔧 FIX: 0.0→기본값 (감량 전에도 안전한 SL 보장)
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -10051,6 +10041,11 @@ def main():
                                 if wm in OPEN_POSITIONS:
                                     _release_entry_lock(wm)
                                     continue
+                                # 🔧 FIX: MAX_POSITIONS 체크 (리테스트도 포지션 한도 준수)
+                                _retest_active = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
+                                if _retest_active >= MAX_POSITIONS:
+                                    _release_entry_lock(wm)
+                                    continue
                                 OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
 
                             # 리테스트 조건 충족 → 진입 (half 강제)
@@ -10154,6 +10149,10 @@ def main():
                         with _POSITION_LOCK:
                             if cm in OPEN_POSITIONS:
                                 # 이미 포지션 보유 중 → watchlist 유지, 다음 사이클에 재확인
+                                continue
+                            # 🔧 FIX: MAX_POSITIONS 체크 (동그라미도 포지션 한도 준수)
+                            _circle_active = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
+                            if _circle_active >= MAX_POSITIONS:
                                 continue
 
                         # 락 획득
@@ -10389,9 +10388,15 @@ def main():
                                     args=(bm, actual_entry_b, actual_vol_b, _box_info),
                                     daemon=True
                                 )
-                                bt.start()
-                                with _MONITOR_LOCK:
-                                    _ACTIVE_MONITORS[bm] = bt
+                                try:
+                                    bt.start()
+                                    with _MONITOR_LOCK:
+                                        _ACTIVE_MONITORS[bm] = bt
+                                except Exception as _bt_err:
+                                    print(f"[BOX_THREAD_ERR] {bm} 스레드 시작 실패: {_bt_err}")
+                                    with _POSITION_LOCK:
+                                        OPEN_POSITIONS.pop(bm, None)
+                                    _release_entry_lock(bm)
                             else:
                                 with _POSITION_LOCK:
                                     _pp = OPEN_POSITIONS.get(bm)
