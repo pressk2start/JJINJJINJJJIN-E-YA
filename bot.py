@@ -7349,22 +7349,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     flow_score = min(25.0, flow_score)
     gate_score += flow_score
 
-    # --- (E) 🕯️ 캔들 모멘텀 (0~15점) ---
-    # 틱 레벨(15s)로 잡히지 않는 1분봉 중간 강도 상승 보상
-    # OM +0.71%/1분, 270M 같은 "느리지 않지만 폭발적이지도 않은" 움직임 감지
-    candle_score = 0.0
+    # --- (E) 🕯️ 캔들 모멘텀 보너스 (바이너리: 0 or +20점) ---
+    # 1분봉이 확실히 강할 때만 고정 보너스 (점화/돌파와 같은 구조)
+    # 조건: 몸통 ≥ 0.5% AND 거래량 ≥ 1.5x MA20 (둘 다 충족해야 함)
     _body = candle_body_pct * 100  # 소수 → %
-    # 몸통 크기 (0~8점): 0.2%=0, 0.5%=4.3, 0.7%=7.1, 0.75%+=8
-    if _body >= 0.2:
-        candle_score += min(8.0, (_body - 0.2) * 14.3)
-    # 거래량 MA 대비 (0~4점): 1.2x=0.5, 2x=2.5, 2.6x+=4
-    if vol_vs_ma >= 1.2:
-        candle_score += min(4.0, (vol_vs_ma - 1.0) * 2.5)
-    # 연속 양봉 (0~3점): 2봉+=3
-    if green_streak >= 2:
-        candle_score += 3.0
-    candle_score = min(15.0, candle_score)
-    gate_score += candle_score
+    candle_momentum = (_body >= 0.5 and vol_vs_ma >= 1.5)
+    if candle_momentum:
+        gate_score += 20.0
 
     # === 점화 보너스 (3점부터 +10, 4점부터 +15) ===
     is_ignition = (ignition_score >= 3)
@@ -7382,8 +7373,9 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # === 가중점수 통과 판정 ===
     # 🔧 FIX: GATE_SCORE_THRESHOLD → 모듈상수로 이동 (stage1_gate 외부에서 튜닝 가능)
+    _cm_tag = " 🕯️CM" if candle_momentum else ""
     score_detail = (f"gate_score={gate_score:.0f} "
-                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f} 캔들{candle_score:.0f}]")
+                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}]{_cm_tag}")
 
     if gate_score < GATE_SCORE_THRESHOLD:
         return False, f"[가중점수] {gate_score:.0f}<{GATE_SCORE_THRESHOLD:.0f} | {score_detail} | {metrics}"
@@ -7406,6 +7398,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 후보 경로 판정
     if is_ignition:
         cand_path = "🔥점화"
+    elif candle_momentum:
+        cand_path = "🕯️캔들돌파"
     elif breakout_score == 2:
         cand_path = "강돌파 (EMA↑+고점↑)"
     elif ema20_breakout:
@@ -7415,11 +7409,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         cand_path = "거래량↑"
 
-    # 진입 조건: 돌파 OR vol_vs_ma OR 점화 (기존 유지)
+    # 진입 조건: 돌파 OR vol_vs_ma OR 점화 OR 캔들모멘텀 (기존 유지)
     # 🔧 FIX: max() — FLOOR(0.2)는 하한 보장, 실효값은 VOL_VS_MA_MIN(0.5) 이상
     # min()이면 항상 0.2로 빠져서 거래량 MA 0.2배만 넘으면 통과 → 페이크 진입 증가
     eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
+    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3) or candle_momentum
 
     if not entry_signal:
         return False, f"진입조건미달 EMA={ema20_breakout} 고점={high_breakout} MA{vol_vs_ma:.1f}x | {score_detail} | {metrics}"
