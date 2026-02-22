@@ -1298,9 +1298,61 @@ def sync_orphan_positions():
                         print(f"[ORPHAN_CLEANUP] {market} 죽은 모니터 스레드 정리")
                         _ACTIVE_MONITORS.pop(market, None)
 
-                # 모니터링 스레드 시작
-                def _orphan_monitor(m, entry_price):
+                # 🔧 FIX: 박스 포지션인지 감지 (박스모니터 복구용)
+                _is_box_orphan = False
+                _box_orphan_info = None
+                with _BOX_LOCK:
+                    # 1) _BOX_WATCHLIST에 아직 있는 경우 (워치리스트는 남아있지만 모니터 죽은 경우)
+                    _bw = _BOX_WATCHLIST.get(market)
+                    if _bw and _bw.get("state") == "holding":
+                        _is_box_orphan = True
+                        _box_orphan_info = {
+                            "box_high": _bw.get("box_high", 0),
+                            "box_low": _bw.get("box_low", 0),
+                            "box_tp": _bw.get("box_high", 0),  # TP = 상단
+                            "box_stop": _bw.get("box_low", 0) * 0.995,  # SL = 하단 -0.5%
+                            "range_pct": _bw.get("range_pct", 0),
+                        }
+                    # 2) _BOX_LAST_EXIT에 최근 기록 (1800초 이내) → 박스 매도 실패로 유령화
+                    elif market in _BOX_LAST_EXIT and (now - _BOX_LAST_EXIT[market]) < 1800:
+                        _is_box_orphan = True
+                # 3) 박스 정보 없으면 실시간 박스 감지 시도 (BOX_LAST_EXIT 이력만 있는 경우 포함)
+                if not _box_orphan_info:
                     try:
+                        _orphan_c1_box = get_minutes_candles(1, market, 60)
+                        if _orphan_c1_box:
+                            _box_is, _box_det = detect_box_range(_orphan_c1_box)
+                            if _box_is and _box_det:
+                                _is_box_orphan = True
+                                _box_orphan_info = {
+                                    "box_high": _box_det["box_high"],
+                                    "box_low": _box_det["box_low"],
+                                    "box_tp": _box_det["box_high"],
+                                    "box_stop": _box_det["box_low"] * 0.995,
+                                    "range_pct": _box_det.get("range_pct", 0),
+                                }
+                    except Exception:
+                        pass
+
+                # 모니터링 스레드 시작
+                def _orphan_monitor(m, entry_price, _is_box=_is_box_orphan, _box_info=_box_orphan_info):
+                    try:
+                        # 🔧 FIX: 박스 유령 포지션 → box_monitor_position으로 복구 (시간만료 없음)
+                        if _is_box and _box_info:
+                            with _POSITION_LOCK:
+                                _opos = OPEN_POSITIONS.get(m, {})
+                                _opos["strategy"] = "box"
+                                if m in OPEN_POSITIONS:
+                                    OPEN_POSITIONS[m] = _opos
+                            _orphan_vol = _opos.get("volume", 0)
+                            if _orphan_vol <= 0:
+                                _orphan_vol = get_balance_with_locked(m)
+                            print(f"[ORPHAN] 📦 {m} 박스 포지션 복구 → box_monitor_position 시작")
+                            tg_send(f"📦 {m} 유령 → 박스 모니터 복구\n• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])}")
+                            box_monitor_position(m, entry_price, _orphan_vol, _box_info)
+                            return
+
+                        # 일반 유령 포지션 → 기존 로직
                         # 🔧 FIX: dummy_pre를 실제 데이터로 보강 (기존: 모든 파라미터 0 → 모니터링 무력화)
                         # OPEN_POSITIONS에 저장된 원본 데이터 복원 시도
                         with _POSITION_LOCK:
@@ -7426,8 +7478,19 @@ def box_monitor_position(m, entry_price, volume, box_info):
     except Exception as e:
         print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+        # 🔧 FIX: 매도 실패 시 잔고 확인 → 코인 남아있으면 OPEN_POSITIONS 유지 (유령 방지)
+        try:
+            _fail_bal = get_balance_with_locked(m)
+            if _fail_bal is not None and _fail_bal > 0:
+                print(f"[BOX_MON] 📦 {m} 매도 실패 but 잔고 {_fail_bal:.6f} 존재 → 포지션 유지 (유령 전환 방지)")
+                tg_send(f"⚠️ {m} 매도 실패 → 포지션 유지 중 (다음 동기화에서 재시도)")
+                with _BOX_LOCK:
+                    _BOX_WATCHLIST.pop(m, None)
+                return  # mark_position_closed 호출하지 않음 → OPEN_POSITIONS 유지
+        except Exception:
+            pass
 
-    # 정리
+    # 정리 (매도 성공 시에만 도달)
     with _BOX_LOCK:
         _BOX_WATCHLIST.pop(m, None)
         _BOX_LAST_EXIT[m] = time.time()  # 🔧 FIX: _BOX_LOCK 안에서 쓰기 (레이스컨디션 방지)
