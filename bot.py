@@ -7637,7 +7637,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
         and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
-        and imbalance >= -0.05        # 호가 매도우위 아님
+        and imbalance >= 0.10         # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC 사례)
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
         and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
@@ -7651,7 +7651,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
-        and imbalance >= -0.05                       # 🔧 FIX: 매도우위 진입 차단
+        and imbalance >= 0.10                        # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC: 임밸-0.05+vol 0.96x 진입)
+        and vol_surge >= 1.0                         # 🔧 FIX: 최소 평균 이상 거래량 필수 (AZTEC: 0.96x 평균이하 진입 차단)
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
         and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
