@@ -7592,6 +7592,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
     # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
+    # 🔧 FIX: ETC 16:09 사례 — 틱나이 7.6초 (폭발 이미 종료) + CV 2.39 → 꼭대기 진입
     # gate_score 무관 — 점화는 자기 조건으로만 판단
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
@@ -7599,14 +7600,18 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and imbalance >= -0.05        # 호가 매도우위 아님
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
+        and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
     # gate_score 무관 — 자체 조건(consec/임밸/body/EMA이격)으로 판단
+    # 🔧 FIX: AGLD 사례 — consec 6이지만 임밸 -0.10 (매도우위) → 꼭대기 진입
+    #    → imbalance >= -0.05 추가 (점화와 동일 기준)
     strongbreak_pass = (
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
+        and imbalance >= -0.05                       # 🔧 FIX: 매도우위 진입 차단
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
         and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
@@ -7615,6 +7620,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세 + 호가 뒷받침
     # 🔧 NOM 13:59 사례: 임밸 -0.08 → imbalance >= 0.10으로 차단
+    # 🔧 FIX: UXLINK 사례 — 틱3개/연속3회/CV0.11(봇) → 캔들만 크고 틱 확인 부족
     # gate_score 무관 — 자체 조건(body/거래량/임밸/가속)으로 판단
     candle_momentum = (
         _body >= 0.5              # 몸통 ≥ 0.5%
@@ -7623,6 +7629,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and ema20_breakout        # 가격 > EMA20
         and imbalance >= 0.10     # 🔧 호가 매수우위 필수 (매도벽이면 돌파 불가)
         and accel >= 0.8          # 🔧 체결 가속 확인 (둔화 중이면 꼭대기)
+        and consecutive_buys >= GATE_CONSEC_MIN  # 🔧 FIX: 최소 연속매수 필수 (틱 3개 진입 방지)
     )
 
     # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
@@ -8029,28 +8036,38 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
-    # 🔧 FIX: 독립경로 후보는 하드컷 면제 (점화/강돌파/캔들 경로에 기회 부여)
-    _indep_candidate = (
-        ignition_score >= 3                                          # 점화 경로
-        or (ema20_breakout and high_breakout)                        # 강돌파 경로
-        or (candle_body_pct >= 0.005 and vol_vs_ma >= 1.5           # 캔들 경로 전제조건
-            and ema20_breakout)
-    )
-    if not _indep_candidate:
-        if _trend_down:
+    # 🔧 FIX: 하드컷별 개별 면제 판정 (일괄 면제 → 세분화)
+    # ENSO 사례: 서지 0.61x인데 강돌파로 VOL_SURGE_LOW 면제 → 볼륨없는 돌파 = 가짜
+    # BERA 사례: 캔들모멘텀이 CONSEC_LOW 면제 → 틱 3개로 진입
+    _ign_candidate = (ignition_score >= 3)
+    _brk_candidate = (ema20_breakout and high_breakout)
+    _bypassed = []
+
+    # TREND_DOWN: 점화 or 강돌파 면제 (추세 반전/돌파 가능)
+    if _trend_down:
+        if _ign_candidate or _brk_candidate:
+            _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
+        else:
             cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_down_gap*100:.2f}%) 하락추세 진입 차단")
             return None
-        if _vol_surge_low:
+
+    # VOL_SURGE_LOW: 점화만 면제 (강돌파는 볼륨 확인 필수 — 볼륨없는 돌파 = 가짜)
+    if _vol_surge_low:
+        if _ign_candidate:
+            _bypassed.append(f"VOL({vol_surge:.2f}x)")
+        else:
             cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
             return None
-        if _consec_low:
+
+    # CONSEC_LOW: 점화 or 강돌파 면제 (자체 수급 체크 있음)
+    if _consec_low:
+        if _ign_candidate or _brk_candidate:
+            _bypassed.append(f"CONSEC({cons_buys})")
+        else:
             cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
             return None
-    elif _trend_down or _vol_surge_low or _consec_low:
-        _bypassed = []
-        if _trend_down: _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
-        if _vol_surge_low: _bypassed.append(f"VOL({vol_surge:.2f}x)")
-        if _consec_low: _bypassed.append(f"CONSEC({cons_buys})")
+
+    if _bypassed:
         print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
 
     # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
