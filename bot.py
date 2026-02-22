@@ -8265,8 +8265,16 @@ def postcheck_6s(m, pre):
     if is_ignition:
         _ign_spread = pre.get("spread", 0)
         _ign_buy = pre.get("buy_ratio", 0)
-        if _ign_spread > 0.40:
-            return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%)"
+        # 🔧 FIX: 하드코딩 0.40% → 가격대별 동적 상한 (stage1_gate와 동일 로직)
+        _ign_price = pre.get("price", 0)
+        if _ign_price > 0 and _ign_price < 100:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
+        elif _ign_price >= 100 and _ign_price < 1000:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
+        else:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
+        if _ign_spread > _ign_spread_max:
+            return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%>{_ign_spread_max:.2f}%)"
         if _ign_buy < 0.48:
             return False, f"IGN_BUY_LOW({_ign_buy:.2f})"
         # 🔧 조기진입: 0.8→0.3초 (점화는 모멘텀 확실, 0.8초도 꼭대기 위험)
