@@ -117,6 +117,11 @@ MFE_RR_MULTIPLIERS = {
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
+
+def refresh_mfe_targets():
+    """DYN_SL_MIN 변경 시 MFE 타겟 재계산"""
+    global MFE_PARTIAL_TARGETS
+    MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
 # MFE_PARTIAL_RATIO 제거 (미사용 — 실제 비율은 하드코딩됨)
 # ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
 SCALP_TO_RUNNER_MIN_BUY = 0.52   # 🔧 R:R수정: 0.56→0.52 (러너 전환 더 적극적으로)
@@ -2916,7 +2921,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 sell_volume = actual_bal
             else:
                 print(f"[PARTIAL→FULL] {m} 실잔고=0 → 이미 청산됨")
-                sell_volume = 0.0
+                mark_position_closed(m, "partial_to_full_already_zero")
+                return True, "이미 청산됨(잔고=0)", 0.0
             was_full = True  # 🔧 전량청산 시도 표시
             # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
             with _POSITION_LOCK:
@@ -4565,6 +4571,7 @@ def auto_learn_exit_params():
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
+                        refresh_mfe_targets()
                         print(f"[EXIT_LEARN] SL 넓힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL경계 손절)")
 
                 # 패배 MAE가 SL의 50% 미만 = SL 전에 다른 원인으로 청산 (SL 좁혀도 됨)
@@ -4575,6 +4582,7 @@ def auto_learn_exit_params():
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
+                        refresh_mfe_targets()
                         print(f"[EXIT_LEARN] SL 좁힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL전 청산)")
 
         # =====================================================
@@ -4754,8 +4762,8 @@ def load_exit_params():
         try:
             with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if "params" in data:
-                DYNAMIC_EXIT_PARAMS.update(data["params"])
+            if "exit_params" in data:
+                DYNAMIC_EXIT_PARAMS.update(data["exit_params"])
                 print(f"[EXIT_PARAMS] 로드 완료: 승률 {data.get('win_rate')}%, 평균손익 {data.get('avg_pnl')}%")
         except Exception as e:
             print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
@@ -4771,6 +4779,7 @@ def load_learned_weights():
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
     global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global DYN_SL_MIN, DYN_SL_MAX, HARD_STOP_DD, TRAIL_DISTANCE_MIN_BASE
 
     if not os.path.exists(WEIGHTS_PATH):
         print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
@@ -4819,6 +4828,7 @@ def load_learned_weights():
                 DYN_SL_MAX = ep.get("DYN_SL_MAX", DYN_SL_MAX)
                 HARD_STOP_DD = ep.get("HARD_STOP_DD", HARD_STOP_DD)
                 TRAIL_DISTANCE_MIN_BASE = ep.get("TRAIL_DISTANCE_MIN_BASE", TRAIL_DISTANCE_MIN_BASE)
+                refresh_mfe_targets()
                 print(f"[WEIGHTS] SL/트레일 로드: SL {DYN_SL_MIN*100:.2f}~{DYN_SL_MAX*100:.2f}% "
                       f"| 트레일 {TRAIL_DISTANCE_MIN_BASE*100:.2f}% | 비상 {HARD_STOP_DD*100:.1f}% "
                       f"| {ep_data.get('updated_at', '?')}")
@@ -7218,7 +7228,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # ============================================================
     # 🔧 특단조치: AND 20개 필터 → 필수 하드컷 + 가중점수제
     # 기존: 20개 조건이 모두 통과해야 진입 (완벽한 셋업만 허용 → 이미 피로구간)
-    # 변경: 필수 안전필터(슬리피지/신선도/과열) + 가중점수(60점 이상이면 통과)
+    # 변경: 필수 안전필터(슬리피지/신선도/과열) + 가중점수(70점 이상이면 통과)
     #       강한 거래량+보통 매수비 조합도 통과 가능 (유연한 조기진입)
     # ============================================================
 
@@ -7914,7 +7924,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "imbalance": imbalance,
         "turn_pct": turn_pct,
         "spread": ob["spread"],
-        "buy_ratio": twin["buy_ratio"],
+        "buy_ratio": _gate_buy_ratio,
         "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),  # 🔧 스파이크 방지용 보수적 매수비
         "fresh_ok": fresh_ok,  # 🔧 CRITICAL: fresh_ok 전달 (스코어 계산용)
         "mega": mega,
@@ -8265,8 +8275,16 @@ def postcheck_6s(m, pre):
     if is_ignition:
         _ign_spread = pre.get("spread", 0)
         _ign_buy = pre.get("buy_ratio", 0)
-        if _ign_spread > 0.40:
-            return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%)"
+        # 🔧 FIX: 하드코딩 0.40% → 가격대별 동적 상한 (stage1_gate와 동일 로직)
+        _ign_price = pre.get("price", 0)
+        if _ign_price > 0 and _ign_price < 100:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
+        elif _ign_price >= 100 and _ign_price < 1000:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
+        else:
+            _ign_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
+        if _ign_spread > _ign_spread_max:
+            return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%>{_ign_spread_max:.2f}%)"
         if _ign_buy < 0.48:
             return False, f"IGN_BUY_LOW({_ign_buy:.2f})"
         # 🔧 조기진입: 0.8→0.3초 (점화는 모멘텀 확실, 0.8초도 꼭대기 위험)
@@ -8775,6 +8793,8 @@ def monitor_position(m,
             OPEN_POSITIONS.pop(m, None)
         return "유효하지 않은 entry_price", None, "", None, 0, 0, 0
 
+    # 🔧 FIX: c1 초기화 (is_box 경로에서 미할당 → finally 참조 시 UnboundLocalError 방지)
+    c1 = []
     # 🔧 FIX: 박스 포지션은 고정 SL/TP 사용 (dynamic_stop_loss 덮어쓰기 방지)
     if pre.get("is_box"):
         base_stop = pre.get("box_stop", entry_price * (1 - DYN_SL_MIN))
@@ -10151,6 +10171,9 @@ def main():
     _last_heartbeat_ts = time.time()
     _HEARTBEAT_INTERVAL = 1800  # 30분
 
+    # 🔧 FIX: c1_cache 초기화 (첫 반복에서 box_scan_markets에 NameError 방지)
+    c1_cache = {}
+
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
@@ -10465,7 +10488,8 @@ def main():
                         _release_entry_lock(cm)
 
             # 📦 박스권 매매: 스캔 + 진입 체크
-            if BOX_ENABLED:
+            # 🔧 FIX: c1_cache 비어있으면 스킵 (첫 반복에서 빈 캐시로 스캔 방지)
+            if BOX_ENABLED and c1_cache:
                 try:
                     box_cleanup()
                     box_scan_markets(c1_cache)
@@ -10629,8 +10653,9 @@ def main():
             obc = fetch_orderbook_cache(shard)
 
             c1_cache = {}
+            # 🔧 FIX: 20→30 캔들 (BOX_LOOKBACK=30 요구 충족 — 돌파 감지는 20개만 슬라이싱해서 사용)
             futures = {
-                _candle_executor.submit(get_minutes_candles, 1, m, 20): m
+                _candle_executor.submit(get_minutes_candles, 1, m, 30): m
                 for m in shard
             }
             for f in as_completed(futures):
