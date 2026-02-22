@@ -1249,11 +1249,35 @@ def sync_orphan_positions():
                 # 모니터링 스레드 시작
                 def _orphan_monitor(m, entry_price):
                     try:
-                        # 더미 pre 생성
+                        # 🔧 FIX: dummy_pre를 실제 데이터로 보강 (기존: 모든 파라미터 0 → 모니터링 무력화)
+                        # OPEN_POSITIONS에 저장된 원본 데이터 복원 시도
+                        with _POSITION_LOCK:
+                            _orphan_pos = OPEN_POSITIONS.get(m, {})
+                        _orphan_signal_type = _orphan_pos.get("signal_type", "normal")
+                        _orphan_trade_type = _orphan_pos.get("trade_type", "scalp")
+                        _orphan_signal_tag = _orphan_pos.get("signal_tag", "유령복구")
+                        # 실시간 호가/틱 데이터 조회
+                        _orphan_ticks = get_recent_ticks(m, 100) or []
+                        _orphan_t15 = micro_tape_stats_from_ticks(_orphan_ticks, 15) if _orphan_ticks else {
+                            "buy_ratio": 0.5, "krw": 0, "n": 0, "krw_per_sec": 0
+                        }
+                        _orphan_ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                        _orphan_ob = {"depth_krw": 10_000_000}
+                        if _orphan_ob_raw and len(_orphan_ob_raw) > 0:
+                            try:
+                                _units = _orphan_ob_raw[0].get("orderbook_units", [])
+                                _depth = sum(u.get("ask_size", 0) * u.get("ask_price", 0) + u.get("bid_size", 0) * u.get("bid_price", 0) for u in _units[:5])
+                                _orphan_ob = {"depth_krw": _depth, "raw": _orphan_ob_raw[0]}
+                            except Exception:
+                                pass
                         dummy_pre = {
                             "price": entry_price,
-                            "ob": {"depth_krw": 10_000_000},
-                            "tape": {"buy_ratio": 0.5, "krw": 0, "n": 0, "krw_per_sec": 0},
+                            "ob": _orphan_ob,
+                            "tape": _orphan_t15,
+                            "ticks": _orphan_ticks,
+                            "signal_type": _orphan_signal_type,
+                            "trade_type": _orphan_trade_type,
+                            "signal_tag": _orphan_signal_tag,
                         }
                         remonitor_until_close(m, entry_price, dummy_pre, tight_mode=False)
                     except Exception as e:
@@ -9558,12 +9582,15 @@ def monitor_position(m,
                 if verdict is None:
                     verdict = "연장만료(모니터링 종료)"
             else:
-                # 🔧 FIX: 본절구간(-FEE~+FEE) 또는 trail 미무장 상태에서 시간만료
-                # — 기존: verdict만 세팅하고 포지션 방치 → remonitor에 의존
-                # — 수정: 즉시 청산하여 방치 방지 (reentry=True일 때 remonitor 안 돌아가므로)
-                close_auto_position(m, f"시간만료 본절컷 {_final_gain*100:+.2f}%")
-                _already_closed = True
-                verdict = "시간만료_본절컷"
+                # 🔧 FIX: reentry(리모니터 사이클)에서 수익 중이면 다음 사이클로 이월
+                # — 기존: 60초마다 본절컷 → 상승 추세 중 +0.12%에서 조기 청산 (ZRO 사례)
+                # — 수정: reentry + 수익 → 다음 사이클에서 계속 감시 (트레일 무장 기회 부여)
+                if reentry and _final_gain > 0:
+                    verdict = "연장만료(모니터링 종료)"  # non-closing → remonitor 다음 사이클
+                else:
+                    close_auto_position(m, f"시간만료 본절컷 {_final_gain*100:+.2f}%")
+                    _already_closed = True
+                    verdict = "시간만료_본절컷"
 
     finally:
         # ================================
