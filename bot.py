@@ -7539,12 +7539,17 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and not _ema_chase                       # 🔧 EMA20 대비 1%+ 이격 시 추격 차단
     )
 
-    # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세
+    # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세 + 호가 뒷받침
+    # 🔧 꼭대기방지: 임밸런스 + 가속도 추가 (NOM 13:59 사례 — 매도우위 횡보장 진입 차단)
+    # - 임밸런스 음수 = 호가판이 매도 우위 → "돌파"가 아니라 매도벽에 부딪히는 것
+    # - 가속도 0.8x+ = 최근 체결이 이전보다 빨라지는 중 (모멘텀 확인)
     candle_momentum = (
         _body >= 0.5              # 몸통 ≥ 0.5%
         and vol_vs_ma >= 1.5      # 거래량 ≥ 1.5x MA20
         and buy_ratio >= 0.50     # 매수 우위
         and ema20_breakout        # 가격 > EMA20
+        and imbalance >= 0.10     # 🔧 호가 매수우위 필수 (매도벽이면 돌파 불가)
+        and accel >= 0.8          # 🔧 체결 가속 확인 (둔화 중이면 꼭대기)
     )
 
     # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
