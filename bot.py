@@ -277,7 +277,7 @@ _RETEST_LOCK = threading.Lock()
 CIRCLE_ENTRY_ENABLED = True            # 동그라미 엔트리 활성화
 CIRCLE_MAX_CANDLES = 10                # 🔧 완화: 6→10봉 (6봉 안에 풀사이클 거의 불가능)
 CIRCLE_TIMEOUT_SEC = 600               # 🔧 완화: 420→600초 (10봉×60초, 충분한 관찰 시간)
-CIRCLE_PULLBACK_MIN_PCT = 0.004        # 🔧 완화: 0.9→0.4% (0.9%는 진입 불가 원인 — 대부분 0.3~0.5% 눌림 후 반등)
+CIRCLE_PULLBACK_MIN_PCT = 0.007        # 🔧 강화: 0.4→0.7% (0.4%는 알트 정상 노이즈, 진짜 눌림은 0.7%+)
 CIRCLE_PULLBACK_MAX_PCT = 0.025        # 최대 2.5% 눌림 (너무 빠지면 폐기)
 CIRCLE_RECLAIM_LEVEL = "body_low"      # 🔧 완화: body_mid → body_low (몸통 하단 회복만 확인)
 CIRCLE_MIN_IGN_SCORE = 3              # 등록 최소 점화점수
@@ -289,7 +289,7 @@ CIRCLE_STATE_MIN_DWELL_SEC = 8         # 🔧 완화: 15→8초 (3단계×15=45�
 CIRCLE_REBREAK_BUY_RATIO_MIN = 0.50    # 🔧 완화: 0.55→0.50 (재돌파 진입 허용 확대)
 CIRCLE_REBREAK_IMBALANCE_MIN = 0.20    # 🔧 완화: 0.30→0.20 (재돌파 진입 허용 확대)
 CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 🔧 원복: 0.25→0.35 (알트 스프레드 0.25% 초과 흔함)
-CIRCLE_REBREAK_MIN_SCORE = 2           # 🔧 완화: 3→2 (5개 중 2개 통과이면 재돌파 허용)
+CIRCLE_REBREAK_MIN_SCORE = 3           # 🔧 강화: 2→3 (5개 중 3개 통과해야 재돌파 허용)
 CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 🔧 원복: 12000→8000 (중소형 코인 체결강도 허용)
 # 🔧 NEW: 노이즈 방어 (저가코인 틱사이즈 문제 차단)
 CIRCLE_ATR_FLOOR = 0.003               # ATR < 0.3% → 패턴이 1~2틱 노이즈 (진입 거부)
@@ -6536,7 +6536,9 @@ def circle_check_entry(m):
         _w = _CIRCLE_WATCHLIST.get(m)
         ign_body_top = _w["ign_body_top"] if _w else ign_high
     rebreak_level = ign_body_top  # 몸통 상단 기준 재돌파
-    if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= rebreak_level:
+    # 🔧 FIX: 재돌파 시 현재 캔들이 양봉이어야 함 (음봉 윗꼬리 돌파 = 페이크)
+    cur_candle_green = (cur_candle["trade_price"] > cur_candle["opening_price"])
+    if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= rebreak_level and cur_candle_green:
         rebreak_score = 0
         rebreak_details = []
 
