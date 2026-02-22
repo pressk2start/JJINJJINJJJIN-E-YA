@@ -7349,57 +7349,78 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     flow_score = min(25.0, flow_score)
     gate_score += flow_score
 
-    # === 점화 보너스 (3점부터 +10, 4점부터 +15) ===
+    # ============================================================
+    # [PHASE 2.5] 독립 경로 판정 (각 경로별 AND 조건, gate_score 무관)
+    # ============================================================
     is_ignition = (ignition_score >= 3)
-    if ignition_score >= 4:
-        gate_score += 15.0
-    elif ignition_score >= 3:
-        gate_score += 10.0
-
-    # === 돌파 보너스 ===
     breakout_score = int(ema20_breakout) + int(high_breakout)
-    if breakout_score == 2:
-        gate_score += 10.0  # 강돌파 (EMA+고점)
-    elif breakout_score == 1:
-        gate_score += 5.0   # 단일 돌파
-
-    # === 캔들 모멘텀 판정 (gate_score와 독립) ===
     _body = candle_body_pct * 100  # 소수 → %
+
+    # 🔥 점화 독립 조건: 틱 폭발 + 가격이 실제로 반응해야 함
+    ignition_pass = (
+        is_ignition                   # 점화 점수 ≥ 3
+        and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
+        and imbalance >= -0.05        # 호가 매도우위 아님
+    )
+
+    # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
+    strongbreak_pass = (
+        breakout_score == 2
+        and not GATE_STRONGBREAK_OFF
+        and accel <= GATE_STRONGBREAK_ACCEL_MAX
+        and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
+             or (buy_ratio >= 0.55 and imbalance >= 0.40))
+    )
+
+    # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세
     candle_momentum = (
-        _body >= 0.5              # 1분봉 몸통 ≥ 0.5%
+        _body >= 0.5              # 몸통 ≥ 0.5%
         and vol_vs_ma >= 1.5      # 거래량 ≥ 1.5x MA20
         and buy_ratio >= 0.50     # 매수 우위
         and ema20_breakout        # 가격 > EMA20
     )
 
+    # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
+    if breakout_score == 1:
+        gate_score += 5.0   # EMA↑ 또는 고점↑ 단독
+
     score_detail = (f"gate_score={gate_score:.0f} "
                     f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}]")
 
-    # ============================================================
-    # [PHASE 2.5] 경로 분기: 기존 gate_score OR 캔들 모멘텀
-    # ============================================================
     gate_passed = (gate_score >= GATE_SCORE_THRESHOLD)
 
-    if not gate_passed and not candle_momentum:
-        # 둘 다 미달 → 차단
+    if not gate_passed and not ignition_pass and not strongbreak_pass and not candle_momentum:
         return False, f"[가중점수] {gate_score:.0f}<{GATE_SCORE_THRESHOLD:.0f} | {score_detail} | {metrics}"
 
     # ============================================================
-    # [PHASE 3] 진입 경로 판정 + 경로별 품질 필터
+    # [PHASE 3] 경로별 통과 처리
     # ============================================================
+    oh_tag = " [OVERHEAT_HALF]" if _overheat_half else ""
 
-    if candle_momentum and not gate_passed:
-        # 🕯️ 캔들 모멘텀 독립 경로 (gate_score 불합격이지만 캔들 조건 충족)
-        cand_path = "🕯️캔들돌파"
-        signal_tag = cand_path
-        pass_summary = (f"몸통{_body:.2f}% MA{vol_vs_ma:.1f}x "
-                        f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}")
-        oh_tag = " [OVERHEAT_HALF]" if _overheat_half else ""
+    # 🔥 점화 독립 경로
+    if ignition_pass and not gate_passed:
+        signal_tag = "🔥점화"
+        pass_summary = (f"변동{price_change*100:.2f}% 임밸{imbalance:.2f} "
+                        f"매수{buy_ratio:.0%} 연속{consecutive_buys}")
         return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
 
-    # --- 기존 경로 (gate_score 통과) ---
+    # 강돌파 독립 경로
+    if strongbreak_pass and not gate_passed:
+        signal_tag = "강돌파 (EMA↑+고점↑)"
+        pass_summary = (f"매수{buy_ratio:.0%} 연속{consecutive_buys} "
+                        f"임밸{imbalance:.2f} 가속{accel:.1f}x")
+        return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
 
-    # 강돌파 전용 품질 필터 (유지)
+    # 🕯️ 캔들 독립 경로
+    if candle_momentum and not gate_passed:
+        signal_tag = "🕯️캔들돌파"
+        pass_summary = (f"몸통{_body:.2f}% MA{vol_vs_ma:.1f}x "
+                        f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}")
+        return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
+
+    # --- gate_score 통과 경로 (EMA↑, 고점↑, 거래량↑) ---
+
+    # gate_score 통과했더라도 강돌파면 품질 필터 적용
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
@@ -7410,7 +7431,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     elif GATE_STRONGBREAK_OFF and breakout_score == 2:
         return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
 
-    # 후보 경로 판정
+    # 경로 태그
     if is_ignition:
         cand_path = "🔥점화"
     elif candle_momentum:
@@ -7424,8 +7445,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     else:
         cand_path = "거래량↑"
 
-    # 진입 조건: 돌파 OR vol_vs_ma OR 점화 (기존 유지)
-    # 🔧 FIX: max() — FLOOR(0.2)는 하한 보장, 실효값은 VOL_VS_MA_MIN(0.5) 이상
+    # 진입 조건: 돌파 OR vol_vs_ma OR 점화
     eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
     entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
 
@@ -7435,8 +7455,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 통과 ===
     signal_tag = cand_path
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
-    # 🔧 FIX: OVERHEAT→HALF 마킹 (호출부에서 entry_mode 제한용)
-    oh_tag = " [OVERHEAT_HALF]" if _overheat_half else ""
     return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
 
 
