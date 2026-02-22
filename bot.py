@@ -7592,6 +7592,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
     # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
+    # 🔧 FIX: ETC 16:09 사례 — 틱나이 7.6초 (폭발 이미 종료) + CV 2.39 → 꼭대기 진입
     # gate_score 무관 — 점화는 자기 조건으로만 판단
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
@@ -7599,6 +7600,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and imbalance >= -0.05        # 호가 매도우위 아님
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
+        and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
