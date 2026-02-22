@@ -7079,7 +7079,8 @@ def box_monitor_position(m, entry_price, volume, box_info):
     box_range = box_high - box_low
 
     start_ts = time.time()
-    max_hold_sec = 600  # 최대 10분 홀딩 (박스 깨지면 의미 없음)
+    # 🔧 시간만료 제거: 박스매매는 박스 유지되는 한 시간 제한 없음 (추세 이탈만 청산)
+    # 대신 박스 유효성 주기적 체크로 대체
 
     print(f"[BOX_MON] 📦 {m} 모니터 시작 | 진입 {entry_price:,.0f} | TP {box_tp:,.0f} SL {box_stop:,.0f}")
 
@@ -7089,7 +7090,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
     breakout_trail = False    # 돌파 트레일 모드
     trail_peak = 0            # 트레일 최고점
 
-    while time.time() - start_ts < max_hold_sec:
+    while True:
         time.sleep(1.5)
 
         try:
@@ -7099,6 +7100,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
             cur_price = c1[-1]["trade_price"]
         except Exception:
             continue
+
+        # 🔧 포지션 상태 체크 (외부에서 이미 청산된 경우 루프 탈출)
+        with _POSITION_LOCK:
+            if m not in OPEN_POSITIONS:
+                sell_reason = "📦 외부 청산 감지"
+                remaining_vol = 0
+                break
 
         cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
 
@@ -7126,7 +7134,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
                     if _bp:
                         _bp["volume"] = remaining_vol
                 print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
-                tg_send(f"📦 {m} 상단 부분익절 70% | 나머지 돌파 대기")
+                _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                tg_send(
+                    f"📦 <b>[박스매매] 부분익절 70%</b> {m}\n"
+                    f"• 현재가: {fmt6(cur_price)}원 ({_partial_gain:+.2f}%)\n"
+                    f"• 나머지 30% 돌파 대기\n"
+                    f"{link_for(m)}"
+                )
             except Exception as pe:
                 print(f"[BOX_MON] 부분매도 실패: {pe}")
                 sell_reason = f"📦 박스 상단 익절 (부분매도실패→전량)"
@@ -7149,10 +7163,6 @@ def box_monitor_position(m, entry_price, volume, box_info):
         if cur_price <= box_stop:
             sell_reason = f"📦 박스 하단 이탈 (SL {box_stop:,.0f})"
             break
-
-    # 시간 초과
-    if not sell_reason:
-        sell_reason = f"📦 박스 시간초과 {max_hold_sec}초"
 
     # 나머지 수량 매도
     try:
@@ -7181,33 +7191,63 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception:
             sell_price = cur_price
 
-        pnl_pct = (sell_price / entry_price - 1) * 100 if entry_price > 0 else 0
-        pnl_emoji = "💰" if pnl_pct > 0 else "📉"
+        # 🔧 일반 매매와 동일한 손익 계산 (수수료 반영)
         hold_sec = time.time() - start_ts
+        est_entry_value = entry_price * volume
+        est_exit_value = sell_price * volume  # 전체 수량 기준 (부분익절 포함)
+        pl_value = est_exit_value - est_entry_value
+        gross_ret_pct = (sell_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+        net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY
+        net_pl_value = pl_value - fee_total
+        result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
 
+        # 🔧 거래 결과 기록 (승률 기반 리스크 튜닝)
+        try:
+            record_trade(m, net_ret_pct / 100.0)
+        except Exception as _e:
+            print(f"[BOX_TRADE_RECORD_ERR] {_e}")
+
+        # 🔧 자동 학습용 결과 업데이트
+        if AUTO_LEARN_ENABLED:
+            try:
+                update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
+                                    exit_reason=sell_reason)
+            except Exception as _e:
+                print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
+
+        # 🔧 일반 매매와 동일한 청산 알림 포맷
         tg_send(
-            f"{pnl_emoji} <b>[박스매매] 매도</b> {m}\n"
+            f"====================================\n"
+            f"{result_emoji} <b>자동청산 완료 [박스매매]</b> {m}\n"
+            f"====================================\n"
+            f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{gross_ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
+            f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
             f"• 사유: {sell_reason}\n"
-            f"• 진입: {fmt6(entry_price)}원 → 매도: {fmt6(sell_price)}원\n"
-            f"• 수익률: {pnl_pct:+.2f}%\n"
+            f"• 매수평단: {fmt6(entry_price)}원\n"
+            f"• 실매도가: {fmt6(sell_price)}원\n"
+            f"• 체결수량: {volume:.6f}\n"
+            f"• 매수금액: {est_entry_value:,.0f}원\n"
+            f"• 청산금액: {est_exit_value:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
             f"• 보유시간: {hold_sec:.0f}초\n"
             f"• 박스: {fmt6(box_low)}~{fmt6(box_high)} ({box_info.get('range_pct', 0)*100:.1f}%)\n"
+            f"====================================\n"
             f"{link_for(m)}"
         )
 
-        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL {pnl_pct:+.2f}% | {hold_sec:.0f}초")
+        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL net:{net_ret_pct:+.2f}% | {hold_sec:.0f}초")
 
     except Exception as e:
         print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
-        tg_send(f"⚠️ 박스매매 매도 실패 {m}\n{e}")
+        tg_send(f"⚠️ <b>자동청산 실패 [박스매매]</b> {m}\n사유: {e}")
 
     # 정리
     with _BOX_LOCK:
         _BOX_WATCHLIST.pop(m, None)
         _BOX_LAST_EXIT[m] = time.time()  # 🔧 FIX: _BOX_LOCK 안에서 쓰기 (레이스컨디션 방지)
 
-    with _POSITION_LOCK:
-        OPEN_POSITIONS.pop(m, None)
+    mark_position_closed(m, f"box_close:{sell_reason}")
 
 
 def box_confirm_entry(m):
@@ -10613,12 +10653,21 @@ def main():
                                     "range_pct": box_pre.get("box_range_pct", 0),
                                 }
 
+                                # 🔧 일반 매매와 동일한 매수 알림 포맷
+                                _box_signal_price = box_pre.get("price", 0)
+                                _box_slip_pct = (actual_entry_b / _box_signal_price - 1.0) * 100 if _box_signal_price > 0 else 0
+                                _box_krw_used = actual_entry_b * actual_vol_b
+                                _box_buy_r = box_pre.get("buy_ratio", 0)
+                                _box_spread = box_pre.get("spread", 0)
+                                _box_sl_display = fmt6(_box_info['box_stop'])
+
                                 tg_send(
-                                    f"📦 <b>[박스매매] 하단 매수</b> {bm}\n"
-                                    f"• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
-                                    f"• 체결가: {fmt6(actual_entry_b)}원\n"
-                                    f"• 목표: {fmt6(_box_info['box_tp'])}원 | 손절: {fmt6(_box_info['box_stop'])}원\n"
-                                    f"• 매수비: {box_pre.get('buy_ratio', 0):.0%}\n"
+                                    f"📦 <b>[중간진입] 자동매수 [박스매매]</b> {bm}\n"
+                                    f"• 신호: 📦박스하단 | 박스 {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
+                                    f"• 지표: 매수{_box_buy_r:.0%} 스프레드{_box_spread:.2f}%\n"
+                                    f"• 신호가: {fmt6(_box_signal_price)}원 → 체결가: {fmt6(actual_entry_b)}원 ({_box_slip_pct:+.2f}%)\n"
+                                    f"• 주문: {_box_krw_used:,.0f}원 | 수량: {actual_vol_b:.6f}\n"
+                                    f"• 손절: {_box_sl_display}원 (SL {box_sl_pct*100:.2f}%) | 목표: {fmt6(_box_info['box_tp'])}원\n"
                                     f"{link_for(bm)}"
                                 )
 
