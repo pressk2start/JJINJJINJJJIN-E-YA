@@ -2921,7 +2921,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 sell_volume = actual_bal
             else:
                 print(f"[PARTIAL→FULL] {m} 실잔고=0 → 이미 청산됨")
-                sell_volume = 0.0
+                mark_position_closed(m, "partial_to_full_already_zero")
+                return True, "이미 청산됨(잔고=0)", 0.0
             was_full = True  # 🔧 전량청산 시도 표시
             # 🔧 FIX: 전량청산 모드로 전환 → partial_state 해제 (부분체결 시 재시도 가능하게)
             with _POSITION_LOCK:
@@ -4778,6 +4779,7 @@ def load_learned_weights():
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
     global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global DYN_SL_MIN, DYN_SL_MAX, HARD_STOP_DD, TRAIL_DISTANCE_MIN_BASE
 
     if not os.path.exists(WEIGHTS_PATH):
         print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
@@ -10169,6 +10171,9 @@ def main():
     _last_heartbeat_ts = time.time()
     _HEARTBEAT_INTERVAL = 1800  # 30분
 
+    # 🔧 FIX: c1_cache 초기화 (첫 반복에서 box_scan_markets에 NameError 방지)
+    c1_cache = {}
+
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
@@ -10483,7 +10488,8 @@ def main():
                         _release_entry_lock(cm)
 
             # 📦 박스권 매매: 스캔 + 진입 체크
-            if BOX_ENABLED:
+            # 🔧 FIX: c1_cache 비어있으면 스킵 (첫 반복에서 빈 캐시로 스캔 방지)
+            if BOX_ENABLED and c1_cache:
                 try:
                     box_cleanup()
                     box_scan_markets(c1_cache)
