@@ -1437,16 +1437,17 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
 
         if drift > thr:
             # 🔧 추격진입 예외 완전 제거 (pullback 엔트리가 있으므로 추격 불필요)
-            # 기존: AGGRESSIVE_MODE면 drift+0.3%까지 허용 → 역선택/휩쏘/꼭대기체결 급증
             return False, current_price, False
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
         down_thr = max(0.005, thr * 0.8)  # 🔧 0.5% 또는 상단의 80%
         if drift < -down_thr:
-            # 급락 컷 (signal_skip에서 로그 처리)
             return False, current_price, False
 
-        return True, current_price, False
+        # 🔧 FIX: 추격성 진입 구분 (B안 — drift가 thr의 70%↑이면 chase 마킹)
+        # chase=True → 후속에서 강제 half + spread 0.25% + depth 15M
+        is_chase = (drift >= thr * 0.7)
+        return True, current_price, is_chase
 
     except Exception as e:
         print(f"[GUARD_ERR] {m}: {e} → 1회 재시도")
@@ -1633,7 +1634,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         else:
             PULLBACK_WAIT_SEC = 2.0
         PULLBACK_MIN_DIP = 0.001    # 🔧 0.15→0.1% (미세 눌림도 인정)
-        PULLBACK_MAX_DIP = 0.015 if _is_circle_entry else 0.012  # 🔧 FIX: 동그라미 1.5% (재돌파 변동 허용) / 일반 1.2%
+        # 🔧 FIX: PULLBACK_MAX_DIP을 SL 기반 연동 (SL보다 먼저 기회를 버리지 않게)
+        # 기존: 고정 1.2/1.5% → SL(1.8%)보다 먼저 컷 → 좋은 신호 버림
+        # 변경: min(0.020, SL * 0.8) → SL이 넓을수록 정상 눌림도 넓게 허용
+        _pb_sl_ref = pre.get("box_sl_pct", DYN_SL_MIN)
+        _pb_base_dip = min(0.020, _pb_sl_ref * 0.8)
+        if _is_circle_entry:
+            PULLBACK_MAX_DIP = max(_pb_base_dip, 0.015)   # 동그라미: 최소 1.5%
+        else:
+            PULLBACK_MAX_DIP = max(_pb_base_dip, 0.012)   # 일반: 최소 1.2%
         PULLBACK_BOUNCE_TICKS = 2   # 🔧 3→2틱 (빠른 확인)
 
         _pb_peak = current_price
@@ -2389,7 +2398,7 @@ def add_auto_position(m, cur_price, reason=""):
         # 🔧 FIX: 추매 후 손절가 재계산 (평단이 바뀌었으므로)
         try:
             _sig_type_for_sl = pos.get("signal_type", "normal")
-            new_stop, new_sl_pct, _ = dynamic_stop_loss(new_entry_price, c1_for_sl, _sig_type_for_sl, current_price=cur_price)
+            new_stop, new_sl_pct, _ = dynamic_stop_loss(new_entry_price, c1_for_sl, _sig_type_for_sl, current_price=cur_price, trade_type=pos.get("trade_type"))
             pos["stop"] = new_stop
             pos["sl_pct"] = new_sl_pct
         except Exception as e:
@@ -2899,7 +2908,27 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     # 🔧 FIX: _CLOSING_MARKETS 등록 후 전체를 try/except로 감싸기
     # — lock 밖 ~ 내부 try 사이, 내부 try 안 모든 예외 시 cleanup 보장
     try:
-        sell_volume = current_volume * sell_ratio
+        # 🔧 FIX: 실잔고 기반 매도 수량 계산 (pos.volume 불일치 방어)
+        # 기존: current_volume(pos) * sell_ratio → 잔고 지연/레이스 시 주문 실패
+        # 변경: actual balance 우선, 실패 시 pos 기반 폴백
+        actual_bal = get_actual_balance(m)
+        if actual_bal > 0:
+            sell_volume = actual_bal * sell_ratio
+            if abs(actual_bal - current_volume) / max(current_volume, 1e-10) > 0.01:
+                print(f"[PARTIAL_BAL_DIFF] {m} 실잔고={actual_bal:.6f} vs pos={current_volume:.6f} → 실잔고 기준 사용")
+            current_volume = actual_bal  # 이후 remaining 계산도 실잔고 기준
+        elif actual_bal == 0:
+            msg = f"[REMONITOR] {m} 부분청산: 실잔고=0 → 이미 청산됨"
+            print(msg)
+            mark_position_closed(m, "partial_sell_actual_zero")
+            with _POSITION_LOCK:
+                _CLOSING_MARKETS.discard(m)
+            return True, msg, 0.0
+        else:
+            # API 실패(-1) → pos 기반 폴백
+            print(f"[PARTIAL_BAL_WARN] {m} 잔고API 실패 → pos.volume({current_volume:.6f}) 폴백")
+            sell_volume = current_volume * sell_ratio
+
         if sell_volume <= 0:
             msg = f"[REMONITOR] {m} 부분청산 실패: sell_volume<=0"
             print(msg)
@@ -7032,35 +7061,60 @@ def box_check_entry(m):
             if dwell < BOX_CONFIRM_SEC:
                 return None  # 아직 체류 시간 미달
 
-    # 매수세 확인 (반등 징후) — 🔧 강화: 확실한 반등만 진입
+    # 매수세 확인 (반등 징후) — 🔧 캔들 기반 반등 + 틱 보조
+    # 🔧 FIX: 캔들 기반 반등 1차 체크 (저점 갱신 실패 + 양봉 = mean-reversion 시그널)
+    # 틱이 얇은 종목에서도 작동하고, 펌프 오진입도 방지
+    candle_bounce = False
+    try:
+        if c1 and len(c1) >= 3:
+            c_prev = c1[-2]
+            c_cur = c1[-1]
+            # 직전봉 대비 저점이 높아지고(저점 갱신 실패) + 현재봉 양봉
+            no_lower_low = (c_cur["low_price"] >= c_prev["low_price"])
+            cur_bullish = (c_cur["trade_price"] > c_cur["opening_price"])
+            candle_bounce = (no_lower_low and cur_bullish)
+    except Exception:
+        pass
+
     try:
         ticks = get_recent_ticks(m, 100)
         if not ticks or len(ticks) < 8:
-            return None
-        t10 = micro_tape_stats_from_ticks(ticks, 10)
-        t30 = micro_tape_stats_from_ticks(ticks, 30)
+            # 🔧 FIX: 틱 부족해도 캔들 반등 확인되면 진입 허용
+            if not candle_bounce:
+                return None
+        else:
+            t10 = micro_tape_stats_from_ticks(ticks, 10)
+            t30 = micro_tape_stats_from_ticks(ticks, 30)
+            tick_count = len(ticks)
 
-        # 🔧 반등 조건 강화: 매수비 > 53% (50%는 중립에 불과)
-        if t10["buy_ratio"] < 0.53:
-            return None
-        if t10["krw_per_sec"] < 5000:  # 🔧 3000→5000 (유동성 있는 반등만)
-            return None
+            # 🔧 FIX: 틱 수에 따라 매수비 기준 보정 (틱 적으면 왜곡 가능)
+            buy_ratio_thr = 0.53 if tick_count >= 30 else 0.58
+            if t10["buy_ratio"] < buy_ratio_thr:
+                if not candle_bounce:  # 캔들 반등 확인되면 틱 조건 완화
+                    return None
+            if t10["krw_per_sec"] < 5000:
+                if not candle_bounce:
+                    return None
 
-        # 🔧 반등 가속도 확인 (t10 > t30 = 최근 매수세 증가)
-        flow_accel = calc_flow_acceleration(ticks)
-        if flow_accel < 1.0:  # 🔧 1.2→1.0 (바닥에서는 안정적 매수세만 있어도 반등 신호)
-            return None  # 매수세 감소 중 → 하락 지속 가능성
+            # 반등 가속도 확인
+            flow_accel = calc_flow_acceleration(ticks)
+            if flow_accel < 1.0:
+                if not candle_bounce:
+                    return None
 
-        # 🔧 FIX: 연속매수 확인 (바닥에서 실제 매수세 유입)
-        cons_buys = calc_consecutive_buys(ticks, 10)
-        if cons_buys < 3:
-            return None  # 연속매수 3회 미만 → 반등 불확실
+            # 연속매수 확인
+            cons_buys = calc_consecutive_buys(ticks, 10)
+            if cons_buys < 3:
+                if not candle_bounce:
+                    return None
 
-        # 🔧 FIX: 30초 매수비도 확인 (10초만 강한 스파이크 방지)
-        if t30["buy_ratio"] < 0.48:
-            return None  # 30초 기준으로도 매수 우위여야 함
+            # 30초 매수비 확인
+            if t30["buy_ratio"] < 0.48:
+                if not candle_bounce:
+                    return None
     except Exception:
-        return None
+        if not candle_bounce:
+            return None
 
     # 호가 확인 (스프레드)
     try:
@@ -7150,6 +7204,9 @@ def box_monitor_position(m, entry_price, volume, box_info):
     remaining_vol = volume    # 남은 수량
     breakout_trail = False    # 돌파 트레일 모드
     trail_peak = 0            # 트레일 최고점
+    # 🔧 FIX: 부분익절 실현손익 누적 (최종 손익 계산 정확도 보장)
+    realized_krw = 0.0        # 부분매도 실현 금액 누적
+    realized_vol = 0.0        # 부분매도 체결 수량 누적
 
     while True:
         time.sleep(1.5)
@@ -7186,15 +7243,18 @@ def box_monitor_position(m, entry_price, volume, box_info):
         if cur_price >= box_tp and not partial_sold:
             partial_vol = remaining_vol * 0.70
             try:
-                place_market_sell(m, partial_vol)
+                _partial_res = place_market_sell(m, partial_vol)
                 remaining_vol -= partial_vol
                 partial_sold = True
+                # 🔧 FIX: 부분매도 실현금액 누적 (정확한 손익 계산)
+                realized_krw += cur_price * partial_vol  # 체결가 근사치
+                realized_vol += partial_vol
                 # 🔧 FIX: OPEN_POSITIONS volume 동기화 (크래시 복구 시 이중매도 방지)
                 with _POSITION_LOCK:
                     _bp = OPEN_POSITIONS.get(m)
                     if _bp:
                         _bp["volume"] = remaining_vol
-                print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
+                print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 실현 {realized_krw:,.0f}원 | 나머지 {remaining_vol:.6f}")
                 _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
                 tg_send(
                     f"📦 <b>[박스매매] 부분익절 70%</b> {m}\n"
@@ -7252,12 +7312,17 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception:
             sell_price = cur_price
 
-        # 🔧 일반 매매와 동일한 손익 계산 (수수료 반영)
+        # 🔧 FIX: 부분익절 실현금액을 합산한 정확한 손익 계산
+        # 기존: sell_price * volume (마지막 매도가로 전체 계산 → 부분익절 무시)
+        # 변경: realized_krw(부분매도 누적) + sell_price * remaining_vol(나머지) = 실제 총 매도금액
         hold_sec = time.time() - start_ts
         est_entry_value = entry_price * volume
-        est_exit_value = sell_price * volume  # 전체 수량 기준 (부분익절 포함)
+        final_sell_krw = sell_price * remaining_vol if remaining_vol > 0 else 0.0
+        est_exit_value = realized_krw + final_sell_krw  # 부분+나머지 합산
         pl_value = est_exit_value - est_entry_value
-        gross_ret_pct = (sell_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+        # 가중평균 매도가 (기록/학습용)
+        avg_exit_price = est_exit_value / volume if volume > 0 else sell_price
+        gross_ret_pct = (avg_exit_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
         net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
         fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY
         net_pl_value = pl_value - fee_total
@@ -7498,10 +7563,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     _imb = min(imbalance, 1.0)
     if _imb >= 0.15:
         flow_score += min(10.0, (_imb - 0.15) * 11.8)
-    # 회전율 기여 (0~5): 2%=1, 5%=3, 10%+=5
-    _tp = min(turn_pct, 20.0)
-    if _tp >= 2.0:
-        flow_score += min(5.0, (_tp - 2.0) * 0.625)
+    # 🔧 FIX: 회전율 기여 — 중간 최적(peak) 형태 (과회전 구간 감점)
+    # 기존: 회전율 높을수록 단조증가 → 과회전(피로/분배) 종목도 점수↑
+    # 변경: 2~8% 가점(최대 +5점), 12%+ 감점(-3점)
+    _tp = min(turn_pct, 30.0)
+    if 2.0 <= _tp <= 8.0:
+        flow_score += min(5.0, (_tp - 2.0) * 0.833)   # 2%→0, 8%→5
+    elif 8.0 < _tp <= 12.0:
+        flow_score += max(0.0, 5.0 - (_tp - 8.0) * 1.25)  # 8%→5, 12%→0
+    elif _tp > 12.0:
+        flow_score -= min(3.0, (_tp - 12.0) * 0.5)    # 12%→-0, 18%→-3 (과회전 감점)
     flow_score = min(25.0, flow_score)
     gate_score += flow_score
 
@@ -8221,8 +8292,11 @@ def final_check_leader(m, pre, tight_mode=False):
         if entry_mode == "confirm":
             entry_mode = "half"
         elif entry_mode == "half":
-            print(f"[REGIME_FLAT] {m} half+횡보 → 진입 차단 (probe 폐지)")
-            return None
+            # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제 (기회손실 감소)
+            # 기존: 진입 차단 → 거래 0건 날이 많아짐 → 분산/일관성 악화
+            # 변경: half 유지하되 scalp로 강제 → 빠른 TP로 리스크 제한
+            pre["_force_scalp"] = True
+            print(f"[REGIME_FLAT] {m} half+횡보 → half 유지 + scalp 강제")
         if entry_mode != old_mode:
             print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
 
@@ -8242,8 +8316,9 @@ def final_check_leader(m, pre, tight_mode=False):
             if entry_mode == "confirm":
                 entry_mode = "half"
             elif entry_mode == "half":
-                print(f"[강돌파↓] {m} half+편면모멘텀 → 진입 차단 (probe 폐지)")
-                return None
+                # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제
+                pre["_force_scalp"] = True
+                print(f"[강돌파↓] {m} half+편면모멘텀 → half 유지 + scalp 강제")
             if entry_mode != old_mode:
                 print(f"[강돌파↓] {m} 편면모멘텀 consec{'✓' if consec_ok else '✗'} supply{'✓' if supply_ok else '✗'} → {old_mode}→{entry_mode}")
 
@@ -8265,8 +8340,9 @@ def final_check_leader(m, pre, tight_mode=False):
                 if entry_mode == "confirm":
                     entry_mode = "half"
                 elif entry_mode == "half":
-                    print(f"[DECAY↓] {m} half+매수세둔화 → 진입 차단 (probe 폐지)")
-                    return None
+                    # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제
+                    pre["_force_scalp"] = True
+                    print(f"[DECAY↓] {m} half+매수세둔화 → half 유지 + scalp 강제")
                 if entry_mode != old_mode:
                     print(f"[DECAY↓] {m} 매수세둔화 → {old_mode}→{entry_mode}")
 
@@ -8288,7 +8364,11 @@ def final_check_leader(m, pre, tight_mode=False):
         or (_consec >= 5 and _surge >= 2.0)            # 강한 연속 매수 + 급등
         or (score >= 80 and _breakout)                 # 높은 스코어 + 돌파
     )
-    trade_type = "runner" if is_runner_entry else "scalp"
+    # 🔧 FIX: _force_scalp 플래그 반영 (half→차단 대신 half+scalp 강제)
+    if pre.get("_force_scalp"):
+        trade_type = "scalp"
+    else:
+        trade_type = "runner" if is_runner_entry else "scalp"
     print(f"[TRADE_TYPE] {m} → {trade_type} (ign={_ign} consec={_consec} surge={_surge:.1f}x score={score:.0f} breakout={_breakout})")
 
     # 이미 stage1_gate/prebreak에서 모든 필터링 완료
@@ -8546,6 +8626,8 @@ def postcheck_6s(m, pre):
     base_price = pre["price"]
     peak = base_price
     trough_after_peak = base_price  # 피크 이후 최저가 추적
+    # 🔧 FIX: surge 기준을 첫 틱 가격으로 리베이스 (관측 지연 처벌 제거)
+    surge_base_set = False
 
     # ★★★ postcheck 중 최대 허용 급등 (1.5%)
     MAX_SURGE = 0.015
@@ -8580,6 +8662,11 @@ def postcheck_6s(m, pre):
             acc.appendleft(x)  # ✅ 최신이 index 0 유지
 
         curp = max(ticks, key=tick_ts_ms).get("trade_price", base_price)
+
+        # 🔧 FIX: 첫 틱 가격으로 surge base 리베이스 (API지연→가격변동을 surge로 오인 방지)
+        if not surge_base_set and curp > 0:
+            base_price = curp
+            surge_base_set = True
 
         # 🔧 승률개선: 급등 필터 강화 (55%/15K → 58%/18K + 되돌림 체크)
         # 55%는 가짜 돌파도 통과 → 매수비+거래속도+되돌림 3중 확인
@@ -8671,44 +8758,47 @@ def upbit_tick_size(price: float) -> float:
     if p >=         1: return 0.01
     return 0.001
 
-def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None):
+def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, trade_type=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
     if not atr or atr <= 0:
-        # 🔧 FIX: 폴백도 DYN_SL_MIN 사용 (STOP_LOSS_PCT=1.5%와 불일치 해소)
         return entry_price * (1 - DYN_SL_MIN), DYN_SL_MIN, None
 
     # 🔧 ATR 바닥값: 너무 작으면 휩쏘에 털림 방지 (최소 0.05% 또는 호가단위)
     atr = max(atr, entry_price * 0.0005, upbit_tick_size(entry_price))
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
-    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)  # 자동튜닝 값 그대로 적용
+    pct = min(max(base_pct, DYN_SL_MIN), DYN_SL_MAX)
 
-    # 🔧 FIX 7차: SL 승수를 곱셈→최대값 선택으로 변경 (곱셈 폭발 방지)
-    # 기존: 신호1.3 × 수익1.5 = 1.95배 → DYN_SL_MAX 2.2%가 4.3%까지 확대 가능
-    # 변경: max(신호1.3, 수익1.5) = 1.5배 → 최대 3.3% (통제 가능)
     _sl_signal_mult = 1.0
     _sl_profit_mult = 1.0
 
     # 🚀 신호 유형별 완화
     if signal_type in ("early", "ign", "mega"):
         _sl_signal_mult = 1.3
-    # ⭕ 동그라미/리테스트(재돌파): 눌림 검증 완료 → 점화와 동일 수준 완화
     elif signal_type in ("circle", "retest"):
         _sl_signal_mult = 1.3
 
-    # 💎 익절 중이면 손절폭 더 완화 (눌림 방지)
-    # 🔧 손절완화: 1.5→1.8배 (수익 구간에서 정상 눌림에 잘리는 문제 추가 완화)
-    if current_price and current_price > entry_price * 1.008:
-        _sl_profit_mult = 1.8
+    # 🔧 FIX: 수익구간 SL 완화를 trade_type별로 분기
+    # 기존: +0.8% 넘으면 무조건 1.8배 → scalp에서 본절 근처까지 밀려도 오래 버팀
+    # 변경: scalp는 +1.3%↑에서만 완화(1.5배), runner는 기존대로 빠르게 완화(1.8배)
+    if current_price and entry_price > 0:
+        gain = current_price / entry_price - 1.0
+        if trade_type == "scalp":
+            # scalp: 더 높은 수익에서, 더 적게 완화
+            if gain > 0.013:
+                _sl_profit_mult = 1.5
+        else:
+            # runner/기본: 빠르게 완화하여 추세 유지
+            if gain > 0.008:
+                _sl_profit_mult = 1.8
 
-    # 🔧 FIX 7차: 최대값 선택 (곱셈 폭발 제거, 최대 1.8배까지만)
+    # 최대값 선택 (곱셈 폭발 제거)
     _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
     max_sl = DYN_SL_MAX * _sl_mult
     pct = min(max(pct, DYN_SL_MIN), max_sl)
 
-    # ATR 상세 (텔레그램용) - 소수점 2자리로 표시
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
     return entry_price * (1 - pct), pct, atr_info
 
@@ -9512,7 +9602,7 @@ def monitor_position(m,
                             trail_db_hits = 0
                             _c1_cache = None; _c1_cache_ts = 0.0
                             c1_for_sl = _get_c1_cached()
-                            _new_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달
+                            _new_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type)  # 🔧 FIX: signal_type/current_price/trade_type 전달
                             base_stop = max(base_stop, _new_stop)  # 🔧 FIX: 래칫 보호 (추매 후 SL 하향 방지)
                             # trail은 유지 (이미 무장된 상태면 새 평단 기준으로 계속)
                             tg_send_mid(f"🔧 {m} 추매(눌림재돌파) 평단→{fmt6(new_entry)} | best/worst 보존")
@@ -9571,9 +9661,15 @@ def monitor_position(m,
                 else:
                     trail_db_hits += 1
                 _trail_dur = time.time() - trail_db_first_ts
-                # 🔧 익절극대화: 트레일 디바운스를 SL보다 강화 (+2회, +5초) — 트레일컷 과잉 방지
-                _tdb_n = EXIT_DEBOUNCE_N + 2 + (1 if alive_sec < WARMUP_SEC else 0)
-                _tdb_sec = EXIT_DEBOUNCE_SEC + 5 + (2 if alive_sec < WARMUP_SEC else 0)
+                # 🔧 FIX: 트레일 디바운스를 trade_type별로 차등
+                # 기존: SL+2회 +5초 고정 → scalp에서 큰 수익 되돌림 허용
+                # 변경: scalp는 SL 수준(빠른 확정), runner는 기존대로 강하게(꼬리 살리기)
+                if trade_type == "scalp":
+                    _tdb_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0)      # SL과 동일
+                    _tdb_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0)  # SL과 동일
+                else:
+                    _tdb_n = EXIT_DEBOUNCE_N + 2 + (1 if alive_sec < WARMUP_SEC else 0)
+                    _tdb_sec = EXIT_DEBOUNCE_SEC + 5 + (2 if alive_sec < WARMUP_SEC else 0)
                 if trail_db_hits >= _tdb_n or _trail_dur >= _tdb_sec:
                     # 디바운스 통과 → 실제 청산
                     # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
@@ -9862,7 +9958,7 @@ def monitor_position(m,
                         verdict = "연장_RATCHET_STOP"
                         break
                     # 🔧 FIX: ATR 동적 손절 체크 (연장루프에서도 가격 폭락 방어)
-                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached(), signal_type=signal_type_for_sl, current_price=curp)  # 🔧 FIX: signal_type/current_price 전달 (수익구간 SL 완화 적용)
+                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached(), signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type)  # 🔧 FIX: trade_type 전달 (scalp/runner SL 분리)
                     if _ext_sl_price > 0 and curp <= _ext_sl_price:
                         _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
                         close_auto_position(m, f"연장ATR손절 {_ext_gain*100:.2f}% (SL {_ext_sl_pct*100:.2f}%)")
