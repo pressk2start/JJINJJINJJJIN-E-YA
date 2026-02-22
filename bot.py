@@ -528,6 +528,21 @@ OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 _CLOSING_MARKETS = set()  # 🔧 FIX: 중복 청산 방지용 (청산 진행 중 마켓 표시)
 
+
+def _pop_position_tracked(market, caller="unknown"):
+    """🔧 FIX: 포지션 제거 시 호출자 + 상태 로깅 (유령포지션 원인 추적용)
+    반드시 _POSITION_LOCK 내부에서 호출할 것."""
+    pos = OPEN_POSITIONS.get(market)
+    if pos:
+        state = pos.get("state", "?")
+        strategy = pos.get("strategy", "?")
+        age = time.time() - pos.get("entry_ts", time.time())
+        print(f"[POS_REMOVE] {market} state={state} strategy={strategy} age={age:.0f}s caller={caller}")
+        import traceback
+        traceback.print_stack(limit=6)
+    return OPEN_POSITIONS.pop(market, None)
+
+
 def mark_position_closed(market, reason=""):
     """
     🔧 FIX: 포지션 청산 완료 마킹 (중복 청산 방지 핵심)
@@ -544,7 +559,7 @@ def mark_position_closed(market, reason=""):
         pos["state"] = "closed"
         pos["closed_at"] = time.time()
         pos["closed_reason"] = reason
-        OPEN_POSITIONS.pop(market, None)
+        _pop_position_tracked(market, f"mark_closed:{reason}")
     return True
 
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
@@ -1217,10 +1232,18 @@ def sync_orphan_positions():
                     # 이미 다른 곳(메인 루프)에서 추가됨 → 스킵
                     print(f"[ORPHAN] {market} 이미 OPEN_POSITIONS에 있음 (race 방지) → 스킵")
                     continue
+                # 🔧 FIX: SL/ATR 데이터 보강 (기존: 모두 0 → 청산 알람에 ATR 0%, SL 0% 표시)
+                _orphan_c1 = get_minutes_candles(1, market, 20)
+                _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1)
+                _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
+                _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
                 OPEN_POSITIONS[market] = {
                     "state": "open",
                     "entry_price": avg_buy_price,
                     "volume": balance,
+                    "stop": _orphan_stop,
+                    "sl_pct": _orphan_sl_pct_val,
+                    "entry_atr_pct": round(_orphan_atr_pct, 4),
                     "entry_mode": "orphan",  # 유령 포지션 표시
                     "ts": now,
                     "entry_ts": now,  # 🔧 FIX: entry_ts 추가 (보유시간 -0초 버그 수정)
@@ -1234,6 +1257,7 @@ def sync_orphan_positions():
                 f"• 평단: {fmt6(avg_buy_price)}원\n"
                 f"• 현재가: {fmt6(cur_price)}원 ({pnl_pct:+.2f}%)\n"
                 f"• 수량: {balance:.6f}\n"
+                f"• SL: {_orphan_sl_pct_val*100:.2f}% | ATR: {_orphan_atr_pct:.3f}%\n"
                 f"→ 모니터링 시작 (ATR 손절 적용)"
             )
 
@@ -9258,11 +9282,26 @@ def monitor_position(m,
             time.sleep(RECHECK_SEC)
 
             # 🔧 찌꺼기 방지: 부분청산→전량청산 전환 시 루프 조기 종료
+            # 🔧 FIX: 잔고 확인 후 판단 (OPEN_POSITIONS 이탈만으로 청산 단정 → 유령포지션 원인)
             with _POSITION_LOCK:
                 if m not in OPEN_POSITIONS:
-                    verdict = "부분청산→전량청산"
-                    _already_closed = True
-                    break
+                    _actual_bal_check = get_balance_with_locked(m)
+                    if _actual_bal_check is not None and _actual_bal_check > 1e-12:
+                        # 잔고 있는데 OPEN_POSITIONS에서 사라짐 → 재등록 후 계속 모니터링
+                        print(f"[MON_GUARD] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal_check:.6f} → 재등록")
+                        OPEN_POSITIONS[m] = {
+                            "state": "open", "entry_price": entry_price,
+                            "volume": _actual_bal_check, "stop": base_stop,
+                            "sl_pct": eff_sl_pct, "entry_ts": start_ts,
+                            "strategy": pre.get("strategy", "breakout"),
+                            "signal_type": pre.get("signal_type", "normal"),
+                            "signal_tag": pre.get("signal_tag", "복구"),
+                            "trade_type": pre.get("trade_type", "scalp"),
+                        }
+                    else:
+                        verdict = "부분청산→전량청산"
+                        _already_closed = True
+                        break
 
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
