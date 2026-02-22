@@ -311,26 +311,26 @@ _CIRCLE_LOCK = threading.Lock()
 # 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
-BOX_LOOKBACK = 36                      # 🔧 24→36 (5분봉 36개 = 3시간, 더 뚜렷한 박스만)
+BOX_LOOKBACK = 30                      # 🔧 36→30 (5분봉 30개 = 2.5시간, 신호 빈도 개선)
 BOX_USE_5MIN = True                    # 🔧 5분봉 기반 박스 감지 (1분봉 노이즈 제거)
 BOX_MIN_RANGE_PCT = 0.015              # 최소 1.5% 범위
-BOX_MAX_RANGE_PCT = 0.035              # 최대 3.5% 범위
-BOX_MIN_TOUCHES = 4                    # 🔧 3→4 (상단/하단 각 4회 이상 터치 = 확실한 박스)
-BOX_TOUCH_ZONE_PCT = 0.15              # 🔧 20→15% (터치 영역 좁혀서 정확한 반전만)
-BOX_ENTRY_ZONE_PCT = 0.20              # 진입 영역: 박스 하단 20% 이내
+BOX_MAX_RANGE_PCT = 0.050              # 🔧 3.5→5.0% (암호화폐 변동성에 맞춤 — 3.5%는 너무 좁음)
+BOX_MIN_TOUCHES = 3                    # 🔧 4→3 (비연속 터치 3회면 충분한 확인)
+BOX_TOUCH_ZONE_PCT = 0.20              # 🔧 15→20% (터치 영역 넓혀서 카운트 정상화)
+BOX_ENTRY_ZONE_PCT = 0.25              # 🔧 20→25% (진입 영역 약간 확대 — 3% 범위면 0.75%폭)
 BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
 BOX_SL_BUFFER_PCT = 0.003              # 손절: 박스 하단 -0.3% (이탈 확인)
-BOX_MIN_VOL_KRW = 100_000_000         # 🔧 8천만→1억 (3시간 기준, 유동성 확보)
+BOX_MIN_VOL_KRW = 80_000_000          # 🔧 1억→8천만 (약간 완화)
 BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
 BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
 BOX_SCAN_INTERVAL = 60                 # 60초 주기 스캔
 BOX_MIN_BB_WIDTH = 0.012               # 최소 BB폭 1.2%
-BOX_MAX_BB_WIDTH = 0.028               # 🔧 3.0→2.8% (BB폭 상한 약간 축소)
+BOX_MAX_BB_WIDTH = 0.040               # 🔧 2.8→4.0% (암호화폐 현실에 맞춤 — 2.8%는 너무 좁음)
 BOX_CONFIRM_SEC = 10                   # 저점 체류 확인 10초
-BOX_MIN_MIDCROSS = 4                   # 🔧 NEW: 중간선 교차 최소 4회 (진짜 왕복 확인)
-BOX_MAX_TREND_SLOPE = 0.003            # 🔧 NEW: 종가 선형회귀 기울기 상한 0.3% (추세 없어야 박스)
-BOX_MIN_CLOSE_IN_RANGE = 0.80          # 🔧 NEW: 종가의 80% 이상이 박스 중앙 60% 안에 있어야
+BOX_MIN_MIDCROSS = 3                   # 🔧 4→3 (3회 왕복이면 충분한 횡보 확인)
+BOX_MAX_TREND_SLOPE = 0.003            # 종가 선형회귀 기울기 상한 0.3% (추세 없어야 박스)
+BOX_MIN_CLOSE_IN_RANGE = 0.70          # 🔧 80→70% (70%면 충분히 중앙 밀집)
 
 # 박스 워치리스트: { market: { box_high, box_low, ... } }
 _BOX_WATCHLIST = {}
@@ -7048,8 +7048,8 @@ def box_check_entry(m):
 
         # 🔧 반등 가속도 확인 (t10 > t30 = 최근 매수세 증가)
         flow_accel = calc_flow_acceleration(ticks)
-        if flow_accel < 1.2:  # 🔧 1.1→1.2 (더 확실한 반등 가속)
-            return None  # 반등 가속 없음 → 하락 지속 가능성
+        if flow_accel < 1.0:  # 🔧 1.2→1.0 (바닥에서는 안정적 매수세만 있어도 반등 신호)
+            return None  # 매수세 감소 중 → 하락 지속 가능성
 
         # 🔧 FIX: 연속매수 확인 (바닥에서 실제 매수세 유입)
         cons_buys = calc_consecutive_buys(ticks, 10)
