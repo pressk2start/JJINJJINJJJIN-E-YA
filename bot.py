@@ -10653,8 +10653,9 @@ def main():
             obc = fetch_orderbook_cache(shard)
 
             c1_cache = {}
+            # 🔧 FIX: 20→30 캔들 (BOX_LOOKBACK=30 요구 충족 — 돌파 감지는 20개만 슬라이싱해서 사용)
             futures = {
-                _candle_executor.submit(get_minutes_candles, 1, m, 20): m
+                _candle_executor.submit(get_minutes_candles, 1, m, 30): m
                 for m in shard
             }
             for f in as_completed(futures):
