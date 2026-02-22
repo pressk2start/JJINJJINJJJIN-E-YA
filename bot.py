@@ -3473,14 +3473,14 @@ GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC �
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 5       # 🔧 꼭대기방지: 3→5 (수급 확실히 확인 후 진입, 1~2회 매수는 허수 가능성)
+GATE_CONSEC_MIN = 5       # 🔧 데이터 기반: 승 8.0 vs 패 4.43 → 5 이상
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
-GATE_SCORE_THRESHOLD = 70.0       # 🔧 FIX: 상수화 (기존 함수 내 로컬변수 → 모듈상수)
+GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
@@ -7186,7 +7186,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
                  ignition_score=0, best_ask_krw=0, cur_price=0,
                  consecutive_buys=0, cv=0.0, overheat=0.0,
-                 pstd=0.0, market=""):
+                 pstd=0.0, market="",
+                 candle_body_pct=0.0, green_streak=0):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -7348,6 +7349,23 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     flow_score = min(25.0, flow_score)
     gate_score += flow_score
 
+    # --- (E) 🕯️ 캔들 모멘텀 (0~15점) ---
+    # 틱 레벨(15s)로 잡히지 않는 1분봉 중간 강도 상승 보상
+    # OM +0.71%/1분, 270M 같은 "느리지 않지만 폭발적이지도 않은" 움직임 감지
+    candle_score = 0.0
+    _body = candle_body_pct * 100  # 소수 → %
+    # 몸통 크기 (0~8점): 0.2%=0, 0.5%=4.3, 0.7%=7.1, 0.75%+=8
+    if _body >= 0.2:
+        candle_score += min(8.0, (_body - 0.2) * 14.3)
+    # 거래량 MA 대비 (0~4점): 1.2x=0.5, 2x=2.5, 2.6x+=4
+    if vol_vs_ma >= 1.2:
+        candle_score += min(4.0, (vol_vs_ma - 1.0) * 2.5)
+    # 연속 양봉 (0~3점): 2봉+=3
+    if green_streak >= 2:
+        candle_score += 3.0
+    candle_score = min(15.0, candle_score)
+    gate_score += candle_score
+
     # === 점화 보너스 (3점부터 +10, 4점부터 +15) ===
     is_ignition = (ignition_score >= 3)
     if ignition_score >= 4:
@@ -7365,7 +7383,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # === 가중점수 통과 판정 ===
     # 🔧 FIX: GATE_SCORE_THRESHOLD → 모듈상수로 이동 (stage1_gate 외부에서 튜닝 가능)
     score_detail = (f"gate_score={gate_score:.0f} "
-                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}]")
+                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f} 캔들{candle_score:.0f}]")
 
     if gate_score < GATE_SCORE_THRESHOLD:
         return False, f"[가중점수] {gate_score:.0f}<{GATE_SCORE_THRESHOLD:.0f} | {score_detail} | {metrics}"
@@ -7657,6 +7675,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     overheat = accel * vol_surge
     spread = ob.get("spread", 9.9)
 
+    # 🕯️ 캔들 모멘텀 지표 (stage1_gate 캔들 보너스용)
+    candle_body_pct = (cur["trade_price"] / max(cur["opening_price"], 1) - 1)  # 종가-시가 %
+    _green_streak = 0
+    for _gc in reversed(c1):
+        if _gc["trade_price"] > _gc["opening_price"]:
+            _green_streak += 1
+        else:
+            break
+    green_streak = _green_streak
+
     # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
     if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
@@ -7798,6 +7826,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         overheat=overheat,
         pstd=(pstd10 * 100) if pstd10 is not None else None,  # 소수→% 변환, 데이터 부족시 None
         market=m,
+        candle_body_pct=candle_body_pct,
+        green_streak=green_streak,
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
