@@ -1133,13 +1133,26 @@ def sync_orphan_positions():
                 if market in OPEN_POSITIONS:
                     continue  # 이미 추적 중
 
+            # 🔧 FIX: 모니터 스레드가 살아있으면 유령 아님 (정상 매수 후 모니터링 중)
+            with _MONITOR_LOCK:
+                _mon_thread = _ACTIVE_MONITORS.get(market)
+                if _mon_thread is not None and isinstance(_mon_thread, threading.Thread) and _mon_thread.is_alive():
+                    print(f"[ORPHAN] {market} 모니터 스레드 활성 → 유령 아님, 스킵")
+                    continue
+
+            # 🔧 FIX: _CLOSING_MARKETS에 있으면 청산 진행 중 → 유령 아님
+            with _POSITION_LOCK:
+                if market in _CLOSING_MARKETS:
+                    print(f"[ORPHAN] {market} 청산 진행 중 → 유령 아님, 스킵")
+                    continue
+
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
             # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
             if market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
-            # 🔧 FIX: 최근 5분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
+            # 🔧 FIX: 최근 10분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
             # - 업비트 주문 내역 조회로 실제 매수 여부 확인
             skip_recent_buy = False
@@ -1161,7 +1174,7 @@ def sync_orphan_positions():
                                     order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
                                     now_utc = datetime.now(timezone.utc)
                                     age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 300:  # 5분 이내 매수
+                                    if age_sec < 600:  # 10분 이내 매수
                                         print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
                                         skip_recent_buy = True
                                         break  # for loop 탈출
@@ -1174,10 +1187,10 @@ def sync_orphan_positions():
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
 
-            # 🔧 FIX: 봇 내부 최근 매수 체크 (300초 내 매수면 유령 아님)
-            # 120초 → 300초로 증가: 정상 매수 직후 유령 오탐 방지 강화
+            # 🔧 FIX: 봇 내부 최근 매수 체크 (600초 내 매수면 유령 아님)
+            # 300초 → 600초로 증가: 매수 후 모니터→청산→잔고지연까지 충분한 보호
             last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 300:
+            if now - last_buy_ts < 600:
                 print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
                 continue
 
@@ -1206,6 +1219,7 @@ def sync_orphan_positions():
                     "volume": balance,
                     "entry_mode": "orphan",  # 유령 포지션 표시
                     "ts": now,
+                    "entry_ts": now,  # 🔧 FIX: entry_ts 추가 (보유시간 -0초 버그 수정)
                     "orphan_detected": True,
                 }
 
@@ -7376,12 +7390,16 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
+    # 🔧 FIX: 꼭대기 진입 방지 강화
+    # - buy_ratio 0.55→0.58 (약한 매수세 동반 돌파 = 페이크 가능성 높음)
+    # - 과열(overheat>12) 시 강돌파 독립경로 차단 (점수제로 전환)
     strongbreak_pass = (
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
+        and overheated <= 12.0  # 🔧 FIX: 과열 시 강돌파 독립경로 차단 (꼭대기 방지)
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
-             or (buy_ratio >= 0.55 and imbalance >= 0.40))
+             or (buy_ratio >= 0.58 and imbalance >= 0.40))
     )
 
     # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세
@@ -7835,6 +7853,22 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if ignition_score < 3 and t15["buy_ratio"] >= 0.60 and t45["buy_ratio"] < 0.48:
         cut("BUY_FADE", f"{m} 매수비페이드 t15={t15['buy_ratio']:.2f} t45={t45['buy_ratio']:.2f} (꼭대기)", near_miss=False)
         return None
+
+    # === 🔧 FIX: 틱피크 근접 + 매수세 약화 감지 (꼭대기 진입 방지) ===
+    # 현재가가 최근 30초 틱 고가의 99.8% 이상 + 매수비 60% 미만 → 피크에서 매수세 빠지는 중
+    # 점화는 면제 (점화는 신고가 갱신 중 진입이 정상)
+    if ignition_score < 3 and ticks and len(ticks) >= 5:
+        _tick_prices = [t.get("trade_price", 0) for t in ticks if t.get("trade_price", 0) > 0]
+        if _tick_prices:
+            _tick_high = max(_tick_prices)
+            _tick_low = min(_tick_prices)
+            _tick_range = (_tick_high - _tick_low) / _tick_high if _tick_high > 0 else 0
+            # 가격이 틱 고점의 99.8% 이상 = 거의 꼭대기
+            if cur_price >= _tick_high * 0.998 and _tick_range >= 0.003:
+                # 매수비가 60% 미만이면 매수세 약화 중 → 꼭대기
+                if twin["buy_ratio"] < 0.60:
+                    cut("TICK_PEAK", f"{m} 틱피크({cur_price}/{_tick_high}) 매수비{twin['buy_ratio']:.2f}<0.60 (꼭대기)", near_miss=True)
+                    return None
 
     # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
     # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
@@ -8318,6 +8352,12 @@ def postcheck_6s(m, pre):
     pc_max_pstd = POSTCHECK_MAX_PSTD + 0.0005 * r          # 살짝 더 관대
     pc_max_cv = POSTCHECK_MAX_CV + 0.18 * r
     pc_max_dd = POSTCHECK_MAX_DD + 0.005 * r
+
+    # 🔧 FIX: 강돌파 신호는 포스트체크 매수비 기준 강화 (꼭대기 진입 방지)
+    # - 강돌파는 게이트 점수 없이 독립경로로 통과 → postcheck에서 보완
+    # - 매수비 0.46~0.48이면 방향성 약함 → 0.54 이상 요구
+    if is_strongbreak:
+        pc_min_buy = max(pc_min_buy, 0.54)
 
     window = POSTCHECK_WINDOW_SEC
     start = time.time()
