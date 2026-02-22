@@ -7620,6 +7620,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세 + 호가 뒷받침
     # 🔧 NOM 13:59 사례: 임밸 -0.08 → imbalance >= 0.10으로 차단
+    # 🔧 FIX: UXLINK 사례 — 틱3개/연속3회/CV0.11(봇) → 캔들만 크고 틱 확인 부족
     # gate_score 무관 — 자체 조건(body/거래량/임밸/가속)으로 판단
     candle_momentum = (
         _body >= 0.5              # 몸통 ≥ 0.5%
@@ -7628,6 +7629,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and ema20_breakout        # 가격 > EMA20
         and imbalance >= 0.10     # 🔧 호가 매수우위 필수 (매도벽이면 돌파 불가)
         and accel >= 0.8          # 🔧 체결 가속 확인 (둔화 중이면 꼭대기)
+        and consecutive_buys >= GATE_CONSEC_MIN  # 🔧 FIX: 최소 연속매수 필수 (틱 3개 진입 방지)
     )
 
     # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
@@ -8034,12 +8036,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
-    # 🔧 FIX: 독립경로 후보는 하드컷 면제 (점화/강돌파/캔들 경로에 기회 부여)
+    # 🔧 FIX: 독립경로 후보는 하드컷 면제 (점화/강돌파만 — 캔들은 제외)
+    # 🔧 FIX: UXLINK 사례 — 캔들모멘텀이 CONSEC_LOW(3회) 면제받아 틱3개로 진입
+    #    → 캔들은 독자적 강도가 부족하므로 하드컷 면제 대상에서 제외
     _indep_candidate = (
         ignition_score >= 3                                          # 점화 경로
         or (ema20_breakout and high_breakout)                        # 강돌파 경로
-        or (candle_body_pct >= 0.005 and vol_vs_ma >= 1.5           # 캔들 경로 전제조건
-            and ema20_breakout)
     )
     if not _indep_candidate:
         if _trend_down:
