@@ -1600,7 +1600,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX: 동그라미(재돌파)는 이미 눌림→리클레임 거쳤으므로 대기 축소
         # ============================================================
         _is_circle_entry = pre.get("is_circle", False)
-        PULLBACK_WAIT_SEC = 1.0 if _is_circle_entry else 2.0   # 🔧 꼭대기방지: 0.5/1→1/2초 (눌림 확인 여유 확보, 꼭대기 매수 감소)
+        _is_ignition = "점화" in pre.get("signal_tag", "")
+        # 🔧 점화 신호: 풀백 대기 0.5초 (모멘텀 확실 → 지체 = 꼭대기 진입)
+        # 동그라미: 1.0초 / 일반: 2.0초
+        if _is_ignition:
+            PULLBACK_WAIT_SEC = 0.5
+        elif _is_circle_entry:
+            PULLBACK_WAIT_SEC = 1.0
+        else:
+            PULLBACK_WAIT_SEC = 2.0
         PULLBACK_MIN_DIP = 0.001    # 🔧 0.15→0.1% (미세 눌림도 인정)
         PULLBACK_MAX_DIP = 0.015 if _is_circle_entry else 0.012  # 🔧 FIX: 동그라미 1.5% (재돌파 변동 허용) / 일반 1.2%
         PULLBACK_BOUNCE_TICKS = 2   # 🔧 3→2틱 (빠른 확인)
@@ -3522,7 +3530,7 @@ IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
 # ========================================
 PREBREAK_ENABLED = False              # Pre-break 비활성화 (stage1_gate로 통합)
 PREBREAK_HIGH_PCT = 0.002             # 고점 대비 0.2% 이내
-PREBREAK_POSTCHECK_SEC = 2            # probe 전용 2초 포스트체크
+PREBREAK_POSTCHECK_SEC = 1            # 🔧 2→1초 (진입 지연 최소화, 빠른 포스트체크)
 PREBREAK_BUY_MIN = 0.60               # 최소 매수비 60%
 PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
@@ -4870,12 +4878,15 @@ def now_kst_str():
 def get_scan_interval():
     """
     시간대별 스캔 주기(초)
+    - 04~06시: 3초 (새벽 초입 변동성 — 빠른 감지 필수)
     - 09시대: 3초 (초동 변동성 대응)
     - 10~14시: 5초
     - 그 외: 기본 6초
     """
     h = now_kst().hour
-    if h == 9:
+    if 4 <= h <= 6:
+        return 3  # 🔧 새벽 초입: 6→3초 (진입 지연 최소화)
+    elif h == 9:
         return 3
     elif 10 <= h <= 14:
         return 5
@@ -8211,8 +8222,8 @@ def postcheck_6s(m, pre):
             return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%)"
         if _ign_buy < 0.48:
             return False, f"IGN_BUY_LOW({_ign_buy:.2f})"
-        # 🔧 조기진입: 1.5→0.8초 (점화는 모멘텀이 확실, 지체하면 꼭대기)
-        time.sleep(0.8)
+        # 🔧 조기진입: 0.8→0.3초 (점화는 모멘텀 확실, 0.8초도 꼭대기 위험)
+        time.sleep(0.3)
         _ign_ticks = get_recent_ticks(m, 50, allow_network=True)
         if _ign_ticks:
             _ign_curp = max(_ign_ticks, key=tick_ts_ms).get("trade_price", pre["price"])
@@ -8250,8 +8261,8 @@ def postcheck_6s(m, pre):
 
     last_fetch = 0.0
     net_calls = 0  # ★ 이번 postcheck에서 실제 네트워크 호출 횟수
-    # 🔧 조기진입: fetch 간격 축소 (2.0/1.6→1.2/0.8초, 빠른 확인)
-    fetch_interval = 1.2 if (0 <= now_kst().hour < 6) else 0.8
+    # 🔧 조기진입: fetch 간격 통합 0.8초 (새벽도 주간과 동일 — 진입 지연 최소화)
+    fetch_interval = 0.8
     ok_streak = 0
 
     base_price = pre["price"]
