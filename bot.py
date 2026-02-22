@@ -3510,8 +3510,6 @@ GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
-GATE_INDEPENDENT_FLOOR = 50       # 🔧 독립경로 최소 가중점수 (점화/캔들돌파: 노이즈 취약)
-GATE_STRONGBREAK_FLOOR = 40       # 🔧 강돌파 전용 바닥 (자체 조건이 강해서 낮게 설정)
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 점화 최소 가속도 (1.0x=평탄 → 진짜 점화 아님)
 GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
@@ -7521,26 +7519,19 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         _ema_dist_pct = (cur_price / ema20_val - 1) * 100  # %
         _ema_chase = (_ema_dist_pct > GATE_EMA_CHASE_MAX)
 
-    # 🔧 구조개선: 독립경로도 최소 가중점수 필요 (gate_score 완전 우회 방지)
-    # - 각 경로 성격에 맞게 차등 적용:
-    #   점화/캔들돌파: 50점 (틱/캔들 기반 → 노이즈 취약 → 품질 확인 필수)
-    #   강돌파: 40점 (EMA+고점+consec+임밸 자체 조건이 빡세서 낮게)
-    _floor_ok = (gate_score >= GATE_INDEPENDENT_FLOOR)
-    _sb_floor_ok = (gate_score >= GATE_STRONGBREAK_FLOOR)
-
-    # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인 + 최소 품질
-    # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) + 매수 59%(약) → 가짜 점화 차단
+    # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
+    # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
+    # gate_score 무관 — 점화는 자기 조건으로만 판단
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
         and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
         and imbalance >= -0.05        # 호가 매도우위 아님
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
-        and _floor_ok                 # 🔧 최소 품질 (gate_score 바닥)
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
-    # 🔧 자체 조건이 강해서 바닥을 40으로 낮게 설정 (점화/캔들 50과 차등)
+    # gate_score 무관 — 자체 조건(consec/임밸/body/EMA이격)으로 판단
     strongbreak_pass = (
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
@@ -7549,13 +7540,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
         and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
         and not _ema_chase                       # 🔧 EMA20 대비 1%+ 이격 시 추격 차단
-        and _sb_floor_ok                         # 🔧 최소 품질 (40점 — 자체 조건 강해서 낮게)
     )
 
     # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세 + 호가 뒷받침
-    # 🔧 꼭대기방지: 임밸런스 + 가속도 추가 (NOM 13:59 사례 — 매도우위 횡보장 진입 차단)
-    # - 임밸런스 음수 = 호가판이 매도 우위 → "돌파"가 아니라 매도벽에 부딪히는 것
-    # - 가속도 0.8x+ = 최근 체결이 이전보다 빨라지는 중 (모멘텀 확인)
+    # 🔧 NOM 13:59 사례: 임밸 -0.08 → imbalance >= 0.10으로 차단
+    # gate_score 무관 — 자체 조건(body/거래량/임밸/가속)으로 판단
     candle_momentum = (
         _body >= 0.5              # 몸통 ≥ 0.5%
         and vol_vs_ma >= 1.5      # 거래량 ≥ 1.5x MA20
@@ -7563,7 +7552,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and ema20_breakout        # 가격 > EMA20
         and imbalance >= 0.10     # 🔧 호가 매수우위 필수 (매도벽이면 돌파 불가)
         and accel >= 0.8          # 🔧 체결 가속 확인 (둔화 중이면 꼭대기)
-        and _floor_ok             # 🔧 최소 품질
     )
 
     # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
@@ -7578,13 +7566,14 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     if not gate_passed and not ignition_pass and not strongbreak_pass and not candle_momentum:
         # 🔧 독립경로 불통과 사유 상세 표시
+        # 독립경로 불통과 사유 상세 (디버그용)
         _why = []
         if is_ignition and not ignition_pass:
-            if not _floor_ok: _why.append(f"점화+품질부족({gate_score:.0f}<{GATE_INDEPENDENT_FLOOR})")
             if accel < GATE_IGNITION_ACCEL_MIN: _why.append(f"점화+가속부족({accel:.1f}<{GATE_IGNITION_ACCEL_MIN})")
             if _body > GATE_IGNITION_BODY_MAX: _why.append(f"점화+과확장({_body:.1f}%)")
         if breakout_score == 2 and not strongbreak_pass:
-            if not _floor_ok: _why.append(f"강돌+품질부족({gate_score:.0f}<{GATE_INDEPENDENT_FLOOR})")
+            if _body > GATE_STRONGBREAK_BODY_MAX: _why.append(f"강돌+과확장({_body:.1f}%)")
+            if _ema_chase: _why.append(f"강돌+EMA추격({_ema_dist_pct:.1f}%)")
         _extra = f" 독립경로차단:[{','.join(_why)}]" if _why else ""
         return False, f"[가중점수] {gate_score:.0f}<{GATE_SCORE_THRESHOLD:.0f}{_extra} | {score_detail} | {metrics}"
 
