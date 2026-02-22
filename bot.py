@@ -7618,11 +7618,12 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
             # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부
             return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
 
-    # 6) 🔧 임밸런스 하드컷 (명확한 매도우위만 거부)
-    # 알트는 호가 얇아서 -0.05~0.0 구간이 정상 → -0.15 이하만 컷
+    # 6) 🔧 임밸런스 하드컷 (명확한 매도우위 거부)
+    # 🔧 FIX: -0.15 → -0.10 강화 (AZTEC 사례: -0.13에서 진입 후 -1.09% 손실)
+    # 알트는 호가 얇아서 -0.05~0.0 구간은 정상이나, -0.10 이하는 매도벽 존재
     # mega는 유동성이 충분해 임밸이 자연적으로 낮을 수 있으므로 예외
-    if not mega and imbalance < -0.15:
-        return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<-0.15 (매도우위) | {metrics}"
+    if not mega and imbalance < -0.10:
+        return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<-0.10 (매도우위) | {metrics}"
 
     # 7) 급등 상한 안전장치
     if volume_surge > GATE_SURGE_MAX:
@@ -7851,6 +7852,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     if not entry_signal:
         return False, f"진입조건미달 EMA={ema20_breakout} 고점={high_breakout} MA{vol_vs_ma:.1f}x | {score_detail} | {metrics}"
+
+    # 🔧 FIX: gate_score 경로 임밸런스 최소 요건 (AZTEC -0.13 사례)
+    # 독립경로(점화/강돌파/캔들)는 imbalance >= 0.10 필수인데
+    # 표준 gate_score 경로는 임밸런스 체크가 없어 매도우위에도 진입 허용됨
+    # → 호가창 매도우위(음수)이면 gate_score 경로도 차단
+    if imbalance < 0.0 and not mega:
+        return False, f"[gate임밸컷] 임밸{imbalance:.2f}<0.0 (호가매도우위 gate차단) | {score_detail} | {metrics}"
 
     # === 통과 ===
     signal_tag = cand_path
