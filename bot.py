@@ -311,23 +311,26 @@ _CIRCLE_LOCK = threading.Lock()
 # 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
-BOX_LOOKBACK = 24                      # 🔧 5분봉 24개 = 2시간 (뚜렷한 박스 판별)
+BOX_LOOKBACK = 36                      # 🔧 24→36 (5분봉 36개 = 3시간, 더 뚜렷한 박스만)
 BOX_USE_5MIN = True                    # 🔧 5분봉 기반 박스 감지 (1분봉 노이즈 제거)
-BOX_MIN_RANGE_PCT = 0.015              # 🔧 1.2→1.5% (5분봉 기준 더 뚜렷한 박스만)
-BOX_MAX_RANGE_PCT = 0.035              # 🔧 3.0→3.5% (5분봉은 범위가 약간 더 넓을 수 있음)
-BOX_MIN_TOUCHES = 3                    # 🔧 2→3 (상단/하단 각 3회 이상 터치 = 확실한 박스)
-BOX_TOUCH_ZONE_PCT = 0.20              # 터치 판정 영역 (박스 범위의 20%)
-BOX_ENTRY_ZONE_PCT = 0.20              # 🔧 25→20% (더 확실한 저점에서만 진입)
+BOX_MIN_RANGE_PCT = 0.015              # 최소 1.5% 범위
+BOX_MAX_RANGE_PCT = 0.035              # 최대 3.5% 범위
+BOX_MIN_TOUCHES = 4                    # 🔧 3→4 (상단/하단 각 4회 이상 터치 = 확실한 박스)
+BOX_TOUCH_ZONE_PCT = 0.15              # 🔧 20→15% (터치 영역 좁혀서 정확한 반전만)
+BOX_ENTRY_ZONE_PCT = 0.20              # 진입 영역: 박스 하단 20% 이내
 BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
 BOX_SL_BUFFER_PCT = 0.003              # 손절: 박스 하단 -0.3% (이탈 확인)
-BOX_MIN_VOL_KRW = 80_000_000          # 🔧 5천만→8천만 (2시간 기준 거래대금, 유동성 확보)
+BOX_MIN_VOL_KRW = 100_000_000         # 🔧 8천만→1억 (3시간 기준, 유동성 확보)
 BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
 BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
-BOX_SCAN_INTERVAL = 60                 # 🔧 30→60초 (5분봉은 자주 체크 불필요)
-BOX_MIN_BB_WIDTH = 0.012               # 🔧 1.0→1.2% (5분봉 기준 최소 밴드폭)
-BOX_MAX_BB_WIDTH = 0.030               # 🔧 2.5→3.0% (5분봉 허용 범위 확대)
-BOX_CONFIRM_SEC = 10                   # 🔧 3→10초 (저점 체류 확인 강화, 찍고 반등이 아닌 안착 확인)
+BOX_SCAN_INTERVAL = 60                 # 60초 주기 스캔
+BOX_MIN_BB_WIDTH = 0.012               # 최소 BB폭 1.2%
+BOX_MAX_BB_WIDTH = 0.028               # 🔧 3.0→2.8% (BB폭 상한 약간 축소)
+BOX_CONFIRM_SEC = 10                   # 저점 체류 확인 10초
+BOX_MIN_MIDCROSS = 4                   # 🔧 NEW: 중간선 교차 최소 4회 (진짜 왕복 확인)
+BOX_MAX_TREND_SLOPE = 0.003            # 🔧 NEW: 종가 선형회귀 기울기 상한 0.3% (추세 없어야 박스)
+BOX_MIN_CLOSE_IN_RANGE = 0.80          # 🔧 NEW: 종가의 80% 이상이 박스 중앙 60% 안에 있어야
 
 # 박스 워치리스트: { market: { box_high, box_low, ... } }
 _BOX_WATCHLIST = {}
@@ -6735,13 +6738,16 @@ def circle_confirm_entry(m):
 
 def detect_box_range(c1, lookback=None):
     """
-    📦 박스권 감지: N봉 캔들에서 박스 상단/하단 식별
+    📦 박스권 감지: N봉 캔들에서 박스 상단/하단 식별 (엄격 검증)
 
-    Returns: (is_box, box_info) where box_info = {
-        "box_high": float, "box_low": float, "range_pct": float,
-        "top_touches": int, "bot_touches": int, "avg_vol": float,
-        "bb_width": float
-    }
+    핵심: 단순 범위 체크가 아닌, 실제 횡보 패턴인지 다중 검증
+    1. 범위 + BB폭 기본 체크
+    2. 비연속 터치 (같은 영역 연속 체류는 1회로)
+    3. 중간선 교차 횟수 (진짜 왕복 = 횡보 확인)
+    4. 종가 선형회귀 기울기 (추세 있으면 박스 아님)
+    5. 종가 집중도 (중앙 60%에 종가 80%+ 밀집)
+
+    Returns: (is_box, box_info)
     """
     lookback = lookback or BOX_LOOKBACK
     if not c1 or len(c1) < lookback:
@@ -6772,29 +6778,76 @@ def detect_box_range(c1, lookback=None):
         if sma20 > 0:
             variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
             std20 = variance ** 0.5
-            bb_width = (4 * std20) / sma20  # BB width = (upper-lower)/middle
-    # 🔧 FIX: NaN/inf 방어 (corrupt candle → NaN 비교 항상 False → 필터 바이패스 방지)
+            bb_width = (4 * std20) / sma20
     if not math.isfinite(bb_width) or bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
         return False, {}
 
-    # 상단/하단 터치 횟수 (박스 범위의 상하 20% 영역)
+    # ===== 🔧 강화1: 비연속 터치 (연속 봉이 같은 영역이면 1회로 카운트) =====
     touch_zone = box_range * BOX_TOUCH_ZONE_PCT
     top_zone = box_high - touch_zone
     bot_zone = box_low + touch_zone
 
-    top_touches = sum(1 for h in highs if h >= top_zone)
-    bot_touches = sum(1 for l in lows if l <= bot_zone)
+    # 비연속 터치 카운트: 이전 봉이 해당 영역 밖이었을 때만 새 터치
+    top_touches = 0
+    bot_touches = 0
+    prev_in_top = False
+    prev_in_bot = False
+    for i in range(len(highs)):
+        in_top = (highs[i] >= top_zone)
+        in_bot = (lows[i] <= bot_zone)
+        if in_top and not prev_in_top:
+            top_touches += 1
+        if in_bot and not prev_in_bot:
+            bot_touches += 1
+        prev_in_top = in_top
+        prev_in_bot = in_bot
 
     if top_touches < BOX_MIN_TOUCHES or bot_touches < BOX_MIN_TOUCHES:
         return False, {}
 
-    # 거래대금 체크 (30분 누적)
+    # ===== 🔧 강화2: 중간선 교차 횟수 (진짜 왕복 확인) =====
+    mid_price = (box_high + box_low) / 2
+    mid_crosses = 0
+    prev_above = (closes[0] >= mid_price) if closes else True
+    for c in closes[1:]:
+        cur_above = (c >= mid_price)
+        if cur_above != prev_above:
+            mid_crosses += 1
+        prev_above = cur_above
+
+    if mid_crosses < BOX_MIN_MIDCROSS:
+        return False, {}
+
+    # ===== 🔧 강화3: 종가 선형회귀 기울기 (추세 필터) =====
+    # 추세가 있으면 박스가 아님 — 기울기가 박스 범위의 0.3% 이하여야
+    n = len(closes)
+    if n >= 10:
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(closes) / n
+        numerator = sum((i - x_mean) * (closes[i] - y_mean) for i in range(n))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+        if denominator > 0 and y_mean > 0:
+            slope = numerator / denominator
+            # 기울기를 %/봉 단위로 변환, 전체 구간 기울기
+            total_slope_pct = abs(slope * n / y_mean)
+            if total_slope_pct > BOX_MAX_TREND_SLOPE:
+                return False, {}
+
+    # ===== 🔧 강화4: 종가 집중도 (중앙 60%에 80%+ 밀집) =====
+    inner_top = box_high - box_range * 0.20
+    inner_bot = box_low + box_range * 0.20
+    closes_in_inner = sum(1 for c in closes if inner_bot <= c <= inner_top)
+    close_ratio = closes_in_inner / max(len(closes), 1)
+    if close_ratio < BOX_MIN_CLOSE_IN_RANGE:
+        return False, {}
+
+    # 거래대금 체크
     total_vol = sum(volumes)
     avg_vol = total_vol / max(len(volumes), 1)
     if total_vol < BOX_MIN_VOL_KRW:
         return False, {}
 
-    # 현재가가 박스 안에 있는지 (마지막 캔들)
+    # 현재가가 박스 안에 있는지
     cur_price = closes[-1]
     if cur_price < box_low or cur_price > box_high:
         return False, {}
@@ -6805,6 +6858,8 @@ def detect_box_range(c1, lookback=None):
         "range_pct": range_pct,
         "top_touches": top_touches,
         "bot_touches": bot_touches,
+        "mid_crosses": mid_crosses,
+        "close_ratio": close_ratio,
         "avg_vol": avg_vol,
         "total_vol": total_vol,
         "bb_width": bb_width,
@@ -6895,6 +6950,8 @@ def box_scan_markets(c1_cache):
                 f"상단 {box_info['box_high']:,.0f} 하단 {box_info['box_low']:,.0f} "
                 f"({box_info['range_pct']*100:.1f}%) | "
                 f"터치 상{box_info['top_touches']}회 하{box_info['bot_touches']}회 | "
+                f"중간교차 {box_info.get('mid_crosses', 0)}회 | "
+                f"종가집중 {box_info.get('close_ratio', 0)*100:.0f}% | "
                 f"BB폭 {box_info['bb_width']*100:.1f}%"
             )
 
