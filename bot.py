@@ -3555,7 +3555,7 @@ GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC �
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 5       # 🔧 데이터 기반: 승 8.0 vs 패 4.43 → 5 이상
+GATE_CONSEC_MIN = 4       # 🔧 진입지연개선: 5→4 (1회 빠른 확인 → 조기 진입, 승8.0 vs 패4.43 감안)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
@@ -3603,7 +3603,7 @@ SPREAD_CAP_HIGH = 0.35             # 🔧 완화: 1000원 이상 캡 (0.25→0.3
 # ========================================
 # 🔧 Ignition 내부 임계치
 # ========================================
-IGN_TPS_MULTIPLIER = 4             # 평시 대비 N배 이상 = 틱 폭주
+IGN_TPS_MULTIPLIER = 3             # 🔧 진입지연개선: 4→3배 (폭주 감지 더 빨리 → 상승 초기 포착)
 IGN_TPS_MIN_TICKS = 15             # 최소 틱 수
 IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
 IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
@@ -5212,7 +5212,7 @@ class LRUCache:
 
 
 _TICKS_CACHE = LRUCache(maxsize=100)
-_TICKS_TTL = 4.5
+_TICKS_TTL = 2.0  # 🔧 진입지연개선: 4.5→2.0초 (stale 틱 재사용 감소 → 신선한 데이터로 조기 감지)
 _C5_CACHE = LRUCache(maxsize=300)
 
 
