@@ -3675,6 +3675,7 @@ IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
 IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
 IGN_UP_COUNT_MIN = 4               # 최근 6틱 중 최소 상승 수
 IGN_VOL_BURST_RATIO = 0.40         # 10초 거래량 >= 1분평균 × 이 비율
+IGN_MIN_ABS_KRW_10S = 3_000_000    # 🔧 FIX: 10초 절대 거래대금 하한 (3M원, 저거래량 노이즈 차단)
 IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
 
 # ========================================
@@ -6019,9 +6020,14 @@ def ignition_detected(
         ret = 0
         price_impulse = False
 
-    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40%) ----
+    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40% AND 절대금액 >= 3M원) ----
     # 🔧 강화: 25% → 40% (폭발적 거래량만 감지)
-    vol_burst = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
+    # 🔧 FIX: 절대 거래대금 하한 추가 (저거래량 코인 노이즈 신호 차단)
+    #   - 기존: 상대적 증가만 체크 → 1분평균 500K인 코인이 5.6배=2.8M에도 점화
+    #   - 추가: 10초간 최소 3M원 이상 실거래 필요 (절대 유동성 보장)
+    _vol_relative = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
+    _vol_absolute = t10["krw"] >= IGN_MIN_ABS_KRW_10S
+    vol_burst = _vol_relative and _vol_absolute
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
@@ -7715,6 +7721,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
     # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
     # 🔧 FIX: ETC 16:09 사례 — 틱나이 7.6초 (폭발 이미 종료) + CV 2.39 → 꼭대기 진입
+    # 🔧 FIX: ZRO 23:50 사례 — 거래량 5.6배지만 절대금액 미미 → 노이즈 진입
     # gate_score 무관 — 점화는 자기 조건으로만 판단
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
@@ -7723,6 +7730,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
         and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
+        and current_volume >= 2_000_000  # 🔧 FIX: 1분봉 거래대금 2M+ 필수 (저거래량 노이즈 차단)
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
@@ -7772,6 +7780,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if is_ignition and not ignition_pass:
             if accel < GATE_IGNITION_ACCEL_MIN: _why.append(f"점화+가속부족({accel:.1f}<{GATE_IGNITION_ACCEL_MIN})")
             if _body > GATE_IGNITION_BODY_MAX: _why.append(f"점화+과확장({_body:.1f}%)")
+            if current_volume < 2_000_000: _why.append(f"점화+거래대금부족({current_volume/1e6:.1f}M<2M)")
         if breakout_score == 2 and not strongbreak_pass:
             if _body > GATE_STRONGBREAK_BODY_MAX: _why.append(f"강돌+과확장({_body:.1f}%)")
             if _ema_chase: _why.append(f"강돌+EMA추격({_ema_dist_pct:.1f}%)")
