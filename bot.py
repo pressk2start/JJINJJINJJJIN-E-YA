@@ -621,13 +621,13 @@ def record_trade(market: str, pnl_pct: float):
             _win_streak = 0
             # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
             if _lose_streak >= 5:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 30분 진입 금지
-                _ENTRY_MAX_MODE = "half"
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 30분 전체 진입 금지")
-            elif _lose_streak >= 4:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 10분 진입 금지
+                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 30분→10분 (기회비용 절감)
                 _ENTRY_MAX_MODE = "half"
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
+            elif _lose_streak >= 4:
+                _ENTRY_SUSPEND_UNTIL = time.time() + 180  # 🔧 10분→3분 (기회비용 절감)
+                _ENTRY_MAX_MODE = "half"
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 3분 전체 진입 금지")
             elif _lose_streak >= 3:
                 _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
@@ -7847,10 +7847,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     regime_flat = (regime_reason == "FLAT_SLOPE")
 
     # ============================================================
-    # ★★★ 구조 변경 2: 5분봉 추세 정렬 필터
-    # 핵심: 5분봉 EMA5 < EMA20이면 하락 추세 → 여기서 매수는 바운스 잡기
-    # 바운스 잡기는 80%가 손실 → 상승 추세에서만 진입
+    # ★★★ 구조 변경 2: 5분봉 추세 정렬 필터 (🔧 독립경로 면제: 지연 판정)
     # ============================================================
+    _trend_down = False
+    _trend_down_gap = 0.0
     try:
         _c5 = get_minutes_candles(5, m, 21)  # 5분봉 21개 = EMA20 계산용
         if _c5 and len(_c5) >= 20:
@@ -7868,9 +7868,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
             _trend_gap = (_ema5 - _ema20) / _ema20 if _ema20 > 0 else 0
             if _ema5 < _ema20 and _trend_gap < -0.003:
-                # EMA5가 EMA20보다 0.3% 이상 아래 = 명확한 하락추세
-                cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_gap*100:.2f}%) 하락추세 진입 차단")
-                return None
+                # 🔧 FIX: 즉시 컷 → 플래그 저장 (독립경로 면제 지원)
+                _trend_down = True
+                _trend_down_gap = _trend_gap
     except Exception:
         pass  # API 실패 시 필터 스킵 (진입 기회 보존)
 
@@ -7978,12 +7978,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
-    # 🛑 하드 컷: 거래량 서지 < 0.65x (평균 대비 크게 부족 = 모멘텀 없음)
-    # XRP 0.53x 횡보 진입 같은 케이스 방지. MEGA는 예외.
-    # 🔧 0.8→0.65 완화: 0.65~0.8 구간은 gate scoring이 다른 강점으로 보완 가능
-    if not mega and vol_surge < 0.65:
-        cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
-        return None
+    # 🛑 거래량 서지 체크 (🔧 독립경로 면제: 플래그만 저장, 지연 판정)
+    _vol_surge_low = (not mega and vol_surge < 0.65)
 
     # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
     shadow_flags = []
@@ -7995,11 +7991,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         shadow_flags.append("ACCEL_WEAK_CTX")
     would_cut = len(shadow_flags) > 0
 
-    # 🔧 데이터 기반 필터: 연속매수, CV (승률 분석 결과)
-    # 연속매수 하한 (승 8.0 vs 패 4.43 → 6 이상만)
-    if cons_buys < GATE_CONSEC_MIN:
-        cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
-        return None
+    # 🔧 데이터 기반 필터: 연속매수 (독립경로 면제: 플래그만 저장, 지연 판정)
+    _consec_low = (cons_buys < GATE_CONSEC_MIN)
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
     # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
     if cv is not None and cv > GATE_CV_MAX and ia["count"] >= 4:
@@ -8035,6 +8028,30 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         high_breakout = high_breakout_wick   # 점화: 폭발적 모멘텀이면 wick도 OK
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
+
+    # 🔧 FIX: 독립경로 후보는 하드컷 면제 (점화/강돌파/캔들 경로에 기회 부여)
+    _indep_candidate = (
+        ignition_score >= 3                                          # 점화 경로
+        or (ema20_breakout and high_breakout)                        # 강돌파 경로
+        or (candle_body_pct >= 0.005 and vol_vs_ma >= 1.5           # 캔들 경로 전제조건
+            and ema20_breakout)
+    )
+    if not _indep_candidate:
+        if _trend_down:
+            cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_down_gap*100:.2f}%) 하락추세 진입 차단")
+            return None
+        if _vol_surge_low:
+            cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
+            return None
+        if _consec_low:
+            cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
+            return None
+    elif _trend_down or _vol_surge_low or _consec_low:
+        _bypassed = []
+        if _trend_down: _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
+        if _vol_surge_low: _bypassed.append(f"VOL({vol_surge:.2f}x)")
+        if _consec_low: _bypassed.append(f"CONSEC({cons_buys})")
+        print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
 
     # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
     # regime_filter가 SIDEWAYS 힌트를 반환했으면, 여기서 예외 조건 판단
