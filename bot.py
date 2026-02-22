@@ -311,22 +311,23 @@ _CIRCLE_LOCK = threading.Lock()
 # 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
-BOX_LOOKBACK = 30                      # 박스 감지용 캔들 수 (30분)
-BOX_MIN_RANGE_PCT = 0.012              # 🔧 상향: 0.5→1.2% (수수료+슬립 감안 최소 수익 구간)
-BOX_MAX_RANGE_PCT = 0.030              # 최대 박스 폭 3.0% (넓으면 박스 아님)
-BOX_MIN_TOUCHES = 2                    # 상단/하단 각각 최소 터치 횟수
+BOX_LOOKBACK = 24                      # 🔧 5분봉 24개 = 2시간 (뚜렷한 박스 판별)
+BOX_USE_5MIN = True                    # 🔧 5분봉 기반 박스 감지 (1분봉 노이즈 제거)
+BOX_MIN_RANGE_PCT = 0.015              # 🔧 1.2→1.5% (5분봉 기준 더 뚜렷한 박스만)
+BOX_MAX_RANGE_PCT = 0.035              # 🔧 3.0→3.5% (5분봉은 범위가 약간 더 넓을 수 있음)
+BOX_MIN_TOUCHES = 3                    # 🔧 2→3 (상단/하단 각 3회 이상 터치 = 확실한 박스)
 BOX_TOUCH_ZONE_PCT = 0.20              # 터치 판정 영역 (박스 범위의 20%)
-BOX_ENTRY_ZONE_PCT = 0.25              # 진입 영역: 박스 하단 25% 이내
+BOX_ENTRY_ZONE_PCT = 0.20              # 🔧 25→20% (더 확실한 저점에서만 진입)
 BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
 BOX_SL_BUFFER_PCT = 0.003              # 손절: 박스 하단 -0.3% (이탈 확인)
-BOX_MIN_VOL_KRW = 50_000_000          # 최소 30분 거래대금 5천만원
+BOX_MIN_VOL_KRW = 80_000_000          # 🔧 5천만→8천만 (2시간 기준 거래대금, 유동성 확보)
 BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
 BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
-BOX_SCAN_INTERVAL = 30                 # 박스 스캔 주기 (30초마다)
-BOX_MIN_BB_WIDTH = 0.010               # 🔧 상향: 0.8→1.0% (최소 박스폭과 정합)
-BOX_MAX_BB_WIDTH = 0.025               # BB 폭 최대 2.5%
-BOX_CONFIRM_SEC = 3                    # 하단 체류 확인 시간 (3초)
+BOX_SCAN_INTERVAL = 60                 # 🔧 30→60초 (5분봉은 자주 체크 불필요)
+BOX_MIN_BB_WIDTH = 0.012               # 🔧 1.0→1.2% (5분봉 기준 최소 밴드폭)
+BOX_MAX_BB_WIDTH = 0.030               # 🔧 2.5→3.0% (5분봉 허용 범위 확대)
+BOX_CONFIRM_SEC = 10                   # 🔧 3→10초 (저점 체류 확인 강화, 찍고 반등이 아닌 안착 확인)
 
 # 박스 워치리스트: { market: { box_high, box_low, ... } }
 _BOX_WATCHLIST = {}
@@ -1133,13 +1134,26 @@ def sync_orphan_positions():
                 if market in OPEN_POSITIONS:
                     continue  # 이미 추적 중
 
+            # 🔧 FIX: 모니터 스레드가 살아있으면 유령 아님 (정상 매수 후 모니터링 중)
+            with _MONITOR_LOCK:
+                _mon_thread = _ACTIVE_MONITORS.get(market)
+                if _mon_thread is not None and isinstance(_mon_thread, threading.Thread) and _mon_thread.is_alive():
+                    print(f"[ORPHAN] {market} 모니터 스레드 활성 → 유령 아님, 스킵")
+                    continue
+
+            # 🔧 FIX: _CLOSING_MARKETS에 있으면 청산 진행 중 → 유령 아님
+            with _POSITION_LOCK:
+                if market in _CLOSING_MARKETS:
+                    print(f"[ORPHAN] {market} 청산 진행 중 → 유령 아님, 스킵")
+                    continue
+
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
             # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
             if market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
-            # 🔧 FIX: 최근 5분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
+            # 🔧 FIX: 최근 10분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
             # - 업비트 주문 내역 조회로 실제 매수 여부 확인
             skip_recent_buy = False
@@ -1161,7 +1175,7 @@ def sync_orphan_positions():
                                     order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
                                     now_utc = datetime.now(timezone.utc)
                                     age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 300:  # 5분 이내 매수
+                                    if age_sec < 600:  # 10분 이내 매수
                                         print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
                                         skip_recent_buy = True
                                         break  # for loop 탈출
@@ -1174,10 +1188,10 @@ def sync_orphan_positions():
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
 
-            # 🔧 FIX: 봇 내부 최근 매수 체크 (300초 내 매수면 유령 아님)
-            # 120초 → 300초로 증가: 정상 매수 직후 유령 오탐 방지 강화
+            # 🔧 FIX: 봇 내부 최근 매수 체크 (600초 내 매수면 유령 아님)
+            # 300초 → 600초로 증가: 매수 후 모니터→청산→잔고지연까지 충분한 보호
             last_buy_ts = _RECENT_BUY_TS.get(market, 0)
-            if now - last_buy_ts < 300:
+            if now - last_buy_ts < 600:
                 print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
                 continue
 
@@ -1206,6 +1220,7 @@ def sync_orphan_positions():
                     "volume": balance,
                     "entry_mode": "orphan",  # 유령 포지션 표시
                     "ts": now,
+                    "entry_ts": now,  # 🔧 FIX: entry_ts 추가 (보유시간 -0초 버그 수정)
                     "orphan_detected": True,
                 }
 
@@ -1885,9 +1900,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             # - 주문~체결 사이에 sync_orphan이 돌면 잔고 발견 → 유령으로 오판
             # - 주문 전에 기록해두면 sync에서 300초 보호에 걸려 스킵됨
             _RECENT_BUY_TS[m] = time.time()
-            # 하이브리드 매수: 지정가(ask1) → 1.2초 대기 → 미체결 시 시장가 전환
+            # 하이브리드 매수: 지정가(ask1) → 대기 → 미체결 시 시장가 전환
+            # 🔧 FIX: 강돌파는 하이브리드 타임아웃 0.6초로 단축 (빠른 진입 = 꼭대기 방지)
             _ob_for_hybrid = pre.get("ob")
-            res = hybrid_buy(m, krw_to_use, ob_data=_ob_for_hybrid, timeout_sec=1.2)
+            _is_strongbreak_entry = "강돌파" in pre.get("signal_tag", "")
+            _hybrid_timeout = 0.6 if _is_strongbreak_entry else 1.2
+            res = hybrid_buy(m, krw_to_use, ob_data=_ob_for_hybrid, timeout_sec=_hybrid_timeout)
             print("[AUTO_BUY_RES]", json.dumps(res, ensure_ascii=False))
             oid = res.get("uuid") if isinstance(res, dict) else None
             od = get_order_result(oid, timeout_sec=12) if oid else None
@@ -6809,7 +6827,7 @@ def box_scan_markets(c1_cache):
     _BOX_LAST_SCAN_TS = now
 
     for m, c1 in c1_cache.items():
-        if not c1 or len(c1) < BOX_LOOKBACK:
+        if not c1:
             continue
 
         # 이미 돌파 포지션 보유 중이면 스킵
@@ -6833,7 +6851,21 @@ def box_scan_markets(c1_cache):
         if ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:
             continue
 
-        is_box, box_info = detect_box_range(c1)
+        # 🔧 FIX: 5분봉 기반 박스 감지 (1분봉 노이즈 제거, 뚜렷한 패턴만)
+        if BOX_USE_5MIN:
+            try:
+                c5 = get_minutes_candles(5, m, BOX_LOOKBACK)
+                if not c5 or len(c5) < BOX_LOOKBACK:
+                    continue
+                box_candles = c5
+            except Exception:
+                continue
+        else:
+            if len(c1) < BOX_LOOKBACK:
+                continue
+            box_candles = c1
+
+        is_box, box_info = detect_box_range(box_candles)
         if not is_box:
             continue
 
@@ -6939,23 +6971,33 @@ def box_check_entry(m):
             if dwell < BOX_CONFIRM_SEC:
                 return None  # 아직 체류 시간 미달
 
-    # 매수세 확인 (반등 징후)
+    # 매수세 확인 (반등 징후) — 🔧 강화: 확실한 반등만 진입
     try:
-        ticks = get_recent_ticks(m, 60)
-        if not ticks or len(ticks) < 5:
+        ticks = get_recent_ticks(m, 100)
+        if not ticks or len(ticks) < 8:
             return None
         t10 = micro_tape_stats_from_ticks(ticks, 10)
+        t30 = micro_tape_stats_from_ticks(ticks, 30)
 
-        # 반등 조건: 매수비 > 50% AND 거래가 살아있음
-        if t10["buy_ratio"] < 0.50:
+        # 🔧 반등 조건 강화: 매수비 > 53% (50%는 중립에 불과)
+        if t10["buy_ratio"] < 0.53:
             return None
-        if t10["krw_per_sec"] < 3000:
+        if t10["krw_per_sec"] < 5000:  # 🔧 3000→5000 (유동성 있는 반등만)
             return None
 
         # 🔧 반등 가속도 확인 (t10 > t30 = 최근 매수세 증가)
         flow_accel = calc_flow_acceleration(ticks)
-        if flow_accel < 1.1:
+        if flow_accel < 1.2:  # 🔧 1.1→1.2 (더 확실한 반등 가속)
             return None  # 반등 가속 없음 → 하락 지속 가능성
+
+        # 🔧 FIX: 연속매수 확인 (바닥에서 실제 매수세 유입)
+        cons_buys = calc_consecutive_buys(ticks, 10)
+        if cons_buys < 3:
+            return None  # 연속매수 3회 미만 → 반등 불확실
+
+        # 🔧 FIX: 30초 매수비도 확인 (10초만 강한 스파이크 방지)
+        if t30["buy_ratio"] < 0.48:
+            return None  # 30초 기준으로도 매수 우위여야 함
     except Exception:
         return None
 
@@ -8303,13 +8345,31 @@ def postcheck_6s(m, pre):
     if pre.get("ign_ok") or pre.get("two_green_break") or pre.get(
             "mega_ok", False):
         return True, "BYPASS_STRONG_BREAK"
-    # 🔧 강돌파 조건부 바이패스: 수급이 확실히 강할 때만
+    # 🔧 강돌파 빠른 진입: 점화 수준의 초고속 체크 (3초 풀체크 → 0.5초 퀵체크)
+    # - 강돌파는 EMA+고점 동시 돌파 = 확실한 모멘텀 → 늦게 들어가면 꼭대기
+    # - 최소 안전장치(스프레드/급락/매수비 급감)만 확인 후 즉시 진입
     is_strongbreak = "강돌파" in pre.get("signal_tag", "")
     if is_strongbreak:
         sb_imb = pre.get("imbalance", 0)
         sb_br = pre.get("buy_ratio", 0)
-        if sb_imb >= 0.55 and sb_br >= 0.62:
-            return True, "BYPASS_STRONGBREAK_STRONG"
+        sb_spread = pre.get("spread", 0)
+        # 스프레드 과다면 풀체크로 전환
+        if sb_spread > 0.30:
+            pass  # 풀 postcheck 진행
+        else:
+            # 0.5초 퀵체크: 급락/매수비 급감만 확인
+            time.sleep(0.5)
+            _sb_ticks = get_recent_ticks(m, 50, allow_network=True)
+            if _sb_ticks:
+                _sb_curp = max(_sb_ticks, key=tick_ts_ms).get("trade_price", pre["price"])
+                if pre["price"] > 0:
+                    _sb_dd = _sb_curp / pre["price"] - 1.0
+                    if _sb_dd < -0.006:
+                        return False, f"SB_DD({_sb_dd*100:.2f}%)"
+                _sb_t5 = micro_tape_stats_from_ticks(_sb_ticks, 5)
+                if _sb_t5.get("buy_ratio", 0) < 0.42:
+                    return False, f"SB_BUY_FADE({_sb_t5.get('buy_ratio',0):.2f})"
+            return True, "FAST_STRONGBREAK"
 
     # ★★★ 장세/야간 완화 노브
     r = relax_knob()
