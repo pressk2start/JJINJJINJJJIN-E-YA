@@ -4877,21 +4877,10 @@ def now_kst_str():
 # =========================
 def get_scan_interval():
     """
-    시간대별 스캔 주기(초)
-    - 04~06시: 3초 (새벽 초입 변동성 — 빠른 감지 필수)
-    - 09시대: 3초 (초동 변동성 대응)
-    - 10~14시: 5초
-    - 그 외: 기본 6초
+    스캔 주기: 전 시간대 3초 통일
+    🔧 기존 3~6초 가변 → 3초 고정 (진입 지연 최소화)
     """
-    h = now_kst().hour
-    if 4 <= h <= 6:
-        return 3  # 🔧 새벽 초입: 6→3초 (진입 지연 최소화)
-    elif h == 9:
-        return 3
-    elif 10 <= h <= 14:
-        return 5
-    else:
-        return SCAN_INTERVAL  # 기본값(6초)
+    return 3
 
 def link_for(m):
     return f"https://upbit.com/exchange?code=CRIX.UPBIT.{m}"
