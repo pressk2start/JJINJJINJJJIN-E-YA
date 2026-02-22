@@ -311,23 +311,26 @@ _CIRCLE_LOCK = threading.Lock()
 # 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
-BOX_LOOKBACK = 24                      # 🔧 5분봉 24개 = 2시간 (뚜렷한 박스 판별)
+BOX_LOOKBACK = 36                      # 🔧 24→36 (5분봉 36개 = 3시간, 더 뚜렷한 박스만)
 BOX_USE_5MIN = True                    # 🔧 5분봉 기반 박스 감지 (1분봉 노이즈 제거)
-BOX_MIN_RANGE_PCT = 0.015              # 🔧 1.2→1.5% (5분봉 기준 더 뚜렷한 박스만)
-BOX_MAX_RANGE_PCT = 0.035              # 🔧 3.0→3.5% (5분봉은 범위가 약간 더 넓을 수 있음)
-BOX_MIN_TOUCHES = 3                    # 🔧 2→3 (상단/하단 각 3회 이상 터치 = 확실한 박스)
-BOX_TOUCH_ZONE_PCT = 0.20              # 터치 판정 영역 (박스 범위의 20%)
-BOX_ENTRY_ZONE_PCT = 0.20              # 🔧 25→20% (더 확실한 저점에서만 진입)
+BOX_MIN_RANGE_PCT = 0.015              # 최소 1.5% 범위
+BOX_MAX_RANGE_PCT = 0.035              # 최대 3.5% 범위
+BOX_MIN_TOUCHES = 4                    # 🔧 3→4 (상단/하단 각 4회 이상 터치 = 확실한 박스)
+BOX_TOUCH_ZONE_PCT = 0.15              # 🔧 20→15% (터치 영역 좁혀서 정확한 반전만)
+BOX_ENTRY_ZONE_PCT = 0.20              # 진입 영역: 박스 하단 20% 이내
 BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
 BOX_SL_BUFFER_PCT = 0.003              # 손절: 박스 하단 -0.3% (이탈 확인)
-BOX_MIN_VOL_KRW = 80_000_000          # 🔧 5천만→8천만 (2시간 기준 거래대금, 유동성 확보)
+BOX_MIN_VOL_KRW = 100_000_000         # 🔧 8천만→1억 (3시간 기준, 유동성 확보)
 BOX_ENTRY_MODE = "half"                # 박스 매매는 항상 half 사이즈
 BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
-BOX_SCAN_INTERVAL = 60                 # 🔧 30→60초 (5분봉은 자주 체크 불필요)
-BOX_MIN_BB_WIDTH = 0.012               # 🔧 1.0→1.2% (5분봉 기준 최소 밴드폭)
-BOX_MAX_BB_WIDTH = 0.030               # 🔧 2.5→3.0% (5분봉 허용 범위 확대)
-BOX_CONFIRM_SEC = 10                   # 🔧 3→10초 (저점 체류 확인 강화, 찍고 반등이 아닌 안착 확인)
+BOX_SCAN_INTERVAL = 60                 # 60초 주기 스캔
+BOX_MIN_BB_WIDTH = 0.012               # 최소 BB폭 1.2%
+BOX_MAX_BB_WIDTH = 0.028               # 🔧 3.0→2.8% (BB폭 상한 약간 축소)
+BOX_CONFIRM_SEC = 10                   # 저점 체류 확인 10초
+BOX_MIN_MIDCROSS = 4                   # 🔧 NEW: 중간선 교차 최소 4회 (진짜 왕복 확인)
+BOX_MAX_TREND_SLOPE = 0.003            # 🔧 NEW: 종가 선형회귀 기울기 상한 0.3% (추세 없어야 박스)
+BOX_MIN_CLOSE_IN_RANGE = 0.80          # 🔧 NEW: 종가의 80% 이상이 박스 중앙 60% 안에 있어야
 
 # 박스 워치리스트: { market: { box_high, box_low, ... } }
 _BOX_WATCHLIST = {}
@@ -6735,13 +6738,16 @@ def circle_confirm_entry(m):
 
 def detect_box_range(c1, lookback=None):
     """
-    📦 박스권 감지: N봉 캔들에서 박스 상단/하단 식별
+    📦 박스권 감지: N봉 캔들에서 박스 상단/하단 식별 (엄격 검증)
 
-    Returns: (is_box, box_info) where box_info = {
-        "box_high": float, "box_low": float, "range_pct": float,
-        "top_touches": int, "bot_touches": int, "avg_vol": float,
-        "bb_width": float
-    }
+    핵심: 단순 범위 체크가 아닌, 실제 횡보 패턴인지 다중 검증
+    1. 범위 + BB폭 기본 체크
+    2. 비연속 터치 (같은 영역 연속 체류는 1회로)
+    3. 중간선 교차 횟수 (진짜 왕복 = 횡보 확인)
+    4. 종가 선형회귀 기울기 (추세 있으면 박스 아님)
+    5. 종가 집중도 (중앙 60%에 종가 80%+ 밀집)
+
+    Returns: (is_box, box_info)
     """
     lookback = lookback or BOX_LOOKBACK
     if not c1 or len(c1) < lookback:
@@ -6772,29 +6778,76 @@ def detect_box_range(c1, lookback=None):
         if sma20 > 0:
             variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
             std20 = variance ** 0.5
-            bb_width = (4 * std20) / sma20  # BB width = (upper-lower)/middle
-    # 🔧 FIX: NaN/inf 방어 (corrupt candle → NaN 비교 항상 False → 필터 바이패스 방지)
+            bb_width = (4 * std20) / sma20
     if not math.isfinite(bb_width) or bb_width < BOX_MIN_BB_WIDTH or bb_width > BOX_MAX_BB_WIDTH:
         return False, {}
 
-    # 상단/하단 터치 횟수 (박스 범위의 상하 20% 영역)
+    # ===== 🔧 강화1: 비연속 터치 (연속 봉이 같은 영역이면 1회로 카운트) =====
     touch_zone = box_range * BOX_TOUCH_ZONE_PCT
     top_zone = box_high - touch_zone
     bot_zone = box_low + touch_zone
 
-    top_touches = sum(1 for h in highs if h >= top_zone)
-    bot_touches = sum(1 for l in lows if l <= bot_zone)
+    # 비연속 터치 카운트: 이전 봉이 해당 영역 밖이었을 때만 새 터치
+    top_touches = 0
+    bot_touches = 0
+    prev_in_top = False
+    prev_in_bot = False
+    for i in range(len(highs)):
+        in_top = (highs[i] >= top_zone)
+        in_bot = (lows[i] <= bot_zone)
+        if in_top and not prev_in_top:
+            top_touches += 1
+        if in_bot and not prev_in_bot:
+            bot_touches += 1
+        prev_in_top = in_top
+        prev_in_bot = in_bot
 
     if top_touches < BOX_MIN_TOUCHES or bot_touches < BOX_MIN_TOUCHES:
         return False, {}
 
-    # 거래대금 체크 (30분 누적)
+    # ===== 🔧 강화2: 중간선 교차 횟수 (진짜 왕복 확인) =====
+    mid_price = (box_high + box_low) / 2
+    mid_crosses = 0
+    prev_above = (closes[0] >= mid_price) if closes else True
+    for c in closes[1:]:
+        cur_above = (c >= mid_price)
+        if cur_above != prev_above:
+            mid_crosses += 1
+        prev_above = cur_above
+
+    if mid_crosses < BOX_MIN_MIDCROSS:
+        return False, {}
+
+    # ===== 🔧 강화3: 종가 선형회귀 기울기 (추세 필터) =====
+    # 추세가 있으면 박스가 아님 — 기울기가 박스 범위의 0.3% 이하여야
+    n = len(closes)
+    if n >= 10:
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(closes) / n
+        numerator = sum((i - x_mean) * (closes[i] - y_mean) for i in range(n))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+        if denominator > 0 and y_mean > 0:
+            slope = numerator / denominator
+            # 기울기를 %/봉 단위로 변환, 전체 구간 기울기
+            total_slope_pct = abs(slope * n / y_mean)
+            if total_slope_pct > BOX_MAX_TREND_SLOPE:
+                return False, {}
+
+    # ===== 🔧 강화4: 종가 집중도 (중앙 60%에 80%+ 밀집) =====
+    inner_top = box_high - box_range * 0.20
+    inner_bot = box_low + box_range * 0.20
+    closes_in_inner = sum(1 for c in closes if inner_bot <= c <= inner_top)
+    close_ratio = closes_in_inner / max(len(closes), 1)
+    if close_ratio < BOX_MIN_CLOSE_IN_RANGE:
+        return False, {}
+
+    # 거래대금 체크
     total_vol = sum(volumes)
     avg_vol = total_vol / max(len(volumes), 1)
     if total_vol < BOX_MIN_VOL_KRW:
         return False, {}
 
-    # 현재가가 박스 안에 있는지 (마지막 캔들)
+    # 현재가가 박스 안에 있는지
     cur_price = closes[-1]
     if cur_price < box_low or cur_price > box_high:
         return False, {}
@@ -6805,6 +6858,8 @@ def detect_box_range(c1, lookback=None):
         "range_pct": range_pct,
         "top_touches": top_touches,
         "bot_touches": bot_touches,
+        "mid_crosses": mid_crosses,
+        "close_ratio": close_ratio,
         "avg_vol": avg_vol,
         "total_vol": total_vol,
         "bb_width": bb_width,
@@ -6895,6 +6950,8 @@ def box_scan_markets(c1_cache):
                 f"상단 {box_info['box_high']:,.0f} 하단 {box_info['box_low']:,.0f} "
                 f"({box_info['range_pct']*100:.1f}%) | "
                 f"터치 상{box_info['top_touches']}회 하{box_info['bot_touches']}회 | "
+                f"중간교차 {box_info.get('mid_crosses', 0)}회 | "
+                f"종가집중 {box_info.get('close_ratio', 0)*100:.0f}% | "
                 f"BB폭 {box_info['bb_width']*100:.1f}%"
             )
 
@@ -7079,7 +7136,8 @@ def box_monitor_position(m, entry_price, volume, box_info):
     box_range = box_high - box_low
 
     start_ts = time.time()
-    max_hold_sec = 600  # 최대 10분 홀딩 (박스 깨지면 의미 없음)
+    # 🔧 시간만료 제거: 박스매매는 박스 유지되는 한 시간 제한 없음 (추세 이탈만 청산)
+    # 대신 박스 유효성 주기적 체크로 대체
 
     print(f"[BOX_MON] 📦 {m} 모니터 시작 | 진입 {entry_price:,.0f} | TP {box_tp:,.0f} SL {box_stop:,.0f}")
 
@@ -7089,7 +7147,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
     breakout_trail = False    # 돌파 트레일 모드
     trail_peak = 0            # 트레일 최고점
 
-    while time.time() - start_ts < max_hold_sec:
+    while True:
         time.sleep(1.5)
 
         try:
@@ -7099,6 +7157,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
             cur_price = c1[-1]["trade_price"]
         except Exception:
             continue
+
+        # 🔧 포지션 상태 체크 (외부에서 이미 청산된 경우 루프 탈출)
+        with _POSITION_LOCK:
+            if m not in OPEN_POSITIONS:
+                sell_reason = "📦 외부 청산 감지"
+                remaining_vol = 0
+                break
 
         cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
 
@@ -7126,7 +7191,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
                     if _bp:
                         _bp["volume"] = remaining_vol
                 print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 나머지 {remaining_vol:.6f}")
-                tg_send(f"📦 {m} 상단 부분익절 70% | 나머지 돌파 대기")
+                _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                tg_send(
+                    f"📦 <b>[박스매매] 부분익절 70%</b> {m}\n"
+                    f"• 현재가: {fmt6(cur_price)}원 ({_partial_gain:+.2f}%)\n"
+                    f"• 나머지 30% 돌파 대기\n"
+                    f"{link_for(m)}"
+                )
             except Exception as pe:
                 print(f"[BOX_MON] 부분매도 실패: {pe}")
                 sell_reason = f"📦 박스 상단 익절 (부분매도실패→전량)"
@@ -7149,10 +7220,6 @@ def box_monitor_position(m, entry_price, volume, box_info):
         if cur_price <= box_stop:
             sell_reason = f"📦 박스 하단 이탈 (SL {box_stop:,.0f})"
             break
-
-    # 시간 초과
-    if not sell_reason:
-        sell_reason = f"📦 박스 시간초과 {max_hold_sec}초"
 
     # 나머지 수량 매도
     try:
@@ -7181,33 +7248,63 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception:
             sell_price = cur_price
 
-        pnl_pct = (sell_price / entry_price - 1) * 100 if entry_price > 0 else 0
-        pnl_emoji = "💰" if pnl_pct > 0 else "📉"
+        # 🔧 일반 매매와 동일한 손익 계산 (수수료 반영)
         hold_sec = time.time() - start_ts
+        est_entry_value = entry_price * volume
+        est_exit_value = sell_price * volume  # 전체 수량 기준 (부분익절 포함)
+        pl_value = est_exit_value - est_entry_value
+        gross_ret_pct = (sell_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+        net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY
+        net_pl_value = pl_value - fee_total
+        result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
 
+        # 🔧 거래 결과 기록 (승률 기반 리스크 튜닝)
+        try:
+            record_trade(m, net_ret_pct / 100.0)
+        except Exception as _e:
+            print(f"[BOX_TRADE_RECORD_ERR] {_e}")
+
+        # 🔧 자동 학습용 결과 업데이트
+        if AUTO_LEARN_ENABLED:
+            try:
+                update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
+                                    exit_reason=sell_reason)
+            except Exception as _e:
+                print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
+
+        # 🔧 일반 매매와 동일한 청산 알림 포맷
         tg_send(
-            f"{pnl_emoji} <b>[박스매매] 매도</b> {m}\n"
+            f"====================================\n"
+            f"{result_emoji} <b>자동청산 완료 [박스매매]</b> {m}\n"
+            f"====================================\n"
+            f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{gross_ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
+            f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
             f"• 사유: {sell_reason}\n"
-            f"• 진입: {fmt6(entry_price)}원 → 매도: {fmt6(sell_price)}원\n"
-            f"• 수익률: {pnl_pct:+.2f}%\n"
+            f"• 매수평단: {fmt6(entry_price)}원\n"
+            f"• 실매도가: {fmt6(sell_price)}원\n"
+            f"• 체결수량: {volume:.6f}\n"
+            f"• 매수금액: {est_entry_value:,.0f}원\n"
+            f"• 청산금액: {est_exit_value:,.0f}원\n"
+            f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
             f"• 보유시간: {hold_sec:.0f}초\n"
             f"• 박스: {fmt6(box_low)}~{fmt6(box_high)} ({box_info.get('range_pct', 0)*100:.1f}%)\n"
+            f"====================================\n"
             f"{link_for(m)}"
         )
 
-        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL {pnl_pct:+.2f}% | {hold_sec:.0f}초")
+        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL net:{net_ret_pct:+.2f}% | {hold_sec:.0f}초")
 
     except Exception as e:
         print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
-        tg_send(f"⚠️ 박스매매 매도 실패 {m}\n{e}")
+        tg_send(f"⚠️ <b>자동청산 실패 [박스매매]</b> {m}\n사유: {e}")
 
     # 정리
     with _BOX_LOCK:
         _BOX_WATCHLIST.pop(m, None)
         _BOX_LAST_EXIT[m] = time.time()  # 🔧 FIX: _BOX_LOCK 안에서 쓰기 (레이스컨디션 방지)
 
-    with _POSITION_LOCK:
-        OPEN_POSITIONS.pop(m, None)
+    mark_position_closed(m, f"box_close:{sell_reason}")
 
 
 def box_confirm_entry(m):
@@ -10613,12 +10710,21 @@ def main():
                                     "range_pct": box_pre.get("box_range_pct", 0),
                                 }
 
+                                # 🔧 일반 매매와 동일한 매수 알림 포맷
+                                _box_signal_price = box_pre.get("price", 0)
+                                _box_slip_pct = (actual_entry_b / _box_signal_price - 1.0) * 100 if _box_signal_price > 0 else 0
+                                _box_krw_used = actual_entry_b * actual_vol_b
+                                _box_buy_r = box_pre.get("buy_ratio", 0)
+                                _box_spread = box_pre.get("spread", 0)
+                                _box_sl_display = fmt6(_box_info['box_stop'])
+
                                 tg_send(
-                                    f"📦 <b>[박스매매] 하단 매수</b> {bm}\n"
-                                    f"• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
-                                    f"• 체결가: {fmt6(actual_entry_b)}원\n"
-                                    f"• 목표: {fmt6(_box_info['box_tp'])}원 | 손절: {fmt6(_box_info['box_stop'])}원\n"
-                                    f"• 매수비: {box_pre.get('buy_ratio', 0):.0%}\n"
+                                    f"📦 <b>[중간진입] 자동매수 [박스매매]</b> {bm}\n"
+                                    f"• 신호: 📦박스하단 | 박스 {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
+                                    f"• 지표: 매수{_box_buy_r:.0%} 스프레드{_box_spread:.2f}%\n"
+                                    f"• 신호가: {fmt6(_box_signal_price)}원 → 체결가: {fmt6(actual_entry_b)}원 ({_box_slip_pct:+.2f}%)\n"
+                                    f"• 주문: {_box_krw_used:,.0f}원 | 수량: {actual_vol_b:.6f}\n"
+                                    f"• 손절: {_box_sl_display}원 (SL {box_sl_pct*100:.2f}%) | 목표: {fmt6(_box_info['box_tp'])}원\n"
                                     f"{link_for(bm)}"
                                 )
 
