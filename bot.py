@@ -8036,28 +8036,38 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
-    # 🔧 FIX: 독립경로 후보는 하드컷 면제 (점화/강돌파만 — 캔들은 제외)
-    # 🔧 FIX: UXLINK 사례 — 캔들모멘텀이 CONSEC_LOW(3회) 면제받아 틱3개로 진입
-    #    → 캔들은 독자적 강도가 부족하므로 하드컷 면제 대상에서 제외
-    _indep_candidate = (
-        ignition_score >= 3                                          # 점화 경로
-        or (ema20_breakout and high_breakout)                        # 강돌파 경로
-    )
-    if not _indep_candidate:
-        if _trend_down:
+    # 🔧 FIX: 하드컷별 개별 면제 판정 (일괄 면제 → 세분화)
+    # ENSO 사례: 서지 0.61x인데 강돌파로 VOL_SURGE_LOW 면제 → 볼륨없는 돌파 = 가짜
+    # BERA 사례: 캔들모멘텀이 CONSEC_LOW 면제 → 틱 3개로 진입
+    _ign_candidate = (ignition_score >= 3)
+    _brk_candidate = (ema20_breakout and high_breakout)
+    _bypassed = []
+
+    # TREND_DOWN: 점화 or 강돌파 면제 (추세 반전/돌파 가능)
+    if _trend_down:
+        if _ign_candidate or _brk_candidate:
+            _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
+        else:
             cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_down_gap*100:.2f}%) 하락추세 진입 차단")
             return None
-        if _vol_surge_low:
+
+    # VOL_SURGE_LOW: 점화만 면제 (강돌파는 볼륨 확인 필수 — 볼륨없는 돌파 = 가짜)
+    if _vol_surge_low:
+        if _ign_candidate:
+            _bypassed.append(f"VOL({vol_surge:.2f}x)")
+        else:
             cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
             return None
-        if _consec_low:
+
+    # CONSEC_LOW: 점화 or 강돌파 면제 (자체 수급 체크 있음)
+    if _consec_low:
+        if _ign_candidate or _brk_candidate:
+            _bypassed.append(f"CONSEC({cons_buys})")
+        else:
             cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
             return None
-    elif _trend_down or _vol_surge_low or _consec_low:
-        _bypassed = []
-        if _trend_down: _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
-        if _vol_surge_low: _bypassed.append(f"VOL({vol_surge:.2f}x)")
-        if _consec_low: _bypassed.append(f"CONSEC({cons_buys})")
+
+    if _bypassed:
         print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
 
     # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
