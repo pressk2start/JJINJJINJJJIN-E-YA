@@ -7966,6 +7966,17 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("TICKS_LOW", f"{m} no ticks")
         return None
 
+    # 🔧 진입지연개선: 실시간 러닝바로 price_change 보강 (캔들 확정 전 조기 감지)
+    _running = running_1m_bar(ticks, prev)
+    if _running and _running.get("change_from_prev", 0) > price_change:
+        _running_pc = _running["change_from_prev"]
+        # 러닝바는 미확정이므로 90% 할인 적용 (보수적)
+        price_change = max(price_change, _running_pc * 0.9)
+        # 러닝바 거래대금으로 current_volume도 보강
+        _running_vol = _running.get("volume_krw", 0)
+        if _running_vol > current_volume:
+            current_volume = max(current_volume, _running_vol * 0.85)
+
     # 🔥 평시 TPS 업데이트 (점화 감지용)
     update_baseline_tps(m, ticks)
 
