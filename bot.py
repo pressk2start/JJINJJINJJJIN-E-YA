@@ -9290,7 +9290,7 @@ def monitor_position(m,
             if not pre.get("is_box") and time.time() - _last_sl_refresh_ts >= 5:
                 _c1_for_sl_refresh = _get_c1_cached()
                 _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
-                    entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp
+                    entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type
                 )
                 # base_stop은 래칫/본절잠금과 충돌하니 max로만 갱신 (하향 방지)
                 base_stop = max(base_stop, _new_stop)
