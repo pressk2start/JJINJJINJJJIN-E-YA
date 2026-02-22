@@ -7603,10 +7603,13 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
     # gate_score 무관 — 자체 조건(consec/임밸/body/EMA이격)으로 판단
+    # 🔧 FIX: AGLD 사례 — consec 6이지만 임밸 -0.10 (매도우위) → 꼭대기 진입
+    #    → imbalance >= -0.05 추가 (점화와 동일 기준)
     strongbreak_pass = (
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
+        and imbalance >= -0.05                       # 🔧 FIX: 매도우위 진입 차단
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
         and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
