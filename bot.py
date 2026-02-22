@@ -3507,6 +3507,9 @@ GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관�
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
+GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
+GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
+GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
@@ -7338,7 +7341,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  ignition_score=0, best_ask_krw=0, cur_price=0,
                  consecutive_buys=0, cv=0.0, overheat=0.0,
                  pstd=0.0, market="",
-                 candle_body_pct=0.0, green_streak=0):
+                 candle_body_pct=0.0, green_streak=0,
+                 ema20_val=None):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -7507,20 +7511,32 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     breakout_score = int(ema20_breakout) + int(high_breakout)
     _body = candle_body_pct * 100  # 소수 → %
 
+    # 🔧 꼭대기방지: EMA20 이격도 계산 (강돌파 추격 진입 차단)
+    _ema_chase = False
+    _ema_dist_pct = 0.0
+    if ema20_val and ema20_val > 0 and cur_price > 0:
+        _ema_dist_pct = (cur_price / ema20_val - 1) * 100  # %
+        _ema_chase = (_ema_dist_pct > GATE_EMA_CHASE_MAX)
+
     # 🔥 점화 독립 조건: 틱 폭발 + 가격이 실제로 반응해야 함
+    # 🔧 꼭대기방지: 캔들 이미 1.5%+ 상승 시 차단 (스파이크 꼭대기 진입 방지)
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
         and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
         and imbalance >= -0.05        # 호가 매도우위 아님
+        and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
+    # 🔧 꼭대기방지: 캔들 과확장 + EMA 이격 추격 차단
     strongbreak_pass = (
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
+        and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
+        and not _ema_chase                       # 🔧 EMA20 대비 1%+ 이격 시 추격 차단
     )
 
     # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세
@@ -7536,7 +7552,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         gate_score += 5.0   # EMA↑ 또는 고점↑ 단독
 
     score_detail = (f"gate_score={gate_score:.0f} "
-                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}]")
+                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}] "
+                    f"body={_body:.2f}% ema이격={_ema_dist_pct:.2f}%")
 
     gate_passed = (gate_score >= GATE_SCORE_THRESHOLD)
 
@@ -7575,6 +7592,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
         if accel > GATE_STRONGBREAK_ACCEL_MAX:
             return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
+        # 🔧 꼭대기방지: 캔들 과확장 / EMA 추격 차단 (gate_score 경로에서도 적용)
+        if _body > GATE_STRONGBREAK_BODY_MAX:
+            return False, f"강돌파+캔들과확장 body{_body:.1f}%>{GATE_STRONGBREAK_BODY_MAX}% (꼭대기위험) | {metrics}"
+        if _ema_chase:
+            return False, f"강돌파+EMA추격 이격{_ema_dist_pct:.1f}%>{GATE_EMA_CHASE_MAX}% (추격위험) | {metrics}"
         momentum_ok = (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
                        or (buy_ratio >= 0.55 and imbalance >= 0.40))
         if not momentum_ok:
@@ -8005,6 +8027,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         market=m,
         candle_body_pct=candle_body_pct,
         green_streak=green_streak,
+        ema20_val=ema20,  # 🔧 꼭대기방지: EMA20 이격도 체크용
     )
     if not gate_ok:
         # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
@@ -8089,6 +8112,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 🔧 VWAP 기반 진입 품질
         "vwap_score_bonus": vwap_score_bonus,
         "vwap_gap": round(vwap_gap, 2),
+        # 🔧 꼭대기방지: 캔들 확장도 (postcheck 조기진입 판단용)
+        "candle_body_pct": candle_body_pct,
     }
 
     return pre
@@ -8426,8 +8451,15 @@ def postcheck_6s(m, pre):
             return False, f"IGN_SPREAD_HIGH({_ign_spread:.2f}%>{_ign_spread_max:.2f}%)"
         if _ign_buy < 0.48:
             return False, f"IGN_BUY_LOW({_ign_buy:.2f})"
-        # 🔧 조기진입: 0.8→0.3초 (점화는 모멘텀 확실, 0.8초도 꼭대기 위험)
-        time.sleep(0.3)
+        # 🔧 꼭대기방지: 캔들 위치 기반 적응적 타이밍
+        # - 캔들 초입(body < 0.5%): 빠른 진입 (0.1초만 확인)
+        # - 캔들 중반(0.5~1.5%): 기존 0.3초 확인
+        _ign_body = pre.get("candle_body_pct", 0)
+        if _ign_body < 0.005:  # 캔들 초입 → 즉시 진입 (0.1초만)
+            time.sleep(0.1)
+            print(f"[IGN_FAST] {m} 캔들초입 body={_ign_body*100:.2f}% → 0.1초 퀵체크")
+        else:
+            time.sleep(0.3)
         _ign_ticks = get_recent_ticks(m, 50, allow_network=True)
         if _ign_ticks:
             _ign_curp = max(_ign_ticks, key=tick_ts_ms).get("trade_price", pre["price"])
@@ -8450,12 +8482,19 @@ def postcheck_6s(m, pre):
         sb_imb = pre.get("imbalance", 0)
         sb_br = pre.get("buy_ratio", 0)
         sb_spread = pre.get("spread", 0)
+        _sb_body = pre.get("candle_body_pct", 0)
         # 스프레드 과다면 풀체크로 전환
         if sb_spread > 0.30:
             pass  # 풀 postcheck 진행
         else:
-            # 0.5초 퀵체크: 급락/매수비 급감만 확인
-            time.sleep(0.5)
+            # 🔧 꼭대기방지: 캔들 위치 기반 적응적 타이밍
+            # - 캔들 초입(body < 0.4%): 즉시 진입 (0.1초 최소 체크)
+            # - 캔들 중반(0.4~1.0%): 0.3초 퀵체크
+            if _sb_body < 0.004:  # 캔들 초입 → 빠른 진입
+                time.sleep(0.1)
+                print(f"[SB_FAST] {m} 캔들초입 body={_sb_body*100:.2f}% → 0.1초 퀵체크")
+            else:
+                time.sleep(0.3)  # 🔧 0.5→0.3초 단축
             _sb_ticks = get_recent_ticks(m, 50, allow_network=True)
             if _sb_ticks:
                 _sb_curp = max(_sb_ticks, key=tick_ts_ms).get("trade_price", pre["price"])
