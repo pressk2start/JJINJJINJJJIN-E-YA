@@ -1229,14 +1229,19 @@ def sync_orphan_positions():
             # 🔧 FIX: OPEN_POSITIONS에 추가 전 한번 더 확인 (race condition 방지)
             with _POSITION_LOCK:
                 if market in OPEN_POSITIONS:
-                    # 이미 다른 곳(메인 루프)에서 추가됨 → 스킵
                     print(f"[ORPHAN] {market} 이미 OPEN_POSITIONS에 있음 (race 방지) → 스킵")
                     continue
-                # 🔧 FIX: SL/ATR 데이터 보강 (기존: 모두 0 → 청산 알람에 ATR 0%, SL 0% 표시)
-                _orphan_c1 = get_minutes_candles(1, market, 20)
-                _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1)
-                _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
-                _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
+
+            # 🔧 FIX: API/계산을 락 밖에서 수행 (데드락 방지 — 락 안 네트워크 호출 금지)
+            _orphan_c1 = get_minutes_candles(1, market, 20)
+            _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1)
+            _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
+            _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
+
+            with _POSITION_LOCK:
+                if market in OPEN_POSITIONS:
+                    print(f"[ORPHAN] {market} 계산 중 다른 곳에서 추가됨 → 스킵")
+                    continue
                 OPEN_POSITIONS[market] = {
                     "state": "open",
                     "entry_price": avg_buy_price,
@@ -1244,9 +1249,9 @@ def sync_orphan_positions():
                     "stop": _orphan_stop,
                     "sl_pct": _orphan_sl_pct_val,
                     "entry_atr_pct": round(_orphan_atr_pct, 4),
-                    "entry_mode": "orphan",  # 유령 포지션 표시
+                    "entry_mode": "orphan",
                     "ts": now,
-                    "entry_ts": now,  # 🔧 FIX: entry_ts 추가 (보유시간 -0초 버그 수정)
+                    "entry_ts": now,
                     "orphan_detected": True,
                 }
 
@@ -3241,6 +3246,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             return False
 
     CYCLE_SEC = 60  # 🔧 승률개선: 300→60초 (빠른 하락 대응, 5분 방치→1분 반응)
+    MAX_REMONITOR_CYCLES = 60  # 🔧 FIX: 무한루프 방지 (최대 60회 × 60초 = 60분)
     cycle = 0
 
     # 🔧 FIX: 루프 밖으로 이동 (매 반복 재생성 방지)
@@ -3256,6 +3262,14 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
 
     while True:
         cycle += 1
+        # 🔧 FIX: 무한루프 방지 — 최대 사이클 초과 시 강제 청산
+        if cycle > MAX_REMONITOR_CYCLES:
+            print(f"[REMONITOR] {m} 최대 {MAX_REMONITOR_CYCLES}회 초과 → 강제 청산")
+            try:
+                close_auto_position(m, f"remonitor 최대사이클({MAX_REMONITOR_CYCLES}회) 초과")
+            except Exception as _rmc_err:
+                print(f"[REMONITOR_FORCE_CLOSE_ERR] {m}: {_rmc_err}")
+            return True
         print(f"[REMONITOR] {m} {cycle}회차 재모니터링 시작")
 
         # 🔧 유령 포지션 탈출: 실잔고 확인
@@ -7246,25 +7260,30 @@ def box_monitor_position(m, entry_price, volume, box_info):
             continue
 
         # 🔧 포지션 상태 체크 (외부에서 이미 청산된 경우)
+        # 🔧 FIX: API 호출을 락 밖으로 이동 (데드락 방지)
+        _box_pos_missing = False
         with _POSITION_LOCK:
             if m not in OPEN_POSITIONS:
-                # 🔧 FIX: 잔고 확인 — OPEN_POSITIONS에서 사라져도 코인이 남아있을 수 있음
-                # 기존: remaining_vol=0 → 매도 안 함 → 유령포지션 발생
-                # 변경: 실제 잔고 확인 후 잔고 있으면 매도 진행
-                _actual_bal = get_balance_with_locked(m)
-                if _actual_bal is not None and _actual_bal > 0:
-                    remaining_vol = _actual_bal
-                    sell_reason = "📦 포지션 이탈 감지 (잔고 존재→청산)"
-                    # 포지션 재등록 (매도 로직에서 사용)
+                _box_pos_missing = True
+        if _box_pos_missing:
+            _actual_bal = get_balance_with_locked(m)
+            if _actual_bal is not None and _actual_bal > 0:
+                remaining_vol = _actual_bal
+                sell_reason = "📦 포지션 이탈 감지 (잔고 존재→청산)"
+                with _POSITION_LOCK:
                     OPEN_POSITIONS[m] = {
                         "state": "open", "entry_price": entry_price,
                         "volume": _actual_bal, "strategy": "box",
                     }
-                    print(f"[BOX_MON] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal:.6f} → 청산 진행")
-                else:
-                    sell_reason = "📦 외부 청산 감지"
-                    remaining_vol = 0
-                break
+                print(f"[BOX_MON] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal:.6f} → 청산 진행")
+            elif _actual_bal is not None and _actual_bal < 0:
+                # 🔧 FIX: API 실패 → 다음 루프에서 재확인
+                print(f"[BOX_MON] {m} 잔고 조회 실패 → 다음 루프 대기")
+                continue
+            else:
+                sell_reason = "📦 외부 청산 감지"
+                remaining_vol = 0
+            break
 
         cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
 
@@ -7637,7 +7656,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
         and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
-        and imbalance >= -0.05        # 호가 매도우위 아님
+        and imbalance >= 0.10         # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC 사례)
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
         and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
@@ -7651,7 +7670,8 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         breakout_score == 2
         and not GATE_STRONGBREAK_OFF
         and accel <= GATE_STRONGBREAK_ACCEL_MAX
-        and imbalance >= -0.05                       # 🔧 FIX: 매도우위 진입 차단
+        and imbalance >= 0.10                        # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC: 임밸-0.05+vol 0.96x 진입)
+        and vol_surge >= 1.0                         # 🔧 FIX: 최소 평균 이상 거래량 필수 (AZTEC: 0.96x 평균이하 진입 차단)
         and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
              or (buy_ratio >= 0.55 and imbalance >= 0.40))
         and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
@@ -7964,6 +7984,20 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if not ticks:
         cut("TICKS_LOW", f"{m} no ticks")
         return None
+
+    # 🔧 진입지연개선: 실시간 러닝바로 price_change 보강 (캔들 확정 전 조기 감지)
+    _running = running_1m_bar(ticks, prev)
+    if _running and _running.get("change_from_prev", 0) > price_change:
+        _running_pc = _running["change_from_prev"]
+        # 🔧 FIX: 스푸핑 방지 — 러닝바 가격변동이 비정상(5%초과)이면 무시
+        if 0 < _running_pc <= 0.05:
+            price_change = max(price_change, _running_pc * 0.9)
+            # 러닝바 거래대금으로 current_volume도 보강
+            _running_vol = _running.get("volume_krw", 0)
+            # 🔧 FIX: 거래대금도 이전 평균의 10배 이내만 허용
+            _vol_cap = max(current_volume, sum(past_volumes) / max(len(past_volumes), 1)) * 10
+            if 0 < _running_vol <= _vol_cap and _running_vol > current_volume:
+                current_volume = max(current_volume, _running_vol * 0.85)
 
     # 🔥 평시 TPS 업데이트 (점화 감지용)
     update_baseline_tps(m, ticks)
@@ -9283,12 +9317,17 @@ def monitor_position(m,
 
             # 🔧 찌꺼기 방지: 부분청산→전량청산 전환 시 루프 조기 종료
             # 🔧 FIX: 잔고 확인 후 판단 (OPEN_POSITIONS 이탈만으로 청산 단정 → 유령포지션 원인)
+            # 🔧 FIX: API 호출을 락 밖으로 이동 (데드락 방지 — 락 안 네트워크 호출 금지)
+            _pos_missing = False
             with _POSITION_LOCK:
                 if m not in OPEN_POSITIONS:
-                    _actual_bal_check = get_balance_with_locked(m)
-                    if _actual_bal_check is not None and _actual_bal_check > 1e-12:
-                        # 잔고 있는데 OPEN_POSITIONS에서 사라짐 → 재등록 후 계속 모니터링
-                        print(f"[MON_GUARD] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal_check:.6f} → 재등록")
+                    _pos_missing = True
+            if _pos_missing:
+                _actual_bal_check = get_balance_with_locked(m)
+                if _actual_bal_check is not None and _actual_bal_check > 1e-12:
+                    # 잔고 있는데 OPEN_POSITIONS에서 사라짐 → 재등록 후 계속 모니터링
+                    print(f"[MON_GUARD] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal_check:.6f} → 재등록")
+                    with _POSITION_LOCK:
                         OPEN_POSITIONS[m] = {
                             "state": "open", "entry_price": entry_price,
                             "volume": _actual_bal_check, "stop": base_stop,
@@ -9298,10 +9337,13 @@ def monitor_position(m,
                             "signal_tag": pre.get("signal_tag", "복구"),
                             "trade_type": pre.get("trade_type", "scalp"),
                         }
-                    else:
-                        verdict = "부분청산→전량청산"
-                        _already_closed = True
-                        break
+                elif _actual_bal_check is not None and _actual_bal_check < 0:
+                    # 🔧 FIX: API 실패(-1) → 포지션 유지, 다음 루프에서 재확인
+                    print(f"[MON_GUARD] {m} 잔고 조회 실패 → 포지션 유지, 다음 루프 대기")
+                else:
+                    verdict = "부분청산→전량청산"
+                    _already_closed = True
+                    break
 
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
@@ -9740,6 +9782,8 @@ def monitor_position(m,
 
                 trail_dist = base_trail * _trail_momentum
                 trail_stop = max(trail_stop, curp * (1.0 - trail_dist))
+                # 🔧 FIX: trail_stop이 base_stop 아래로 내려가지 않도록 바닥 보장
+                trail_stop = max(trail_stop, base_stop)
 
             # 🔧 트레일링 손절 실제 청산 트리거 (디바운스 적용)
             if trail_armed and curp < trail_stop:
@@ -9812,7 +9856,7 @@ def monitor_position(m,
                     trail_dist = max(trail_dist_min, (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                 else:
                     trail_dist = trail_dist_min
-                trail_stop = max(trail_stop, curp * (1.0 - trail_dist))  # 래칫: 느슨해지는 방향 덮어쓰기 방지
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist), base_stop)  # 래칫: 느슨해지는 방향 덮어쓰기 방지 + base_stop 바닥 보장
                 # 본절 확보 (래칫 기본)
                 be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
                 base_stop = max(base_stop, be_stop)
