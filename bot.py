@@ -528,6 +528,21 @@ OPEN_POSITIONS = {}
 _POSITION_LOCK = threading.Lock()  # 포지션 접근 락
 _CLOSING_MARKETS = set()  # 🔧 FIX: 중복 청산 방지용 (청산 진행 중 마켓 표시)
 
+
+def _pop_position_tracked(market, caller="unknown"):
+    """🔧 FIX: 포지션 제거 시 호출자 + 상태 로깅 (유령포지션 원인 추적용)
+    반드시 _POSITION_LOCK 내부에서 호출할 것."""
+    pos = OPEN_POSITIONS.get(market)
+    if pos:
+        state = pos.get("state", "?")
+        strategy = pos.get("strategy", "?")
+        age = time.time() - pos.get("entry_ts", time.time())
+        print(f"[POS_REMOVE] {market} state={state} strategy={strategy} age={age:.0f}s caller={caller}")
+        import traceback
+        traceback.print_stack(limit=6)
+    return OPEN_POSITIONS.pop(market, None)
+
+
 def mark_position_closed(market, reason=""):
     """
     🔧 FIX: 포지션 청산 완료 마킹 (중복 청산 방지 핵심)
@@ -544,7 +559,7 @@ def mark_position_closed(market, reason=""):
         pos["state"] = "closed"
         pos["closed_at"] = time.time()
         pos["closed_reason"] = reason
-        OPEN_POSITIONS.pop(market, None)
+        _pop_position_tracked(market, f"mark_closed:{reason}")
     return True
 
 MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))  # 🔧 최대 동시 포지션 수 (총 노출 한도)
@@ -1217,10 +1232,18 @@ def sync_orphan_positions():
                     # 이미 다른 곳(메인 루프)에서 추가됨 → 스킵
                     print(f"[ORPHAN] {market} 이미 OPEN_POSITIONS에 있음 (race 방지) → 스킵")
                     continue
+                # 🔧 FIX: SL/ATR 데이터 보강 (기존: 모두 0 → 청산 알람에 ATR 0%, SL 0% 표시)
+                _orphan_c1 = get_minutes_candles(1, market, 20)
+                _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1)
+                _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
+                _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
                 OPEN_POSITIONS[market] = {
                     "state": "open",
                     "entry_price": avg_buy_price,
                     "volume": balance,
+                    "stop": _orphan_stop,
+                    "sl_pct": _orphan_sl_pct_val,
+                    "entry_atr_pct": round(_orphan_atr_pct, 4),
                     "entry_mode": "orphan",  # 유령 포지션 표시
                     "ts": now,
                     "entry_ts": now,  # 🔧 FIX: entry_ts 추가 (보유시간 -0초 버그 수정)
@@ -1234,6 +1257,7 @@ def sync_orphan_positions():
                 f"• 평단: {fmt6(avg_buy_price)}원\n"
                 f"• 현재가: {fmt6(cur_price)}원 ({pnl_pct:+.2f}%)\n"
                 f"• 수량: {balance:.6f}\n"
+                f"• SL: {_orphan_sl_pct_val*100:.2f}% | ATR: {_orphan_atr_pct:.3f}%\n"
                 f"→ 모니터링 시작 (ATR 손절 적용)"
             )
 
@@ -2114,15 +2138,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX: vwap_gap=0 도 유효값 → falsy 체크 대신 None 체크
         _vwap_gap_str = f" VWAP{pre.get('vwap_gap', 0):+.1f}%" if pre.get('vwap_gap') is not None else ""
 
-        tg_send(
-            f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
-            f"• 신호: {signal_tag}{_vwap_gap_str}\n"
-            f"• 지표: 서지{surge_str} 매수{buy_r:.0%} 임밸{imb:.2f} 연속{cons}회\n"
-            f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
-            f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
-            f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
-            f"{link_for(m)}"
-        )
+        # 🔧 FIX: 박스 진입은 박스 코드에서 별도 알람 발송 → 여기서 중복 발송 방지
+        if not pre.get("is_box"):
+            tg_send(
+                f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
+                f"• 신호: {signal_tag}{_vwap_gap_str}\n"
+                f"• 지표: 서지{surge_str} 매수{buy_r:.0%} 임밸{imb:.2f} 연속{cons}회\n"
+                f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
+                f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
+                f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
+                f"{link_for(m)}"
+            )
 
         # 🔧 FIX: 최근 매수 시간 기록 (유령 오탐 방지)
         _RECENT_BUY_TS[m] = time.time()
@@ -7219,11 +7245,25 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception:
             continue
 
-        # 🔧 포지션 상태 체크 (외부에서 이미 청산된 경우 루프 탈출)
+        # 🔧 포지션 상태 체크 (외부에서 이미 청산된 경우)
         with _POSITION_LOCK:
             if m not in OPEN_POSITIONS:
-                sell_reason = "📦 외부 청산 감지"
-                remaining_vol = 0
+                # 🔧 FIX: 잔고 확인 — OPEN_POSITIONS에서 사라져도 코인이 남아있을 수 있음
+                # 기존: remaining_vol=0 → 매도 안 함 → 유령포지션 발생
+                # 변경: 실제 잔고 확인 후 잔고 있으면 매도 진행
+                _actual_bal = get_balance_with_locked(m)
+                if _actual_bal is not None and _actual_bal > 0:
+                    remaining_vol = _actual_bal
+                    sell_reason = "📦 포지션 이탈 감지 (잔고 존재→청산)"
+                    # 포지션 재등록 (매도 로직에서 사용)
+                    OPEN_POSITIONS[m] = {
+                        "state": "open", "entry_price": entry_price,
+                        "volume": _actual_bal, "strategy": "box",
+                    }
+                    print(f"[BOX_MON] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal:.6f} → 청산 진행")
+                else:
+                    sell_reason = "📦 외부 청산 감지"
+                    remaining_vol = 0
                 break
 
         cur_gain = (cur_price / entry_price - 1) if entry_price > 0 else 0
@@ -7257,7 +7297,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
                 print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 실현 {realized_krw:,.0f}원 | 나머지 {remaining_vol:.6f}")
                 _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
                 tg_send(
-                    f"📦 <b>[박스매매] 부분익절 70%</b> {m}\n"
+                    f"💰 <b>부분익절 70%</b> {m}\n"
                     f"• 현재가: {fmt6(cur_price)}원 ({_partial_gain:+.2f}%)\n"
                     f"• 나머지 30% 돌파 대기\n"
                     f"{link_for(m)}"
@@ -7342,10 +7382,10 @@ def box_monitor_position(m, entry_price, volume, box_info):
             except Exception as _e:
                 print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
 
-        # 🔧 일반 매매와 동일한 청산 알림 포맷
+        # 🔧 FIX: 일반 매매와 동일한 헤더 형식
         tg_send(
             f"====================================\n"
-            f"{result_emoji} <b>자동청산 완료 [박스매매]</b> {m}\n"
+            f"{result_emoji} <b>자동청산 완료</b> {m}\n"
             f"====================================\n"
             f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{gross_ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
             f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
@@ -7366,7 +7406,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
 
     except Exception as e:
         print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
-        tg_send(f"⚠️ <b>자동청산 실패 [박스매매]</b> {m}\n사유: {e}")
+        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
     # 정리
     with _BOX_LOCK:
@@ -9242,11 +9282,26 @@ def monitor_position(m,
             time.sleep(RECHECK_SEC)
 
             # 🔧 찌꺼기 방지: 부분청산→전량청산 전환 시 루프 조기 종료
+            # 🔧 FIX: 잔고 확인 후 판단 (OPEN_POSITIONS 이탈만으로 청산 단정 → 유령포지션 원인)
             with _POSITION_LOCK:
                 if m not in OPEN_POSITIONS:
-                    verdict = "부분청산→전량청산"
-                    _already_closed = True
-                    break
+                    _actual_bal_check = get_balance_with_locked(m)
+                    if _actual_bal_check is not None and _actual_bal_check > 1e-12:
+                        # 잔고 있는데 OPEN_POSITIONS에서 사라짐 → 재등록 후 계속 모니터링
+                        print(f"[MON_GUARD] {m} OPEN_POSITIONS 이탈 but 잔고 {_actual_bal_check:.6f} → 재등록")
+                        OPEN_POSITIONS[m] = {
+                            "state": "open", "entry_price": entry_price,
+                            "volume": _actual_bal_check, "stop": base_stop,
+                            "sl_pct": eff_sl_pct, "entry_ts": start_ts,
+                            "strategy": pre.get("strategy", "breakout"),
+                            "signal_type": pre.get("signal_type", "normal"),
+                            "signal_tag": pre.get("signal_tag", "복구"),
+                            "trade_type": pre.get("trade_type", "scalp"),
+                        }
+                    else:
+                        verdict = "부분청산→전량청산"
+                        _already_closed = True
+                        break
 
             ticks = get_recent_ticks(m, 100)
             if not ticks or len(ticks) < 3:
@@ -10904,8 +10959,9 @@ def main():
                                 _box_spread = box_pre.get("spread", 0)
                                 _box_sl_display = fmt6(_box_info['box_stop'])
 
+                                # 🔧 FIX: 일반 매수와 동일한 헤더 형식 (내용은 박스 전용 유지)
                                 tg_send(
-                                    f"📦 <b>[중간진입] 자동매수 [박스매매]</b> {bm}\n"
+                                    f"⚡ <b>[중간진입] 자동매수</b> {bm}\n"
                                     f"• 신호: 📦박스하단 | 박스 {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])} ({_box_info['range_pct']*100:.1f}%)\n"
                                     f"• 지표: 매수{_box_buy_r:.0%} 스프레드{_box_spread:.2f}%\n"
                                     f"• 신호가: {fmt6(_box_signal_price)}원 → 체결가: {fmt6(actual_entry_b)}원 ({_box_slip_pct:+.2f}%)\n"
