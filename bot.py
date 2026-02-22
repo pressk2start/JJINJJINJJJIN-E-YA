@@ -291,6 +291,9 @@ CIRCLE_REBREAK_IMBALANCE_MIN = 0.20    # 🔧 완화: 0.30→0.20 (재돌파 진
 CIRCLE_REBREAK_SPREAD_MAX = 0.35       # 🔧 원복: 0.25→0.35 (알트 스프레드 0.25% 초과 흔함)
 CIRCLE_REBREAK_MIN_SCORE = 2           # 🔧 완화: 3→2 (5개 중 2개 통과이면 재돌파 허용)
 CIRCLE_REBREAK_KRW_PER_SEC_MIN = 8000  # 🔧 원복: 12000→8000 (중소형 코인 체결강도 허용)
+# 🔧 NEW: 노이즈 방어 (저가코인 틱사이즈 문제 차단)
+CIRCLE_ATR_FLOOR = 0.003               # ATR < 0.3% → 패턴이 1~2틱 노이즈 (진입 거부)
+CIRCLE_IMB_HARD_FLOOR = 0.05           # 임밸런스 < 0.05 → 방향성 부재 (스코어 무관 거부)
 
 # 동그라미 워치리스트
 # state: "armed" → "pullback" → "reclaim" → "ready"
@@ -6604,11 +6607,31 @@ def circle_check_entry(m):
         except Exception:
             pass  # API 실패 시 필터 비활성 (기존 로직 유지)
 
+        # 🔧 NEW: 노이즈 방어 — ATR 바닥 + 임밸런스 하드플로어
+        _circle_noise_ok = True
+        try:
+            _c1_atr = get_minutes_candles(1, m, 20) or []
+            if _c1_atr and len(_c1_atr) >= 15:
+                _atr_raw = atr14_from_candles(_c1_atr, 14)
+                if _atr_raw and cur_price > 0:
+                    _atr_pct = _atr_raw / cur_price
+                    if _atr_pct < CIRCLE_ATR_FLOOR:
+                        _circle_noise_ok = False
+                        rebreak_details.append(f"ATR{_atr_pct*100:.2f}%<{CIRCLE_ATR_FLOOR*100:.1f}%✗")
+            # 임밸런스 하드플로어 (스코어 통과와 무관하게 차단)
+            if ob and ob.get("raw"):
+                _imb_hard = calc_orderbook_imbalance(ob)
+                if _imb_hard < CIRCLE_IMB_HARD_FLOOR:
+                    _circle_noise_ok = False
+                    rebreak_details.append(f"imb_hard={_imb_hard:.2f}<{CIRCLE_IMB_HARD_FLOOR}✗")
+        except Exception:
+            pass
+
         # 🔧 FIX: 상태 전이는 락 안에서 (API 후 상태 재검증)
         with _CIRCLE_LOCK:
             watch = _CIRCLE_WATCHLIST.get(m)
             if watch and watch["state"] == "reclaim":
-                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE and _circle_vwap_ok:
+                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE and _circle_vwap_ok and _circle_noise_ok:
                     watch["state"] = "ready"
                     watch["state_ts"] = time.time()
                     print(
@@ -6617,7 +6640,14 @@ def circle_check_entry(m):
                         f"| {candle_count}봉째 | state→ready"
                     )
                 else:
-                    _fail_reason = f"품질{rebreak_score}/5<{CIRCLE_REBREAK_MIN_SCORE}" if rebreak_score < CIRCLE_REBREAK_MIN_SCORE else "VWAP/EMA5필터"
+                    _reasons = []
+                    if rebreak_score < CIRCLE_REBREAK_MIN_SCORE:
+                        _reasons.append(f"품질{rebreak_score}/5<{CIRCLE_REBREAK_MIN_SCORE}")
+                    if not _circle_vwap_ok:
+                        _reasons.append("VWAP/EMA5필터")
+                    if not _circle_noise_ok:
+                        _reasons.append("노이즈필터(ATR/임밸)")
+                    _fail_reason = ",".join(_reasons) or "알수없음"
                     print(
                         f"[CIRCLE] {m} 재돌파 미달 ({_fail_reason}) "
                         f"[{','.join(rebreak_details)}] | reclaim 유지"
