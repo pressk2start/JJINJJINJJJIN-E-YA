@@ -1298,9 +1298,61 @@ def sync_orphan_positions():
                         print(f"[ORPHAN_CLEANUP] {market} 죽은 모니터 스레드 정리")
                         _ACTIVE_MONITORS.pop(market, None)
 
-                # 모니터링 스레드 시작
-                def _orphan_monitor(m, entry_price):
+                # 🔧 FIX: 박스 포지션인지 감지 (박스모니터 복구용)
+                _is_box_orphan = False
+                _box_orphan_info = None
+                with _BOX_LOCK:
+                    # 1) _BOX_WATCHLIST에 아직 있는 경우 (워치리스트는 남아있지만 모니터 죽은 경우)
+                    _bw = _BOX_WATCHLIST.get(market)
+                    if _bw and _bw.get("state") == "holding":
+                        _is_box_orphan = True
+                        _box_orphan_info = {
+                            "box_high": _bw.get("box_high", 0),
+                            "box_low": _bw.get("box_low", 0),
+                            "box_tp": _bw.get("box_high", 0),  # TP = 상단
+                            "box_stop": _bw.get("box_low", 0) * 0.995,  # SL = 하단 -0.5%
+                            "range_pct": _bw.get("range_pct", 0),
+                        }
+                    # 2) _BOX_LAST_EXIT에 최근 기록 (1800초 이내) → 박스 매도 실패로 유령화
+                    elif market in _BOX_LAST_EXIT and (now - _BOX_LAST_EXIT[market]) < 1800:
+                        _is_box_orphan = True
+                # 3) 박스 정보 없으면 실시간 박스 감지 시도 (BOX_LAST_EXIT 이력만 있는 경우 포함)
+                if not _box_orphan_info:
                     try:
+                        _orphan_c1_box = get_minutes_candles(1, market, 60)
+                        if _orphan_c1_box:
+                            _box_is, _box_det = detect_box_range(_orphan_c1_box)
+                            if _box_is and _box_det:
+                                _is_box_orphan = True
+                                _box_orphan_info = {
+                                    "box_high": _box_det["box_high"],
+                                    "box_low": _box_det["box_low"],
+                                    "box_tp": _box_det["box_high"],
+                                    "box_stop": _box_det["box_low"] * 0.995,
+                                    "range_pct": _box_det.get("range_pct", 0),
+                                }
+                    except Exception:
+                        pass
+
+                # 모니터링 스레드 시작
+                def _orphan_monitor(m, entry_price, _is_box=_is_box_orphan, _box_info=_box_orphan_info):
+                    try:
+                        # 🔧 FIX: 박스 유령 포지션 → box_monitor_position으로 복구 (시간만료 없음)
+                        if _is_box and _box_info:
+                            with _POSITION_LOCK:
+                                _opos = OPEN_POSITIONS.get(m, {})
+                                _opos["strategy"] = "box"
+                                if m in OPEN_POSITIONS:
+                                    OPEN_POSITIONS[m] = _opos
+                            _orphan_vol = _opos.get("volume", 0)
+                            if _orphan_vol <= 0:
+                                _orphan_vol = get_balance_with_locked(m)
+                            print(f"[ORPHAN] 📦 {m} 박스 포지션 복구 → box_monitor_position 시작")
+                            tg_send(f"📦 {m} 유령 → 박스 모니터 복구\n• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])}")
+                            box_monitor_position(m, entry_price, _orphan_vol, _box_info)
+                            return
+
+                        # 일반 유령 포지션 → 기존 로직
                         # 🔧 FIX: dummy_pre를 실제 데이터로 보강 (기존: 모든 파라미터 0 → 모니터링 무력화)
                         # OPEN_POSITIONS에 저장된 원본 데이터 복원 시도
                         with _POSITION_LOCK:
@@ -3623,6 +3675,7 @@ IGN_CONSEC_BUY_MIN = 7             # 연속 매수 최소 횟수
 IGN_PRICE_IMPULSE_MIN = 0.005      # 가격 임펄스 최소 수익률 (0.5%)
 IGN_UP_COUNT_MIN = 4               # 최근 6틱 중 최소 상승 수
 IGN_VOL_BURST_RATIO = 0.40         # 10초 거래량 >= 1분평균 × 이 비율
+IGN_MIN_ABS_KRW_10S = 3_000_000    # 🔧 FIX: 10초 절대 거래대금 하한 (3M원, 저거래량 노이즈 차단)
 IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
 
 # ========================================
@@ -5967,9 +6020,14 @@ def ignition_detected(
         ret = 0
         price_impulse = False
 
-    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40%) ----
+    # ---- 4) 거래량 폭발 (10초 거래량 >= 1분평균의 40% AND 절대금액 >= 3M원) ----
     # 🔧 강화: 25% → 40% (폭발적 거래량만 감지)
-    vol_burst = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
+    # 🔧 FIX: 절대 거래대금 하한 추가 (저거래량 코인 노이즈 신호 차단)
+    #   - 기존: 상대적 증가만 체크 → 1분평균 500K인 코인이 5.6배=2.8M에도 점화
+    #   - 추가: 10초간 최소 3M원 이상 실거래 필요 (절대 유동성 보장)
+    _vol_relative = t10["krw"] >= IGN_VOL_BURST_RATIO * avg_candle_volume if avg_candle_volume > 0 else False
+    _vol_absolute = t10["krw"] >= IGN_MIN_ABS_KRW_10S
+    vol_burst = _vol_relative and _vol_absolute
 
     # ---- 스프레드 안정성 필터 (옵션) ----
     spread_ok = True
@@ -7426,8 +7484,19 @@ def box_monitor_position(m, entry_price, volume, box_info):
     except Exception as e:
         print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
         tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+        # 🔧 FIX: 매도 실패 시 잔고 확인 → 코인 남아있으면 OPEN_POSITIONS 유지 (유령 방지)
+        try:
+            _fail_bal = get_balance_with_locked(m)
+            if _fail_bal is not None and _fail_bal > 0:
+                print(f"[BOX_MON] 📦 {m} 매도 실패 but 잔고 {_fail_bal:.6f} 존재 → 포지션 유지 (유령 전환 방지)")
+                tg_send(f"⚠️ {m} 매도 실패 → 포지션 유지 중 (다음 동기화에서 재시도)")
+                with _BOX_LOCK:
+                    _BOX_WATCHLIST.pop(m, None)
+                return  # mark_position_closed 호출하지 않음 → OPEN_POSITIONS 유지
+        except Exception:
+            pass
 
-    # 정리
+    # 정리 (매도 성공 시에만 도달)
     with _BOX_LOCK:
         _BOX_WATCHLIST.pop(m, None)
         _BOX_LAST_EXIT[m] = time.time()  # 🔧 FIX: _BOX_LOCK 안에서 쓰기 (레이스컨디션 방지)
@@ -7652,6 +7721,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
     # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
     # 🔧 FIX: ETC 16:09 사례 — 틱나이 7.6초 (폭발 이미 종료) + CV 2.39 → 꼭대기 진입
+    # 🔧 FIX: ZRO 23:50 사례 — 거래량 5.6배지만 절대금액 미미 → 노이즈 진입
     # gate_score 무관 — 점화는 자기 조건으로만 판단
     ignition_pass = (
         is_ignition                   # 점화 점수 ≥ 3
@@ -7660,6 +7730,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
         and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
         and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
+        and current_volume >= 2_000_000  # 🔧 FIX: 1분봉 거래대금 2M+ 필수 (저거래량 노이즈 차단)
     )
 
     # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
@@ -7709,6 +7780,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         if is_ignition and not ignition_pass:
             if accel < GATE_IGNITION_ACCEL_MIN: _why.append(f"점화+가속부족({accel:.1f}<{GATE_IGNITION_ACCEL_MIN})")
             if _body > GATE_IGNITION_BODY_MAX: _why.append(f"점화+과확장({_body:.1f}%)")
+            if current_volume < 2_000_000: _why.append(f"점화+거래대금부족({current_volume/1e6:.1f}M<2M)")
         if breakout_score == 2 and not strongbreak_pass:
             if _body > GATE_STRONGBREAK_BODY_MAX: _why.append(f"강돌+과확장({_body:.1f}%)")
             if _ema_chase: _why.append(f"강돌+EMA추격({_ema_dist_pct:.1f}%)")
