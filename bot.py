@@ -2207,8 +2207,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 f"{link_for(m)}"
             )
 
-        # 🔧 FIX: 최근 매수 시간 기록 (유령 오탐 방지)
+        # 🔧 FIX: 최근 매수 시간 기록 + 유령감지 방지 (레이스컨디션 대비)
         _RECENT_BUY_TS[m] = time.time()
+        with _ORPHAN_LOCK:
+            _ORPHAN_HANDLED.add(m)
 
         # === 🧠 피처 로깅 (자동 학습용) ===
         if AUTO_LEARN_ENABLED:
@@ -7503,6 +7505,10 @@ def box_monitor_position(m, entry_price, volume, box_info):
 
     mark_position_closed(m, f"box_close:{sell_reason}")
 
+    # 🔧 FIX: 매도 완료 후 _ORPHAN_HANDLED 해제 (다음 진입 시 재감지 가능)
+    with _ORPHAN_LOCK:
+        _ORPHAN_HANDLED.discard(m)
+
 
 def box_confirm_entry(m):
     """📦 박스 진입 확정 → state를 holding으로 변경"""
@@ -11063,6 +11069,13 @@ def main():
 
                             if _box_opened:
                                 box_confirm_entry(bm)
+                                # 🔧 FIX: 박스 진입 즉시 유령포지션 감지 방지
+                                # - 레이스컨디션: 박스 모니터 시작 전 sync_orphan이 잔고 발견 → 유령 오탐
+                                # - _ORPHAN_HANDLED에 등록하여 ghost detection 원천 차단
+                                # - _RECENT_BUY_TS도 갱신 (box_monitor_position 안에서 600초 보호)
+                                with _ORPHAN_LOCK:
+                                    _ORPHAN_HANDLED.add(bm)
+                                _RECENT_BUY_TS[bm] = time.time()
                                 with _POSITION_LOCK:
                                     actual_entry_b = OPEN_POSITIONS.get(bm, {}).get("entry_price", box_pre["price"])
                                     actual_vol_b = OPEN_POSITIONS.get(bm, {}).get("volume", 0)
