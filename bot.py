@@ -3725,29 +3725,29 @@ GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이�
 GATE_ACCEL_MAX = 5.0      # 🔧 before1 복원: 5.0 (폭발적 유입 진입 허용, 과도한 차단 해제)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
-GATE_OVERHEAT_MAX = 15.0  # 🔧 승률개선: 20→15 (과열 필터 강화 — 꼭대기 진입 방지)
+GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 6       # 🔧 승률개선: 4→6 (데이터: 승8.0 vs 패4.43 → 패자 기준 4 사용 중이던 것을 승자 기준으로 강화)
+GATE_CONSEC_MIN = 4       # 🔧 진입지연개선: 5→4 (1회 빠른 확인 → 조기 진입, 승8.0 vs 패4.43 감안)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
-GATE_STRONGBREAK_ACCEL_MAX = 2.5  # 🔧 승률개선: 3.5→2.5 (가속 3.5x는 이미 피크 → 꼭대기 진입)
+GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
 GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
-GATE_IGNITION_ACCEL_MIN = 1.3     # 🔧 승률개선: 1.1→1.3 (1.1x는 거의 평탄, 진짜 점화는 1.3x+ 가속)
-GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
-GATE_CV_MAX = 3.0         # 🔧 승률개선: 4.0→3.0 (불규칙 틱 도착 = 유동성 부족 / 워시트레이딩)
+GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 점화 최소 가속도 (1.0x=평탄 → 진짜 점화 아님)
+GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
+GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
-GATE_PSTD_MAX = 0.12      # 🔧 승률개선: 0.50→0.12 (데이터수집 완화를 복원 — 50% 변동성은 노이즈/펌프덤프)
-GATE_PSTD_STRONGBREAK_MAX = 0.08  # 🔧 승률개선: 0.30→0.08 (강돌파는 안정적 가격 움직임이어야 함)
-GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터수집 완화를 복원)
-GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
+GATE_PSTD_MAX = 0.50      # 🔧 대폭 완화 (0.10→0.50) 데이터 수집 후 재조정
+GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 수집 후 재조정
+GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
+GATE_TURN_MAX_ALT = 150.0     # before2 기준 유지 (워시트레이딩 리스크 차단)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
+GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
