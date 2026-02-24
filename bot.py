@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 import uuid
 import hashlib
-import jwth
+import jwt
 
 # 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
 try:
@@ -61,7 +61,7 @@ DYN_SL_MAX = 0.032   # 🔧 손절완화: 2.8→3.2% (고변동 코인 정상 �
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.010  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
+PROFIT_CHECKPOINT_BASE = 0.015  # 🔧 체크포인트강화: 1.0→1.5% (트레일+수수료 차감 후에도 수익 보장 — Cowork 개선 채택)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.004  # 🔧 R:R수정: 0.1→0.4% (체크포인트 도달 시 최소 보장 수익 확보)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -108,8 +108,8 @@ def get_expected_exit_slip_pct():
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 1.8,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
-    "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
+    "🔥점화": 2.5,              # 🔧 R:R강화: SL 1.8%×2.5=4.5% (점화는 크게 먹어야 — Cowork 개선 채택)
+    "강돌파 (EMA↑+고점↑)": 2.0,  # 🔧 R:R강화: SL 1.8%×2.0=3.6% (강돌파도 R:R 2:1 확보)
     "EMA↑": 1.3,                 # 🔧 R:R수정: SL 1.8%×1.3=2.3% (TP>SL 확실히)
     "고점↑": 1.3,                # 🔧 R:R수정: SL 1.8%×1.3=2.3%
     "거래량↑": 1.2,              # 🔧 R:R수정: SL 1.8%×1.2=2.2% (최소 R:R 1.2:1)
@@ -124,21 +124,22 @@ def refresh_mfe_targets():
     MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
 # MFE_PARTIAL_RATIO 제거 (미사용 — 실제 비율은 하드코딩됨)
 # ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
-SCALP_TO_RUNNER_MIN_BUY = 0.52   # 🔧 R:R수정: 0.56→0.52 (러너 전환 더 적극적으로)
-SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준도 완화)
+SCALP_TO_RUNNER_MIN_BUY = 0.58   # 🔧 러너전환: 0.52→0.58 (가짜 러너 전환 방지 — Cowork 개선 채택)
+SCALP_TO_RUNNER_MIN_ACCEL = 0.5  # 🔧 러너전환: 0.4→0.5 (가속도 기준 강화로 확실한 모멘텀만)
 
 # 트레일링 손절 설정
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일 여유 확보, 노이즈 트립 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.0060  # 🔧 트레일복원: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
 
 def get_trail_distance_min():
-    """🔧 R:R수정: 트레일 거리를 SL의 30%로 연동
-    SL 1.8% × 0.30 = 0.54% (알트 정상 눌림 0.3~0.7%에서 살아남기)
+    """🔧 트레일복원: 트레일 거리를 SL의 40%로 연동
+    SL 1.8% × 0.40 = 0.72% (알트 정상 눌림 0.3~0.7%에서 살아남기)
+    기존 30% → 0.54%는 너무 타이트해서 +1% 수익이 0.5% 눌림에 청산됨
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.30)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.40)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -212,7 +213,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 5
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
+        TRAIL_DISTANCE_MIN_BASE = 0.0060  # 🔧 트레일복원: 0.40→0.60% (balanced도 정상 눌림 허용)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -1526,9 +1527,10 @@ def sync_orphan_positions():
 
         # 🔧 FIX: _RECENT_BUY_TS 오래된 항목 정리 (메모리 누수 방지)
         _now_cleanup = time.time()
-        _stale_keys = [k for k, v in list(_RECENT_BUY_TS.items()) if _now_cleanup - v > 600]
-        for k in _stale_keys:
-            _RECENT_BUY_TS.pop(k, None)
+        with _RECENT_BUY_TS_LOCK:
+            _stale_keys = [k for k, v in list(_RECENT_BUY_TS.items()) if _now_cleanup - v > 600]
+            for k in _stale_keys:
+                _RECENT_BUY_TS.pop(k, None)
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
