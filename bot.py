@@ -45,7 +45,7 @@ def fmt6(x):
 # =========================
 TOP_N = 60
 SCAN_INTERVAL = 6
-COOLDOWN = 480
+COOLDOWN = 240  # 🔧 수익성패치: 480→240초 (8분→4분, 거래기회 2배)
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
@@ -664,8 +664,8 @@ _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안�
 # 🔧 승률개선: 코인별 연패 추적 (같은 코인 반복 손절 방지)
 _COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
 _COIN_LOSS_LOCK = threading.Lock()
-COIN_LOSS_MAX = 2         # 코인별 연속 손실 최대 횟수 (2패 후 쿨다운)
-COIN_LOSS_COOLDOWN = 1800  # 코인별 쿨다운 (초) - 30분간 재진입 금지
+COIN_LOSS_MAX = 3         # 🔧 수익성패치: 2→3 (2패 금지는 과도 → 3패까지 허용)
+COIN_LOSS_COOLDOWN = 900  # 🔧 수익성패치: 1800→900초 (30분→15분, 회복 기회 확보)
 # 🔧 FIX: 연패 게이트 전역변수 상단 선언 (record_trade()에서 사용, 선언 순서 보장)
 _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
@@ -3724,7 +3724,7 @@ GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 5.0      # 🔧 before1 복원: 5.0 (폭발적 유입 진입 허용, 과도한 차단 해제)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
-GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
+GATE_SURGE_MAX = 20.0     # 🔧 수익성패치: 100→20배 (펌프앤덤프 차단, 정상 급등은 20배 이내)
 GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 4       # 🔧 진입지연개선: 5→4 (1회 빠른 확인 → 조기 진입, 승8.0 vs 패4.43 감안)
@@ -3738,7 +3738,7 @@ GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과�
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 점화 최소 가속도 (1.0x=평탄 → 진짜 점화 아님)
-GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
+GATE_SCORE_THRESHOLD = 60.0       # 🔧 수익성패치: 70→60 (균형잡힌 신호도 통과 → 거래기회 확대)
 GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
@@ -3747,7 +3747,7 @@ GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 �
 GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
 GATE_TURN_MAX_ALT = 150.0     # before2 기준 유지 (워시트레이딩 리스크 차단)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
+GATE_VOL_MIN = 300_000    # 🔧 수익성패치: 10만→30만원 (저유동성 노이즈 차단)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
