@@ -209,9 +209,9 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 8
-        HARD_STOP_DD = 0.038
+        HARD_STOP_DD = 0.042   # 🔧 수익성패치: 0.038→0.042 (SL 2.0%×2.1, 전역값과 통일)
         EXIT_DEBOUNCE_SEC = 10
-        EXIT_DEBOUNCE_N = 5
+        EXIT_DEBOUNCE_N = 4    # 🔧 수익성패치: 5→4 (SL 반응 5초 단축, 실현손실 0.2~0.3%p 개선)
         TRAIL_ATR_MULT = 1.0
         TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
         SPIKE_RECOVERY_WINDOW = 3
@@ -519,7 +519,7 @@ ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 # 추매 트리거 조건
 PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.010"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
 PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "25000"))  # 🔧 수익성패치: 35k→25k (중소형 알트 추매 허용)
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
 
 
@@ -598,7 +598,7 @@ _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안�
 _COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
 _COIN_LOSS_LOCK = threading.Lock()
 COIN_LOSS_MAX = 2         # 코인별 연속 손실 최대 횟수 (2패 후 쿨다운)
-COIN_LOSS_COOLDOWN = 1800  # 코인별 쿨다운 (초) - 30분간 재진입 금지
+COIN_LOSS_COOLDOWN = 900   # 🔧 수익성패치: 1800→900초 (30→15분, 회복 기회 확보)
 # 🔧 FIX: 연패 게이트 전역변수 상단 선언 (record_trade()에서 사용, 선언 순서 보장)
 _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
@@ -9734,8 +9734,8 @@ def monitor_position(m,
                         print(f"[수급확인] {m} 감량 후 회복 확인 | {cur_gain*100:.2f}% | 잔여 포지션 유지")
                         tg_send_mid(f"✅ {m} 휩쏘 방어 성공 | 감량50% 후 회복 | 잔여 트레일 전환")
                         _sl_reduced = False  # 관망 종료, 일반 모드 복귀
-                    # 🔧 손절완화: 관망 시간 20→30초, SL 기준 70→80% (더 오래 기다리고 더 깊이 허용)
-                    elif _sl_observe_elapsed >= 30.0:
+                    # 🔧 수익성패치: 관망 30→20초 (SL 근처 30초는 추세반전 확정, 추가손실 방지)
+                    elif _sl_observe_elapsed >= 20.0:
                         _sl_final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
                         if _sl_final_gain <= -eff_sl_pct * 0.8:
                             # 20초 지나도 SL 70% 이상 손실 유지 → 추세 반전 확정
@@ -9851,7 +9851,7 @@ def monitor_position(m,
                 # 🔧 MAE/MFE 게이트: 흔들린 포지션엔 추매 금지
                 mae_now = (worst / entry_price - 1.0) if entry_price > 0 else -1
                 mfe_now_add = (best / entry_price - 1.0) if entry_price > 0 else 0
-                add_cond_mfe = mae_now > -0.0025 and mfe_now_add > 0.007  # MAE>-0.25%, MFE>0.7%
+                add_cond_mfe = mae_now > -0.005 and mfe_now_add > 0.007  # 🔧 수익성패치: MAE>-0.5%(정상 눌림 허용), MFE>0.7%
 
                 # 🔧 피라미딩 BTC 역풍 차단: BTC -0.3% 이하 + 수급 미달이면 추매 금지
                 _btc5_pyr = btc_5m_change()
@@ -9880,7 +9880,9 @@ def monitor_position(m,
                             # best, worst 리셋하지 않음
 
                             # 추매 후 부분 상태만 리셋 (트레일/체크포인트는 유지)
-                            checkpoint_reached = False  # 새 평단 기준 체크포인트 재평가
+                            # 🔧 수익성패치: trail_armed면 CP 리셋 스킵 (래칫 덮어쓰기 방지)
+                            if not trail_armed:
+                                checkpoint_reached = False  # 새 평단 기준 체크포인트 재평가
                             mfe_partial_done = False    # 새 기회 허용
                             plateau_partial_done = False
                             last_peak_ts = time.time()
@@ -9921,9 +9923,14 @@ def monitor_position(m,
                         _trail_momentum = 1.4
                     else:
                         _trail_momentum = 1.0  # 러너: 약세에도 축소 없이 기본 유지
-                    # 🔧 익절극대화: 러너 래칫 50→40% (MFE의 40% 확보, 나머지 60%는 추세에 태우기)
-                    # 50%는 중간 눌림에서 너무 빨리 청산 → 러너 큰 수익 놓침
-                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * 0.40))
+                    # 🔧 수익성패치: 러너 래칫 MFE 구간별 차등 (큰 수익일수록 더 많이 잠금)
+                    if _trail_max_gain >= 0.05:    # +5% 이상: 55% 잠금
+                        _ratchet_pct = 0.55
+                    elif _trail_max_gain >= 0.03:  # +3% 이상: 50% 잠금
+                        _ratchet_pct = 0.50
+                    else:                          # 기본: 40% 잠금
+                        _ratchet_pct = 0.40
+                    _runner_lock = entry_price * (1.0 + max(FEE_RATE + 0.001, _trail_max_gain * _ratchet_pct))
                     base_stop = max(base_stop, _runner_lock)
                     # 🔧 FIX: 러너 래칫을 OPEN_POSITIONS에 저장
                     with _POSITION_LOCK:
@@ -9958,8 +9965,9 @@ def monitor_position(m,
                     _tdb_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0)      # SL과 동일
                     _tdb_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0)  # SL과 동일
                 else:
-                    _tdb_n = EXIT_DEBOUNCE_N + 2 + (1 if alive_sec < WARMUP_SEC else 0)
-                    _tdb_sec = EXIT_DEBOUNCE_SEC + 5 + (2 if alive_sec < WARMUP_SEC else 0)
+                    # 🔧 수익성패치: +2/+5 → +1/+3 (러너도 반응 10초 단축, 되돌림 손실 감소)
+                    _tdb_n = EXIT_DEBOUNCE_N + 1 + (1 if alive_sec < WARMUP_SEC else 0)
+                    _tdb_sec = EXIT_DEBOUNCE_SEC + 3 + (2 if alive_sec < WARMUP_SEC else 0)
                 if trail_db_hits >= _tdb_n or _trail_dur >= _tdb_sec:
                     # 디바운스 통과 → 실제 청산
                     # 🔧 FIX: Division by Zero 방어 (entry_price, best는 항상 양수여야 함)
@@ -9998,7 +10006,8 @@ def monitor_position(m,
 
             # ② 체크포인트 도달 시 강세/약세 판단
             # 🔧 FIX: 체크포인트 재평가 - 가격이 50% 아래로 떨어지면 리셋 (0.3→0.5: 상태진동 방지)
-            if checkpoint_reached and cur_gain < (dyn_checkpoint * 0.5):
+            # 🔧 수익성패치: trail_armed 상태에서는 CP 리셋 스킵 (래칫 보호 일관성)
+            if checkpoint_reached and cur_gain < (dyn_checkpoint * 0.5) and not trail_armed:
                 checkpoint_reached = False  # 체크포인트 아래로 떨어짐 → 재평가 허용
 
             # 🔧 소프트 가드: 초기 30초간 손절/트레일 디바운스 강화 (false breakout 방어)
@@ -10164,8 +10173,8 @@ def monitor_position(m,
                             break
                         mfe_partial_done = True
                         last_exit_event_ts = time.time()
-                        # 수익 70% 락인
-                        mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.70)
+                        # 🔧 수익성패치: 래칫 70→55% (러너 추세연장 여유 확보, 이미 25~40% 익절함)
+                        mfe_lock_pct = max(FEE_RATE + 0.001, max_gain * 0.55)
                         be_stop = entry_price * (1.0 + mfe_lock_pct)
                         base_stop = max(base_stop, be_stop)
                         # 🔧 FIX: MFE 래칫을 OPEN_POSITIONS에 저장
@@ -10196,10 +10205,10 @@ def monitor_position(m,
                 _already_closed = True
                 verdict = "시간만료_손실컷"
             elif trail_armed and _final_gain > FEE_RATE:
-                # 수익 상태 + 트레일 무장 → 90초 연장 (러너 기회)
-                tg_send_mid(f"⏰ {m} 시간만료 but 수익중 +{_final_gain*100:.2f}% → 90초 연장 러너모드")
+                # 🔧 수익성패치: 스캘프/러너 연장시간 차등 (스캘프는 빠른 확정)
+                _ext_horizon = 90 if trade_type == "runner" else 30
+                tg_send_mid(f"⏰ {m} 시간만료 but 수익중 +{_final_gain*100:.2f}% → {_ext_horizon}초 연장 ({trade_type})")
                 _ext_start = time.time()
-                _ext_horizon = 90  # 연장 시간 (초)
                 _ext_trail_hits = 0  # 🔧 FIX: 트레일 디바운스 (1틱 노이즈 방지)
                 while time.time() - _ext_start <= _ext_horizon:
                     time.sleep(RECHECK_SEC)
