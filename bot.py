@@ -45,23 +45,23 @@ def fmt6(x):
 # =========================
 TOP_N = 60
 SCAN_INTERVAL = 6
-COOLDOWN = 600
+COOLDOWN = 480
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
-HARD_STOP_DD = 0.030  # 🔧 승률개선: 3.8→4.2% (SL 2.0% 대비 비상용 2.1배 = 정상 눌림 확실히 허용)
-EXIT_DEBOUNCE_SEC = 6  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 3  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
+HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 대비 비상용 넓게, 정상 눌림 확실히 허용)
+EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
+EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.015   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
-DYN_SL_MAX = 0.028   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
+DYN_SL_MIN = 0.018   # 🔧 손절완화: 1.5→1.8% (알트 1분봉 노이즈 0.5~1.5% → 1.5%에서도 정상눌림 걸림, 1.8%로 추가 완화)
+DYN_SL_MAX = 0.032   # 🔧 손절완화: 2.8→3.2% (고변동 코인 정상 눌림 + balanced 하드스톱 3.8%와 정합)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.015  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
+PROFIT_CHECKPOINT_BASE = 0.010  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.004  # 🔧 R:R수정: 0.1→0.4% (체크포인트 도달 시 최소 보장 수익 확보)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -108,8 +108,8 @@ def get_expected_exit_slip_pct():
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 2.5,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
-    "강돌파 (EMA↑+고점↑)": 2.0,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
+    "🔥점화": 1.8,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
+    "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
     "EMA↑": 1.3,                 # 🔧 R:R수정: SL 1.8%×1.3=2.3% (TP>SL 확실히)
     "고점↑": 1.3,                # 🔧 R:R수정: SL 1.8%×1.3=2.3%
     "거래량↑": 1.2,              # 🔧 R:R수정: SL 1.8%×1.2=2.2% (최소 R:R 1.2:1)
@@ -124,22 +124,21 @@ def refresh_mfe_targets():
     MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
 # MFE_PARTIAL_RATIO 제거 (미사용 — 실제 비율은 하드코딩됨)
 # ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
-SCALP_TO_RUNNER_MIN_BUY = 0.58   # 🔧 R:R수정: 0.56→0.52 (러너 전환 더 적극적으로)
-SCALP_TO_RUNNER_MIN_ACCEL = 0.5  # 🔧 R:R수정: 0.6→0.4 (가속도 기준도 완화)
+SCALP_TO_RUNNER_MIN_BUY = 0.52   # 🔧 R:R수정: 0.56→0.52 (러너 전환 더 적극적으로)
+SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준도 완화)
 
 # 트레일링 손절 설정
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0090  # 🔧 승률개선: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
+TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일 여유 확보, 노이즈 트립 방지)
 
 def get_trail_distance_min():
-    """🔧 승률개선: 트레일 거리를 SL의 40%로 연동
-    SL 2.0% × 0.40 = 0.80% (알트 정상 눌림 0.3~0.7%에서 살아남을 여유)
-    기존 30% → 0.54%는 너무 타이트해서 +1% 수익이 0.5% 눌림에 청산됨
+    """🔧 R:R수정: 트레일 거리를 SL의 30%로 연동
+    SL 1.8% × 0.30 = 0.54% (알트 정상 눌림 0.3~0.7%에서 살아남기)
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.60)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.30)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -209,11 +208,11 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 8
-        HARD_STOP_DD = 0.030
-        EXIT_DEBOUNCE_SEC = 6
-        EXIT_DEBOUNCE_N = 3
+        HARD_STOP_DD = 0.038
+        EXIT_DEBOUNCE_SEC = 10
+        EXIT_DEBOUNCE_N = 5
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0090  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
+        TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -572,21 +571,21 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.002"))  # 🔧 구조개�
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
 # === 공격 모드 / 피라미딩 설정 ===
-AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "0") == "1"
+AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 
 # 소액 선진입 + 추매 구조 (소액 프로브가 더 안정적)
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
 
 # RISK_PER_TRADE를 쪼개서 사용 (seed + add)
 # 예: RISK_PER_TRADE=0.003, SEED=0.55, ADD=0.55 면 대략 1.1배 정도 리스크 사용
-SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.45"))
-ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.40"))
+SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
+ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
 # 추매 트리거 조건
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.018"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.65"))  # 매수비
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.010"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
+PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "20"))  # 추매 간 최소 간격(초)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
 
 
 # 현재 열린 포지션 기록용
@@ -664,7 +663,7 @@ _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안�
 # 🔧 승률개선: 코인별 연패 추적 (같은 코인 반복 손절 방지)
 _COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
 _COIN_LOSS_LOCK = threading.Lock()
-COIN_LOSS_MAX = 1         # 코인별 연속 손실 최대 횟수 (2패 후 쿨다운)
+COIN_LOSS_MAX = 2         # 코인별 연속 손실 최대 횟수 (2패 후 쿨다운)
 COIN_LOSS_COOLDOWN = 1800  # 코인별 쿨다운 (초) - 30분간 재진입 금지
 # 🔧 FIX: 연패 게이트 전역변수 상단 선언 (record_trade()에서 사용, 선언 순서 보장)
 _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
@@ -727,17 +726,16 @@ def record_trade(market: str, pnl_pct: float):
             _win_streak = 0
             # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
             if _lose_streak >= 5:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 🔧 30분 전체 진입 금지
-                _ENTRY_MAX_MODE = None
+                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 30분→10분 (기회비용 절감)
+                _ENTRY_MAX_MODE = "half"
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
             elif _lose_streak >= 4:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 10분 half만 허용
+                _ENTRY_SUSPEND_UNTIL = time.time() + 180  # 🔧 10분→3분 (기회비용 절감)
                 _ENTRY_MAX_MODE = "half"
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 3분 전체 진입 금지")
             elif _lose_streak >= 3:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 300  # 🔧 3연패 → 5분 진입 금지
-                _ENTRY_MAX_MODE = "half"
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 5분 half만 허용")
+                _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
 
 
 def is_coin_loss_cooldown(market: str) -> bool:
@@ -3795,7 +3793,7 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.020  # 🔧 DYN_SL_MIN 2.0% 연동 (폴백용)
+STOP_LOSS_PCT = 0.018  # 🔧 DYN_SL_MIN 1.8% 연동 (폴백용)
 RECHECK_SEC = 5
 
 # (IGN_BREAK_LOOKBACK, IGN_MIN_BODY, IGN_MIN_BUY, ABS_SURGE_KRW, RELAXED_X 삭제 — 미사용 상수)
@@ -9465,7 +9463,7 @@ def monitor_position(m,
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
     # 🔧 FIX: SL 확장에 캡 적용 (eff_sl_pct에 이미 1.8x 적용 가능 → 1.35x 스태킹 시 7.78% 가능)
-    _sl_extended_pct = min(eff_sl_pct * 1.15, DYN_SL_MAX * 1.0)  # 최대 4.8%
+    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 최대 4.8%
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -9477,7 +9475,7 @@ def monitor_position(m,
     in_soft_guard = True  # 🔧 FIX: 초기화 (첫 루프에서 SL 디바운스 참조 시 NameError 방지)
 
     consecutive_failures = 0
-    MAX_CONSECUTIVE_FAILURES = 5
+    MAX_CONSECUTIVE_FAILURES = 10
 
     ob = pre.get("ob")
 
@@ -9501,7 +9499,7 @@ def monitor_position(m,
 
     # === 🔧 청산 이벤트 쿨다운 (MFE/Plateau/Checkpoint 겹침 방지) ===
     last_exit_event_ts = 0.0
-    EXIT_EVENT_COOLDOWN_SEC = 3.0  # 부분익절 후 6초간 다른 청산 트리거 무시
+    EXIT_EVENT_COOLDOWN_SEC = 6.0  # 부분익절 후 6초간 다른 청산 트리거 무시
 
 
     # === 🔧 MFE 기반 부분익절 상태 ===
@@ -9676,8 +9674,8 @@ def monitor_position(m,
                 # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
                 _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
                 # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업/소프트가드 중 더 둔하게
-                _db_n = EXIT_DEBOUNCE_N + (0 if alive_sec < WARMUP_SEC else 0) + (0 if in_soft_guard else 0)
-                _db_sec = EXIT_DEBOUNCE_SEC + (0 if alive_sec < WARMUP_SEC else 0) + (0 if in_soft_guard else 0)
+                _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
+                _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
                 if not _is_hard_stop and stop_hits < _db_n and _sl_duration < _db_sec:
                     continue  # 디바운스 대기
 
@@ -9803,9 +9801,9 @@ def monitor_position(m,
                         tg_send_mid(f"✅ {m} 휩쏘 방어 성공 | 감량50% 후 회복 | 잔여 트레일 전환")
                         _sl_reduced = False  # 관망 종료, 일반 모드 복귀
                     # 🔧 손절완화: 관망 시간 20→30초, SL 기준 70→80% (더 오래 기다리고 더 깊이 허용)
-                    elif _sl_observe_elapsed >= 15.0:
+                    elif _sl_observe_elapsed >= 30.0:
                         _sl_final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-                        if _sl_final_gain <= -eff_sl_pct * 0.6:
+                        if _sl_final_gain <= -eff_sl_pct * 0.8:
                             # 20초 지나도 SL 70% 이상 손실 유지 → 추세 반전 확정
                             close_auto_position(m, f"관망만료청산 | 20초 후 미회복 -{abs(_sl_final_gain)*100:.2f}%")
                             _already_closed = True
