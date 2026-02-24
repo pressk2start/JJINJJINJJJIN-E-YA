@@ -210,10 +210,10 @@ def _apply_exit_profile():
     else:  # balanced
         WARMUP_SEC = 8
         HARD_STOP_DD = 0.030
-        EXIT_DEBOUNCE_SEC = 10
-        EXIT_DEBOUNCE_N = 5
+        EXIT_DEBOUNCE_SEC = 6
+        EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
+        TRAIL_DISTANCE_MIN_BASE = 0.0090  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -11848,5 +11848,6 @@ if __name__ == "__main__":
     start_health_server()
     start_watchdogs()  # 🐕 워치독 시작 (헬스비트/세션리프레시/락청소)
     main()
+
 
 
