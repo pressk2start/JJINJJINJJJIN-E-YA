@@ -50,13 +50,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
-HARD_STOP_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (SL 1.5% 대비 비상용 넓게, 정상 눌림 확실히 허용)
+HARD_STOP_DD = 0.042  # 🔧 승률개선: 3.8→4.2% (SL 2.0% 대비 비상용 2.1배 = 정상 눌림 확실히 허용)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.018   # 🔧 손절완화: 1.5→1.8% (알트 1분봉 노이즈 0.5~1.5% → 1.5%에서도 정상눌림 걸림, 1.8%로 추가 완화)
-DYN_SL_MAX = 0.032   # 🔧 손절완화: 2.8→3.2% (고변동 코인 정상 눌림 + balanced 하드스톱 3.8%와 정합)
+DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
+DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -131,14 +131,15 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준�
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일 여유 확보, 노이즈 트립 방지)
+TRAIL_DISTANCE_MIN_BASE = 0.0060  # 🔧 승률개선: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
 
 def get_trail_distance_min():
-    """🔧 R:R수정: 트레일 거리를 SL의 30%로 연동
-    SL 1.8% × 0.30 = 0.54% (알트 정상 눌림 0.3~0.7%에서 살아남기)
+    """🔧 승률개선: 트레일 거리를 SL의 40%로 연동
+    SL 2.0% × 0.40 = 0.80% (알트 정상 눌림 0.3~0.7%에서 살아남을 여유)
+    기존 30% → 0.54%는 너무 타이트해서 +1% 수익이 0.5% 눌림에 청산됨
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.30)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.40)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -592,6 +593,12 @@ TRADE_HISTORY = deque(maxlen=30)  # 최근 30개 거래 기록
 _lose_streak = 0              # 연속 패배 수
 _win_streak = 0               # 연속 승리 수
 _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안전 보장
+
+# 🔧 승률개선: 코인별 연패 추적 (같은 코인 반복 손절 방지)
+_COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
+_COIN_LOSS_LOCK = threading.Lock()
+COIN_LOSS_MAX = 2         # 코인별 연속 손실 최대 횟수 (2패 후 쿨다운)
+COIN_LOSS_COOLDOWN = 1800  # 코인별 쿨다운 (초) - 30분간 재진입 금지
 # 🔧 FIX: 연패 게이트 전역변수 상단 선언 (record_trade()에서 사용, 선언 순서 보장)
 _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
@@ -624,6 +631,23 @@ def record_trade(market: str, pnl_pct: float):
         "time": time.time(),
     })
 
+    # 🔧 승률개선: 코인별 손실 기록 (같은 코인 반복 손절 방지)
+    now_ts = time.time()
+    with _COIN_LOSS_LOCK:
+        if is_win:
+            # 승리하면 해당 코인 손실 기록 초기화
+            _COIN_LOSS_HISTORY.pop(market, None)
+        else:
+            # 패배 기록 추가 (최근 COIN_LOSS_COOLDOWN 이내만 유지)
+            if market not in _COIN_LOSS_HISTORY:
+                _COIN_LOSS_HISTORY[market] = []
+            _COIN_LOSS_HISTORY[market].append(now_ts)
+            # 오래된 기록 정리
+            _COIN_LOSS_HISTORY[market] = [
+                ts for ts in _COIN_LOSS_HISTORY[market]
+                if now_ts - ts < COIN_LOSS_COOLDOWN
+            ]
+
     # 🔧 FIX H1: streak 카운터를 락으로 보호 (2개 스레드 동시 record_trade → 연패 카운터 오작동 방지)
     with _STREAK_LOCK:
         if is_win:
@@ -646,6 +670,18 @@ def record_trade(market: str, pnl_pct: float):
             elif _lose_streak >= 3:
                 _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
+
+
+def is_coin_loss_cooldown(market: str) -> bool:
+    """🔧 승률개선: 코인별 연패 쿨다운 체크
+    최근 COIN_LOSS_COOLDOWN(30분) 내 COIN_LOSS_MAX(2)회 이상 손절한 코인이면 True
+    """
+    now_ts = time.time()
+    with _COIN_LOSS_LOCK:
+        losses = _COIN_LOSS_HISTORY.get(market, [])
+        # 쿨다운 기간 내 손실만 카운트
+        recent = [ts for ts in losses if now_ts - ts < COIN_LOSS_COOLDOWN]
+        return len(recent) >= COIN_LOSS_MAX
 
 
 def get_adaptive_risk() -> float:
@@ -3621,29 +3657,29 @@ GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이�
 GATE_ACCEL_MAX = 5.0      # 🔧 before1 복원: 5.0 (폭발적 유입 진입 허용, 과도한 차단 해제)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 100.0    # 🔧 사실상 제거: 급등 초입 잡기
-GATE_OVERHEAT_MAX = 20.0  # 🔧 재활성화: 과열 필터 (accel*surge > 20 = 꼭대기)
+GATE_OVERHEAT_MAX = 15.0  # 🔧 승률개선: 20→15 (과열 필터 강화 — 꼭대기 진입 방지)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 4       # 🔧 진입지연개선: 5→4 (1회 빠른 확인 → 조기 진입, 승8.0 vs 패4.43 감안)
+GATE_CONSEC_MIN = 6       # 🔧 승률개선: 4→6 (데이터: 승8.0 vs 패4.43 → 패자 기준 4 사용 중이던 것을 승자 기준으로 강화)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
-GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 2.0→3.5 완화
+GATE_STRONGBREAK_ACCEL_MAX = 2.5  # 🔧 승률개선: 3.5→2.5 (가속 3.5x는 이미 피크 → 꼭대기 진입)
 GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
-GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 점화 최소 가속도 (1.0x=평탄 → 진짜 점화 아님)
-GATE_SCORE_THRESHOLD = 70.0       # 🔧 가중점수 기준
-GATE_CV_MAX = 4.0         # 🔧 CV 상한 - before1 기준 (급등주 진입 허용)
+GATE_IGNITION_ACCEL_MIN = 1.3     # 🔧 승률개선: 1.1→1.3 (1.1x는 거의 평탄, 진짜 점화는 1.3x+ 가속)
+GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
+GATE_CV_MAX = 3.0         # 🔧 승률개선: 4.0→3.0 (불규칙 틱 도착 = 유동성 부족 / 워시트레이딩)
 GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
-GATE_PSTD_MAX = 0.50      # 🔧 대폭 완화 (0.10→0.50) 데이터 수집 후 재조정
-GATE_PSTD_STRONGBREAK_MAX = 0.30  # 🔧 대폭 완화 (0.06→0.30) 데이터 수집 후 재조정
-GATE_TURN_MAX_MAJOR = 800.0   # 🔧 대폭 완화 (400→800) 데이터 수집 후 재조정
-GATE_TURN_MAX_ALT = 150.0     # before2 기준 유지 (워시트레이딩 리스크 차단)
+GATE_PSTD_MAX = 0.12      # 🔧 승률개선: 0.50→0.12 (데이터수집 완화를 복원 — 50% 변동성은 노이즈/펌프덤프)
+GATE_PSTD_STRONGBREAK_MAX = 0.08  # 🔧 승률개선: 0.30→0.08 (강돌파는 안정적 가격 움직임이어야 함)
+GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터수집 완화를 복원)
+GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 100_000    # 🔧 before1 기준 (10만원)
+GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
@@ -3691,7 +3727,7 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.018  # 🔧 DYN_SL_MIN 1.8% 연동 (폴백용)
+STOP_LOSS_PCT = 0.020  # 🔧 DYN_SL_MIN 2.0% 연동 (폴백용)
 RECHECK_SEC = 5
 
 # (IGN_BREAK_LOOKBACK, IGN_MIN_BODY, IGN_MIN_BUY, ABS_SURGE_KRW, RELAXED_X 삭제 — 미사용 상수)
@@ -6173,6 +6209,13 @@ def check_retest_entry(m):
     if not RETEST_MODE_ENABLED:
         return None
 
+    # 🔧 승률개선: 야간 + 코인별 연패 체크
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return None
+    if is_coin_loss_cooldown(m):
+        return None
+
     with _RETEST_LOCK:
         watch = _RETEST_WATCHLIST.get(m)
         if not watch:
@@ -6495,6 +6538,13 @@ def circle_check_entry(m):
     - 거래량 사망 시 폐기
     """
     if not CIRCLE_ENTRY_ENABLED:
+        return None
+
+    # 🔧 승률개선: 야간 + 코인별 연패 체크
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return None
+    if is_coin_loss_cooldown(m):
         return None
 
     with _CIRCLE_LOCK:
@@ -7099,6 +7149,13 @@ def box_check_entry(m):
     3. 박스가 여전히 유효 (이탈 안 함)
     """
     if not BOX_ENABLED:
+        return None
+
+    # 🔧 승률개선: 야간 + 코인별 연패 체크
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return None
+    if is_coin_loss_cooldown(m):
         return None
 
     with _BOX_LOCK:
@@ -8271,6 +8328,20 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🔧 5분 EMA 추세 필터: TREND_DOWN (line ~7423)에서 이미 처리
     # (중복 API 호출 제거 — 점화 면제도 TREND_DOWN에서 불필요, 점화는 추세 반전이니 -0.3% gap 안 걸림)
 
+    # === 🔧 승률개선: 야간 진입 차단 (00~07 KST) ===
+    # 야간은 유동성 극감 → 스프레드 확대, 가짜 돌파, 휩쏘 빈발
+    # 점화(ignition)도 야간에는 노이즈일 확률 높음 → 전면 차단
+    _hour_kst = now_kst().hour
+    if 0 <= _hour_kst < 7:
+        cut("NIGHT_BLOCK", f"{m} 야간진입차단 {_hour_kst}시 (00~07 KST 유동성부족)", near_miss=False)
+        return None
+
+    # === 🔧 승률개선: 코인별 연패 쿨다운 ===
+    # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
+    if is_coin_loss_cooldown(m):
+        cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
+        return None
+
     # === 🔧 매수비 페이드 감지 (꼭대기 진입 방지) ===
     # t15 매수비는 높은데 t45 매수비가 50% 미만 → 직전 15초만 강한 "스파이크"
     # 이미 피크를 지난 것이므로 진입하면 꼭대기에 물림
@@ -9095,19 +9166,19 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
     except Exception:
         r = 0.0
 
-    base = 150  # 기본값
+    base = 240  # 🔧 승률개선: 150→240초 (2.5분은 너무 짧음 → 4분 기본으로 추세 확인 여유)
 
     # 신호 유형 가중
     if pre.get("mega_ok"):
-        base = 300
+        base = 360  # 🔧 승률개선: 300→360초 (메가는 6분)
     elif pre.get("ign_ok"):
-        base = 240
+        base = 300  # 🔧 승률개선: 240→300초 (점화는 5분)
     elif pre.get("botacc_ok"):
-        base = 210
+        base = 270  # 🔧 승률개선: 210→270초
     elif pre.get("early_ok"):
-        base = 180
+        base = 240  # 🔧 승률개선: 180→240초
     elif pre.get("two_green_break"):
-        base = 210
+        base = 270  # 🔧 승률개선: 210→270초
 
     # 오더북 깊이 기반 (깊으면 여유 있게)
     ob_depth = 0
@@ -9143,7 +9214,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
         base -= 30
 
     # 하한/상한 클램프
-    base = max(90, min(base, 360))
+    base = max(120, min(base, 480))  # 🔧 승률개선: 90~360 → 120~480 (최소 2분, 최대 8분)
     return int(base)
 
 
