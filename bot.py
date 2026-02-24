@@ -50,18 +50,18 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
-HARD_STOP_DD = 0.042  # 🔧 승률개선: 3.8→4.2% (SL 2.0% 대비 비상용 2.1배 = 정상 눌림 확실히 허용)
-EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
+HARD_STOP_DD = 0.030  # 🔧 승률개선: 3.8→4.2% (SL 2.0% 대비 비상용 2.1배 = 정상 눌림 확실히 허용)
+EXIT_DEBOUNCE_SEC = 6  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
+EXIT_DEBOUNCE_N = 3  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
-DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
+DYN_SL_MIN = 0.015   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
+DYN_SL_MAX = 0.028   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.010  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
+PROFIT_CHECKPOINT_BASE = 0.015  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.004  # 🔧 R:R수정: 0.1→0.4% (체크포인트 도달 시 최소 보장 수익 확보)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -108,8 +108,8 @@ def get_expected_exit_slip_pct():
 # 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
 # SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 1.8,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
-    "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
+    "🔥점화": 2.5,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
+    "강돌파 (EMA↑+고점↑)": 2.0,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
     "EMA↑": 1.3,                 # 🔧 R:R수정: SL 1.8%×1.3=2.3% (TP>SL 확실히)
     "고점↑": 1.3,                # 🔧 R:R수정: SL 1.8%×1.3=2.3%
     "거래량↑": 1.2,              # 🔧 R:R수정: SL 1.8%×1.2=2.2% (최소 R:R 1.2:1)
@@ -131,7 +131,7 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준�
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0060  # 🔧 승률개선: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
+TRAIL_DISTANCE_MIN_BASE = 0.0090  # 🔧 승률개선: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
 
 def get_trail_distance_min():
     """🔧 승률개선: 트레일 거리를 SL의 40%로 연동
@@ -139,7 +139,7 @@ def get_trail_distance_min():
     기존 30% → 0.54%는 너무 타이트해서 +1% 수익이 0.5% 눌림에 청산됨
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.40)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.60)
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -209,7 +209,7 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 8
-        HARD_STOP_DD = 0.038
+        HARD_STOP_DD = 0.030
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 5
         TRAIL_ATR_MULT = 1.0
@@ -439,6 +439,72 @@ def cleanup_stale_entry_locks(max_age_sec=300):
         print(f"[LOCK_CLEAN_ERR] {e}")
 
 
+
+PENDING_TIMEOUT_SEC = 60
+
+def cleanup_stuck_pending():
+    """pending 상태로 60초 이상 고착된 포지션 정리"""
+    now = time.time()
+    stuck = []
+    with _POSITION_LOCK:
+        for m, pos in list(OPEN_POSITIONS.items()):
+            if pos.get("state") == "pending":
+                entry_ts = pos.get("entry_ts", pos.get("pending_ts", now))
+                if now - entry_ts > PENDING_TIMEOUT_SEC:
+                    stuck.append(m)
+    for m in stuck:
+        print(f"[PENDING_TIMEOUT] {m} pending {PENDING_TIMEOUT_SEC}초 초과 → 정리")
+        actual = get_actual_balance(m)
+        with _POSITION_LOCK:
+            if actual and actual > 0:
+                if m in OPEN_POSITIONS:
+                    OPEN_POSITIONS[m]["state"] = "active"
+                    print(f"[PENDING_TIMEOUT] {m} 잔고 발견 → active 전환")
+            else:
+                OPEN_POSITIONS.pop(m, None)
+                print(f"[PENDING_TIMEOUT] {m} 잔고 없음 → 제거")
+
+
+def _record_entry_slippage(market, expected_price, order_result):
+    """진입 슬리피지 자동 기록"""
+    try:
+        if not order_result or not isinstance(order_result, dict):
+            return
+        exec_vol = float(order_result.get("executed_volume") or "0")
+        if exec_vol <= 0:
+            return
+        trades = order_result.get("trades", [])
+        if trades:
+            total_val = sum(float(t.get("price", 0)) * float(t.get("volume", 0)) for t in trades)
+            total_vol = sum(float(t.get("volume", 0)) for t in trades)
+            avg_price = total_val / max(total_vol, 1e-10)
+        else:
+            avg_price = expected_price
+        if expected_price > 0 and avg_price > 0:
+            slip = abs(avg_price - expected_price) / expected_price
+            _ENTRY_SLIP_HISTORY.append(slip)
+    except Exception as e:
+        print(f"[SLIP] {market} entry slip record err: {e}")
+
+
+def _record_exit_slippage(market, expected_price, order_result):
+    """청산 슬리피지 자동 기록"""
+    try:
+        if not order_result or not isinstance(order_result, dict):
+            return
+        trades = order_result.get("trades", [])
+        if trades:
+            total_val = sum(float(t.get("price", 0)) * float(t.get("volume", 0)) for t in trades)
+            total_vol = sum(float(t.get("volume", 0)) for t in trades)
+            avg_price = total_val / max(total_vol, 1e-10)
+        else:
+            avg_price = expected_price
+        if expected_price > 0 and avg_price > 0:
+            slip = abs(avg_price - expected_price) / expected_price
+            _EXIT_SLIP_HISTORY.append(slip)
+    except Exception as e:
+        print(f"[SLIP] {market} exit slip record err: {e}")
+
 from contextlib import contextmanager
 
 @contextmanager
@@ -506,7 +572,7 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.002"))  # 🔧 구조개�
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 
 # === 공격 모드 / 피라미딩 설정 ===
-AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
+AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "0") == "1"
 
 # 소액 선진입 + 추매 구조 (소액 프로브가 더 안정적)
 USE_PYRAMIDING = os.getenv("USE_PYRAMIDING", "1") == "1"
@@ -517,10 +583,10 @@ SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
 ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
 
 # 추매 트리거 조건
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.010"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))  # 매수비
+PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.018"))  # 🔧 SL연동: +1.0% (1×SL) 이상에서 추매 (SL보다 낮으면 손실중 추매 위험)
+PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.65"))  # 매수비
 PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "35000"))  # KRW/s
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
+PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "20"))  # 추매 간 최소 간격(초)
 
 
 # 현재 열린 포지션 기록용
@@ -579,7 +645,8 @@ ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
 _ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
-_RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
+_RECENT_BUY_TS = {}
+_RECENT_BUY_TS_LOCK = threading.Lock()        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 
 # 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
 
@@ -660,16 +727,17 @@ def record_trade(market: str, pnl_pct: float):
             _win_streak = 0
             # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
             if _lose_streak >= 5:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 30분→10분 (기회비용 절감)
-                _ENTRY_MAX_MODE = "half"
+                _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 🔧 30분 전체 진입 금지
+                _ENTRY_MAX_MODE = None
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
             elif _lose_streak >= 4:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 180  # 🔧 10분→3분 (기회비용 절감)
+                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 10분 half만 허용
                 _ENTRY_MAX_MODE = "half"
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 3분 전체 진입 금지")
             elif _lose_streak >= 3:
-                _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
+                _ENTRY_SUSPEND_UNTIL = time.time() + 300  # 🔧 3연패 → 5분 진입 금지
+                _ENTRY_MAX_MODE = "half"
+                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 5분 half만 허용")
 
 
 def is_coin_loss_cooldown(market: str) -> bool:
@@ -11780,3 +11848,4 @@ if __name__ == "__main__":
     start_health_server()
     start_watchdogs()  # 🐕 워치독 시작 (헬스비트/세션리프레시/락청소)
     main()
+
