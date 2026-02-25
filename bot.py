@@ -3700,7 +3700,6 @@ TICKS_BUY_RATIO = 0.56
 # 연속매수: 승 8.0 vs 패 4.43 → 하한 6
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
-GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
@@ -3710,7 +3709,6 @@ GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
-GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 2   # 📊 180신호분석: 6→2 (강돌파도 동일 기준 — 2개면 수급 확인 충분)
@@ -3730,9 +3728,7 @@ GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터�
 GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
 GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
-GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
-GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
@@ -3744,12 +3740,7 @@ GATE_GREEN_STREAK_MAX = 3     # 📊 연속양봉 상한 3개 (4+ wr33.3% avg-0.
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
 # ========================================
-GATE_RELAX_SURGE_FLOOR = 0.1      # 급등배수 하한
 GATE_RELAX_VOL_MA_FLOOR = 0.2      # 🔧 before1 복원 (vol_vs_ma OR 경로 재활성화)
-GATE_RELAX_TURN_FLOOR = 0.5       # 회전율 하한 (%)
-GATE_RELAX_BUY_FLOOR = 0.45       # 매수비 하한
-GATE_RELAX_IMB_FLOOR = 0.15       # 🔧 before1 복원 (0.35→0.15)
-GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
 
 # ========================================
 # 🔧 스프레드 가격대별 스케일링
@@ -4147,7 +4138,6 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         f"🎯 현재 임계치: "
                         f"매수비≥{thr.get('GATE_BUY_RATIO_MIN', GATE_BUY_RATIO_MIN):.0%} "
                         f"스프레드≤{thr.get('GATE_SPREAD_MAX', GATE_SPREAD_MAX):.2f}% "
-                        f"회전≥{thr.get('GATE_TURN_MIN', GATE_TURN_MIN):.1f}% "
                         f"임밸≥{thr.get('GATE_IMBALANCE_MIN', GATE_IMBALANCE_MIN):.2f} "
                         f"급등≤{thr.get('GATE_SURGE_MAX', GATE_SURGE_MAX):.1f}x "
                         f"가속≥{thr.get('GATE_ACCEL_MIN', GATE_ACCEL_MIN):.2f}x"
@@ -4520,10 +4510,10 @@ def analyze_and_update_weights():
     - 승리/패배 그룹 간 피처 분포 분석
     - GATE_* 전역 변수 조절
     """
-    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_IMBALANCE_MIN, GATE_OVERHEAT_MAX, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
 
     if not os.path.exists(TRADE_LOG_PATH):
         print("[AUTO_LEARN] 거래 로그 없음")
@@ -4580,7 +4570,6 @@ def analyze_and_update_weights():
         old_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
-            "GATE_TURN_MIN": GATE_TURN_MIN,
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
@@ -4611,17 +4600,6 @@ def analyze_and_update_weights():
                 changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
                 if AUTO_LEARN_APPLY:
                     GATE_SPREAD_MAX = new_val
-
-        # 회전율: 승자 > 패자면 상향
-        if "turn" in stats:
-            w, l = stats["turn"]["win"], stats["turn"]["lose"]
-            if w > l:
-                target = max(1.0, w * 0.8)
-                new_val = round(GATE_TURN_MIN * (1 - BLEND) + target * BLEND, 2)
-                new_val = max(1.0, min(10.0, new_val))
-                changes["GATE_TURN_MIN"] = round(new_val - GATE_TURN_MIN, 2)
-                if AUTO_LEARN_APPLY:
-                    GATE_TURN_MIN = new_val
 
         # 임밸런스: 승자 > 패자면 상향
         if "imbalance" in stats:
@@ -4681,15 +4659,12 @@ def analyze_and_update_weights():
         new_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
-            "GATE_TURN_MIN": GATE_TURN_MIN,
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
             "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
             "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
             "GATE_VOL_MIN": GATE_VOL_MIN,
-            "GATE_SURGE_MIN": GATE_SURGE_MIN,
-            "GATE_PRICE_MIN": GATE_PRICE_MIN,
         }
 
         # 🔧 FIX: 원자적 쓰기 (크래시 시 학습 데이터 손실 방지)
@@ -5017,10 +4992,10 @@ def load_learned_weights():
     - 현행: "gate_thresholds"가 있으면 GATE_* 임계치 복원
     """
     global SCORE_WEIGHTS
-    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
     global DYN_SL_MIN, DYN_SL_MAX, HARD_STOP_DD, TRAIL_DISTANCE_MIN_BASE
 
     if not os.path.exists(WEIGHTS_PATH):
@@ -5039,7 +5014,6 @@ def load_learned_weights():
         # (현행) 게이트 임계치 복원
         thr = data.get("gate_thresholds")
         if isinstance(thr, dict):
-            GATE_TURN_MIN      = thr.get("GATE_TURN_MIN",      GATE_TURN_MIN)
             GATE_TURN_MAX      = thr.get("GATE_TURN_MAX",      GATE_TURN_MAX)
             GATE_SPREAD_MAX    = thr.get("GATE_SPREAD_MAX",    GATE_SPREAD_MAX)
             GATE_ACCEL_MIN     = thr.get("GATE_ACCEL_MIN",     GATE_ACCEL_MIN)
@@ -5048,12 +5022,7 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
-            # 🔧 아래 4개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
-            # GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
-            # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
-            # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
-            # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
-            print(f"[WEIGHTS] 게이트 임계치 로드 (VOL/PRICE는 코드값 우선): {thr}")
+            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
@@ -7688,15 +7657,14 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     - 학습/튜닝 포인트: GATE_* 변수 하나
 
     [전역 변수 임계치 사용 - 자동학습 대상]
-    - GATE_TURN_MIN: 회전율 하한
     - GATE_SPREAD_MAX: 스프레드 상한
-    - GATE_ACCEL_MIN: 가속도 하한
+    - GATE_ACCEL_MIN/MAX: 가속도 범위
     - GATE_BUY_RATIO_MIN: 매수비 하한
     - GATE_IMBALANCE_MIN: 호가 임밸런스 하한
     - GATE_VOL_MIN: 거래대금 하한
-    - GATE_SURGE_MIN: 거래량급등 하한
-    - GATE_PRICE_MIN: 가격변동 하한
     - GATE_FRESH_AGE_MAX: 틱신선도 상한(초)
+    - GATE_BODY_MIN: 캔들 바디 하한 (📊 180신호분석)
+    - GATE_UW_RATIO_MIN: 윗꼬리 하한 (📊 180신호분석)
 
     [로그 형식 통일]
     - 컷 메시지: "항목 현재값<기준값" 또는 "현재값>기준값"
@@ -8300,16 +8268,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🛑 거래량 서지 체크 (🔧 독립경로 면제: 플래그만 저장, 지연 판정)
     _vol_surge_low = (not mega and vol_surge < 0.65)
 
-    # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
-    shadow_flags = []
-    if cv is not None and cv > 2.2:
-        shadow_flags.append("CV22")
-    if turn_pct >= 12 and (cons_buys > 18 or overheat > 3):
-        shadow_flags.append("TURNxCONS/HEAT")
-    if accel >= 3.0 and not (imbalance >= 0.40 and spread <= 0.12):
-        shadow_flags.append("ACCEL_WEAK_CTX")
-    would_cut = len(shadow_flags) > 0
-
     # 🔧 데이터 기반 필터: 연속매수 (독립경로 면제: 플래그만 저장, 지연 판정)
     _consec_low = (cons_buys < GATE_CONSEC_MIN)
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
@@ -8724,9 +8682,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "gate_reason": gate_reason,
         # 🔥 경로 표시: signal_tag 하나로 통일 (점화3, EMA↑, 고점↑, 거래량↑ 등)
         "signal_tag": signal_tag,
-        # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
-        "shadow_flags": ",".join(shadow_flags) if shadow_flags else "",
-        "would_cut": would_cut,
+        "shadow_flags": "",
+        "would_cut": False,
         "cv": cv,
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
