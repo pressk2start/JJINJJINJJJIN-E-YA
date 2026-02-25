@@ -2338,7 +2338,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     "imbalance": imbalance,
                     "volume_surge": pre.get("volume_surge", 1.0),
                     "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
-                    "score": pre.get("score", 0),
+                    "score": pre.get("ignition_score", 0),
                     "entry_mode": entry_mode,
                     "signal_tag": pre.get("signal_tag", "기본"),
                     "filter_type": pre.get("filter_type", "stage1_gate"),
@@ -3721,7 +3721,6 @@ GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과�
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
-GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
 ## (제거됨) GATE_CV_MAX: CV_HIGH 필터 삭제 → 스푸핑 필터 + overheat가 커버
 GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
@@ -4300,7 +4299,6 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             imbal = row.get("imbalance", 0) or 0
             spread = row.get("spread", 0) or 0
             vol_surge = row.get("volume_surge", 0) or 0
-            score = row.get("score", 0) or 0
             hold = row.get("hold_sec", 0) or 0
 
             # 🔥 새 지표
