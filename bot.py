@@ -3694,10 +3694,10 @@ GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
-GATE_ACCEL_MAX = 5.0      # 🔧 before1 복원: 5.0 (폭발적 유입 진입 허용, 과도한 차단 해제)
+GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
 GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
-GATE_SURGE_MAX = 20.0     # 🔧 수익성패치: 100→20배 (펌프앤덤프 차단)
-GATE_OVERHEAT_MAX = 18.0  # 🔧 알람복구: 15→18 (15는 정상 급등도 과열로 차단, 18이면 진짜 과열만 필터)
+GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
+GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 6       # 🔧 승률개선: 4→6 (데이터: 승8.0 vs 패4.43 → 패자 기준 4 사용 중이던 것을 승자 기준으로 강화)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
@@ -3705,14 +3705,14 @@ GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관�
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
-GATE_STRONGBREAK_ACCEL_MAX = 2.5  # 🔧 승률개선: 3.5→2.5 (가속 3.5x는 이미 피크 → 꼭대기 진입)
+GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 차트분석: 2.5→3.5 (진짜 돌파는 accel 3-4x, 2.5로 막으면 손실)
 GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
 GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
-GATE_IGNITION_ACCEL_MIN = 1.3     # 🔧 승률개선: 1.1→1.3 (1.1x는 거의 평탄, 진짜 점화는 1.3x+ 가속)
+GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
 GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
 GATE_CV_MAX = 3.5         # 🔧 알람복구: 3.0→3.5 (3.0은 정상 알트도 차단, 3.5이면 극단적 불규칙만 필터)
-GATE_FRESH_AGE_MAX = 7.5  # 🔧 틱 신선도 상한 (초) - before1 기준 (저유동성 시간대 대응)
+GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
 GATE_PSTD_MAX = 0.20      # 🔧 알람복구: 0.12→0.20 (0.12는 정상 알트 변동도 차단, 0.20이면 과도한 노이즈만 필터)
 GATE_PSTD_STRONGBREAK_MAX = 0.12  # 🔧 알람복구: 0.08→0.12 (강돌파는 약간의 변동성 동반이 정상)
@@ -6766,13 +6766,14 @@ def circle_check_entry(m):
             entry_pre = dict(original_pre)
             entry_pre["circle_entry"] = True
             entry_pre["is_circle"] = True  # 🔧 FIX: final_price_guard/pullback 분기용 플래그
+            entry_pre["is_surge_circle"] = watch.get("is_surge_circle", False)  # 🔧 차트분석: 폭발진입 플래그
             entry_pre["circle_state_path"] = "armed→pullback→reclaim→rebreak"
             entry_pre["circle_candles"] = candle_count
             entry_pre["circle_pullback_pct"] = pullback_pct_hist
             entry_pre["circle_ign_high"] = ign_high
             entry_pre["circle_reclaim_price"] = watch.get("reclaim_price", 0)
             entry_pre["price"] = cur_price
-            entry_pre["entry_mode"] = CIRCLE_ENTRY_MODE
+            entry_pre["entry_mode"] = "full" if watch.get("is_surge_circle") else CIRCLE_ENTRY_MODE  # 🔧 차트분석: 폭발진입은 full size
             # 🔧 FIX: 동그라미 전용 메타데이터 (TP/SL/매도 로직 분기용)
             entry_pre["signal_tag"] = "⭕동그라미"
             entry_pre["trade_type"] = "runner"   # 재돌파는 추세연장 성향
@@ -6793,6 +6794,26 @@ def circle_check_entry(m):
     # 🔧 FIX: 재돌파 시 현재 캔들이 양봉이어야 함 (음봉 윗꼬리 돌파 = 페이크)
     cur_candle_green = (cur_candle["trade_price"] > cur_candle["opening_price"])
     if state == "reclaim" and state_dwell >= CIRCLE_STATE_MIN_DWELL_SEC and cur_price >= rebreak_level and cur_candle_green:
+        # === 🔧 차트분석: 폭발 종목 감지 (HOLO/STEEM형 9시 급등) ===
+        # 실측: vol 45~1570x, 직전 1분 vol 2~5x 선행, 피크까지 2-4봉(10-20분), 피크 +6.6~13.3%
+        # 동그라미 rebreak 시 "폭발"이면 품질점수 무시하고 즉시 진입
+        _is_surge_circle = False
+        try:
+            _sc_c1 = get_minutes_candles(1, m, 5)
+            if _sc_c1 and len(_sc_c1) >= 3:
+                _sc_cur_vol = _sc_c1[-1].get("candle_acc_trade_price", 0)
+                _sc_prev_avg = sum(c.get("candle_acc_trade_price", 0) for c in _sc_c1[:-1]) / max(len(_sc_c1)-1, 1)
+                _sc_vol_spike = _sc_cur_vol / max(_sc_prev_avg, 1)
+                _sc_body = abs(_sc_c1[-1].get("trade_price",0) - _sc_c1[-1].get("opening_price",0)) / max(_sc_c1[-1].get("opening_price",1), 1) * 100
+
+                # 폭발 조건: vol 20x+ AND body 2%+ (HOLO: 1570x+8.96%, STEEM: 45x+8.75%)
+                if _sc_vol_spike >= 20 and _sc_body >= 2.0:
+                    _is_surge_circle = True
+                    print(f"[CIRCLE_SURGE] {m} 폭발감지! vol {_sc_vol_spike:.0f}x body {_sc_body:.2f}% → 품질점수 무시 즉시진입")
+                    # 폭발 시 full 사이즈 (일반 동그라미는 half)
+        except Exception:
+            pass
+
         rebreak_score = 0
         rebreak_details = []
 
@@ -6911,9 +6932,10 @@ def circle_check_entry(m):
         with _CIRCLE_LOCK:
             watch = _CIRCLE_WATCHLIST.get(m)
             if watch and watch["state"] == "reclaim":
-                if rebreak_score >= CIRCLE_REBREAK_MIN_SCORE and _circle_vwap_ok and _circle_noise_ok:
+                if (_is_surge_circle or rebreak_score >= CIRCLE_REBREAK_MIN_SCORE) and _circle_vwap_ok and _circle_noise_ok:
                     watch["state"] = "ready"
                     watch["state_ts"] = time.time()
+                    watch["is_surge_circle"] = _is_surge_circle  # 🔧 차트분석: 폭발진입 플래그 저장
                     print(
                         f"[CIRCLE] ⭕ {m} 재돌파 확인 ✓ | 현재 {cur_price:,.0f} ≥ 몸통상단 {rebreak_level:,.0f} "
                         f"| 품질 {rebreak_score}/5 ({','.join(rebreak_details)}) "
@@ -7639,7 +7661,7 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  consecutive_buys=0, cv=0.0, overheat=0.0,
                  pstd=0.0, market="",
                  candle_body_pct=0.0, green_streak=0,
-                 ema20_val=None):
+                 ema20_val=None, circle_surge=False):
     """
     1단계 진입 게이트: 단일 통합 필터 (점화 통합)
 
@@ -7729,8 +7751,11 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<-0.10 (매도우위) | {metrics}"
 
     # 7) 급등 상한 안전장치
-    if volume_surge > GATE_SURGE_MAX:
+    # 🔧 차트분석: circle_surge면 GATE_SURGE_MAX 우회 (HOLO/STEEM형 폭발 진입 허용)
+    if volume_surge > GATE_SURGE_MAX and not circle_surge:
         return False, f"[하드컷] 급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x | {metrics}"
+    elif volume_surge > GATE_SURGE_MAX and circle_surge:
+        print(f"  [SURGE_OVERRIDE] {market} 급등({volume_surge:.0f}x)>기준({GATE_SURGE_MAX}x) → circle_surge 우회 통과")
 
     # 7) 과회전 상한 (메이저/알트 구분)
     # 🔧 FIX: substring → exact match (ETHFI, BTCST 등 오탐 방지)
@@ -9958,6 +9983,24 @@ def monitor_position(m,
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
             # 🔧 실패돌파/스크래치/횡보탈출/고점미갱신: before1 비활성화 상태 유지
             # (향후 필요시 git history 참고)
+
+            # 🔧 차트분석: 폭발진입은 피크 후 급락 (-4.6~6.4%) → 빠른 익절
+            if pos.get("is_surge_circle") and alive_sec >= 300:  # 5분 이상 경과
+                if cur_gain > 0.02:  # 2% 이상 수익
+                    # 볼륨 감소 감지 (피크아웃)
+                    try:
+                        _sc_recent = get_recent_ticks(m, 30)
+                        if _sc_recent and len(_sc_recent) >= 10:
+                            _sc_rv = sum(t.get("trade_price",0) * t.get("trade_volume",0) for t in _sc_recent[:5])
+                            _sc_pv = sum(t.get("trade_price",0) * t.get("trade_volume",0) for t in _sc_recent[5:10])
+                            if _sc_pv > 0 and _sc_rv < _sc_pv * 0.5:  # 거래량 50% 감소
+                                print(f"[SURGE_PEAK_EXIT] {m} 폭발익절 {cur_gain*100:.2f}% (vol감소)")
+                                close_auto_position(m, f"폭발익절 | +{cur_gain*100:.2f}% | 볼륨감소(피크아웃)")
+                                _already_closed = True
+                                verdict = "SURGE_PEAK_EXIT"
+                                break
+                    except Exception:
+                        pass
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
