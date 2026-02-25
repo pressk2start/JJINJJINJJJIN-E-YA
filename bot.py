@@ -6141,10 +6141,6 @@ def check_retest_entry(m):
     if not RETEST_MODE_ENABLED:
         return None
 
-    # 🔧 승률개선: 야간 + 코인별 연패 체크
-    _h = now_kst().hour
-    if 0 <= _h < 7:
-        return None
     if is_coin_loss_cooldown(m):
         return None
 
@@ -6472,10 +6468,6 @@ def circle_check_entry(m):
     if not CIRCLE_ENTRY_ENABLED:
         return None
 
-    # 🔧 승률개선: 야간 + 코인별 연패 체크
-    _h = now_kst().hour
-    if 0 <= _h < 7:
-        return None
     if is_coin_loss_cooldown(m):
         return None
 
@@ -7105,10 +7097,6 @@ def box_check_entry(m):
     if not BOX_ENABLED:
         return None
 
-    # 🔧 승률개선: 야간 + 코인별 연패 체크
-    _h = now_kst().hour
-    if 0 <= _h < 7:
-        return None
     if is_coin_loss_cooldown(m):
         return None
 
@@ -7916,13 +7904,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
-    # === 🔧 승률개선: 야간 진입 차단 (00~07 KST) ===
-    # 야간은 유동성 극감 → 스프레드 확대, 가짜 돌파, 휩쏘 빈발
-    # 점화(ignition)도 야간에는 노이즈일 확률 높음 → 전면 차단
     _hour_kst = now_kst().hour
-    if 0 <= _hour_kst < 7:
-        cut("NIGHT_BLOCK", f"{m} 야간진입차단 {_hour_kst}시 (00~07 KST 유동성부족)", near_miss=False)
-        return None
 
     # === 🔧 v7: 오후(12-18시) half 페널티 — 172샘플 시간대 분석 ===
     # 📊 오후: n=43 avg+0.167% wr28% (최악) vs 오전: n=27 avg+0.677% wr59% (최고)
