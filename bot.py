@@ -154,7 +154,7 @@ FEE_RATE = FEE_RATE_ROUNDTRIP  # 하위 호환용
 
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
-POSTCHECK_ENABLED = True      # 🔧 승률개선: 포스트체크 활성화 (가짜 돌파 3~6초 검증)
+POSTCHECK_ENABLED = False     # 🔧 비활성화: 포스트체크 끔 (진입 지연 + 기회손실 > 가짜돌파 차단 이득)
 EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
 
 # --- 환경변수(.env 지원) ---
@@ -1289,204 +1289,226 @@ def sync_orphan_positions():
             # 🔥 유령 포지션 발견! (2사이클 연속 존재 + OPEN_POSITIONS에 없음)
             print(f"[ORPHAN] {market} 유령 포지션 발견! 잔고={balance:.4f} 평단={avg_buy_price:.2f}")
 
-            # 현재가 조회
+            # 🔧 FIX: 개별 orphan 처리를 try/except로 격리 (한 종목 에러가 나머지 종목 처리를 막지 않게)
             try:
-                cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
-                cur_price = cur_js[0].get("trade_price", avg_buy_price) if cur_js and len(cur_js) > 0 else avg_buy_price  # 🔧 FIX: 빈 배열 방어
-            except Exception:
-                cur_price = avg_buy_price
-
-            # 수익률 계산
-            pnl_pct = ((cur_price / avg_buy_price) - 1.0) * 100 if avg_buy_price > 0 else 0
-
-            # 🔧 FIX: OPEN_POSITIONS에 추가 전 한번 더 확인 (race condition 방지)
-            with _POSITION_LOCK:
-                if market in OPEN_POSITIONS:
-                    print(f"[ORPHAN] {market} 이미 OPEN_POSITIONS에 있음 (race 방지) → 스킵")
-                    continue
-
-            # 🔧 FIX: API/계산을 락 밖에서 수행 (데드락 방지 — 락 안 네트워크 호출 금지)
-            _orphan_c1 = get_minutes_candles(1, market, 20)
-            _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1, market=market)
-            _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
-            _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
-
-            with _POSITION_LOCK:
-                if market in OPEN_POSITIONS:
-                    print(f"[ORPHAN] {market} 계산 중 다른 곳에서 추가됨 → 스킵")
-                    continue
-                OPEN_POSITIONS[market] = {
-                    "state": "open",
-                    "entry_price": avg_buy_price,
-                    "volume": balance,
-                    "stop": _orphan_stop,
-                    "sl_pct": _orphan_sl_pct_val,
-                    "entry_atr_pct": round(_orphan_atr_pct, 4),
-                    "entry_mode": "orphan",
-                    "ts": now,
-                    "entry_ts": now,
-                    "orphan_detected": True,
-                }
-
-            # 텔레그램 알림
-            tg_send(
-                f"👻 유령 포지션 감지!\n"
-                f"• {market}\n"
-                f"• 평단: {fmt6(avg_buy_price)}원\n"
-                f"• 현재가: {fmt6(cur_price)}원 ({pnl_pct:+.2f}%)\n"
-                f"• 수량: {balance:.6f}\n"
-                f"• SL: {_orphan_sl_pct_val*100:.2f}% | ATR: {_orphan_atr_pct:.3f}%\n"
-                f"→ 모니터링 시작 (ATR 손절 적용)"
-            )
-
-            # 🔧 처리 완료 표시 (반복 알림 방지) - 먼저 표시
-            with _ORPHAN_LOCK:
-                _ORPHAN_HANDLED.add(market)
-
-            # 🔧 FIX: orphan 즉시 손절 → DYN_SL_MIN 연동 (0.6% 하드코딩 제거)
-            # - 기존: -0.6% 고정 → 정상 눌림도 강제청산 (승률 하락)
-            # - 수정: DYN_SL_MIN(1.0%) 기준으로 판단 (본전략 SL과 일관)
-            _orphan_sl_pct = DYN_SL_MIN * 100  # 1.0%
-            if pnl_pct <= -_orphan_sl_pct:
-                print(f"[ORPHAN] {market} 이미 손절선 이하 ({pnl_pct:.2f}%) → 즉시 청산")
+                # 현재가 조회
                 try:
-                    close_auto_position(market, f"유령포지션 손절 | 감지 즉시 {pnl_pct:.2f}%")
-                except Exception as e:
-                    print(f"[ORPHAN_CLOSE_ERR] {market}: {e}")
-                    # 🔧 청산 실패 시 OPEN_POSITIONS에서 제거 (다음 동기화에서 재시도)
-                    with _POSITION_LOCK:
-                        OPEN_POSITIONS.pop(market, None)
-                    with _ORPHAN_LOCK:
-                        _ORPHAN_HANDLED.discard(market)
-            else:
-                # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
-                with _MONITOR_LOCK:
-                    existing_thread = _ACTIVE_MONITORS.get(market)
-                    if existing_thread is not None:
-                        # 🔧 FIX: 스레드가 살아있는지 확인 (is_alive)
-                        if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
-                            print(f"[ORPHAN_SKIP] {market} 이미 모니터링 중 → 스레드 생성 스킵")
-                            continue
-                        # 죽은 스레드면 정리하고 새로 시작
-                        print(f"[ORPHAN_CLEANUP] {market} 죽은 모니터 스레드 정리")
-                        _ACTIVE_MONITORS.pop(market, None)
+                    cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market})
+                    cur_price = cur_js[0].get("trade_price", avg_buy_price) if cur_js and len(cur_js) > 0 else avg_buy_price  # 🔧 FIX: 빈 배열 방어
+                except Exception:
+                    cur_price = avg_buy_price
 
-                # 🔧 FIX: 박스 포지션인지 감지 (박스모니터 복구용)
-                _is_box_orphan = False
-                _box_orphan_info = None
-                with _BOX_LOCK:
-                    # 1) _BOX_WATCHLIST에 아직 있는 경우 (워치리스트는 남아있지만 모니터 죽은 경우)
-                    _bw = _BOX_WATCHLIST.get(market)
-                    if _bw and _bw.get("state") == "holding":
-                        _is_box_orphan = True
-                        _box_orphan_info = {
-                            "box_high": _bw.get("box_high", 0),
-                            "box_low": _bw.get("box_low", 0),
-                            "box_tp": _bw.get("box_high", 0),  # TP = 상단
-                            "box_stop": _bw.get("box_low", 0) * 0.995,  # SL = 하단 -0.5%
-                            "range_pct": _bw.get("range_pct", 0),
-                        }
-                    # 2) _BOX_LAST_EXIT에 최근 기록 (1800초 이내) → 박스 매도 실패로 유령화
-                    elif market in _BOX_LAST_EXIT and (now - _BOX_LAST_EXIT[market]) < 1800:
-                        _is_box_orphan = True
-                # 3) 박스 정보 없으면 실시간 박스 감지 시도 (BOX_LAST_EXIT 이력만 있는 경우 포함)
-                if not _box_orphan_info:
-                    try:
-                        _orphan_c1_box = get_minutes_candles(1, market, 60)
-                        if _orphan_c1_box:
-                            _box_is, _box_det = detect_box_range(_orphan_c1_box)
-                            if _box_is and _box_det:
-                                _is_box_orphan = True
-                                _box_orphan_info = {
-                                    "box_high": _box_det["box_high"],
-                                    "box_low": _box_det["box_low"],
-                                    "box_tp": _box_det["box_high"],
-                                    "box_stop": _box_det["box_low"] * 0.995,
-                                    "range_pct": _box_det.get("range_pct", 0),
-                                }
-                    except Exception:
-                        pass
+                # 수익률 계산
+                pnl_pct = ((cur_price / avg_buy_price) - 1.0) * 100 if avg_buy_price > 0 else 0
 
-                # 모니터링 스레드 시작
-                def _orphan_monitor(m, entry_price, _is_box=_is_box_orphan, _box_info=_box_orphan_info):
-                    try:
-                        # 🔧 FIX: 박스 유령 포지션 → box_monitor_position으로 복구 (시간만료 없음)
-                        if _is_box and _box_info:
-                            with _POSITION_LOCK:
-                                _opos = OPEN_POSITIONS.get(m, {})
-                                _opos["strategy"] = "box"
-                                if m in OPEN_POSITIONS:
-                                    OPEN_POSITIONS[m] = _opos
-                            _orphan_vol = _opos.get("volume", 0)
-                            if _orphan_vol <= 0:
-                                _orphan_vol = get_balance_with_locked(m)
-                            print(f"[ORPHAN] 📦 {m} 박스 포지션 복구 → box_monitor_position 시작")
-                            tg_send(f"📦 {m} 유령 → 박스 모니터 복구\n• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])}")
-                            box_monitor_position(m, entry_price, _orphan_vol, _box_info)
-                            return
+                # 🔧 FIX: OPEN_POSITIONS에 추가 전 한번 더 확인 (race condition 방지)
+                with _POSITION_LOCK:
+                    if market in OPEN_POSITIONS:
+                        print(f"[ORPHAN] {market} 이미 OPEN_POSITIONS에 있음 (race 방지) → 스킵")
+                        continue
 
-                        # 일반 유령 포지션 → 기존 로직
-                        # 🔧 FIX: dummy_pre를 실제 데이터로 보강 (기존: 모든 파라미터 0 → 모니터링 무력화)
-                        # OPEN_POSITIONS에 저장된 원본 데이터 복원 시도
-                        with _POSITION_LOCK:
-                            _orphan_pos = OPEN_POSITIONS.get(m, {})
-                        _orphan_signal_type = _orphan_pos.get("signal_type", "normal")
-                        _orphan_trade_type = _orphan_pos.get("trade_type", "scalp")
-                        _orphan_signal_tag = _orphan_pos.get("signal_tag", "유령복구")
-                        # 실시간 호가/틱 데이터 조회
-                        _orphan_ticks = get_recent_ticks(m, 100) or []
-                        _orphan_t15 = micro_tape_stats_from_ticks(_orphan_ticks, 15) if _orphan_ticks else {
-                            "buy_ratio": 0.5, "krw": 0, "n": 0, "krw_per_sec": 0
-                        }
-                        _orphan_ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
-                        _orphan_ob = {"depth_krw": 10_000_000}
-                        if _orphan_ob_raw and len(_orphan_ob_raw) > 0:
-                            try:
-                                _units = _orphan_ob_raw[0].get("orderbook_units", [])
-                                _depth = sum(u.get("ask_size", 0) * u.get("ask_price", 0) + u.get("bid_size", 0) * u.get("bid_price", 0) for u in _units[:5])
-                                _orphan_ob = {"depth_krw": _depth, "raw": _orphan_ob_raw[0]}
-                            except Exception:
-                                pass
-                        dummy_pre = {
-                            "price": entry_price,
-                            "ob": _orphan_ob,
-                            "tape": _orphan_t15,
-                            "ticks": _orphan_ticks,
-                            "signal_type": _orphan_signal_type,
-                            "trade_type": _orphan_trade_type,
-                            "signal_tag": _orphan_signal_tag,
-                        }
-                        remonitor_until_close(m, entry_price, dummy_pre, tight_mode=False)
-                    except Exception as e:
-                        print(f"[ORPHAN_ERR] {m} 모니터링 에러: {e}")
-                        # 🔧 FIX: 예외 발생 시 알람 + 잔고 확인 후 정리
+                # 🔧 FIX: API/계산을 락 밖에서 수행 (데드락 방지 — 락 안 네트워크 호출 금지)
+                _orphan_c1 = get_minutes_candles(1, market, 20)
+                _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1, market=market)
+                _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
+                _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
+
+                with _POSITION_LOCK:
+                    if market in OPEN_POSITIONS:
+                        print(f"[ORPHAN] {market} 계산 중 다른 곳에서 추가됨 → 스킵")
+                        continue
+                    OPEN_POSITIONS[market] = {
+                        "state": "open",
+                        "entry_price": avg_buy_price,
+                        "volume": balance,
+                        "stop": _orphan_stop,
+                        "sl_pct": _orphan_sl_pct_val,
+                        "entry_atr_pct": round(_orphan_atr_pct, 4),
+                        "entry_mode": "orphan",
+                        "ts": now,
+                        "entry_ts": now,
+                        "orphan_detected": True,
+                        # 🔧 FIX: 튜닝 데이터 필드 초기화 (청산 알람 0값 방지)
+                        "entry_pstd": 0.0,
+                        "mfe_pct": 0.0,
+                        "mae_pct": 0.0,
+                        "mfe_sec": 0,
+                        "trail_dist": 0.0,
+                        "trail_stop_pct": 0.0,
+                    }
+
+                # 텔레그램 알림
+                tg_send(
+                    f"👻 유령 포지션 감지!\n"
+                    f"• {market}\n"
+                    f"• 평단: {fmt6(avg_buy_price)}원\n"
+                    f"• 현재가: {fmt6(cur_price)}원 ({pnl_pct:+.2f}%)\n"
+                    f"• 수량: {balance:.6f}\n"
+                    f"• SL: {_orphan_sl_pct_val*100:.2f}% | ATR: {_orphan_atr_pct:.3f}%\n"
+                    f"→ 모니터링 시작 (ATR 손절 적용)"
+                )
+
+                # 🔧 처리 완료 표시 (반복 알림 방지) - 먼저 표시
+                with _ORPHAN_LOCK:
+                    _ORPHAN_HANDLED.add(market)
+
+                # 🔧 FIX: orphan 즉시 손절 → DYN_SL_MIN 연동 (0.6% 하드코딩 제거)
+                # - 기존: -0.6% 고정 → 정상 눌림도 강제청산 (승률 하락)
+                # - 수정: DYN_SL_MIN(1.0%) 기준으로 판단 (본전략 SL과 일관)
+                _orphan_sl_pct = DYN_SL_MIN * 100  # 1.0%
+                if pnl_pct <= -_orphan_sl_pct:
+                    print(f"[ORPHAN] {market} 이미 손절선 이하 ({pnl_pct:.2f}%) → 즉시 청산")
+                    # 🔧 FIX: 즉시 손절을 별도 스레드에서 실행 (블로킹 방지 → 다른 종목 처리 지연 제거)
+                    def _orphan_close_now(_m=market, _pnl=pnl_pct):
                         try:
-                            actual = get_balance_with_locked(m)
-                            # 🔧 FIX: -1 = 조회 실패 → 포지션 유지 (오탐 방지)
-                            if actual < 0:
-                                tg_send(f"⚠️ {m} 유령포지션 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
-                            elif actual <= 1e-12:
-                                tg_send(f"⚠️ {m} 유령포지션 오류 (이미 청산됨)\n• 예외: {e}")
-                                with _POSITION_LOCK:
-                                    OPEN_POSITIONS.pop(m, None)
-                                with _ORPHAN_LOCK:
-                                    _ORPHAN_HANDLED.discard(m)
-                            else:
-                                tg_send(f"🚨 {m} 유령포지션 오류 → 청산 시도\n• 예외: {e}")
-                                close_auto_position(m, f"유령모니터링예외 | {e}")
-                        except Exception:
-                            tg_send(f"🚨 {m} 유령포지션 오류\n• 예외: {e}")
-                    finally:
-                        # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
-                        with _MONITOR_LOCK:
-                            _ACTIVE_MONITORS.pop(m, None)
+                            close_auto_position(_m, f"유령포지션 손절 | 감지 즉시 {_pnl:.2f}%")
+                        except Exception as e:
+                            print(f"[ORPHAN_CLOSE_ERR] {_m}: {e}")
+                            with _POSITION_LOCK:
+                                OPEN_POSITIONS.pop(_m, None)
+                            with _ORPHAN_LOCK:
+                                _ORPHAN_HANDLED.discard(_m)
+                    threading.Thread(target=_orphan_close_now, daemon=True).start()
+                else:
+                    # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
+                    with _MONITOR_LOCK:
+                        existing_thread = _ACTIVE_MONITORS.get(market)
+                        if existing_thread is not None:
+                            # 🔧 FIX: 스레드가 살아있는지 확인 (is_alive)
+                            if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
+                                print(f"[ORPHAN_SKIP] {market} 이미 모니터링 중 → 스레드 생성 스킵")
+                                continue
+                            # 죽은 스레드면 정리하고 새로 시작
+                            print(f"[ORPHAN_CLEANUP] {market} 죽은 모니터 스레드 정리")
+                            _ACTIVE_MONITORS.pop(market, None)
 
-                t = threading.Thread(target=_orphan_monitor, args=(market, avg_buy_price), daemon=True)
-                t.start()
-                # 🔧 FIX: 스레드 객체 저장 (ident 대신)
-                with _MONITOR_LOCK:
-                    _ACTIVE_MONITORS[market] = t
-                print(f"[ORPHAN] {market} 모니터링 스레드 시작")
+                    # 🔧 FIX: 박스 포지션인지 감지 (박스모니터 복구용)
+                    _is_box_orphan = False
+                    _box_orphan_info = None
+                    with _BOX_LOCK:
+                        # 1) _BOX_WATCHLIST에 아직 있는 경우 (워치리스트는 남아있지만 모니터 죽은 경우)
+                        _bw = _BOX_WATCHLIST.get(market)
+                        if _bw and _bw.get("state") == "holding":
+                            _is_box_orphan = True
+                            _box_orphan_info = {
+                                "box_high": _bw.get("box_high", 0),
+                                "box_low": _bw.get("box_low", 0),
+                                "box_tp": _bw.get("box_high", 0),  # TP = 상단
+                                "box_stop": _bw.get("box_low", 0) * 0.995,  # SL = 하단 -0.5%
+                                "range_pct": _bw.get("range_pct", 0),
+                            }
+                        # 2) _BOX_LAST_EXIT에 최근 기록 (1800초 이내) → 박스 매도 실패로 유령화
+                        elif market in _BOX_LAST_EXIT and (now - _BOX_LAST_EXIT[market]) < 1800:
+                            _is_box_orphan = True
+                    # 3) 박스 정보 없으면 실시간 박스 감지 시도 (BOX_LAST_EXIT 이력만 있는 경우 포함)
+                    if not _box_orphan_info:
+                        try:
+                            _orphan_c1_box = get_minutes_candles(1, market, 60)
+                            if _orphan_c1_box:
+                                _box_is, _box_det = detect_box_range(_orphan_c1_box)
+                                if _box_is and _box_det:
+                                    _is_box_orphan = True
+                                    _box_orphan_info = {
+                                        "box_high": _box_det["box_high"],
+                                        "box_low": _box_det["box_low"],
+                                        "box_tp": _box_det["box_high"],
+                                        "box_stop": _box_det["box_low"] * 0.995,
+                                        "range_pct": _box_det.get("range_pct", 0),
+                                    }
+                        except Exception:
+                            pass
+
+                    # 모니터링 스레드 시작
+                    def _orphan_monitor(m, entry_price, _is_box=_is_box_orphan, _box_info=_box_orphan_info):
+                        try:
+                            # 🔧 FIX: 박스 유령 포지션 → box_monitor_position으로 복구 (시간만료 없음)
+                            if _is_box and _box_info:
+                                with _POSITION_LOCK:
+                                    _opos = OPEN_POSITIONS.get(m, {})
+                                    _opos["strategy"] = "box"
+                                    if m in OPEN_POSITIONS:
+                                        OPEN_POSITIONS[m] = _opos
+                                _orphan_vol = _opos.get("volume", 0)
+                                if _orphan_vol <= 0:
+                                    _orphan_vol = get_balance_with_locked(m)
+                                print(f"[ORPHAN] 📦 {m} 박스 포지션 복구 → box_monitor_position 시작")
+                                tg_send(f"📦 {m} 유령 → 박스 모니터 복구\n• 박스: {fmt6(_box_info['box_low'])}~{fmt6(_box_info['box_high'])}")
+                                box_monitor_position(m, entry_price, _orphan_vol, _box_info)
+                                return
+
+                            # 일반 유령 포지션 → 기존 로직
+                            # 🔧 FIX: dummy_pre를 실제 데이터로 보강 (기존: 모든 파라미터 0 → 모니터링 무력화)
+                            # OPEN_POSITIONS에 저장된 원본 데이터 복원 시도
+                            with _POSITION_LOCK:
+                                _orphan_pos = OPEN_POSITIONS.get(m, {})
+                            _orphan_signal_type = _orphan_pos.get("signal_type", "normal")
+                            _orphan_trade_type = _orphan_pos.get("trade_type", "scalp")
+                            _orphan_signal_tag = _orphan_pos.get("signal_tag", "유령복구")
+                            # 실시간 호가/틱 데이터 조회
+                            _orphan_ticks = get_recent_ticks(m, 100) or []
+                            _orphan_t15 = micro_tape_stats_from_ticks(_orphan_ticks, 15) if _orphan_ticks else {
+                                "buy_ratio": 0.5, "krw": 0, "n": 0, "krw_per_sec": 0
+                            }
+                            _orphan_ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                            _orphan_ob = {"depth_krw": 10_000_000}
+                            if _orphan_ob_raw and len(_orphan_ob_raw) > 0:
+                                try:
+                                    _units = _orphan_ob_raw[0].get("orderbook_units", [])
+                                    _depth = sum(u.get("ask_size", 0) * u.get("ask_price", 0) + u.get("bid_size", 0) * u.get("bid_price", 0) for u in _units[:5])
+                                    _orphan_ob = {"depth_krw": _depth, "raw": _orphan_ob_raw[0]}
+                                except Exception:
+                                    pass
+                            dummy_pre = {
+                                "price": entry_price,
+                                "ob": _orphan_ob,
+                                "tape": _orphan_t15,
+                                "ticks": _orphan_ticks,
+                                "signal_type": _orphan_signal_type,
+                                "trade_type": _orphan_trade_type,
+                                "signal_tag": _orphan_signal_tag,
+                            }
+                            remonitor_until_close(m, entry_price, dummy_pre, tight_mode=False)
+                        except Exception as e:
+                            print(f"[ORPHAN_ERR] {m} 모니터링 에러: {e}")
+                            # 🔧 FIX: 예외 발생 시 알람 + 잔고 확인 후 정리
+                            try:
+                                actual = get_balance_with_locked(m)
+                                # 🔧 FIX: -1 = 조회 실패 → 포지션 유지 (오탐 방지)
+                                if actual < 0:
+                                    tg_send(f"⚠️ {m} 유령포지션 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
+                                elif actual <= 1e-12:
+                                    tg_send(f"⚠️ {m} 유령포지션 오류 (이미 청산됨)\n• 예외: {e}")
+                                    with _POSITION_LOCK:
+                                        OPEN_POSITIONS.pop(m, None)
+                                    with _ORPHAN_LOCK:
+                                        _ORPHAN_HANDLED.discard(m)
+                                else:
+                                    tg_send(f"🚨 {m} 유령포지션 오류 → 청산 시도\n• 예외: {e}")
+                                    close_auto_position(m, f"유령모니터링예외 | {e}")
+                            except Exception:
+                                tg_send(f"🚨 {m} 유령포지션 오류\n• 예외: {e}")
+                        finally:
+                            # 🔧 FIX: 모니터링 종료 시 활성 목록에서 제거
+                            with _MONITOR_LOCK:
+                                _ACTIVE_MONITORS.pop(m, None)
+
+                    t = threading.Thread(target=_orphan_monitor, args=(market, avg_buy_price), daemon=True)
+                    t.start()
+                    # 🔧 FIX: 스레드 객체 저장 (ident 대신)
+                    with _MONITOR_LOCK:
+                        _ACTIVE_MONITORS[market] = t
+                    print(f"[ORPHAN] {market} 모니터링 스레드 시작")
+
+            except Exception as _orphan_err:
+                # 🔧 FIX: 개별 orphan 처리 에러 격리 (한 종목 에러 → 나머지 종목 계속 처리)
+                print(f"[ORPHAN_PROCESS_ERR] {market} 개별 처리 실패: {_orphan_err}")
+                # 에러 발생 시 해당 종목의 pending 상태 정리
+                with _POSITION_LOCK:
+                    _err_pos = OPEN_POSITIONS.get(market)
+                    if _err_pos and _err_pos.get("orphan_detected"):
+                        OPEN_POSITIONS.pop(market, None)
+                with _ORPHAN_LOCK:
+                    _ORPHAN_HANDLED.discard(market)
 
         # 🔧 청산된 포지션은 _ORPHAN_HANDLED에서 제거 (재매수 시 다시 감지 가능)
         # 🔧 FIX: 락 보호 (compound set 연산 원자성 보장)
@@ -2216,6 +2238,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "box_stop": pre.get("box_stop"),
                 "box_high": pre.get("box_high"),
                 "box_low": pre.get("box_low"),
+                # 🔧 FIX: 튜닝 데이터 필드 초기화 (monitor가 갱신 전 청산 시 0값 방지)
+                "mfe_pct": 0.0,
+                "mae_pct": 0.0,
+                "mfe_sec": 0,
+                "trail_dist": 0.0,
+                "trail_stop_pct": 0.0,
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -2934,8 +2962,18 @@ def close_auto_position(m, reason=""):
             if net_ret_pct <= 0:
                 print(f"[CLOSE_DEBUG] {m} 청산알람 발송 직전 | ret={net_ret_pct:.2f}%(net) vol={vol:.6f} exit_price={exit_price_used}")
 
-            # 🔧 데이터수집: 청산 알람에 손절/트레일 튜닝용 메트릭 추가
-            _pos_data = pos or {}
+            # 🔧 FIX: 청산 알람용 튜닝 데이터는 LIVE 포지션에서 재읽기 (deepcopy는 시작 시점 스냅샷 → 모니터 갱신값 누락)
+            # mark_position_closed() 이후라 OPEN_POSITIONS에서 이미 제거됐을 수 있으므로, deepcopy를 fallback으로 사용
+            with _POSITION_LOCK:
+                _live_pos = OPEN_POSITIONS.get(m) or {}
+            _pos_data = {}
+            # 먼저 deepcopy(pos)의 값으로 초기화, 그 위에 live 값 덮어쓰기 (최신값 우선)
+            if pos:
+                _pos_data.update(pos)
+            if _live_pos:
+                for _tkey in ("mfe_pct", "mae_pct", "mfe_sec", "trail_dist", "trail_stop_pct", "entry_atr_pct", "entry_pstd"):
+                    if _tkey in _live_pos:
+                        _pos_data[_tkey] = _live_pos[_tkey]
             _hold_sec = time.time() - _pos_data.get("entry_ts", time.time())
             _mfe_val = _pos_data.get("mfe_pct", 0.0)
             _mae_val = _pos_data.get("mae_pct", 0.0)
@@ -9006,10 +9044,14 @@ def monitor_position(m,
                     pos_now["mae_pct"] = mae_pct
                     if _mfe_sec is not None:
                         pos_now["mfe_sec"] = round(_mfe_sec, 1)  # 최고점 도달까지 걸린 시간
+                    # 🔧 FIX: trail_dist/trail_stop_pct를 항상 저장 (trail 미무장 시에도 기본값 기록 → 청산 알람 0값 방지)
                     if trail_armed:
-                        # 🔧 FIX: trail_dist_min 대신 실제 trail_dist 저장 (ATR+모멘텀 반영된 실제값)
                         pos_now["trail_dist"] = round((trail_dist if trail_dist > 0 else trail_dist_min) * 100, 3)  # % 단위
                         pos_now["trail_stop_pct"] = round((trail_stop / entry_price - 1.0) * 100, 3) if trail_stop > 0 and entry_price > 0 else 0
+                    else:
+                        # 트레일 미무장이라도 잠재 트레일 거리 기록 (튜닝 참고용)
+                        pos_now["trail_dist"] = round(trail_dist_min * 100, 3)
+                        pos_now["trail_stop_pct"] = 0.0
                     OPEN_POSITIONS[m] = pos_now
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
