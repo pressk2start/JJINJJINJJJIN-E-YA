@@ -3719,7 +3719,7 @@ GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확�
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
 GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
-GATE_CV_MAX = 3.5         # 🔧 알람복구: 3.0→3.5 (3.0은 정상 알트도 차단, 3.5이면 극단적 불규칙만 필터)
+## (제거됨) GATE_CV_MAX: CV_HIGH 필터 삭제 → 스푸핑 필터 + overheat가 커버
 GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
 GATE_PSTD_MAX = 0.20      # 🔧 알람복구: 0.12→0.20 (0.12는 정상 알트 변동도 차단, 0.20이면 과도한 노이즈만 필터)
@@ -8268,13 +8268,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🛑 거래량 서지 체크 (🔧 독립경로 면제: 플래그만 저장, 지연 판정)
     _vol_surge_low = (not mega and vol_surge < 0.65)
 
-    # 🔧 데이터 기반 필터: 연속매수 (독립경로 면제: 플래그만 저장, 지연 판정)
-    _consec_low = (cons_buys < GATE_CONSEC_MIN)
+    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수(0-25)에서 연속매수 평가 → 중복 제거
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
-    # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
-    if cv is not None and cv > GATE_CV_MAX and ia["count"] >= 4:
-        cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
-        return None
+    # 🔧 (제거됨) CV_HIGH: 스푸핑 필터(FAKE_FLOW_HARD)가 극단 CV 체크, overheat가 변동성 커버 → 중복 제거
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
@@ -8329,13 +8325,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
             return None
 
-    # CONSEC_LOW: 점화 or 강돌파 면제 (자체 수급 체크 있음)
-    if _consec_low:
-        if _ign_candidate or _brk_candidate:
-            _bypassed.append(f"CONSEC({cons_buys})")
-        else:
-            cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
-            return None
+    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수에서 연속매수 평가 → 중복 하드컷 제거
 
     if _bypassed:
         print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
@@ -8398,20 +8388,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     btc5 = btc_5m_change()
     btc_headwind = btc5 <= -0.003  # -0.3%
 
-    # 🔧 BTC 폭풍 레짐: 높은 변동성 → 추가 요건 강화
-    btc_regime, btc_atr_pct = btc_volatility_regime()
-    if btc_regime == "storm":
-        # BTC 고변동성 시 추가 요건 (수급/모멘텀 강해야만 진입)
-        _storm_fail = []
-        if twin["buy_ratio"] < 0.62:
-            _storm_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.62")
-        if imbalance < 0.40:
-            _storm_fail.append(f"imb={imbalance:.2f}<0.40")
-        if accel < 0.8:
-            _storm_fail.append(f"accel={accel:.1f}<0.8")
-        if _storm_fail:
-            cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
-            return None
+    # 🔧 (제거됨) BTC_STORM: BTC_HEADWIND(-0.3% 방향성)가 이미 BTC 리스크 커버 → 중복 ATR 체크 제거
 
     # 🔧 5분 EMA 추세 필터: TREND_DOWN (line ~7423)에서 이미 처리
     # (중복 API 호출 제거 — 점화 면제도 TREND_DOWN에서 불필요, 점화는 추세 반전이니 -0.3% gap 안 걸림)
@@ -8420,33 +8397,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # SONIC 사례: 1분 RSI50(중립) 5분 RSI64(상승) 15분 볼밴124%(극과매수) → 꼭대기 진입
     # 15분봉이 과열 상태면 1분/5분에서 신호 나와도 이미 늦은 것
     # 점화는 면제 (폭발적 모멘텀은 15분 과열 무시 가능)
-    _entry_mode_override = None  # 🔧 BUG FIX: pre 딕셔너리로 전달 (기존 _entry_mode_override 죽은변수 수정)
-    if not _ign_candidate:
-        try:
-            _c15 = get_minutes_candles(15, m, 20)
-            if _c15 and len(_c15) >= 15:
-                _c15_closes = [x["trade_price"] for x in _c15]
-                _c15_last20 = _c15_closes[-min(20,len(_c15_closes)):]
-                _c15_sma = sum(_c15_last20) / len(_c15_last20)
-                _c15_std = (sum((x - _c15_sma)**2 for x in _c15_last20) / len(_c15_last20)) ** 0.5
-                if _c15_std > 0:
-                    _c15_bb_upper = _c15_sma + 2 * _c15_std
-                    _c15_bb_lower = _c15_sma - 2 * _c15_std
-                    _c15_bb_pos = (_c15_closes[-1] - _c15_bb_lower) / (_c15_bb_upper - _c15_bb_lower) * 100
-                    # 15분봉 볼밴 위치 95% 이상 = 극과매수 → half 강제
-                    if _c15_bb_pos > 95:
-                        print(f"[15M_OVERBOUGHT] {m} 15분봉 BB위치 {_c15_bb_pos:.0f}% → half 강제")
-                        _entry_mode_override = "half"
-                    # 15분봉 거래량 급감 + 과매수 = 피크 확정 → 진입 차단
-                    _c15_vols = [x.get("candle_acc_trade_price", 0) for x in _c15]
-                    _c15_rv = sum(_c15_vols[-3:]) if len(_c15_vols) >= 3 else 0
-                    _c15_pv = sum(_c15_vols[-6:-3]) if len(_c15_vols) >= 6 else 1
-                    _c15_vol_ratio = _c15_rv / max(_c15_pv, 1)
-                    if _c15_bb_pos > 95 and _c15_vol_ratio < 0.5:
-                        cut("15M_PEAK", f"{m} 15분봉 피크(BB{_c15_bb_pos:.0f}% + 거래량감소{_c15_vol_ratio:.2f}x)")
-                        return None
-        except Exception:
-            pass  # 15분봉 조회 실패 시 필터 스킵
+    # 🔧 (제거됨) 15M_PEAK: VWAP_CHASE(추격차단) + V7차트분석(RSI/vol)이 동일 역할 → 추가 API 낭비 제거
+    _entry_mode_override = None
 
     # === 🔧 v7 차트분석: 172샘플 다중타임프레임 검증 기반 사이즈 결정 ===
     # 📊 172신호 15분수익률 분석 결과:
@@ -8540,20 +8492,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 이전 v4의 RSI>75 half 강제는 22샘플 기반이었으나 172샘플로 반증됨
     # RSI>70+vol5+가 wr67%로 최고 콤보이므로 RSI 과매수 필터 삭제
 
-    # === 🔧 업비트 데이터 기반: 호가 비대칭 매도우세 시 사이즈 축소 ===
-    # 실시간 분석: 호가비대칭 0.31~2.67x 범위, <0.5x면 매도벽 압도
-    try:
-        _ob_imbal = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
-        if _ob_imbal and _ob_imbal[0].get("orderbook_units"):
-            _ob_units = _ob_imbal[0]["orderbook_units"][:5]
-            _ob_bid = sum(float(u["bid_price"]) * float(u["bid_size"]) for u in _ob_units)
-            _ob_ask = sum(float(u["ask_price"]) * float(u["ask_size"]) for u in _ob_units)
-            _ob_ratio = _ob_bid / max(_ob_ask, 1)
-            if _ob_ratio < 0.5:
-                print(f"[OB_SELL_HEAVY] {m} 호가비대칭 {_ob_ratio:.2f}x (매도벽 우세) → half 강제")
-                _entry_mode_override = "half"
-    except Exception:
-        pass
+    # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
     # === 🔧 승률개선: 야간 진입 차단 (00~07 KST) ===
     # 야간은 유동성 극감 → 스프레드 확대, 가짜 돌파, 휩쏘 빈발
@@ -8577,13 +8516,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
         return None
 
-    # === 🔧 매수비 페이드 감지 (꼭대기 진입 방지) ===
-    # t15 매수비는 높은데 t45 매수비가 50% 미만 → 직전 15초만 강한 "스파이크"
-    # 이미 피크를 지난 것이므로 진입하면 꼭대기에 물림
-    # 점화는 면제 (점화 자체가 짧은 구간에서 폭발)
-    if ignition_score < 3 and t15["buy_ratio"] >= 0.60 and t45["buy_ratio"] < 0.48:
-        cut("BUY_FADE", f"{m} 매수비페이드 t15={t15['buy_ratio']:.2f} t45={t45['buy_ratio']:.2f} (꼭대기)", near_miss=False)
-        return None
+    # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
 
     # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
     # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
