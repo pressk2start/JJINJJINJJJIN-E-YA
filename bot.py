@@ -542,7 +542,6 @@ def _pop_position_tracked(market, caller="unknown"):
         strategy = pos.get("strategy", "?")
         age = time.time() - pos.get("entry_ts", time.time())
         print(f"[POS_REMOVE] {market} state={state} strategy={strategy} age={age:.0f}s caller={caller}")
-        import traceback
         traceback.print_stack(limit=6)
     return OPEN_POSITIONS.pop(market, None)
 
@@ -583,6 +582,7 @@ _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중�
 _ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
+_RECENT_BUY_LOCK = threading.Lock()  # 🔧 FIX: _RECENT_BUY_TS 스레드 안전 보호 (모니터/스캔 동시접근)
 
 # 🔔 재모니터링 알림 쿨타임 (비매매 알림용)
 
@@ -1280,7 +1280,8 @@ def sync_orphan_positions():
 
             # 🔧 FIX: 봇 내부 최근 매수 체크 (600초 내 매수면 유령 아님)
             # 300초 → 600초로 증가: 매수 후 모니터→청산→잔고지연까지 충분한 보호
-            last_buy_ts = _RECENT_BUY_TS.get(market, 0)
+            with _RECENT_BUY_LOCK:
+                last_buy_ts = _RECENT_BUY_TS.get(market, 0)
             if now - last_buy_ts < 600:
                 print(f"[ORPHAN] {market} 최근 매수 ({now - last_buy_ts:.0f}초 전) → 유령 아님, 스킵")
                 continue
@@ -1496,9 +1497,10 @@ def sync_orphan_positions():
 
         # 🔧 FIX: _RECENT_BUY_TS 오래된 항목 정리 (메모리 누수 방지)
         _now_cleanup = time.time()
-        _stale_keys = [k for k, v in list(_RECENT_BUY_TS.items()) if _now_cleanup - v > 600]
-        for k in _stale_keys:
-            _RECENT_BUY_TS.pop(k, None)
+        with _RECENT_BUY_LOCK:
+            _stale_keys = [k for k, v in list(_RECENT_BUY_TS.items()) if _now_cleanup - v > 600]
+            for k in _stale_keys:
+                _RECENT_BUY_TS.pop(k, None)
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
@@ -2064,7 +2066,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             # 🔧 FIX: 매수 주문 전에 _RECENT_BUY_TS 선제 기록 (유령 오탐 방지)
             # - 주문~체결 사이에 sync_orphan이 돌면 잔고 발견 → 유령으로 오판
             # - 주문 전에 기록해두면 sync에서 300초 보호에 걸려 스킵됨
-            _RECENT_BUY_TS[m] = time.time()
+            with _RECENT_BUY_LOCK:
+                _RECENT_BUY_TS[m] = time.time()
             # 하이브리드 매수: 지정가(ask1) → 대기 → 미체결 시 시장가 전환
             # 🔧 FIX: 강돌파는 하이브리드 타임아웃 0.6초로 단축 (빠른 진입 = 꼭대기 방지)
             _ob_for_hybrid = pre.get("ob")
@@ -2283,7 +2286,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             )
 
         # 🔧 FIX: 최근 매수 시간 기록 + 유령감지 방지 (레이스컨디션 대비)
-        _RECENT_BUY_TS[m] = time.time()
+        with _RECENT_BUY_LOCK:
+            _RECENT_BUY_TS[m] = time.time()
         with _ORPHAN_LOCK:
             _ORPHAN_HANDLED.add(m)
 
@@ -2966,7 +2970,6 @@ def close_auto_position(m, reason=""):
 
         except Exception as e:
             print("[AUTO SELL ERR]", e)
-            import traceback
             traceback.print_exc()  # 🔧 DEBUG: 상세 에러 출력
             tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
 
@@ -3366,7 +3369,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     # 🔧 FIX: 잔고 0이면 즉시 리턴 (청산 완료 확인)
     # 🔧 FIX: 매수 직후 300초 내에는 잔고=0이어도 API 지연 가능 → 포지션 유지
     bal_check = get_balance_with_locked(m)
-    buy_age = time.time() - _RECENT_BUY_TS.get(m, 0)
+    with _RECENT_BUY_LOCK:
+        buy_age = time.time() - _RECENT_BUY_TS.get(m, 0)
     if bal_check >= 0 and bal_check <= 1e-12:
         if buy_age < 300:
             print(f"[REMONITOR] {m} 진입 전 잔고=0이지만 매수 {buy_age:.0f}초 전 → API 지연 가능, 계속 진행")
@@ -3435,7 +3439,8 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             continue
         if actual <= 1e-12:
             # 🔧 FIX: 매수 직후 300초 내에는 잔고=0이어도 API 지연 가능 → 다음 사이클 대기
-            buy_age_loop = time.time() - _RECENT_BUY_TS.get(m, 0)
+            with _RECENT_BUY_LOCK:
+                buy_age_loop = time.time() - _RECENT_BUY_TS.get(m, 0)
             if buy_age_loop < 300:
                 print(f"[REMONITOR] {m} 잔고=0이지만 매수 {buy_age_loop:.0f}초 전 → API 지연 가능, 다음 사이클 대기")
                 time.sleep(5)
@@ -4700,7 +4705,6 @@ def analyze_and_update_weights():
         return None
     except Exception as e:
         print(f"[AUTO_LEARN_ERR] {e}")
-        import traceback
         traceback.print_exc()
         return None
 
@@ -4911,7 +4915,6 @@ def auto_learn_exit_params():
         return None
     except Exception as e:
         print(f"[EXIT_LEARN_ERR] {e}")
-        import traceback
         traceback.print_exc()
         return None
 
@@ -11381,7 +11384,8 @@ def main():
                                 # - _RECENT_BUY_TS도 갱신 (box_monitor_position 안에서 600초 보호)
                                 with _ORPHAN_LOCK:
                                     _ORPHAN_HANDLED.add(bm)
-                                _RECENT_BUY_TS[bm] = time.time()
+                                with _RECENT_BUY_LOCK:
+                                    _RECENT_BUY_TS[bm] = time.time()
                                 with _POSITION_LOCK:
                                     actual_entry_b = OPEN_POSITIONS.get(bm, {}).get("entry_price", box_pre["price"])
                                     actual_vol_b = OPEN_POSITIONS.get(bm, {}).get("volume", 0)
@@ -11861,13 +11865,14 @@ def main():
                             add_to_retest_watchlist(m, cur_price, pre)
                             print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% | ign={pre.get('ignition_score',0)} → 워치리스트 검토 완료")
                             # 🔧 FIX: pending 마킹 정리 (안 하면 ghost 포지션으로 남아 진입 차단)
+                            # 🔧 FIX: signal dict도 _POSITION_LOCK 안에서 정리 (일관성)
                             with _POSITION_LOCK:
                                 OPEN_POSITIONS.pop(m, None)
-                            # 🔧 FIX: 워치리스트만 등록하고 진입 안 한 경우 cooldown 되돌리기
-                            # (진입 안 했는데 cooldown 걸리면 리테스트/재탐지 기회 손실)
-                            last_signal_at.pop(m, None)
-                            last_price_at_alert.pop(m, None)
-                            last_reason.pop(m, None)
+                                # 🔧 FIX: 워치리스트만 등록하고 진입 안 한 경우 cooldown 되돌리기
+                                # (진입 안 했는데 cooldown 걸리면 리테스트/재탐지 기회 손실)
+                                last_signal_at.pop(m, None)
+                                last_price_at_alert.pop(m, None)
+                                last_reason.pop(m, None)
                             # recent_alerts는 유지 (10초 이내 동일 종목 중복 신호 방지)
                             _release_entry_lock(m)
                             _lock_held = False
@@ -11923,7 +11928,6 @@ def main():
                                 remonitor_until_close(market, entry, pre_data, tight_mode=tight)
                         except Exception as e:
                             print(f"[MON_ERR] {market}: {e}")
-                            import traceback
                             traceback.print_exc()
                             # 🔧 FIX: 예외 발생 시 알람 + 잔고 확인 후 정리
                             try:
@@ -11933,7 +11937,8 @@ def main():
                                     tg_send(f"⚠️ {market} 모니터링 오류 (잔고 조회 실패)\n• 예외: {e}\n• 포지션 유지")
                                 elif actual <= 1e-12:
                                     # 🔧 FIX: 매수 직후 300초 내 잔고=0은 API 지연일 수 있음 → 포지션 유지
-                                    buy_age = time.time() - _RECENT_BUY_TS.get(market, 0)
+                                    with _RECENT_BUY_LOCK:
+                                        buy_age = time.time() - _RECENT_BUY_TS.get(market, 0)
                                     if buy_age < 300:
                                         tg_send(f"⚠️ {market} 모니터링 오류 (매수 {buy_age:.0f}초 전, 잔고=0 but 포지션 유지)\n• 예외: {e}")
                                     else:
