@@ -7642,82 +7642,8 @@ def box_cleanup():
 # =========================
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
-def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, fresh_ok,
-                 fresh_age=0.0, fresh_max_age=2.0,
-                 current_volume=0, price_change=0, mega=False,
-                 ema20_breakout=False, high_breakout=False, vol_vs_ma=0.0,
-                 ignition_score=0, best_ask_krw=0, cur_price=0,
-                 consecutive_buys=0, cv=0.0, overheat=0.0,
-                 pstd=0.0, market="",
-                 candle_body_pct=0.0, green_streak=0,
-                 ema20_val=None, circle_surge=False):
-    """
-    1단계 진입 게이트: 최소 안전 필터 + 신호 태깅
-    - 하드컷: 틱신선도, 스프레드, 최소거래대금, 스푸핑, 가속과다 (5개)
-    - 진입 결정은 calc_risk_score(final_check_leader)에서 수행
-    Returns: (allow, reason)
-    """
-    # 📊 주요 지표 한줄 요약
-    metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
-               f"변동={price_change*100:.2f}% 회전={turn_pct:.1f}% 매수비={buy_ratio:.0%} "
-               f"스프레드={spread:.2f}% 임밸={imbalance:.2f} 가속={accel:.1f}x "
-               f"연속매수={consecutive_buys}")
-
-    # ============================================================
-    # 최소 하드컷 — 이 조건 실패 시 어떤 스코어든 위험한 진입
-    # ============================================================
-
-    # 1) 틱 신선도 (필수)
-    if not fresh_ok:
-        return False, f"[하드컷] 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {metrics}"
-
-    # 2) 스프레드 (슬리피지 방어 - 가격대별 동적 상한)
-    if cur_price > 0 and cur_price < 100:
-        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
-    elif cur_price >= 100 and cur_price < 1000:
-        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
-    else:
-        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
-    if spread > eff_spread_max:
-        return False, f"[하드컷] 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {metrics}"
-
-    # 3) 최소 거래대금 (유동성 확보)
-    if current_volume < GATE_VOL_MIN and not mega:
-        return False, f"[하드컷] 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {metrics}"
-
-    # 4) 매수비 100% 스푸핑 체크
-    if abs(buy_ratio - 1.0) < 1e-6:
-        return False, f"[하드컷] 매수비100%(스푸핑) | {metrics}"
-
-    # 5) 가속도 과다 안전장치
-    if accel > GATE_ACCEL_MAX:
-        return False, f"[하드컷] 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
-
-    # ============================================================
-    # 신호 태깅 (진입 판단은 calc_risk_score에서, 여기서는 태그만)
-    # ============================================================
-    is_ignition = (ignition_score >= 3)
-    breakout_score = int(ema20_breakout) + int(high_breakout)
-
-    if is_ignition:
-        signal_tag = "🔥점화"
-    elif breakout_score == 2:
-        signal_tag = "강돌파 (EMA↑+고점↑)"
-    elif ema20_breakout:
-        signal_tag = "EMA↑"
-    elif high_breakout:
-        signal_tag = "고점↑"
-    elif vol_vs_ma >= 1.5:
-        signal_tag = "거래량↑"
-    else:
-        signal_tag = "기본"
-
-    pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
-    return True, f"{signal_tag} PASS | {pass_summary} | {metrics}"
-
-
 # =========================
-# 🔧 레짐 필터 (횡보장 진입 차단)
+# 🔧 레짐 필터 (횡보장 진입 차단) — 현재 미사용, 참조용 유지
 # =========================
 def is_sideways_regime(c1, lookback=20):
     """
@@ -8111,51 +8037,69 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
 
-    # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
-    # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
+    # === 매수비 계산 (스푸핑 방지: 비점화는 가중평균) ===
     _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
-    gate_ok, gate_reason = stage1_gate(
-        spread=ob["spread"],
-        accel=accel,
-        volume_surge=vol_surge,
-        turn_pct=turn_pct,
-        buy_ratio=_gate_buy_ratio,
-        imbalance=imbalance,
-        fresh_ok=fresh_ok,
-        fresh_age=fresh_age,
-        fresh_max_age=fresh_max_age,
-        current_volume=current_volume,
-        price_change=price_change,
-        mega=mega,
-        # 🚀 신규 파라미터
-        ema20_breakout=ema20_breakout,
-        high_breakout=high_breakout,
-        vol_vs_ma=vol_vs_ma,
-        ignition_score=ignition_score,
-        best_ask_krw=ob.get("best_ask_krw", 0),  # 🔧 FIX (C): 호가깊이 기반 스프레드 제한
-        cur_price=cur["trade_price"],  # 🔧 스프레드 가격대별 분리용
-        consecutive_buys=cons_buys,
-        cv=cv if cv is not None else 0.0,  # 🔧 None → 0.0 (gate 내부 포맷팅 안전)
-        overheat=overheat,
-        pstd=(pstd10 * 100) if pstd10 is not None else None,  # 소수→% 변환, 데이터 부족시 None
-        market=m,
-        candle_body_pct=candle_body_pct,
-        green_streak=green_streak,
-        ema20_val=ema20,  # 🔧 꼭대기방지: EMA20 이격도 체크용
-    )
-    if not gate_ok:
-        # STAGE1_GATE는 텔레그램 알람 전에 컷되므로 near_miss=False
-        cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=False)
+
+    # ============================================================
+    # 하드컷 — 이 조건 실패 시 어떤 스코어든 위험한 진입
+    # ============================================================
+    _metrics = (f"점화={ignition_score} surge={vol_surge:.2f}x 매수비={_gate_buy_ratio:.0%} "
+                f"스프레드={spread:.2f}% 가속={accel:.1f}x")
+
+    # 1) 틱 신선도
+    if not fresh_ok:
+        cut("FRESH", f"{m} 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {_metrics}", near_miss=False)
         return None
 
-    # === VWAP gap 계산 (사이즈 조절/표시용, 하드컷 없음) ===
+    # 2) 스프레드 (가격대별 동적 상한)
+    if cur_price > 0 and cur_price < 100:
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
+    elif cur_price >= 100 and cur_price < 1000:
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
+    else:
+        eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
+    if spread > eff_spread_max:
+        cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {_metrics}", near_miss=False)
+        return None
+
+    # 3) 최소 거래대금
+    if current_volume < GATE_VOL_MIN and not mega:
+        cut("VOL_MIN", f"{m} 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {_metrics}", near_miss=False)
+        return None
+
+    # 4) 매수비 100% 스푸핑
+    if abs(_gate_buy_ratio - 1.0) < 1e-6:
+        cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
+        return None
+
+    # 5) 가속도 과다
+    if accel > GATE_ACCEL_MAX:
+        cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
+        return None
+
+    # ============================================================
+    # 신호 태깅 (진입 판단은 calc_risk_score에서)
+    # ============================================================
+    breakout_score = int(ema20_breakout) + int(high_breakout)
+
+    if _ign_candidate:
+        signal_tag = "🔥점화"
+    elif breakout_score == 2:
+        signal_tag = "강돌파 (EMA↑+고점↑)"
+    elif ema20_breakout:
+        signal_tag = "EMA↑"
+    elif high_breakout:
+        signal_tag = "고점↑"
+    elif vol_vs_ma >= 1.5:
+        signal_tag = "거래량↑"
+    else:
+        signal_tag = "기본"
+
+    # === VWAP gap 계산 (사이즈 조절/표시용) ===
     vwap = calc_vwap_from_candles(c1, 20)
     vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
 
     # === 결과 패키징 ===
-    # 🔥 signal_tag 추출 (gate_reason: "{signal_tag} PASS | {metrics}")
-    signal_tag = gate_reason.split(" PASS")[0] if " PASS" in gate_reason else "기본"
-
     pre = {
         "price": cur["trade_price"],
         "change": price_change,
@@ -8167,22 +8111,19 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "flow_accel": accel,
         "imbalance": imbalance,
         "turn_pct": turn_pct,
-        "spread": ob["spread"],
+        "spread": spread,
         "buy_ratio": _gate_buy_ratio,
         "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),
         "fresh_ok": fresh_ok,
         "mega": mega,
         "filter_type": "stage1_gate",
         "ignition_score": ignition_score,
-        "gate_reason": gate_reason,
         "signal_tag": signal_tag,
-        "shadow_flags": "",
-        "would_cut": False,
         "cv": cv,
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
         "overheat": overheat,
-        "ign_ok": (ignition_score >= 3),
+        "ign_ok": _ign_candidate,
         "mega_ok": mega,
         "candle_body_pct": candle_body_pct,
         "vwap_gap": round(vwap_gap, 2),
