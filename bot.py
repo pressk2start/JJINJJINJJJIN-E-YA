@@ -3389,6 +3389,14 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         "연장_ATR_STOP",                            # 연장 ATR 손절
         "연장중_전량청산",                          # 연장 중 외부 청산
         "유효하지 않은 entry_price",                # 🔧 FIX: 잘못된 진입가 → 포지션 제거 후 verdict
+        "하드스톱",                                  # 🔧 BUG FIX: SL×1.5 초과 즉시컷 (중복청산 방지)
+        "본절SL",                                    # 🔧 BUG FIX: 래칫 본절 손절 (중복청산 방지)
+        "수급감량_DUST",                            # 🔧 BUG FIX: 수급확인 감량 후 dust 정리 (중복청산 방지)
+        "잔여청산",                                  # 🔧 BUG FIX: 감량 후 잔여 청산 (중복청산 방지)
+        "관망만료",                                  # 🔧 BUG FIX: 수급확인 관망 후 청산 (중복청산 방지)
+        "V7_TIMEOUT_LOSS",                          # 🔧 BUG FIX: v7 시간대 타임아웃 손실청산 (중복청산 방지)
+        "V7_SURGE_PEAK_EXIT",                       # 🔧 BUG FIX: v7 폭발 피크아웃 익절 (중복청산 방지)
+        "V7_SURGE_FAIL",                            # 🔧 BUG FIX: v7 폭발 15분 미수익 청산 (중복청산 방지)
     }
 
     while True:
@@ -8411,6 +8419,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # SONIC 사례: 1분 RSI50(중립) 5분 RSI64(상승) 15분 볼밴124%(극과매수) → 꼭대기 진입
     # 15분봉이 과열 상태면 1분/5분에서 신호 나와도 이미 늦은 것
     # 점화는 면제 (폭발적 모멘텀은 15분 과열 무시 가능)
+    _entry_mode_override = None  # 🔧 BUG FIX: pre 딕셔너리로 전달 (기존 _entry_mode_override 죽은변수 수정)
     if not _ign_candidate:
         try:
             _c15 = get_minutes_candles(15, m, 20)
@@ -8426,7 +8435,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                     # 15분봉 볼밴 위치 95% 이상 = 극과매수 → half 강제
                     if _c15_bb_pos > 95:
                         print(f"[15M_OVERBOUGHT] {m} 15분봉 BB위치 {_c15_bb_pos:.0f}% → half 강제")
-                        _ENTRY_MAX_MODE_OVERRIDE = "half"
+                        _entry_mode_override = "half"
                     # 15분봉 거래량 급감 + 과매수 = 피크 확정 → 진입 차단
                     _c15_vols = [x.get("candle_acc_trade_price", 0) for x in _c15]
                     _c15_rv = sum(_c15_vols[-3:]) if len(_c15_vols) >= 3 else 0
@@ -8485,42 +8494,42 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             # ① 폭발 거래량 vol20x+ → 무조건 full (wr83%, avg+2.259%)
             if _chart_volratio >= 20:
                 print(f"[V7_SURGE_VOL] {m} vol{_chart_volratio:.0f}x≥20 → 폭발 full")
-                _ENTRY_MAX_MODE_OVERRIDE = "full"
+                _entry_mode_override = "full"
 
             # ② RSI>70 + vol5x+ → full (wr67%, avg+0.69%, 최고 콤보)
             elif _chart_rsi >= 70 and _chart_volratio >= 5:
                 print(f"[V7_HOT_MOMENTUM] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 강세돌파 full")
-                _ENTRY_MAX_MODE_OVERRIDE = "full"
+                _entry_mode_override = "full"
 
             # ③ 강한 모멘텀: mom>1.5% + RSI65+ → full (wr64%, avg+0.817%)
             elif _chart_mom5 > 1.5 and _chart_rsi >= 65:
                 print(f"[V7_STRONG_MOM] {m} mom{_chart_mom5:.2f}%+RSI{_chart_rsi:.0f} → 강모멘텀 full")
-                _ENTRY_MAX_MODE_OVERRIDE = "full"
+                _entry_mode_override = "full"
 
             # ④ RSI50-60 + vol5x+ → full (avg+1.307%, 고거래량 핵심)
             elif 50 <= _chart_rsi < 60 and _chart_volratio >= 5:
                 print(f"[V7_MID_HIGHVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중립고거래 full")
-                _ENTRY_MAX_MODE_OVERRIDE = "full"
+                _entry_mode_override = "full"
 
             # ⑤ 오전 9-11시 + vol5x+ → full 보너스 (wr64%, avg+1.306%)
             elif 9 <= _hour_now < 12 and _chart_volratio >= 5:
                 print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
-                _ENTRY_MAX_MODE_OVERRIDE = "full"
+                _entry_mode_override = "full"
 
             # ⑥ vol10-20x → half (avg-0.18%, 트랩존 — 거래량 있지만 방향불명)
             elif 10 <= _chart_volratio < 20:
                 print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(10-20) → 트랩존 half")
-                _ENTRY_MAX_MODE_OVERRIDE = "half"
+                _entry_mode_override = "half"
 
             # ⑦ RSI<50 → half (wr35%, avg+0.012%, 약세장)
             elif _chart_rsi < 50:
                 print(f"[V7_WEAK_RSI] {m} RSI{_chart_rsi:.0f}<50 → 약세 half")
-                _ENTRY_MAX_MODE_OVERRIDE = "half"
+                _entry_mode_override = "half"
 
             # ⑧ RSI60-70 + vol<5x → half (wr26%, 최저 승률)
             elif 60 <= _chart_rsi < 70 and _chart_volratio < 5:
                 print(f"[V7_MID_LOWVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중상위저거래 half")
-                _ENTRY_MAX_MODE_OVERRIDE = "half"
+                _entry_mode_override = "half"
 
             # 나머지 (RSI50-60+vol2-5 등) → override 없음 (기본 사이즈 유지)
         except Exception:
@@ -8541,7 +8550,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             _ob_ratio = _ob_bid / max(_ob_ask, 1)
             if _ob_ratio < 0.5:
                 print(f"[OB_SELL_HEAVY] {m} 호가비대칭 {_ob_ratio:.2f}x (매도벽 우세) → half 강제")
-                _ENTRY_MAX_MODE_OVERRIDE = "half"
+                _entry_mode_override = "half"
     except Exception:
         pass
 
@@ -8557,9 +8566,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 📊 오후: n=43 avg+0.167% wr28% (최악) vs 오전: n=27 avg+0.677% wr59% (최고)
     # 오후 진입은 승률이 28%로 극히 낮으므로 사이즈 축소 (차단은 아님)
     if not _ign_candidate and 12 <= _hour_kst < 18:
-        if _ENTRY_MAX_MODE_OVERRIDE != "full":  # full 오버라이드 안 된 경우만
+        if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
             print(f"[V7_AFTERNOON] {m} 오후{_hour_kst}시 wr28% → half 페널티")
-            _ENTRY_MAX_MODE_OVERRIDE = "half"
+            _entry_mode_override = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
@@ -8692,6 +8701,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "vwap_gap": round(vwap_gap, 2),
         # 🔧 꼭대기방지: 캔들 확장도 (postcheck 조기진입 판단용)
         "candle_body_pct": candle_body_pct,
+        # 🔧 BUG FIX: v7 차트분석 기반 entry_mode 오버라이드 전달 (기존 죽은변수 수정)
+        # None=스코어 기본, "half"=리스크 축소, "full"=최적조건 유지
+        "_entry_mode_override": _entry_mode_override,
     }
 
     return pre
@@ -8763,6 +8775,17 @@ def final_check_leader(m, pre, tight_mode=False):
     # 🔧 pstd 다운그레이드: before1 비활성화 (과도한 다운그레이드 방지)
 
     # === 다운그레이드 로직 (완화된 임계치) ===
+
+    # 🔧 BUG FIX: v7 차트분석 기반 entry_mode 오버라이드 적용 (기존 죽은변수 수정)
+    # "half" → confirm을 half로 다운그레이드 (15분봉 과매수, 트랩존, 약세RSI, 매도벽, 오후패널티)
+    # "full" → half를 confirm으로 업그레이드 (폭발거래량, RSI70+vol5x, 강모멘텀, 오전고거래)
+    _mode_override = pre.get("_entry_mode_override")
+    if _mode_override == "half" and entry_mode == "confirm":
+        entry_mode = "half"
+        print(f"[MODE_OVERRIDE] {m} v7차트분석 → confirm→half 다운그레이드")
+    elif _mode_override == "full" and entry_mode == "half":
+        entry_mode = "confirm"
+        print(f"[MODE_OVERRIDE] {m} v7차트분석 → half→confirm 업그레이드")
 
     # 🔧 4-2. SIDEWAYS 레짐 → 무조건 half 강제 (예외 통과했으나 리스크 축소)
     if pre.get("regime_sideways"):
@@ -9243,6 +9266,10 @@ def upbit_tick_size(price: float) -> float:
     if p >=         1: return 0.01
     return 0.001
 
+# 🔧 BUG FIX: 5분봉 ATR 캐시 (60초 TTL) — 모니터링 루프에서 매번 API 호출하던 문제 수정
+_ATR5_CACHE = {}  # {market: {"atr5": float, "ts": float}}
+_ATR5_CACHE_TTL = 60  # 초
+
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, trade_type=None, market=None):
     atr = atr14_from_candles(c1, ATR_PERIOD)
     if not atr or atr <= 0:
@@ -9257,16 +9284,22 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
     _atr5_adjusted_min = DYN_SL_MIN
     if market:
         try:
-            _c5_sl = get_minutes_candles(5, market, 20)
-            if _c5_sl and len(_c5_sl) >= 15:
-                _atr5 = atr14_from_candles(_c5_sl, 14)
-                if _atr5 and _atr5 > 0:
-                    _atr5_pct = _atr5 / max(entry_price, 1)
-                    _atr1_pct = atr / max(entry_price, 1)
-                    if _atr5_pct > _atr1_pct * 1.5:
-                        _atr5_adjusted_min = min(_atr5_pct * 2, DYN_SL_MAX)
-                        if _atr5_adjusted_min > DYN_SL_MIN:
-                            print(f"[DYN_SL] {market} 5분ATR({_atr5_pct*100:.2f}%)>1분ATR({_atr1_pct*100:.2f}%)×1.5 → SL하한 {DYN_SL_MIN*100:.1f}%→{_atr5_adjusted_min*100:.2f}%")
+            # 🔧 BUG FIX: 60초 TTL 캐시 (5분봉 데이터를 매번 조회하던 API 낭비 제거)
+            _now = time.time()
+            _cached = _ATR5_CACHE.get(market)
+            if _cached and (_now - _cached["ts"]) < _ATR5_CACHE_TTL:
+                _atr5 = _cached["atr5"]
+            else:
+                _c5_sl = get_minutes_candles(5, market, 20)
+                _atr5 = atr14_from_candles(_c5_sl, 14) if _c5_sl and len(_c5_sl) >= 15 else None
+                _ATR5_CACHE[market] = {"atr5": _atr5, "ts": _now}
+            if _atr5 and _atr5 > 0:
+                _atr5_pct = _atr5 / max(entry_price, 1)
+                _atr1_pct = atr / max(entry_price, 1)
+                if _atr5_pct > _atr1_pct * 1.5:
+                    _atr5_adjusted_min = min(_atr5_pct * 2, DYN_SL_MAX)
+                    if _atr5_adjusted_min > DYN_SL_MIN:
+                        print(f"[DYN_SL] {market} 5분ATR({_atr5_pct*100:.2f}%)>1분ATR({_atr1_pct*100:.2f}%)×1.5 → SL하한 {DYN_SL_MIN*100:.1f}%→{_atr5_adjusted_min*100:.2f}%")
         except Exception:
             pass
 
@@ -10049,7 +10082,7 @@ def monitor_position(m,
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
-            gain_from_entry = (curp / entry_price - 1.0)
+            gain_from_entry = (curp / entry_price - 1.0) if entry_price > 0 else 0
 
             # 🔧 특단조치: PROBE→CONFIRM 전환 로직 제거 (probe 폐지 → 불필요)
 
@@ -10255,9 +10288,6 @@ def monitor_position(m,
             cur_gain = (curp / entry_price - 1.0)
             # 🔧 FIX: 루프 상단 오더북 스냅샷 재사용 (API 중복 호출 제거)
             ob_now = ob_snap
-            # 🔧 변경안A: max_gain 조기 계산 (러너 판정용)
-            _max_gain_now = (best / entry_price - 1.0) if entry_price > 0 else 0
-
             # === 🎯 ATR 기반 동적 손절 (틱스탑 제거됨) ===
             # 이미 line 4876에서 웜업 없이 즉시 ATR 손절 적용 중
             # 여기는 트레일링 손절 이후 추가 손절 판정용
@@ -10298,8 +10328,8 @@ def monitor_position(m,
 
             # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
             # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
-            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
-            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+            max_gain = (best / entry_price - 1.0) if entry_price > 0 else 0  # MFE 수익률 (다른 곳에서 사용)
+            cur_gain_now = (curp / entry_price - 1.0) if entry_price > 0 else 0  # 현재 수익률
 
             # ============================================================
             # 🔧 매도구조개선: 매수세감쇄 익절 제거
