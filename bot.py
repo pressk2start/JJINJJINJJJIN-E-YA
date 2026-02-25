@@ -8354,12 +8354,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 📊 ② 윗꼬리 0% 필터 (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
     # 약간의 윗꼬리(10-30%)가 있어야 매수세 충돌 = 실제 돌파 시도
     # 꼬리 전혀 없으면 "급등 전 캔들이 아니라 단순 양봉"
+    # 📊 FIX: body≥1% 큰 바디 캔들은 면제 (몸통이 크면 uw 비율이 자연적으로 낮음, STEEM 6.55% 사례)
     _high = cur.get("high_price", cur["trade_price"])
     _low = cur.get("low_price", cur["trade_price"])
     _candle_range = _high - _low
     _upper_wick = _high - max(cur["trade_price"], cur["opening_price"])
     _uw_ratio = _upper_wick / _candle_range if _candle_range > 0 else 0
-    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate:
+    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate and candle_body_pct < 0.01:
         cut("NO_WICK", f"{m} 윗꼬리{_uw_ratio*100:.1f}%<{GATE_UW_RATIO_MIN*100:.0f}% (단순양봉)")
         return None
 
