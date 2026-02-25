@@ -3709,11 +3709,11 @@ GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC �
 GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
-GATE_CONSEC_MIN = 6       # 🔧 승률개선: 4→6 (데이터: 승8.0 vs 패4.43 → 패자 기준 4 사용 중이던 것을 승자 기준으로 강화)
+GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
 GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
-GATE_STRONGBREAK_CONSEC_MIN = 6   # 🔧 꼭대기방지: 4→6 (강돌파도 수급 확인 후 진입)
+GATE_STRONGBREAK_CONSEC_MIN = 2   # 📊 180신호분석: 6→2 (강돌파도 동일 기준 — 2개면 수급 확인 충분)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 차트분석: 2.5→3.5 (진짜 돌파는 accel 3-4x, 2.5로 막으면 손실)
 GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
@@ -3733,6 +3733,13 @@ GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 
 GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
+
+# ========================================
+# 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
+# ========================================
+GATE_BODY_MIN = 0.003         # 📊 바디 하한 0.3% (body<0.5% wr29.5% → 최소 0.3% 필수)
+GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
+GATE_GREEN_STREAK_MAX = 3     # 📊 연속양봉 상한 3개 (4+ wr33.3% avg-0.34% → 과열)
 
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
@@ -8375,6 +8382,40 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if _bypassed:
         print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
 
+    # ========================================
+    # 📊 180신호분석 데이터 기반 필터 (진입 품질 강화)
+    # ========================================
+
+    # 📊 ① 캔들 바디 하한 (body<0.5% wr29.5% → 0.3% 최소 필수)
+    # 바디가 너무 작으면 "약간 움직였지만 모멘텀 없는" 상태 → 기대값 마이너스
+    # 점화는 자체 price_change≥0.3% 조건이 있으므로 면제
+    if candle_body_pct < GATE_BODY_MIN and not _ign_candidate:
+        cut("BODY_TOO_SMALL", f"{m} 바디{candle_body_pct*100:.2f}%<{GATE_BODY_MIN*100:.1f}% (약한캔들)")
+        return None
+
+    # 📊 ② 윗꼬리 0% 필터 (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
+    # 약간의 윗꼬리(10-30%)가 있어야 매수세 충돌 = 실제 돌파 시도
+    # 꼬리 전혀 없으면 "급등 전 캔들이 아니라 단순 양봉"
+    _high = cur.get("high_price", cur["trade_price"])
+    _low = cur.get("low_price", cur["trade_price"])
+    _candle_range = _high - _low
+    _upper_wick = _high - max(cur["trade_price"], cur["opening_price"])
+    _uw_ratio = _upper_wick / _candle_range if _candle_range > 0 else 0
+    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate:
+        cut("NO_WICK", f"{m} 윗꼬리{_uw_ratio*100:.1f}%<{GATE_UW_RATIO_MIN*100:.0f}% (단순양봉)")
+        return None
+
+    # 📊 ③ WEAK_SIGNAL 콤보 (body<0.5% + vol<5x → wr27.9% MFE0.56%)
+    # 바디 0.3~0.5% 구간은 거래량이 뒷받침되면(5x+) 괜찮지만, 거래량도 약하면 확실한 손실 구간
+    if candle_body_pct < 0.005 and vol_surge < 5.0 and not _ign_candidate and not _brk_candidate:
+        cut("WEAK_SIGNAL", f"{m} 약신호콤보 바디{candle_body_pct*100:.2f}%+서지{vol_surge:.1f}x<5x")
+        return None
+
+    # 📊 ④ 연속 양봉 과열 (4+개 wr33.3% avg-0.34% → 이미 올랐으면 추격 위험)
+    if green_streak >= (GATE_GREEN_STREAK_MAX + 1) and not _ign_candidate:
+        cut("GREEN_OVERHEAT", f"{m} 연속양봉{green_streak}≥{GATE_GREEN_STREAK_MAX+1}개 (과열)")
+        return None
+
     # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
     # regime_filter가 SIDEWAYS 힌트를 반환했으면, 여기서 예외 조건 판단
     regime_sideways = ("SIDEWAYS" in regime_reason)
@@ -8517,9 +8558,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
                 _entry_mode_override = "full"
 
-            # ⑥ vol10-20x → half (avg-0.18%, 트랩존 — 거래량 있지만 방향불명)
-            elif 10 <= _chart_volratio < 20:
-                print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(10-20) → 트랩존 half")
+            # ⑥ vol5-20x → half (📊 180신호분석: 5-10x wr32.7% 트랩존, 10-20x avg-0.18%)
+            elif 5 <= _chart_volratio < 20:
+                print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(5-20) → 트랩존 half")
                 _entry_mode_override = "half"
 
             # ⑦ RSI<50 → half (wr35%, avg+0.012%, 약세장)
