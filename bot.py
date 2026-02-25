@@ -3700,7 +3700,6 @@ TICKS_BUY_RATIO = 0.56
 # 연속매수: 승 8.0 vs 패 4.43 → 하한 6
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
-GATE_TURN_MIN = 2.0       # 회전율 하한 (%)
 GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
@@ -3710,7 +3709,6 @@ GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
-GATE_CONSEC_MAX = 15      # 🔧 연속매수 상한 - 10→15 완화
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_CONSEC_MIN = 2   # 📊 180신호분석: 6→2 (강돌파도 동일 기준 — 2개면 수급 확인 충분)
@@ -3721,7 +3719,7 @@ GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확�
 GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
 GATE_SCORE_THRESHOLD = 75.0       # 🔧 승률개선: 70→75 (약한 신호 조합의 gate 통과 차단)
-GATE_CV_MAX = 3.5         # 🔧 알람복구: 3.0→3.5 (3.0은 정상 알트도 차단, 3.5이면 극단적 불규칙만 필터)
+## (제거됨) GATE_CV_MAX: CV_HIGH 필터 삭제 → 스푸핑 필터 + overheat가 커버
 GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
 # 🔧 노이즈/과변동 필터 (승패 데이터 기반)
 GATE_PSTD_MAX = 0.20      # 🔧 알람복구: 0.12→0.20 (0.12는 정상 알트 변동도 차단, 0.20이면 과도한 노이즈만 필터)
@@ -3730,9 +3728,7 @@ GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터�
 GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
 GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
-GATE_SURGE_MIN = 0.5      # 🔧 배수 하한 - before1 기준
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
-GATE_PRICE_MIN = 0.0005   # 🔧 완화: 0.1%→0.05% - 보합장도 진입 허용
 
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
@@ -3744,12 +3740,7 @@ GATE_GREEN_STREAK_MAX = 3     # 📊 연속양봉 상한 3개 (4+ wr33.3% avg-0.
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
 # ========================================
-GATE_RELAX_SURGE_FLOOR = 0.1      # 급등배수 하한
 GATE_RELAX_VOL_MA_FLOOR = 0.2      # 🔧 before1 복원 (vol_vs_ma OR 경로 재활성화)
-GATE_RELAX_TURN_FLOOR = 0.5       # 회전율 하한 (%)
-GATE_RELAX_BUY_FLOOR = 0.45       # 매수비 하한
-GATE_RELAX_IMB_FLOOR = 0.15       # 🔧 before1 복원 (0.35→0.15)
-GATE_RELAX_ACCEL_FLOOR = 0.1      # 가속도 하한
 
 # ========================================
 # 🔧 스프레드 가격대별 스케일링
@@ -4147,7 +4138,6 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         f"🎯 현재 임계치: "
                         f"매수비≥{thr.get('GATE_BUY_RATIO_MIN', GATE_BUY_RATIO_MIN):.0%} "
                         f"스프레드≤{thr.get('GATE_SPREAD_MAX', GATE_SPREAD_MAX):.2f}% "
-                        f"회전≥{thr.get('GATE_TURN_MIN', GATE_TURN_MIN):.1f}% "
                         f"임밸≥{thr.get('GATE_IMBALANCE_MIN', GATE_IMBALANCE_MIN):.2f} "
                         f"급등≤{thr.get('GATE_SURGE_MAX', GATE_SURGE_MAX):.1f}x "
                         f"가속≥{thr.get('GATE_ACCEL_MIN', GATE_ACCEL_MIN):.2f}x"
@@ -4520,10 +4510,10 @@ def analyze_and_update_weights():
     - 승리/패배 그룹 간 피처 분포 분석
     - GATE_* 전역 변수 조절
     """
-    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_IMBALANCE_MIN, GATE_OVERHEAT_MAX, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
 
     if not os.path.exists(TRADE_LOG_PATH):
         print("[AUTO_LEARN] 거래 로그 없음")
@@ -4580,7 +4570,6 @@ def analyze_and_update_weights():
         old_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
-            "GATE_TURN_MIN": GATE_TURN_MIN,
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
@@ -4611,17 +4600,6 @@ def analyze_and_update_weights():
                 changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
                 if AUTO_LEARN_APPLY:
                     GATE_SPREAD_MAX = new_val
-
-        # 회전율: 승자 > 패자면 상향
-        if "turn" in stats:
-            w, l = stats["turn"]["win"], stats["turn"]["lose"]
-            if w > l:
-                target = max(1.0, w * 0.8)
-                new_val = round(GATE_TURN_MIN * (1 - BLEND) + target * BLEND, 2)
-                new_val = max(1.0, min(10.0, new_val))
-                changes["GATE_TURN_MIN"] = round(new_val - GATE_TURN_MIN, 2)
-                if AUTO_LEARN_APPLY:
-                    GATE_TURN_MIN = new_val
 
         # 임밸런스: 승자 > 패자면 상향
         if "imbalance" in stats:
@@ -4681,15 +4659,12 @@ def analyze_and_update_weights():
         new_values = {
             "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
             "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
-            "GATE_TURN_MIN": GATE_TURN_MIN,
             "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
             "GATE_SURGE_MAX": GATE_SURGE_MAX,
             "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
             "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
             "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
             "GATE_VOL_MIN": GATE_VOL_MIN,
-            "GATE_SURGE_MIN": GATE_SURGE_MIN,
-            "GATE_PRICE_MIN": GATE_PRICE_MIN,
         }
 
         # 🔧 FIX: 원자적 쓰기 (크래시 시 학습 데이터 손실 방지)
@@ -5017,10 +4992,10 @@ def load_learned_weights():
     - 현행: "gate_thresholds"가 있으면 GATE_* 임계치 복원
     """
     global SCORE_WEIGHTS
-    global GATE_TURN_MIN, GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
-    global GATE_VOL_MIN, GATE_SURGE_MIN, GATE_PRICE_MIN, GATE_VOL_VS_MA_MIN
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
     global DYN_SL_MIN, DYN_SL_MAX, HARD_STOP_DD, TRAIL_DISTANCE_MIN_BASE
 
     if not os.path.exists(WEIGHTS_PATH):
@@ -5039,7 +5014,6 @@ def load_learned_weights():
         # (현행) 게이트 임계치 복원
         thr = data.get("gate_thresholds")
         if isinstance(thr, dict):
-            GATE_TURN_MIN      = thr.get("GATE_TURN_MIN",      GATE_TURN_MIN)
             GATE_TURN_MAX      = thr.get("GATE_TURN_MAX",      GATE_TURN_MAX)
             GATE_SPREAD_MAX    = thr.get("GATE_SPREAD_MAX",    GATE_SPREAD_MAX)
             GATE_ACCEL_MIN     = thr.get("GATE_ACCEL_MIN",     GATE_ACCEL_MIN)
@@ -5048,12 +5022,7 @@ def load_learned_weights():
             GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
             GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
             GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
-            # 🔧 아래 4개는 코드 값 우선 사용 (저장된 파일에서 로드 안 함)
-            # GATE_FRESH_AGE_MAX = thr.get("GATE_FRESH_AGE_MAX", GATE_FRESH_AGE_MAX)
-            # GATE_VOL_MIN       = thr.get("GATE_VOL_MIN",       GATE_VOL_MIN)
-            # GATE_SURGE_MIN     = thr.get("GATE_SURGE_MIN",     GATE_SURGE_MIN)
-            # GATE_PRICE_MIN     = thr.get("GATE_PRICE_MIN",     GATE_PRICE_MIN)
-            print(f"[WEIGHTS] 게이트 임계치 로드 (VOL/PRICE는 코드값 우선): {thr}")
+            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
 
         print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
     except Exception as e:
@@ -7688,15 +7657,14 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     - 학습/튜닝 포인트: GATE_* 변수 하나
 
     [전역 변수 임계치 사용 - 자동학습 대상]
-    - GATE_TURN_MIN: 회전율 하한
     - GATE_SPREAD_MAX: 스프레드 상한
-    - GATE_ACCEL_MIN: 가속도 하한
+    - GATE_ACCEL_MIN/MAX: 가속도 범위
     - GATE_BUY_RATIO_MIN: 매수비 하한
     - GATE_IMBALANCE_MIN: 호가 임밸런스 하한
     - GATE_VOL_MIN: 거래대금 하한
-    - GATE_SURGE_MIN: 거래량급등 하한
-    - GATE_PRICE_MIN: 가격변동 하한
     - GATE_FRESH_AGE_MAX: 틱신선도 상한(초)
+    - GATE_BODY_MIN: 캔들 바디 하한 (📊 180신호분석)
+    - GATE_UW_RATIO_MIN: 윗꼬리 하한 (📊 180신호분석)
 
     [로그 형식 통일]
     - 컷 메시지: "항목 현재값<기준값" 또는 "현재값>기준값"
@@ -8300,23 +8268,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🛑 거래량 서지 체크 (🔧 독립경로 면제: 플래그만 저장, 지연 판정)
     _vol_surge_low = (not mega and vol_surge < 0.65)
 
-    # 🔍 섀도우 태깅 (실거래는 그대로, 태그만 기록)
-    shadow_flags = []
-    if cv is not None and cv > 2.2:
-        shadow_flags.append("CV22")
-    if turn_pct >= 12 and (cons_buys > 18 or overheat > 3):
-        shadow_flags.append("TURNxCONS/HEAT")
-    if accel >= 3.0 and not (imbalance >= 0.40 and spread <= 0.12):
-        shadow_flags.append("ACCEL_WEAK_CTX")
-    would_cut = len(shadow_flags) > 0
-
-    # 🔧 데이터 기반 필터: 연속매수 (독립경로 면제: 플래그만 저장, 지연 판정)
-    _consec_low = (cons_buys < GATE_CONSEC_MIN)
+    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수(0-25)에서 연속매수 평가 → 중복 제거
     # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
-    # 🔧 FIX: CV 센티넬(9.9)은 데이터 부족이지 과열이 아님 → 틱 충분할 때만 컷
-    if cv is not None and cv > GATE_CV_MAX and ia["count"] >= 4:
-        cut("CV_HIGH", f"{m} CV{cv:.2f}>{GATE_CV_MAX} (변동성 과열)")
-        return None
+    # 🔧 (제거됨) CV_HIGH: 스푸핑 필터(FAKE_FLOW_HARD)가 극단 CV 체크, overheat가 변동성 커버 → 중복 제거
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
@@ -8371,13 +8325,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
             return None
 
-    # CONSEC_LOW: 점화 or 강돌파 면제 (자체 수급 체크 있음)
-    if _consec_low:
-        if _ign_candidate or _brk_candidate:
-            _bypassed.append(f"CONSEC({cons_buys})")
-        else:
-            cut("CONSEC_LOW", f"{m} 연속매수{cons_buys}<{GATE_CONSEC_MIN} (수급 미확인)")
-            return None
+    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수에서 연속매수 평가 → 중복 하드컷 제거
 
     if _bypassed:
         print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
@@ -8396,12 +8344,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 📊 ② 윗꼬리 0% 필터 (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
     # 약간의 윗꼬리(10-30%)가 있어야 매수세 충돌 = 실제 돌파 시도
     # 꼬리 전혀 없으면 "급등 전 캔들이 아니라 단순 양봉"
+    # 📊 FIX: body≥1% 큰 바디 캔들은 면제 (몸통이 크면 uw 비율이 자연적으로 낮음, STEEM 6.55% 사례)
     _high = cur.get("high_price", cur["trade_price"])
     _low = cur.get("low_price", cur["trade_price"])
     _candle_range = _high - _low
     _upper_wick = _high - max(cur["trade_price"], cur["opening_price"])
     _uw_ratio = _upper_wick / _candle_range if _candle_range > 0 else 0
-    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate:
+    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate and candle_body_pct < 0.01:
         cut("NO_WICK", f"{m} 윗꼬리{_uw_ratio*100:.1f}%<{GATE_UW_RATIO_MIN*100:.0f}% (단순양봉)")
         return None
 
@@ -8439,20 +8388,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     btc5 = btc_5m_change()
     btc_headwind = btc5 <= -0.003  # -0.3%
 
-    # 🔧 BTC 폭풍 레짐: 높은 변동성 → 추가 요건 강화
-    btc_regime, btc_atr_pct = btc_volatility_regime()
-    if btc_regime == "storm":
-        # BTC 고변동성 시 추가 요건 (수급/모멘텀 강해야만 진입)
-        _storm_fail = []
-        if twin["buy_ratio"] < 0.62:
-            _storm_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.62")
-        if imbalance < 0.40:
-            _storm_fail.append(f"imb={imbalance:.2f}<0.40")
-        if accel < 0.8:
-            _storm_fail.append(f"accel={accel:.1f}<0.8")
-        if _storm_fail:
-            cut("BTC_STORM", f"{m} BTC폭풍(ATR{btc_atr_pct:.2f}%) 추가요건 미달: {', '.join(_storm_fail)}", near_miss=False)
-            return None
+    # 🔧 (제거됨) BTC_STORM: BTC_HEADWIND(-0.3% 방향성)가 이미 BTC 리스크 커버 → 중복 ATR 체크 제거
 
     # 🔧 5분 EMA 추세 필터: TREND_DOWN (line ~7423)에서 이미 처리
     # (중복 API 호출 제거 — 점화 면제도 TREND_DOWN에서 불필요, 점화는 추세 반전이니 -0.3% gap 안 걸림)
@@ -8461,33 +8397,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # SONIC 사례: 1분 RSI50(중립) 5분 RSI64(상승) 15분 볼밴124%(극과매수) → 꼭대기 진입
     # 15분봉이 과열 상태면 1분/5분에서 신호 나와도 이미 늦은 것
     # 점화는 면제 (폭발적 모멘텀은 15분 과열 무시 가능)
-    _entry_mode_override = None  # 🔧 BUG FIX: pre 딕셔너리로 전달 (기존 _entry_mode_override 죽은변수 수정)
-    if not _ign_candidate:
-        try:
-            _c15 = get_minutes_candles(15, m, 20)
-            if _c15 and len(_c15) >= 15:
-                _c15_closes = [x["trade_price"] for x in _c15]
-                _c15_last20 = _c15_closes[-min(20,len(_c15_closes)):]
-                _c15_sma = sum(_c15_last20) / len(_c15_last20)
-                _c15_std = (sum((x - _c15_sma)**2 for x in _c15_last20) / len(_c15_last20)) ** 0.5
-                if _c15_std > 0:
-                    _c15_bb_upper = _c15_sma + 2 * _c15_std
-                    _c15_bb_lower = _c15_sma - 2 * _c15_std
-                    _c15_bb_pos = (_c15_closes[-1] - _c15_bb_lower) / (_c15_bb_upper - _c15_bb_lower) * 100
-                    # 15분봉 볼밴 위치 95% 이상 = 극과매수 → half 강제
-                    if _c15_bb_pos > 95:
-                        print(f"[15M_OVERBOUGHT] {m} 15분봉 BB위치 {_c15_bb_pos:.0f}% → half 강제")
-                        _entry_mode_override = "half"
-                    # 15분봉 거래량 급감 + 과매수 = 피크 확정 → 진입 차단
-                    _c15_vols = [x.get("candle_acc_trade_price", 0) for x in _c15]
-                    _c15_rv = sum(_c15_vols[-3:]) if len(_c15_vols) >= 3 else 0
-                    _c15_pv = sum(_c15_vols[-6:-3]) if len(_c15_vols) >= 6 else 1
-                    _c15_vol_ratio = _c15_rv / max(_c15_pv, 1)
-                    if _c15_bb_pos > 95 and _c15_vol_ratio < 0.5:
-                        cut("15M_PEAK", f"{m} 15분봉 피크(BB{_c15_bb_pos:.0f}% + 거래량감소{_c15_vol_ratio:.2f}x)")
-                        return None
-        except Exception:
-            pass  # 15분봉 조회 실패 시 필터 스킵
+    # 🔧 (제거됨) 15M_PEAK: VWAP_CHASE(추격차단) + V7차트분석(RSI/vol)이 동일 역할 → 추가 API 낭비 제거
+    _entry_mode_override = None
 
     # === 🔧 v7 차트분석: 172샘플 다중타임프레임 검증 기반 사이즈 결정 ===
     # 📊 172신호 15분수익률 분석 결과:
@@ -8581,20 +8492,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 이전 v4의 RSI>75 half 강제는 22샘플 기반이었으나 172샘플로 반증됨
     # RSI>70+vol5+가 wr67%로 최고 콤보이므로 RSI 과매수 필터 삭제
 
-    # === 🔧 업비트 데이터 기반: 호가 비대칭 매도우세 시 사이즈 축소 ===
-    # 실시간 분석: 호가비대칭 0.31~2.67x 범위, <0.5x면 매도벽 압도
-    try:
-        _ob_imbal = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
-        if _ob_imbal and _ob_imbal[0].get("orderbook_units"):
-            _ob_units = _ob_imbal[0]["orderbook_units"][:5]
-            _ob_bid = sum(float(u["bid_price"]) * float(u["bid_size"]) for u in _ob_units)
-            _ob_ask = sum(float(u["ask_price"]) * float(u["ask_size"]) for u in _ob_units)
-            _ob_ratio = _ob_bid / max(_ob_ask, 1)
-            if _ob_ratio < 0.5:
-                print(f"[OB_SELL_HEAVY] {m} 호가비대칭 {_ob_ratio:.2f}x (매도벽 우세) → half 강제")
-                _entry_mode_override = "half"
-    except Exception:
-        pass
+    # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
     # === 🔧 승률개선: 야간 진입 차단 (00~07 KST) ===
     # 야간은 유동성 극감 → 스프레드 확대, 가짜 돌파, 휩쏘 빈발
@@ -8618,13 +8516,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
         return None
 
-    # === 🔧 매수비 페이드 감지 (꼭대기 진입 방지) ===
-    # t15 매수비는 높은데 t45 매수비가 50% 미만 → 직전 15초만 강한 "스파이크"
-    # 이미 피크를 지난 것이므로 진입하면 꼭대기에 물림
-    # 점화는 면제 (점화 자체가 짧은 구간에서 폭발)
-    if ignition_score < 3 and t15["buy_ratio"] >= 0.60 and t45["buy_ratio"] < 0.48:
-        cut("BUY_FADE", f"{m} 매수비페이드 t15={t15['buy_ratio']:.2f} t45={t45['buy_ratio']:.2f} (꼭대기)", near_miss=False)
-        return None
+    # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
 
     # 🔧 스푸핑 방지: 비점화는 가중평균 매수비(t15 70%+t45 30%) 사용, 점화만 twin 허용
     # min()은 너무 보수적(0.50~0.52) → 게이트 70점 도달 불가 → 가중평균으로 완화
@@ -8724,9 +8616,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "gate_reason": gate_reason,
         # 🔥 경로 표시: signal_tag 하나로 통일 (점화3, EMA↑, 고점↑, 거래량↑ 등)
         "signal_tag": signal_tag,
-        # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
-        "shadow_flags": ",".join(shadow_flags) if shadow_flags else "",
-        "would_cut": would_cut,
+        "shadow_flags": "",
+        "would_cut": False,
         "cv": cv,
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
