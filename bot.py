@@ -10082,7 +10082,7 @@ def monitor_position(m,
                     break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
-            gain_from_entry = (curp / entry_price - 1.0)
+            gain_from_entry = (curp / entry_price - 1.0) if entry_price > 0 else 0
 
             # 🔧 특단조치: PROBE→CONFIRM 전환 로직 제거 (probe 폐지 → 불필요)
 
@@ -10328,8 +10328,8 @@ def monitor_position(m,
 
             # 🔧 [제거됨] Giveback Cap / Peak Giveback → 트레일링으로 대체
             # 트레일링 간격 0.25%로 타이트화하여 동일 효과 달성
-            max_gain = (best / entry_price - 1.0)  # MFE 수익률 (다른 곳에서 사용)
-            cur_gain_now = (curp / entry_price - 1.0)  # 현재 수익률
+            max_gain = (best / entry_price - 1.0) if entry_price > 0 else 0  # MFE 수익률 (다른 곳에서 사용)
+            cur_gain_now = (curp / entry_price - 1.0) if entry_price > 0 else 0  # 현재 수익률
 
             # ============================================================
             # 🔧 매도구조개선: 매수세감쇄 익절 제거
