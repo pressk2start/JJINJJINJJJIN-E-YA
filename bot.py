@@ -7652,48 +7652,22 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
                  candle_body_pct=0.0, green_streak=0,
                  ema20_val=None, circle_surge=False):
     """
-    1단계 진입 게이트: 단일 통합 필터 (점화 통합)
-
-    [🔥 점화 점수 = 가점/완화 요소]
-    - ignition_score가 높으면 임계치가 동적으로 완화됨
-    - 별도 분기 없이 단일 흐름으로 처리
-    - 학습/튜닝 포인트: GATE_* 변수 하나
-
-    [전역 변수 임계치 사용 - 자동학습 대상]
-    - GATE_SPREAD_MAX: 스프레드 상한
-    - GATE_ACCEL_MIN/MAX: 가속도 범위
-    - GATE_BUY_RATIO_MIN: 매수비 하한
-    - GATE_IMBALANCE_MIN: 호가 임밸런스 하한
-    - GATE_VOL_MIN: 거래대금 하한
-    - GATE_FRESH_AGE_MAX: 틱신선도 상한(초)
-    - GATE_BODY_MIN: 캔들 바디 하한 (📊 180신호분석)
-    - GATE_UW_RATIO_MIN: 윗꼬리 하한 (📊 180신호분석)
-
-    [로그 형식 통일]
-    - 컷 메시지: "항목 현재값<기준값" 또는 "현재값>기준값"
-    - 모든 컷에 현재값과 동적 기준값 표시
-
+    1단계 진입 게이트: 최소 안전 필터 + 신호 태깅
+    - 하드컷: 틱신선도, 스프레드, 최소거래대금, 스푸핑, 가속과다 (5개)
+    - 진입 결정은 calc_risk_score(final_check_leader)에서 수행
     Returns: (allow, reason)
     """
-    # ============================================================
-    # 🔧 특단조치: AND 20개 필터 → 필수 하드컷 + 가중점수제
-    # 기존: 20개 조건이 모두 통과해야 진입 (완벽한 셋업만 허용 → 이미 피로구간)
-    # 변경: 필수 안전필터(슬리피지/신선도/과열) + 가중점수(70점 이상이면 통과)
-    #       강한 거래량+보통 매수비 조합도 통과 가능 (유연한 조기진입)
-    # ============================================================
-
-    # 📊 주요 지표 한줄 요약 (튜닝용 - 모든 컷/통과에 표시)
+    # 📊 주요 지표 한줄 요약
     metrics = (f"점화={ignition_score} surge={volume_surge:.2f}x MA대비={vol_vs_ma:.1f}x "
                f"변동={price_change*100:.2f}% 회전={turn_pct:.1f}% 매수비={buy_ratio:.0%} "
                f"스프레드={spread:.2f}% 임밸={imbalance:.2f} 가속={accel:.1f}x "
                f"연속매수={consecutive_buys}")
 
     # ============================================================
-    # [PHASE 1] 필수 하드컷 — 안전장치 (반드시 통과해야 함)
-    # 이 필터들은 통과 못하면 어떤 조합이든 위험한 진입
+    # 최소 하드컷 — 이 조건 실패 시 어떤 스코어든 위험한 진입
     # ============================================================
 
-    # 1) 틱 신선도 (필수 - 완화 없음)
+    # 1) 틱 신선도 (필수)
     if not fresh_ok:
         return False, f"[하드컷] 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {metrics}"
 
@@ -7704,9 +7678,6 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
     else:
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
-    # 점화 구간 스프레드 강화 (슬리피지 방어)
-    if ignition_score >= 3:
-        eff_spread_max = min(eff_spread_max, 0.25)
     if spread > eff_spread_max:
         return False, f"[하드컷] 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {metrics}"
 
@@ -7718,268 +7689,31 @@ def stage1_gate(*, spread, accel, volume_surge, turn_pct, buy_ratio, imbalance, 
     if abs(buy_ratio - 1.0) < 1e-6:
         return False, f"[하드컷] 매수비100%(스푸핑) | {metrics}"
 
-    # 5) 🔧 승률개선: 과열 = 매수비 62%+ 동반이면 half 허용, 미달이면 거부
-    # 60%는 너무 느슨 → 62%+ 엄격화, MEGA 승격 대신 half 진입으로 리스크 제한
-    overheated = accel * volume_surge
-    _overheat_half = False  # 🔧 FIX: OVERHEAT→HALF 플래그 (호출부에서 entry_mode 제한용)
-    if overheated > GATE_OVERHEAT_MAX:
-        if buy_ratio >= 0.62:
-            # 강한 매수세 동반 과열 → half 모드로 허용 (MEGA 승격은 과도)
-            print(f"  [OVERHEAT→HALF] {market} 과열({overheated:.1f}) + 매수비({buy_ratio:.0%}) → half 허용")
-            _overheat_half = True  # 🔧 FIX: half 플래그 설정 (reason에 마킹)
-        else:
-            # 매수세 부재 과열 = 스푸핑/펌프앤덤프 → 거부
-            return False, f"[하드컷] 과열+매수약({buy_ratio:.0%}) {overheated:.1f}>{GATE_OVERHEAT_MAX} | {metrics}"
-
-    # 6) 🔧 임밸런스 하드컷 (명확한 매도우위 거부)
-    # 🔧 FIX: -0.15 → -0.10 강화 (AZTEC 사례: -0.13에서 진입 후 -1.09% 손실)
-    # 알트는 호가 얇아서 -0.05~0.0 구간은 정상이나, -0.10 이하는 매도벽 존재
-    # mega는 유동성이 충분해 임밸이 자연적으로 낮을 수 있으므로 예외
-    if not mega and imbalance < -0.10:
-        return False, f"[하드컷] 임밸런스부족 {imbalance:.2f}<-0.10 (매도우위) | {metrics}"
-
-    # 7) 급등 상한 안전장치
-    # 🔧 차트분석: circle_surge면 GATE_SURGE_MAX 우회 (HOLO/STEEM형 폭발 진입 허용)
-    if volume_surge > GATE_SURGE_MAX and not circle_surge:
-        return False, f"[하드컷] 급등과다 {volume_surge:.1f}x>{GATE_SURGE_MAX}x | {metrics}"
-    elif volume_surge > GATE_SURGE_MAX and circle_surge:
-        print(f"  [SURGE_OVERRIDE] {market} 급등({volume_surge:.0f}x)>기준({GATE_SURGE_MAX}x) → circle_surge 우회 통과")
-
-    # 7) 과회전 상한 (메이저/알트 구분)
-    # 🔧 FIX: substring → exact match (ETHFI, BTCST 등 오탐 방지)
-    is_major = market.upper() in ("KRW-BTC", "KRW-ETH") if market else False
-    eff_turn_max = GATE_TURN_MAX_MAJOR if is_major else GATE_TURN_MAX_ALT
-    if turn_pct > eff_turn_max:
-        return False, f"[하드컷] 과회전 {turn_pct:.0f}%>{eff_turn_max:.0f}% {'메이저' if is_major else '알트'} | {metrics}"
-
-    # 8) 과회전 + 스프레드 = 슬리피지 위험
-    if turn_pct > 50 and spread > 0.25:
-        return False, f"[하드컷] 과회전+스프레드 회전{turn_pct:.0f}%>50% 스프{spread:.2f}%>0.25% | {metrics}"
-
-    # 9) 가속도 과다 안전장치
+    # 5) 가속도 과다 안전장치
     if accel > GATE_ACCEL_MAX:
         return False, f"[하드컷] 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {metrics}"
 
     # ============================================================
-    # [PHASE 2] 가중 점수제 — 유연한 조기진입 (각 0~25점, 합계 60점 이상)
-    # 핵심: 강한 거래량 + 보통 매수비 = 통과 가능 (개별 약점을 다른 강점이 보완)
-    # ============================================================
-    gate_score = 0.0
-
-    # --- (A) 거래량 강도 (0~25점) ---
-    # volume_surge + vol_vs_ma 종합
-    _vs = min(volume_surge, 10.0)  # 10배 캡
-    _vm = min(vol_vs_ma, 5.0)      # 5배 캡
-    vol_score = 0.0
-    # surge 기여 (0~15): 0.5x=0, 2x=10, 4x+=15
-    if _vs >= 0.5:
-        vol_score += min(15.0, (_vs - 0.5) * 4.3)
-    # vol_vs_ma 기여 (0~10): 0.5x=0, 2x=7.5, 3x+=10
-    if _vm >= 0.5:
-        vol_score += min(10.0, (_vm - 0.5) * 4.0)
-    vol_score = min(25.0, vol_score)
-    gate_score += vol_score
-
-    # --- (B) 체결 가속도 (0~25점) ---
-    # accel(t5/t15 krw_per_sec ratio): 가장 강력한 선행지표
-    # 1.5+ = 뭔가 터지기 직전, 0.8 이하 = 피로구간
-    _ac = min(accel, 5.0)
-    accel_score = 0.0
-    if _ac >= 0.3:
-        # 0.3=0점, 1.0=8점, 1.5=15점, 2.5+=25점
-        accel_score = min(25.0, max(0.0, (_ac - 0.3) * 11.4))
-    gate_score += accel_score
-
-    # --- (C) 매수비 (0~25점) ---
-    # buy_ratio: 0.50=0, 0.58=8, 0.65=17, 0.75+=25
-    _br = min(buy_ratio, 0.95)
-    buy_score = 0.0
-    if _br >= 0.50:
-        buy_score = min(25.0, (_br - 0.50) * 100.0)
-    gate_score += buy_score
-
-    # --- (D) 주문흐름 품질 (0~25점) ---
-    # consecutive_buys + imbalance + turn_pct 종합
-    flow_score = 0.0
-    # 연속매수 기여 (0~10): 1=2, 3=6, 5+=10
-    _cb = min(consecutive_buys, 8)
-    flow_score += min(10.0, _cb * 2.0)
-    # 임밸런스 기여 (0~10): 0.15=0, 0.50=7, 0.80+=10
-    _imb = min(imbalance, 1.0)
-    if _imb >= 0.15:
-        flow_score += min(10.0, (_imb - 0.15) * 11.8)
-    # 🔧 FIX: 회전율 기여 — 중간 최적(peak) 형태 (과회전 구간 감점)
-    # 기존: 회전율 높을수록 단조증가 → 과회전(피로/분배) 종목도 점수↑
-    # 변경: 2~8% 가점(최대 +5점), 12%+ 감점(-3점)
-    _tp = min(turn_pct, 30.0)
-    if 2.0 <= _tp <= 8.0:
-        flow_score += min(5.0, (_tp - 2.0) * 0.833)   # 2%→0, 8%→5
-    elif 8.0 < _tp <= 12.0:
-        flow_score += max(0.0, 5.0 - (_tp - 8.0) * 1.25)  # 8%→5, 12%→0
-    elif _tp > 12.0:
-        flow_score -= min(3.0, (_tp - 12.0) * 0.5)    # 12%→-0, 18%→-3 (과회전 감점)
-    flow_score = min(25.0, flow_score)
-    gate_score += flow_score
-
-    # ============================================================
-    # [PHASE 2.5] 독립 경로 판정 (각 경로별 AND 조건, gate_score 무관)
+    # 신호 태깅 (진입 판단은 calc_risk_score에서, 여기서는 태그만)
     # ============================================================
     is_ignition = (ignition_score >= 3)
     breakout_score = int(ema20_breakout) + int(high_breakout)
-    _body = candle_body_pct * 100  # 소수 → %
 
-    # 🔧 꼭대기방지: EMA20 이격도 계산 (강돌파 추격 진입 차단)
-    _ema_chase = False
-    _ema_dist_pct = 0.0
-    if ema20_val and ema20_val > 0 and cur_price > 0:
-        _ema_dist_pct = (cur_price / ema20_val - 1) * 100  # %
-        _ema_chase = (_ema_dist_pct > GATE_EMA_CHASE_MAX)
-
-    # 🔥 점화 독립 조건: 틱 폭발 + 가격 반응 + 가속 확인
-    # 🔧 CYBER 13:55 사례: 가속 1.0x(평탄) → accel >= 1.1로 차단
-    # 🔧 FIX: ETC 16:09 사례 — 틱나이 7.6초 (폭발 이미 종료) + CV 2.39 → 꼭대기 진입
-    # 🔧 FIX: ZRO 23:50 사례 — 거래량 5.6배지만 절대금액 미미 → 노이즈 진입
-    # gate_score 무관 — 점화는 자기 조건으로만 판단
-    ignition_pass = (
-        is_ignition                   # 점화 점수 ≥ 3
-        and price_change >= 0.003     # 1분봉 ≥ 0.3% (가격 반응 확인)
-        and imbalance >= 0.10         # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC 사례)
-        and _body <= GATE_IGNITION_BODY_MAX  # 🔧 캔들 과확장 차단
-        and accel >= GATE_IGNITION_ACCEL_MIN  # 🔧 가속도 최소 (평탄=가짜점화)
-        and fresh_age <= 5.0          # 🔧 FIX: 점화=틱폭발 → 5초 넘으면 이미 종료
-        and current_volume >= 2_000_000  # 🔧 FIX: 1분봉 거래대금 2M+ 필수 (저거래량 노이즈 차단)
-    )
-
-    # 강돌파 독립 조건: EMA+고점 동시 돌파 + 수급 품질
-    # gate_score 무관 — 자체 조건(consec/임밸/body/EMA이격)으로 판단
-    # 🔧 FIX: AGLD 사례 — consec 6이지만 임밸 -0.10 (매도우위) → 꼭대기 진입
-    #    → imbalance >= -0.05 추가 (점화와 동일 기준)
-    strongbreak_pass = (
-        breakout_score == 2
-        and not GATE_STRONGBREAK_OFF
-        and accel <= GATE_STRONGBREAK_ACCEL_MAX
-        and imbalance >= 0.10                        # 🔧 FIX: -0.05→0.10 (매도우위 진입 차단 — AZTEC: 임밸-0.05+vol 0.96x 진입)
-        and vol_surge >= 1.0                         # 🔧 FIX: 최소 평균 이상 거래량 필수 (AZTEC: 0.96x 평균이하 진입 차단)
-        and (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
-             or (buy_ratio >= 0.55 and imbalance >= 0.40))
-        and _body <= GATE_STRONGBREAK_BODY_MAX  # 🔧 캔들 이미 1%+ 상승 시 차단
-        and not _ema_chase                       # 🔧 EMA20 대비 1%+ 이격 시 추격 차단
-    )
-
-    # 🕯️ 캔들모멘텀 독립 조건: 1분봉 강한 양봉 + 거래량 + 추세 + 호가 뒷받침
-    # 🔧 NOM 13:59 사례: 임밸 -0.08 → imbalance >= 0.10으로 차단
-    # 🔧 FIX: UXLINK 사례 — 틱3개/연속3회/CV0.11(봇) → 캔들만 크고 틱 확인 부족
-    # gate_score 무관 — 자체 조건(body/거래량/임밸/가속)으로 판단
-    candle_momentum = (
-        _body >= 0.5              # 몸통 ≥ 0.5%
-        and vol_vs_ma >= 1.5      # 거래량 ≥ 1.5x MA20
-        and buy_ratio >= 0.50     # 매수 우위
-        and ema20_breakout        # 가격 > EMA20
-        and imbalance >= 0.10     # 🔧 호가 매수우위 필수 (매도벽이면 돌파 불가)
-        and accel >= 0.8          # 🔧 체결 가속 확인 (둔화 중이면 꼭대기)
-        and consecutive_buys >= GATE_CONSEC_MIN  # 🔧 FIX: 최소 연속매수 필수 (틱 3개 진입 방지)
-    )
-
-    # === gate_score 보너스: 단일 돌파만 유지 (독립 경로 제외) ===
-    if breakout_score == 1:
-        gate_score += 5.0   # EMA↑ 또는 고점↑ 단독
-
-    score_detail = (f"gate_score={gate_score:.0f} "
-                    f"[거래량{vol_score:.0f} 가속{accel_score:.0f} 매수비{buy_score:.0f} 흐름{flow_score:.0f}] "
-                    f"body={_body:.2f}% ema이격={_ema_dist_pct:.2f}%")
-
-    gate_passed = (gate_score >= GATE_SCORE_THRESHOLD)
-
-    if not gate_passed and not ignition_pass and not strongbreak_pass and not candle_momentum:
-        # 🔧 독립경로 불통과 사유 상세 표시
-        # 독립경로 불통과 사유 상세 (디버그용)
-        _why = []
-        if is_ignition and not ignition_pass:
-            if accel < GATE_IGNITION_ACCEL_MIN: _why.append(f"점화+가속부족({accel:.1f}<{GATE_IGNITION_ACCEL_MIN})")
-            if _body > GATE_IGNITION_BODY_MAX: _why.append(f"점화+과확장({_body:.1f}%)")
-            if current_volume < 2_000_000: _why.append(f"점화+거래대금부족({current_volume/1e6:.1f}M<2M)")
-        if breakout_score == 2 and not strongbreak_pass:
-            if _body > GATE_STRONGBREAK_BODY_MAX: _why.append(f"강돌+과확장({_body:.1f}%)")
-            if _ema_chase: _why.append(f"강돌+EMA추격({_ema_dist_pct:.1f}%)")
-        _extra = f" 독립경로차단:[{','.join(_why)}]" if _why else ""
-        return False, f"[가중점수] {gate_score:.0f}<{GATE_SCORE_THRESHOLD:.0f}{_extra} | {score_detail} | {metrics}"
-
-    # ============================================================
-    # [PHASE 3] 경로별 통과 처리
-    # ============================================================
-    oh_tag = " [OVERHEAT_HALF]" if _overheat_half else ""
-
-    # 🔥 점화 독립 경로
-    if ignition_pass and not gate_passed:
-        signal_tag = "🔥점화"
-        pass_summary = (f"변동{price_change*100:.2f}% 임밸{imbalance:.2f} "
-                        f"매수{buy_ratio:.0%} 연속{consecutive_buys}")
-        return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
-
-    # 강돌파 독립 경로
-    if strongbreak_pass and not gate_passed:
-        signal_tag = "강돌파 (EMA↑+고점↑)"
-        pass_summary = (f"매수{buy_ratio:.0%} 연속{consecutive_buys} "
-                        f"임밸{imbalance:.2f} 가속{accel:.1f}x")
-        return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
-
-    # 🕯️ 캔들 독립 경로
-    if candle_momentum and not gate_passed:
-        signal_tag = "🕯️캔들돌파"
-        pass_summary = (f"몸통{_body:.2f}% MA{vol_vs_ma:.1f}x "
-                        f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}")
-        return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
-
-    # --- gate_score 통과 경로 (EMA↑, 고점↑, 거래량↑) ---
-
-    # gate_score 통과했더라도 강돌파면 품질 필터 적용
-    if breakout_score == 2 and not GATE_STRONGBREAK_OFF:
-        if accel > GATE_STRONGBREAK_ACCEL_MAX:
-            return False, f"강돌파+과속 {accel:.1f}x>{GATE_STRONGBREAK_ACCEL_MAX:.1f}x | {metrics}"
-        # 🔧 꼭대기방지: 캔들 과확장 / EMA 추격 차단 (gate_score 경로에서도 적용)
-        if _body > GATE_STRONGBREAK_BODY_MAX:
-            return False, f"강돌파+캔들과확장 body{_body:.1f}%>{GATE_STRONGBREAK_BODY_MAX}% (꼭대기위험) | {metrics}"
-        if _ema_chase:
-            return False, f"강돌파+EMA추격 이격{_ema_dist_pct:.1f}%>{GATE_EMA_CHASE_MAX}% (추격위험) | {metrics}"
-        momentum_ok = (consecutive_buys >= GATE_STRONGBREAK_CONSEC_MIN
-                       or (buy_ratio >= 0.55 and imbalance >= 0.40))
-        if not momentum_ok:
-            return False, f"강돌파+모멘텀부족 consec{consecutive_buys} br{buy_ratio:.2f} imb{imbalance:.2f} | {metrics}"
-    elif GATE_STRONGBREAK_OFF and breakout_score == 2:
-        return False, f"강돌파차단 EMA돌파+고점돌파 동시 (승률21%) | {metrics}"
-
-    # 경로 태그
     if is_ignition:
-        cand_path = "🔥점화"
-    elif candle_momentum:
-        cand_path = "🕯️캔들돌파"
+        signal_tag = "🔥점화"
     elif breakout_score == 2:
-        cand_path = "강돌파 (EMA↑+고점↑)"
+        signal_tag = "강돌파 (EMA↑+고점↑)"
     elif ema20_breakout:
-        cand_path = "EMA↑"
+        signal_tag = "EMA↑"
     elif high_breakout:
-        cand_path = "고점↑"
+        signal_tag = "고점↑"
+    elif vol_vs_ma >= 1.5:
+        signal_tag = "거래량↑"
     else:
-        cand_path = "거래량↑"
+        signal_tag = "기본"
 
-    # 진입 조건: 돌파 OR vol_vs_ma OR 점화
-    eff_vol_vs_ma = max(GATE_RELAX_VOL_MA_FLOOR, GATE_VOL_VS_MA_MIN)
-    entry_signal = (breakout_score >= 1) or (vol_vs_ma >= eff_vol_vs_ma) or (ignition_score >= 3)
-
-    if not entry_signal:
-        return False, f"진입조건미달 EMA={ema20_breakout} 고점={high_breakout} MA{vol_vs_ma:.1f}x | {score_detail} | {metrics}"
-
-    # 🔧 FIX: gate_score 경로 임밸런스 최소 요건 (AZTEC -0.13 사례)
-    # 독립경로(점화/강돌파/캔들)는 imbalance >= 0.10 필수인데
-    # 표준 gate_score 경로는 임밸런스 체크가 없어 매도우위에도 진입 허용됨
-    # → 호가창 매도우위(음수)이면 gate_score 경로도 차단
-    if imbalance < 0.0 and not mega:
-        return False, f"[gate임밸컷] 임밸{imbalance:.2f}<0.0 (호가매도우위 gate차단) | {score_detail} | {metrics}"
-
-    # === 통과 ===
-    signal_tag = cand_path
     pass_summary = f"매수{buy_ratio:.0%} 회전{turn_pct:.1f}% 임밸{imbalance:.2f}"
-    return True, f"{signal_tag} PASS | {score_detail} | {pass_summary}{oh_tag}"
+    return True, f"{signal_tag} PASS | {pass_summary} | {metrics}"
 
 
 # =========================
@@ -8102,41 +7836,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
         return None
 
-    # === 🔧 레짐 필터: 횡보장/박스상단 진입 차단 ===
-    cur_price = c1[-1]["trade_price"] if c1 else 0
-    _regime_ok, regime_reason = regime_filter(m, c1, cur_price)
-    # 🔧 regime_filter는 항상 True 반환 (SIDEWAYS/FLAT_SLOPE = 힌트, 호출부에서 예외 판단)
-    # 🔧 FIX: FLAT_SLOPE → entry_mode half로 다운그레이드 (기회비용 절감)
-    regime_flat = (regime_reason == "FLAT_SLOPE")
-
-    # ============================================================
-    # ★★★ 구조 변경 2: 5분봉 추세 정렬 필터 (🔧 독립경로 면제: 지연 판정)
-    # ============================================================
-    _trend_down = False
-    _trend_down_gap = 0.0
-    try:
-        _c5 = get_minutes_candles(5, m, 21)  # 5분봉 21개 = EMA20 계산용
-        if _c5 and len(_c5) >= 20:
-            _c5_closes = [x["trade_price"] for x in _c5]
-            # EMA5 계산
-            _ema5_mult = 2 / (5 + 1)
-            _ema5 = _c5_closes[0]
-            for _p in _c5_closes[1:]:
-                _ema5 = _p * _ema5_mult + _ema5 * (1 - _ema5_mult)
-            # EMA20 계산
-            _ema20_mult = 2 / (20 + 1)
-            _ema20 = _c5_closes[0]
-            for _p in _c5_closes[1:]:
-                _ema20 = _p * _ema20_mult + _ema20 * (1 - _ema20_mult)
-
-            _trend_gap = (_ema5 - _ema20) / _ema20 if _ema20 > 0 else 0
-            if _ema5 < _ema20 and _trend_gap < -0.003:
-                # 🔧 FIX: 즉시 컷 → 플래그 저장 (독립경로 면제 지원)
-                _trend_down = True
-                _trend_down_gap = _trend_gap
-    except Exception:
-        pass  # API 실패 시 필터 스킵 (진입 기회 보존)
-
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
@@ -8204,19 +7903,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
     turn = twin["krw"] / max(ob["depth_krw"], 1)
 
-    # === 🔧 수익개선(실데이터): 거래량 피크 감지 ===
-    # HOLO 사례: 1분봉 거래량 502배 폭발 후 급감 → 이미 피크 지남
-    # 최근 3봉 거래량이 이전 3봉 대비 10배 이상 폭발 후, 현재봉이 피크봉의 30% 미만 → 피크 아웃
-    if len(c1) >= 7:
-        _v_recent3 = [c.get("candle_acc_trade_price", 0) for c in c1[-4:-1]]  # 직전 3봉
-        _v_before3 = [c.get("candle_acc_trade_price", 0) for c in c1[-7:-4]]  # 그 전 3봉
-        _v_current = c1[-1].get("candle_acc_trade_price", 0)
-        _v_peak = max(_v_recent3) if _v_recent3 else 0
-        _v_before_avg = sum(_v_before3) / max(len(_v_before3), 1)
-        if _v_before_avg > 0 and _v_peak / _v_before_avg > 10 and _v_peak > 0 and _v_current < _v_peak * 0.3:
-            cut("VOL_PEAK_OUT", f"{m} 거래량피크아웃 (피크{_v_peak/1e6:.0f}M→현재{_v_current/1e6:.0f}M, 이전평균{_v_before_avg/1e6:.0f}M)")
-            return None
-
     # 🔥 1단계 게이트 적용 (단일 통합 필터)
     # 🔧 FIX: SMA → EMA 기반 vol_surge (펌프 초반 더 빠른 반응)
     if past_volumes and len(past_volumes) >= 3:
@@ -8268,13 +7954,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
         return None
 
-    # 🛑 거래량 서지 체크 (🔧 독립경로 면제: 플래그만 저장, 지연 판정)
-    _vol_surge_low = (not mega and vol_surge < 0.65)
-
-    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수(0-25)에서 연속매수 평가 → 중복 제거
-    # 🔧 (제거됨) 연속매수 상한 - 매수세 강한 게 위험이 아님, 매수비/임밸/스프레드가 이미 필터링
-    # 🔧 (제거됨) CV_HIGH: 스푸핑 필터(FAKE_FLOW_HARD)가 극단 CV 체크, overheat가 변동성 커버 → 중복 제거
-
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
     cur_price = cur["trade_price"]
     cur_high = cur.get("high_price", cur_price)  # 🔧 현재봉 고가
@@ -8305,96 +7984,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
 
-    # 🔧 FIX: 하드컷별 개별 면제 판정 (일괄 면제 → 세분화)
-    # ENSO 사례: 서지 0.61x인데 강돌파로 VOL_SURGE_LOW 면제 → 볼륨없는 돌파 = 가짜
-    # BERA 사례: 캔들모멘텀이 CONSEC_LOW 면제 → 틱 3개로 진입
     _ign_candidate = (ignition_score >= 3)
-    _brk_candidate = (ema20_breakout and high_breakout)
-    _bypassed = []
-
-    # TREND_DOWN: 점화 or 강돌파 면제 (추세 반전/돌파 가능)
-    if _trend_down:
-        if _ign_candidate or _brk_candidate:
-            _bypassed.append(f"TREND({_trend_down_gap*100:.2f}%)")
-        else:
-            cut("TREND_DOWN", f"{m} 5분 EMA5<EMA20 ({_trend_down_gap*100:.2f}%) 하락추세 진입 차단")
-            return None
-
-    # VOL_SURGE_LOW: 점화만 면제 (강돌파는 볼륨 확인 필수 — 볼륨없는 돌파 = 가짜)
-    if _vol_surge_low:
-        if _ign_candidate:
-            _bypassed.append(f"VOL({vol_surge:.2f}x)")
-        else:
-            cut("VOL_SURGE_LOW", f"{m} 거래량서지 {vol_surge:.2f}x<0.65x (모멘텀부족)", near_miss=False)
-            return None
-
-    # 🔧 (제거됨) CONSEC_LOW: gate flow 점수에서 연속매수 평가 → 중복 하드컷 제거
-
-    if _bypassed:
-        print(f"[INDEP_BYPASS] {m} 하드컷 면제: {','.join(_bypassed)} | ign={ignition_score} brk={int(ema20_breakout)}{int(high_breakout)}")
-
-    # ========================================
-    # 📊 180신호분석 데이터 기반 필터 (진입 품질 강화)
-    # ========================================
-
-    # 📊 ① 캔들 바디 하한 (body<0.5% wr29.5% → 0.3% 최소 필수)
-    # 바디가 너무 작으면 "약간 움직였지만 모멘텀 없는" 상태 → 기대값 마이너스
-    # 점화는 자체 price_change≥0.3% 조건이 있으므로 면제
-    if candle_body_pct < GATE_BODY_MIN and not _ign_candidate:
-        cut("BODY_TOO_SMALL", f"{m} 바디{candle_body_pct*100:.2f}%<{GATE_BODY_MIN*100:.1f}% (약한캔들)")
-        return None
-
-    # 📊 ② 윗꼬리 0% 필터 (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
-    # 약간의 윗꼬리(10-30%)가 있어야 매수세 충돌 = 실제 돌파 시도
-    # 꼬리 전혀 없으면 "급등 전 캔들이 아니라 단순 양봉"
-    # 📊 FIX: body≥1% 큰 바디 캔들은 면제 (몸통이 크면 uw 비율이 자연적으로 낮음, STEEM 6.55% 사례)
-    _high = cur.get("high_price", cur["trade_price"])
-    _low = cur.get("low_price", cur["trade_price"])
-    _candle_range = _high - _low
-    _upper_wick = _high - max(cur["trade_price"], cur["opening_price"])
-    _uw_ratio = _upper_wick / _candle_range if _candle_range > 0 else 0
-    if _candle_range > 0 and _uw_ratio < GATE_UW_RATIO_MIN and not _ign_candidate and candle_body_pct < 0.01:
-        cut("NO_WICK", f"{m} 윗꼬리{_uw_ratio*100:.1f}%<{GATE_UW_RATIO_MIN*100:.0f}% (단순양봉)")
-        return None
-
-    # 📊 ③ WEAK_SIGNAL 콤보 (body<0.5% + vol<5x → wr27.9% MFE0.56%)
-    # 바디 0.3~0.5% 구간은 거래량이 뒷받침되면(5x+) 괜찮지만, 거래량도 약하면 확실한 손실 구간
-    if candle_body_pct < 0.005 and vol_surge < 5.0 and not _ign_candidate and not _brk_candidate:
-        cut("WEAK_SIGNAL", f"{m} 약신호콤보 바디{candle_body_pct*100:.2f}%+서지{vol_surge:.1f}x<5x")
-        return None
-
-    # 📊 ④ 연속 양봉 과열 (4+개 wr33.3% avg-0.34% → 이미 올랐으면 추격 위험)
-    if green_streak >= (GATE_GREEN_STREAK_MAX + 1) and not _ign_candidate:
-        cut("GREEN_OVERHEAT", f"{m} 연속양봉{green_streak}≥{GATE_GREEN_STREAK_MAX+1}개 (과열)")
-        return None
-
-    # 🔧 4-2. SIDEWAYS 예외 처리: 점화/강돌파가 아니면 횡보장 진입 차단
-    # regime_filter가 SIDEWAYS 힌트를 반환했으면, 여기서 예외 조건 판단
-    regime_sideways = ("SIDEWAYS" in regime_reason)
-    if regime_sideways:
-        _sw_allow = False
-        _sw_reason = ""
-        # 예외1: 만점 점화 (ignition_score >= 4) → 횡보 돌파 가능성
-        if ignition_score >= 4:
-            _sw_allow = True
-            _sw_reason = "점화만점"
-        # 예외2: 강점화 + 거래량 서지 2배 이상 + 고점 돌파 → 강한 돌파 신호
-        elif ignition_score >= 3 and vol_surge >= 2.0 and high_breakout:
-            _sw_allow = True
-            _sw_reason = "점화3+서지2x+고점돌파"
-        if not _sw_allow:
-            cut("SIDEWAYS_BLOCK", f"{m} 횡보장 {regime_reason} 예외미달 (ign={ignition_score}, surge={vol_surge:.1f}x)")
-            return None
-        print(f"[SIDEWAYS_ALLOW] {m} {regime_reason} 예외통과: {_sw_reason} → half 강제")
-
-    # === 🔥 BTC 역풍 가드 + 변동성 레짐 (게이트 통과 후 추가 요건 체크) ===
-    btc5 = btc_5m_change()
-    btc_headwind = btc5 <= -0.003  # -0.3%
-
-    # 🔧 (제거됨) BTC_STORM: BTC_HEADWIND(-0.3% 방향성)가 이미 BTC 리스크 커버 → 중복 ATR 체크 제거
-
-    # 🔧 5분 EMA 추세 필터: TREND_DOWN (line ~7423)에서 이미 처리
-    # (중복 API 호출 제거 — 점화 면제도 TREND_DOWN에서 불필요, 점화는 추세 반전이니 -0.3% gap 안 걸림)
 
     # === 🔧 수익개선(실데이터): 15분봉 과매수 필터 ===
     # SONIC 사례: 1분 RSI50(중립) 5분 RSI64(상승) 15분 볼밴124%(극과매수) → 꼭대기 진입
@@ -8558,41 +8148,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STAGE1_GATE", f"{m} {gate_reason}", near_miss=False)
         return None
 
-    # 🔥 BTC 역풍 시 추가 요건 체크 (게이트 통과 후)
-    if btc_headwind:
-        headwind_fail = []
-        if accel < 0.3:
-            headwind_fail.append(f"accel={accel:.2f}<0.3")
-        if turn_pct < 2.5:
-            headwind_fail.append(f"turn={turn_pct:.2f}<2.5")
-        if twin["buy_ratio"] < 0.60:
-            headwind_fail.append(f"buy_ratio={twin['buy_ratio']:.2f}<0.60")
-
-        if headwind_fail:
-            cut("BTC_HEADWIND", f"{m} BTC역풍({btc5*100:.2f}%) 추가요건 미달: {', '.join(headwind_fail)}", near_miss=False)
-            return None
-        print(f"[BTC_HEADWIND] {m} BTC 5분 {btc5*100:.2f}% → 추가요건 통과")
-
-    # === VWAP 기반 진입 품질 계산 ===
+    # === VWAP gap 계산 (사이즈 조절/표시용, 하드컷 없음) ===
     vwap = calc_vwap_from_candles(c1, 20)
-    vwap_score_bonus = 0
-    if vwap and cur_price > 0:
-        vwap_gap = (cur_price / vwap - 1.0) * 100  # % 단위
-        # VWAP 근처(±0.3%) 진입 = 최적 (지지 가까움)
-        if abs(vwap_gap) <= 0.3:
-            vwap_score_bonus = 5  # +5점 보너스
-        # VWAP 위 0.3~1.0% = 양호 (추세 확인)
-        elif 0.3 < vwap_gap <= 1.0:
-            vwap_score_bonus = 2
-        # VWAP 위 1.5% 이상 = 추격 위험
-        # 🔧 비점화는 하드컷 (꼭대기 추격이 손절 과다의 핵심 원인)
-        elif vwap_gap > 1.5:
-            if ignition_score < 3:
-                cut("VWAP_CHASE", f"{m} VWAP+{vwap_gap:.1f}% 추격진입 차단 (비점화)", near_miss=False)
-                return None
-            vwap_score_bonus = -3
-    else:
-        vwap_gap = 0.0
+    vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
 
     # === 결과 패키징 ===
     # 🔥 signal_tag 추출 (gate_reason: "{signal_tag} PASS | {metrics}")
@@ -8611,13 +8169,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "turn_pct": turn_pct,
         "spread": ob["spread"],
         "buy_ratio": _gate_buy_ratio,
-        "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),  # 🔧 스파이크 방지용 보수적 매수비
-        "fresh_ok": fresh_ok,  # 🔧 CRITICAL: fresh_ok 전달 (스코어 계산용)
+        "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),
+        "fresh_ok": fresh_ok,
         "mega": mega,
         "filter_type": "stage1_gate",
         "ignition_score": ignition_score,
         "gate_reason": gate_reason,
-        # 🔥 경로 표시: signal_tag 하나로 통일 (점화3, EMA↑, 고점↑, 거래량↑ 등)
         "signal_tag": signal_tag,
         "shadow_flags": "",
         "would_cut": False,
@@ -8625,20 +8182,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "pstd": pstd10,
         "consecutive_buys": cons_buys,
         "overheat": overheat,
-        "regime_flat": regime_flat,
-        "regime_sideways": regime_sideways,  # 🔧 4-2: SIDEWAYS 예외 통과 시 half 강제용
-        # 🔧 FIX: postcheck bypass 정합성 (ign_ok/mega_ok 키 누락 → bypass 항상 실패하던 버그)
         "ign_ok": (ignition_score >= 3),
         "mega_ok": mega,
-        # 🔧 FIX: OVERHEAT→HALF 플래그 전달 (메인루프에서 entry_mode 제한)
-        "_overheat_half": gate_ok and "[OVERHEAT_HALF]" in gate_reason,
-        # 🔧 VWAP 기반 진입 품질
-        "vwap_score_bonus": vwap_score_bonus,
-        "vwap_gap": round(vwap_gap, 2),
-        # 🔧 꼭대기방지: 캔들 확장도 (postcheck 조기진입 판단용)
         "candle_body_pct": candle_body_pct,
-        # 🔧 BUG FIX: v7 차트분석 기반 entry_mode 오버라이드 전달 (기존 죽은변수 수정)
-        # None=스코어 기본, "half"=리스크 축소, "full"=최적조건 유지
+        "vwap_gap": round(vwap_gap, 2),
         "_entry_mode_override": _entry_mode_override,
     }
 
@@ -8682,8 +8229,6 @@ def final_check_leader(m, pre, tight_mode=False):
     score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
     # 🔧 FIX(I3): killer 통과 가산점 반영 (entry_mode 이중결정 → score 단일 시스템)
     score += pre.get("killer_bonus", 0)
-    # 🔧 VWAP 기반 진입 품질 보너스 (VWAP 근처: +5, 추격: -3)
-    score += pre.get("vwap_score_bonus", 0)
 
     # 🔧 성과조정: 임밸런스 필터 (매도우위 심할 때 진입 차단)
     # 근거: 8개 스냅샷 전체에서 승리=임밸런스 양수, 패배=음수 일관
@@ -8722,27 +8267,6 @@ def final_check_leader(m, pre, tight_mode=False):
     elif _mode_override == "full" and entry_mode == "half":
         entry_mode = "confirm"
         print(f"[MODE_OVERRIDE] {m} v7차트분석 → half→confirm 업그레이드")
-
-    # 🔧 4-2. SIDEWAYS 레짐 → 무조건 half 강제 (예외 통과했으나 리스크 축소)
-    if pre.get("regime_sideways"):
-        if entry_mode == "confirm":
-            entry_mode = "half"
-            print(f"[SIDEWAYS_HALF] {m} 횡보장 예외통과 → confirm→half 다운그레이드")
-
-    # FLAT_SLOPE 레짐 → 다운그레이드 (횡보장 리스크 축소)
-    # 🔧 특단조치: probe 폐지 → half 이하는 진입 차단
-    if pre.get("regime_flat"):
-        old_mode = entry_mode
-        if entry_mode == "confirm":
-            entry_mode = "half"
-        elif entry_mode == "half":
-            # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제 (기회손실 감소)
-            # 기존: 진입 차단 → 거래 0건 날이 많아짐 → 분산/일관성 악화
-            # 변경: half 유지하되 scalp로 강제 → 빠른 TP로 리스크 제한
-            pre["_force_scalp"] = True
-            print(f"[REGIME_FLAT] {m} half+횡보 → half 유지 + scalp 강제")
-        if entry_mode != old_mode:
-            print(f"[REGIME_FLAT] {m} EMA slope 평평 → {old_mode}→{entry_mode} 다운그레이드")
 
     # 강돌파 다운그레이드 (완화: 연속매수≥3 OR 매수비≥0.55+임밸≥0.40이면 유지)
     # 🔧 특단조치: probe 폐지 → half 이하는 진입 차단
@@ -11670,10 +11194,6 @@ def main():
                 # 🔧 승률개선: 급등 허용 시 half 강제 (리스크 제한)
                 if pre.get("_surge_probe"):
                     pre["entry_mode"] = "half"
-                # 🔧 FIX: 과열+매수세 동반 → half 강제 (stage1_gate에서 마킹)
-                if pre.get("_overheat_half"):
-                    pre["entry_mode"] = "half"
-
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
