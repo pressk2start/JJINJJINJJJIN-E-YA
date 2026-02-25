@@ -7763,6 +7763,17 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             break
     green_streak = _green_streak
 
+    # 📊 윗꼬리 비율 계산 (180신호분석: uw<10% wr21.9%, 10-30% wr50.9% 최적)
+    _uw_high = cur.get("high_price", cur["trade_price"])
+    _uw_low = cur.get("low_price", cur["trade_price"])
+    _uw_close = cur["trade_price"]
+    _uw_open = cur["opening_price"]
+    _uw_range = _uw_high - _uw_low
+    if _uw_range > 0:
+        upper_wick_ratio = (_uw_high - max(_uw_close, _uw_open)) / _uw_range
+    else:
+        upper_wick_ratio = 0.0
+
     # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
     if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
@@ -7872,8 +7883,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MID_HIGHVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중립고거래 full")
                 _entry_mode_override = "full"
 
-            # ⑤ 오전 9-11시 + vol5x+ → full 보너스 (wr64%, avg+1.306%)
-            elif 9 <= _hour_now < 12 and _chart_volratio >= 5:
+            # ⑤ 오전 9-12시 + vol3x+ → full 보너스 (📊 9-12시 wr53.3% MFE3.195% 압도적 → 임계 완화 5x→3x)
+            elif 9 <= _hour_now < 12 and _chart_volratio >= 3:
                 print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
                 _entry_mode_override = "full"
 
@@ -7960,6 +7971,22 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
         return None
 
+    # 6) 📊 바디 하한 (body<0.5% wr29.5% → 최소 0.3% 필수, 점화 면제)
+    if not _ign_candidate and candle_body_pct < GATE_BODY_MIN:
+        cut("BODY_MIN", f"{m} 바디과소 {candle_body_pct*100:.2f}%<{GATE_BODY_MIN*100:.1f}% | {_metrics}")
+        return None
+
+    # 7) 📊 윗꼬리 하한 (uw<10% wr21.9% → 꼬리없는 단순양봉 차단, 점화 면제)
+    #    양봉(body>0)인데 윗꼬리가 전혀 없으면 = 돌파 시도 아닌 단순 상승
+    if not _ign_candidate and candle_body_pct > 0 and upper_wick_ratio < GATE_UW_RATIO_MIN:
+        cut("UW_MIN", f"{m} 윗꼬리부족 {upper_wick_ratio*100:.1f}%<{GATE_UW_RATIO_MIN*100:.0f}% | {_metrics}")
+        return None
+
+    # 8) 📊 WEAK_SIGNAL 콤보 (body<0.5% + vol<5x → wr27.9% 확실한 거르기 대상)
+    if not _ign_candidate and candle_body_pct < 0.005 and vol_surge < 5:
+        cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
+        return None
+
     # ============================================================
     # 신호 태깅
     # ============================================================
@@ -7997,6 +8024,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     elif _entry_mode_override == "full" and _entry_mode == "half":
         _entry_mode = "confirm"
 
+    # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
+    if green_streak > GATE_GREEN_STREAK_MAX and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[GREEN_STREAK] {m} 연속양봉 {green_streak}개>{GATE_GREEN_STREAK_MAX} → half 강제 (과열)")
+
     # === 결과 패키징 ===
     pre = {
         "price": cur["trade_price"],
@@ -8024,6 +8056,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "ign_ok": _ign_candidate,
         "mega_ok": mega,
         "candle_body_pct": candle_body_pct,
+        "upper_wick_ratio": upper_wick_ratio,
+        "green_streak": green_streak,
         "vwap_gap": round(vwap_gap, 2),
         "entry_mode": _entry_mode,
         "is_precision_pocket": _is_precision,
