@@ -49,10 +49,10 @@ COOLDOWN = 240  # 🔧 수익성패치: 480→240초 (게이트 엄격하니 쿨
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
+WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
 HARD_STOP_DD = 0.032  # 🔧 수익개선: 4.2→3.2% (SL 2.0% 대비 1.6배, 비상청산이 SL과 너무 멀면 손실만 확대)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
+EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
 DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
@@ -188,7 +188,7 @@ def _apply_exit_profile():
     prof = EXIT_PROFILE
 
     if prof == "gentle":
-        WARMUP_SEC = 10
+        WARMUP_SEC = 7          # 🔧 백테스트튜닝: 10→7초 (balanced 5초 대비 느슨)
         HARD_STOP_DD = 0.030
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
@@ -199,7 +199,7 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 6
+        WARMUP_SEC = 3          # 🔧 백테스트튜닝: 6→3초 (balanced 5초 대비 타이트)
         HARD_STOP_DD = 0.025
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
@@ -210,10 +210,10 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
-        WARMUP_SEC = 8
+        WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
         HARD_STOP_DD = 0.042   # 🔧 수익성패치: 0.038→0.042 (SL 2.0%×2.1, 전역값과 통일)
         EXIT_DEBOUNCE_SEC = 10
-        EXIT_DEBOUNCE_N = 4    # 🔧 수익성패치: 5→4 (SL 반응 5초 단축, 실현손실 0.2~0.3%p 개선)
+        EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
         TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
         SPIKE_RECOVERY_WINDOW = 3
@@ -4746,7 +4746,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.004 (0.1% ~ 0.4%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.002 (0.1% ~ 0.2%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -4855,7 +4855,7 @@ def auto_learn_exit_params():
                 if capture_rate < 0.40:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4866,7 +4866,7 @@ def auto_learn_exit_params():
                 elif capture_rate > 0.70:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4881,7 +4881,7 @@ def auto_learn_exit_params():
                 # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
                 target_trail = max(0.001, avg_drop * 0.80)
                 new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                 if abs(new_trail - old_trail) > 0.0005:
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
