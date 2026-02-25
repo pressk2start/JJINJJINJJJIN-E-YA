@@ -2206,6 +2206,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_spread": round(pre.get("spread", 0), 4),  # 진입시 스프레드
                 "entry_consec": pre.get("consecutive_buys", 0),  # 진입시 연속매수
                 # 📦 전략 태그 (박스/돌파/동그라미 구분)
+                "entry_hour": now_kst().hour,  # 🔧 v7: 시간대별 청산 타임아웃 차별화용
                 "strategy": "box" if pre.get("is_box") else
                             "circle" if pre.get("is_circle") else "breakout",
                 # 📦 박스 전용 TP/SL (모니터에서 우선 적용)
@@ -8437,10 +8438,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         except Exception:
             pass  # 15분봉 조회 실패 시 필터 스킵
 
-    # === 🔧 차트분석: 5분봉 최적조건 → full 유지, 극초기/위험조건 → half 강제 ===
-    # 📊 데이터: RSI 50-60 + vol 2-5x = 최적조건 (R:R 9.27:1) → full 사이즈 유지
-    # 📊 데이터: 모멘텀 극초기 <0.3% = 안전진입 (승률 75%, MAE 0.28%) → full 유지
-    # 📊 데이터: RSI>65 + mom>1.5% = 위험조건 (15분후 -0.30%, 승률 33%) → half 강제
+    # === 🔧 v7 차트분석: 172샘플 다중타임프레임 검증 기반 사이즈 결정 ===
+    # 📊 172신호 15분수익률 분석 결과:
+    #   RSI<50: n=37 avg+0.012% wr35% → half (약세장 진입)
+    #   RSI50-60+vol2-5: n=31 avg-0.123% wr39% → neutral (이전 "최적"은 오류)
+    #   RSI50-60+vol5+: n=18 avg+1.307% wr44% → full (고거래량이 핵심)
+    #   RSI60-70: n=39 avg+0.182% wr26% → half (최저 승률)
+    #   RSI>70+vol5+: n=21 avg+0.69% wr67% → full (최고 콤보!)
+    #   RSI>70+vol2-5: n=26 avg+0.437% wr42% → neutral
+    #   mom>1.5+RSI65+: n=22 avg+0.817% wr64% → full (강한 모멘텀)
+    #   vol20x+: n=6 avg+2.259% wr83% → full (폭발)
+    #   vol10-20x: n=20 avg-0.18% wr35% → half (트랩존)
+    #   오전9-11+vol5+: n=11 avg+1.306% wr64% → full 보너스
     if not _ign_candidate:
         try:
             # 5분봉 5봉 모멘텀 계산
@@ -8455,8 +8464,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 _v_avg5 = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5
                 _chart_volratio = _v_last / max(_v_avg5, 1) if _v_avg5 > 0 else 0
 
-            # RSI 계산 (위에서 이미 계산된 경우 재사용, 아니면 새로 계산)
-            _chart_rsi = 50.0  # 기본값
+            # RSI 계산
+            _chart_rsi = 50.0
             try:
                 _rsi_c1_temp = c1 if c1 and len(c1) >= 15 else get_minutes_candles(1, m, 20)
                 if _rsi_c1_temp and len(_rsi_c1_temp) >= 15:
@@ -8471,42 +8480,55 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             except Exception:
                 pass
 
-            # 최적 조건: RSI 50-60 + vol 2-5x → full 강제 (사이즈 올림, 허들 미변경)
-            if 50 <= _chart_rsi <= 60 and 2 <= _chart_volratio < 5:
-                print(f"[CHART_OPTIMAL] {m} RSI{_chart_rsi:.0f} vol{_chart_volratio:.1f}x → 최적조건 full 유지")
+            _hour_now = now_kst().hour
+
+            # ① 폭발 거래량 vol20x+ → 무조건 full (wr83%, avg+2.259%)
+            if _chart_volratio >= 20:
+                print(f"[V7_SURGE_VOL] {m} vol{_chart_volratio:.0f}x≥20 → 폭발 full")
                 _ENTRY_MAX_MODE_OVERRIDE = "full"
 
-            # 극초기 모멘텀: 안전진입 (모멘텀 <0.3% + 거래량 증가)
-            elif _chart_mom5 < 0.3 and _chart_volratio >= 2:
-                print(f"[CHART_EARLY] {m} 모멘텀{_chart_mom5:.2f}% vol{_chart_volratio:.1f}x → 초기진입 full 유지")
+            # ② RSI>70 + vol5x+ → full (wr67%, avg+0.69%, 최고 콤보)
+            elif _chart_rsi >= 70 and _chart_volratio >= 5:
+                print(f"[V7_HOT_MOMENTUM] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 강세돌파 full")
                 _ENTRY_MAX_MODE_OVERRIDE = "full"
 
-            # 위험 조건: RSI>65 + 후기모멘텀>1.5% → half 강제
-            elif _chart_rsi > 65 and _chart_mom5 > 1.5:
-                print(f"[CHART_RISKY] {m} RSI{_chart_rsi:.0f} mom{_chart_mom5:.2f}% → 위험조건 half 강제")
+            # ③ 강한 모멘텀: mom>1.5% + RSI65+ → full (wr64%, avg+0.817%)
+            elif _chart_mom5 > 1.5 and _chart_rsi >= 65:
+                print(f"[V7_STRONG_MOM] {m} mom{_chart_mom5:.2f}%+RSI{_chart_rsi:.0f} → 강모멘텀 full")
+                _ENTRY_MAX_MODE_OVERRIDE = "full"
+
+            # ④ RSI50-60 + vol5x+ → full (avg+1.307%, 고거래량 핵심)
+            elif 50 <= _chart_rsi < 60 and _chart_volratio >= 5:
+                print(f"[V7_MID_HIGHVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중립고거래 full")
+                _ENTRY_MAX_MODE_OVERRIDE = "full"
+
+            # ⑤ 오전 9-11시 + vol5x+ → full 보너스 (wr64%, avg+1.306%)
+            elif 9 <= _hour_now < 12 and _chart_volratio >= 5:
+                print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
+                _ENTRY_MAX_MODE_OVERRIDE = "full"
+
+            # ⑥ vol10-20x → half (avg-0.18%, 트랩존 — 거래량 있지만 방향불명)
+            elif 10 <= _chart_volratio < 20:
+                print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(10-20) → 트랩존 half")
                 _ENTRY_MAX_MODE_OVERRIDE = "half"
+
+            # ⑦ RSI<50 → half (wr35%, avg+0.012%, 약세장)
+            elif _chart_rsi < 50:
+                print(f"[V7_WEAK_RSI] {m} RSI{_chart_rsi:.0f}<50 → 약세 half")
+                _ENTRY_MAX_MODE_OVERRIDE = "half"
+
+            # ⑧ RSI60-70 + vol<5x → half (wr26%, 최저 승률)
+            elif 60 <= _chart_rsi < 70 and _chart_volratio < 5:
+                print(f"[V7_MID_LOWVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중상위저거래 half")
+                _ENTRY_MAX_MODE_OVERRIDE = "half"
+
+            # 나머지 (RSI50-60+vol2-5 등) → override 없음 (기본 사이즈 유지)
         except Exception:
             pass
 
-    # === 🔧 업비트 데이터 기반: RSI 과매수 시 사이즈 축소 (허들 미상승) ===
-    # 실시간 분석: RSI>70 코인이 50%(10/20) → 고점 진입 방지
-    if not _ign_candidate:
-        try:
-            _rsi_c1 = c1 if 'c1' in dir() else get_minutes_candles(1, m, 20)
-            if _rsi_c1 and len(_rsi_c1) >= 15:
-                _rsi_closes = [x["trade_price"] for x in sorted(_rsi_c1, key=lambda x: x.get("candle_date_time_kst",""))[-15:]]
-                _rsi_gains, _rsi_losses = 0, 0
-                for _ri in range(1, len(_rsi_closes)):
-                    _rd = _rsi_closes[_ri] - _rsi_closes[_ri-1]
-                    if _rd > 0: _rsi_gains += _rd
-                    else: _rsi_losses -= _rd
-                _rsi_rs = _rsi_gains / max(_rsi_losses, 0.001)
-                _rsi_val = 100 - 100 / (1 + _rsi_rs)
-                if _rsi_val > 75:
-                    print(f"[RSI_OVERBOUGHT] {m} 1분RSI {_rsi_val:.0f} > 75 → half 강제 (진입차단 아님)")
-                    _ENTRY_MAX_MODE_OVERRIDE = "half"
-        except Exception:
-            pass
+    # === 🔧 v7: RSI>75 half 제거 — 172샘플에서 RSI>70 wr53% avg+0.55%로 수익구간 확인 ===
+    # 이전 v4의 RSI>75 half 강제는 22샘플 기반이었으나 172샘플로 반증됨
+    # RSI>70+vol5+가 wr67%로 최고 콤보이므로 RSI 과매수 필터 삭제
 
     # === 🔧 업비트 데이터 기반: 호가 비대칭 매도우세 시 사이즈 축소 ===
     # 실시간 분석: 호가비대칭 0.31~2.67x 범위, <0.5x면 매도벽 압도
@@ -8530,6 +8552,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if 0 <= _hour_kst < 7:
         cut("NIGHT_BLOCK", f"{m} 야간진입차단 {_hour_kst}시 (00~07 KST 유동성부족)", near_miss=False)
         return None
+
+    # === 🔧 v7: 오후(12-18시) half 페널티 — 172샘플 시간대 분석 ===
+    # 📊 오후: n=43 avg+0.167% wr28% (최악) vs 오전: n=27 avg+0.677% wr59% (최고)
+    # 오후 진입은 승률이 28%로 극히 낮으므로 사이즈 축소 (차단은 아님)
+    if not _ign_candidate and 12 <= _hour_kst < 18:
+        if _ENTRY_MAX_MODE_OVERRIDE != "full":  # full 오버라이드 안 된 경우만
+            print(f"[V7_AFTERNOON] {m} 오후{_hour_kst}시 wr28% → half 페널티")
+            _ENTRY_MAX_MODE_OVERRIDE = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
@@ -9958,25 +9988,26 @@ def monitor_position(m,
                             print(f"[수급확인] {m} 관망 만료 | 약간 회복 {_sl_final_gain*100:.2f}% → 잔여 유지")
                             _sl_reduced = False
 
-            # === 🔧 차트분석: 30분 타임아웃 강화 (청산 로직) ===
-            # 📊 데이터: 30분(1800초) 후 edge -0.221%, winRate 40.9% → 청산 신호
-            # 수익 중: 트레일 타이트닝 50% / 손실 중: 스크래치 아웃
-            if alive_sec >= 1800:  # 30분 경과
+            # === 🔧 v7 차트분석: 시간대 적응형 타임아웃 (청산 로직) ===
+            # 📊 172샘플: 오전 wr59% → 30분 유지, 오후 wr28% → 20분으로 조기청산
+            # 수익 중: 트레일 타이트닝 / 손실 중: 스크래치 아웃
+            _entry_hour = pos.get("entry_hour", 12)
+            _timeout_sec = 1200 if 12 <= _entry_hour < 18 else 1800  # 오후 20분, 그외 30분
+            if alive_sec >= _timeout_sec:
                 if cur_gain > 0:
                     # 수익 중: 트레일링 스톱 타이트닝 (정상의 50%)
-                    # 🔧 FIX: trail_dist를 절반으로 축소하여 더 타이트한 손절 적용
                     if trail_armed and trail_dist > 0:
                         _trail_dist_tight = trail_dist * 0.5
                         trail_stop = max(trail_stop, curp * (1.0 - _trail_dist_tight), base_stop)
-                        print(f"[30M_TIMEOUT] {m} 30분경과 수익중({cur_gain*100:.2f}%) → 트레일 타이트닝 (dist {trail_dist*100:.2f}% → {_trail_dist_tight*100:.2f}%)")
-                        tg_send_mid(f"⏰ {m} 30분 경과 | +{cur_gain*100:.2f}% | 트레일 타이트닝 50%")
+                        print(f"[V7_TIMEOUT] {m} {_timeout_sec//60}분경과 수익중({cur_gain*100:.2f}%) → 트레일 타이트닝")
+                        tg_send_mid(f"⏰ {m} {_timeout_sec//60}분 경과 | +{cur_gain*100:.2f}% | 트레일 타이트닝 50%")
                 else:
                     # 손실 중: 스크래치 아웃 (즉시 청산)
-                    close_auto_position(m, f"30분타임아웃 손실청산 | -{abs(cur_gain)*100:.2f}% | 스크래치아웃")
+                    close_auto_position(m, f"{_timeout_sec//60}분타임아웃 손실청산 | -{abs(cur_gain)*100:.2f}% | 스크래치아웃")
                     _already_closed = True
-                    verdict = "30M_TIMEOUT_LOSS"
-                    print(f"[30M_TIMEOUT] {m} 30분경과 손실중({cur_gain*100:.2f}%) → 스크래치아웃")
-                    tg_send_mid(f"⏰ {m} 30분 경과 | {cur_gain*100:.2f}% 손실 → 강제 청산")
+                    verdict = "V7_TIMEOUT_LOSS"
+                    print(f"[V7_TIMEOUT] {m} {_timeout_sec//60}분경과 손실중({cur_gain*100:.2f}%) → 스크래치아웃")
+                    tg_send_mid(f"⏰ {m} {_timeout_sec//60}분 경과 | {cur_gain*100:.2f}% 손실 → 강제 청산")
                     break
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
@@ -9984,23 +10015,38 @@ def monitor_position(m,
             # 🔧 실패돌파/스크래치/횡보탈출/고점미갱신: before1 비활성화 상태 유지
             # (향후 필요시 git history 참고)
 
-            # 🔧 차트분석: 폭발진입은 피크 후 급락 (-4.6~6.4%) → 빠른 익절
-            if pos.get("is_surge_circle") and alive_sec >= 300:  # 5분 이상 경과
-                if cur_gain > 0.02:  # 2% 이상 수익
-                    # 볼륨 감소 감지 (피크아웃)
+            # === 🔧 v7 차트분석: 폭발진입 적응형 청산 ===
+            # 📊 1분봉 서지 분석: 피크 2-4바(10-20분), 이후 급락 -4.6~6.4%
+            # vol20x+ avg+2.259% → 5분 홀드 후 볼륨감소 or 10분 무조건 트레일 타이트닝
+            if pos.get("is_surge_circle"):
+                if alive_sec >= 180 and cur_gain > 0.015:  # 3분+1.5% 이상
+                    # 볼륨 감소 감지 (피크아웃) → 즉시 익절
                     try:
                         _sc_recent = get_recent_ticks(m, 30)
                         if _sc_recent and len(_sc_recent) >= 10:
                             _sc_rv = sum(t.get("trade_price",0) * t.get("trade_volume",0) for t in _sc_recent[:5])
                             _sc_pv = sum(t.get("trade_price",0) * t.get("trade_volume",0) for t in _sc_recent[5:10])
                             if _sc_pv > 0 and _sc_rv < _sc_pv * 0.5:  # 거래량 50% 감소
-                                print(f"[SURGE_PEAK_EXIT] {m} 폭발익절 {cur_gain*100:.2f}% (vol감소)")
+                                print(f"[V7_SURGE_EXIT] {m} 폭발익절 {cur_gain*100:.2f}% (vol감소 {_sc_rv/_sc_pv:.1f}x)")
                                 close_auto_position(m, f"폭발익절 | +{cur_gain*100:.2f}% | 볼륨감소(피크아웃)")
                                 _already_closed = True
-                                verdict = "SURGE_PEAK_EXIT"
+                                verdict = "V7_SURGE_PEAK_EXIT"
                                 break
                     except Exception:
                         pass
+                # 10분 경과 시 트레일 강제 타이트닝 (피크 구간 벗어남)
+                if alive_sec >= 600 and trail_armed and trail_dist > 0:
+                    _surge_tight = trail_dist * 0.3  # 70% 축소
+                    trail_stop = max(trail_stop, curp * (1.0 - _surge_tight), base_stop)
+                    if alive_sec < 605:  # 로그 1회만
+                        print(f"[V7_SURGE_TIGHT] {m} 폭발 10분경과 → 트레일 {trail_dist*100:.2f}%→{_surge_tight*100:.2f}%")
+                # 15분 경과 + 손실 → 스크래치아웃 (서지 실패)
+                if alive_sec >= 900 and cur_gain <= 0:
+                    close_auto_position(m, f"폭발실패 | 15분 미수익 {cur_gain*100:.2f}%")
+                    _already_closed = True
+                    verdict = "V7_SURGE_FAIL"
+                    print(f"[V7_SURGE_FAIL] {m} 폭발 15분 미수익 → 청산")
+                    break
 
             # === 2) 트레일링 손절: 이익이 나야만 무장
             gain_from_entry = (curp / entry_price - 1.0)
