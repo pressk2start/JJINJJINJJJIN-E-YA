@@ -3822,19 +3822,6 @@ MEGA_VOL_Z = 2.8  # 2.2 -> 2.8
 MEGA_ABS_KRW = 4_000_000  # 2.0M -> 4.0M
 
 # =========================
-# 🎯 리스크 스코어 설정 (AND → 가중합)
-# =========================
-USE_RISK_SCORE = True
-
-# 가중치 (합계 100) - 🔧 초기값 고정 (자동학습 리셋)
-SCORE_WEIGHTS = {
-    "buy_ratio": 28,      # 매수비 (핵심)
-    "spread": 15,         # 스프레드 (낮을수록 좋음)
-    "turn": 22,           # 회전율
-    "imbalance": 18,      # 오더북 임밸런스
-    "fresh": 7,           # 틱 신선도
-    "volume_surge": 10,   # 거래량 급증
-}
 
 def calc_orderbook_imbalance(ob):
     """
@@ -3867,82 +3854,6 @@ def _safe_float(x, default=0.0):
     except Exception:
         return default
 
-def calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge):
-    """
-    리스크 스코어 계산 (0~100+)
-    - 비선형 정규화 (S-curve) + 교차 피처 시너지 보너스
-    - 시간대별 가중치 조정
-    """
-    # 🔧 안전 패치: NaN/inf 방지
-    buy_ratio = _safe_float(buy_ratio, 0.5)
-    spread = _safe_float(spread, 0.5)
-    turn = _safe_float(turn, 0.01)
-    imbalance = _safe_float(imbalance, 0.0)
-    volume_surge = _safe_float(volume_surge, 1.0)
-
-    # 🔧 안전 패치: 매수비 100% 비정상값 클리핑 (허수/스푸핑 방지)
-    if buy_ratio >= 0.999:
-        buy_ratio = 0.98
-
-    score = 0.0
-
-    # === 비선형 정규화 (S-curve: 중간값 부근에서 변별력 극대화) ===
-    def _sigmoid_norm(val, center, width):
-        """S-curve 정규화: center 기준 ±width에서 0~1 매핑"""
-        x = (val - center) / max(width, 0.001)
-        return 1.0 / (1.0 + math.exp(-x * 4))  # 기울기 4로 완만한 S-curve
-
-    # 매수비: 중심 0.60, 폭 0.10 (0.50~0.70에서 변별)
-    buy_norm = _sigmoid_norm(buy_ratio, 0.60, 0.10)
-    score += SCORE_WEIGHTS["buy_ratio"] * buy_norm
-
-    # 스프레드: 낮을수록 좋음 (역방향 S-curve)
-    spread_norm = 1.0 - _sigmoid_norm(spread, 0.20, 0.15)
-    score += SCORE_WEIGHTS["spread"] * spread_norm
-
-    # 회전율: 중심 0.03, 폭 0.02
-    turn_norm = _sigmoid_norm(turn, 0.03, 0.02)
-    score += SCORE_WEIGHTS["turn"] * turn_norm
-
-    # 임밸런스: 중심 0.15, 폭 0.20
-    imb_norm = _sigmoid_norm(imbalance, 0.15, 0.20)
-    score += SCORE_WEIGHTS["imbalance"] * imb_norm
-
-    # 틱 신선도: bool → 0 or 100
-    score += SCORE_WEIGHTS["fresh"] * (1.0 if fresh_ok else 0.0)
-
-    # 거래량 급증: 중심 1.5, 폭 0.5
-    surge_norm = _sigmoid_norm(volume_surge, 1.5, 0.5)
-    score += SCORE_WEIGHTS["volume_surge"] * surge_norm
-
-    # === 교차 피처 시너지 보너스 (핵심 개선) ===
-    # 매수비 + 임밸런스 동시 강세 → 진짜 수급 (최대 +8점)
-    if buy_ratio >= 0.62 and imbalance >= 0.35:
-        synergy_buy_imb = min(8.0, (buy_ratio - 0.55) * (imbalance - 0.10) * 200)
-        score += synergy_buy_imb
-
-    # 가속 + 회전 동시 강세 → 폭발적 유입 (최대 +5점)
-    if volume_surge >= 1.5 and turn >= 0.03:
-        synergy_flow = min(5.0, (volume_surge - 1.0) * turn * 100)
-        score += synergy_flow
-
-    # 스프레드 좁고 + 임밸런스 강함 → 진입 최적 환경 (최대 +4점)
-    if spread <= 0.15 and imbalance >= 0.40:
-        score += min(4.0, (0.20 - spread) * imbalance * 100)
-
-    # === 시간대별 가중치 조정 (장초/활성시간 보너스) ===
-    try:
-        h = now_kst().hour
-        if 9 <= h <= 10:      # 장초 급등 빈발 → +3점
-            score += 3.0
-        elif 14 <= h <= 16:   # 오후 활성 → +1점
-            score += 1.0
-        elif 0 <= h < 6:      # 야간 → -2점 (노이즈 많음)
-            score -= 2.0
-    except Exception:
-        pass
-
-    return round(score, 1)
 
 # =========================
 # 🧠 자동 가중치 학습 시스템
@@ -4991,10 +4902,9 @@ def load_exit_params():
 def load_learned_weights():
     """
     저장된 학습 파일 로드
-    - 과거 버전 호환: "weights"가 있으면 SCORE_WEIGHTS 업데이트
+    - 과거 버전 호환: "weights" 키는 무시 (스코어 시스템 폐지)
     - 현행: "gate_thresholds"가 있으면 GATE_* 임계치 복원
     """
-    global SCORE_WEIGHTS
     global GATE_TURN_MAX, GATE_SPREAD_MAX
     global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
     global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
@@ -5008,11 +4918,6 @@ def load_learned_weights():
     try:
         with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-
-        # (구버전 호환) 스코어 가중치가 저장돼 있으면 갱신
-        if isinstance(data.get("weights"), dict):
-            SCORE_WEIGHTS.update(data["weights"])
-            print(f"[WEIGHTS] 학습된 가중치 로드: {SCORE_WEIGHTS}")
 
         # (현행) 게이트 임계치 복원
         thr = data.get("gate_thresholds")
@@ -8078,7 +7983,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
 
     # ============================================================
-    # 신호 태깅 (진입 판단은 calc_risk_score에서)
+    # 신호 태깅
     # ============================================================
     breakout_score = int(ema20_breakout) + int(high_breakout)
 
@@ -8098,6 +8003,15 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # === VWAP gap 계산 (사이즈 조절/표시용) ===
     vwap = calc_vwap_from_candles(c1, 20)
     vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
+
+    # === entry_mode 결정 (규칙 기반) ===
+    # 기본: half (50%) — 강한 조건 충족 시 confirm (100%)
+    _is_precision = (imbalance >= 0.6 and _gate_buy_ratio >= 0.635)
+    _strong_synergy = (_gate_buy_ratio >= 0.62 and imbalance >= 0.35 and vol_surge >= 1.5)
+    if _ign_candidate or _is_precision or _strong_synergy:
+        _entry_mode = "confirm"
+    else:
+        _entry_mode = "half"
 
     # === 결과 패키징 ===
     pre = {
@@ -8128,177 +8042,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "candle_body_pct": candle_body_pct,
         "vwap_gap": round(vwap_gap, 2),
         "_entry_mode_override": _entry_mode_override,
+        "entry_mode": _entry_mode,
+        "is_precision_pocket": _is_precision,
     }
 
     return pre
 
-def final_check_leader(m, pre, tight_mode=False):
-    """
-    🔧 단순 패스쓰루: stage1_gate/prebreak에서 모든 필터링 완료
-    호환성을 위해 함수는 유지하되, 바로 payload 반환
-    """
-    t = pre["tape"]
-    ob = pre["ob"]
-
-    # Pre-break는 틱수 체크 스킵 (이미 조건 충족)
-    filter_type = pre.get("filter_type", "stage1_gate")
-    if filter_type != "prebreak":
-        # 최소 틱수만 체크 (이건 stage1_gate 전에 필요)
-        if t["n"] < MIN_TICKS_COUNT:
-            cut("TICKS_LOW", f"{m} {t['n']}")
-            return None
-
-    # 필터 타입에 따른 표시: signal_tag 사용
-    if filter_type == "prebreak":
-        display_filter = "🚀선행진입"
-    elif "점화" in pre.get("signal_tag", ""):
-        display_filter = "빠른진입"
-    else:
-        display_filter = "통합게이트"
-
-    # 🔧 FIX: score 계산 복원 (calc_risk_score 호출)
-    # 🔧 before1 복원: 기본 매수비 사용 (conservative 제거)
-    buy_ratio = pre.get("buy_ratio", 0.5)
-    spread = pre.get("spread", 0.5)
-    # 🔧 CRITICAL: turn 단위 보정 (퍼센트 → 소수)
-    _tp = pre.get("turn_pct")
-    turn = (_tp if _tp is not None else 1.0) / 100.0  # 🔧 FIX: turn_pct=0 마스킹 방지 (or→is not None)
-    imbalance = pre.get("imbalance", 0.0)
-    volume_surge = pre.get("volume_surge", 1.0)
-    fresh_ok = pre.get("fresh_ok", True)
-
-    score = calc_risk_score(buy_ratio, spread, turn, imbalance, fresh_ok, volume_surge)
-    # 🔧 FIX(I3): killer 통과 가산점 반영 (entry_mode 이중결정 → score 단일 시스템)
-    score += pre.get("killer_bonus", 0)
-
-    # 🔧 성과조정: 임밸런스 필터 (매도우위 심할 때 진입 차단)
-    # 근거: 8개 스냅샷 전체에서 승리=임밸런스 양수, 패배=음수 일관
-    if imbalance < -0.3:
-        print(f"[IMB_CUT] {m} imbalance={imbalance:.2f}<-0.3 → 진입 차단 (매도우위)")
-        return None
-
-    # 프리시전 포켓: 임밸 >= 0.6 AND 매수비 >= 63.5%
-    is_precision = (imbalance >= 0.6 and buy_ratio >= 0.635)
-
-    # === 🔥 스코어 기반 진입모드 자동 매핑 (이진 시스템) ===
-    # 🔧 특단조치: probe 폐지 → 50% or 100% only (10% 소액 진입 = 수수료만 내는 구조)
-    # score < 55: 진입 차단 (확신 없으면 안 치는 게 나음)
-    # score 55~78: half (50%) → 적정 사이즈로 R:R 확보
-    # score >= 78: confirm (100%) → 강한 신호에 풀 베팅
-    # 🔧 성과조정: 72→78 (confirm이 MFE를 깎는 데이터 — S5~S8 confirm승률 11~20% < half승률 22~30%)
-    if score < 55:
-        print(f"[SCORE_CUT] {m} score={score:.1f}<55 → 진입 차단 (probe 폐지)")
-        return None
-    elif score < 78:
-        entry_mode = "half"
-    else:
-        entry_mode = "confirm"
-
-    # 🔧 pstd 다운그레이드: before1 비활성화 (과도한 다운그레이드 방지)
-
-    # === 다운그레이드 로직 (완화된 임계치) ===
-
-    # 🔧 BUG FIX: v7 차트분석 기반 entry_mode 오버라이드 적용 (기존 죽은변수 수정)
-    # "half" → confirm을 half로 다운그레이드 (15분봉 과매수, 트랩존, 약세RSI, 매도벽, 오후패널티)
-    # "full" → half를 confirm으로 업그레이드 (폭발거래량, RSI70+vol5x, 강모멘텀, 오전고거래)
-    _mode_override = pre.get("_entry_mode_override")
-    if _mode_override == "half" and entry_mode == "confirm":
-        entry_mode = "half"
-        print(f"[MODE_OVERRIDE] {m} v7차트분석 → confirm→half 다운그레이드")
-    elif _mode_override == "full" and entry_mode == "half":
-        entry_mode = "confirm"
-        print(f"[MODE_OVERRIDE] {m} v7차트분석 → half→confirm 업그레이드")
-
-    # 강돌파 다운그레이드 (완화: 연속매수≥3 OR 매수비≥0.55+임밸≥0.40이면 유지)
-    # 🔧 특단조치: probe 폐지 → half 이하는 진입 차단
-    if "강돌파" in pre.get("signal_tag", ""):
-        sb_cons = pre.get("consecutive_buys", 0)
-        sb_br = pre.get("buy_ratio", 0)
-        sb_imb = pre.get("imbalance", 0)
-        consec_ok = sb_cons >= GATE_STRONGBREAK_CONSEC_MIN
-        supply_ok = (sb_br >= 0.55 and sb_imb >= 0.40)
-        # 🔧 FIX: AND → OR (주석 의도와 코드 불일치 수정)
-        # - 기존: consec AND supply 둘 다 만족해야 유지 → 강돌파 과도한 차단
-        # - 수정: 연속매수만 좋아도 OR 수급만 좋아도 유지 (의도대로)
-        if not (consec_ok or supply_ok):
-            old_mode = entry_mode
-            if entry_mode == "confirm":
-                entry_mode = "half"
-            elif entry_mode == "half":
-                # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제
-                pre["_force_scalp"] = True
-                print(f"[강돌파↓] {m} half+편면모멘텀 → half 유지 + scalp 강제")
-            if entry_mode != old_mode:
-                print(f"[강돌파↓] {m} 편면모멘텀 consec{'✓' if consec_ok else '✗'} supply{'✓' if supply_ok else '✗'} → {old_mode}→{entry_mode}")
-
-    # 매수세 둔화 다운그레이드 (완화: t15 < t45 * 0.3 — 급감만)
-    # 🔧 특단조치: probe 폐지 → half 이하는 진입 차단
-    if entry_mode in ("confirm", "half"):
-        _ticks_for_decay = pre.get("ticks")
-        if _ticks_for_decay:
-            _decay, _decay_info = buy_decay_flag(_ticks_for_decay)
-            _t15_st = micro_tape_stats_from_ticks(_ticks_for_decay, 15)
-            _t45_st = micro_tape_stats_from_ticks(_ticks_for_decay, 45)
-            # 완화: t15 거래속도가 t45의 30% 미만일 때만 (0.6→0.3)
-            _flow_fading = (
-                _decay
-                or (_t15_st.get("krw_per_sec", 0) < _t45_st.get("krw_per_sec", 1) * 0.3)
-            )
-            if _flow_fading:
-                old_mode = entry_mode
-                if entry_mode == "confirm":
-                    entry_mode = "half"
-                elif entry_mode == "half":
-                    # 🔧 FIX: half→차단 대신 half 유지 + scalp 강제
-                    pre["_force_scalp"] = True
-                    print(f"[DECAY↓] {m} half+매수세둔화 → half 유지 + scalp 강제")
-                if entry_mode != old_mode:
-                    print(f"[DECAY↓] {m} 매수세둔화 → {old_mode}→{entry_mode}")
-
-    # 🔧 특단조치: probe 폐지 → probe 알트 과회전 필터 제거 (probe 자체가 없음)
-
-    # ============================================================
-    # 🔧 특단조치: 트레이드 유형 진입 시 결정 (스캘프 vs 러너)
-    # 러너 조건: 점화 OR (연속매수 5+ AND 거래량급등 2x+) OR (score >= 80 AND 돌파)
-    # 나머지: 스캘프 (빠른 TP로 확정 수익)
-    # ============================================================
-    _ign = pre.get("ignition_score", 0)
-    _consec = pre.get("consecutive_buys", 0)
-    _surge = pre.get("volume_surge", 1.0)
-    _signal_tag = pre.get("signal_tag", "")
-    _breakout = ("EMA" in _signal_tag or "고점" in _signal_tag or "강돌파" in _signal_tag)
-
-    is_runner_entry = (
-        _ign >= 3                                      # 점화 신호
-        or (_consec >= 5 and _surge >= 2.0)            # 강한 연속 매수 + 급등
-        or (score >= 80 and _breakout)                 # 높은 스코어 + 돌파
-    )
-    # 🔧 FIX: _force_scalp 플래그 반영 (half→차단 대신 half+scalp 강제)
-    if pre.get("_force_scalp"):
-        trade_type = "scalp"
-    else:
-        trade_type = "runner" if is_runner_entry else "scalp"
-    print(f"[TRADE_TYPE] {m} → {trade_type} (ign={_ign} consec={_consec} surge={_surge:.1f}x score={score:.0f} breakout={_breakout})")
-
-    # 이미 stage1_gate/prebreak에서 모든 필터링 완료
-    # 기존 호출 코드 호환을 위해 payload 형식으로 반환
-    return {
-        "price": pre["price"],
-        "chg": round(pre.get("change", 0) * 100, 2),
-        "current_volume": int(pre.get("current_volume", 0)),
-        "volume_surge": round(pre.get("volume_surge", 0.0), 2),
-        "buy": round(pre.get("buy_ratio", 0) * 100, 1),
-        "n": t["n"],
-        "spread": round(pre.get("spread", 0), 2),
-        "turn": round(pre.get("turn_pct", 0), 2),
-        "imbalance": round(imbalance, 3),
-        "score": score,
-        "entry_mode": entry_mode,  # 🔥 스코어 기반 자동 매핑
-        "trade_type": trade_type,  # 🔧 특단조치: 스캘프/러너 진입 시 결정
-        "is_precision_pocket": is_precision,
-        "filter_type": display_filter,
-        "is_prebreak": filter_type == "prebreak",
-    }
 
 
 # =========================
@@ -8336,7 +8085,7 @@ def append_csv(row: dict):
             w.writerow(padded)
 
 
-def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
+def snapshot_row(m, entry_price, pre, c1, ob, t15, btc1m, btc5m,
                  flags):
     try:
         raw_ob = ob["raw"]["orderbook_units"][:3]
@@ -8354,7 +8103,7 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
 
     # 🔥 GATE 핵심 지표
     imbalance = pre.get("imbalance", 0.0)
-    overheat = flow_accel * float(payload.get("volume_surge", 1.0))  # accel * surge
+    overheat = flow_accel * float(pre.get("volume_surge", 1.0))  # accel * surge
     # 틱 신선도: 마지막 틱 나이 (초)
     fresh_age = 0.0
     if ticks:
@@ -8392,10 +8141,10 @@ def snapshot_row(m, entry_price, payload, pre, c1, ob, t15, btc1m, btc5m,
         "t15_rate": round(t15.get("rate", 0.0), 4),
         "t15_krw": int(t15.get("krw", 0)),
         "turn": flags.get("turn", ""),
-        "spread": payload.get("spread", ""),
+        "spread": pre.get("spread", ""),
         "depth_krw": ob.get("depth_krw", ""),
         "bidask_ratio": round(bidask_ratio, 3),
-        "volume_surge": payload.get("volume_surge", ""),
+        "volume_surge": pre.get("volume_surge", ""),
         "btc_1m": btc1m,
         "btc_5m": btc5m,
         "hour": now_kst().hour,
@@ -11078,34 +10827,100 @@ def main():
                     f"{'✓' if killer_imb else '✗'}체결{imbalance:.2f}≥{K_IMB}",
                 ])
 
-                # 🔧 FIX(I3): killer를 entry_mode 직접 설정 대신 score 가산점으로 통합
-                # → final_check_leader의 score 기반 entry_mode가 유일한 결정자
+                # 킬러 조건 → entry_mode 직접 반영 (6/6 → confirm 승격)
                 killer_pass_count = sum([killer_buy, killer_turn, killer_consec,
                                         killer_vol_base, killer_vol_surge, killer_imb])
                 if all_killer:
-                    pre["killer_bonus"] = 25  # 6/6 통과 → score +25 (confirm 도달 보장)
-                    print(f"[KILLER✓] {m} {pre.get('signal_tag', '?')} | {killer_vals}")
+                    pre["entry_mode"] = "confirm"
+                    print(f"[KILLER✓] {m} {pre.get('signal_tag', '?')} → confirm | {killer_vals}")
                 else:
-                    pre["killer_bonus"] = max(0, (killer_pass_count - 3) * 5)  # 4/6=+5, 5/6=+10
-                    fail_cnt = 6 - killer_pass_count
-                    print(f"[KILLER] {m} {killer_pass_count}/6 통과 (+{pre['killer_bonus']}점) | {killer_vals}")
+                    print(f"[KILLER] {m} {killer_pass_count}/6 통과 | {killer_vals}")
 
-                payload = final_check_leader(m, pre, tight_mode=tight_mode)
-                if not payload: continue
+                # === 인라인 필터 ===
+                _t = pre["tape"]
+                _filter_type = pre.get("filter_type", "stage1_gate")
 
-                # 🔧 FIX: score/filter_type/entry_mode를 pre에 복사 (자동매수 알람에서 사용)
-                pre["score"] = payload.get("score", 0)
-                pre["filter_type"] = payload.get("filter_type", "기본통과")
-                # 🔧 FIX: final_check_leader의 스코어/decay/레짐 다운그레이드 결과 반영
-                # 이전에는 entry_mode가 반영 안 되어 half 모드가 사실상 도달 불가능했음
-                pre["entry_mode"] = payload.get("entry_mode", pre.get("entry_mode", "confirm"))
-                # 🔧 FIX: trade_type (runner/scalp) 전파 — 미전파 시 항상 scalp 폴백되어 runner 감지 무효화
-                pre["trade_type"] = payload.get("trade_type", "scalp")
+                # 최소 틱수 체크 (prebreak 제외)
+                if _filter_type != "prebreak" and _t["n"] < MIN_TICKS_COUNT:
+                    cut("TICKS_LOW", f"{m} {_t['n']}")
+                    continue
 
-                # ★★★ 프리시전 포켓: 강진입 모드 승격 ★★★
-                # 조건: 임밸 >= 0.6 AND 매수비 >= 63.5% (정밀도 ~82%)
-                if payload.get("is_precision_pocket"):
-                    pre["entry_mode"] = "confirm"  # probe → confirm 승격
+                # 임밸런스 하드컷 (매도우위 심하면 진입 차단)
+                _imb = pre.get("imbalance", 0.0)
+                if _imb < -0.3:
+                    print(f"[IMB_CUT] {m} imbalance={_imb:.2f}<-0.3 → 진입 차단")
+                    continue
+
+                # 프리시전 포켓 → confirm 승격
+                if pre.get("is_precision_pocket"):
+                    pre["entry_mode"] = "confirm"
+
+                entry_mode = pre.get("entry_mode", "half")
+
+                # v7 차트분석 기반 오버라이드
+                _mode_override = pre.get("_entry_mode_override")
+                if _mode_override == "half" and entry_mode == "confirm":
+                    entry_mode = "half"
+                    print(f"[MODE_OVERRIDE] {m} v7차트분석 → confirm→half 다운그레이드")
+                elif _mode_override == "full" and entry_mode == "half":
+                    entry_mode = "confirm"
+                    print(f"[MODE_OVERRIDE] {m} v7차트분석 → half→confirm 업그레이드")
+
+                # 강돌파 다운그레이드 (편면모멘텀)
+                if "강돌파" in pre.get("signal_tag", ""):
+                    sb_cons = pre.get("consecutive_buys", 0)
+                    sb_br = pre.get("buy_ratio", 0)
+                    sb_imb = pre.get("imbalance", 0)
+                    consec_ok = sb_cons >= GATE_STRONGBREAK_CONSEC_MIN
+                    supply_ok = (sb_br >= 0.55 and sb_imb >= 0.40)
+                    if not (consec_ok or supply_ok):
+                        old_mode = entry_mode
+                        if entry_mode == "confirm":
+                            entry_mode = "half"
+                        elif entry_mode == "half":
+                            pre["_force_scalp"] = True
+                            print(f"[강돌파↓] {m} half+편면모멘텀 → half 유지 + scalp 강제")
+                        if entry_mode != old_mode:
+                            print(f"[강돌파↓] {m} 편면모멘텀 → {old_mode}→{entry_mode}")
+
+                # 매수세 둔화 다운그레이드
+                _ticks_for_decay = pre.get("ticks")
+                if _ticks_for_decay:
+                    _decay, _decay_info = buy_decay_flag(_ticks_for_decay)
+                    _t15_st = micro_tape_stats_from_ticks(_ticks_for_decay, 15)
+                    _t45_st = micro_tape_stats_from_ticks(_ticks_for_decay, 45)
+                    _flow_fading = (
+                        _decay
+                        or (_t15_st.get("krw_per_sec", 0) < _t45_st.get("krw_per_sec", 1) * 0.3)
+                    )
+                    if _flow_fading:
+                        old_mode = entry_mode
+                        if entry_mode == "confirm":
+                            entry_mode = "half"
+                        elif entry_mode == "half":
+                            pre["_force_scalp"] = True
+                            print(f"[DECAY↓] {m} half+매수세둔화 → half 유지 + scalp 강제")
+                        if entry_mode != old_mode:
+                            print(f"[DECAY↓] {m} 매수세둔화 → {old_mode}→{entry_mode}")
+
+                pre["entry_mode"] = entry_mode
+
+                # 트레이드 유형 결정 (스캘프 vs 러너)
+                _ign = pre.get("ignition_score", 0)
+                _consec = pre.get("consecutive_buys", 0)
+                _surge = pre.get("volume_surge", 1.0)
+                _signal_tag = pre.get("signal_tag", "")
+                _breakout = ("EMA" in _signal_tag or "고점" in _signal_tag or "강돌파" in _signal_tag)
+                is_runner_entry = (
+                    _ign >= 3
+                    or (_consec >= 5 and _surge >= 2.0)
+                    or (entry_mode == "confirm" and _breakout)
+                )
+                if pre.get("_force_scalp"):
+                    pre["trade_type"] = "scalp"
+                else:
+                    pre["trade_type"] = "runner" if is_runner_entry else "scalp"
+                print(f"[TRADE_TYPE] {m} → {pre['trade_type']} (ign={_ign} consec={_consec} surge={_surge:.1f}x breakout={_breakout})")
 
                 # 🔧 FIX: postcheck 전 중복 체크 + 즉시 마킹 (6초 동안 다른 스캔 차단)
                 with _POSITION_LOCK:
@@ -11183,10 +10998,9 @@ def main():
                 # 동적 손절가
                 dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(pre['price'], c1, market=m)
 
-                # 스코어/임밸런스 표시
-                score_str = f"스코어 {payload.get('score', 0)}" if USE_RISK_SCORE else ""
-                imb_str = f"임밸 {payload.get('imbalance', 0):.2f}"
-                pocket_mark = "🎯" if payload.get("is_precision_pocket") else ""
+                # 임밸런스 표시
+                imb_str = f"임밸 {pre.get('imbalance', 0):.2f}"
+                pocket_mark = "🎯" if pre.get("is_precision_pocket") else ""
 
                 # 🔥 경로 표시: signal_tag 하나로 간소화
                 filter_type = pre.get("filter_type", "stage1_gate")
@@ -11206,7 +11020,7 @@ def main():
                 accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "➡️")
 
                 # 🔥 GATE 핵심 지표
-                overheat = flow_accel * float(payload.get("volume_surge", 1.0))
+                overheat = flow_accel * float(pre.get("volume_surge", 1.0))
                 fresh_age = 0.0
                 if ticks_for_metrics:
                     now_ms = int(time.time() * 1000)
@@ -11239,8 +11053,8 @@ def main():
                 txt = (
                     f"⚡ <b>초입 신호</b> {m} <code>#{reason}</code>{pocket_mark}\n"
                     f"💵 현재가 {fmt6(pre['price'])}원\n"
-                    f"📊 등락 {payload['chg']}% | 거래증가 {payload['volume_surge']}배 | 회전 {payload['turn']}%\n"
-                    f"🔸매수 {payload['buy']}% | 틱 {payload['n']} | 스프레드 {payload['spread']}% | {imb_str}\n"
+                    f"📊 등락 {round(pre.get('change', 0) * 100, 2)}% | 거래증가 {round(pre.get('volume_surge', 0), 2)}배 | 회전 {round(pre.get('turn_pct', 0), 2)}%\n"
+                    f"🔸매수 {round(pre.get('buy_ratio', 0) * 100, 1)}% | 틱 {pre['tape']['n']} | 스프레드 {round(pre.get('spread', 0), 2)}% | {imb_str}\n"
                     f"🔥 연속매수 {cons_buys}회 | 틱당 {avg_krw/1000:.0f}K | 가속 {flow_accel:.1f}x {accel_emoji}\n"
                     f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
                     f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
@@ -11306,7 +11120,7 @@ def main():
                             "uptick_ok":
                             True
                         }
-                        row = snapshot_row(m, pre["price"], payload, pre, c1,
+                        row = snapshot_row(m, pre["price"], pre, c1,
                                            ob, t15_now, btc1m, btc5m, flags)
                         append_csv(row)
                     except Exception as e:
