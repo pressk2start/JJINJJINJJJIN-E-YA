@@ -49,10 +49,10 @@ COOLDOWN = 240  # 🔧 수익성패치: 480→240초 (게이트 엄격하니 쿨
 PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
-WARMUP_SEC = 8  # 🔧 손절억제: 5→8초 (초반 노이즈 무시 확대, S8 MFE 0.09% 문제 대응)
+WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
 HARD_STOP_DD = 0.032  # 🔧 수익개선: 4.2→3.2% (SL 2.0% 대비 1.6배, 비상청산이 SL과 너무 멀면 손실만 확대)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 5  # 🔧 손절완화: 4→5회 (5회 연속이면 진짜 하락, 4회까지는 휩쏘 가능)
+EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
 DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
@@ -62,7 +62,7 @@ DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 �
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
 PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 백테스트최적화: 1.0→0.3% (168샘플: 승률 45.8→63.7%, 평균수익 +54%)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.001  # 🔧 백테스트최적화: 0.4→0.1% (체크포인트 0.3%에 맞춰 cost_floor 하향)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0005  # 🔧 FIX: 0.1→0.05% (cost_floor=수수료0.1%+슬립0.13%+α0.05%=0.28% < CP 0.30%)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -107,11 +107,11 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
-# 핵심: SL 1.0% 기준 TP를 2.0~3.0%로 → 승률 35~40%에서도 수익 가능
-# SL 1.0% 기준: 점화 3.0%, 강돌파 2.5%, EMA 2.0%, 기본 2.0%
+# 핵심: SL 2.0% 기준 R:R 연동 MFE 부분익절 목표
+# SL 2.0% 기준: 점화 3.6%, 강돌파 3.0%, EMA 2.8%, 기본 2.7%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 1.8,              # 🔧 R:R수정: SL 1.8%×1.8=3.2% (점화는 크게 먹어야)
-    "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 R:R수정: SL 1.8%×1.5=2.7%
+    "🔥점화": 1.8,              # SL 2.0%×1.8=3.6% (점화는 크게 먹어야)
+    "강돌파 (EMA↑+고점↑)": 1.5,  # SL 2.0%×1.5=3.0%
     "EMA↑": 1.4,                 # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%, 수수료 차감 후 실질 R:R>1)
     "고점↑": 1.4,                # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%)
     "거래량↑": 1.35,             # 🔧 수익개선: 1.2→1.35 (SL 2.0%×1.35=2.7%, 기존 2.4%는 수수료에 먹힘)
@@ -188,7 +188,7 @@ def _apply_exit_profile():
     prof = EXIT_PROFILE
 
     if prof == "gentle":
-        WARMUP_SEC = 10
+        WARMUP_SEC = 7          # 🔧 백테스트튜닝: 10→7초 (balanced 5초 대비 느슨)
         HARD_STOP_DD = 0.030
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
@@ -199,7 +199,7 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
-        WARMUP_SEC = 6
+        WARMUP_SEC = 3          # 🔧 백테스트튜닝: 6→3초 (balanced 5초 대비 타이트)
         HARD_STOP_DD = 0.025
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
@@ -210,10 +210,10 @@ def _apply_exit_profile():
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
-        WARMUP_SEC = 8
+        WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
         HARD_STOP_DD = 0.042   # 🔧 수익성패치: 0.038→0.042 (SL 2.0%×2.1, 전역값과 통일)
         EXIT_DEBOUNCE_SEC = 10
-        EXIT_DEBOUNCE_N = 4    # 🔧 수익성패치: 5→4 (SL 반응 5초 단축, 실현손실 0.2~0.3%p 개선)
+        EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
         TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
         SPIKE_RECOVERY_WINDOW = 3
@@ -4746,7 +4746,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.004 (0.1% ~ 0.4%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.002 (0.1% ~ 0.2%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -4855,7 +4855,7 @@ def auto_learn_exit_params():
                 if capture_rate < 0.40:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4866,7 +4866,7 @@ def auto_learn_exit_params():
                 elif capture_rate > 0.70:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4881,7 +4881,7 @@ def auto_learn_exit_params():
                 # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
                 target_trail = max(0.001, avg_drop * 0.80)
                 new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                new_trail = max(0.001, min(0.004, round(new_trail, 4)))
+                new_trail = max(0.001, min(0.002, round(new_trail, 4)))
                 if abs(new_trail - old_trail) > 0.0005:
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
@@ -10094,18 +10094,18 @@ def monitor_position(m,
                 print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
-            # 기존: 6단계 → +2.0%에서 55% 잠금 (0.9%만 눌림 허용 = 트레일과 충돌)
-            # 변경: 3단계 → 큰 수익에서만 안전망, 나머지는 트레일(0.8%)이 처리
-            # 트레일 0.8%가 메인 보호 → 래칫은 큰 수익 최저보장만 담당
+            # 3단계: CP(~0.3%)→본절, +3.5%→+1.8%, +5.0%→+3.0%
+            # 트레일 0.15%가 메인 보호 → 래칫은 큰 수익 최저보장만 담당
             if trail_armed and gain_from_entry > 0:
                 _ratchet_lock = 0
                 if gain_from_entry >= 0.050:      # +5.0% → 최소 +3.0% 확보 (60%)
                     _ratchet_lock = entry_price * (1.0 + 0.030)
                 elif gain_from_entry >= 0.035:    # +3.5% → 최소 +1.8% 확보 (51%)
                     _ratchet_lock = entry_price * (1.0 + 0.018)
-                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~1.0%) → 본절+α
-                    # 🔧 R:R수정: α 0.2→0.5% (체크포인트 도달 시 최소 0.4% 순수익 보장)
-                    _ratchet_lock = entry_price * (1.0 + FEE_RATE + 0.005)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.3%) → 본절 보호
+                    # 🔧 BUGFIX: 기존 +0.6%(FEE+0.5%)가 CP 0.3%보다 높아 즉시 청산 발동
+                    # 수정: 본절(수수료 커버) = +0.1% → CP(0.3%)와 0.2% 여유 확보
+                    _ratchet_lock = entry_price * (1.0 + FEE_RATE)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -10352,8 +10352,8 @@ def monitor_position(m,
                 # 핵심: 코인의 실제 ATR%를 기준 ATR(0.5%) 대비 비율로 MFE 스케일링
                 # - 저변동 코인(ATR 0.3%): vol_factor=0.7 → 타겟 축소 → 도달 가능한 목표
                 # - 고변동 코인(ATR 1.0%): vol_factor=1.8 → 타겟 확대 → 큰 수익 포착
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0)  # 🔧 SL연동: fallback 1.3→2.0 (SL 1.0% 기준 R:R 2.0)
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # 🔧 SL연동: fallback 0.8→2.0% (SL 1.0%×2.0)
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0)  # fallback 2.0 (테이블 미매칭 시 보수적)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.0=4.0%
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
@@ -10418,8 +10418,8 @@ def monitor_position(m,
             else:
                 # === 러너 모드: 30% 익절 + 70% 넓은 트레일 ===
                 # 🔧 구조개선: R:R 연동 + 코인별 변동성 맞춤 MFE (러너는 더 넓게)
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0) + 0.3  # 🔧 SL연동: fallback 1.3→2.0 (러너 +0.3 보너스 유지)
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # 🔧 SL연동: fallback 0.8→2.0%
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0) + 0.3  # fallback 2.3 (러너 +0.3 보너스)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.3=4.6%
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
