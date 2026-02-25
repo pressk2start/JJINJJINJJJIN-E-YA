@@ -61,8 +61,8 @@ DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 �
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.010  # 🔧 R:R수정: 0.4→1.0% (체크포인트가 트레일+수수료보다 충분히 높아야 의미있는 수익)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.004  # 🔧 R:R수정: 0.1→0.4% (체크포인트 도달 시 최소 보장 수익 확보)
+PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 백테스트최적화: 1.0→0.3% (168샘플: 승률 45.8→63.7%, 평균수익 +54%)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.001  # 🔧 백테스트최적화: 0.4→0.1% (체크포인트 0.3%에 맞춰 cost_floor 하향)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -80,9 +80,9 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
     return default
 
 def get_dynamic_checkpoint():
-    """🔧 현실화: SL 연동 체크포인트 — 실제 MFE 데이터 기반 하향
-    기존: SL × 0.75 = 1.125% → 평균MFE 0.14%의 8배, 50건 중 트레일 0회 발동
-    변경: SL × 0.25 = 0.375% → MFE 0.14%의 2.5배, 승리 트레이드에서 발동 가능
+    """🔧 백테스트최적화: 168샘플 기반 체크포인트 0.3%
+    기존 ~1.0% → 트레일 발동 자체가 안 됨 (승률 45.8%)
+    변경 0.3% → 승률 63.7%, 평균수익 +0.311%, 누적 52.3%
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -90,11 +90,10 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 🔧 R:R수정: SL × 0.55 (체크포인트 > 트레일거리 + 수수료 보장)
-    # SL 1.8% × 0.55 = 0.99% → 트레일(0.54%) + 수수료(0.1%) 빼도 +0.35% 순수익
-    sl_linked = DYN_SL_MIN * 0.55  # 0.018 * 0.55 = 0.0099 (~1.0%)
-    # 둘 중 큰 값 사용, 최대 2.0% 캡
-    return max(cost_floor, min(0.020, sl_linked))
+    # 🔧 백테스트최적화: SL × 0.15 (SL 2.0% × 0.15 = 0.30%)
+    sl_linked = DYN_SL_MIN * 0.15  # 0.020 * 0.15 = 0.003 (0.3%)
+    # 둘 중 큰 값 사용, 최대 1.0% 캡
+    return max(cost_floor, min(0.010, sl_linked))
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -134,15 +133,15 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준�
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0060  # 🔧 승률개선: 0.40→0.60% (알트 정상 눌림 0.3~0.7% → 0.4%는 너무 타이트)
+TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (168샘플: 0.15%가 승률·수익 최적)
 
 def get_trail_distance_min():
-    """🔧 승률개선: 트레일 거리를 SL의 40%로 연동
-    SL 2.0% × 0.40 = 0.80% (알트 정상 눌림 0.3~0.7%에서 살아남을 여유)
-    기존 30% → 0.54%는 너무 타이트해서 +1% 수익이 0.5% 눌림에 청산됨
+    """🔧 백테스트최적화: 트레일 거리 0.15%
+    기존 SL×0.40=0.80% → 너무 넓어서 수익 흘림
+    168샘플 결과: 0.15%가 0.20%/0.40% 대비 승률·누적 모두 우위
     """
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.40)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -194,7 +193,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.0050  # 🔧 R:R수정: 0.30→0.50% (gentle은 넓게)
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 백테스트최적화: 0.50→0.20% (gentle은 balanced 0.15% 대비 살짝 넓게)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
@@ -205,7 +204,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 🔧 R:R수정: 0.20→0.30% (strict도 최소한의 여유)
+        TRAIL_DISTANCE_MIN_BASE = 0.0012  # 🔧 백테스트최적화: 0.30→0.12% (strict는 balanced 0.15% 대비 타이트)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
@@ -216,7 +215,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 4    # 🔧 수익성패치: 5→4 (SL 반응 5초 단축, 실현손실 0.2~0.3%p 개선)
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0040  # 🔧 R:R수정: 0.25→0.40% (트레일+수수료가 수익 다 먹는 문제 해결)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -4747,7 +4746,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.005 ~ 0.015 (0.5% ~ 1.5%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.004 (0.1% ~ 0.4%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -4856,7 +4855,7 @@ def auto_learn_exit_params():
                 if capture_rate < 0.40:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4867,7 +4866,7 @@ def auto_learn_exit_params():
                 elif capture_rate > 0.70:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                    new_trail = max(0.001, min(0.004, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4880,9 +4879,9 @@ def auto_learn_exit_params():
             if len(win_drops) >= 5:
                 avg_drop = abs(win_drops.mean()) / 100  # % → 소수
                 # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
-                target_trail = max(0.005, avg_drop * 0.80)
+                target_trail = max(0.001, avg_drop * 0.80)
                 new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                new_trail = max(0.005, min(0.015, round(new_trail, 4)))
+                new_trail = max(0.001, min(0.004, round(new_trail, 4)))
                 if abs(new_trail - old_trail) > 0.0005:
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
