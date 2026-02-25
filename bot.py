@@ -10601,13 +10601,18 @@ def monitor_position(m,
         # ================================
         # 🔧 FIX: 루프 종료 후 c1 갱신 (stale 데이터로 끝알람/ctx 판단 왜곡 방지)
         c1 = _get_c1_cached() or c1
-        action, rationale = _end_reco(m,
-                                      entry_price,
-                                      last_price,
-                                      c1,
-                                      ticks,
-                                      ob_depth_krw,
-                                      ctx_thr=CTX_EXIT_THRESHOLD)
+        # 🔧 BUG FIX: _end_reco 예외 시 finally 블록 중단 → remonitor 미호출 방지
+        try:
+            action, rationale = _end_reco(m,
+                                          entry_price,
+                                          last_price,
+                                          c1,
+                                          ticks,
+                                          ob_depth_krw,
+                                          ctx_thr=CTX_EXIT_THRESHOLD)
+        except Exception as _reco_err:
+            print(f"[END_RECO_ERR] {m}: {_reco_err}")
+            action, rationale = None, f"끝알람 생성 오류: {_reco_err}"
 
         # ===========================================
         # 🔧 FIX: 청산 없이 모니터 종료 → 재모니터 전환 알림
