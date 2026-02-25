@@ -102,6 +102,9 @@ def get_expected_exit_slip_pct():
 
 # (PROFIT_CHECKPOINT 제거됨 — PROFIT_CHECKPOINT_BASE 직접 사용)
 
+# 🔧 차트분석: 5분봉 최적 청산 타이밍 (15분 = bar 3에서 edge 최대 0.631%)
+CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
+
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
@@ -8409,6 +8412,92 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         except Exception:
             pass  # 15분봉 조회 실패 시 필터 스킵
 
+    # === 🔧 차트분석: 5분봉 최적조건 → full 유지, 극초기/위험조건 → half 강제 ===
+    # 📊 데이터: RSI 50-60 + vol 2-5x = 최적조건 (R:R 9.27:1) → full 사이즈 유지
+    # 📊 데이터: 모멘텀 극초기 <0.3% = 안전진입 (승률 75%, MAE 0.28%) → full 유지
+    # 📊 데이터: RSI>65 + mom>1.5% = 위험조건 (15분후 -0.30%, 승률 33%) → half 강제
+    if not _ign_candidate:
+        try:
+            # 5분봉 5봉 모멘텀 계산
+            _chart_mom5 = 0.0
+            if c1 and len(c1) >= 6:
+                _chart_mom5 = (c1[-1].get("trade_price", 0) - c1[-6].get("trade_price", 0)) / max(c1[-6].get("trade_price", 1), 1) * 100
+
+            # 거래량 비율 (최근 1봉 / 이전 5봉 평균)
+            _chart_volratio = 0.0
+            if c1 and len(c1) >= 6:
+                _v_last = c1[-1].get("candle_acc_trade_price", 0)
+                _v_avg5 = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5
+                _chart_volratio = _v_last / max(_v_avg5, 1) if _v_avg5 > 0 else 0
+
+            # RSI 계산 (위에서 이미 계산된 경우 재사용, 아니면 새로 계산)
+            _chart_rsi = 50.0  # 기본값
+            try:
+                _rsi_c1_temp = c1 if c1 and len(c1) >= 15 else get_minutes_candles(1, m, 20)
+                if _rsi_c1_temp and len(_rsi_c1_temp) >= 15:
+                    _rsi_closes_temp = [x["trade_price"] for x in sorted(_rsi_c1_temp, key=lambda x: x.get("candle_date_time_kst", ""))[-15:]]
+                    _rsi_gains_temp, _rsi_losses_temp = 0, 0
+                    for _ri_temp in range(1, len(_rsi_closes_temp)):
+                        _rd_temp = _rsi_closes_temp[_ri_temp] - _rsi_closes_temp[_ri_temp-1]
+                        if _rd_temp > 0: _rsi_gains_temp += _rd_temp
+                        else: _rsi_losses_temp -= _rd_temp
+                    _rsi_rs_temp = _rsi_gains_temp / max(_rsi_losses_temp, 0.001)
+                    _chart_rsi = 100 - 100 / (1 + _rsi_rs_temp)
+            except Exception:
+                pass
+
+            # 최적 조건: RSI 50-60 + vol 2-5x → full 강제 (사이즈 올림, 허들 미변경)
+            if 50 <= _chart_rsi <= 60 and 2 <= _chart_volratio < 5:
+                print(f"[CHART_OPTIMAL] {m} RSI{_chart_rsi:.0f} vol{_chart_volratio:.1f}x → 최적조건 full 유지")
+                _ENTRY_MAX_MODE_OVERRIDE = "full"
+
+            # 극초기 모멘텀: 안전진입 (모멘텀 <0.3% + 거래량 증가)
+            elif _chart_mom5 < 0.3 and _chart_volratio >= 2:
+                print(f"[CHART_EARLY] {m} 모멘텀{_chart_mom5:.2f}% vol{_chart_volratio:.1f}x → 초기진입 full 유지")
+                _ENTRY_MAX_MODE_OVERRIDE = "full"
+
+            # 위험 조건: RSI>65 + 후기모멘텀>1.5% → half 강제
+            elif _chart_rsi > 65 and _chart_mom5 > 1.5:
+                print(f"[CHART_RISKY] {m} RSI{_chart_rsi:.0f} mom{_chart_mom5:.2f}% → 위험조건 half 강제")
+                _ENTRY_MAX_MODE_OVERRIDE = "half"
+        except Exception:
+            pass
+
+    # === 🔧 업비트 데이터 기반: RSI 과매수 시 사이즈 축소 (허들 미상승) ===
+    # 실시간 분석: RSI>70 코인이 50%(10/20) → 고점 진입 방지
+    if not _ign_candidate:
+        try:
+            _rsi_c1 = c1 if 'c1' in dir() else get_minutes_candles(1, m, 20)
+            if _rsi_c1 and len(_rsi_c1) >= 15:
+                _rsi_closes = [x["trade_price"] for x in sorted(_rsi_c1, key=lambda x: x.get("candle_date_time_kst",""))[-15:]]
+                _rsi_gains, _rsi_losses = 0, 0
+                for _ri in range(1, len(_rsi_closes)):
+                    _rd = _rsi_closes[_ri] - _rsi_closes[_ri-1]
+                    if _rd > 0: _rsi_gains += _rd
+                    else: _rsi_losses -= _rd
+                _rsi_rs = _rsi_gains / max(_rsi_losses, 0.001)
+                _rsi_val = 100 - 100 / (1 + _rsi_rs)
+                if _rsi_val > 75:
+                    print(f"[RSI_OVERBOUGHT] {m} 1분RSI {_rsi_val:.0f} > 75 → half 강제 (진입차단 아님)")
+                    _ENTRY_MAX_MODE_OVERRIDE = "half"
+        except Exception:
+            pass
+
+    # === 🔧 업비트 데이터 기반: 호가 비대칭 매도우세 시 사이즈 축소 ===
+    # 실시간 분석: 호가비대칭 0.31~2.67x 범위, <0.5x면 매도벽 압도
+    try:
+        _ob_imbal = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+        if _ob_imbal and _ob_imbal[0].get("orderbook_units"):
+            _ob_units = _ob_imbal[0]["orderbook_units"][:5]
+            _ob_bid = sum(float(u["bid_price"]) * float(u["bid_size"]) for u in _ob_units)
+            _ob_ask = sum(float(u["ask_price"]) * float(u["ask_size"]) for u in _ob_units)
+            _ob_ratio = _ob_bid / max(_ob_ask, 1)
+            if _ob_ratio < 0.5:
+                print(f"[OB_SELL_HEAVY] {m} 호가비대칭 {_ob_ratio:.2f}x (매도벽 우세) → half 강제")
+                _ENTRY_MAX_MODE_OVERRIDE = "half"
+    except Exception:
+        pass
+
     # === 🔧 승률개선: 야간 진입 차단 (00~07 KST) ===
     # 야간은 유동성 극감 → 스프레드 확대, 가짜 돌파, 휩쏘 빈발
     # 점화(ignition)도 야간에는 노이즈일 확률 높음 → 전면 차단
@@ -9843,6 +9932,27 @@ def monitor_position(m,
                             # 20초 지나고 약간 회복 → 생존 (일반 모드 복귀)
                             print(f"[수급확인] {m} 관망 만료 | 약간 회복 {_sl_final_gain*100:.2f}% → 잔여 유지")
                             _sl_reduced = False
+
+            # === 🔧 차트분석: 30분 타임아웃 강화 (청산 로직) ===
+            # 📊 데이터: 30분(1800초) 후 edge -0.221%, winRate 40.9% → 청산 신호
+            # 수익 중: 트레일 타이트닝 50% / 손실 중: 스크래치 아웃
+            if alive_sec >= 1800:  # 30분 경과
+                if cur_gain > 0:
+                    # 수익 중: 트레일링 스톱 타이트닝 (정상의 50%)
+                    # 🔧 FIX: trail_dist를 절반으로 축소하여 더 타이트한 손절 적용
+                    if trail_armed and trail_dist > 0:
+                        _trail_dist_tight = trail_dist * 0.5
+                        trail_stop = max(trail_stop, curp * (1.0 - _trail_dist_tight), base_stop)
+                        print(f"[30M_TIMEOUT] {m} 30분경과 수익중({cur_gain*100:.2f}%) → 트레일 타이트닝 (dist {trail_dist*100:.2f}% → {_trail_dist_tight*100:.2f}%)")
+                        tg_send_mid(f"⏰ {m} 30분 경과 | +{cur_gain*100:.2f}% | 트레일 타이트닝 50%")
+                else:
+                    # 손실 중: 스크래치 아웃 (즉시 청산)
+                    close_auto_position(m, f"30분타임아웃 손실청산 | -{abs(cur_gain)*100:.2f}% | 스크래치아웃")
+                    _already_closed = True
+                    verdict = "30M_TIMEOUT_LOSS"
+                    print(f"[30M_TIMEOUT] {m} 30분경과 손실중({cur_gain*100:.2f}%) → 스크래치아웃")
+                    tg_send_mid(f"⏰ {m} 30분 경과 | {cur_gain*100:.2f}% 손실 → 강제 청산")
+                    break
 
             # === 🔥 실패 브레이크아웃 즉시 탈출 ===
             # +0.15% 돌파 후 5초 내 진입가 이하로 복귀 → 가짜 돌파, 즉시 청산
