@@ -3750,10 +3750,10 @@ GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
-GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
+GATE_BUY_RATIO_MIN = 0.60 # 🔧 매수비 하한 - 0.58→0.60 강화 (승자 avg 0.65 vs 패자 0.45)
 GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
-GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
+GATE_IMBALANCE_MIN = 0.55 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50→0.55 강화
 GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
@@ -3777,7 +3777,7 @@ GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
 # ========================================
-GATE_BODY_MIN = 0.005         # 📊 949건궤적: body<0.7% MFE=0 지배적 → 0.3→0.5% 상향
+GATE_BODY_MIN = 0.007         # 📊 949건궤적: body<0.7% wr0%, 0.7%+ wr33% → 0.5→0.7% 강화
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
 GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
@@ -8024,11 +8024,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
-    #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
-    if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
-        _entry_mode = "half"
-        print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
+    # 9) 📊 vr<0.5 차단 (1010건: 215건 wr60% 총손실-56.2% → half로도 부족)
+    #    직전 5봉 대비 거래량이 절반 미만 → 가짜 신호 → 차단
+    if not _ign_candidate and vol_surge < 0.5:
+        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 거래량부족 | {_metrics}")
+        return None
 
     # ============================================================
     # 신호 태깅
