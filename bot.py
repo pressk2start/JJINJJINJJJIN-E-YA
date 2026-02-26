@@ -8029,11 +8029,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<0.5 차단 (데이터: 215건 wr60% 건당-0.26%, 총손실-56.2%)
-    #    직전 5봉 대비 거래량이 절반 미만 → 가짜 신호
-    if not _ign_candidate and vol_surge < 0.5:
-        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 거래량부족 | {_metrics}")
-        return None
+    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
+    if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
 
     # ============================================================
     # 신호 태깅
@@ -10999,15 +10999,13 @@ def main():
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
-                # 🔧 야간/새벽 완화 (데이터: 7시 wr50%, 8시 wr51%, 건당-0.64%)
+                # 🔧 야간/새벽 완화 (1010건: 7-8시 wr49-51% / 3847건: 승률차이 미미 → half로 절충)
                 _night_h = now_kst().hour
-                if 7 <= _night_h < 9:
-                    # 7-8시: 장 열리기 직전 유동성 최악 → 차단
-                    print(f"[PRE_MARKET] {m} {_night_h}시 진입 차단 (7-8시 wr49-51%, 총손실-50.9%)")
-                    continue
-                elif 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
+                if 0 <= _night_h < 9 and pre.get("entry_mode") == "confirm":
+                    # 0-8시 통합: 유동성 부족 → half 강제 (차단은 과공격적)
                     pre["entry_mode"] = "half"
-                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
+                    _tag = "PRE_MARKET" if _night_h >= 7 else "NIGHT"
+                    print(f"[{_tag}] {m} {_night_h}시 → half 강제 (유동성 부족 완화)")
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
                 # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
