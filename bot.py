@@ -1617,7 +1617,19 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             thr = max_drift
 
         if drift > thr:
-            # 🔧 추격진입 예외 완전 제거 (pullback 엔트리가 있으므로 추격 불필요)
+            # 🔧 FIX: 급등 시 무조건 차단 → 모멘텀 확인 후 half 허용
+            # 오르는 종목이니까 가격이 오르는 건 당연 — 추세가 살아있으면 진입
+            # 단, 추격 리스크 제한 위해 half + chase 마킹
+            _guard_ticks = ticks or []
+            if _guard_ticks and len(_guard_ticks) >= 3:
+                _gt10 = micro_tape_stats_from_ticks(_guard_ticks, 10)
+                _g_buy = _gt10.get("buy_ratio", 0)
+                _g_rate = _gt10.get("krw_per_sec", 0)
+                # 매수비 55%+ & 거래속도 15K+ = 추세 살아있음
+                if _g_buy >= 0.55 and _g_rate >= 15000 and drift <= thr * 2.0:
+                    # drift가 thr의 2배 이내면 half로 진입 허용
+                    print(f"[GUARD_MOMENTUM] {m} drift {drift*100:.2f}%>{thr*100:.2f}% but 매수{_g_buy:.0%} 속도{_g_rate:.0f} → half 허용")
+                    return True, current_price, True  # is_chase=True → 후속에서 half 강제
             return False, current_price, False
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
@@ -1645,8 +1657,11 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
                 if drift <= 0.006:  # 0.6% 이하면 통과
                     print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
                     return True, current_price, False
+                elif drift <= 0.012:  # 🔧 FIX: 0.6~1.2% → chase(half) 허용 (추세 진입 기회 보존)
+                    print(f"[GUARD_RETRY_CHASE] {m} 재시도 drift {drift*100:.2f}% → half 허용")
+                    return True, current_price, True
                 else:
-                    print(f"[GUARD_RETRY_FAIL] {m} 재시도 성공했으나 급등 (drift={drift*100:.2f}%)")
+                    print(f"[GUARD_RETRY_FAIL] {m} 재시도 drift {drift*100:.2f}% > 1.2% → 차단")
                     return False, current_price, False
         except Exception as e2:
             print(f"[GUARD_RETRY_ERR] {m}: {e2}")
@@ -1770,10 +1785,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
         _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
         _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
-        if _total_gap > 2.0 and not pre.get("is_circle"):
+        # 🔧 FIX: 2.0%→3.0% 완화 + 2.0~3.0% 구간은 chase(half) 허용
+        # 오르는 종목은 VWAP 대비 자연스럽게 벌어짐 — 너무 빡빡하면 진입 불가
+        if _total_gap > 3.0 and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
-                  f"= 총 {_total_gap:.1f}% > 2.0% → 꼭대기 진입 차단")
+                  f"= 총 {_total_gap:.1f}% > 3.0% → 꼭대기 진입 차단")
+        elif _total_gap > 2.0 and not pre.get("is_circle"):
+            is_chase = True  # half 강제
+            print(f"[VWAP+DRIFT] {m} 총 {_total_gap:.1f}% > 2.0% → half 다운그레이드")
 
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
