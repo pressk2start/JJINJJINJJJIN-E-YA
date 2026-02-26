@@ -8024,12 +8024,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<1.0 차단 — 급등인데 거래량이 평소 이하면 가짜
+    # 9) 📊 vr 게이트 — 거래량 품질 체크 (점화 면제)
     #    vol_surge = 현재봉 거래대금 / 직전5봉 EMA (상대값, 코인별 자동 보정)
-    #    <1.0 = 평소보다 적은 거래량 → 호가 얇은 노이즈 or 단발성
-    if not _ign_candidate and vol_surge < 1.0:
-        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<1.0 평소이하 거래량 | {_metrics}")
+    #    <0.5 = 평소의 절반 이하 → 확실한 노이즈 차단
+    #    0.5~1.0 = 평소 수준 → half로 진입 (시작 단계 기회 보존)
+    if not _ign_candidate and vol_surge < 0.5:
+        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 노이즈 거래량 | {_metrics}")
         return None
+    if not _ign_candidate and vol_surge < 1.0 and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[VR_HALF] {m} vr{vol_surge:.2f}<1.0 평소이하 → half (기회보존)")
 
     # ============================================================
     # 신호 태깅
