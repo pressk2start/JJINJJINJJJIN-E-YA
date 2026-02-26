@@ -583,6 +583,7 @@ ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
 _ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
+_ORPHAN_FIRST_SYNC = True  # 🔧 FIX: 봇 시작 후 첫 sync 표시 (재시작 시 전체 유령 즉시 처리)
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 _RECENT_BUY_LOCK = threading.Lock()  # 🔧 FIX: _RECENT_BUY_TS 스레드 안전 보호 (모니터/스캔 동시접근)
 
@@ -1187,7 +1188,7 @@ def sync_orphan_positions():
     - 감지된 포지션을 OPEN_POSITIONS에 추가하고 모니터링 시작
     - 세션 내 1회만 처리 (반복 알림 방지)
     """
-    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS
+    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS, _ORPHAN_FIRST_SYNC
 
     now = time.time()
     if now - _LAST_ORPHAN_SYNC < ORPHAN_SYNC_INTERVAL:
@@ -1240,42 +1241,40 @@ def sync_orphan_positions():
                     continue
 
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
-            # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
-            if market not in _PREV_SYNC_MARKETS:
+            # 단, 봇 시작 직후 첫 sync에서는 대기 없이 바로 처리
+            # (재시작이므로 기존 포지션이 전부 유령 — 오탐 가능성 없음)
+            if not _ORPHAN_FIRST_SYNC and market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
             # 🔧 FIX: 최근 10분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
-            # - 업비트 주문 내역 조회로 실제 매수 여부 확인
+            # - 단, 봇 재시작 첫 sync에서는 건너뜀 (기존 포지션 = 당연히 매수 이력 있음)
             skip_recent_buy = False
-            try:
-                recent_orders = upbit_private_get("/v1/orders", {
-                    "market": market,
-                    "state": "done",
-                    "limit": 5
-                })
-                if recent_orders:
-                    for order in recent_orders:
-                        if order.get("side") == "bid":  # 매수 주문
-                            # created_at 예: "2024-01-01T12:00:00+09:00"
-                            created_str = order.get("created_at", "")
-                            if created_str:
-                                try:
-                                    # FIX [H1]: 상단 임포트 사용 (중복 import 제거)
-                                    # ISO 형식 파싱
-                                    order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                                    now_utc = datetime.now(timezone.utc)
-                                    age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 600:  # 10분 이내 매수
-                                        print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
-                                        skip_recent_buy = True
-                                        break  # for loop 탈출
-                                except Exception as parse_err:
-                                    print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
-            except Exception as orders_err:
-                print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
-                # 조회 실패 시 기존 로직대로 진행
+            if not _ORPHAN_FIRST_SYNC:
+                try:
+                    recent_orders = upbit_private_get("/v1/orders", {
+                        "market": market,
+                        "state": "done",
+                        "limit": 5
+                    })
+                    if recent_orders:
+                        for order in recent_orders:
+                            if order.get("side") == "bid":  # 매수 주문
+                                created_str = order.get("created_at", "")
+                                if created_str:
+                                    try:
+                                        order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                                        now_utc = datetime.now(timezone.utc)
+                                        age_sec = (now_utc - order_time).total_seconds()
+                                        if age_sec < 600:  # 10분 이내 매수
+                                            print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
+                                            skip_recent_buy = True
+                                            break
+                                    except Exception as parse_err:
+                                        print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
+                except Exception as orders_err:
+                    print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
 
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
@@ -1528,6 +1527,11 @@ def sync_orphan_positions():
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
+
+        # 🔧 FIX: 첫 sync 완료 → 이후부터는 2사이클 확인 복원
+        if _ORPHAN_FIRST_SYNC:
+            _ORPHAN_FIRST_SYNC = False
+            print(f"[ORPHAN] 첫 동기화 완료 (발견: {len(current_markets)}개 마켓, 이후 2사이클 확인 복원)")
 
     except Exception as e:
         print(f"[ORPHAN_SYNC_ERR] {e}")
