@@ -3770,10 +3770,10 @@ GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
-GATE_BUY_RATIO_MIN = 0.60 # 🔧 매수비 하한 - 0.58→0.60 강화 (승자 avg 0.65 vs 패자 0.45)
+GATE_BUY_RATIO_MIN = 0.58 # 🔧 0.60→0.58 복원 (0.60은 신호 과다 차단 — 0.58이 균형점)
 GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
-GATE_IMBALANCE_MIN = 0.55 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50→0.55 강화
+GATE_IMBALANCE_MIN = 0.50 # 🔧 0.55→0.50 복원 (0.55는 초기 움직임 과다 차단 — 0.50이 균형점)
 GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
@@ -3791,7 +3791,7 @@ GATE_PSTD_STRONGBREAK_MAX = 0.12  # 🔧 알람복구: 0.08→0.12 (강돌파는
 GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터수집 완화를 복원)
 GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
+GATE_VOL_MIN = 500_000    # 🔧 1M→500K 완화 (1M은 소형알트 전체 차단 — 50만원이면 실거래 구분 가능)
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 
 # ========================================
@@ -8046,10 +8046,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 9) 📊 vr 게이트 — 거래량 품질 체크 (점화 면제)
     #    vol_surge = 현재봉 거래대금 / 직전5봉 EMA (상대값, 코인별 자동 보정)
-    #    <0.5 = 평소의 절반 이하 → 확실한 노이즈 차단
-    #    0.5~1.0 = 평소 수준 → half로 진입 (시작 단계 기회 보존)
-    if not _ign_candidate and vol_surge < 0.5:
-        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 노이즈 거래량 | {_metrics}")
+    #    <0.3 = 극저 거래량 → 확실한 노이즈 차단
+    #    0.3~1.0 = 시작 단계 → half로 진입 (기회 보존)
+    if not _ign_candidate and vol_surge < 0.3:
+        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.3 노이즈 거래량 | {_metrics}")
         return None
     if not _ign_candidate and vol_surge < 1.0 and _entry_mode == "confirm":
         _entry_mode = "half"
@@ -8103,11 +8103,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             _spike_wave = 1
     _is_first_wave = (_spike_wave == 1)
 
-    # 🔧 FIX: 2파+ → 차단 (기존 half, SL 피격률 85% → half로도 손실 누적)
-    # 데이터: 1파 SL38% vs 2파+ SL85% → 진입 자체가 마이너스 기대값
-    if not _is_first_wave:
-        cut("WAVE2_BLOCK", f"{m} {_spike_wave}파 감지 → 차단 (SL피격률85%) | {_metrics}")
-        return None
+    # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험 — 완전차단은 신호 과다 사망)
+    # 데이터: 1파 SL38% vs 2파+ SL85% → 리스크 높지만 기회 자체를 죽이면 안됨
+    if not _is_first_wave and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
 
     # 📊 body 2%+ → half 강제 (1010건: body1-2% SL52%, body2%+ SL68%)
     # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소 (점화 면제: 점화는 모멘텀 우선)
