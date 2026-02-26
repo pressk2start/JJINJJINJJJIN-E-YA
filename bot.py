@@ -8024,10 +8024,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<0.5 차단 (1010건: 215건 wr60% 총손실-56.2% → half로도 부족)
-    #    직전 5봉 대비 거래량이 절반 미만 → 가짜 신호 → 차단
-    if not _ign_candidate and vol_surge < 0.5:
-        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 거래량부족 | {_metrics}")
+    # 9) 📊 vr<1.0 차단 — 급등인데 거래량이 평소 이하면 가짜
+    #    vol_surge = 현재봉 거래대금 / 직전5봉 EMA (상대값, 코인별 자동 보정)
+    #    <1.0 = 평소보다 적은 거래량 → 호가 얇은 노이즈 or 단발성
+    if not _ign_candidate and vol_surge < 1.0:
+        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<1.0 평소이하 거래량 | {_metrics}")
         return None
 
     # ============================================================
