@@ -211,7 +211,7 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
-        HARD_STOP_DD = 0.042   # 🔧 수익성패치: 0.038→0.042 (SL 2.0%×2.1, 전역값과 통일)
+        HARD_STOP_DD = 0.032   # 🔧 FIX: 4.2→3.2% (전역값과 통일, SL 2.0%×1.6 — 비상청산이 SL과 너무 멀면 손실만 확대)
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
@@ -10924,6 +10924,12 @@ def main():
                 if pre.get("_surge_probe"):
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
+
+                # 🔧 야간 완화: 0~7시 유동성 부족 → half 강제 (차단 아님, 리스크 축소)
+                _night_h = now_kst().hour
+                if 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
+                    pre["entry_mode"] = "half"
+                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
                 # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
