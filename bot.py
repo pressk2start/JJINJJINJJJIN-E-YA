@@ -136,12 +136,14 @@ TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 노이즈 -0.53% → 0.15% trail 즉사 → 0.20%
 
 def get_trail_distance_min():
-    """🔧 트레일 거리 — 전시간 통일 (SL 2.0% 통일에 맞춤)
-    기존: 야간 0.10% / 주간 0.20% → 야간 trail이 SL 대비 너무 빡빡
-    수정: 전시간 TRAIL_DISTANCE_MIN_BASE(0.20%) 사용
+    """🔧 시간대별 트레일 거리
+    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
     """
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15% < BASE 0.20%
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -1617,19 +1619,7 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             thr = max_drift
 
         if drift > thr:
-            # 🔧 FIX: 급등 시 무조건 차단 → 모멘텀 확인 후 half 허용
-            # 오르는 종목이니까 가격이 오르는 건 당연 — 추세가 살아있으면 진입
-            # 단, 추격 리스크 제한 위해 half + chase 마킹
-            _guard_ticks = ticks or []
-            if _guard_ticks and len(_guard_ticks) >= 3:
-                _gt10 = micro_tape_stats_from_ticks(_guard_ticks, 10)
-                _g_buy = _gt10.get("buy_ratio", 0)
-                _g_rate = _gt10.get("krw_per_sec", 0)
-                # 매수비 55%+ & 거래속도 15K+ = 추세 살아있음
-                if _g_buy >= 0.55 and _g_rate >= 15000 and drift <= thr * 2.0:
-                    # drift가 thr의 2배 이내면 half로 진입 허용
-                    print(f"[GUARD_MOMENTUM] {m} drift {drift*100:.2f}%>{thr*100:.2f}% but 매수{_g_buy:.0%} 속도{_g_rate:.0f} → half 허용")
-                    return True, current_price, True  # is_chase=True → 후속에서 half 강제
+            # 🔧 추격진입 예외 완전 제거 (pullback 엔트리가 있으므로 추격 불필요)
             return False, current_price, False
 
         # 🔧 FIX: 하방 급락 컷 (페이크 브레이크 방지)
@@ -1657,11 +1647,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
                 if drift <= 0.006:  # 0.6% 이하면 통과
                     print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
                     return True, current_price, False
-                elif drift <= 0.012:  # 🔧 FIX: 0.6~1.2% → chase(half) 허용 (추세 진입 기회 보존)
-                    print(f"[GUARD_RETRY_CHASE] {m} 재시도 drift {drift*100:.2f}% → half 허용")
-                    return True, current_price, True
                 else:
-                    print(f"[GUARD_RETRY_FAIL] {m} 재시도 drift {drift*100:.2f}% > 1.2% → 차단")
+                    print(f"[GUARD_RETRY_FAIL] {m} 재시도 성공했으나 급등 (drift={drift*100:.2f}%)")
                     return False, current_price, False
         except Exception as e2:
             print(f"[GUARD_RETRY_ERR] {m}: {e2}")
@@ -1785,15 +1772,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
         _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
         _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
-        # 🔧 FIX: 2.0%→3.0% 완화 + 2.0~3.0% 구간은 chase(half) 허용
-        # 오르는 종목은 VWAP 대비 자연스럽게 벌어짐 — 너무 빡빡하면 진입 불가
-        if _total_gap > 3.0 and not pre.get("is_circle"):
+        if _total_gap > 2.0 and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
-                  f"= 총 {_total_gap:.1f}% > 3.0% → 꼭대기 진입 차단")
-        elif _total_gap > 2.0 and not pre.get("is_circle"):
-            is_chase = True  # half 강제
-            print(f"[VWAP+DRIFT] {m} 총 {_total_gap:.1f}% > 2.0% → half 다운그레이드")
+                  f"= 총 {_total_gap:.1f}% > 2.0% → 꼭대기 진입 차단")
 
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
@@ -3770,10 +3752,10 @@ GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
-GATE_BUY_RATIO_MIN = 0.58 # 🔧 0.60→0.58 복원 (0.60은 신호 과다 차단 — 0.58이 균형점)
+GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
 GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
-GATE_IMBALANCE_MIN = 0.50 # 🔧 0.55→0.50 복원 (0.55는 초기 움직임 과다 차단 — 0.50이 균형점)
+GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
 GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
@@ -3791,13 +3773,13 @@ GATE_PSTD_STRONGBREAK_MAX = 0.12  # 🔧 알람복구: 0.08→0.12 (강돌파는
 GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터수집 완화를 복원)
 GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 500_000    # 🔧 1M→500K 완화 (1M은 소형알트 전체 차단 — 50만원이면 실거래 구분 가능)
+GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
 # ========================================
-GATE_BODY_MIN = 0.005         # 🔧 0.7%→0.5% 복원 (0.7%면 대부분 알트 캔들 컷 → 진입 불가)
+GATE_BODY_MIN = 0.005         # 📊 949건궤적: body<0.7% MFE=0 지배적 → 0.3→0.5% 상향
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
 GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
@@ -4757,7 +4739,7 @@ def auto_learn_exit_params():
                     # SL 경계 손절 → SL을 패배MAE의 120%로 타겟
                     target_sl = avg_loss_mae_dec * 1.20
                     new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
-                    new_sl = max(0.015, min(0.020, round(new_sl, 4)))  # 🔧 FIX: 하한 0.8%→1.5% (수동 2.0% 튜닝 보호)
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
@@ -4768,7 +4750,7 @@ def auto_learn_exit_params():
                 elif avg_loss_mae < current_sl_pct * 0.50:
                     target_sl = avg_loss_mae_dec * 1.50  # MAE의 150% 정도로 축소
                     new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
-                    new_sl = max(0.015, min(0.020, round(new_sl, 4)))  # 🔧 FIX: 하한 0.8%→1.5% (수동 2.0% 튜닝 보호)
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
@@ -8044,16 +8026,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr 게이트 — 거래량 품질 체크 (점화 면제)
-    #    vol_surge = 현재봉 거래대금 / 직전5봉 EMA (상대값, 코인별 자동 보정)
-    #    <0.3 = 극저 거래량 → 확실한 노이즈 차단
-    #    0.3~1.0 = 시작 단계 → half로 진입 (기회 보존)
-    if not _ign_candidate and vol_surge < 0.3:
-        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.3 노이즈 거래량 | {_metrics}")
-        return None
-    if not _ign_candidate and vol_surge < 1.0 and _entry_mode == "confirm":
+    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
+    if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
         _entry_mode = "half"
-        print(f"[VR_HALF] {m} vr{vol_surge:.2f}<1.0 평소이하 → half (기회보존)")
+        print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
 
     # ============================================================
     # 신호 태깅
@@ -8103,8 +8080,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             _spike_wave = 1
     _is_first_wave = (_spike_wave == 1)
 
-    # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험 — 완전차단은 신호 과다 사망)
-    # 데이터: 1파 SL38% vs 2파+ SL85% → 리스크 높지만 기회 자체를 죽이면 안됨
+    # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험)
     if not _is_first_wave and _entry_mode == "confirm":
         _entry_mode = "half"
         print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
@@ -8536,7 +8512,6 @@ def upbit_tick_size(price: float) -> float:
 
 # 🔧 BUG FIX: 5분봉 ATR 캐시 (60초 TTL) — 모니터링 루프에서 매번 API 호출하던 문제 수정
 _ATR5_CACHE = {}  # {market: {"atr5": float, "ts": float}}
-_ATR5_CACHE_LOCK = threading.Lock()  # 🔧 FIX: 여러 모니터 스레드에서 동시 접근 race condition 방지
 _ATR5_CACHE_TTL = 60  # 초
 
 def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, trade_type=None, market=None):
@@ -8555,17 +8530,13 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
         try:
             # 🔧 BUG FIX: 60초 TTL 캐시 (5분봉 데이터를 매번 조회하던 API 낭비 제거)
             _now = time.time()
-            with _ATR5_CACHE_LOCK:
-                _cached = _ATR5_CACHE.get(market)
-                if _cached and (_now - _cached["ts"]) < _ATR5_CACHE_TTL:
-                    _atr5 = _cached["atr5"]
-                else:
-                    _cached = None
-            if not _cached or (_now - _cached["ts"]) >= _ATR5_CACHE_TTL:
+            _cached = _ATR5_CACHE.get(market)
+            if _cached and (_now - _cached["ts"]) < _ATR5_CACHE_TTL:
+                _atr5 = _cached["atr5"]
+            else:
                 _c5_sl = get_minutes_candles(5, market, 20)
                 _atr5 = atr14_from_candles(_c5_sl, 14) if _c5_sl and len(_c5_sl) >= 15 else None
-                with _ATR5_CACHE_LOCK:
-                    _ATR5_CACHE[market] = {"atr5": _atr5, "ts": _now}
+                _ATR5_CACHE[market] = {"atr5": _atr5, "ts": _now}
             if _atr5 and _atr5 > 0:
                 _atr5_pct = _atr5 / max(entry_price, 1)
                 _atr1_pct = atr / max(entry_price, 1)
@@ -8613,7 +8584,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
     _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
-    max_sl = min(DYN_SL_MAX * _sl_mult, 0.050)  # 🔧 FIX: 절대 하드캡 5% (기존 3.5%×1.8=6.3% 가능 → 최대 5%로 제한)
+    max_sl = DYN_SL_MAX * _sl_mult
     # 🔧 BUG FIX: DYN_SL_MIN 대신 _time_sl_min 사용 (야간 1.5% 리셋 방지)
     pct = min(max(pct, _time_sl_min), max_sl)
 
@@ -9374,13 +9345,13 @@ def monitor_position(m,
             # 🔧 before1 복원: 독립 trail_armed 블록 (단순 체크포인트 기반 무장)
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                # 🔧 FIX: trail_stop 최소보장 = entry × (1 + CP×0.65)
-                # 기존 CP×0.5=0.125% → 수수료(0.1%) 후 순수익 0.025% (거의 제로)
-                # 수정: CP×0.65=0.1625% → 수수료 후 0.0625% 확보 (2.5배 개선)
+                # 🔧 FIX: trail_stop 최소보장 = entry × (1 + CP×0.5)
+                # 기존: curp × 0.9985 → CP 직후 반락 시 +0.15% 청산 → 수수료 후 손실
+                # 수정: 최소 CP의 50%는 확보 (실질 수익 보장)
                 _trail_raw = curp * (1.0 - trail_dist_min)
-                _trail_min_floor = entry_price * (1.0 + dyn_checkpoint * 0.65)
+                _trail_min_floor = entry_price * (1.0 + dyn_checkpoint * 0.5)
                 trail_stop = max(_trail_raw, _trail_min_floor)
-                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장 (floor +{dyn_checkpoint*65:.2f}%)")
+                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장 (floor +{dyn_checkpoint*50:.2f}%)")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
             # 3단계: CP(~0.3%)→본절, +3.5%→+1.8%, +5.0%→+3.0%
@@ -9392,8 +9363,8 @@ def monitor_position(m,
                 elif gain_from_entry >= 0.035:    # +3.5% → 최소 +1.8% 확보 (51%)
                     _ratchet_lock = entry_price * (1.0 + 0.018)
                 elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.25%) → 실질수익 보호
-                    # 🔧 FIX: CP×0.65 = 0.1625% 확보 (수수료 후 실질 수익 보장)
-                    _ratchet_lock = entry_price * (1.0 + dyn_checkpoint * 0.65)
+                    # 🔧 FIX: CP×0.5 = 0.125% 확보 (수수료+슬립 커버)
+                    _ratchet_lock = entry_price * (1.0 + dyn_checkpoint * 0.5)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -10123,14 +10094,6 @@ def _cleanup_spike_tracker():
                    if (_now - v["ts"]) >= _SPIKE_WAVE_WINDOW]
         for m in expired:
             del _SPIKE_TRACKER[m]
-    # 🔧 FIX: _IGNITION 캐시도 함께 정리 (무한 성장 방지)
-    _IGN_TTL = 3600  # 1시간 이상 된 점화 기록 삭제
-    with _IGNITION_LOCK:
-        _ign_expired = [m for m, ts in _IGNITION_LAST_SIGNAL.items()
-                        if (_now - ts / 1000.0) >= _IGN_TTL]
-        for m in _ign_expired:
-            _IGNITION_LAST_SIGNAL.pop(m, None)
-            _IGNITION_BASELINE_TPS.pop(m, None)
 
 # =========================
 # 시간대별 쿨다운 설정
