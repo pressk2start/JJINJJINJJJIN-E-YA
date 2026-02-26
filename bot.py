@@ -133,7 +133,7 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준�
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (168샘플: 0.15%가 승률·수익 최적)
+TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 노이즈 -0.53% → 0.15% trail 즉사 → 0.20%
 
 def get_trail_distance_min():
     """🔧 시간대별 트레일 거리
@@ -206,7 +206,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0012  # 🔧 백테스트최적화: 0.30→0.12% (strict는 balanced 0.15% 대비 타이트)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 949건궤적: 0.12→0.15% (strict도 노이즈 마진 확보)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
@@ -217,7 +217,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 0.15→0.20% (노이즈 -0.53% 대비)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -3779,7 +3779,7 @@ GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
 # ========================================
-GATE_BODY_MIN = 0.003         # 📊 바디 하한 0.3% (body<0.5% wr29.5% → 최소 0.3% 필수)
+GATE_BODY_MIN = 0.005         # 📊 949건궤적: body<0.7% MFE=0 지배적 → 0.3→0.5% 상향
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
 GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
@@ -7957,16 +7957,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
-    _hour_kst = now_kst().hour
-
-    # === 🔧 3929건시뮬: 시간대 half 축소 (10-18시 8h → 13-17시 4h) ===
-    # 📊 기존 10-18시: 하루 18시간 half → confirm 진입 불가 (수익 절반)
-    # 📊 시뮬: 13시 wr56%, 15시 wr57%, 17시 wr58% = 실제 약세 구간만
-    # 📊 10-12시: wr62-69% 양호 → half 불필요
-    if not _ign_candidate and 13 <= _hour_kst < 17:
-        if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
-            print(f"[V7_TIMEPENALTY] {m} 오후{_hour_kst}시 → half 페널티")
-            _entry_mode_override = "half"
+    # === 🔧 949건궤적: 시간대 half 완전 제거 ===
+    # 📊 half = 승률 불변 + 수익 절반 → 기대값 악화만 초래
+    # 📊 약세 시간대는 다른 gate(body, vr, imbalance)가 이미 커버
+    # (기존 10-18시 → 13-17시 → 제거)
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
