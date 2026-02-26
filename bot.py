@@ -136,14 +136,12 @@ TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 노이즈 -0.53% → 0.15% trail 즉사 → 0.20%
 
 def get_trail_distance_min():
-    """🔧 시간대별 트레일 거리
-    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
+    """🔧 트레일 거리 — 전시간 통일 (SL 2.0% 통일에 맞춤)
+    기존: 야간 0.10% / 주간 0.20% → 야간 trail이 SL 대비 너무 빡빡
+    수정: 전시간 TRAIL_DISTANCE_MIN_BASE(0.20%) 사용
     """
-    _h = now_kst().hour
-    if 0 <= _h < 7:
-        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15% < BASE 0.20%
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
