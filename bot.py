@@ -8067,14 +8067,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _entry_mode = "confirm"
 
     # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
+    # 조회만: count는 gate 통과 후 return pre 직전에서만 갱신
     _now_ts = time.time()
     with _SPIKE_TRACKER_LOCK:
         _wave_info = _SPIKE_TRACKER.get(m)
         if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
-            _wave_info["count"] += 1
-            _spike_wave = _wave_info["count"]
+            _spike_wave = _wave_info["count"] + 1  # 현재 몇파인지만 확인 (갱신 X)
         else:
-            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
             _spike_wave = 1
     _is_first_wave = (_spike_wave == 1)
 
@@ -8129,6 +8128,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "is_precision_pocket": _is_precision,
         "spike_wave": _spike_wave,
     }
+
+    # 🔧 FIX: gate 통과 후에만 카운트 갱신 (스캔만으로 2파 판정 방지)
+    with _SPIKE_TRACKER_LOCK:
+        _wave_info = _SPIKE_TRACKER.get(m)
+        if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+            _wave_info["count"] = _spike_wave
+        else:
+            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
 
     return pre
 
