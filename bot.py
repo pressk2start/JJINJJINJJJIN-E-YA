@@ -8068,13 +8068,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
     _now_ts = time.time()
-    _wave_info = _SPIKE_TRACKER.get(m)
-    if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
-        _wave_info["count"] += 1
-        _spike_wave = _wave_info["count"]
-    else:
-        _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
-        _spike_wave = 1
+    with _SPIKE_TRACKER_LOCK:
+        _wave_info = _SPIKE_TRACKER.get(m)
+        if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+            _wave_info["count"] += 1
+            _spike_wave = _wave_info["count"]
+        else:
+            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
+            _spike_wave = 1
     _is_first_wave = (_spike_wave == 1)
 
     # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험)
@@ -8083,8 +8084,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
 
     # 📊 body 2%+ → half 강제 (1010건: body1-2% SL52%, body2%+ SL68%)
-    # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소
-    if candle_body_pct >= 0.02 and _entry_mode == "confirm":
+    # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소 (점화 면제: 점화는 모멘텀 우선)
+    if candle_body_pct >= 0.02 and _entry_mode == "confirm" and not _ign_candidate:
         _entry_mode = "half"
         print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥2% → half 강제 (추격방지)")
 
@@ -8579,7 +8580,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
     pct *= _sl_mult
 
     max_sl = DYN_SL_MAX * _sl_mult
-    pct = min(max(pct, DYN_SL_MIN), max_sl)
+    # 🔧 BUG FIX: DYN_SL_MIN 대신 _time_sl_min 사용 (야간 1.5% 리셋 방지)
+    pct = min(max(pct, _time_sl_min), max_sl)
 
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
     return entry_price * (1 - pct), pct, atr_info
@@ -10072,7 +10074,17 @@ ALERT_TTL = 1800
 # {market: {"ts": first_spike_time, "count": spike_count}}
 # 30분 내 같은 코인 재급등 → 2파로 판정
 _SPIKE_TRACKER = {}
+_SPIKE_TRACKER_LOCK = threading.Lock()  # 🔧 FIX: 멀티스레드 경쟁 방지
 _SPIKE_WAVE_WINDOW = 1800  # 30분 내 재급등 = 2파
+
+def _cleanup_spike_tracker():
+    """🔧 FIX: 만료된 _SPIKE_TRACKER 항목 제거 (메모리 누수 방지)"""
+    _now = time.time()
+    with _SPIKE_TRACKER_LOCK:
+        expired = [m for m, v in _SPIKE_TRACKER.items()
+                   if (_now - v["ts"]) >= _SPIKE_WAVE_WINDOW]
+        for m in expired:
+            del _SPIKE_TRACKER[m]
 
 # =========================
 # 시간대별 쿨다운 설정
@@ -10373,6 +10385,9 @@ def main():
 
             # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
             sync_orphan_positions()
+
+            # 🔧 FIX: 스파이크 트래커 만료 항목 정리 (메모리 누수 방지)
+            _cleanup_spike_tracker()
 
             # 🎯 리테스트 워치리스트 체크 (장초 2차 기회 진입)
             if RETEST_MODE_ENABLED:
