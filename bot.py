@@ -61,8 +61,8 @@ DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 �
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 백테스트최적화: 1.0→0.3% (168샘플: 승률 45.8→63.7%, 평균수익 +54%)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.0005  # 🔧 FIX: 0.1→0.05% (cost_floor=수수료0.1%+슬립0.13%+α0.05%=0.28% < CP 0.30%)
+PROFIT_CHECKPOINT_BASE = 0.0025  # 🔧 데이터최적화: 0.3→0.25% (CP↓→빠른trail무장, 732건 wr83% PnL+126%)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 조정: cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% ≈ CP 0.25%
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -80,9 +80,10 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
     return default
 
 def get_dynamic_checkpoint():
-    """🔧 백테스트최적화: 168샘플 기반 체크포인트 0.3%
-    기존 ~1.0% → 트레일 발동 자체가 안 됨 (승률 45.8%)
-    변경 0.3% → 승률 63.7%, 평균수익 +0.311%, 누적 52.3%
+    """🔧 체크포인트 = max(비용바닥, PROFIT_CHECKPOINT_BASE)
+    비용바닥: 수수료 + 왕복슬립 + 최소알파 (≈0.26%)
+    BASE: 0.25% (데이터 최적)
+    → 실질 비용을 커버하면서 빠른 trail 무장
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -90,10 +91,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 🔧 백테스트최적화: SL × 0.15 (SL 2.0% × 0.15 = 0.30%)
-    sl_linked = DYN_SL_MIN * 0.15  # 0.020 * 0.15 = 0.003 (0.3%)
-    # 둘 중 큰 값 사용, 최대 1.0% 캡
-    return max(cost_floor, min(0.010, sl_linked))
+    # 🔧 FIX: sl_linked 제거 → PROFIT_CHECKPOINT_BASE 직접 사용
+    # 기존: sl_linked = DYN_SL_MIN * 0.15 = 0.003 고정 → BASE 변경이 무효화됨
+    return max(cost_floor, PROFIT_CHECKPOINT_BASE)
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -133,13 +133,15 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준�
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (168샘플: 0.15%가 승률·수익 최적)
+TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 노이즈 -0.53% → 0.15% trail 즉사 → 0.20%
 
 def get_trail_distance_min():
-    """🔧 백테스트최적화: 트레일 거리 0.15%
-    기존 SL×0.40=0.80% → 너무 넓어서 수익 흘림
-    168샘플 결과: 0.15%가 0.20%/0.40% 대비 승률·누적 모두 우위
+    """🔧 시간대별 트레일 거리
+    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
     """
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
     return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
@@ -204,18 +206,18 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0012  # 🔧 백테스트최적화: 0.30→0.12% (strict는 balanced 0.15% 대비 타이트)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 949건궤적: 0.12→0.15% (strict도 노이즈 마진 확보)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
         WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
-        HARD_STOP_DD = 0.042   # 🔧 수익성패치: 0.038→0.042 (SL 2.0%×2.1, 전역값과 통일)
+        HARD_STOP_DD = 0.032   # 🔧 FIX: 4.2→3.2% (전역값과 통일, SL 2.0%×1.6 — 비상청산이 SL과 너무 멀면 손실만 확대)
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 949건궤적: 0.15→0.20% (노이즈 -0.53% 대비)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -255,7 +257,7 @@ _IGNITION_LOCK = threading.Lock()
 # 🎯 리테스트 진입 모드 (Retest Entry Mode)
 # =========================
 # 장초 급등 → 첫 양봉 패스 → 되돌림 후 지지 확인 시 진입
-RETEST_MODE_ENABLED = True           # 리테스트 모드 활성화
+RETEST_MODE_ENABLED = False          # 🔧 FIX: 리테스트 모드 비활성화 (이전 합의)
 RETEST_PEAK_MIN_GAIN = 0.015         # 최소 1.5% 급등 시 워치리스트 등록
 RETEST_PULLBACK_MIN = 0.006          # 🔧 최소 0.6% 되돌림 필요 (너무 얕으면 진짜 눌림 아님)
 RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
@@ -581,6 +583,7 @@ ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
 _ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
+_ORPHAN_FIRST_SYNC = True  # 🔧 FIX: 봇 시작 후 첫 sync 표시 (재시작 시 전체 유령 즉시 처리)
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 _RECENT_BUY_LOCK = threading.Lock()  # 🔧 FIX: _RECENT_BUY_TS 스레드 안전 보호 (모니터/스캔 동시접근)
 
@@ -1185,7 +1188,7 @@ def sync_orphan_positions():
     - 감지된 포지션을 OPEN_POSITIONS에 추가하고 모니터링 시작
     - 세션 내 1회만 처리 (반복 알림 방지)
     """
-    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS
+    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS, _ORPHAN_FIRST_SYNC
 
     now = time.time()
     if now - _LAST_ORPHAN_SYNC < ORPHAN_SYNC_INTERVAL:
@@ -1238,42 +1241,40 @@ def sync_orphan_positions():
                     continue
 
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
-            # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
-            if market not in _PREV_SYNC_MARKETS:
+            # 단, 봇 시작 직후 첫 sync에서는 대기 없이 바로 처리
+            # (재시작이므로 기존 포지션이 전부 유령 — 오탐 가능성 없음)
+            if not _ORPHAN_FIRST_SYNC and market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
             # 🔧 FIX: 최근 10분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
-            # - 업비트 주문 내역 조회로 실제 매수 여부 확인
+            # - 단, 봇 재시작 첫 sync에서는 건너뜀 (기존 포지션 = 당연히 매수 이력 있음)
             skip_recent_buy = False
-            try:
-                recent_orders = upbit_private_get("/v1/orders", {
-                    "market": market,
-                    "state": "done",
-                    "limit": 5
-                })
-                if recent_orders:
-                    for order in recent_orders:
-                        if order.get("side") == "bid":  # 매수 주문
-                            # created_at 예: "2024-01-01T12:00:00+09:00"
-                            created_str = order.get("created_at", "")
-                            if created_str:
-                                try:
-                                    # FIX [H1]: 상단 임포트 사용 (중복 import 제거)
-                                    # ISO 형식 파싱
-                                    order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                                    now_utc = datetime.now(timezone.utc)
-                                    age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 600:  # 10분 이내 매수
-                                        print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
-                                        skip_recent_buy = True
-                                        break  # for loop 탈출
-                                except Exception as parse_err:
-                                    print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
-            except Exception as orders_err:
-                print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
-                # 조회 실패 시 기존 로직대로 진행
+            if not _ORPHAN_FIRST_SYNC:
+                try:
+                    recent_orders = upbit_private_get("/v1/orders", {
+                        "market": market,
+                        "state": "done",
+                        "limit": 5
+                    })
+                    if recent_orders:
+                        for order in recent_orders:
+                            if order.get("side") == "bid":  # 매수 주문
+                                created_str = order.get("created_at", "")
+                                if created_str:
+                                    try:
+                                        order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                                        now_utc = datetime.now(timezone.utc)
+                                        age_sec = (now_utc - order_time).total_seconds()
+                                        if age_sec < 600:  # 10분 이내 매수
+                                            print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
+                                            skip_recent_buy = True
+                                            break
+                                    except Exception as parse_err:
+                                        print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
+                except Exception as orders_err:
+                    print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
 
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
@@ -1526,6 +1527,11 @@ def sync_orphan_positions():
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
+
+        # 🔧 FIX: 첫 sync 완료 → 이후부터는 2사이클 확인 복원
+        if _ORPHAN_FIRST_SYNC:
+            _ORPHAN_FIRST_SYNC = False
+            print(f"[ORPHAN] 첫 동기화 완료 (발견: {len(current_markets)}개 마켓, 이후 2사이클 확인 복원)")
 
     except Exception as e:
         print(f"[ORPHAN_SYNC_ERR] {e}")
@@ -3773,9 +3779,9 @@ GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
 # ========================================
-GATE_BODY_MIN = 0.003         # 📊 바디 하한 0.3% (body<0.5% wr29.5% → 최소 0.3% 필수)
+GATE_BODY_MIN = 0.005         # 📊 949건궤적: body<0.7% MFE=0 지배적 → 0.3→0.5% 상향
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
-GATE_GREEN_STREAK_MAX = 3     # 📊 연속양봉 상한 3개 (4+ wr33.3% avg-0.34% → 과열)
+GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
@@ -3833,7 +3839,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (HARD_STOP_DD 3.8% 연동)
+POSTCHECK_MAX_DD = 0.030  # 🔧 FIX: 3.8→3.0% (HARD_STOP_DD 3.2% 이하로 통일)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
@@ -7926,10 +7932,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
                 _entry_mode_override = "full"
 
-            # ⑥ vol5-20x → half (📊 180신호분석: 5-10x wr32.7% 트랩존, 10-20x avg-0.18%)
-            elif 5 <= _chart_volratio < 20:
-                print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(5-20) → 트랩존 half")
-                _entry_mode_override = "half"
+            # ⑥ 🔧 1010건분석: vr 5-20x는 CP77% SL21%로 최적 구간 → 트랩존 해제
+            # (기존: half 강제 — 180신호분석 기반이었으나 1010건에서 반증)
+            # elif 5 <= _chart_volratio < 20:
+            #     _entry_mode_override = "half"
 
             # ⑦ RSI<50 → half (wr35%, avg+0.012%, 약세장)
             elif _chart_rsi < 50:
@@ -7951,15 +7957,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
-    _hour_kst = now_kst().hour
-
-    # === 🔧 v7: 오후(12-18시) half 페널티 — 172샘플 시간대 분석 ===
-    # 📊 오후: n=43 avg+0.167% wr28% (최악) vs 오전: n=27 avg+0.677% wr59% (최고)
-    # 오후 진입은 승률이 28%로 극히 낮으므로 사이즈 축소 (차단은 아님)
-    if not _ign_candidate and 12 <= _hour_kst < 18:
-        if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
-            print(f"[V7_AFTERNOON] {m} 오후{_hour_kst}시 wr28% → half 페널티")
-            _entry_mode_override = "half"
+    # === 🔧 949건궤적: 시간대 half 완전 제거 ===
+    # 📊 half = 승률 불변 + 수익 절반 → 기대값 악화만 초래
+    # 📊 약세 시간대는 다른 gate(body, vr, imbalance)가 이미 커버
+    # (기존 10-18시 → 13-17시 → 제거)
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
@@ -8025,6 +8026,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
+    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
+    if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
+
     # ============================================================
     # 신호 태깅
     # ============================================================
@@ -8062,10 +8069,33 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     elif _entry_mode_override == "full" and _entry_mode == "half":
         _entry_mode = "confirm"
 
-    # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
-    if green_streak > GATE_GREEN_STREAK_MAX and _entry_mode == "confirm":
+    # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
+    # 조회만: count는 gate 통과 후 return pre 직전에서만 갱신
+    _now_ts = time.time()
+    with _SPIKE_TRACKER_LOCK:
+        _wave_info = _SPIKE_TRACKER.get(m)
+        if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+            _spike_wave = _wave_info["count"] + 1  # 현재 몇파인지만 확인 (갱신 X)
+        else:
+            _spike_wave = 1
+    _is_first_wave = (_spike_wave == 1)
+
+    # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험)
+    if not _is_first_wave and _entry_mode == "confirm":
         _entry_mode = "half"
-        print(f"[GREEN_STREAK] {m} 연속양봉 {green_streak}개>{GATE_GREEN_STREAK_MAX} → half 강제 (과열)")
+        print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
+
+    # 📊 body 2%+ → half 강제 (1010건: body1-2% SL52%, body2%+ SL68%)
+    # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소 (점화 면제: 점화는 모멘텀 우선)
+    if candle_body_pct >= 0.02 and _entry_mode == "confirm" and not _ign_candidate:
+        _entry_mode = "half"
+        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥2% → half 강제 (추격방지)")
+
+    # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
+    # 🔧 1파 면제: 1파에서 gs=4+도 안전 (데이터 cpWin83%, slHit67%)
+    if green_streak > GATE_GREEN_STREAK_MAX and _entry_mode == "confirm" and not _is_first_wave:
+        _entry_mode = "half"
+        print(f"[GREEN_STREAK] {m} 연속양봉 {green_streak}개>{GATE_GREEN_STREAK_MAX} → half 강제 (과열, 2파+)")
 
     # === 결과 패키징 ===
     pre = {
@@ -8099,7 +8129,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "vwap_gap": round(vwap_gap, 2),
         "entry_mode": _entry_mode,
         "is_precision_pocket": _is_precision,
+        "spike_wave": _spike_wave,
     }
+
+    # 🔧 FIX: gate 통과 후에만 카운트 갱신 (스캔만으로 2파 판정 방지)
+    with _SPIKE_TRACKER_LOCK:
+        _wave_info = _SPIKE_TRACKER.get(m)
+        if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+            _wave_info["count"] = _spike_wave
+        else:
+            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
 
     return pre
 
@@ -8509,7 +8548,14 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
             pass
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
-    pct = min(max(base_pct, max(DYN_SL_MIN, _atr5_adjusted_min)), DYN_SL_MAX)
+
+    # 🔧 3929건시뮬: 시간대별 SL → 전시간 2.0% 통일
+    # 야간 1.2%: MAE -1.47~1.75% → 정상 노이즈에 피격 (승률 ~40%)
+    # 야간 2.0%: 승률 63% 유지 (시뮬 검증)
+    # 9시 2.5%: 불필요한 확대 → 2.0%로 통일
+    _time_sl_min = DYN_SL_MIN  # 전시간 2.0% 통일
+
+    pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
     _sl_signal_mult = 1.0
     _sl_profit_mult = 1.0
@@ -8539,7 +8585,8 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
     pct *= _sl_mult
 
     max_sl = DYN_SL_MAX * _sl_mult
-    pct = min(max(pct, DYN_SL_MIN), max_sl)
+    # 🔧 BUG FIX: DYN_SL_MIN 대신 _time_sl_min 사용 (야간 1.5% 리셋 방지)
+    pct = min(max(pct, _time_sl_min), max_sl)
 
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
     return entry_price * (1 - pct), pct, atr_info
@@ -9298,8 +9345,13 @@ def monitor_position(m,
             # 🔧 before1 복원: 독립 trail_armed 블록 (단순 체크포인트 기반 무장)
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                trail_stop = curp * (1.0 - trail_dist_min)  # 🔧 FIX: 이중 호출 제거, 이미 계산된 값 사용
-                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
+                # 🔧 FIX: trail_stop 최소보장 = entry × (1 + CP×0.5)
+                # 기존: curp × 0.9985 → CP 직후 반락 시 +0.15% 청산 → 수수료 후 손실
+                # 수정: 최소 CP의 50%는 확보 (실질 수익 보장)
+                _trail_raw = curp * (1.0 - trail_dist_min)
+                _trail_min_floor = entry_price * (1.0 + dyn_checkpoint * 0.5)
+                trail_stop = max(_trail_raw, _trail_min_floor)
+                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장 (floor +{dyn_checkpoint*50:.2f}%)")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
             # 3단계: CP(~0.3%)→본절, +3.5%→+1.8%, +5.0%→+3.0%
@@ -9310,10 +9362,9 @@ def monitor_position(m,
                     _ratchet_lock = entry_price * (1.0 + 0.030)
                 elif gain_from_entry >= 0.035:    # +3.5% → 최소 +1.8% 확보 (51%)
                     _ratchet_lock = entry_price * (1.0 + 0.018)
-                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.3%) → 본절 보호
-                    # 🔧 BUGFIX: 기존 +0.6%(FEE+0.5%)가 CP 0.3%보다 높아 즉시 청산 발동
-                    # 수정: 본절(수수료 커버) = +0.1% → CP(0.3%)와 0.2% 여유 확보
-                    _ratchet_lock = entry_price * (1.0 + FEE_RATE)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.25%) → 실질수익 보호
+                    # 🔧 FIX: CP×0.5 = 0.125% 확보 (수수료+슬립 커버)
+                    _ratchet_lock = entry_price * (1.0 + dyn_checkpoint * 0.5)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -10028,6 +10079,22 @@ last_reason = {}
 # last_trade_was_loss → 상단(line 458)에서 초기화됨
 ALERT_TTL = 1800
 
+# === 🔧 1파/2파 추적 (데이터 기반: 1파 SL38% vs 2파+ SL85%) ===
+# {market: {"ts": first_spike_time, "count": spike_count}}
+# 30분 내 같은 코인 재급등 → 2파로 판정
+_SPIKE_TRACKER = {}
+_SPIKE_TRACKER_LOCK = threading.Lock()  # 🔧 FIX: 멀티스레드 경쟁 방지
+_SPIKE_WAVE_WINDOW = 1800  # 30분 내 재급등 = 2파
+
+def _cleanup_spike_tracker():
+    """🔧 FIX: 만료된 _SPIKE_TRACKER 항목 제거 (메모리 누수 방지)"""
+    _now = time.time()
+    with _SPIKE_TRACKER_LOCK:
+        expired = [m for m, v in _SPIKE_TRACKER.items()
+                   if (_now - v["ts"]) >= _SPIKE_WAVE_WINDOW]
+        for m in expired:
+            del _SPIKE_TRACKER[m]
+
 # =========================
 # 시간대별 쿨다운 설정
 # =========================
@@ -10327,6 +10394,9 @@ def main():
 
             # 🔧 유령 포지션 동기화 (업비트 잔고 vs OPEN_POSITIONS)
             sync_orphan_positions()
+
+            # 🔧 FIX: 스파이크 트래커 만료 항목 정리 (메모리 누수 방지)
+            _cleanup_spike_tracker()
 
             # 🎯 리테스트 워치리스트 체크 (장초 2차 기회 진입)
             if RETEST_MODE_ENABLED:
@@ -10924,6 +10994,13 @@ def main():
                 if pre.get("_surge_probe"):
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
+
+                # 🔧 3929건시뮬: 야간 half 0-7시만 (0-9시는 9시간 → 과도)
+                # 7-8시: 3847건 데이터에서 승률차이 미미 → half 불필요
+                _night_h = now_kst().hour
+                if 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
+                    pre["entry_mode"] = "half"
+                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
                 # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
