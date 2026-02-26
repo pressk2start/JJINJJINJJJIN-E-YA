@@ -61,8 +61,8 @@ DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 �
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 백테스트최적화: 1.0→0.3% (168샘플: 승률 45.8→63.7%, 평균수익 +54%)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.0005  # 🔧 FIX: 0.1→0.05% (cost_floor=수수료0.1%+슬립0.13%+α0.05%=0.28% < CP 0.30%)
+PROFIT_CHECKPOINT_BASE = 0.0025  # 🔧 데이터최적화: 0.3→0.25% (CP↓→빠른trail무장, 732건 wr83% PnL+126%)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 조정: cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% ≈ CP 0.25%
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -8029,6 +8029,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
+    # 9) 📊 vr<0.5 차단 (데이터: 215건 wr60% 건당-0.26%, 총손실-56.2%)
+    #    직전 5봉 대비 거래량이 절반 미만 → 가짜 신호
+    if not _ign_candidate and vol_surge < 0.5:
+        cut("LOW_VOL_RATIO", f"{m} vr{vol_surge:.2f}<0.5 거래량부족 | {_metrics}")
+        return None
+
     # ============================================================
     # 신호 태깅
     # ============================================================
@@ -8067,14 +8073,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _entry_mode = "confirm"
 
     # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
+    # 조회만: count는 gate 통과 후 return pre 직전에서만 갱신
     _now_ts = time.time()
     with _SPIKE_TRACKER_LOCK:
         _wave_info = _SPIKE_TRACKER.get(m)
         if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
-            _wave_info["count"] += 1
-            _spike_wave = _wave_info["count"]
+            _spike_wave = _wave_info["count"] + 1  # 현재 몇파인지만 확인 (갱신 X)
         else:
-            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
             _spike_wave = 1
     _is_first_wave = (_spike_wave == 1)
 
@@ -8129,6 +8134,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "is_precision_pocket": _is_precision,
         "spike_wave": _spike_wave,
     }
+
+    # 🔧 FIX: gate 통과 후에만 카운트 갱신 (스캔만으로 2파 판정 방지)
+    with _SPIKE_TRACKER_LOCK:
+        _wave_info = _SPIKE_TRACKER.get(m)
+        if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+            _wave_info["count"] = _spike_wave
+        else:
+            _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
 
     return pre
 
@@ -8540,11 +8553,11 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
 
     # 🔧 1010건분석: 시간대별 동적 SL 하한
-    # 야간(0-7시): MFE 0.84% → SL 2%는 R:R 역전 → 1.5%로 축소
+    # 야간(0-7시): MFE 0.84% → SL 1.0% 최적이나 노이즈 마진 고려 1.2%
     # 9시: MFE 2.99% → 눌림 허용 위해 SL 2.5%로 확대
     _hour_sl = now_kst().hour
     if 0 <= _hour_sl < 7:
-        _time_sl_min = 0.015  # 야간 1.5%
+        _time_sl_min = 0.012  # 야간 1.2% (데이터: SL1.0%최적, 실전마진+0.2%)
     elif 9 <= _hour_sl < 10:
         _time_sl_min = 0.025  # 9시대 2.5%
     else:
@@ -10986,9 +10999,13 @@ def main():
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
-                # 🔧 야간 완화: 0~7시 유동성 부족 → half 강제 (차단 아님, 리스크 축소)
+                # 🔧 야간/새벽 완화 (데이터: 7시 wr50%, 8시 wr51%, 건당-0.64%)
                 _night_h = now_kst().hour
-                if 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
+                if 7 <= _night_h < 9:
+                    # 7-8시: 장 열리기 직전 유동성 최악 → 차단
+                    print(f"[PRE_MARKET] {m} {_night_h}시 진입 차단 (7-8시 wr49-51%, 총손실-50.9%)")
+                    continue
+                elif 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
