@@ -255,7 +255,7 @@ _IGNITION_LOCK = threading.Lock()
 # 🎯 리테스트 진입 모드 (Retest Entry Mode)
 # =========================
 # 장초 급등 → 첫 양봉 패스 → 되돌림 후 지지 확인 시 진입
-RETEST_MODE_ENABLED = True           # 리테스트 모드 활성화
+RETEST_MODE_ENABLED = False          # 🔧 FIX: 리테스트 모드 비활성화 (이전 합의)
 RETEST_PEAK_MIN_GAIN = 0.015         # 최소 1.5% 급등 시 워치리스트 등록
 RETEST_PULLBACK_MIN = 0.006          # 🔧 최소 0.6% 되돌림 필요 (너무 얕으면 진짜 눌림 아님)
 RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
@@ -7953,12 +7953,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     _hour_kst = now_kst().hour
 
-    # === 🔧 v7: 오후(12-18시) half 페널티 — 172샘플 시간대 분석 ===
-    # 📊 오후: n=43 avg+0.167% wr28% (최악) vs 오전: n=27 avg+0.677% wr59% (최고)
-    # 오후 진입은 승률이 28%로 극히 낮으므로 사이즈 축소 (차단은 아님)
-    if not _ign_candidate and 12 <= _hour_kst < 18:
+    # === 🔧 v7+: 10시 이후 half 페널티 — 시간대 분석 확대 ===
+    # 📊 기존: 12-18시만 half (wr28%)
+    # 📊 추가: 10-12시도 cpWin 67%, slHit 83% → 위험 구간
+    # 오전 9시대만 안전 (1파 100% CP 도달)
+    if not _ign_candidate and 10 <= _hour_kst < 18:
         if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
-            print(f"[V7_AFTERNOON] {m} 오후{_hour_kst}시 wr28% → half 페널티")
+            _pm_label = "오전" if _hour_kst < 12 else "오후"
+            print(f"[V7_TIMEPENALTY] {m} {_pm_label}{_hour_kst}시 → half 페널티")
             _entry_mode_override = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
@@ -8062,10 +8064,32 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     elif _entry_mode_override == "full" and _entry_mode == "half":
         _entry_mode = "confirm"
 
-    # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
-    if green_streak > GATE_GREEN_STREAK_MAX and _entry_mode == "confirm":
+    # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
+    _now_ts = time.time()
+    _wave_info = _SPIKE_TRACKER.get(m)
+    if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
+        _wave_info["count"] += 1
+        _spike_wave = _wave_info["count"]
+    else:
+        _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
+        _spike_wave = 1
+    _is_first_wave = (_spike_wave == 1)
+
+    # 📊 2파+ → half 강제 (SL 피격률 85%, 추격매수 위험)
+    if not _is_first_wave and _entry_mode == "confirm":
         _entry_mode = "half"
-        print(f"[GREEN_STREAK] {m} 연속양봉 {green_streak}개>{GATE_GREEN_STREAK_MAX} → half 강제 (과열)")
+        print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
+
+    # 📊 body 5%+ → half 강제 (cpWin 100%이지만 slHit 100%, MAE -8.29%)
+    if candle_body_pct >= 0.05 and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥5% → half 강제 (과팽창)")
+
+    # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
+    # 🔧 1파 면제: 1파에서 gs=4+도 안전 (데이터 cpWin83%, slHit67%)
+    if green_streak > GATE_GREEN_STREAK_MAX and _entry_mode == "confirm" and not _is_first_wave:
+        _entry_mode = "half"
+        print(f"[GREEN_STREAK] {m} 연속양봉 {green_streak}개>{GATE_GREEN_STREAK_MAX} → half 강제 (과열, 2파+)")
 
     # === 결과 패키징 ===
     pre = {
@@ -8099,6 +8123,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "vwap_gap": round(vwap_gap, 2),
         "entry_mode": _entry_mode,
         "is_precision_pocket": _is_precision,
+        "spike_wave": _spike_wave,
     }
 
     return pre
@@ -10027,6 +10052,12 @@ last_price_at_alert = {}
 last_reason = {}
 # last_trade_was_loss → 상단(line 458)에서 초기화됨
 ALERT_TTL = 1800
+
+# === 🔧 1파/2파 추적 (데이터 기반: 1파 SL38% vs 2파+ SL85%) ===
+# {market: {"ts": first_spike_time, "count": spike_count}}
+# 30분 내 같은 코인 재급등 → 2파로 판정
+_SPIKE_TRACKER = {}
+_SPIKE_WAVE_WINDOW = 1800  # 30분 내 재급등 = 2파
 
 # =========================
 # 시간대별 쿨다운 설정
