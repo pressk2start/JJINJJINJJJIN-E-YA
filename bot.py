@@ -136,10 +136,12 @@ TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
 TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (168샘플: 0.15%가 승률·수익 최적)
 
 def get_trail_distance_min():
-    """🔧 백테스트최적화: 트레일 거리 0.15%
-    기존 SL×0.40=0.80% → 너무 넓어서 수익 흘림
-    168샘플 결과: 0.15%가 0.20%/0.40% 대비 승률·누적 모두 우위
+    """🔧 시간대별 트레일 거리
+    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
     """
+    _h = now_kst().hour
+    if 0 <= _h < 7:
+        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
     return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
@@ -3775,7 +3777,7 @@ GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 # ========================================
 GATE_BODY_MIN = 0.003         # 📊 바디 하한 0.3% (body<0.5% wr29.5% → 최소 0.3% 필수)
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
-GATE_GREEN_STREAK_MAX = 3     # 📊 연속양봉 상한 3개 (4+ wr33.3% avg-0.34% → 과열)
+GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
@@ -3833,7 +3835,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.038  # 🔧 손절완화: 3.0→3.8% (HARD_STOP_DD 3.8% 연동)
+POSTCHECK_MAX_DD = 0.030  # 🔧 FIX: 3.8→3.0% (HARD_STOP_DD 3.2% 이하로 통일)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
@@ -7926,10 +7928,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MORNING_VOL] {m} {_hour_now}시+vol{_chart_volratio:.1f}x → 오전고거래 full")
                 _entry_mode_override = "full"
 
-            # ⑥ vol5-20x → half (📊 180신호분석: 5-10x wr32.7% 트랩존, 10-20x avg-0.18%)
-            elif 5 <= _chart_volratio < 20:
-                print(f"[V7_VOL_TRAP] {m} vol{_chart_volratio:.1f}x(5-20) → 트랩존 half")
-                _entry_mode_override = "half"
+            # ⑥ 🔧 1010건분석: vr 5-20x는 CP77% SL21%로 최적 구간 → 트랩존 해제
+            # (기존: half 강제 — 180신호분석 기반이었으나 1010건에서 반증)
+            # elif 5 <= _chart_volratio < 20:
+            #     _entry_mode_override = "half"
 
             # ⑦ RSI<50 → half (wr35%, avg+0.012%, 약세장)
             elif _chart_rsi < 50:
@@ -8080,10 +8082,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _entry_mode = "half"
         print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
 
-    # 📊 body 5%+ → half 강제 (cpWin 100%이지만 slHit 100%, MAE -8.29%)
-    if candle_body_pct >= 0.05 and _entry_mode == "confirm":
+    # 📊 body 2%+ → half 강제 (1010건: body1-2% SL52%, body2%+ SL68%)
+    # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소
+    if candle_body_pct >= 0.02 and _entry_mode == "confirm":
         _entry_mode = "half"
-        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥5% → half 강제 (과팽창)")
+        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥2% → half 강제 (추격방지)")
 
     # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
     # 🔧 1파 면제: 1파에서 gs=4+도 안전 (데이터 cpWin83%, slHit67%)
@@ -8534,7 +8537,19 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
             pass
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
-    pct = min(max(base_pct, max(DYN_SL_MIN, _atr5_adjusted_min)), DYN_SL_MAX)
+
+    # 🔧 1010건분석: 시간대별 동적 SL 하한
+    # 야간(0-7시): MFE 0.84% → SL 2%는 R:R 역전 → 1.5%로 축소
+    # 9시: MFE 2.99% → 눌림 허용 위해 SL 2.5%로 확대
+    _hour_sl = now_kst().hour
+    if 0 <= _hour_sl < 7:
+        _time_sl_min = 0.015  # 야간 1.5%
+    elif 9 <= _hour_sl < 10:
+        _time_sl_min = 0.025  # 9시대 2.5%
+    else:
+        _time_sl_min = DYN_SL_MIN  # 기본 2.0%
+
+    pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
     _sl_signal_mult = 1.0
     _sl_profit_mult = 1.0
