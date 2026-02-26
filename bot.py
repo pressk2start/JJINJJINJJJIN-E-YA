@@ -80,9 +80,10 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
     return default
 
 def get_dynamic_checkpoint():
-    """🔧 백테스트최적화: 168샘플 기반 체크포인트 0.3%
-    기존 ~1.0% → 트레일 발동 자체가 안 됨 (승률 45.8%)
-    변경 0.3% → 승률 63.7%, 평균수익 +0.311%, 누적 52.3%
+    """🔧 체크포인트 = max(비용바닥, PROFIT_CHECKPOINT_BASE)
+    비용바닥: 수수료 + 왕복슬립 + 최소알파 (≈0.26%)
+    BASE: 0.25% (데이터 최적)
+    → 실질 비용을 커버하면서 빠른 trail 무장
     """
     fee = FEE_RATE
     avg_entry_slip = _get_trimmed_mean(_ENTRY_SLIP_HISTORY, 0.0005)
@@ -90,10 +91,9 @@ def get_dynamic_checkpoint():
     est_roundtrip_slip = max(0.0005, avg_entry_slip) + max(0.0005, avg_exit_slip)
     # 비용 기반 바닥 = 수수료 + 슬립 + 최소알파
     cost_floor = fee + est_roundtrip_slip + PROFIT_CHECKPOINT_MIN_ALPHA
-    # 🔧 백테스트최적화: SL × 0.15 (SL 2.0% × 0.15 = 0.30%)
-    sl_linked = DYN_SL_MIN * 0.15  # 0.020 * 0.15 = 0.003 (0.3%)
-    # 둘 중 큰 값 사용, 최대 1.0% 캡
-    return max(cost_floor, min(0.010, sl_linked))
+    # 🔧 FIX: sl_linked 제거 → PROFIT_CHECKPOINT_BASE 직접 사용
+    # 기존: sl_linked = DYN_SL_MIN * 0.15 = 0.003 고정 → BASE 변경이 무효화됨
+    return max(cost_floor, PROFIT_CHECKPOINT_BASE)
 
 def get_expected_exit_slip_pct():
     """TP 판단용 예상 청산 슬립 (exit만 사용, %)"""
@@ -583,6 +583,7 @@ ORPHAN_SYNC_INTERVAL = 30  # 30초마다 체크
 _ORPHAN_HANDLED = set()    # 이미 처리한 유령 포지션 (세션 내 중복 알림 방지)
 _ORPHAN_LOCK = threading.Lock()  # 🔧 FIX: _ORPHAN_HANDLED 스레드 안전 보호
 _PREV_SYNC_MARKETS = set() # 이전 동기화에서 발견된 마켓 (신규 매수 오탐 방지)
+_ORPHAN_FIRST_SYNC = True  # 🔧 FIX: 봇 시작 후 첫 sync 표시 (재시작 시 전체 유령 즉시 처리)
 _RECENT_BUY_TS = {}        # 🔧 최근 매수 시간 추적 (유령 오탐 방지)
 _RECENT_BUY_LOCK = threading.Lock()  # 🔧 FIX: _RECENT_BUY_TS 스레드 안전 보호 (모니터/스캔 동시접근)
 
@@ -1187,7 +1188,7 @@ def sync_orphan_positions():
     - 감지된 포지션을 OPEN_POSITIONS에 추가하고 모니터링 시작
     - 세션 내 1회만 처리 (반복 알림 방지)
     """
-    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS
+    global _LAST_ORPHAN_SYNC, _PREV_SYNC_MARKETS, _ORPHAN_FIRST_SYNC
 
     now = time.time()
     if now - _LAST_ORPHAN_SYNC < ORPHAN_SYNC_INTERVAL:
@@ -1240,42 +1241,40 @@ def sync_orphan_positions():
                     continue
 
             # 🔧 FIX: 이전 동기화에 없던 마켓은 스킵 (신규 매수 오탐 방지)
-            # 처음 발견된 잔고는 정상 매수일 가능성 → 다음 사이클까지 대기
-            if market not in _PREV_SYNC_MARKETS:
+            # 단, 봇 시작 직후 첫 sync에서는 대기 없이 바로 처리
+            # (재시작이므로 기존 포지션이 전부 유령 — 오탐 가능성 없음)
+            if not _ORPHAN_FIRST_SYNC and market not in _PREV_SYNC_MARKETS:
                 print(f"[ORPHAN] {market} 신규 발견 → 다음 사이클까지 대기 (오탐 방지)")
                 continue
 
             # 🔧 FIX: 최근 10분 내 매수 주문이 있으면 스킵 (다중 프로세스 오탐 방지)
             # - 한 프로세스에서 매수, 다른 프로세스에서 sync 시 오탐 발생 가능
-            # - 업비트 주문 내역 조회로 실제 매수 여부 확인
+            # - 단, 봇 재시작 첫 sync에서는 건너뜀 (기존 포지션 = 당연히 매수 이력 있음)
             skip_recent_buy = False
-            try:
-                recent_orders = upbit_private_get("/v1/orders", {
-                    "market": market,
-                    "state": "done",
-                    "limit": 5
-                })
-                if recent_orders:
-                    for order in recent_orders:
-                        if order.get("side") == "bid":  # 매수 주문
-                            # created_at 예: "2024-01-01T12:00:00+09:00"
-                            created_str = order.get("created_at", "")
-                            if created_str:
-                                try:
-                                    # FIX [H1]: 상단 임포트 사용 (중복 import 제거)
-                                    # ISO 형식 파싱
-                                    order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                                    now_utc = datetime.now(timezone.utc)
-                                    age_sec = (now_utc - order_time).total_seconds()
-                                    if age_sec < 600:  # 10분 이내 매수
-                                        print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
-                                        skip_recent_buy = True
-                                        break  # for loop 탈출
-                                except Exception as parse_err:
-                                    print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
-            except Exception as orders_err:
-                print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
-                # 조회 실패 시 기존 로직대로 진행
+            if not _ORPHAN_FIRST_SYNC:
+                try:
+                    recent_orders = upbit_private_get("/v1/orders", {
+                        "market": market,
+                        "state": "done",
+                        "limit": 5
+                    })
+                    if recent_orders:
+                        for order in recent_orders:
+                            if order.get("side") == "bid":  # 매수 주문
+                                created_str = order.get("created_at", "")
+                                if created_str:
+                                    try:
+                                        order_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                                        now_utc = datetime.now(timezone.utc)
+                                        age_sec = (now_utc - order_time).total_seconds()
+                                        if age_sec < 600:  # 10분 이내 매수
+                                            print(f"[ORPHAN] {market} 최근 매수 주문 발견 ({age_sec:.0f}초 전) → 스킵")
+                                            skip_recent_buy = True
+                                            break
+                                    except Exception as parse_err:
+                                        print(f"[ORPHAN] {market} 주문시간 파싱 에러: {parse_err}")
+                except Exception as orders_err:
+                    print(f"[ORPHAN] {market} 주문내역 조회 에러: {orders_err}")
 
             if skip_recent_buy:
                 continue  # 🔧 다음 마켓으로 (유령 감지 스킵)
@@ -1528,6 +1527,11 @@ def sync_orphan_positions():
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
         _PREV_SYNC_MARKETS = current_markets.copy()
+
+        # 🔧 FIX: 첫 sync 완료 → 이후부터는 2사이클 확인 복원
+        if _ORPHAN_FIRST_SYNC:
+            _ORPHAN_FIRST_SYNC = False
+            print(f"[ORPHAN] 첫 동기화 완료 (발견: {len(current_markets)}개 마켓, 이후 2사이클 확인 복원)")
 
     except Exception as e:
         print(f"[ORPHAN_SYNC_ERR] {e}")
@@ -7955,14 +7959,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     _hour_kst = now_kst().hour
 
-    # === 🔧 v7+: 10시 이후 half 페널티 — 시간대 분석 확대 ===
-    # 📊 기존: 12-18시만 half (wr28%)
-    # 📊 추가: 10-12시도 cpWin 67%, slHit 83% → 위험 구간
-    # 오전 9시대만 안전 (1파 100% CP 도달)
-    if not _ign_candidate and 10 <= _hour_kst < 18:
+    # === 🔧 3929건시뮬: 시간대 half 축소 (10-18시 8h → 13-17시 4h) ===
+    # 📊 기존 10-18시: 하루 18시간 half → confirm 진입 불가 (수익 절반)
+    # 📊 시뮬: 13시 wr56%, 15시 wr57%, 17시 wr58% = 실제 약세 구간만
+    # 📊 10-12시: wr62-69% 양호 → half 불필요
+    if not _ign_candidate and 13 <= _hour_kst < 17:
         if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
-            _pm_label = "오전" if _hour_kst < 12 else "오후"
-            print(f"[V7_TIMEPENALTY] {m} {_pm_label}{_hour_kst}시 → half 페널티")
+            print(f"[V7_TIMEPENALTY] {m} 오후{_hour_kst}시 → half 페널티")
             _entry_mode_override = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
@@ -8552,16 +8555,11 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
 
-    # 🔧 1010건분석: 시간대별 동적 SL 하한
-    # 야간(0-7시): MFE 0.84% → SL 1.0% 최적이나 노이즈 마진 고려 1.2%
-    # 9시: MFE 2.99% → 눌림 허용 위해 SL 2.5%로 확대
-    _hour_sl = now_kst().hour
-    if 0 <= _hour_sl < 7:
-        _time_sl_min = 0.012  # 야간 1.2% (데이터: SL1.0%최적, 실전마진+0.2%)
-    elif 9 <= _hour_sl < 10:
-        _time_sl_min = 0.025  # 9시대 2.5%
-    else:
-        _time_sl_min = DYN_SL_MIN  # 기본 2.0%
+    # 🔧 3929건시뮬: 시간대별 SL → 전시간 2.0% 통일
+    # 야간 1.2%: MAE -1.47~1.75% → 정상 노이즈에 피격 (승률 ~40%)
+    # 야간 2.0%: 승률 63% 유지 (시뮬 검증)
+    # 9시 2.5%: 불필요한 확대 → 2.0%로 통일
+    _time_sl_min = DYN_SL_MIN  # 전시간 2.0% 통일
 
     pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
@@ -9353,8 +9351,13 @@ def monitor_position(m,
             # 🔧 before1 복원: 독립 trail_armed 블록 (단순 체크포인트 기반 무장)
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                trail_stop = curp * (1.0 - trail_dist_min)  # 🔧 FIX: 이중 호출 제거, 이미 계산된 값 사용
-                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장")
+                # 🔧 FIX: trail_stop 최소보장 = entry × (1 + CP×0.5)
+                # 기존: curp × 0.9985 → CP 직후 반락 시 +0.15% 청산 → 수수료 후 손실
+                # 수정: 최소 CP의 50%는 확보 (실질 수익 보장)
+                _trail_raw = curp * (1.0 - trail_dist_min)
+                _trail_min_floor = entry_price * (1.0 + dyn_checkpoint * 0.5)
+                trail_stop = max(_trail_raw, _trail_min_floor)
+                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장 (floor +{dyn_checkpoint*50:.2f}%)")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
             # 3단계: CP(~0.3%)→본절, +3.5%→+1.8%, +5.0%→+3.0%
@@ -9365,10 +9368,9 @@ def monitor_position(m,
                     _ratchet_lock = entry_price * (1.0 + 0.030)
                 elif gain_from_entry >= 0.035:    # +3.5% → 최소 +1.8% 확보 (51%)
                     _ratchet_lock = entry_price * (1.0 + 0.018)
-                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.3%) → 본절 보호
-                    # 🔧 BUGFIX: 기존 +0.6%(FEE+0.5%)가 CP 0.3%보다 높아 즉시 청산 발동
-                    # 수정: 본절(수수료 커버) = +0.1% → CP(0.3%)와 0.2% 여유 확보
-                    _ratchet_lock = entry_price * (1.0 + FEE_RATE)
+                elif gain_from_entry >= dyn_checkpoint:  # 체크포인트(~0.25%) → 실질수익 보호
+                    # 🔧 FIX: CP×0.5 = 0.125% 확보 (수수료+슬립 커버)
+                    _ratchet_lock = entry_price * (1.0 + dyn_checkpoint * 0.5)
                 if _ratchet_lock > base_stop:
                     base_stop = _ratchet_lock
 
@@ -10999,13 +11001,12 @@ def main():
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
-                # 🔧 야간/새벽 완화 (1010건: 7-8시 wr49-51% / 3847건: 승률차이 미미 → half로 절충)
+                # 🔧 3929건시뮬: 야간 half 0-7시만 (0-9시는 9시간 → 과도)
+                # 7-8시: 3847건 데이터에서 승률차이 미미 → half 불필요
                 _night_h = now_kst().hour
-                if 0 <= _night_h < 9 and pre.get("entry_mode") == "confirm":
-                    # 0-8시 통합: 유동성 부족 → half 강제 (차단은 과공격적)
+                if 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
-                    _tag = "PRE_MARKET" if _night_h >= 7 else "NIGHT"
-                    print(f"[{_tag}] {m} {_night_h}시 → half 강제 (유동성 부족 완화)")
+                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
                 # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
