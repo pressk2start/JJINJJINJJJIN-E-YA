@@ -3750,7 +3750,7 @@ TICKS_BUY_RATIO = 0.56
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
 GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
-GATE_SPREAD_MAX = 0.35    # 🔧 대규모백테스트: 0.40→0.35% (spread>0.30% 11개 코인 대부분 손실, DOGE/WET/ORBS 등)
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
 GATE_BUY_RATIO_MIN = 0.62 # 🔧 R:R개선: 0.58→0.62 (스푸핑 필터 강화, 0.58은 노이즈 범위)
@@ -7960,20 +7960,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     _hour_kst = now_kst().hour
 
-    # === 🔧 대규모백테스트(236K캔들): 시간대 필터 강화 ===
-    # 📊 01시: wr49% PnL-85.76% PF0.41 (최악)
-    # 📊 13시: wr42% PnL-78.04% PF0.42 (최악급)
-    # 📊 14시: wr48% PnL-48.69% PF0.58
-    # 📊 18시: wr51% PnL-65.43% PF0.55
-    # 📊 03시: wr50% PnL-42.52% PF0.58
-    # → 01시, 03시: 비점화 진입 완전 차단 (점화만 허용)
-    # → 13시, 14시, 18시: half 페널티 (기존 13-17 범위에서 18시 추가)
-    if not _ign_candidate and _hour_kst in (1, 3):
-        cut("DEAD_HOUR", f"{m} 심야{_hour_kst}시 진입차단 (백테스트 PF<0.6, 점화 외 진입금지)")
-        return None
-    if not _ign_candidate and _hour_kst in (13, 14, 18):
+    # === 🔧 3929건시뮬: 시간대 half 축소 (10-18시 8h → 13-17시 4h) ===
+    # 📊 기존 10-18시: 하루 18시간 half → confirm 진입 불가 (수익 절반)
+    # 📊 시뮬: 13시 wr56%, 15시 wr57%, 17시 wr58% = 실제 약세 구간만
+    # 📊 10-12시: wr62-69% 양호 → half 불필요
+    if not _ign_candidate and 13 <= _hour_kst < 17:
         if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
-            print(f"[V7_TIMEPENALTY] {m} {_hour_kst}시 → half 페널티 (백테스트 PF<0.6)")
+            print(f"[V7_TIMEPENALTY] {m} 오후{_hour_kst}시 → half 페널티")
             _entry_mode_override = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
@@ -9297,7 +9290,7 @@ def monitor_position(m,
             # 📊 172샘플: 오전 wr59% → 30분 유지, 오후 wr28% → 20분으로 조기청산
             # 수익 중: 트레일 타이트닝 / 손실 중: 스크래치 아웃
             _entry_hour = pos.get("entry_hour", 12)
-            _timeout_sec = 1200 if 12 <= _entry_hour < 19 else 1800  # 🔧 대규모백테스트: 18시 PF0.55 → 오후구간 18시까지 확장 (12~19시 20분, 그외 30분)
+            _timeout_sec = 1200 if 12 <= _entry_hour < 18 else 1800  # 오후 20분, 그외 30분
             if alive_sec >= _timeout_sec:
                 if cur_gain > 0:
                     # 수익 중: 트레일링 스톱 타이트닝 (정상의 50%)
