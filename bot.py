@@ -616,7 +616,7 @@ def main():
                     "tick": tick_all, "orderbook": ob_all, "results": all_results},
                    f, ensure_ascii=False, indent=2)
 
-    # 텔레그램 요약
+    # ===== 텔레그램으로 분석결과 전체 전송 =====
     tw = sum(r["win"] for r in all_results)/len(all_results)*100
     tp = statistics.mean([r["pnl"] for r in all_results])
     mfes = sorted([r["mfe"] for r in all_results if r["mfe"]>0])
@@ -635,12 +635,40 @@ def main():
        f"📉 MFE중위=+{mfe50:.3f}% MAE중위={mae50:.3f}%\n"
        f"🔚 {es}\n"
        f"━━━━━━━━━━━━━━━\n"
-       f"🏆 핵심팩터:\n{top5}\n"
-       f"━━━━━━━━━━━━━━━\n"
-       f"📁 {RESULT_TXT}\n📁 {RESULT_JSON}")
+       f"🏆 핵심팩터:\n{top5}")
+
+    # 분석결과 전체를 텔레그램으로 전송 (4000자씩 쪼개서)
+    tg("📋 === 전체 분석결과 텔레그램 전송 시작 ===")
+    chunk = ""
+    for line in out_lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            tg(chunk)
+            chunk = line + "\n"
+            time.sleep(0.5)
+        else:
+            chunk += line + "\n"
+    if chunk.strip():
+        tg(chunk)
+
+    # 틱/호가 데이터도 전송
+    tick_msg = "📊 [TICK 상세]\n"
+    for m, td in sorted(tick_all.items(), key=lambda x:-x[1].get("buy_ratio",0)):
+        tick_msg += f"{m.split('-')[1]:8s}: 매수비={td['buy_ratio']:.0%} pstd={td['pstd']:.3f}% 연매수={td['consec_buy']}\n"
+    tg(tick_msg[:3900])
+
+    ob_msg = "📊 [ORDERBOOK 상세]\n"
+    for m, od in sorted(ob_all.items(), key=lambda x:-x[1].get("imbalance",0)):
+        ob_msg += f"{m.split('-')[1]:8s}: 임밸={od['imbalance']:+.3f} 스프={od['spread']:.4f}% bid={od['bid_krw']/1e6:.1f}M\n"
+    tg(ob_msg[:3900])
+
+    tg(f"📋 === 전체 분석결과 전송 완료 ===\n📁 서버: {RESULT_TXT}\n📁 서버: {RESULT_JSON}")
 
 if __name__ == "__main__":
     try: main()
     except Exception as e:
         err = traceback.format_exc(); print(err)
-        tg(f"❌ 크래시!\n{str(e)}\n{err[-500:]}"); sys.exit(1)
+        tg(f"❌ 크래시!\n{str(e)}\n{err[-500:]}")
+    # ===== 재시작 방지: 프로세스 매니저가 다시 띄우지 않도록 대기 =====
+    tg("💤 분석 완료. 대기모드 진입 (원래 bot.py로 복구해주세요)")
+    while True:
+        time.sleep(3600)
