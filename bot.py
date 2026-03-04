@@ -50,13 +50,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.020  # 🔧 R:R개선: 3.2→2.0% (SL 1.2% 대비 1.67배, 비상청산도 SL에 비례 축소)
+HARD_STOP_DD = 0.012  # 🔧 전체점검v5: DYN_SL_MAX와 동일 (SL 확대 경로 전면 차단)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 SSOT 정리: 모든 프로파일(gentle/balanced/strict) 3회로 통일
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.010   # 🔧 전체점검v4: 1.2→1.0% (노이즈 138건 안정적, MFE P50=0.413% 대비 R:R 개선)
-DYN_SL_MAX = 0.015   # 🔧 전체점검v4: 1.8→1.5% (MAE 분석: SL 1.5% 이상은 과도한 손실 허용)
+DYN_SL_MIN = 0.010   # 🔧 전체점검v5: 1.0% (SL=TP 균형, MFE P50=0.413%)
+DYN_SL_MAX = 0.012   # 🔧 전체점검v5: 1.5→1.2% (어떤 경로로든 최대 1.2% 보장)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -258,7 +258,7 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7          # 🔧 백테스트튜닝: 10→7초 (balanced 5초 대비 느슨)
-        HARD_STOP_DD = 0.022    # 🔧 R:R개선: SL 1.2% 기준 1.83배
+        HARD_STOP_DD = 0.012    # 🔧 전체점검v5: DYN_SL_MAX와 통일
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
@@ -269,7 +269,7 @@ def _apply_exit_profile():
 
     elif prof == "strict":
         WARMUP_SEC = 3          # 🔧 백테스트튜닝: 6→3초 (balanced 5초 대비 타이트)
-        HARD_STOP_DD = 0.018    # 🔧 R:R개선: SL 1.2% 기준 1.5배 (strict)
+        HARD_STOP_DD = 0.012    # 🔧 전체점검v5: DYN_SL_MAX와 통일
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
@@ -280,7 +280,7 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
-        HARD_STOP_DD = 0.020   # 🔧 R:R개선: SL 1.2%×1.67=2.0% (balanced 전역값과 통일)
+        HARD_STOP_DD = 0.012   # 🔧 전체점검v5: DYN_SL_MAX와 통일
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
@@ -3636,7 +3636,7 @@ GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 차트분석: 2.5→3.5 (진짜 돌파는 accel 3-4x, 2.5로 막으면 손실)
 GATE_STRONGBREAK_BODY_MAX = 0.8   # 🔧 캔들분석: 1.0→0.8% (body큰 봉 = 꼭대기, body>0.5% WR=17% → 강돌파도 축소)
 GATE_IGNITION_BODY_MAX = 1.0      # 🔧 캔들분석: 1.5→1.0% (점화도 body 1%+ 이면 꼭대기 진입 위험)
-GATE_EMA_CHASE_MAX = 0.5          # 🔧 캔들분석: 1.0→0.5% (ema_gap>0.5% WR=24.1% → 추격 구간, 전 신호 적용)
+GATE_EMA_CHASE_MAX = 0.3          # 🔧 전체점검v5: 0.5→0.3% (EMA 위 0.3%+ = 추격, WR=24.1%→ 더 엄격하게)
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
 ## (제거됨) GATE_CV_MAX: CV_HIGH 필터 삭제 → 스푸핑 필터 + overheat가 커버
 GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
@@ -3655,7 +3655,7 @@ GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
 # trend_1h >= 0.1%: WR=34~41%★ (우수)
 # ========================================
 GATE_TREND_1H_MIN = -0.3         # 🔧 캔들분석: 1H 추세 -0.3% 이하 → 진입 차단 (WR=21.2%✗)
-GATE_TREND_1H_HALF = 0.1         # 🔧 데이터분석v3: 0.0→0.1 (0~0.1 WR=25.0% 약함, 0.1+ WR=33.9%★)
+GATE_TREND_1H_HALF = 0.15        # 🔧 전체점검v5: 0.1→0.15 (1H 추세 0.15%+ 만 confirm, 약한 추세 차단)
 # 🔧 데이터분석v3: ema5_slope 필터 (2nd most important factor, -14.2% diff)
 # D01[-2.6,-0.12] WR=43.3%★, D08[0.038,0.067] WR=21.8%✗ → slope양수 = 이미 올라간 후
 GATE_EMA5_SLOPE_MAX = 0.067      # 🔧 ema5_slope >= 0.067 → half (WR=21.8%✗, 추격구간)
@@ -3672,7 +3672,7 @@ GATE_GREEN_STREAK_MAX = 3     # 🔧 캔들분석: 4→3 (gs5+ WR=19.6%✗, gs1+
 # 🔧 캔들분석 2차: BB/RSI/mom 필터 (23,250건 데이터)
 # ========================================
 GATE_BB_POS_HALF = 80         # 🔧 bb_pos>=80: WR=24.0% → half (밴드 상단)
-GATE_BB_POS_CUT = 100         # 🔧 bb_pos>=100: WR=22.3%✗ → 비점화 차단 (밴드 이탈)
+GATE_BB_POS_CUT = 85          # 🔧 전체점검v5: 100→85 (볼밴 상단 85%+ 차단, 과열 진입 방지)
 GATE_MOM5_HALF = 1.0          # 🔧 mom5>=1%: 이미 늦은 진입 → half (ema5_slope -14.5% 팩터)
 GATE_MOM5_CUT = 2.0           # 🔧 mom5>=2%: 극과열 → 비점화 차단
 GATE_TICK_BUY_RATIO_MIN = 0.40  # 🔧 tick_buy_ratio<0.4: 매도세 우위 → half (0.40-0.50 WR=30.6%★)
@@ -6600,11 +6600,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 🔧 캔들분석: EMA20 이격 추격 차단 (ema_gap>0.5% WR=24.1%, >1.0% WR=26.7%)
-    #    현재가가 EMA20 위로 GATE_EMA_CHASE_MAX% 이상 → half / 차단
+    # 9) 🔧 전체점검v5: EMA20 이격 추격 차단 (0.3%+ half, 0.6%+ 차단)
     if ema20 and ema20 > 0 and not _ign_candidate:
         _ema_gap_pct = (cur_price / ema20 - 1.0) * 100  # % 단위
-        if _ema_gap_pct >= GATE_EMA_CHASE_MAX * 2:  # 1.0% 이상 → 차단
+        if _ema_gap_pct >= GATE_EMA_CHASE_MAX * 2:  # 0.6% 이상 → 차단
             cut("EMA_CHASE", f"{m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX*2:.1f}% | {_metrics}")
             return None
         elif _ema_gap_pct >= GATE_EMA_CHASE_MAX:  # 0.5% 이상 → half
@@ -7256,33 +7255,15 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 
     pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
-    _sl_signal_mult = 1.0
-    _sl_profit_mult = 1.0
+    # 🔧 전체점검v5: SL 확대 경로 전면 차단
+    # 기존: _sl_signal_mult=1.3 (신호별), _sl_profit_mult=1.2~1.3 (수익중) → 실제 SL 1.95~2.25%
+    # 문제: TP 0.25~0.45% 대비 R:R=1:5~9 → 구조적 손실
+    # 변경: 모든 mult=1.0, SL은 설정값 그대로 적용
+    _sl_mult = 1.0
 
-    # 🚀 신호 유형별 완화
-    if signal_type in ("early", "ign", "mega"):
-        _sl_signal_mult = 1.3
-    elif signal_type in ("circle", "retest"):
-        _sl_signal_mult = 1.3
-
-    # 🔧 전체점검v4: 수익구간 SL 완화 축소 (과도한 완화 → 수익 반납 방지)
-    # 기존: scalp 1.5배, runner 1.8배 → 변곡점에서 손실 확대 원인
-    # 변경: scalp 1.2배, runner 1.3배 (최소 완화)
-    if current_price and entry_price > 0:
-        gain = current_price / entry_price - 1.0
-        if trade_type == "scalp":
-            if gain > 0.013:
-                _sl_profit_mult = 1.2
-        else:
-            if gain > 0.008:
-                _sl_profit_mult = 1.3
-
-    # 최대값 선택 (곱셈 폭발 제거)
-    _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
-    max_sl = DYN_SL_MAX * _sl_mult
-    # 🔧 BUG FIX: DYN_SL_MIN 대신 _time_sl_min 사용 (야간 1.5% 리셋 방지)
+    max_sl = DYN_SL_MAX
     pct = min(max(pct, _time_sl_min), max_sl)
 
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
@@ -7630,8 +7611,8 @@ def monitor_position(m,
     # 🔧 수급확인 손절: 감량 후 관망모드 상태
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
-    # 🔧 FIX: SL 확장에 캡 적용 (eff_sl_pct에 이미 1.8x 적용 가능 → 1.35x 스태킹 시 7.78% 가능)
-    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 최대 4.8%
+    # 🔧 전체점검v5: SL 확대 제거 — 수급확인 후에도 동일 SL 유지
+    _sl_extended_pct = eff_sl_pct  # 확대 없음
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -7843,8 +7824,10 @@ def monitor_position(m,
                 else:
                     stop_hits += 1
                 _sl_duration = time.time() - stop_first_seen_ts
-                # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
-                _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
+                # 🔧 전체점검v5: 하드스톱 = DYN_SL_MAX(1.2%) 초과 시 즉시 컷
+                # 기존: eff_sl_pct×1.5 → 최대 1.95% 손실
+                # 변경: DYN_SL_MAX 고정 → 어떤 경우든 1.2% 초과 불가
+                _is_hard_stop = cur_gain <= -DYN_SL_MAX
                 # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업/소프트가드 중 더 둔하게
                 _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
                 _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
@@ -7918,9 +7901,9 @@ def monitor_position(m,
                     tg_send_mid(f"🛑 {m} 수급확인손절 | -{abs(cur_gain)*100:.2f}% | 추세사망({_sl_alive_signals}/3)")
                     break
 
-                # 추세 살아있음 (신호 1개+) → SL 확대만, 20초 관찰 제거 (Trail에 위임)
+                # 추세 살아있음 (신호 1개+) → SL 유지, 관찰 스킵 (Trail에 위임)
                 if not _sl_reduced:
-                    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)
+                    _sl_extended_pct = eff_sl_pct  # 🔧 전체점검v5: SL 확대 제거
                     _sl_reduced = True
                     # 디바운스 리셋
                     stop_first_seen_ts = 0.0
@@ -7961,7 +7944,8 @@ def monitor_position(m,
             # 📊 172샘플: 오전 wr59% → 30분 유지, 오후 wr28% → 20분으로 조기청산
             # 수익 중: 트레일 타이트닝 / 손실 중: 스크래치 아웃
             _entry_hour = pos.get("entry_hour", 12)
-            _timeout_sec = 1200 if 12 <= _entry_hour < 18 else 1800  # 오후 20분, 그외 30분
+            # 🔧 전체점검v5: 20/30분→10/15분 (MFE P50=0.413%, 5분 안에 수익 못 나면 대부분 손절)
+            _timeout_sec = 600 if 12 <= _entry_hour < 18 else 900  # 오후 10분, 그외 15분
             if alive_sec >= _timeout_sec:
                 if cur_gain > 0:
                     # 수익 중: 트레일링 스톱 타이트닝 (정상의 50%)
