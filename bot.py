@@ -491,7 +491,7 @@ def simulate(c1, c5, c15, c60, daily, market, btc_c5, tick_data):
             if candles[i]["candle_date_time_kst"] <= t: return i
         return 0
 
-    for idx in range(30, len(c1) - 16):
+    for idx in range(30, len(c1) - 16, 3):  # 3봉 간격 (메모리 절약, 통계 충분)
         c = c1[idx]; prev = c1[idx-1]
         close = c["trade_price"]; op = c["opening_price"]
         if close <= 0 or op <= 0: continue
@@ -862,6 +862,7 @@ def main():
 
     all_results = []
     tick_all, ob_all = {}, {}
+    import gc
 
     for i, m in enumerate(markets):
         coin = m.split("-")[1]
@@ -888,6 +889,10 @@ def main():
             res = simulate(c1, c5, c15, c60, daily, m, btc_c5, ticks)
             all_results.extend(res)
             print(f"  시뮬: {len(res)}건 WR={sum(r['win'] for r in res)/max(len(res),1)*100:.1f}%")
+
+            # 메모리 해제 (캔들/틱 데이터 삭제)
+            del c1, c5, c15, c60, daily, ticks, ob, res
+            gc.collect()
         except Exception as e:
             print(f"  ❌ {coin}: {e}"); continue
 
@@ -900,18 +905,26 @@ def main():
     # 분석 (섹션별 안전 실행 + 즉시 전송)
     out_lines, imp = run_analysis(all_results, tick_all, ob_all)
 
-    # 파일 저장
+    # 파일 저장 (results는 너무 크면 요약만 저장)
     try:
         txt = "\n".join(out_lines)
         with open(RESULT_TXT, "w", encoding="utf-8") as f: f.write(txt)
+        # JSON은 결과 요약만 (전체 results는 메모리 문제로 제외)
+        summary = {
+            "timestamp": datetime.now(KST).isoformat(),
+            "total": len(all_results),
+            "elapsed_min": round(elapsed,1),
+            "importance": imp,
+            "tick": tick_all,
+            "orderbook": ob_all,
+            "wr": round(sum(r["win"] for r in all_results)/len(all_results)*100, 1),
+            "pnl": round(safe_mean([r["pnl"] for r in all_results]), 3),
+        }
         with open(RESULT_JSON, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": datetime.now(KST).isoformat(), "total": len(all_results),
-                        "elapsed_min": round(elapsed,1), "importance": imp,
-                        "tick": tick_all, "orderbook": ob_all, "results": all_results},
-                       f, ensure_ascii=False, indent=2)
+            json.dump(summary, f, ensure_ascii=False, indent=2)
         tg(f"💾 저장 완료: {RESULT_TXT}")
     except Exception as e:
-        tg(f"⚠️ 파일 저장 에러 (분석은 완료): {e}")
+        tg(f"⚠️ 파일 저장 에러 (분석은 이미 텔레그램 전송됨): {e}")
 
     tg(f"✅ [캔들분석v3] 전체 완료! | {len(all_results)}건 | {elapsed:.1f}분")
 
