@@ -3858,6 +3858,15 @@ GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬
 GATE_GREEN_STREAK_MAX = 3     # 🔧 캔들분석: 4→3 (gs5+ WR=19.6%✗, gs1+ WR=24.3% → 3개부터 과열 half)
 
 # ========================================
+# 🔧 캔들분석 2차: BB/RSI/mom 필터 (23,250건 데이터)
+# ========================================
+GATE_BB_POS_HALF = 80         # 🔧 bb_pos>=80: WR=24.0% → half (밴드 상단)
+GATE_BB_POS_CUT = 100         # 🔧 bb_pos>=100: WR=22.3%✗ → 비점화 차단 (밴드 이탈)
+GATE_MOM5_HALF = 2.0          # 🔧 mom5>=2%: 이미 늦은 진입 → half (ema5_slope -14.5% 팩터)
+GATE_MOM5_CUT = 3.0           # 🔧 mom5>=3%: 극과열 → 비점화 차단
+GATE_TICK_BUY_RATIO_MIN = 0.40  # 🔧 tick_buy_ratio<0.4: 매도세 우위 → half (0.40-0.50 WR=30.6%★)
+
+# ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
 # ========================================
 GATE_RELAX_VOL_MA_FLOOR = 0.2      # 🔧 before1 복원 (vol_vs_ma OR 경로 재활성화)
@@ -8050,13 +8059,27 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MID_LOWVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중상위저거래 half")
                 _entry_mode_override = "half"
 
+            # ⑨ 🔧 캔들분석 2차: RSI>70 + vol<5x → half (23,250건: rsi_1m 70-80 WR=24.0%)
+            # ②에서 RSI>70+vol5x+=full이므로, vol<5x만 여기서 억제
+            elif _chart_rsi >= 70 and _chart_volratio < 5:
+                print(f"[V7_RSI_OVERBUY] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x<5 → 과매수저거래 half")
+                _entry_mode_override = "half"
+
+            # ⑩ 🔧 캔들분석 2차: mom5>2% → half (ema5_slope -14.5% 팩터, 추격 과열)
+            if _chart_mom5 >= GATE_MOM5_CUT and not _ign_candidate:
+                print(f"[V7_MOM5_CUT] {m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_CUT}% → 극과열 half")
+                _entry_mode_override = "half"
+            elif _chart_mom5 >= GATE_MOM5_HALF and _entry_mode_override != "full":
+                print(f"[V7_MOM5_HALF] {m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_HALF}% → 과열 half")
+                _entry_mode_override = "half"
+
             # 나머지 (RSI50-60+vol2-5 등) → override 없음 (기본 사이즈 유지)
         except Exception:
             pass
 
-    # === 🔧 v7: RSI>75 half 제거 — 172샘플에서 RSI>70 wr53% avg+0.55%로 수익구간 확인 ===
-    # 이전 v4의 RSI>75 half 강제는 22샘플 기반이었으나 172샘플로 반증됨
-    # RSI>70+vol5+가 wr67%로 최고 콤보이므로 RSI 과매수 필터 삭제
+    # 🔧 캔들분석 2차: RSI 과매수 필터 (23,250건 기반으로 172샘플 v4 대체)
+    # 172샘플: RSI>70 wr53% → 23,250건: rsi_1m 70-80 WR=24.0% (대표본이 정확)
+    # RSI>70+vol5+는 여전히 full 유지 (콤보 효과), 나머지는 half
 
     # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
@@ -8170,7 +8193,37 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 _entry_mode = "half"
                 print(f"[EMA_CHASE_HALF] {m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX:.1f}% → half (추격방지)")
 
-    # 10) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    # 10) 🔧 캔들분석 2차: BB 포지션 필터
+    #    bb_pos>=100 WR=22.3%✗ (밴드 이탈), bb_pos>=80 WR=24.0% (밴드 상단)
+    #    bb_pos<20 WR=34.2%★ (밴드 하단 = 매수 유리)
+    _bb_pos = 50.0  # 기본값 (중립)
+    try:
+        if len(closes) >= 20:
+            _bb_sma20 = sum(closes[-20:]) / 20
+            _bb_std20 = (sum((x - _bb_sma20) ** 2 for x in closes[-20:]) / 20) ** 0.5
+            if _bb_std20 > 0:
+                _bb_upper = _bb_sma20 + 2 * _bb_std20
+                _bb_lower = _bb_sma20 - 2 * _bb_std20
+                _bb_range = _bb_upper - _bb_lower
+                if _bb_range > 0:
+                    _bb_pos = ((cur_price - _bb_lower) / _bb_range) * 100
+    except Exception:
+        pass
+
+    if _bb_pos >= GATE_BB_POS_CUT and not _ign_candidate:
+        cut("BB_OVERBOUGHT", f"{m} BB포지션 {_bb_pos:.0f}%≥{GATE_BB_POS_CUT}% (밴드이탈 WR=22.3%✗) | {_metrics}")
+        return None
+    if _bb_pos >= GATE_BB_POS_HALF and not _ign_candidate and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[BB_HIGH] {m} BB포지션 {_bb_pos:.0f}%≥{GATE_BB_POS_HALF}% → half (밴드상단 WR=24%)")
+
+    # 🔧 캔들분석 2차: tick_buy_ratio < 0.4 → 매도세 우위 half
+    # 23,250건: 0.40-0.50 구간 WR=30.6%★, <0.40이면 매도세 지배 → 사이즈 축소
+    if _gate_buy_ratio < GATE_TICK_BUY_RATIO_MIN and not _ign_candidate and _entry_mode == "confirm":
+        _entry_mode = "half"
+        print(f"[TICK_BUY_LOW] {m} 매수비 {_gate_buy_ratio:.0%}<{GATE_TICK_BUY_RATIO_MIN:.0%} → half (매도세우위)")
+
+    # 11) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
     #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
     if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
         _entry_mode = "half"
@@ -8285,6 +8338,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "green_streak": green_streak,
         "vwap_gap": round(vwap_gap, 2),
         "trend_1h": round(_trend_1h, 2),
+        "bb_pos": round(_bb_pos, 1),
         "entry_mode": _entry_mode,
         "is_precision_pocket": _is_precision,
         "spike_wave": _spike_wave,
