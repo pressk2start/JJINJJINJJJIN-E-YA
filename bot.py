@@ -82,7 +82,7 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
 def get_dynamic_checkpoint():
     """🔧 체크포인트 = max(비용바닥, PROFIT_CHECKPOINT_BASE)
     비용바닥: 수수료 + 왕복슬립 + 최소알파 (≈0.26%)
-    BASE: 0.25% (데이터 최적)
+    BASE: 0.30% (캔들분석 최적 — MFE P25=0.198%, cost_floor 0.26% 이상)
     → 실질 비용을 커버하면서 빠른 trail 무장
     """
     fee = FEE_RATE
@@ -4757,7 +4757,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.002 (0.1% ~ 0.2%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.0015 ~ 0.003 (0.15% ~ 0.30%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -4866,7 +4866,7 @@ def auto_learn_exit_params():
                 if capture_rate < 0.40:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                    new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4877,7 +4877,7 @@ def auto_learn_exit_params():
                 elif capture_rate > 0.70:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                    new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4892,7 +4892,7 @@ def auto_learn_exit_params():
                 # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
                 target_trail = max(0.001, avg_drop * 0.80)
                 new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
                 if abs(new_trail - old_trail) > 0.0005:
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
@@ -8082,20 +8082,27 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # === 매수비 계산 (스푸핑 방지: 비점화는 가중평균) ===
     _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
 
-    # === 🔧 캔들분석: 1시간 추세 필터 (trend_1h) ===
-    # 5분봉 12개(=1시간)의 종가 변화율로 추세 판단
-    # trend_1h < -0.3%: WR=20.7% → 차단, trend_1h < 0%: WR=24.6% → half
+    # === 🔧 캔들분석: 추세 필터 (trend_1h 프록시) ===
+    # c1은 1분봉 30개 → 30분 추세로 1시간 추세를 근사
+    # 1시간 추세 임계치를 30분 비율로 축소 적용 (×0.5)
+    # 원본: trend_1h < -0.3% WR=20.7%✗ → 30분 프록시: -0.15%
     _trend_1h = 0.0
     try:
-        if c1 and len(c1) >= 12:
+        if c1 and len(c1) >= 30:
             _t1h_now = c1[-1]["trade_price"]
-            _t1h_ago = c1[-12]["trade_price"]
+            _t1h_ago = c1[-30]["trade_price"]  # 30분 전 (1분봉 30개)
             _trend_1h = (_t1h_now / max(_t1h_ago, 1) - 1.0) * 100  # % 단위
+        elif c1 and len(c1) >= 20:
+            _t1h_now = c1[-1]["trade_price"]
+            _t1h_ago = c1[-20]["trade_price"]  # 20분 전 (최소)
+            _trend_1h = (_t1h_now / max(_t1h_ago, 1) - 1.0) * 100
     except Exception:
         pass
 
-    if _trend_1h < GATE_TREND_1H_MIN and not _ign_candidate:
-        cut("TREND_1H_WEAK", f"{m} 1H추세 {_trend_1h:.2f}%<{GATE_TREND_1H_MIN}% (WR=20.7%✗) → 차단")
+    # 30분 프록시 임계치 = 1시간 임계치 × 0.5
+    _trend_cut = GATE_TREND_1H_MIN * 0.5   # -0.3% × 0.5 = -0.15%
+    if _trend_1h < _trend_cut and not _ign_candidate:
+        cut("TREND_1H_WEAK", f"{m} 30분추세 {_trend_1h:.2f}%<{_trend_cut:.2f}% (1H프록시, WR=20.7%✗) → 차단")
         return None
 
     # ============================================================
@@ -8151,7 +8158,19 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    # 9) 🔧 캔들분석: EMA20 이격 추격 차단 (ema_gap>0.5% WR=24.1%, >1.0% WR=26.7%)
+    #    현재가가 EMA20 위로 GATE_EMA_CHASE_MAX% 이상 → half / 차단
+    if ema20 and ema20 > 0 and not _ign_candidate:
+        _ema_gap_pct = (cur_price / ema20 - 1.0) * 100  # % 단위
+        if _ema_gap_pct >= GATE_EMA_CHASE_MAX * 2:  # 1.0% 이상 → 차단
+            cut("EMA_CHASE", f"{m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX*2:.1f}% | {_metrics}")
+            return None
+        elif _ema_gap_pct >= GATE_EMA_CHASE_MAX:  # 0.5% 이상 → half
+            if _entry_mode == "confirm":
+                _entry_mode = "half"
+                print(f"[EMA_CHASE_HALF] {m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX:.1f}% → half (추격방지)")
+
+    # 10) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
     #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
     if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
         _entry_mode = "half"
@@ -8184,16 +8203,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _is_precision = (imbalance >= 0.6 and _gate_buy_ratio >= 0.635)
     _strong_synergy = (_gate_buy_ratio >= 0.62 and imbalance >= 0.35 and vol_surge >= 1.5)
     # 🔧 캔들분석: 최고 콤보 — trend_1h≥0.1 + vol_surge≥2 = WR 39.4%★
-    _trend_surge_combo = (_trend_1h >= 0.1 and vol_surge >= 2.0)
+    # 30분 프록시: 0.1% × 0.5 = 0.05% (1분봉 30개 기준)
+    _trend_surge_combo = (_trend_1h >= 0.05 and vol_surge >= 2.0)
     if _ign_candidate or _is_precision or _strong_synergy or _trend_surge_combo:
         _entry_mode = "confirm"
     else:
         _entry_mode = "half"
 
-    # 🔧 캔들분석: 1H 추세 0% 이하 → half 강제 (WR=24.6%, 하락추세 진입 리스크)
-    if _trend_1h < GATE_TREND_1H_HALF and _entry_mode == "confirm" and not _ign_candidate:
+    # 🔧 캔들분석: 30분 추세 0% 이하 → half 강제 (1H 추세 프록시, WR=24.6%)
+    _trend_half_thr = GATE_TREND_1H_HALF  # 0% (30분과 1시간 모두 동일 기준)
+    if _trend_1h < _trend_half_thr and _entry_mode == "confirm" and not _ign_candidate:
         _entry_mode = "half"
-        print(f"[TREND_1H_HALF] {m} 1H추세 {_trend_1h:.2f}%<{GATE_TREND_1H_HALF}% → half 강제")
+        print(f"[TREND_HALF] {m} 30분추세 {_trend_1h:.2f}%<{_trend_half_thr}% → half 강제")
 
     # v7 차트분석 오버라이드 적용
     if _entry_mode_override == "half" and _entry_mode == "confirm":
@@ -11149,6 +11170,8 @@ def main():
                 _night_h = now_kst().hour
                 if 4 <= _night_h <= 5:
                     cut("NIGHT_DEAD", f"{m} {_night_h}시 유동성사망 (WR=14~20%) → 진입 차단")
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
                     continue
                 if _night_h == 18 and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
