@@ -409,9 +409,13 @@ def simulate_trade(indicators, entry_idx, max_hold, checkpoint_pct, trail_pct, s
         exit_reason = "timeout"
         exit_idx = last_idx
 
-    # Calculate PnL with costs
-    gross_pnl_pct = (exit_price - entry_price) / entry_price
-    net_pnl_pct = gross_pnl_pct - TOTAL_COST_RT
+    # Calculate PnL — proper round-trip cost model
+    # gross = pure price movement (no costs)
+    gross_pnl_pct = (exit_price / entry_price) - 1.0
+    # net = slippage-adjusted execution + fees
+    entry_exec = entry_price * (1 + SLIPPAGE_PER_SIDE)
+    exit_exec = exit_price * (1 - SLIPPAGE_PER_SIDE)
+    net_pnl_pct = (exit_exec / entry_exec) - 1.0 - (2 * FEE_PER_SIDE)
     mfe_pct = (best_price - entry_price) / entry_price
     mae_pct = (worst_price - entry_price) / entry_price
 
@@ -478,17 +482,21 @@ def run_backtest(all_data, checkpoint_pct, trail_pct, sl_min_pct, sl_max_pct):
 
 def calc_stats(trades):
     """Calculate comprehensive statistics for a list of trades."""
+    empty = {
+        "count": 0, "win_rate": 0, "avg_pnl": 0, "total_pnl": 0,
+        "avg_gross_pnl": 0, "total_gross_pnl": 0,
+        "max_dd": 0, "profit_factor": 0, "avg_mfe": 0, "avg_mae": 0,
+        "avg_hold": 0, "sl_exits": 0, "trail_exits": 0, "timeout_exits": 0,
+        "exit_breakdown": {},
+    }
     if not trades:
-        return {
-            "count": 0, "win_rate": 0, "avg_pnl": 0, "total_pnl": 0,
-            "max_dd": 0, "profit_factor": 0, "avg_mfe": 0, "avg_mae": 0,
-            "avg_hold": 0, "sl_exits": 0, "trail_exits": 0, "timeout_exits": 0,
-        }
+        return empty
 
     wins = [t for t in trades if t["net_pnl_pct"] > 0]
     losses = [t for t in trades if t["net_pnl_pct"] <= 0]
 
     total_pnl = sum(t["net_pnl_pct"] for t in trades)
+    total_gross = sum(t["gross_pnl_pct"] for t in trades)
     gross_profit = sum(t["net_pnl_pct"] for t in wins) if wins else 0
     gross_loss = abs(sum(t["net_pnl_pct"] for t in losses)) if losses else 0.001
 
@@ -502,15 +510,35 @@ def calc_stats(trades):
         dd = peak - equity
         max_dd = max(max_dd, dd)
 
-    sl_exits = sum(1 for t in trades if t["exit_reason"] == "stop_loss")
-    trail_exits = sum(1 for t in trades if t["exit_reason"] == "trail_stop")
-    timeout_exits = sum(1 for t in trades if t["exit_reason"] == "timeout")
+    # Per exit-reason breakdown
+    exit_reasons = defaultdict(list)
+    for t in trades:
+        exit_reasons[t["exit_reason"]].append(t)
+
+    exit_breakdown = {}
+    for reason, rtrades in exit_reasons.items():
+        r_net = sum(t["net_pnl_pct"] for t in rtrades)
+        r_gross = sum(t["gross_pnl_pct"] for t in rtrades)
+        exit_breakdown[reason] = {
+            "count": len(rtrades),
+            "pct": len(rtrades) / len(trades) * 100,
+            "avg_net": r_net / len(rtrades) * 100,
+            "total_net": r_net * 100,
+            "avg_gross": r_gross / len(rtrades) * 100,
+            "total_gross": r_gross * 100,
+        }
+
+    sl_exits = len(exit_reasons.get("stop_loss", []))
+    trail_exits = len(exit_reasons.get("trail_stop", []))
+    timeout_exits = len(exit_reasons.get("timeout", []))
 
     return {
         "count": len(trades),
-        "win_rate": len(wins) / len(trades) * 100 if trades else 0,
-        "avg_pnl": total_pnl / len(trades) * 100 if trades else 0,
+        "win_rate": len(wins) / len(trades) * 100,
+        "avg_pnl": total_pnl / len(trades) * 100,
         "total_pnl": total_pnl * 100,
+        "avg_gross_pnl": total_gross / len(trades) * 100,
+        "total_gross_pnl": total_gross * 100,
         "max_dd": max_dd * 100,
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 999,
         "avg_mfe": sum(t["mfe_pct"] for t in trades) / len(trades) * 100,
@@ -519,6 +547,7 @@ def calc_stats(trades):
         "sl_exits": sl_exits,
         "trail_exits": trail_exits,
         "timeout_exits": timeout_exits,
+        "exit_breakdown": exit_breakdown,
     }
 
 
@@ -701,19 +730,49 @@ def main():
 
   ────────────────────────────────────
   Win Rate:        {final_stats['win_rate']:.1f}%
-  Avg Profit/Trade:{final_stats['avg_pnl']:.3f}%
-  Total PnL:       {final_stats['total_pnl']:.2f}%
-  Max Drawdown:    {final_stats['max_dd']:.2f}%
-  Profit Factor:   {final_stats['profit_factor']:.2f}
   Total Trades:    {final_stats['count']}
   ────────────────────────────────────
+  Gross PnL (비용 없음):
+    Avg/Trade:     {final_stats['avg_gross_pnl']:+.4f}%
+    Total:         {final_stats['total_gross_pnl']:+.2f}%
+  Net PnL (슬리피지+수수료 포함):
+    Avg/Trade:     {final_stats['avg_pnl']:+.4f}%
+    Total:         {final_stats['total_pnl']:+.2f}%
+  Cost Impact:     {final_stats['avg_gross_pnl'] - final_stats['avg_pnl']:+.4f}%/trade
+  ────────────────────────────────────
+  Max Drawdown:    {final_stats['max_dd']:.2f}%
+  Profit Factor:   {final_stats['profit_factor']:.2f}
   Avg MFE:         {final_stats['avg_mfe']:.3f}%
   Avg MAE:         {final_stats['avg_mae']:.3f}%
   Avg Hold:        {final_stats['avg_hold']:.1f} candles
-  SL Exits:        {final_stats['sl_exits']} ({final_stats['sl_exits']/max(final_stats['count'],1)*100:.1f}%)
-  Trail Exits:     {final_stats['trail_exits']} ({final_stats['trail_exits']/max(final_stats['count'],1)*100:.1f}%)
-  Timeout Exits:   {final_stats['timeout_exits']} ({final_stats['timeout_exits']/max(final_stats['count'],1)*100:.1f}%)
 """)
+
+    # ── Exit Reason Breakdown ──
+    print_header("EXIT REASON BREAKDOWN")
+
+    eb = final_stats.get("exit_breakdown", {})
+    print(f"{'Reason':>14s} | {'Count':>7} {'Pct%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
+    print("-" * 68)
+    for reason in ["stop_loss", "trail_stop", "timeout"]:
+        if reason in eb:
+            r = eb[reason]
+            print(
+                f"{reason:>14s} | "
+                f"{r['count']:>7d} {r['pct']:>7.1f} {r['avg_gross']:>+10.4f} {r['avg_net']:>+9.4f} {r['total_net']:>+9.2f}"
+            )
+
+    if eb:
+        best_exit = max(eb.items(), key=lambda x: x[1]["avg_net"])
+        worst_exit = min(eb.items(), key=lambda x: x[1]["avg_net"])
+        print(f"\n  Best exit:  {best_exit[0]} (avg net {best_exit[1]['avg_net']:+.4f}%)")
+        print(f"  Worst exit: {worst_exit[0]} (avg net {worst_exit[1]['avg_net']:+.4f}%)")
+
+    # Gross vs Net diagnosis
+    if final_stats["total_gross_pnl"] > 0 and final_stats["total_pnl"] < 0:
+        print(f"\n  ⚠️ DIAGNOSIS: Gross PnL 양수 but Net PnL 음수 → 비용 모델이 수익을 잡아먹는 구조!")
+        print(f"     → 진입 빈도를 줄이거나, 수익폭이 큰 신호만 필터링 필요")
+    elif final_stats["total_gross_pnl"] < 0:
+        print(f"\n  ❌ DIAGNOSIS: Gross PnL도 음수 → 전략 자체가 음의 기댓값. 로직 재설계 필요")
 
     # ── Per-Coin Breakdown ──
     print_header("PER-COIN BREAKDOWN")
@@ -815,6 +874,160 @@ def main():
         if wide:
             print(f"\n  ⚠️ Wide spreads (>0.30%): {', '.join(wide)}")
             print(f"     Consider excluding these from live trading to reduce slippage.")
+
+    # ── Holding Time Grid Experiment ──
+    print_header("HOLDING TIME GRID EXPERIMENT")
+    print("  Testing different max_hold values with optimal params...\n")
+
+    hold_values = [5, 10, 15, 20, 30, 45, 60]
+    print(f"{'MaxHold':>8s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'SL%':>5} {'Trail%':>7} {'TO%':>5}")
+    print("-" * 95)
+
+    hold_results = []
+    for mh in hold_values:
+        # Temporarily override max_hold for all timeframes
+        saved_max_holds = {}
+        for tf_key in TIMEFRAMES:
+            saved_max_holds[tf_key] = TIMEFRAMES[tf_key]["max_hold"]
+            TIMEFRAMES[tf_key]["max_hold"] = mh
+
+        h_trades, _, _, _ = run_backtest(all_data, best_cp, best_trail, best_sl_min, best_sl_max)
+        h_stats = calc_stats(h_trades)
+        hold_results.append((mh, h_stats))
+
+        n = max(h_stats["count"], 1)
+        print(
+            f"{mh:>8d} | "
+            f"{h_stats['count']:>7d} {h_stats['win_rate']:>7.1f} {h_stats['avg_gross_pnl']:>+10.4f} "
+            f"{h_stats['avg_pnl']:>+9.4f} {h_stats['total_pnl']:>+9.2f} "
+            f"{h_stats['profit_factor']:>6.2f} "
+            f"{h_stats['sl_exits']/n*100:>5.1f} {h_stats['trail_exits']/n*100:>7.1f} "
+            f"{h_stats['timeout_exits']/n*100:>5.1f}"
+        )
+
+        # Restore
+        for tf_key in TIMEFRAMES:
+            TIMEFRAMES[tf_key]["max_hold"] = saved_max_holds[tf_key]
+
+    best_hold = max(hold_results, key=lambda x: x[1]["total_pnl"])
+    print(f"\n  Best max_hold: {best_hold[0]} candles (Net PnL: {best_hold[1]['total_pnl']:+.2f}%)")
+
+    # ── Optimal Filter Combo Search ──
+    print_header("OPTIMAL FILTER COMBO SEARCH")
+    print("  Searching indicator filter combos on final trades...\n")
+
+    # Build per-trade feature vectors from indicator data
+    trade_features = []
+    for t in final_trades:
+        idx = t.get("entry_idx", 0)
+        market = t.get("market", "")
+        tf_key = None
+        for tk, ti in TIMEFRAMES.items():
+            if ti["label"] == t.get("timeframe", ""):
+                tf_key = tk
+                break
+        if tf_key is None or (market, tf_key) not in all_data:
+            continue
+
+        inds = all_data[(market, tf_key)]
+        if idx >= len(inds):
+            continue
+        ind = inds[idx]
+
+        # Extract features available at entry time
+        close = ind["close"]
+        ema20 = ind["ema20"]
+        rsi = ind["rsi"]
+        vol = ind["volume"]
+        vol_ma = ind["vol_ma20"]
+
+        feat = {
+            "ema_gap_pct": ((close - ema20) / ema20 * 100) if ema20 and ema20 > 0 else 0,
+            "rsi": rsi if rsi else 50,
+            "vol_ratio": (vol / vol_ma) if vol_ma and vol_ma > 0 else 1,
+            "body_pct": ((close - ind["open"]) / ind["open"] * 100) if ind["open"] > 0 else 0,
+            "candle_range_pct": ((ind["high"] - ind["low"]) / ind["low"] * 100) if ind["low"] > 0 else 0,
+        }
+        trade_features.append((feat, t))
+
+    if trade_features:
+        # Define filter conditions to test
+        filter_defs = {
+            "ema_gap<=0.5": lambda f: f["ema_gap_pct"] <= 0.5,
+            "ema_gap<=1.0": lambda f: f["ema_gap_pct"] <= 1.0,
+            "ema_gap<=0.3": lambda f: f["ema_gap_pct"] <= 0.3,
+            "rsi<=55": lambda f: f["rsi"] <= 55,
+            "rsi<=50": lambda f: f["rsi"] <= 50,
+            "rsi<=60": lambda f: f["rsi"] <= 60,
+            "rsi>=40": lambda f: f["rsi"] >= 40,
+            "vol_ratio>=2.0": lambda f: f["vol_ratio"] >= 2.0,
+            "vol_ratio>=2.5": lambda f: f["vol_ratio"] >= 2.5,
+            "vol_ratio>=3.0": lambda f: f["vol_ratio"] >= 3.0,
+            "body_pct<=0.3": lambda f: f["body_pct"] <= 0.3,
+            "body_pct<=0.5": lambda f: f["body_pct"] <= 0.5,
+            "range_pct<=1.0": lambda f: f["candle_range_pct"] <= 1.0,
+        }
+
+        # Test single filters
+        print(f"  [Single Filters]")
+        print(f"{'Filter':>22s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
+        print("-" * 75)
+
+        single_results = []
+        for fname, ffunc in filter_defs.items():
+            passed = [(f, t) for f, t in trade_features if ffunc(f)]
+            if len(passed) >= 10:
+                ptrades = [t for _, t in passed]
+                s = calc_stats(ptrades)
+                single_results.append((fname, s, len(passed)))
+                print(
+                    f"{fname:>22s} | "
+                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
+                    f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f}"
+                )
+
+        # Test 2-filter combos (top combinations)
+        filter_names = list(filter_defs.keys())
+        combo_results = []
+
+        for i in range(len(filter_names)):
+            for j in range(i + 1, len(filter_names)):
+                f1, f2 = filter_names[i], filter_names[j]
+                fn1, fn2 = filter_defs[f1], filter_defs[f2]
+                passed = [(f, t) for f, t in trade_features if fn1(f) and fn2(f)]
+                if len(passed) >= 10:
+                    ptrades = [t for _, t in passed]
+                    s = calc_stats(ptrades)
+                    combo_results.append((f"{f1} & {f2}", s, len(passed)))
+
+        # Sort by avg_gross_pnl descending
+        combo_results.sort(key=lambda x: x[1]["avg_gross_pnl"], reverse=True)
+
+        if combo_results:
+            print(f"\n  [Top 15 Two-Filter Combos by Gross PnL]")
+            print(f"{'Combo':>45s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9}")
+            print("-" * 90)
+
+            for combo_name, s, cnt in combo_results[:15]:
+                marker = " ★" if s["avg_gross_pnl"] > 0 else ""
+                print(
+                    f"{combo_name:>45s} | "
+                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
+                    f"{s['avg_pnl']:>+9.4f}{marker}"
+                )
+
+            # Profitable combos summary
+            profitable = [c for c in combo_results if c[1]["avg_gross_pnl"] > 0]
+            net_profitable = [c for c in combo_results if c[1]["avg_pnl"] > 0]
+            print(f"\n  Gross PnL > 0 combos: {len(profitable)} / {len(combo_results)}")
+            print(f"  Net PnL > 0 combos:   {len(net_profitable)} / {len(combo_results)}")
+
+            if net_profitable:
+                print(f"\n  ✅ NET PROFITABLE combos:")
+                for name, s, cnt in net_profitable[:5]:
+                    print(f"     {name}: WR={s['win_rate']:.1f}% gross={s['avg_gross_pnl']:+.4f}% net={s['avg_pnl']:+.4f}% (n={cnt})")
+    else:
+        print("  No trade features extracted - skipping combo search.")
 
     # ── Summary ──
     elapsed_total = time.time() - start_time
