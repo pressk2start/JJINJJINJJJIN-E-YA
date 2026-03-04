@@ -66,17 +66,27 @@ PARALLEL_WORKERS = 12
 # ========================================
 ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
 
-# ELITE_MODE 전용 파라미터
-ELITE_TREND_1H_MIN = 0.05      # 30분 프록시 기준 (1H 0.1% × 0.5)
-ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단)
-ELITE_GOOD_HOURS = {0, 6, 19, 20, 23}  # KST 좋은 시간대
+# ELITE_MODE 전용 파라미터 (Trend-Filtered Pullback 전략)
+ELITE_TREND_1H_MIN = 0.05      # 30분 프록시 기준 (1H 0.1% × 0.5) — Factor Importance 1위
+ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
+ELITE_GOOD_HOURS = {0, 6, 19, 20, 23}  # KST 좋은 시간대 — Hourly WR 35~43%
+ELITE_VWAP_GAP_MAX = 0.0       # VWAP 아래에서만 매수 (vwap_gap < 0) — Factor Importance 3위
+ELITE_RSI_1M_MAX = 35           # RSI 1m < 35 과매도 진입 — 외부 RSI(2) 전략 원리
+ELITE_EMA_GAP_MAX = 0.0        # EMA20 아래에서만 매수 (눌림목) — Factor Importance 2위
 ELITE_SL = 0.004                # 0.4% 손절 (R:R 1:1)
 ELITE_SL_MAX = 0.005            # 0.5% 최대 SL (ATR 확장 허용 최소화)
 ELITE_TP = 0.004                # 0.4% 익절 (R:R 1:1, MFE P50=0.41% 감안)
+# 🔧 2단계 분할익절: 50%는 0.3%에 1차 익절, 나머지 50%는 0.6% 트레일
+ELITE_TP_PARTIAL = 0.003        # 1차 익절 0.3% (50% 물량)
+ELITE_TP_TRAIL = 0.006          # 2차 트레일 목표 0.6% (MFE P75=0.621%)
+ELITE_PARTIAL_RATIO = 0.5       # 1차 익절 비율 (50%)
+# 🔧 타임아웃 10분: MFE 대부분 초반 5~10분 형성, 이후 MAE만 증가
+ELITE_HORIZON_SEC = 600         # 10분 (기존 4~8분 → 10분 고정)
 
 if ELITE_MODE:
-    print(f"[ELITE_MODE] ON — SL={ELITE_SL*100:.1f}% TP={ELITE_TP*100:.1f}% R:R=1:1 | "
-          f"조건: trend≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + hours={sorted(ELITE_GOOD_HOURS)}")
+    print(f"[ELITE_MODE] ON — Trend-Filtered Pullback | SL={ELITE_SL*100:.1f}% TP=분할({ELITE_TP_PARTIAL*100:.1f}%/{ELITE_TP_TRAIL*100:.1f}%) | "
+          f"조건: trend≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + VWAP<0 + RSI<{ELITE_RSI_1M_MAX} + EMA<0 + hours={sorted(ELITE_GOOD_HOURS)} | "
+          f"타임아웃={ELITE_HORIZON_SEC}초")
 else:
     print("[ELITE_MODE] OFF — 기존 로직 유지")
 
@@ -140,16 +150,16 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
 # 핵심: SL 1.0% 기준 R:R 연동 MFE 부분익절 목표 (MFE P50=0.413% 현실 반영)
-# 🔧 ELITE_MODE: R:R 1:1 → multiplier = 1.0 (SL 0.4% × 1.0 = TP 0.4%)
+# 🔧 ELITE_MODE: 2단계 분할익절 → multiplier = 1.5 (SL 0.4% × 1.5 = 0.6% 트레일 목표)
 if ELITE_MODE:
     MFE_RR_MULTIPLIERS = {
-        "🔥점화": 1.0,              # 🔧 ELITE: SL 0.4% × 1.0 = 0.4% (R:R 1:1)
-        "⭕동그라미": 1.0,           # 🔧 ELITE: R:R 1:1
-        "강돌파 (EMA↑+고점↑)": 1.0,  # 🔧 ELITE: R:R 1:1
-        "EMA↑": 1.0,                 # 🔧 ELITE: R:R 1:1
-        "고점↑": 1.0,                # 🔧 ELITE: R:R 1:1
-        "거래량↑": 1.0,             # 🔧 ELITE: R:R 1:1
-        "기본": 1.0,                # 🔧 ELITE: R:R 1:1
+        "🔥점화": 1.5,              # 🔧 ELITE: SL 0.4% × 1.5 = 0.6% (2차 트레일 목표)
+        "⭕동그라미": 1.5,           # 🔧 ELITE: 2단계 분할익절
+        "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 ELITE: 2단계 분할익절
+        "EMA↑": 1.5,                 # 🔧 ELITE: 2단계 분할익절
+        "고점↑": 1.5,                # 🔧 ELITE: 2단계 분할익절
+        "거래량↑": 1.5,             # 🔧 ELITE: 2단계 분할익절
+        "기본": 1.5,                # 🔧 ELITE: 2단계 분할익절
     }
 else:
     MFE_RR_MULTIPLIERS = {
@@ -3567,17 +3577,18 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # 🔧 구조개선: 리모니터 TP 대폭 하향 — 갭존 해소
             #   기존: 스캘프TP 0.6~0.9% → 리모니터TP 1.2~2.2% (도달 불가능한 갭)
             #   개선: 리모니터TP = 스캘프TP × 1.5 수준 (현실적 도달 가능)
-            # 🔧 ELITE_MODE: R:R 1:1 → 모든 태그 TP 0.40% 통일
+            # 🔧 ELITE_MODE: 2단계 분할익절 (50%@0.3% + 50%→0.6% 트레일)
+            # TP_PART = 1차 익절 (50% 물량, 0.3%), TP_FULL = 2차 트레일 목표 (0.6%)
             if ELITE_MODE:
                 TP_FULL = {
-                    "🔥점화": 0.40, "⭕동그라미": 0.40,
-                    "강돌파 (EMA↑+고점↑)": 0.40, "EMA↑": 0.40,
-                    "고점↑": 0.40, "거래량↑": 0.40, "기본": 0.40,
+                    "🔥점화": ELITE_TP_TRAIL * 100, "⭕동그라미": ELITE_TP_TRAIL * 100,
+                    "강돌파 (EMA↑+고점↑)": ELITE_TP_TRAIL * 100, "EMA↑": ELITE_TP_TRAIL * 100,
+                    "고점↑": ELITE_TP_TRAIL * 100, "거래량↑": ELITE_TP_TRAIL * 100, "기본": ELITE_TP_TRAIL * 100,
                 }
                 TP_PART = {
-                    "🔥점화": 0.30, "⭕동그라미": 0.30,
-                    "강돌파 (EMA↑+고점↑)": 0.30, "EMA↑": 0.30,
-                    "고점↑": 0.30, "거래량↑": 0.30, "기본": 0.30,
+                    "🔥점화": ELITE_TP_PARTIAL * 100, "⭕동그라미": ELITE_TP_PARTIAL * 100,
+                    "강돌파 (EMA↑+고점↑)": ELITE_TP_PARTIAL * 100, "EMA↑": ELITE_TP_PARTIAL * 100,
+                    "고점↑": ELITE_TP_PARTIAL * 100, "거래량↑": ELITE_TP_PARTIAL * 100, "기본": ELITE_TP_PARTIAL * 100,
                 }
             else:
                 TP_FULL = {
@@ -6763,16 +6774,30 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
 
     # ============================================================
-    # 🔧 ELITE_MODE 게이트: 소수정예 조건 미충족 시 진입 차단
-    # 세 조건 모두 AND 충족 필수: trend_1h ≥ 0.1% + bb_pos < 40 + 좋은시간대
+    # 🔧 ELITE_MODE 게이트: Trend-Filtered Pullback (6조건 AND)
+    # 1) trend_1h ≥ 0.1% (Factor Importance 1위)
+    # 2) bb_pos < 40 (볼린저 하단 눌림)
+    # 3) 좋은시간대 (0,6,19,20,23시)
+    # 4) vwap_gap < 0 (VWAP 아래 = 눌림목, Factor Importance 3위)
+    # 5) RSI 1m < 35 (과매도 진입, 외부 RSI(2) 전략)
+    # 6) ema_gap < 0 (EMA20 아래 = 눌림목, Factor Importance 2위)
     # 점화는 면제 (점화 자체가 강한 시그널이므로)
     # ============================================================
     if ELITE_MODE and not _ign_candidate:
+        # VWAP/EMA gap 조기 계산 (ELITE 게이트에서 필요)
+        _elite_vwap = calc_vwap_from_candles(c1, 20) if c1 else None
+        _elite_vwap_gap = ((cur_price / _elite_vwap - 1.0) * 100) if _elite_vwap and _elite_vwap > 0 else 0.0
+        _elite_ema_gap = ((cur_price / ema20 - 1.0) * 100) if ema20 and ema20 > 0 else 0.0
+
         _elite_trend_ok = (_trend_1h >= ELITE_TREND_1H_MIN)
         _elite_bb_ok = (_bb_pos < ELITE_BB_POS_MAX)
         _elite_hour_ok = (_hour_kst in ELITE_GOOD_HOURS)
+        _elite_vwap_ok = (_elite_vwap_gap < ELITE_VWAP_GAP_MAX)
+        _elite_rsi_ok = (_chart_rsi < ELITE_RSI_1M_MAX)
+        _elite_ema_ok = (_elite_ema_gap < ELITE_EMA_GAP_MAX)
 
-        if not (_elite_trend_ok and _elite_bb_ok and _elite_hour_ok):
+        if not (_elite_trend_ok and _elite_bb_ok and _elite_hour_ok
+                and _elite_vwap_ok and _elite_rsi_ok and _elite_ema_ok):
             _elite_fails = []
             if not _elite_trend_ok:
                 _elite_fails.append(f"1H추세{_trend_1h:.2f}%<{ELITE_TREND_1H_MIN}%")
@@ -6780,6 +6805,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 _elite_fails.append(f"BB{_bb_pos:.0f}≥{ELITE_BB_POS_MAX}")
             if not _elite_hour_ok:
                 _elite_fails.append(f"{_hour_kst}시∉좋은시간대")
+            if not _elite_vwap_ok:
+                _elite_fails.append(f"VWAP{_elite_vwap_gap:+.2f}%≥{ELITE_VWAP_GAP_MAX}%")
+            if not _elite_rsi_ok:
+                _elite_fails.append(f"RSI{_chart_rsi:.0f}≥{ELITE_RSI_1M_MAX}")
+            if not _elite_ema_ok:
+                _elite_fails.append(f"EMA{_elite_ema_gap:+.2f}%≥{ELITE_EMA_GAP_MAX}%")
             cut("ELITE_GATE", f"{m} ELITE 조건 미충족: {' + '.join(_elite_fails)} → 진입 차단")
             return None
 
@@ -7465,7 +7496,12 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
     - early_ok: 비교적 짧게 추세 확인
     - ignition_ok / mega_ok: 상대적으로 길게 (추세 이어질 가능성)
     - 시장 모드(TIGHT), 야간, BTC 모멘텀, 오더북 깊이 등에 따라 가/감
+    🔧 ELITE_MODE: 10분 고정 (MFE 대부분 5~10분에 형성, 이후 MAE만 증가)
     """
+    # 🔧 ELITE_MODE: 타임아웃 10분 고정 (데이터 기반 최적 홀딩 시간)
+    if ELITE_MODE:
+        return ELITE_HORIZON_SEC
+
     try:
         r = relax_knob()  # 0.0 ~ 1.5
     except Exception:
@@ -9100,8 +9136,9 @@ def main():
     _elite_detail = ""
     if ELITE_MODE:
         _elite_detail = (
-            f"\n🎯 ELITE MODE: SL={ELITE_SL*100:.1f}% TP={ELITE_TP*100:.1f}% R:R=1:1"
-            f"\n📋 조건: 1H추세≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + {sorted(ELITE_GOOD_HOURS)}시"
+            f"\n🎯 ELITE MODE: Trend-Filtered Pullback"
+            f"\n📋 SL={ELITE_SL*100:.1f}% | TP=분할({ELITE_TP_PARTIAL*100:.1f}%/{ELITE_TP_TRAIL*100:.1f}%) | 타임아웃={ELITE_HORIZON_SEC}초"
+            f"\n📋 조건: 1H추세≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + VWAP<0 + RSI<{ELITE_RSI_1M_MAX} + EMA<0 + {sorted(ELITE_GOOD_HOURS)}시"
         )
     tg_send(
         f"🚀 대장초입 헌터 v3.2.7+Score (동적매도) 시작\n"
