@@ -52,7 +52,7 @@ PARALLEL_WORKERS = 12
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
 HARD_STOP_DD = 0.020  # 🔧 R:R개선: 3.2→2.0% (SL 1.2% 대비 1.67배, 비상청산도 SL에 비례 축소)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 5  # 🔧 R:R개선: 3→5회 (트레일 0.40%에 맞춰 5회 확인, 헛트립 방지)
+EXIT_DEBOUNCE_N = 3  # 🔧 SSOT 정리: 모든 프로파일(gentle/balanced/strict) 3회로 통일
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
 DYN_SL_MIN = 0.012   # 🔧 R:R개선: 2.0→1.2% (CP 0.6% 기준 R:R=1:2, 손익분기 필요승률 40%로 개선)
@@ -183,7 +183,7 @@ def check_momentum_guard(ticks, entry_price, cur_price, alive_sec):
     recent_ticks = list(ticks)[-20:] if len(ticks) >= 20 else list(ticks)
     if not recent_ticks:
         return False
-    recent_buys = sum(1 for t in recent_ticks if t.get("type", "ask") == "bid")
+    recent_buys = sum(1 for t in recent_ticks if t.get("ask_bid") == "BID")
     recent_buy_ratio = recent_buys / len(recent_ticks)
     if cur_price > entry_price and recent_buy_ratio > 0.52:
         return True
@@ -261,7 +261,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.0050  # 🔧 R:R개선: 0.20→0.50% (gentle은 balanced 0.40% 대비 살짝 넓게)
+        TRAIL_DISTANCE_MIN_BASE = 0.0050  # 0.50% (gentle: balanced 0.25% 대비 넓게)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
@@ -272,7 +272,7 @@ def _apply_exit_profile():
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 🔧 R:R개선: 0.12→0.30% (strict는 balanced 0.40% 대비 타이트)
+        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 0.30% (strict: balanced 0.25% 대비 타이트)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
@@ -6570,7 +6570,6 @@ def circle_register(m, pre, c1):
             "peak_after_ign": ign_high,   # 점화 이후 최고점
             "pullback_low": ign_high,     # 눌림 저점
             "reclaim_price": 0,           # 리클레임 확인 가격
-            "was_below_reclaim": False,   # pullback 중 body_mid 아래 경험 여부
             # 원본 pre (진입 시 재사용) — 🔧 FIX(데이터분석): shallow copy로 키 오염 방지
             "pre": dict(pre),
             # 메타데이터 (디버그용)
@@ -6674,12 +6673,6 @@ def circle_check_entry(m):
     pullback_pct_hist = (peak - pullback_low) / peak if peak > 0 else 0
     pullback_pct_now = (ign_high - cur_price) / ign_high if ign_high > 0 else 0
 
-    # --- was_below_reclaim 추적 (pullback 상태에서 body_mid 아래 경험 기록) ---
-    with _CIRCLE_LOCK:
-        watch = _CIRCLE_WATCHLIST.get(m)
-        if watch and watch["state"] == "pullback" and cur_price < ign_body_mid:
-            watch["was_below_reclaim"] = True
-
     # --- 과도한 눌림 체크 (역대 저점 기준 — 한번이라도 깊이 빠졌으면 구조 훼손) ---
     if pullback_pct_hist > CIRCLE_PULLBACK_MAX_PCT:
         with _CIRCLE_LOCK:
@@ -6767,7 +6760,7 @@ def circle_check_entry(m):
                 watch["reclaim_price"] = cur_price
                 print(
                     f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
-                    f"| 아래 체류 경험 ✓ | {candle_count}봉째 | state→reclaim"
+                    f"| {candle_count}봉째 | state→reclaim"
                 )
 
         elif state == "reclaim":
@@ -7314,10 +7307,9 @@ def box_check_entry(m):
     except Exception:
         pass
 
-    # 🔧 FIX(데이터분석): 기본값 선언 — ticks 부족+candle_bounce 통과 시 NameError 방지
+    # 🔧 FIX: 기본값 선언 — ticks 미정의 NameError 방지 (try 블록 전에 반드시 선언)
+    ticks = []
     t10 = {"buy_ratio": 0.0, "krw_per_sec": 0, "n": 0, "rate": 0.0, "krw": 0}
-    if not ticks:
-        ticks = []
     try:
         ticks = get_recent_ticks(m, 100)
         if not ticks or len(ticks) < 8:
