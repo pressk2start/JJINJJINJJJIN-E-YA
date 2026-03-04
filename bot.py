@@ -3862,8 +3862,8 @@ GATE_GREEN_STREAK_MAX = 3     # 🔧 캔들분석: 4→3 (gs5+ WR=19.6%✗, gs1+
 # ========================================
 GATE_BB_POS_HALF = 80         # 🔧 bb_pos>=80: WR=24.0% → half (밴드 상단)
 GATE_BB_POS_CUT = 100         # 🔧 bb_pos>=100: WR=22.3%✗ → 비점화 차단 (밴드 이탈)
-GATE_MOM5_HALF = 2.0          # 🔧 mom5>=2%: 이미 늦은 진입 → half (ema5_slope -14.5% 팩터)
-GATE_MOM5_CUT = 3.0           # 🔧 mom5>=3%: 극과열 → 비점화 차단
+GATE_MOM5_HALF = 1.0          # 🔧 mom5>=1%: 이미 늦은 진입 → half (ema5_slope -14.5% 팩터)
+GATE_MOM5_CUT = 2.0           # 🔧 mom5>=2%: 극과열 → 비점화 차단
 GATE_TICK_BUY_RATIO_MIN = 0.40  # 🔧 tick_buy_ratio<0.4: 매도세 우위 → half (0.40-0.50 WR=30.6%★)
 
 # ========================================
@@ -4766,7 +4766,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.0015 ~ 0.003 (0.15% ~ 0.30%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.002 ~ 0.003 (0.20% ~ 0.30%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -4875,7 +4875,7 @@ def auto_learn_exit_params():
                 if capture_rate < 0.40:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
+                    new_trail = max(0.002, min(0.003, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4886,7 +4886,7 @@ def auto_learn_exit_params():
                 elif capture_rate > 0.70:
                     target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
                     new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                    new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
+                    new_trail = max(0.002, min(0.003, round(new_trail, 4)))
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
                         TRAIL_DISTANCE_MIN_BASE = new_trail
@@ -4901,7 +4901,7 @@ def auto_learn_exit_params():
                 # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
                 target_trail = max(0.001, avg_drop * 0.80)
                 new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
-                new_trail = max(0.0015, min(0.003, round(new_trail, 4)))
+                new_trail = max(0.002, min(0.003, round(new_trail, 4)))
                 if abs(new_trail - old_trail) > 0.0005:
                     changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
                     if AUTO_LEARN_APPLY:
@@ -7974,6 +7974,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 점화는 면제 (폭발적 모멘텀은 15분 과열 무시 가능)
     # 🔧 (제거됨) 15M_PEAK: VWAP_CHASE(추격차단) + V7차트분석(RSI/vol)이 동일 역할 → 추가 API 낭비 제거
     _entry_mode_override = None
+    _chart_rsi = 50.0      # 기본값 (V7 미실행 시 중립)
+    _chart_mom5 = 0.0      # 기본값 (V7 미실행 시 0)
+    _rsi_5m_proxy = 50.0   # 기본값 (5분봉 RSI 프록시)
 
     # === 🔧 v7 차트분석: 172샘플 다중타임프레임 검증 기반 사이즈 결정 ===
     # 📊 172신호 15분수익률 분석 결과:
@@ -8014,6 +8017,24 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                         else: _rsi_losses_temp -= _rd_temp
                     _rsi_rs_temp = _rsi_gains_temp / max(_rsi_losses_temp, 0.001)
                     _chart_rsi = 100 - 100 / (1 + _rsi_rs_temp)
+            except Exception:
+                pass
+
+            # 🔧 크로스TF: 5분봉 RSI 프록시 (c1 30개 → 5분단위 6개 샘플링)
+            # RSI발산(1m↑5m↓) WR=19.6%✗✗ 감지용
+            try:
+                if len(closes) >= 30:
+                    _c5_closes = [closes[i] for i in range(4, 30, 5)]  # 6 points
+                    if len(_c5_closes) >= 6:
+                        _rg5, _rl5 = 0.0, 0.0
+                        for _i5 in range(1, len(_c5_closes)):
+                            _d5 = _c5_closes[_i5] - _c5_closes[_i5 - 1]
+                            if _d5 > 0:
+                                _rg5 += _d5
+                            else:
+                                _rl5 -= _d5
+                        _rs5 = _rg5 / max(_rl5, 0.001)
+                        _rsi_5m_proxy = 100 - 100 / (1 + _rs5)
             except Exception:
                 pass
 
@@ -8065,12 +8086,16 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_RSI_OVERBUY] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x<5 → 과매수저거래 half")
                 _entry_mode_override = "half"
 
-            # ⑩ 🔧 캔들분석 2차: mom5>2% → half (ema5_slope -14.5% 팩터, 추격 과열)
-            if _chart_mom5 >= GATE_MOM5_CUT and not _ign_candidate:
-                print(f"[V7_MOM5_CUT] {m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_CUT}% → 극과열 half")
-                _entry_mode_override = "half"
-            elif _chart_mom5 >= GATE_MOM5_HALF and _entry_mode_override != "full":
+            # ⑩ 🔧 캔들분석 3차: mom5 과열 half (>=1%)
+            # mom5>=2% 차단은 하드컷 섹션에서 처리 (return None)
+            if _chart_mom5 >= GATE_MOM5_HALF and _entry_mode_override != "full":
                 print(f"[V7_MOM5_HALF] {m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_HALF}% → 과열 half")
+                _entry_mode_override = "half"
+
+            # ⑪ 🔧 크로스TF: RSI 다이버전스 차단 (1m↑5m↓ WR=19.6%✗✗)
+            # rsi_1m>55 AND rsi_5m_proxy<45 → 1분봉만 튀고 5분봉은 약한 가짜펌프
+            if _chart_rsi > 55 and _rsi_5m_proxy < 45 and _entry_mode_override != "full":
+                print(f"[V7_RSI_DIVERGE] {m} RSI1m={_chart_rsi:.0f}>55 + RSI5m={_rsi_5m_proxy:.0f}<45 → 다이버전스 차단")
                 _entry_mode_override = "half"
 
             # 나머지 (RSI50-60+vol2-5 등) → override 없음 (기본 사이즈 유지)
@@ -8126,6 +8151,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _trend_cut = GATE_TREND_1H_MIN * 0.5   # -0.3% × 0.5 = -0.15%
     if _trend_1h < _trend_cut and not _ign_candidate:
         cut("TREND_1H_WEAK", f"{m} 30분추세 {_trend_1h:.2f}%<{_trend_cut:.2f}% (1H프록시, WR=20.7%✗) → 차단")
+        return None
+
+    # 🔧 크로스TF: 1H하락 + 고RSI → 차단 (WR=16.0%✗✗ 최악 조합)
+    # 30분 프록시: trend_1h < -0.05% (1H -0.1% × 0.5)
+    # 하락추세에서 RSI 높은 진입 = 꼭대기 잡기
+    if _trend_1h < -0.05 and _chart_rsi > 60 and not _ign_candidate:
+        cut("TREND_DOWN_RSI_HIGH", f"{m} 1H하락{_trend_1h:.2f}%+RSI{_chart_rsi:.0f}>60 (WR=16.0%✗✗) → 차단")
         return None
 
     # ============================================================
@@ -8217,6 +8249,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _entry_mode = "half"
         print(f"[BB_HIGH] {m} BB포지션 {_bb_pos:.0f}%≥{GATE_BB_POS_HALF}% → half (밴드상단 WR=24%)")
 
+    # 🔧 캔들분석 3차: mom5>=2% → 비점화 차단 (극과열, 추격금지)
+    if _chart_mom5 >= GATE_MOM5_CUT and not _ign_candidate:
+        cut("MOM5_OVERHEAT", f"{m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_CUT}% (극과열 차단) | {_metrics}")
+        return None
+
     # 🔧 캔들분석 2차: tick_buy_ratio < 0.4 → 매도세 우위 half
     # 23,250건: 0.40-0.50 구간 WR=30.6%★, <0.40이면 매도세 지배 → 사이즈 축소
     if _gate_buy_ratio < GATE_TICK_BUY_RATIO_MIN and not _ign_candidate and _entry_mode == "confirm":
@@ -8256,9 +8293,14 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _is_precision = (imbalance >= 0.6 and _gate_buy_ratio >= 0.635)
     _strong_synergy = (_gate_buy_ratio >= 0.62 and imbalance >= 0.35 and vol_surge >= 1.5)
     # 🔧 캔들분석: 최고 콤보 — trend_1h≥0.1 + vol_surge≥2 = WR 39.4%★
-    # 30분 프록시: 0.1% × 0.5 = 0.05% (1분봉 30개 기준)
-    _trend_surge_combo = (_trend_1h >= 0.05 and vol_surge >= 2.0)
-    if _ign_candidate or _is_precision or _strong_synergy or _trend_surge_combo:
+    # 30분 프록시: 0.1% × 0.5 = 0.05% → 0.08% (필터 의미 유지)
+    _trend_surge_combo = (_trend_1h >= 0.08 and vol_surge >= 2.0)
+    # 🔧 크로스TF: 1H상승+저RSI = WR=41.7%★★ 최고 조합
+    # 30분 프록시: trend_1h >= 0.05% + rsi_1m < 50 → 눌림매수 최적 타이밍
+    _trend_up_low_rsi = (_trend_1h >= 0.05 and _chart_rsi < 50)
+    # 🔧 크로스TF: VWAP아래+EMA아래+1H상승 = WR=33.1%★
+    _vwap_ema_dip = (vwap_gap < 0 and ema20 and cur_price < ema20 and _trend_1h >= 0.05)
+    if _ign_candidate or _is_precision or _strong_synergy or _trend_surge_combo or _trend_up_low_rsi or _vwap_ema_dip:
         _entry_mode = "confirm"
     else:
         _entry_mode = "half"
@@ -11219,7 +11261,7 @@ def main():
                 # 🔧 캔들분석: 시간대별 필터 (23,250건 HOURLY 데이터 기반)
                 # 00시: WR=43.6% 최고 → half 해제 (확인 유지)
                 # 04-05시: WR=14.6~19.9% 최악 → 진입 차단
-                # 18시: WR=14.8% → half 강제
+                # 18시: WR=15.1% → 진입 차단 (04시급)
                 # 01-03,06-07시: 야간 half 유지
                 _night_h = now_kst().hour
                 if 4 <= _night_h <= 5:
@@ -11227,9 +11269,12 @@ def main():
                     with _POSITION_LOCK:
                         recent_alerts.pop(m, None)
                     continue
-                if _night_h == 18 and pre.get("entry_mode") == "confirm":
-                    pre["entry_mode"] = "half"
-                    print(f"[TIME_18H] {m} 18시 WR=14.8% → half 강제")
+                # 🔧 크로스TF 3차: 18시 WR=15.1% (04시 18.5%보다 나쁨) → 차단
+                if _night_h == 18:
+                    cut("HOUR_18_DEAD", f"{m} 18시 WR=15.1% (04시급) → 진입 차단")
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
+                    continue
                 if 1 <= _night_h < 4 and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족)")
