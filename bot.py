@@ -111,6 +111,7 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # SL 1.0% 기준: 점화 0.45%, 강돌파 0.38%, EMA 0.33%, 기본 0.25%
 MFE_RR_MULTIPLIERS = {
     "🔥점화": 0.45,              # 🔧 전체점검v4: SL 1.0%×0.45=0.45% (MFE P50=0.413% 근처)
+    "⭕동그라미": 0.40,           # 🔧 전체점검v4: 재돌파 = 점화 근접 (TP_FULL/TP_PART와 일치)
     "강돌파 (EMA↑+고점↑)": 0.38,  # 🔧 전체점검v4: SL 1.0%×0.38=0.38%
     "EMA↑": 0.33,                 # 🔧 전체점검v4: SL 1.0%×0.33=0.33%
     "고점↑": 0.30,                # 🔧 전체점검v4: SL 1.0%×0.30=0.30%
@@ -1617,15 +1618,14 @@ def cut_summary():
         print(f"[CUT_SUMMARY] {' , '.join(parts)}")
 
 
-def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=False):
+def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=False, signal_tag=""):
     """
     주문 직전 가격 재확인 (동적 임계치)
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
     - max_drift: 신호가 대비 허용 상승률 (None이면 동적 계산)
     - ticks: 변동성 계산용 틱 데이터
     - is_circle: 동그라미 재돌파 진입 여부 (True면 threshold 완화)
-    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.2% 구간은
-      '추격 진입'으로 소액/피라미딩 기반 진입 허용
+    - signal_tag: 신호 타입 (점화/강돌파 등 → 대장주 완화)
     """
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
@@ -1644,18 +1644,20 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             pstd = price_band_std(ticks or [], sec=10) if ticks else None
             pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
             r = relax_knob()  # 0~1.5
-            # 🔧 0.5% 기준 (짧은 순간 0.5% 움직임이면 충분)
-            base = 0.005 if not AGGRESSIVE_MODE else 0.006
+            # 🔧 전체점검v4: 0.5→0.8% (대장주일수록 신호→주문 사이 빠르게 상승)
+            # 기존 0.5%는 대장주 기회손실 과다 — 1%+ 급등만 차단하도록 완화
+            base = 0.008 if not AGGRESSIVE_MODE else 0.009
             # 🔧 야간(0~6시) 추격 허용폭 +0.1% 완화
             hour = now_kst().hour
             if 0 <= hour < 6:
                 base += 0.001
-            # 🔧 FIX: pstd 기여도 축소 (서지 중 고변동성 → 가드 넓어짐 → 꼭대기 체결)
-            # 기존: min(0.004, pstd*0.5) → 서지 시 최대 +0.4%
-            # 변경: min(0.002, pstd*0.3) → 서지 시 최대 +0.2% (변동성 클수록 조심)
+            # 🔧 pstd 기여도: 서지 시 최대 +0.2%
             dyn = base + min(0.002, pstd * 0.3) + r * 0.002
-            # 🔧 FIX: 동그라미(재돌파)는 이미 눌림 검증 완료 → threshold +0.3% 완화
+            # 🔧 동그라미(재돌파)는 이미 눌림 검증 완료 → +0.3% 완화
             if is_circle:
+                dyn += 0.003
+            # 🔧 전체점검v4: 점화/강돌파 = 대장주 가능성 높음 → +0.3% 추가 완화
+            if "점화" in signal_tag or "강돌파" in signal_tag:
                 dyn += 0.003
             thr = dyn
         else:
@@ -1686,8 +1688,9 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             if js_retry:
                 current_price = js_retry[0].get("trade_price", initial_price)
                 drift = (current_price / initial_price - 1.0)
-                # 재시도 성공 시 간단히 상승률만 체크 (동적 임계치는 기본값 사용)
-                if drift <= 0.006:  # 0.6% 이하면 통과
+                # 🔧 전체점검v4: base와 동일한 기준 적용 (기존 0.6% 하드코딩 제거)
+                _retry_thr = 0.009 if AGGRESSIVE_MODE else 0.008
+                if drift <= _retry_thr:
                     print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
                     return True, current_price, False
                 else:
@@ -1775,16 +1778,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
-        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
+        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False), signal_tag=pre.get("signal_tag", ""))
 
         # 🔧 FIX: VWAP gap + drift 복합 체크 (가드 통과해도 총 괴리 과대 → 꼭대기 진입 차단)
         # 예: VWAP+1.7% 신호 + 0.95% drift = 2.65% → 실질 VWAP+2.65% 진입은 과도
         _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
         _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
         _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
-        # 🔧 데이터분석v3: 눌림 진입(VWAP<=-0.3)은 drift 허용폭 완화 (2.0→3.0%)
-        # vwap_gap<-0.3 WR=35.5%★ → 눌림 리클레임은 약간의 흔들림이 정상
-        _gap_threshold = 3.0 if _vwap_gap_pct <= -0.3 else 2.0
+        # 🔧 전체점검v4: 대장주 기회손실 방지 — 임계치 2.0→2.5% 완화
+        # 눌림 진입(VWAP<=-0.3)은 3.0% 유지
+        _gap_threshold = 3.0 if _vwap_gap_pct <= -0.3 else 2.5
         if _total_gap > _gap_threshold and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
