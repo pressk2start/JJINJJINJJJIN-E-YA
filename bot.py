@@ -4766,7 +4766,7 @@ def auto_learn_exit_params():
     바운드:
     - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
     - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
-    - TRAIL_DISTANCE_MIN_BASE: 0.0015 ~ 0.003 (0.15% ~ 0.30%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.002 ~ 0.003 (0.20% ~ 0.30%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
 
@@ -11261,7 +11261,7 @@ def main():
                 # 🔧 캔들분석: 시간대별 필터 (23,250건 HOURLY 데이터 기반)
                 # 00시: WR=43.6% 최고 → half 해제 (확인 유지)
                 # 04-05시: WR=14.6~19.9% 최악 → 진입 차단
-                # 18시: WR=14.8% → half 강제
+                # 18시: WR=15.1% → 진입 차단 (04시급)
                 # 01-03,06-07시: 야간 half 유지
                 _night_h = now_kst().hour
                 if 4 <= _night_h <= 5:
