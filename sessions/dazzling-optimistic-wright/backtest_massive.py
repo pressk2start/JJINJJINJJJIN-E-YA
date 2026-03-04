@@ -308,33 +308,62 @@ def prepare_indicators(candles):
 
 
 def check_entry(ind, prev_ind):
-    """Check if entry conditions are met at candle index."""
+    """Check if entry conditions are met at candle index.
+    Returns: 'momentum' | 'pullback' | False
+    """
     if any(v is None for v in [ind["ema20"], ind["vol_ma20"], ind["rsi"], ind["atr"]]):
         return False
 
+    # ── Momentum entry (기존 로직) ──
+    is_momentum = True
+
     # 1. Price > EMA20
     if ind["close"] <= ind["ema20"]:
-        return False
+        is_momentum = False
 
     # 2. Volume > Volume_MA20 * 1.5
     if ind["vol_ma20"] <= 0 or ind["volume"] <= ind["vol_ma20"] * 1.5:
-        return False
+        is_momentum = False
 
     # 3. RSI between 40-70
-    if ind["rsi"] < 40 or ind["rsi"] > 70:
-        return False
+    if is_momentum and (ind["rsi"] < 40 or ind["rsi"] > 70):
+        is_momentum = False
 
     # 4. Positive candle body (close > open)
-    if ind["close"] <= ind["open"]:
-        return False
+    if is_momentum and ind["close"] <= ind["open"]:
+        is_momentum = False
 
     # 5. Previous candle was NOT a big red candle (close < open by >1%)
-    if prev_ind and prev_ind["open"] > 0:
+    if is_momentum and prev_ind and prev_ind["open"] > 0:
         prev_change = (prev_ind["close"] - prev_ind["open"]) / prev_ind["open"]
         if prev_change < -0.01:
-            return False
+            is_momentum = False
 
-    return True
+    if is_momentum:
+        return "momentum"
+
+    # ── Pullback entry (눌림목 매수) ──
+    # 조건: EMA20 근처/아래 + 최근 상승추세(EMA20 기울기 상승) + RSI 과매도 아님
+    ema20 = ind["ema20"]
+    close = ind["close"]
+    if ema20 is None or ema20 <= 0:
+        return False
+
+    ema_gap = (close - ema20) / ema20  # 음수 = EMA 아래
+
+    # 가격이 EMA20 ± 0.5% 이내 (눌림 범위)
+    if ema_gap > 0.005 or ema_gap < -0.015:
+        return False
+
+    # RSI 30-55 (과매도 아닌 눌림 구간)
+    if ind["rsi"] < 30 or ind["rsi"] > 55:
+        return False
+
+    # 볼륨 최소 기준 (평균 이상)
+    if ind["vol_ma20"] <= 0 or ind["volume"] <= ind["vol_ma20"] * 0.8:
+        return False
+
+    return "pullback"
 
 
 def simulate_trade(indicators, entry_idx, max_hold, checkpoint_pct, trail_pct, sl_min_pct, sl_max_pct):
@@ -459,7 +488,8 @@ def run_backtest(all_data, checkpoint_pct, trail_pct, sl_min_pct, sl_max_pct):
 
         i = 21  # Start after indicators are valid (EMA20 needs 20 bars)
         while i < len(indicators) - max_hold:
-            if check_entry(indicators[i], indicators[i - 1] if i > 0 else None):
+            entry_type = check_entry(indicators[i], indicators[i - 1] if i > 0 else None)
+            if entry_type:
                 trade = simulate_trade(
                     indicators, i, max_hold,
                     checkpoint_pct, trail_pct, sl_min_pct, sl_max_pct
@@ -467,6 +497,7 @@ def run_backtest(all_data, checkpoint_pct, trail_pct, sl_min_pct, sl_max_pct):
                 if trade:
                     trade["market"] = market
                     trade["timeframe"] = tf_info["label"]
+                    trade["entry_type"] = entry_type
                     all_trades.append(trade)
                     per_coin[market].append(trade)
                     per_tf[tf_info["label"]].append(trade)
@@ -774,6 +805,38 @@ def main():
     elif final_stats["total_gross_pnl"] < 0:
         print(f"\n  ❌ DIAGNOSIS: Gross PnL도 음수 → 전략 자체가 음의 기댓값. 로직 재설계 필요")
 
+    # ── Entry Type Comparison (Momentum vs Pullback) ──
+    momentum_trades = [t for t in final_trades if t.get("entry_type") == "momentum"]
+    pullback_trades = [t for t in final_trades if t.get("entry_type") == "pullback"]
+
+    if momentum_trades or pullback_trades:
+        print_header("ENTRY TYPE COMPARISON: MOMENTUM vs PULLBACK")
+
+        print(f"{'Type':>12s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'AvgMFE%':>8} {'AvgMAE%':>8}")
+        print("-" * 100)
+
+        for label, trades_subset in [("momentum", momentum_trades), ("pullback", pullback_trades)]:
+            if trades_subset:
+                s = calc_stats(trades_subset)
+                print(
+                    f"{label:>12s} | "
+                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
+                    f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f} "
+                    f"{s['profit_factor']:>6.2f} {s['avg_mfe']:>8.3f} {s['avg_mae']:>8.3f}"
+                )
+            else:
+                print(f"{label:>12s} | {'(no trades)':>7s}")
+
+        if momentum_trades and pullback_trades:
+            m_s = calc_stats(momentum_trades)
+            p_s = calc_stats(pullback_trades)
+            diff = p_s["avg_gross_pnl"] - m_s["avg_gross_pnl"]
+            print(f"\n  Pullback - Momentum gross diff: {diff:+.4f}%/trade")
+            if diff > 0:
+                print(f"  ✅ 눌림목 매수가 모멘텀 추격보다 gross 기준 {diff:+.4f}% 우위")
+            else:
+                print(f"  ❌ 모멘텀 추격이 눌림목보다 gross 기준 {-diff:+.4f}% 우위")
+
     # ── Per-Coin Breakdown ──
     print_header("PER-COIN BREAKDOWN")
 
@@ -947,25 +1010,28 @@ def main():
             "vol_ratio": (vol / vol_ma) if vol_ma and vol_ma > 0 else 1,
             "body_pct": ((close - ind["open"]) / ind["open"] * 100) if ind["open"] > 0 else 0,
             "candle_range_pct": ((ind["high"] - ind["low"]) / ind["low"] * 100) if ind["low"] > 0 else 0,
+            "entry_type": t.get("entry_type", "momentum"),
         }
         trade_features.append((feat, t))
 
     if trade_features:
         # Define filter conditions to test
         filter_defs = {
+            "ema_gap<=0.3": lambda f: f["ema_gap_pct"] <= 0.3,
             "ema_gap<=0.5": lambda f: f["ema_gap_pct"] <= 0.5,
             "ema_gap<=1.0": lambda f: f["ema_gap_pct"] <= 1.0,
-            "ema_gap<=0.3": lambda f: f["ema_gap_pct"] <= 0.3,
-            "rsi<=55": lambda f: f["rsi"] <= 55,
             "rsi<=50": lambda f: f["rsi"] <= 50,
+            "rsi<=55": lambda f: f["rsi"] <= 55,
             "rsi<=60": lambda f: f["rsi"] <= 60,
-            "rsi>=40": lambda f: f["rsi"] >= 40,
+            "rsi45-55": lambda f: 45 <= f["rsi"] <= 55,
             "vol_ratio>=2.0": lambda f: f["vol_ratio"] >= 2.0,
             "vol_ratio>=2.5": lambda f: f["vol_ratio"] >= 2.5,
             "vol_ratio>=3.0": lambda f: f["vol_ratio"] >= 3.0,
             "body_pct<=0.3": lambda f: f["body_pct"] <= 0.3,
             "body_pct<=0.5": lambda f: f["body_pct"] <= 0.5,
             "range_pct<=1.0": lambda f: f["candle_range_pct"] <= 1.0,
+            "is_pullback": lambda f: f.get("entry_type") == "pullback",
+            "is_momentum": lambda f: f.get("entry_type") == "momentum",
         }
 
         # Test single filters
