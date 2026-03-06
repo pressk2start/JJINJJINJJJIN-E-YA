@@ -76,18 +76,18 @@ COIN_WHITELIST = {
 ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
 
 # ELITE_MODE 전용 파라미터 (Trend-Filtered Pullback 전략)
-ELITE_TREND_1H_MIN = 0.05      # 30분 프록시 기준 (1H 0.1% × 0.5) — Factor Importance 1위
+ELITE_TREND_1H_MIN = 0.0       # 🔧 백테스트최적: 0.05→0.0 (역추세 허용 — 눌림목 진입에 추세 필터 불필요)
 ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
-ELITE_GOOD_HOURS = {2, 3, 4, 14, 15}  # 🔧 백테스트최적: 02~04시 WR100%, 14~15시 WR80%+ (기존 {0,6,19,20,23} → 실측 최고시간대)
-ELITE_VWAP_GAP_MAX = 0.0       # VWAP 아래에서만 매수 (vwap_gap < 0) — Factor Importance 3위
-ELITE_RSI_1M_MAX = 35           # RSI 1m < 35 과매도 진입 — 외부 RSI(2) 전략 원리
+ELITE_GOOD_HOURS = {0, 1, 2, 3, 4, 14, 15}  # 🔧 백테스트최적: 새벽0~4시 WR100% + 오후14~15시 WR80%+ (06~13시 손실 70%+ 차단)
+ELITE_VWAP_GAP_MAX = 0.0       # VWAP 아래에서만 매수 (vwap_gap < 0) — Factor Importance 1위
+ELITE_RSI_1M_MAX = 55           # 🔧 백테스트최적: 35→55 (과매도 필터 완화 — RSI 30~55 범위 진입 허용)
 ELITE_EMA_GAP_MAX = 0.0        # EMA20 아래에서만 매수 (눌림목) — Factor Importance 2위
-ELITE_SL = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (5분봉 노이즈 0.3~0.5% 회피)
+ELITE_SL = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (MAE P25=-0.612% 기반, 정상 눌림 생존)
 ELITE_SL_MAX = 0.015            # 🔧 백테스트최적: 0.5%→1.5% (Grid Search 최적값)
-ELITE_TP = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (R:R 1:1 유지)
-# 🔧 백테스트최적: CP=0.80% Trail=0.15% 기준 분할익절 재설계
-ELITE_TP_PARTIAL = 0.008        # 1차 익절 0.8% (CP 도달 시, 50% 물량)
-ELITE_TP_TRAIL = 0.015          # 2차 트레일 목표 1.5% (SL_MAX와 동일 R:R)
+ELITE_TP = 0.008                # 🔧 백테스트최적: 0.4%→0.8% (MFE P50=0.458% 기반)
+# 🔧 백테스트최적: Factor-Optimized 분할익절 (TP0.5%/Trail1.0%)
+ELITE_TP_PARTIAL = 0.005        # 1차 익절 0.5% (50% 물량 — MFE P25=0.200% 이상 확보)
+ELITE_TP_TRAIL = 0.010          # 2차 트레일 목표 1.0% (MFE P75=0.874% 근접)
 ELITE_PARTIAL_RATIO = 0.5       # 1차 익절 비율 (50%)
 # 🔧 타임아웃 10분: MFE 대부분 초반 5~10분 형성, 이후 MAE만 증가
 ELITE_HORIZON_SEC = 600         # 10분 (기존 4~8분 → 10분 고정)
@@ -113,7 +113,7 @@ DYN_SL_MAX = ELITE_SL_MAX if ELITE_MODE else 0.008   # 🔧 백테스트최적: 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.0080 if ELITE_MODE else 0.0030  # 🔧 백테스트최적: 0.15%→0.80% (Grid Search 최적 — 의미있는 수익 확인 후 트레일)
+PROFIT_CHECKPOINT_BASE = 0.0050 if ELITE_MODE else 0.0030  # 🔧 백테스트최적: 0.15%→0.50% (의미있는 수익 확보 후 트레일 무장)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% (CP 0.60%가 항상 우선)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -201,20 +201,19 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # (미사용 — 하위호환)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-# 🔧 백테스트최적: 트레일 거리 = 0.15% (Grid Search Trail=0.15% 최적값)
-TRAIL_DISTANCE_MIN_BASE = 0.0015 if ELITE_MODE else 0.0025  # 🔧 백테스트최적: ELITE 0.12%→0.15% (최적 Trail)
+# 🔧 백테스트최적: 트레일 거리 = 0.30% (정상 눌림 0.3~0.7% 고려)
+TRAIL_DISTANCE_MIN_BASE = 0.0030 if ELITE_MODE else 0.0025  # 🔧 백테스트최적: ELITE 0.12%→0.30% (트레일 넓혀 큰수익 보호)
 
 def get_trail_distance_min():
-    """🔧 캔들분석: Trail 0.20% 포착 최고(0.136%), 0.25% 균형점
-    야간(0-7시) 0.20% (변동성 낮음), 주간 0.25%
-    🔧 ELITE: SL 0.4% 대비 0.10~0.12% 트레일
+    """🔧 백테스트최적: Trail 0.30% (알트 정상 눌림 0.3~0.7% 고려)
+    야간(0-7시) 0.25% (변동성 낮음), 주간 0.30%
     """
     _h = now_kst().hour
     if ELITE_MODE:
-        # 🔧 백테스트최적: 야간 0.12%, 주간 0.15% (Grid Search Trail=0.15%)
+        # 🔧 백테스트최적: 야간 0.25%, 주간 0.30% (SL 1.0% × 0.30)
         if 0 <= _h < 7:
-            return 0.0012
-        return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.15)  # 1.0% × 0.15 = 0.15%
+            return 0.0025
+        return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.30)  # 1.0% × 0.30 = 0.30%
     if 0 <= _h < 7:
         return 0.0020  # 🔧 캔들분석: 0.25→0.20% (야간 변동성 낮으니 트레일 타이트)
     dyn_sl = DYN_SL_MIN
