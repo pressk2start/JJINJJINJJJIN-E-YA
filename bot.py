@@ -79,7 +79,7 @@ ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
 ELITE_TREND_1H_MIN = 0.0       # 🔧 백테스트최적: 0.05→0.0 (역추세 허용 — 눌림목 진입에 추세 필터 불필요)
 ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
 ELITE_GOOD_HOURS = {0, 1, 2, 3, 4, 14, 15}  # 🔧 백테스트최적: 새벽0~4시 WR100% + 오후14~15시 WR80%+ (06~13시 손실 70%+ 차단)
-ELITE_VWAP_GAP_MAX = 0.0       # VWAP 아래에서만 매수 (vwap_gap < 0) — Factor Importance 1위
+ELITE_VWAP_GAP_MAX = -0.3      # 🔧 대량백테스트: 0.0→-0.3% (VWAP 아래 0.3% 이상에서만 매수 — 장기 PF 1.11→1.38, +11.2%, MDD 14.1%)
 ELITE_RSI_1M_MAX = 55           # 🔧 백테스트최적: 35→55 (과매도 필터 완화 — RSI 30~55 범위 진입 허용)
 ELITE_EMA_GAP_MAX = 0.0        # EMA20 아래에서만 매수 (눌림목) — Factor Importance 2위
 ELITE_SL = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (MAE P25=-0.612% 기반, 정상 눌림 생존)
