@@ -78,16 +78,16 @@ ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
 # ELITE_MODE 전용 파라미터 (Trend-Filtered Pullback 전략)
 ELITE_TREND_1H_MIN = 0.0       # 🔧 백테스트최적: 0.05→0.0 (역추세 허용 — 눌림목 진입에 추세 필터 불필요)
 ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
-ELITE_GOOD_HOURS = {0, 1, 2, 3, 4, 14, 15}  # 🔧 백테스트최적: 새벽0~4시 WR100% + 오후14~15시 WR80%+ (06~13시 손실 70%+ 차단)
+ELITE_GOOD_HOURS = set(range(24))  # 🔧 400봉백테스트: 24시간 허용 (EMA<-0.5 필터가 시간대 역할 대체 — 시간제한 해제로 38→38건 유지)
 ELITE_VWAP_GAP_MAX = -0.3      # 🔧 대량백테스트: 0.0→-0.3% (VWAP 아래 0.3% 이상에서만 매수 — 장기 PF 1.11→1.38, +11.2%, MDD 14.1%)
 ELITE_RSI_1M_MAX = 55           # 🔧 백테스트최적: 35→55 (과매도 필터 완화 — RSI 30~55 범위 진입 허용)
-ELITE_EMA_GAP_MAX = 0.0        # EMA20 아래에서만 매수 (눌림목) — Factor Importance 2위
-ELITE_SL = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (MAE P25=-0.612% 기반, 정상 눌림 생존)
+ELITE_EMA_GAP_MAX = -0.5       # 🔧 400봉백테스트: 0.0→-0.5% (핵심 변경 — EMA20 대비 -0.5% 이상 눌림목만 진입, WR 84.2%, PF 4.11)
+ELITE_SL = 0.012                # 🔧 400봉백테스트: 1.0%→1.2% (MDD 최소화 1.30% + 수익 유지 +11.80%)
 ELITE_SL_MAX = 0.015            # 🔧 백테스트최적: 0.5%→1.5% (Grid Search 최적값)
-ELITE_TP = 0.008                # 🔧 백테스트최적: 0.4%→0.8% (MFE P50=0.458% 기반)
-# 🔧 백테스트최적: Factor-Optimized 분할익절 (TP0.5%/Trail1.0%)
-ELITE_TP_PARTIAL = 0.005        # 1차 익절 0.5% (50% 물량 — MFE P25=0.200% 이상 확보)
-ELITE_TP_TRAIL = 0.010          # 2차 트레일 목표 1.0% (MFE P75=0.874% 근접)
+ELITE_TP = 0.008                # 🔧 백테스트최적: 0.4%→0.8% (MFE P50=0.806% 기반)
+# 🔧 400봉백테스트: TP 0.4-0.8% 분할 (MFE P50=0.806% 기반 빠른 익절)
+ELITE_TP_PARTIAL = 0.004        # 🔧 400봉백테스트: 0.5%→0.4% (1차 50% 익절 — 빠른 수익 확보)
+ELITE_TP_TRAIL = 0.008          # 🔧 400봉백테스트: 1.0%→0.8% (2차 트레일 — MFE P50 근접 목표)
 ELITE_PARTIAL_RATIO = 0.5       # 1차 익절 비율 (50%)
 # 🔧 타임아웃 10분: MFE 대부분 초반 5~10분 형성, 이후 MAE만 증가
 ELITE_HORIZON_SEC = 600         # 10분 (기존 4~8분 → 10분 고정)
@@ -113,7 +113,7 @@ DYN_SL_MAX = ELITE_SL_MAX if ELITE_MODE else 0.008   # 🔧 백테스트최적: 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.0050 if ELITE_MODE else 0.0030  # 🔧 백테스트최적: 0.15%→0.50% (의미있는 수익 확보 후 트레일 무장)
+PROFIT_CHECKPOINT_BASE = 0.0035 if ELITE_MODE else 0.0030  # 🔧 400봉백테스트: 0.50%→0.35% (TP_PARTIAL 0.4% 전에 트레일 무장)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% (CP 0.60%가 항상 우선)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
