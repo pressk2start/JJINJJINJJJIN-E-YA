@@ -48,6 +48,15 @@ SCAN_INTERVAL = 6
 COOLDOWN = 240  # 🔧 수익성패치: 480→240초 (게이트 엄격하니 쿨다운은 짧게)
 PARALLEL_WORKERS = 12
 
+# 🔧 백테스트최적: 코인 화이트리스트 (양수익 코인만 진입 허용)
+# ETH(WR55%,PF1.41), DOT(WR50%,PF1.07), ADA(WR55%,PF1.06), SAND(WR64%,PF1.03)
+# 나머지 6코인(DOGE,XRP,BTC,SHIB,AVAX,SOL)이 전체 손실의 80% 견인
+COIN_WHITELIST_ENABLED = os.environ.get("COIN_WHITELIST", "1") == "1"
+COIN_WHITELIST = {
+    "KRW-ETH", "KRW-DOT", "KRW-ADA", "KRW-SAND",
+    "KRW-MATIC", "KRW-LINK", "KRW-ATOM",  # 유사 특성 중형 알트 추가
+}
+
 # ========================================
 # 🔧 ELITE_MODE: 소수정예 진입 + R:R 1:1 (구조적 손익 개선)
 # ========================================
@@ -69,16 +78,16 @@ ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
 # ELITE_MODE 전용 파라미터 (Trend-Filtered Pullback 전략)
 ELITE_TREND_1H_MIN = 0.05      # 30분 프록시 기준 (1H 0.1% × 0.5) — Factor Importance 1위
 ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
-ELITE_GOOD_HOURS = {0, 6, 19, 20, 23}  # KST 좋은 시간대 — Hourly WR 35~43%
+ELITE_GOOD_HOURS = {2, 3, 4, 14, 15}  # 🔧 백테스트최적: 02~04시 WR100%, 14~15시 WR80%+ (기존 {0,6,19,20,23} → 실측 최고시간대)
 ELITE_VWAP_GAP_MAX = 0.0       # VWAP 아래에서만 매수 (vwap_gap < 0) — Factor Importance 3위
 ELITE_RSI_1M_MAX = 35           # RSI 1m < 35 과매도 진입 — 외부 RSI(2) 전략 원리
 ELITE_EMA_GAP_MAX = 0.0        # EMA20 아래에서만 매수 (눌림목) — Factor Importance 2위
-ELITE_SL = 0.004                # 0.4% 손절 (R:R 1:1)
-ELITE_SL_MAX = 0.005            # 0.5% 최대 SL (ATR 확장 허용 최소화)
-ELITE_TP = 0.004                # 0.4% 익절 (R:R 1:1, MFE P50=0.41% 감안)
-# 🔧 2단계 분할익절: 50%는 0.3%에 1차 익절, 나머지 50%는 0.6% 트레일
-ELITE_TP_PARTIAL = 0.003        # 1차 익절 0.3% (50% 물량)
-ELITE_TP_TRAIL = 0.006          # 2차 트레일 목표 0.6% (MFE P75=0.621%)
+ELITE_SL = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (5분봉 노이즈 0.3~0.5% 회피)
+ELITE_SL_MAX = 0.015            # 🔧 백테스트최적: 0.5%→1.5% (Grid Search 최적값)
+ELITE_TP = 0.010                # 🔧 백테스트최적: 0.4%→1.0% (R:R 1:1 유지)
+# 🔧 백테스트최적: CP=0.80% Trail=0.15% 기준 분할익절 재설계
+ELITE_TP_PARTIAL = 0.008        # 1차 익절 0.8% (CP 도달 시, 50% 물량)
+ELITE_TP_TRAIL = 0.015          # 2차 트레일 목표 1.5% (SL_MAX와 동일 R:R)
 ELITE_PARTIAL_RATIO = 0.5       # 1차 익절 비율 (50%)
 # 🔧 타임아웃 10분: MFE 대부분 초반 5~10분 형성, 이후 MAE만 증가
 ELITE_HORIZON_SEC = 600         # 10분 (기존 4~8분 → 10분 고정)
@@ -92,19 +101,19 @@ else:
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.008 if not ELITE_MODE else ELITE_SL_MAX  # 🔧 v4.0: 1.2%→0.8% (DYN_SL_MAX와 동일)
+HARD_STOP_DD = 0.008 if not ELITE_MODE else ELITE_SL_MAX  # 🔧 백테스트최적: ELITE=1.5%, 기존=0.8% (SL_MAX 연동)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 SSOT 정리: 모든 프로파일(gentle/balanced/strict) 3회로 통일
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
 # 🔧 v4.0 R:R수술: SL 1.0%→0.6%, SL_MAX 1.2%→0.8% (R:R 1:1 구조로 개선)
-DYN_SL_MIN = ELITE_SL if ELITE_MODE else 0.006   # 🔧 v4.0: ELITE 0.4% / 기존 1.0%→0.6%
-DYN_SL_MAX = ELITE_SL_MAX if ELITE_MODE else 0.008   # 🔧 v4.0: ELITE 0.5% / 기존 1.2%→0.8%
+DYN_SL_MIN = ELITE_SL if ELITE_MODE else 0.006   # 🔧 백테스트최적: ELITE 1.0% / 기존 0.6%
+DYN_SL_MAX = ELITE_SL_MAX if ELITE_MODE else 0.008   # 🔧 백테스트최적: ELITE 1.5% / 기존 0.8%
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.0015 if ELITE_MODE else 0.0030  # 🔧 v4.0: 0.20%→0.30% (SL 0.6% × 0.5 = CP에서 트레일 무장)
+PROFIT_CHECKPOINT_BASE = 0.0080 if ELITE_MODE else 0.0030  # 🔧 백테스트최적: 0.15%→0.80% (Grid Search 최적 — 의미있는 수익 확인 후 트레일)
 PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% (CP 0.60%가 항상 우선)
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
@@ -154,13 +163,13 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # 🔧 ELITE_MODE: 2단계 분할익절 → multiplier = 1.5 (SL 0.4% × 1.5 = 0.6% 트레일 목표)
 if ELITE_MODE:
     MFE_RR_MULTIPLIERS = {
-        "🔥점화": 1.5,              # 🔧 ELITE: SL 0.4% × 1.5 = 0.6% (2차 트레일 목표)
-        "⭕동그라미": 1.5,           # 🔧 ELITE: 2단계 분할익절
-        "강돌파 (EMA↑+고점↑)": 1.5,  # 🔧 ELITE: 2단계 분할익절
-        "EMA↑": 1.5,                 # 🔧 ELITE: 2단계 분할익절
-        "고점↑": 1.5,                # 🔧 ELITE: 2단계 분할익절
-        "거래량↑": 1.5,             # 🔧 ELITE: 2단계 분할익절
-        "기본": 1.5,                # 🔧 ELITE: 2단계 분할익절
+        "🔥점화": 1.0,              # 🔧 백테스트최적: SL 1.0% × 1.0 = 1.0% TP (R:R 1:1)
+        "⭕동그라미": 1.0,           # 🔧 백테스트최적: R:R 1:1
+        "강돌파 (EMA↑+고점↑)": 1.0,  # 🔧 백테스트최적: R:R 1:1
+        "EMA↑": 1.0,                 # 🔧 백테스트최적: R:R 1:1
+        "고점↑": 1.0,                # 🔧 백테스트최적: R:R 1:1
+        "거래량↑": 1.0,             # 🔧 백테스트최적: R:R 1:1
+        "기본": 1.0,                # 🔧 백테스트최적: R:R 1:1
     }
 else:
     # 🔧 v4.0 R:R수술: SL 0.6% 기준 R:R=1:1 목표 → 모든 신호 1.0배 (0.6% TP)
@@ -192,8 +201,8 @@ SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # (미사용 — 하위호환)
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-# 🔧 ELITE: 트레일 거리 = SL × 0.30 = 0.12% (0.4% SL 대비 적절한 비율)
-TRAIL_DISTANCE_MIN_BASE = 0.0012 if ELITE_MODE else 0.0025  # 🔧 v4.0: 0.25% 유지 (SL 0.6% 대비 적절한 트레일)
+# 🔧 백테스트최적: 트레일 거리 = 0.15% (Grid Search Trail=0.15% 최적값)
+TRAIL_DISTANCE_MIN_BASE = 0.0015 if ELITE_MODE else 0.0025  # 🔧 백테스트최적: ELITE 0.12%→0.15% (최적 Trail)
 
 def get_trail_distance_min():
     """🔧 캔들분석: Trail 0.20% 포착 최고(0.136%), 0.25% 균형점
@@ -202,10 +211,10 @@ def get_trail_distance_min():
     """
     _h = now_kst().hour
     if ELITE_MODE:
-        # ELITE: 야간 0.10%, 주간 0.12% (타이트 트레일)
+        # 🔧 백테스트최적: 야간 0.12%, 주간 0.15% (Grid Search Trail=0.15%)
         if 0 <= _h < 7:
-            return 0.0010
-        return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.30)  # 0.4% × 0.30 = 0.12%
+            return 0.0012
+        return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.15)  # 1.0% × 0.15 = 0.15%
     if 0 <= _h < 7:
         return 0.0020  # 🔧 캔들분석: 0.25→0.20% (야간 변동성 낮으니 트레일 타이트)
     dyn_sl = DYN_SL_MIN
@@ -4354,6 +4363,11 @@ def get_top_krw_by_24h(n=TOP_N):
             if v > 0: acc.append((t["market"], v))
     acc.sort(key=lambda x: x[1], reverse=True)
     mkts = [m for m, _ in acc]
+    # 🔧 백테스트최적: 화이트리스트 필터 (양수익 코인 우선)
+    if COIN_WHITELIST_ENABLED and COIN_WHITELIST:
+        wl = [m for m in mkts if m in COIN_WHITELIST]
+        rest = [m for m in mkts if m not in COIN_WHITELIST]
+        mkts = wl + rest  # 화이트리스트 코인을 상위로 배치 (완전 차단은 아님)
     with _MKTS_CACHE_LOCK:
         _MKTS_CACHE["mkts"] = mkts
         _MKTS_CACHE["ts"] = time.time()  # 🔧 FIX: API 완료 시점 기준
@@ -6582,6 +6596,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
     if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
+        return None
+
+    # === 🔧 백테스트최적: 화이트리스트 필터 (손실코인 진입 차단) ===
+    if COIN_WHITELIST_ENABLED and COIN_WHITELIST and m not in COIN_WHITELIST:
+        cut("WHITELIST", f"{m} 화이트리스트 미포함")
         return None
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
