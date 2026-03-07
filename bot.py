@@ -2325,79 +2325,77 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         with _ORPHAN_LOCK:
             _ORPHAN_HANDLED.add(m)
 
-        # === 🧠 피처 로깅 (자동 학습용) ===
-        if AUTO_LEARN_ENABLED:
+        # === 🧠 피처 로깅 (거래 데이터 기록 + 배치/경로 리포트용) ===
+        # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 실행 (배치 리포트가 CSV 의존)
+        try:
+            ob = pre.get("ob", {})
+            t = pre.get("tape", {})
+            ticks = pre.get("ticks", [])
+            imbalance = calc_orderbook_imbalance(ob) if ob else 0
+            turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
+
+            # 🔥 새 지표 계산
+            cons_buys = calc_consecutive_buys(ticks, 15)
+            t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+            avg_krw = calc_avg_krw_per_tick(t15_stats)
+            flow_accel = calc_flow_acceleration(ticks)
+
+            # 🚀 초단기 미세필터 지표 계산
+            ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
+            cv = ia_stats.get("cv") or 0.0
+            pstd = price_band_std(ticks, sec=10) if ticks else None
+            pstd = pstd if pstd is not None else 0.0
+            overheat = flow_accel * float(pre.get("volume_surge", 1.0))
+            # 틱 신선도
+            fresh_age = 0.0
+            if ticks:
+                now_ms = int(time.time() * 1000)
+                last_tick_ts = max(tick_ts_ms(t) for t in ticks)
+                if last_tick_ts == 0: last_tick_ts = now_ms
+                fresh_age = (now_ms - last_tick_ts) / 1000.0
+            # 베스트호가 깊이
             try:
-                ob = pre.get("ob", {})
-                t = pre.get("tape", {})
-                ticks = pre.get("ticks", [])
-                imbalance = calc_orderbook_imbalance(ob) if ob else 0
-                turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
+                u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
+                best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+            except Exception:
+                best_ask_krw = 0.0
 
-                # 🔥 새 지표 계산
-                cons_buys = calc_consecutive_buys(ticks, 15)
-                t15_stats = micro_tape_stats_from_ticks(ticks, 15)
-                avg_krw = calc_avg_krw_per_tick(t15_stats)
-                flow_accel = calc_flow_acceleration(ticks)
-
-                # 🚀 초단기 미세필터 지표 계산
-                ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
-                cv = ia_stats.get("cv") or 0.0  # 🔧 FIX: None→0.0 (round(None) TypeError 방지)
-                pstd = price_band_std(ticks, sec=10) if ticks else None
-                pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
-                overheat = flow_accel * float(pre.get("volume_surge", 1.0))
-                # 틱 신선도
-                fresh_age = 0.0
-                if ticks:
-                    now_ms = int(time.time() * 1000)
-                    # 🔧 FIX: tick_ts_ms 헬퍼로 통일
-                    last_tick_ts = max(tick_ts_ms(t) for t in ticks)
-                    if last_tick_ts == 0: last_tick_ts = now_ms
-                    fresh_age = (now_ms - last_tick_ts) / 1000.0
-                # 베스트호가 깊이
-                try:
-                    u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
-                    best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
-                except Exception:
-                    best_ask_krw = 0.0
-
-                # 🔍 경로 정보: signal_tag 하나로 통일
-                log_trade_features({
-                    "ts": now_kst_str(),
-                    "market": m,
-                    "entry_price": avg_price,
-                    "buy_ratio": t.get("buy_ratio", 0),
-                    "spread": ob.get("spread", 0),
-                    "turn": turn,
-                    "imbalance": imbalance,
-                    "volume_surge": pre.get("volume_surge", 1.0),
-                    "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
-                    "score": pre.get("ignition_score", 0),
-                    "entry_mode": entry_mode,
-                    "signal_tag": pre.get("signal_tag", "기본"),
-                    "filter_type": pre.get("filter_type", "stage1_gate"),
-                    # 🔥 새 지표
-                    "consecutive_buys": cons_buys,
-                    "avg_krw_per_tick": round(avg_krw, 0),
-                    "flow_acceleration": round(flow_accel, 2),
-                    # 🚀 초단기 미세필터 지표
-                    "overheat": round(overheat, 2),
-                    "fresh_age": round(fresh_age, 2),
-                    "cv": round(cv, 2),
-                    "pstd": round(pstd * 100, 4),  # % 단위
-                    "best_ask_krw": int(best_ask_krw),
-                    # 🔧 FIX: 진단 필드 누락 보완 (FEATURE_FIELDS에 있지만 미기록이던 항목)
-                    "shadow_flags": pre.get("shadow_flags", ""),
-                    "would_cut": 1 if pre.get("would_cut", False) else 0,
-                    "is_prebreak": 1 if pre.get("is_prebreak", False) else 0,
-                    # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 (진입시 기록)
-                    "entry_atr_pct": round(_entry_atr_pct, 4),          # % 단위
-                    "entry_pstd": round(_entry_pstd * 100, 4),          # % 단위 (pstd 필드와 통일)
-                    "entry_spread": round(ob.get("spread", 0), 4),      # % 단위
-                    "entry_consec": cons_buys,
-                })
-            except Exception as e:
-                print(f"[FEATURE_LOG_ERR] {e}")
+            # 🔍 경로 정보: signal_tag 하나로 통일
+            log_trade_features({
+                "ts": now_kst_str(),
+                "market": m,
+                "entry_price": avg_price,
+                "buy_ratio": t.get("buy_ratio", 0),
+                "spread": ob.get("spread", 0),
+                "turn": turn,
+                "imbalance": imbalance,
+                "volume_surge": pre.get("volume_surge", 1.0),
+                "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
+                "score": pre.get("ignition_score", 0),
+                "entry_mode": entry_mode,
+                "signal_tag": pre.get("signal_tag", "기본"),
+                "filter_type": pre.get("filter_type", "stage1_gate"),
+                # 🔥 새 지표
+                "consecutive_buys": cons_buys,
+                "avg_krw_per_tick": round(avg_krw, 0),
+                "flow_acceleration": round(flow_accel, 2),
+                # 🚀 초단기 미세필터 지표
+                "overheat": round(overheat, 2),
+                "fresh_age": round(fresh_age, 2),
+                "cv": round(cv, 2),
+                "pstd": round(pstd * 100, 4),
+                "best_ask_krw": int(best_ask_krw),
+                "shadow_flags": pre.get("shadow_flags", ""),
+                "would_cut": 1 if pre.get("would_cut", False) else 0,
+                "is_prebreak": 1 if pre.get("is_prebreak", False) else 0,
+                # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 (진입시 기록)
+                "entry_atr_pct": round(_entry_atr_pct, 4),
+                "entry_pstd": round(_entry_pstd * 100, 4),
+                "entry_spread": round(ob.get("spread", 0), 4),
+                "entry_consec": cons_buys,
+            })
+        except Exception as e:
+            print(f"[FEATURE_LOG_ERR] {e}")
 
         # 🔐 컨텍스트 종료 시 entry_lock 자동 해제
 
@@ -2676,11 +2674,11 @@ def close_auto_position(m, reason=""):
                 OPEN_POSITIONS.pop(m, None)
             # 🔧 FIX: volume 0이어도 알람 + 리포트 카운트 증가
             tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
-            if AUTO_LEARN_ENABLED:
-                try:
-                    update_trade_result(m, 0, 0, 0, exit_reason=reason or "잔고0_외부청산")  # 🔧 FIX: exit_reason 전달
-                except Exception:
-                    pass
+            # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터 증가)
+            try:
+                update_trade_result(m, 0, 0, 0, exit_reason=reason or "잔고0_외부청산")
+            except Exception:
+                pass
             return
 
         entry_price = pos.get("entry_price", 0)
@@ -2781,19 +2779,17 @@ def close_auto_position(m, reason=""):
                             record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"))  # 🔧 수수료 반영
                         except Exception as _e:
                             print("[DELAYED_TRADE_RECORD_ERR]", _e)
-                        # 🔧 학습 로그 업데이트
-                        if AUTO_LEARN_ENABLED:
-                            try:
-                                hold_sec = time.time() - pos.get("entry_ts", time.time())
-                                mfe = pos.get("mfe_pct", 0.0)
-                                mae = pos.get("mae_pct", 0.0)
-                                # 🔧 FIX: 수수료 반영한 순수익률 사용
-                                update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
-                                                    added=pos.get('added', False), exit_reason=reason,
-                                                    mfe_pct=mfe, mae_pct=mae,
-                                                    entry_ts=pos.get("entry_ts"))
-                            except Exception as _e:
-                                print("[DELAYED_CLOSE_LOG_ERR]", _e)
+                        # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                        try:
+                            hold_sec = time.time() - pos.get("entry_ts", time.time())
+                            mfe = pos.get("mfe_pct", 0.0)
+                            mae = pos.get("mae_pct", 0.0)
+                            update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
+                                                added=pos.get('added', False), exit_reason=reason,
+                                                mfe_pct=mfe, mae_pct=mae,
+                                                entry_ts=pos.get("entry_ts"))
+                        except Exception as _e:
+                            print("[DELAYED_CLOSE_LOG_ERR]", _e)
                         return
 
                 # 30초 후에도 잔고 있으면 → 후속 워커로 추가 감시
@@ -2828,18 +2824,18 @@ def close_auto_position(m, reason=""):
                                     record_trade(m, _net_ret, pos.get("signal_type", "기본"))  # 🔧 FIX: 승률/연패 추적 누락 방지
                                 except Exception:
                                     pass
-                                if AUTO_LEARN_ENABLED:
-                                    try:
-                                        _hold = time.time() - pos.get("entry_ts", time.time())
-                                        _mfe = pos.get("mfe_pct", 0.0)
-                                        _mae = pos.get("mae_pct", 0.0)
-                                        update_trade_result(m, _fup_exit_price, _net_ret, _hold,  # 🔧 FIX: stale cur_price → 실제 체결가
-                                                            added=pos.get('added', False),
-                                                            exit_reason=reason or "후속확인_청산",
-                                                            mfe_pct=_mfe, mae_pct=_mae,
-                                                            entry_ts=pos.get("entry_ts"))
-                                    except Exception as _e:
-                                        print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
+                                # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                                try:
+                                    _hold = time.time() - pos.get("entry_ts", time.time())
+                                    _mfe = pos.get("mfe_pct", 0.0)
+                                    _mae = pos.get("mae_pct", 0.0)
+                                    update_trade_result(m, _fup_exit_price, _net_ret, _hold,
+                                                        added=pos.get('added', False),
+                                                        exit_reason=reason or "후속확인_청산",
+                                                        mfe_pct=_mfe, mae_pct=_mae,
+                                                        entry_ts=pos.get("entry_ts"))
+                                except Exception as _e:
+                                    print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
                                 return
                         # 🔧 4분 후에도 미체결 → 경고 알림
                         tg_send(f"🚨 <b>{m} 청산 미완료</b>\n• 4분 후속감시 종료, 수동 확인 필요\n• 사유: {reason}")
@@ -2941,22 +2937,19 @@ def close_auto_position(m, reason=""):
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
-            # 🧠 자동 학습용 결과 업데이트
-            if AUTO_LEARN_ENABLED:
-                try:
-                    hold_sec = time.time() - pos.get("entry_ts", time.time())
-                    was_added = pos.get("added", False)  # 🔍 추매 여부
-                    # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
-                    mfe = pos.get("mfe_pct", 0.0)
-                    mae = pos.get("mae_pct", 0.0)
-                    # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
-                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
-                                        added=was_added, exit_reason=reason,
-                                        mfe_pct=mfe, mae_pct=mae,
-                                        entry_ts=pos.get("entry_ts"),
-                                        pos_snapshot=dict(pos))
-                except Exception as _e:
-                    print(f"[FEATURE_UPDATE_ERR] {_e}")
+            # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+            try:
+                hold_sec = time.time() - pos.get("entry_ts", time.time())
+                was_added = pos.get("added", False)
+                mfe = pos.get("mfe_pct", 0.0)
+                mae = pos.get("mae_pct", 0.0)
+                update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                                    added=was_added, exit_reason=reason,
+                                    mfe_pct=mfe, mae_pct=mae,
+                                    entry_ts=pos.get("entry_ts"),
+                                    pos_snapshot=dict(pos))
+            except Exception as _e:
+                print(f"[FEATURE_UPDATE_ERR] {_e}")
 
             # 🔧 FIX: net_ret_pct 기준 판정 (gross 기준 시 수수료 미반영으로 마이너스인데 🟢 표기 버그)
             result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
@@ -3025,12 +3018,11 @@ def close_auto_position(m, reason=""):
                 with _ORPHAN_LOCK:
                     _ORPHAN_HANDLED.add(m)
                 tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미달 dust)\n• 소량 잔여는 거래소에 보유 (유령감지 제외)")
-                # 🔧 FIX: 리포트 카운트 증가
-                if AUTO_LEARN_ENABLED:
-                    try:
-                        update_trade_result(m, 0, 0, 0, exit_reason=reason or "최소주문금액_dust")  # 🔧 FIX: exit_reason 전달
-                    except Exception:
-                        pass
+                # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                try:
+                    update_trade_result(m, 0, 0, 0, exit_reason=reason or "최소주문금액_dust")
+                except Exception:
+                    pass
                 return
 
             # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
@@ -3044,12 +3036,11 @@ def close_auto_position(m, reason=""):
                     tg_send(f"🗑️ {m} 포지션 정리 완료 (실제 잔고 0 확인)")
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
-                    # 🔧 FIX: 리포트 카운트 증가
-                    if AUTO_LEARN_ENABLED:
-                        try:
-                            update_trade_result(m, 0, 0, 0, exit_reason=reason or "좀비포지션_잔고0")  # 🔧 FIX: exit_reason 전달
-                        except Exception:
-                            pass
+                    # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                    try:
+                        update_trade_result(m, 0, 0, 0, exit_reason=reason or "좀비포지션_잔고0")
+                    except Exception:
+                        pass
             return
     finally:
         # 🔧 FIX: 중복 청산 방지 락 해제 (성공/실패 상관없이)
@@ -3357,9 +3348,8 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     hold_sec = 0
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
                 record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"))
-                # 🔧 FIX: update_trade_result(net) - 학습/쿨다운 정확성
-                if AUTO_LEARN_ENABLED:
-                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                         added=backup_added, exit_reason=reason or "부분청산",
                                         entry_ts=backup_entry_ts,
                                         pos_snapshot=backup_pos_snapshot)  # 🔧 FIX: 튜닝 메트릭 전달
@@ -7757,13 +7747,12 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception as _e:
             print(f"[BOX_TRADE_RECORD_ERR] {_e}")
 
-        # 🔧 자동 학습용 결과 업데이트
-        if AUTO_LEARN_ENABLED:
-            try:
-                update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
-                                    exit_reason=sell_reason)
-            except Exception as _e:
-                print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
+        # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+        try:
+            update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
+                                exit_reason=sell_reason)
+        except Exception as _e:
+            print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
 
         # 🔧 FIX: 일반 매매와 동일한 헤더 형식
         tg_send(
