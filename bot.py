@@ -4541,8 +4541,8 @@ def send_batch_trade_report():
 
         df = df[df["result"].isin(["win", "lose"])].tail(BATCH_REPORT_INTERVAL)
 
-        if len(df) < 5:
-            tg_send(f"📊 배치 리포트: 데이터 부족 ({len(df)}건)")
+        if len(df) < BATCH_REPORT_INTERVAL:
+            tg_send(f"📊 배치 리포트: 데이터 부족 ({len(df)}/{BATCH_REPORT_INTERVAL}건)")
             return
 
         total = len(df)
