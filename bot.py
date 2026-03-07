@@ -3969,7 +3969,7 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     - mae_pct: 최저 수익률 (Maximum Adverse Excursion)
     - entry_ts: 진입 시각 (중복 방지용 - 동일 거래 식별)
     """
-    global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
+    global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count, _batch_report_count
 
     # last_trade_was_loss는 모듈 레벨에서 정의됨 (L466) — 직접 참조
     global last_trade_was_loss
@@ -4148,7 +4148,6 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             print(f"[PATH_REPORT_ERR] {e}")
 
     # 📊 배치 종합 리포트 (30건마다 자동 발송)
-    global _batch_report_count
     with _trade_log_lock:
         _batch_report_count += 1
         _current_batch_count = _batch_report_count
