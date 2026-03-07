@@ -3917,7 +3917,7 @@ PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시
 # =========================
 # 📊 배치 거래 리포트 (30건마다 텔레그램 종합 발송)
 # =========================
-BATCH_REPORT_INTERVAL = 30  # 30건마다 종합 리포트 발송
+BATCH_REPORT_INTERVAL = 3   # 🔧 테스트: 3건마다 발송 (정상 확인 후 30으로 복원)
 BATCH_LOG_PATH = os.path.join(os.getcwd(), "batch_reports.csv")  # 배치 요약 CSV
 
 def _restore_batch_count() -> int:
