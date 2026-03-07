@@ -3907,7 +3907,7 @@ PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시
 # =========================
 # 📊 배치 거래 리포트 (30건마다 텔레그램 종합 발송)
 # =========================
-BATCH_REPORT_INTERVAL = 3   # 🔧 테스트: 3건마다 발송 (정상 확인 후 30으로 복원)
+BATCH_REPORT_INTERVAL = 50  # 50건마다 배치 리포트 발송
 BATCH_LOG_PATH = os.path.join(os.getcwd(), "batch_reports.csv")  # 배치 요약 CSV
 
 def _restore_batch_count() -> int:
@@ -4514,8 +4514,8 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
 
 def send_batch_trade_report():
     """
-    📊 30건 배치 종합 리포트 — 텔레그램 발송 + CSV 기록
-    진입 경로별/시간대별/코인별 승패 통계, 누적 PnL, 연패/연승 분석
+    📊 50건 배치 종합 리포트 — 텔레그램 발송 + CSV 기록
+    핵심 성과 지표 + 진입경로/시간대/코인/청산사유/진입모드별 분석
     """
     if not os.path.exists(TRADE_LOG_PATH):
         tg_send("📊 배치 리포트: 거래 기록 없음")
@@ -4523,6 +4523,7 @@ def send_batch_trade_report():
 
     try:
         import pandas as pd
+        import numpy as np
         df = pd.read_csv(TRADE_LOG_PATH)
 
         if "result" not in df.columns:
@@ -4544,46 +4545,126 @@ def send_batch_trade_report():
         pnl_series = pd.to_numeric(df["pnl_pct"], errors="coerce").fillna(0) * 100
         total_pnl = pnl_series.sum()
         avg_pnl = pnl_series.mean()
-        avg_win_pnl = pnl_series[df["result"] == "win"].mean() if wins > 0 else 0
-        avg_loss_pnl = pnl_series[df["result"] == "lose"].mean() if losses > 0 else 0
+        win_pnls = pnl_series[df["result"] == "win"]
+        lose_pnls = pnl_series[df["result"] == "lose"]
+        avg_win_pnl = win_pnls.mean() if wins > 0 else 0
+        avg_loss_pnl = lose_pnls.mean() if losses > 0 else 0
+        best_trade = pnl_series.max()
+        worst_trade = pnl_series.min()
+
+        # 🔑 핵심 성과 지표
+        # Profit Factor = 총이익 / 총손실 (>1 이면 수익 구조)
+        gross_profit = win_pnls.sum() if wins > 0 else 0
+        gross_loss = abs(lose_pnls.sum()) if losses > 0 else 0.001
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+
+        # Payoff Ratio = 평균이익 / 평균손실 (리워드:리스크)
+        payoff_ratio = abs(avg_win_pnl / avg_loss_pnl) if avg_loss_pnl != 0 else float('inf')
+
+        # 기대값 = 승률×평균이익 + 패률×평균손실
+        expectancy = (wr / 100 * avg_win_pnl) + ((100 - wr) / 100 * avg_loss_pnl)
+
+        # 최대 연승/연패
+        streak_list = (df["result"] == "win").astype(int).tolist()
+        max_win_streak = max_lose_streak = cur_win = cur_lose = 0
+        for s in streak_list:
+            if s == 1:
+                cur_win += 1
+                cur_lose = 0
+            else:
+                cur_lose += 1
+                cur_win = 0
+            max_win_streak = max(max_win_streak, cur_win)
+            max_lose_streak = max(max_lose_streak, cur_lose)
+
+        # 최대 낙폭 (equity curve drawdown)
+        equity = pnl_series.cumsum()
+        running_max = equity.cummax()
+        drawdown = equity - running_max
+        max_dd = drawdown.min()
 
         # MFE/MAE 통계
-        mfe_str = ""
-        mae_str = ""
-        if "mfe_pct" in df.columns:
-            mfe_vals = pd.to_numeric(df["mfe_pct"], errors="coerce").dropna()
-            if len(mfe_vals) > 0:
-                mfe_str = f"평균MFE: +{mfe_vals.mean():.2f}%"
+        mfe_vals = pd.to_numeric(df.get("mfe_pct", pd.Series(dtype=float)), errors="coerce").dropna()
+        mae_vals = pd.to_numeric(df.get("mae_pct", pd.Series(dtype=float)), errors="coerce").dropna()
+        avg_mfe = mfe_vals.mean() if len(mfe_vals) > 0 else 0
+        avg_mae = mae_vals.mean() if len(mae_vals) > 0 else 0
+
+        # MFE 활용도 = PnL / MFE (고점 대비 얼마나 챙겼는지)
+        mfe_util = 0
+        if "mfe_pct" in df.columns and len(mfe_vals) > 0:
+            _mfe_aligned = pd.to_numeric(df["mfe_pct"], errors="coerce").fillna(0)
+            _mfe_nonzero = _mfe_aligned.replace(0, np.nan)
+            _util = (pnl_series / (_mfe_nonzero * 100)).dropna()
+            mfe_util = _util.mean() * 100 if len(_util) > 0 else 0
+
+        # MAE 역전률 = MAE -0.3% 이하였는데 결국 이긴 비율
+        mae_reversal = 0
         if "mae_pct" in df.columns:
-            mae_vals = pd.to_numeric(df["mae_pct"], errors="coerce").dropna()
-            if len(mae_vals) > 0:
-                mae_str = f"평균MAE: {mae_vals.mean():.2f}%"
+            deep_mae = df[pd.to_numeric(df["mae_pct"], errors="coerce").fillna(0) < -0.3]
+            if len(deep_mae) > 0:
+                mae_reversal = len(deep_mae[deep_mae["result"] == "win"]) / len(deep_mae) * 100
 
         # 보유시간 통계
-        hold_str = ""
-        if "hold_sec" in df.columns:
-            hold_vals = pd.to_numeric(df["hold_sec"], errors="coerce").dropna()
-            if len(hold_vals) > 0:
-                hold_str = f"평균보유: {hold_vals.mean():.0f}초"
+        hold_vals = pd.to_numeric(df.get("hold_sec", pd.Series(dtype=float)), errors="coerce").dropna()
+        avg_hold = hold_vals.mean() if len(hold_vals) > 0 else 0
+        med_hold = hold_vals.median() if len(hold_vals) > 0 else 0
 
-        # ─── 1. 헤더 ───
+        # PnL 표준편차 (변동성)
+        pnl_std = pnl_series.std() if len(pnl_series) > 1 else 0
+
+        # ═══════════════════════════════════════
+        # 리포트 조립
+        # ═══════════════════════════════════════
+
+        # ─── 1. 헤더 + 핵심 지표 ───
         lines = [
-            f"{'=' * 28}",
+            f"{'=' * 32}",
             f"📊 <b>배치 종합 리포트</b> (최근 {total}건)",
-            f"{'=' * 28}",
+            f"{'=' * 32}",
             f"📈 승률: {wr:.1f}% ({wins}승 / {losses}패)",
-            f"💰 누적PnL: {total_pnl:+.2f}%",
-            f"📉 평균PnL: {avg_pnl:+.2f}% (승 {avg_win_pnl:+.2f}% / 패 {avg_loss_pnl:+.2f}%)",
+            f"💰 누적PnL: {total_pnl:+.2f}% | 건당기대값: {expectancy:+.3f}%",
+            f"📉 평균: {avg_pnl:+.2f}% (승 {avg_win_pnl:+.2f}% / 패 {avg_loss_pnl:+.2f}%)",
+            f"🏆 최고: {best_trade:+.2f}% | 최저: {worst_trade:+.2f}%",
+            "",
+            f"<b>🔑 핵심 지표:</b>",
+            f"  PF(Profit Factor): {profit_factor:.2f}" + (" ✅" if profit_factor > 1 else " ❌"),
+            f"  Payoff(보상비): {payoff_ratio:.2f} (평균이익/평균손실)",
+            f"  최대낙폭: {max_dd:+.2f}% | PnL표준편차: {pnl_std:.3f}%",
+            f"  연승max: {max_win_streak} | 연패max: {max_lose_streak}",
         ]
-        if mfe_str or mae_str:
-            lines.append(f"📐 {mfe_str} | {mae_str}")
-        if hold_str:
-            lines.append(f"⏱ {hold_str}")
 
-        # ─── 2. 진입 경로별 통계 ───
+        # ─── 2. MFE/MAE 분석 ───
+        lines.append("")
+        lines.append(f"{'─' * 32}")
+        lines.append("<b>📐 MFE/MAE 분석:</b>")
+        lines.append(f"  평균MFE: +{avg_mfe:.2f}% | 평균MAE: {avg_mae:.2f}%")
+        lines.append(f"  MFE활용도: {mfe_util:.0f}% (고점 대비 수익 실현율)")
+        if mae_reversal > 0 or ("mae_pct" in df.columns):
+            lines.append(f"  MAE역전률: {mae_reversal:.0f}% (MAE<-0.3% 후 이긴 비율)")
+
+        # ─── 3. 보유시간 ───
+        lines.append(f"  보유시간: 평균{avg_hold:.0f}초 / 중앙값{med_hold:.0f}초")
+
+        # 보유시간 구간별 성과
+        if len(hold_vals) > 0:
+            lines.append("")
+            lines.append(f"{'─' * 32}")
+            lines.append("<b>⏱ 보유시간대별:</b>")
+            hold_col = pd.to_numeric(df["hold_sec"], errors="coerce").fillna(0) if "hold_sec" in df.columns else pd.Series([0]*total)
+            for label, lo, hi in [("~60초", 0, 60), ("60~180초", 60, 180), ("180~600초", 180, 600), ("600초~", 600, 999999)]:
+                mask = (hold_col >= lo) & (hold_col < hi)
+                sub = df[mask]
+                if len(sub) > 0:
+                    sw = len(sub[sub["result"] == "win"])
+                    s_wr = sw / len(sub) * 100
+                    s_pnl = pd.to_numeric(sub["pnl_pct"], errors="coerce").fillna(0).sum() * 100
+                    emoji = "🟢" if s_pnl > 0 else "🔴"
+                    lines.append(f"  {emoji} {label}: {len(sub)}건 승률{s_wr:.0f}% PnL{s_pnl:+.2f}%")
+
+        # ─── 4. 진입 경로별 통계 ───
         if "signal_tag" in df.columns:
             lines.append("")
-            lines.append(f"{'─' * 28}")
+            lines.append(f"{'─' * 32}")
             lines.append("<b>📍 경로별 성과:</b>")
             tag_groups = df.groupby(df["signal_tag"].fillna("기본"))
             tag_stats = []
@@ -4592,18 +4673,48 @@ def send_batch_trade_report():
                 w = len(grp[grp["result"] == "win"])
                 t_wr = w / cnt * 100 if cnt > 0 else 0
                 t_pnl = pd.to_numeric(grp["pnl_pct"], errors="coerce").fillna(0).sum() * 100
-                tag_stats.append((tag, cnt, w, t_wr, t_pnl))
-            # PnL 순 정렬
+                t_avg = t_pnl / cnt
+                tag_stats.append((tag, cnt, w, t_wr, t_pnl, t_avg))
             tag_stats.sort(key=lambda x: x[4], reverse=True)
-            for tag, cnt, w, t_wr, t_pnl in tag_stats:
+            for tag, cnt, w, t_wr, t_pnl, t_avg in tag_stats:
                 emoji = "🟢" if t_pnl > 0 else "🔴"
-                lines.append(f"  {emoji} {tag}: {cnt}건 승률{t_wr:.0f}% PnL{t_pnl:+.2f}%")
+                lines.append(f"  {emoji} {tag}: {cnt}건 승률{t_wr:.0f}% PnL{t_pnl:+.2f}% (건당{t_avg:+.2f}%)")
 
-        # ─── 3. 코인별 통계 (상위 5개) ───
+        # ─── 5. 청산 사유별 통계 (카테고리 집계) ───
+        if "exit_reason" in df.columns:
+            lines.append("")
+            lines.append(f"{'─' * 32}")
+            lines.append("<b>⏹ 청산사유별:</b>")
+            # 청산 사유를 카테고리로 그룹핑
+            def _categorize_reason(r):
+                r = str(r).strip()
+                if "트레일" in r: return "트레일링SL"
+                if "본절" in r or "base_stop" in r: return "본절SL"
+                if "시간만료" in r: return "시간만료"
+                if "손절" in r or "SL" in r.upper(): return "손절SL"
+                if "목표가" in r or "TP" in r: return "목표가TP"
+                if "좀비" in r or "잔고0" in r or "dust" in r: return "포지션정리"
+                return r[:15] if len(r) > 15 else (r or "미기록")
+            df["_reason_cat"] = df["exit_reason"].fillna("미기록").apply(_categorize_reason)
+            reason_groups = df.groupby("_reason_cat")
+            reason_stats = []
+            for reason, grp in reason_groups:
+                cnt = len(grp)
+                w = len(grp[grp["result"] == "win"])
+                r_wr = w / cnt * 100 if cnt > 0 else 0
+                r_pnl = pd.to_numeric(grp["pnl_pct"], errors="coerce").fillna(0).sum() * 100
+                reason_stats.append((reason, cnt, w, r_wr, r_pnl))
+            reason_stats.sort(key=lambda x: x[1], reverse=True)
+            for reason, cnt, w, r_wr, r_pnl in reason_stats[:8]:
+                emoji = "🟢" if r_pnl > 0 else "🔴"
+                pct = cnt / total * 100
+                lines.append(f"  {emoji} {reason}: {cnt}건({pct:.0f}%) 승률{r_wr:.0f}% PnL{r_pnl:+.2f}%")
+
+        # ─── 6. 코인별 통계 (상위5 + 하위3) ───
         if "market" in df.columns:
             lines.append("")
-            lines.append(f"{'─' * 28}")
-            lines.append("<b>🪙 코인별 성과 (상위5):</b>")
+            lines.append(f"{'─' * 32}")
+            lines.append("<b>🪙 코인별 (상위5/하위3):</b>")
             coin_groups = df.groupby("market")
             coin_stats = []
             for market, grp in coin_groups:
@@ -4615,13 +4726,16 @@ def send_batch_trade_report():
                 coin_stats.append((coin_name, cnt, w, c_wr, c_pnl))
             coin_stats.sort(key=lambda x: x[4], reverse=True)
             for coin, cnt, w, c_wr, c_pnl in coin_stats[:5]:
-                emoji = "🟢" if c_pnl > 0 else "🔴"
-                lines.append(f"  {emoji} {coin}: {cnt}건 승률{c_wr:.0f}% PnL{c_pnl:+.2f}%")
+                lines.append(f"  🟢 {coin}: {cnt}건 승률{c_wr:.0f}% PnL{c_pnl:+.2f}%")
+            if len(coin_stats) > 5:
+                lines.append("  ···")
+                for coin, cnt, w, c_wr, c_pnl in coin_stats[-3:]:
+                    lines.append(f"  🔴 {coin}: {cnt}건 승률{c_wr:.0f}% PnL{c_pnl:+.2f}%")
 
-        # ─── 4. 시간대별 통계 ───
+        # ─── 7. 시간대별 통계 ───
         if "ts" in df.columns:
             lines.append("")
-            lines.append(f"{'─' * 28}")
+            lines.append(f"{'─' * 32}")
             lines.append("<b>🕐 시간대별:</b>")
             hours = {}
             for _, row in df.iterrows():
@@ -4642,31 +4756,13 @@ def send_batch_trade_report():
             for bucket in sorted(hours.keys()):
                 s = hours[bucket]
                 h_wr = s["win"] / s["total"] * 100 if s["total"] > 0 else 0
-                lines.append(f"  {bucket}: {s['total']}건 승률{h_wr:.0f}% PnL{s['pnl']:+.2f}%")
+                emoji = "🟢" if s["pnl"] > 0 else "🔴"
+                lines.append(f"  {emoji} {bucket}: {s['total']}건 승률{h_wr:.0f}% PnL{s['pnl']:+.2f}%")
 
-        # ─── 5. 청산 사유별 통계 ───
-        if "exit_reason" in df.columns:
-            lines.append("")
-            lines.append(f"{'─' * 28}")
-            lines.append("<b>⏹ 청산사유별:</b>")
-            reason_groups = df.groupby(df["exit_reason"].fillna("미기록").str.strip())
-            reason_stats = []
-            for reason, grp in reason_groups:
-                if not reason:
-                    reason = "미기록"
-                cnt = len(grp)
-                w = len(grp[grp["result"] == "win"])
-                r_wr = w / cnt * 100 if cnt > 0 else 0
-                r_pnl = pd.to_numeric(grp["pnl_pct"], errors="coerce").fillna(0).sum() * 100
-                reason_stats.append((reason, cnt, w, r_wr, r_pnl))
-            reason_stats.sort(key=lambda x: x[1], reverse=True)
-            for reason, cnt, w, r_wr, r_pnl in reason_stats[:6]:
-                lines.append(f"  {reason}: {cnt}건 승률{r_wr:.0f}% PnL{r_pnl:+.2f}%")
-
-        # ─── 6. 진입모드별 통계 ───
+        # ─── 8. 진입모드별 통계 ───
         if "entry_mode" in df.columns:
             lines.append("")
-            lines.append(f"{'─' * 28}")
+            lines.append(f"{'─' * 32}")
             lines.append("<b>📦 진입모드별:</b>")
             for mode in ["probe", "half", "confirm"]:
                 mode_df = df[df["entry_mode"] == mode]
@@ -4674,9 +4770,33 @@ def send_batch_trade_report():
                     m_wins = len(mode_df[mode_df["result"] == "win"])
                     m_wr = m_wins / len(mode_df) * 100
                     m_pnl = pd.to_numeric(mode_df["pnl_pct"], errors="coerce").fillna(0).sum() * 100
-                    lines.append(f"  {mode}: {len(mode_df)}건 승률{m_wr:.0f}% PnL{m_pnl:+.2f}%")
+                    emoji = "🟢" if m_pnl > 0 else "🔴"
+                    lines.append(f"  {emoji} {mode}: {len(mode_df)}건 승률{m_wr:.0f}% PnL{m_pnl:+.2f}%")
 
-        lines.append(f"{'=' * 28}")
+        # ─── 9. 진단 요약 (자동 인사이트) ───
+        lines.append("")
+        lines.append(f"{'─' * 32}")
+        lines.append("<b>🧠 자동 진단:</b>")
+        insights = []
+        if profit_factor < 1:
+            insights.append(f"  ⚠️ PF {profit_factor:.2f} < 1 → 현재 구조적 손실 (총손실 > 총이익)")
+        if payoff_ratio < 1 and wr < 60:
+            insights.append(f"  ⚠️ 보상비 {payoff_ratio:.2f} + 승률 {wr:.0f}% → 둘 다 부족")
+        elif payoff_ratio < 1:
+            insights.append(f"  ℹ️ 보상비 {payoff_ratio:.2f} < 1 → 승률({wr:.0f}%)로 보완 중")
+        if mfe_util < 40 and mfe_util > 0:
+            insights.append(f"  ⚠️ MFE활용 {mfe_util:.0f}% → 고점 대비 수익 실현 부족 (익절 개선 필요)")
+        if max_lose_streak >= 5:
+            insights.append(f"  ⚠️ 최대연패 {max_lose_streak}연패 → 쿨다운/필터 강화 검토")
+        if avg_hold > 0 and med_hold > 0 and avg_hold > med_hold * 2:
+            insights.append(f"  ℹ️ 평균보유({avg_hold:.0f}초) >> 중앙값({med_hold:.0f}초) → 일부 장기 보유가 평균 왜곡")
+        if max_dd < -3:
+            insights.append(f"  ⚠️ 최대낙폭 {max_dd:.2f}% → 연속손실 구간 주의")
+        if not insights:
+            insights.append("  ✅ 특이사항 없음")
+        lines.extend(insights)
+
+        lines.append(f"{'=' * 32}")
 
         report_text = "\n".join(lines)
         tg_send(report_text)
@@ -4689,6 +4809,9 @@ def send_batch_trade_report():
                 writer = csv.DictWriter(f, fieldnames=[
                     "ts", "total", "wins", "losses", "win_rate",
                     "total_pnl", "avg_pnl", "avg_win_pnl", "avg_loss_pnl",
+                    "profit_factor", "payoff_ratio", "expectancy",
+                    "max_dd", "max_win_streak", "max_lose_streak",
+                    "mfe_util", "mae_reversal",
                 ])
                 if not batch_exists:
                     writer.writeheader()
@@ -4702,6 +4825,14 @@ def send_batch_trade_report():
                     "avg_pnl": f"{avg_pnl:.4f}",
                     "avg_win_pnl": f"{avg_win_pnl:.4f}" if wins > 0 else "",
                     "avg_loss_pnl": f"{avg_loss_pnl:.4f}" if losses > 0 else "",
+                    "profit_factor": f"{profit_factor:.3f}",
+                    "payoff_ratio": f"{payoff_ratio:.3f}",
+                    "expectancy": f"{expectancy:.4f}",
+                    "max_dd": f"{max_dd:.4f}",
+                    "max_win_streak": max_win_streak,
+                    "max_lose_streak": max_lose_streak,
+                    "mfe_util": f"{mfe_util:.1f}",
+                    "mae_reversal": f"{mae_reversal:.1f}",
                 })
         except Exception as e:
             print(f"[BATCH_REPORT_CSV_ERR] {e}")
