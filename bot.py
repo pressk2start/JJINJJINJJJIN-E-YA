@@ -48,73 +48,21 @@ SCAN_INTERVAL = 6
 COOLDOWN = 240  # 🔧 수익성패치: 480→240초 (게이트 엄격하니 쿨다운은 짧게)
 PARALLEL_WORKERS = 12
 
-# 🔧 백테스트최적: 코인 화이트리스트 (양수익 코인만 진입 허용)
-# ETH(WR55%,PF1.41), DOT(WR50%,PF1.07), ADA(WR55%,PF1.06), SAND(WR64%,PF1.03)
-# 나머지 6코인(DOGE,XRP,BTC,SHIB,AVAX,SOL)이 전체 손실의 80% 견인
-COIN_WHITELIST_ENABLED = os.environ.get("COIN_WHITELIST", "1") == "1"
-COIN_WHITELIST = {
-    "KRW-ETH", "KRW-DOT", "KRW-ADA", "KRW-SAND",
-    "KRW-MATIC", "KRW-LINK", "KRW-ATOM",  # 유사 특성 중형 알트 추가
-}
-
-# ========================================
-# 🔧 ELITE_MODE: 소수정예 진입 + R:R 1:1 (구조적 손익 개선)
-# ========================================
-# 핵심 논리:
-#   기존: 평균 TP≈0.3%, SL≈0.8~1.0%, WR=27.2% → 기대수익 -0.573% (구조적 마이너스)
-#   변경: TP=0.4%, SL=0.4% (R:R 1:1) + 고승률 조건만 진입 (WR 40%+)
-#   효과: 거래 수 1/5~1/10 감소하지만, 나쁜 조건의 손실이 좋은 조건의 수익을 갉아먹는 구조 해소
-#
-# 진입 조건 (모두 AND):
-#   1. trend_1h >= 0.1% (30분 프록시 기준 0.05%)  — WR=34~41%★
-#   2. bb_pos < 40                                 — WR=34.2%★ (밴드 하단)
-#   3. 좋은 시간대 (0, 6, 19, 20, 23시 KST)       — WR=30%+
-#   → 세 조건 교집합: WR ≈ 44.5% + R:R 1:1 = 기대수익 양전환 가능
-#
-# 환경변수: ELITE_MODE=0 으로 비활성화 가능
-# ========================================
-ELITE_MODE = os.environ.get("ELITE_MODE", "1") == "1"
-
-# ELITE_MODE 전용 파라미터 (Trend-Filtered Pullback 전략)
-ELITE_TREND_1H_MIN = 0.05      # 🔧 실전조정: 0.0→0.05 (추세필터 복원 — 하락장 눌림목 매수=낙하칼잡기 방지, 상승추세 풀백만 허용)
-ELITE_BB_POS_MAX = 40           # BB포지션 40 미만만 진입 (밴드 하단) — 볼린저 하단 눌림
-ELITE_GOOD_HOURS = set(range(24))  # 🔧 400봉백테스트: 24시간 허용 (EMA<-0.5 필터가 시간대 역할 대체 — 시간제한 해제로 38→38건 유지)
-ELITE_VWAP_GAP_MAX = 0.0       # 🔧 실전조정: -0.3→0.0% (EMA<-0.3과 이중필터 시 진입 과소 — VWAP 아래면 OK로 완화)
-ELITE_RSI_1M_MAX = 55           # 🔧 백테스트최적: 35→55 (과매도 필터 완화 — RSI 30~55 범위 진입 허용)
-ELITE_EMA_GAP_MAX = -0.3       # 🔧 실전조정: -0.5→-0.3% (진입빈도 확보 — 백테스트 58건 WR77.6% PF2.01, -0.5는 너무 희귀)
-ELITE_SL = 0.015                # 🔧 실전조정: 1.2%→1.5% (SL 연타 방지 — 정상눌림 MAE P25=-1.078% 생존, SL_MAX와 통일)
-ELITE_SL_MAX = 0.018            # 🔧 실전조정: 1.5%→1.8% (ATR 확장 허용 여유)
-ELITE_TP = 0.008                # 🔧 백테스트최적: 0.4%→0.8% (MFE P50=0.806% 기반)
-# 🔧 400봉백테스트: TP 0.4-0.8% 분할 (MFE P50=0.806% 기반 빠른 익절)
-ELITE_TP_PARTIAL = 0.004        # 🔧 400봉백테스트: 0.5%→0.4% (1차 50% 익절 — 빠른 수익 확보)
-ELITE_TP_TRAIL = 0.008          # 🔧 400봉백테스트: 1.0%→0.8% (2차 트레일 — MFE P50 근접 목표)
-ELITE_PARTIAL_RATIO = 0.5       # 1차 익절 비율 (50%)
-# 🔧 타임아웃 10분: MFE 대부분 초반 5~10분 형성, 이후 MAE만 증가
-ELITE_HORIZON_SEC = 600         # 10분 (기존 4~8분 → 10분 고정)
-
-if ELITE_MODE:
-    print(f"[ELITE_MODE] ON — Trend-Filtered Pullback | SL={ELITE_SL*100:.1f}% TP=분할({ELITE_TP_PARTIAL*100:.1f}%/{ELITE_TP_TRAIL*100:.1f}%) | "
-          f"조건: trend≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + VWAP<0 + RSI<{ELITE_RSI_1M_MAX} + EMA<0 + hours={sorted(ELITE_GOOD_HOURS)} | "
-          f"타임아웃={ELITE_HORIZON_SEC}초")
-else:
-    print("[ELITE_MODE] OFF — 기존 로직 유지")
-
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.008 if not ELITE_MODE else ELITE_SL_MAX  # 🔧 백테스트최적: ELITE=1.5%, 기존=0.8% (SL_MAX 연동)
+HARD_STOP_DD = 0.032  # 🔧 수익개선: 4.2→3.2% (SL 2.0% 대비 1.6배, 비상청산이 SL과 너무 멀면 손실만 확대)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
-EXIT_DEBOUNCE_N = 3  # 🔧 SSOT 정리: 모든 프로파일(gentle/balanced/strict) 3회로 통일
+EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-# 🔧 v4.0 R:R수술: SL 1.0%→0.6%, SL_MAX 1.2%→0.8% (R:R 1:1 구조로 개선)
-DYN_SL_MIN = ELITE_SL if ELITE_MODE else 0.006   # 🔧 백테스트최적: ELITE 1.0% / 기존 0.6%
-DYN_SL_MAX = ELITE_SL_MAX if ELITE_MODE else 0.008   # 🔧 백테스트최적: ELITE 1.5% / 기존 0.8%
+DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
+DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
 #   기존 0.30%에서 무장 → 진입가+0.06%에 트레일스톱 → 한 틱에 트립 문제 해결
-PROFIT_CHECKPOINT_BASE = 0.0035 if ELITE_MODE else 0.0030  # 🔧 400봉백테스트: 0.50%→0.35% (TP_PARTIAL 0.4% 전에 트레일 무장)
-PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% (CP 0.60%가 항상 우선)
+PROFIT_CHECKPOINT_BASE = 0.0025  # 🔧 데이터최적화: 0.3→0.25% (CP↓→빠른trail무장, 732건 wr83% PnL+126%)
+PROFIT_CHECKPOINT_MIN_ALPHA = 0.0003  # 🔧 조정: cost_floor=수수료0.1%+슬립0.13%+α0.03%=0.26% ≈ CP 0.25%
 # 🔧 FIX: entry/exit 슬립 분리 (TP에서 exit만 정확히 반영)
 _ENTRY_SLIP_HISTORY = deque(maxlen=50)  # 진입 슬리피지
 _EXIT_SLIP_HISTORY = deque(maxlen=50)   # 청산 슬리피지
@@ -134,7 +82,7 @@ def _get_trimmed_mean(slip_deque, default=0.0008):
 def get_dynamic_checkpoint():
     """🔧 체크포인트 = max(비용바닥, PROFIT_CHECKPOINT_BASE)
     비용바닥: 수수료 + 왕복슬립 + 최소알파 (≈0.26%)
-    BASE: 0.30% (캔들분석 최적 — MFE P25=0.198%, cost_floor 0.26% 이상)
+    BASE: 0.25% (데이터 최적)
     → 실질 비용을 커버하면서 빠른 trail 무장
     """
     fee = FEE_RATE
@@ -159,29 +107,16 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
-# 핵심: SL 1.0% 기준 R:R 연동 MFE 부분익절 목표 (MFE P50=0.413% 현실 반영)
-# 🔧 ELITE_MODE: 2단계 분할익절 → multiplier = 1.5 (SL 0.4% × 1.5 = 0.6% 트레일 목표)
-if ELITE_MODE:
-    MFE_RR_MULTIPLIERS = {
-        "🔥점화": 1.0,              # 🔧 백테스트최적: SL 1.0% × 1.0 = 1.0% TP (R:R 1:1)
-        "⭕동그라미": 1.0,           # 🔧 백테스트최적: R:R 1:1
-        "강돌파 (EMA↑+고점↑)": 1.0,  # 🔧 백테스트최적: R:R 1:1
-        "EMA↑": 1.0,                 # 🔧 백테스트최적: R:R 1:1
-        "고점↑": 1.0,                # 🔧 백테스트최적: R:R 1:1
-        "거래량↑": 1.0,             # 🔧 백테스트최적: R:R 1:1
-        "기본": 1.0,                # 🔧 백테스트최적: R:R 1:1
-    }
-else:
-    # 🔧 v4.0 R:R수술: SL 0.6% 기준 R:R=1:1 목표 → 모든 신호 1.0배 (0.6% TP)
-    MFE_RR_MULTIPLIERS = {
-        "🔥점화": 1.0,               # 🔧 v4.0: SL 0.6%×1.0=0.6% TP (R:R 1:1)
-        "⭕동그라미": 1.0,            # 🔧 v4.0: 0.6% TP
-        "강돌파 (EMA↑+고점↑)": 1.0,   # 🔧 v4.0: 0.6% TP
-        "EMA↑": 1.0,                  # 🔧 v4.0: 0.6% TP
-        "고점↑": 1.0,                 # 🔧 v4.0: 0.6% TP
-        "거래량↑": 1.0,              # 🔧 v4.0: 0.6% TP
-        "기본": 1.0,                 # 🔧 v4.0: 0.6% TP
-    }
+# 핵심: SL 2.0% 기준 R:R 연동 MFE 부분익절 목표
+# SL 2.0% 기준: 점화 3.6%, 강돌파 3.0%, EMA 2.8%, 기본 2.7%
+MFE_RR_MULTIPLIERS = {
+    "🔥점화": 1.8,              # SL 2.0%×1.8=3.6% (점화는 크게 먹어야)
+    "강돌파 (EMA↑+고점↑)": 1.5,  # SL 2.0%×1.5=3.0%
+    "EMA↑": 1.4,                 # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%, 수수료 차감 후 실질 R:R>1)
+    "고점↑": 1.4,                # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%)
+    "거래량↑": 1.35,             # 🔧 수익개선: 1.2→1.35 (SL 2.0%×1.35=2.7%, 기존 2.4%는 수수료에 먹힘)
+    "기본": 1.35,                # 🔧 수익개선: 1.2→1.35 (SL 2.0%×1.35=2.7%)
+}
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
 
@@ -190,103 +125,28 @@ def refresh_mfe_targets():
     global MFE_PARTIAL_TARGETS
     MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
 # MFE_PARTIAL_RATIO 제거 (미사용 — 실제 비율은 하드코딩됨)
-# 🔧 v4.0: 러너 모드 폐지 — 전부 스캘프 전량익절
-# 이유: 스캘프→러너 50% 익절 후 나머지 50%가 본절/소손실로 끝나는 패턴 반복
-# 차라리 0.6% 전량 익절이 실질 수익 높음
-RUNNER_MODE_DISABLED = True  # 러너 전환 비활성화
-SCALP_TO_RUNNER_MIN_BUY = 0.52   # (미사용 — 하위호환)
-SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # (미사용 — 하위호환)
+# ★ 스캘프→러너 자동전환 임계치: MFE 도달 시 모멘텀 확인되면 러너로 승격
+SCALP_TO_RUNNER_MIN_BUY = 0.52   # 🔧 R:R수정: 0.56→0.52 (러너 전환 더 적극적으로)
+SCALP_TO_RUNNER_MIN_ACCEL = 0.4  # 🔧 R:R수정: 0.6→0.4 (가속도 기준도 완화)
 
 # 트레일링 손절 설정
 # 🔧 매도구조개선: 트레일 거리 = SL × 0.8 (SL 1.0% → 트레일 0.80%)
 # 0.5%는 알트코인 정상 눌림(0.3~0.7%)에서 자꾸 트립 → 큰 수익 잘림
 TRAIL_ATR_MULT = 1.0  # ATR 기반 여유폭
-# 🔧 백테스트최적: 트레일 거리 = 0.30% (정상 눌림 0.3~0.7% 고려)
-TRAIL_DISTANCE_MIN_BASE = 0.0030 if ELITE_MODE else 0.0025  # 🔧 백테스트최적: ELITE 0.12%→0.30% (트레일 넓혀 큰수익 보호)
+TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (168샘플: 0.15%가 승률·수익 최적)
 
 def get_trail_distance_min():
-    """🔧 백테스트최적: Trail 0.30% (알트 정상 눌림 0.3~0.7% 고려)
-    야간(0-7시) 0.25% (변동성 낮음), 주간 0.30%
+    """🔧 시간대별 트레일 거리
+    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
     """
     _h = now_kst().hour
-    if ELITE_MODE:
-        # 🔧 백테스트최적: 야간 0.25%, 주간 0.30% (SL 1.0% × 0.30)
-        if 0 <= _h < 7:
-            return 0.0025
-        return max(TRAIL_DISTANCE_MIN_BASE, DYN_SL_MIN * 0.30)  # 1.0% × 0.30 = 0.30%
     if 0 <= _h < 7:
-        return 0.0020  # 🔧 캔들분석: 0.25→0.20% (야간 변동성 낮으니 트레일 타이트)
+        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.20)  # 🔧 캔들분석: SL 1.2% × 0.20 = 0.24%
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
-
-
-def calculate_atr_from_ticks(ticks, period=14):
-    """Tick 데이터에서 ATR(변동성) 근사 계산"""
-    if not ticks or len(ticks) < period:
-        return 0.005  # 기본값 0.5%
-    try:
-        prices = [t.get("trade_price", 0) for t in ticks if t.get("trade_price", 0) > 0]
-        if len(prices) < period:
-            return 0.005
-        recent_prices = prices[-period:]
-        max_p = max(recent_prices)
-        min_p = min(recent_prices)
-        if max_p > 0:
-            atr = (max_p - min_p) / max_p
-        else:
-            atr = 0.005
-        return max(0.001, atr)  # 최소 0.1%
-    except Exception:
-        return 0.005
-
-
-def check_momentum_guard(ticks, entry_price, cur_price, alive_sec):
-    """
-    진입 후 첫 60초 내 강한 매수신호 감지 시 SL 회피 권유
-    "진입→첫dip→SL" 패턴 방어
-    """
-    if alive_sec > 60:
-        return False
-    if cur_price <= entry_price:
-        return False
-    if not ticks or len(ticks) < 5:
-        return False
-    recent_ticks = list(ticks)[-20:] if len(ticks) >= 20 else list(ticks)
-    if not recent_ticks:
-        return False
-    recent_buys = sum(1 for t in recent_ticks if t.get("ask_bid") == "BID")
-    recent_buy_ratio = recent_buys / len(recent_ticks)
-    if cur_price > entry_price and recent_buy_ratio > 0.52:
-        return True
-    return False
-
-
-def get_exit_zone(cur_gain, dyn_checkpoint, mfe_target):
-    """
-    Exit Zone 결정 (3단계)
-    Zone 1 (0%→CP): SL만 활성, Trail 비활성
-    Zone 2 (CP→MFE): ATR 기반 Trail 시작
-    Zone 3 (MFE+): 넓은 Trail, Runner 전환
-    """
-    if cur_gain < dyn_checkpoint:
-        return "ZONE1"
-    elif cur_gain < mfe_target * 0.8:
-        return "ZONE2"
-    else:
-        return "ZONE3"
-
-
-def get_atr_trail_distance(atr_val, zone):
-    """Zone별 ATR 기반 Trail 거리"""
-    if zone == "ZONE2":
-        return max(0.002, atr_val * 0.75)   # ATR의 75%
-    elif zone == "ZONE3":
-        return max(0.003, atr_val * 1.5)    # ATR의 150%
-    return 0.002  # 기본
-
 
 # === 수수료 설정 (왕복 0.1% 반영) ===
 # 🔧 FIX: 변수명 명확화 - 왕복/편도 혼동 방지
@@ -298,10 +158,6 @@ FEE_RATE = FEE_RATE_ROUNDTRIP  # 하위 호환용
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
 POSTCHECK_ENABLED = False     # 🔧 비활성화: 포스트체크 끔 (진입 지연 + 기회손실 > 가짜돌파 차단 이득)
 EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
-
-# === 🔧 v4.0 진입 지연 확인 (돌파 후 되돌림 체크) ===
-ENTRY_DELAY_SEC = 3            # 돌파 감지 후 3초 대기
-ENTRY_MAX_RETRACEMENT = 0.0015 # 3초간 최대 되돌림 0.15% 이내면 진입
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -335,33 +191,33 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7          # 🔧 백테스트튜닝: 10→7초 (balanced 5초 대비 느슨)
-        HARD_STOP_DD = 0.008    # 🔧 v4.0: DYN_SL_MAX(0.8%)와 통일
+        HARD_STOP_DD = 0.030
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.0050  # 0.50% (gentle: balanced 0.25% 대비 넓게)
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 백테스트최적화: 0.50→0.20% (gentle은 balanced 0.15% 대비 살짝 넓게)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
         WARMUP_SEC = 3          # 🔧 백테스트튜닝: 6→3초 (balanced 5초 대비 타이트)
-        HARD_STOP_DD = 0.008    # 🔧 v4.0: DYN_SL_MAX(0.8%)와 통일
+        HARD_STOP_DD = 0.025
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0030  # 0.30% (strict: balanced 0.25% 대비 타이트)
+        TRAIL_DISTANCE_MIN_BASE = 0.0012  # 🔧 백테스트최적화: 0.30→0.12% (strict는 balanced 0.15% 대비 타이트)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
         WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
-        HARD_STOP_DD = 0.008   # 🔧 v4.0: DYN_SL_MAX(0.8%)와 통일
+        HARD_STOP_DD = 0.032   # 🔧 FIX: 4.2→3.2% (전역값과 통일, SL 2.0%×1.6 — 비상청산이 SL과 너무 멀면 손실만 확대)
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.0025  # 🔧 캔들분석: 0.40→0.25% (Trail 포착률 극대화, 전역값과 통일)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.40→0.15% (168샘플 최적값)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -397,7 +253,30 @@ _IGNITION_LAST_SIGNAL = {}  # {market: timestamp_ms} 마지막 점화 신호 시
 _IGNITION_BASELINE_TPS = {}  # {market: tps} 종목별 평시 틱/초
 _IGNITION_LOCK = threading.Lock()
 
-# (리테스트 진입 모드 제거됨 — RETEST_MODE_ENABLED=False 비활성 상태, 전체점검v4 코드정리)
+# =========================
+# 🎯 리테스트 진입 모드 (Retest Entry Mode)
+# =========================
+# 장초 급등 → 첫 양봉 패스 → 되돌림 후 지지 확인 시 진입
+RETEST_MODE_ENABLED = False          # 🔧 FIX: 리테스트 모드 비활성화 (이전 합의)
+RETEST_PEAK_MIN_GAIN = 0.015         # 최소 1.5% 급등 시 워치리스트 등록
+RETEST_PULLBACK_MIN = 0.006          # 🔧 최소 0.6% 되돌림 필요 (너무 얕으면 진짜 눌림 아님)
+RETEST_PULLBACK_MAX = 0.020          # 최대 2.0% 되돌림까지 허용
+RETEST_BOUNCE_MIN = 0.002            # 최소 0.2% 반등 확인
+RETEST_TIMEOUT_SEC = 900             # 🔧 15분 타임아웃 (3분→15분, 눌림 알파 소멸 전까지)
+# RETEST_SUPPORT_EMA 제거 (미사용 — EMA 지지 체크 미구현)
+RETEST_MORNING_HOURS = (8, 10)       # 장초 시간대 (08:00~10:00)
+
+# 🔧 리테스트 재진입 품질 필터 (떨어지는 칼 진입 구조적 차단)
+RETEST_BUY_RATIO_MIN = 0.55         # 재진입 시 최소 매수비
+RETEST_IMBALANCE_MIN = 0.35         # 재진입 시 최소 임밸런스
+RETEST_SPREAD_MAX = 0.40            # 재진입 시 스프레드 상한 (%)
+RETEST_KRW_PER_SEC_DEAD = 5000      # 눌림 중 거래량 사망 기준 (KRW/s)
+RETEST_EMA_GAP_MIN = 0.001          # 5분 EMA5>EMA20 최소 갭 (+0.1%)
+
+# 리테스트 워치리스트: {market: {"peak_price", "peak_ts", "pullback_low", "state", "pre", ...}}
+# state: "watching" → "pullback" → "bounce" → "ready"
+_RETEST_WATCHLIST = {}
+_RETEST_LOCK = threading.Lock()
 
 # (DCB 데드캣바운스 전략 제거됨 — 비활성 상태였으며 코드 정리)
 
@@ -438,34 +317,26 @@ _CIRCLE_LOCK = threading.Lock()
 # 전략: 횡보장에서 박스 하단 매수 → 상단 매도 반복
 # 돌파 전략과 독립 운영 (별도 워치리스트 + 모니터)
 BOX_ENABLED = True                     # 박스권 매매 활성화
-BOX_LOOKBACK = 30                      # 5분봉 30개 = 2.5시간
-BOX_USE_5MIN = True                    # 5분봉 기반 박스 감지
-BOX_MIN_RANGE_PCT = 0.008              # 🔧 v4.0: 2.0→0.8% (최소 박스 범위)
-BOX_MAX_RANGE_PCT = 0.025              # 🔧 v4.0: 3.5→2.5% (최대 박스 범위)
-BOX_MIN_TOUCHES = 3                    # 비연속 터치 3회
-BOX_TOUCH_ZONE_PCT = 0.20              # 터치 영역 20%
-BOX_ENTRY_ZONE_PCT = 0.12              # 바닥 근처 12% 영역에서만 진입
+BOX_LOOKBACK = 30                      # 🔧 36→30 (5분봉 30개 = 2.5시간, 신호 빈도 개선)
+BOX_USE_5MIN = True                    # 🔧 5분봉 기반 박스 감지 (1분봉 노이즈 제거)
+BOX_MIN_RANGE_PCT = 0.020              # 🔧 1.5→2.0% (수수료+스프레드 감안 최소 마진 확보)
+BOX_MAX_RANGE_PCT = 0.035              # 🔧 5.0→3.5% (BB 2.8%와 맞춤 — 넓으면 가짜 박스 진입)
+BOX_MIN_TOUCHES = 3                    # 🔧 4→3 (비연속 터치 3회면 충분한 확인)
+BOX_TOUCH_ZONE_PCT = 0.20              # 🔧 15→20% (터치 영역 넓혀서 카운트 정상화)
+BOX_ENTRY_ZONE_PCT = 0.12              # 🔧 25→12% (바닥 근처에서만 진입 — 3% 범위면 0.36%폭)
 BOX_EXIT_ZONE_PCT = 0.20               # 익절 영역: 박스 상단 20% 이내
-BOX_SL_BUFFER_PCT = 0.006              # 🔧 v4.0: 0.7→0.6% (SL 축소에 맞춤)
-BOX_MIN_VOL_KRW = 80_000_000          # 8천만
-BOX_ENTRY_MODE = "full"                # 풀사이즈
-BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션
+BOX_SL_BUFFER_PCT = 0.007              # 🔧 0.3→0.7% (박스 내 정상 노이즈 0.5~0.8% 수용)
+BOX_MIN_VOL_KRW = 80_000_000          # 🔧 1억→8천만 (약간 완화)
+BOX_ENTRY_MODE = "full"                # 🔧 half→full (SL 넓혔으므로 풀사이즈 — 수수료 부담 절감)
+BOX_MAX_POSITIONS = 2                  # 박스 전용 최대 포지션 (돌파와 별도)
 BOX_COOLDOWN_SEC = 300                 # 같은 종목 박스 재진입 쿨다운 5분
 BOX_SCAN_INTERVAL = 60                 # 60초 주기 스캔
 BOX_MIN_BB_WIDTH = 0.012               # 최소 BB폭 1.2%
-BOX_MAX_BB_WIDTH = 0.028               # 최대 BB폭 2.8%
+BOX_MAX_BB_WIDTH = 0.028               # 🔧 4.0→2.8% (4%는 추세 초입 — 진짜 박스만 잡기)
 BOX_CONFIRM_SEC = 10                   # 저점 체류 확인 10초
-BOX_MIN_MIDCROSS = 3                   # 3회 왕복
-BOX_MAX_TREND_SLOPE = 0.003            # 추세 없어야 박스
-BOX_MIN_CLOSE_IN_RANGE = 0.70          # 70% 중앙 밀집
-
-# 🔧 v4.0: 멀티그리드 박스 매매 파라미터
-GRID_BOX_ENABLED = True                # 그리드 박스 활성화
-GRID_LEVELS = 3                        # 박스 내 3단계 매수 (33%씩)
-GRID_SPACING_PCT = 0.003               # 그리드 간격 0.3%
-GRID_TP_PCT = 0.004                    # 그리드 익절 0.4% (각 그리드별)
-GRID_SL_PCT = 0.006                    # 박스 이탈 시 0.6% 손절
-GRID_CONFIRM_CANDLES = 30              # 30분봉 박스 확인 (30분 이상 횡보)
+BOX_MIN_MIDCROSS = 3                   # 🔧 4→3 (3회 왕복이면 충분한 횡보 확인)
+BOX_MAX_TREND_SLOPE = 0.003            # 종가 선형회귀 기울기 상한 0.3% (추세 없어야 박스)
+BOX_MIN_CLOSE_IN_RANGE = 0.70          # 🔧 80→70% (70%면 충분히 중앙 밀집)
 
 # 박스 워치리스트: { market: { box_high, box_low, ... } }
 _BOX_WATCHLIST = {}
@@ -847,9 +718,9 @@ def get_adaptive_risk() -> float:
         win_rate = wins / len(TRADE_HISTORY)
 
         if win_rate < 0.30:
-            base_risk = RISK_PER_TRADE * 0.85  # 🔧 R:R개선: 0.8→0.85 (문제는 R:R이지 승률 아님, 과도한 축소=악순환)
+            base_risk = RISK_PER_TRADE * 0.5
         elif win_rate < 0.38:
-            base_risk = RISK_PER_TRADE * 0.90  # 🔧 R:R개선: 0.9→0.90 (포지션 축소로는 R:R 해결 안 됨)
+            base_risk = RISK_PER_TRADE * 0.7  # 🔧 수익개선: 30~38% 구간 리스크 축소 (손실 누적 주범 구간)
         elif win_rate >= 0.50:
             base_risk = RISK_PER_TRADE * 1.2
 
@@ -1703,14 +1574,15 @@ def cut_summary():
         print(f"[CUT_SUMMARY] {' , '.join(parts)}")
 
 
-def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=False, signal_tag=""):
+def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=False):
     """
     주문 직전 가격 재확인 (동적 임계치)
     - initial_price: 신호 발생 시 기준 가격 (pre['price'])
     - max_drift: 신호가 대비 허용 상승률 (None이면 동적 계산)
     - ticks: 변동성 계산용 틱 데이터
     - is_circle: 동그라미 재돌파 진입 여부 (True면 threshold 완화)
-    - signal_tag: 신호 타입 (점화/강돌파 등 → 대장주 완화)
+    - AGGRESSIVE_MODE=True 인 경우, max_drift~max_drift+1.2% 구간은
+      '추격 진입'으로 소액/피라미딩 기반 진입 허용
     """
     try:
         js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
@@ -1729,20 +1601,18 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             pstd = price_band_std(ticks or [], sec=10) if ticks else None
             pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
             r = relax_knob()  # 0~1.5
-            # 🔧 전체점검v4: 0.5→0.8% (대장주일수록 신호→주문 사이 빠르게 상승)
-            # 기존 0.5%는 대장주 기회손실 과다 — 1%+ 급등만 차단하도록 완화
-            base = 0.008 if not AGGRESSIVE_MODE else 0.009
+            # 🔧 0.5% 기준 (짧은 순간 0.5% 움직임이면 충분)
+            base = 0.005 if not AGGRESSIVE_MODE else 0.006
             # 🔧 야간(0~6시) 추격 허용폭 +0.1% 완화
             hour = now_kst().hour
             if 0 <= hour < 6:
                 base += 0.001
-            # 🔧 pstd 기여도: 서지 시 최대 +0.2%
+            # 🔧 FIX: pstd 기여도 축소 (서지 중 고변동성 → 가드 넓어짐 → 꼭대기 체결)
+            # 기존: min(0.004, pstd*0.5) → 서지 시 최대 +0.4%
+            # 변경: min(0.002, pstd*0.3) → 서지 시 최대 +0.2% (변동성 클수록 조심)
             dyn = base + min(0.002, pstd * 0.3) + r * 0.002
-            # 🔧 동그라미(재돌파)는 이미 눌림 검증 완료 → +0.3% 완화
+            # 🔧 FIX: 동그라미(재돌파)는 이미 눌림 검증 완료 → threshold +0.3% 완화
             if is_circle:
-                dyn += 0.003
-            # 🔧 전체점검v4: 점화/강돌파 = 대장주 가능성 높음 → +0.3% 추가 완화
-            if "점화" in signal_tag or "강돌파" in signal_tag:
                 dyn += 0.003
             thr = dyn
         else:
@@ -1773,9 +1643,8 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
             if js_retry:
                 current_price = js_retry[0].get("trade_price", initial_price)
                 drift = (current_price / initial_price - 1.0)
-                # 🔧 전체점검v4: base와 동일한 기준 적용 (기존 0.6% 하드코딩 제거)
-                _retry_thr = 0.009 if AGGRESSIVE_MODE else 0.008
-                if drift <= _retry_thr:
+                # 재시도 성공 시 간단히 상승률만 체크 (동적 임계치는 기본값 사용)
+                if drift <= 0.006:  # 0.6% 이하면 통과
                     print(f"[GUARD_RETRY_OK] {m} 재시도 성공 (drift={drift*100:.2f}%)")
                     return True, current_price, False
                 else:
@@ -1861,22 +1730,52 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             entry_fraction = 1.0    # 전체 금액 (확정 진입)
             mode_emoji = "🔥"
 
+        # ========================================
+        # 🚀 Pre-break 전용 2초 포스트체크
+        # ========================================
+        filter_type = pre.get("filter_type", "")
+        if filter_type == "prebreak" and PREBREAK_POSTCHECK_SEC > 0:
+            print(f"[PREBREAK] {m} → {PREBREAK_POSTCHECK_SEC}초 포스트체크 시작")
+            time.sleep(PREBREAK_POSTCHECK_SEC)
+
+            # 틱 재조회
+            ticks_recheck = get_recent_ticks(m, 100)
+            if not ticks_recheck:
+                signal_skip("PREBREAK 포스트체크: 틱 없음")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+
+            t15_recheck = micro_tape_stats_from_ticks(ticks_recheck, 15)
+
+            # 매수비/거래속도 재확인
+            if t15_recheck["buy_ratio"] < PREBREAK_BUY_MIN * 0.9:  # 10% 여유
+                signal_skip(f"PREBREAK 포스트체크: 매수비 하락 ({t15_recheck['buy_ratio']:.0%})")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+
+            if t15_recheck["krw_per_sec"] < PREBREAK_KRW_PER_SEC_MIN * 0.7:  # 30% 여유
+                signal_skip(f"PREBREAK 포스트체크: 거래속도 하락 ({t15_recheck['krw_per_sec']/1000:.0f}K)")
+                with _POSITION_LOCK:
+                    OPEN_POSITIONS.pop(m, None)
+                return
+
+            print(f"[PREBREAK] {m} 포스트체크 통과 → 진입 진행")
+
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
-        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False), signal_tag=pre.get("signal_tag", ""))
+        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
 
         # 🔧 FIX: VWAP gap + drift 복합 체크 (가드 통과해도 총 괴리 과대 → 꼭대기 진입 차단)
         # 예: VWAP+1.7% 신호 + 0.95% drift = 2.65% → 실질 VWAP+2.65% 진입은 과도
         _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
         _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
         _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
-        # 🔧 전체점검v4: 대장주 기회손실 방지 — 임계치 2.0→2.5% 완화
-        # 눌림 진입(VWAP<=-0.3)은 3.0% 유지
-        _gap_threshold = 3.0 if _vwap_gap_pct <= -0.3 else 2.5
-        if _total_gap > _gap_threshold and not pre.get("is_circle"):
+        if _total_gap > 2.0 and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
-                  f"= 총 {_total_gap:.1f}% > {_gap_threshold:.1f}% → 꼭대기 진입 차단")
+                  f"= 총 {_total_gap:.1f}% > 2.0% → 꼭대기 진입 차단")
 
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
@@ -2395,7 +2294,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         actual_pct = (krw_to_use / krw_bal * 100) if krw_bal > 0 else 0
 
         # 🔥 경로 표시: signal_tag 하나로 간소화
-        path_str = pre.get("signal_tag", "기본")
+        filter_type = pre.get("filter_type", "stage1_gate")
+        if filter_type == "prebreak":
+            path_str = "🚀선행진입"
+        else:
+            path_str = pre.get("signal_tag", "기본")
 
         # ✅ 손절가 None 방지
         safe_stop_str = fmt6(stop_price) if isinstance(stop_price, (int, float)) and stop_price > 0 else "계산중"
@@ -2422,6 +2325,79 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         with _ORPHAN_LOCK:
             _ORPHAN_HANDLED.add(m)
 
+        # === 🧠 피처 로깅 (자동 학습용) ===
+        if AUTO_LEARN_ENABLED:
+            try:
+                ob = pre.get("ob", {})
+                t = pre.get("tape", {})
+                ticks = pre.get("ticks", [])
+                imbalance = calc_orderbook_imbalance(ob) if ob else 0
+                turn = t.get("krw", 0) / max(ob.get("depth_krw", 1), 1) if ob else 0
+
+                # 🔥 새 지표 계산
+                cons_buys = calc_consecutive_buys(ticks, 15)
+                t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+                avg_krw = calc_avg_krw_per_tick(t15_stats)
+                flow_accel = calc_flow_acceleration(ticks)
+
+                # 🚀 초단기 미세필터 지표 계산
+                ia_stats = inter_arrival_stats(ticks, 30) if ticks else {"cv": 0.0}
+                cv = ia_stats.get("cv") or 0.0  # 🔧 FIX: None→0.0 (round(None) TypeError 방지)
+                pstd = price_band_std(ticks, sec=10) if ticks else None
+                pstd = pstd if pstd is not None else 0.0  # None 센티넬 처리
+                overheat = flow_accel * float(pre.get("volume_surge", 1.0))
+                # 틱 신선도
+                fresh_age = 0.0
+                if ticks:
+                    now_ms = int(time.time() * 1000)
+                    # 🔧 FIX: tick_ts_ms 헬퍼로 통일
+                    last_tick_ts = max(tick_ts_ms(t) for t in ticks)
+                    if last_tick_ts == 0: last_tick_ts = now_ms
+                    fresh_age = (now_ms - last_tick_ts) / 1000.0
+                # 베스트호가 깊이
+                try:
+                    u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
+                    best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+                except Exception:
+                    best_ask_krw = 0.0
+
+                # 🔍 경로 정보: signal_tag 하나로 통일
+                log_trade_features({
+                    "ts": now_kst_str(),
+                    "market": m,
+                    "entry_price": avg_price,
+                    "buy_ratio": t.get("buy_ratio", 0),
+                    "spread": ob.get("spread", 0),
+                    "turn": turn,
+                    "imbalance": imbalance,
+                    "volume_surge": pre.get("volume_surge", 1.0),
+                    "fresh": 1 if last_two_ticks_fresh(ticks) else 0,
+                    "score": pre.get("ignition_score", 0),
+                    "entry_mode": entry_mode,
+                    "signal_tag": pre.get("signal_tag", "기본"),
+                    "filter_type": pre.get("filter_type", "stage1_gate"),
+                    # 🔥 새 지표
+                    "consecutive_buys": cons_buys,
+                    "avg_krw_per_tick": round(avg_krw, 0),
+                    "flow_acceleration": round(flow_accel, 2),
+                    # 🚀 초단기 미세필터 지표
+                    "overheat": round(overheat, 2),
+                    "fresh_age": round(fresh_age, 2),
+                    "cv": round(cv, 2),
+                    "pstd": round(pstd * 100, 4),  # % 단위
+                    "best_ask_krw": int(best_ask_krw),
+                    # 🔧 FIX: 진단 필드 누락 보완 (FEATURE_FIELDS에 있지만 미기록이던 항목)
+                    "shadow_flags": pre.get("shadow_flags", ""),
+                    "would_cut": 1 if pre.get("would_cut", False) else 0,
+                    "is_prebreak": 1 if pre.get("is_prebreak", False) else 0,
+                    # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 (진입시 기록)
+                    "entry_atr_pct": round(_entry_atr_pct, 4),          # % 단위
+                    "entry_pstd": round(_entry_pstd * 100, 4),          # % 단위 (pstd 필드와 통일)
+                    "entry_spread": round(ob.get("spread", 0), 4),      # % 단위
+                    "entry_consec": cons_buys,
+                })
+            except Exception as e:
+                print(f"[FEATURE_LOG_ERR] {e}")
 
         # 🔐 컨텍스트 종료 시 entry_lock 자동 해제
 
@@ -2700,6 +2676,12 @@ def close_auto_position(m, reason=""):
                 OPEN_POSITIONS.pop(m, None)
             # 🔧 FIX: volume 0이어도 알람 + 리포트 카운트 증가
             tg_send(f"⚠️ {m} 청산 완료 (수량 0 확인)\n• 사유: {reason}\n• 외부 청산 또는 이미 정리됨")
+            if AUTO_LEARN_ENABLED:
+                try:
+                    update_trade_result(m, 0, 0, 0, exit_reason=reason or "잔고0_외부청산")  # 🔧 FIX: exit_reason 전달
+                except Exception:
+                    pass
+            return
 
         entry_price = pos.get("entry_price", 0)
 
@@ -2799,6 +2781,19 @@ def close_auto_position(m, reason=""):
                             record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"))  # 🔧 수수료 반영
                         except Exception as _e:
                             print("[DELAYED_TRADE_RECORD_ERR]", _e)
+                        # 🔧 학습 로그 업데이트
+                        if AUTO_LEARN_ENABLED:
+                            try:
+                                hold_sec = time.time() - pos.get("entry_ts", time.time())
+                                mfe = pos.get("mfe_pct", 0.0)
+                                mae = pos.get("mae_pct", 0.0)
+                                # 🔧 FIX: 수수료 반영한 순수익률 사용
+                                update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
+                                                    added=pos.get('added', False), exit_reason=reason,
+                                                    mfe_pct=mfe, mae_pct=mae,
+                                                    entry_ts=pos.get("entry_ts"))
+                            except Exception as _e:
+                                print("[DELAYED_CLOSE_LOG_ERR]", _e)
                         return
 
                 # 30초 후에도 잔고 있으면 → 후속 워커로 추가 감시
@@ -2833,6 +2828,18 @@ def close_auto_position(m, reason=""):
                                     record_trade(m, _net_ret, pos.get("signal_type", "기본"))  # 🔧 FIX: 승률/연패 추적 누락 방지
                                 except Exception:
                                     pass
+                                if AUTO_LEARN_ENABLED:
+                                    try:
+                                        _hold = time.time() - pos.get("entry_ts", time.time())
+                                        _mfe = pos.get("mfe_pct", 0.0)
+                                        _mae = pos.get("mae_pct", 0.0)
+                                        update_trade_result(m, _fup_exit_price, _net_ret, _hold,  # 🔧 FIX: stale cur_price → 실제 체결가
+                                                            added=pos.get('added', False),
+                                                            exit_reason=reason or "후속확인_청산",
+                                                            mfe_pct=_mfe, mae_pct=_mae,
+                                                            entry_ts=pos.get("entry_ts"))
+                                    except Exception as _e:
+                                        print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
                                 return
                         # 🔧 4분 후에도 미체결 → 경고 알림
                         tg_send(f"🚨 <b>{m} 청산 미완료</b>\n• 4분 후속감시 종료, 수동 확인 필요\n• 사유: {reason}")
@@ -2934,6 +2941,22 @@ def close_auto_position(m, reason=""):
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
+            # 🧠 자동 학습용 결과 업데이트
+            if AUTO_LEARN_ENABLED:
+                try:
+                    hold_sec = time.time() - pos.get("entry_ts", time.time())
+                    was_added = pos.get("added", False)  # 🔍 추매 여부
+                    # 🔧 MFE/MAE 전달 (monitor_position에서 실시간 저장됨)
+                    mfe = pos.get("mfe_pct", 0.0)
+                    mae = pos.get("mae_pct", 0.0)
+                    # 🔧 FIX: net_ret_pct 사용 (수수료 반영된 실제 수익률)
+                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                                        added=was_added, exit_reason=reason,
+                                        mfe_pct=mfe, mae_pct=mae,
+                                        entry_ts=pos.get("entry_ts"),
+                                        pos_snapshot=dict(pos))
+                except Exception as _e:
+                    print(f"[FEATURE_UPDATE_ERR] {_e}")
 
             # 🔧 FIX: net_ret_pct 기준 판정 (gross 기준 시 수수료 미반영으로 마이너스인데 🟢 표기 버그)
             result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
@@ -3002,6 +3025,12 @@ def close_auto_position(m, reason=""):
                 with _ORPHAN_LOCK:
                     _ORPHAN_HANDLED.add(m)
                 tg_send(f"🧹 {m} 청산 완료 (최소주문금액 미달 dust)\n• 소량 잔여는 거래소에 보유 (유령감지 제외)")
+                # 🔧 FIX: 리포트 카운트 증가
+                if AUTO_LEARN_ENABLED:
+                    try:
+                        update_trade_result(m, 0, 0, 0, exit_reason=reason or "최소주문금액_dust")  # 🔧 FIX: exit_reason 전달
+                    except Exception:
+                        pass
                 return
 
             # 🔧 FIX: 400 에러 시 실제 잔고 확인 → 0이면 좀비 포지션 제거
@@ -3016,6 +3045,11 @@ def close_auto_position(m, reason=""):
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
                     # 🔧 FIX: 리포트 카운트 증가
+                    if AUTO_LEARN_ENABLED:
+                        try:
+                            update_trade_result(m, 0, 0, 0, exit_reason=reason or "좀비포지션_잔고0")  # 🔧 FIX: exit_reason 전달
+                        except Exception:
+                            pass
             return
     finally:
         # 🔧 FIX: 중복 청산 방지 락 해제 (성공/실패 상관없이)
@@ -3311,7 +3345,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
             f"===================================="
         )
 
-        # 🔧 FIX: 전량청산 시 record_trade(net) 호출 (TRADE_HISTORY/streak 추적)
+        # 🔧 FIX: 전량청산 시 record_trade(net) + update_trade_result(net) 호출
+        # - 기존: update_trade_result(gross)만 호출 → TRADE_HISTORY/streak 누락
+        # - 변경: net 기준으로 통일, record_trade도 호출
         if remaining_volume <= 1e-10:
             # 🔧 FIX: 백업된 entry_ts, added 사용 (pop 후라 OPEN_POSITIONS에 없음)
             try:
@@ -3321,6 +3357,12 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     hold_sec = 0
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
                 record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"))
+                # 🔧 FIX: update_trade_result(net) - 학습/쿨다운 정확성
+                if AUTO_LEARN_ENABLED:
+                    update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
+                                        added=backup_added, exit_reason=reason or "부분청산",
+                                        entry_ts=backup_entry_ts,
+                                        pos_snapshot=backup_pos_snapshot)  # 🔧 FIX: 튜닝 메트릭 전달
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
@@ -3602,38 +3644,24 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             # 🔧 구조개선: 리모니터 TP 대폭 하향 — 갭존 해소
             #   기존: 스캘프TP 0.6~0.9% → 리모니터TP 1.2~2.2% (도달 불가능한 갭)
             #   개선: 리모니터TP = 스캘프TP × 1.5 수준 (현실적 도달 가능)
-            # 🔧 ELITE_MODE: 2단계 분할익절 (50%@0.3% + 50%→0.6% 트레일)
-            # TP_PART = 1차 익절 (50% 물량, 0.3%), TP_FULL = 2차 트레일 목표 (0.6%)
-            if ELITE_MODE:
-                TP_FULL = {
-                    "🔥점화": ELITE_TP_TRAIL * 100, "⭕동그라미": ELITE_TP_TRAIL * 100,
-                    "강돌파 (EMA↑+고점↑)": ELITE_TP_TRAIL * 100, "EMA↑": ELITE_TP_TRAIL * 100,
-                    "고점↑": ELITE_TP_TRAIL * 100, "거래량↑": ELITE_TP_TRAIL * 100, "기본": ELITE_TP_TRAIL * 100,
-                }
-                TP_PART = {
-                    "🔥점화": ELITE_TP_PARTIAL * 100, "⭕동그라미": ELITE_TP_PARTIAL * 100,
-                    "강돌파 (EMA↑+고점↑)": ELITE_TP_PARTIAL * 100, "EMA↑": ELITE_TP_PARTIAL * 100,
-                    "고점↑": ELITE_TP_PARTIAL * 100, "거래량↑": ELITE_TP_PARTIAL * 100, "기본": ELITE_TP_PARTIAL * 100,
-                }
-            else:
-                TP_FULL = {
-                    "🔥점화": 0.80,             # 🔧 전체점검v4: 1.5→0.8 (MFE P75~P90 현실적 타겟)
-                    "⭕동그라미": 0.80,          # 🔧 전체점검v4: 1.6→0.8 (재돌파도 점화와 동일)
-                    "강돌파 (EMA↑+고점↑)": 0.55, # 🔧 전체점검v4: 1.0→0.55 (MFE P50=0.41 기준)
-                    "EMA↑": 0.45,              # 🔧 전체점검v4: 0.8→0.45 (P50 수준)
-                    "고점↑": 0.40,             # 🔧 전체점검v4: 0.7→0.40
-                    "거래량↑": 0.35,           # 🔧 전체점검v4: 0.65→0.35 (약신호 빠른 확정)
-                    "기본": 0.40,              # 🔧 전체점검v4: 0.7→0.40
-                }
-                TP_PART = {
-                    "🔥점화": 0.50,             # 🔧 전체점검v4: 0.9→0.50 (MFE P50 이내)
-                    "⭕동그라미": 0.50,          # 🔧 전체점검v4: 0.9→0.50
-                    "강돌파 (EMA↑+고점↑)": 0.35, # 🔧 전체점검v4: 0.6→0.35
-                    "EMA↑": 0.30,              # 🔧 전체점검v4: 0.5→0.30
-                    "고점↑": 0.28,             # 🔧 전체점검v4: 0.5→0.28
-                    "거래량↑": 0.25,           # 🔧 전체점검v4: 0.4→0.25 (최소 확정)
-                    "기본": 0.28,              # 🔧 전체점검v4: 0.5→0.28
-                }
+            TP_FULL = {
+                "🔥점화": 1.5,              # 🔧 구조개선: 2.2→1.5 (점화 프리미엄 유지)
+                "⭕동그라미": 1.6,           # 🔧 FIX: 재돌파는 추세연장 가능 → 점화보다 살짝 높은 풀TP
+                "강돌파 (EMA↑+고점↑)": 1.2,  # 🔧 구조개선: 1.8→1.2
+                "EMA↑": 1.0,               # 🔧 구조개선: 1.4→1.0
+                "고점↑": 0.9,              # 🔧 구조개선: 1.3→0.9
+                "거래량↑": 0.8,            # 🔧 구조개선: 1.2→0.8
+                "기본": 0.9,               # 🔧 구조개선: 1.3→0.9
+            }
+            TP_PART = {
+                "🔥점화": 0.9,              # 🔧 구조개선: 1.2→0.9
+                "⭕동그라미": 0.9,           # 🔧 FIX: 재돌파 부분익절 = 점화와 동일 (눌림 검증 완료)
+                "강돌파 (EMA↑+고점↑)": 0.7,  # 🔧 구조개선: 1.0→0.7
+                "EMA↑": 0.6,               # 🔧 구조개선: 0.9→0.6
+                "고점↑": 0.6,              # 🔧 구조개선: 1.0→0.6
+                "거래량↑": 0.5,            # 🔧 구조개선: 1.0→0.5
+                "기본": 0.6,               # 🔧 구조개선: 1.0→0.6
+            }
 
             # 현재 포지션의 signal_tag 가져오기
             with _POSITION_LOCK:
@@ -3720,68 +3748,40 @@ TICKS_BUY_RATIO = 0.56
 # 연속매수: 승 8.0 vs 패 4.43 → 하한 6
 # 가속도: 승 1.96 vs 패 2.42 → 상한 2.5x
 # ========================================
-# 🔧 v4.0: 필터 간소화 — 40개→15개 (과적합 제거, 기회 확대)
-GATE_TURN_MAX = 40.0      # 유지 (회전율 상한)
-GATE_SPREAD_MAX = 0.50    # 🔧 v4.0: 0.40→0.50% (유지, 스프레드 0.5% 이하)
-GATE_ACCEL_MIN = 0.0      # 🔧 v4.0: 0.6→0.0 (제거 — 가속도가 승률과 무상관)
-GATE_ACCEL_MAX = 999.0    # 🔧 v4.0: 6.0→999 (제거 — 가속도 상한 불필요)
-GATE_BUY_RATIO_MIN = 0.55 # 🔧 v4.0: 0.62→0.55 (완화 — 기회 확대)
-GATE_SURGE_MAX = 999.0    # 🔧 v4.0: 50→999 (제거 — 변동성 자체는 기회)
-GATE_OVERHEAT_MAX = 999.0 # 🔧 v4.0: 25→999 (제거 — 점화를 차단하는 부작용)
-GATE_IMBALANCE_MIN = 0.40 # 🔧 v4.0: 0.55→0.40 (완화 — 최소한의 매수세만 확인)
-GATE_CONSEC_MIN = 2       # 유지
+GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
+GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
+GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
+GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
+GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
+GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
+GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
+GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
+GATE_CONSEC_MIN = 2       # 📊 180신호분석: 6→2 (연속양봉2개 wr42.3% 최적, 6개는 기회 과다 차단)
 GATE_STRONGBREAK_OFF = False  # 🔧 강돌파 활성 (임계치로 품질 관리)
 # 강돌파 전용 강화 임계치 (일반보다 빡세게)
 GATE_STRONGBREAK_TURN_MAX = 25.0  # 🔧 15→25 완화
 GATE_STRONGBREAK_ACCEL_MAX = 3.5  # 🔧 차트분석: 2.5→3.5 (진짜 돌파는 accel 3-4x, 2.5로 막으면 손실)
-GATE_STRONGBREAK_BODY_MAX = 0.8   # 🔧 캔들분석: 1.0→0.8% (body큰 봉 = 꼭대기, body>0.5% WR=17% → 강돌파도 축소)
-GATE_IGNITION_BODY_MAX = 1.0      # 🔧 캔들분석: 1.5→1.0% (점화도 body 1%+ 이면 꼭대기 진입 위험)
-GATE_EMA_CHASE_MAX = 0.3          # 🔧 전체점검v5: 0.5→0.3% (EMA 위 0.3%+ = 추격, WR=24.1%→ 더 엄격하게)
+GATE_STRONGBREAK_BODY_MAX = 1.0   # 🔧 꼭대기방지: 강돌파 캔들 과확장 상한 (%) - 1분봉 시가 대비 이미 1%+ 상승 시 차단
+GATE_IGNITION_BODY_MAX = 1.5      # 🔧 꼭대기방지: 점화 캔들 과확장 상한 (%) - 점화는 모멘텀 확인이므로 좀 더 허용
+GATE_EMA_CHASE_MAX = 1.0          # 🔧 꼭대기방지: 강돌파 EMA20 이격 상한 (%) - 이미 1%+ 위면 추격
 GATE_IGNITION_ACCEL_MIN = 1.1     # 🔧 차트분석: 1.3→1.1 (초기 모멘텀 1.1x도 유효, 차트분석: 초기진입 승률 75%)
 ## (제거됨) GATE_CV_MAX: CV_HIGH 필터 삭제 → 스푸핑 필터 + overheat가 커버
-GATE_FRESH_AGE_MAX = 15.0  # 🔧 v4.0: 10→15초 (완화)
-# 🔧 v4.0: pstd 필터 제거 (변동성 자체는 기회)
-GATE_PSTD_MAX = 999.0     # 🔧 v4.0: 0.20→999 (제거)
-GATE_PSTD_STRONGBREAK_MAX = 999.0  # 🔧 v4.0: 0.12→999 (제거)
+GATE_FRESH_AGE_MAX = 10.0  # 🔧 차트분석: 7.5→10.0 (알트 비활성시간 틱지연 반영, 실데이터: 8-12초 갭 빈번)
+# 🔧 노이즈/과변동 필터 (승패 데이터 기반)
+GATE_PSTD_MAX = 0.20      # 🔧 알람복구: 0.12→0.20 (0.12는 정상 알트 변동도 차단, 0.20이면 과도한 노이즈만 필터)
+GATE_PSTD_STRONGBREAK_MAX = 0.12  # 🔧 알람복구: 0.08→0.12 (강돌파는 약간의 변동성 동반이 정상)
 GATE_TURN_MAX_MAJOR = 400.0   # 🔧 승률개선: 800→400 복원 (데이터수집 완화를 복원)
 GATE_TURN_MAX_ALT = 80.0      # 🔧 승률개선: 150→80 (알트 고회전 = 워시트레이딩/봇 활동)
 # GATE_TURN_MAX_ALT_PROBE, GATE_CONSEC_BUY_MIN_QUALITY 제거 (미사용 — probe 폐지)
-GATE_VOL_MIN = 5_000_000  # 🔧 R:R개선: 1M→5M (저유동성 펌프앤덤프 차단, 500만원 이상 거래대금 필수)
+GATE_VOL_MIN = 1_000_000  # 🔧 승률개선: 100K→1M (10만원은 찌꺼기 수준, 최소 100만원 거래대금 필수)
 GATE_VOL_VS_MA_MIN = 0.5  # 🔧 before1 복원 (OR 경로 재활성화)
-
-# ========================================
-# 🔧 캔들분석: 1시간 추세 필터 (23,250건 데이터 기반)
-# trend_1h < -0.3%: WR=20.7% PnL=-0.410%✗ (심각)
-# trend_1h >= 0.1%: WR=34~41%★ (우수)
-# ========================================
-GATE_TREND_1H_MIN = 0.0          # 🔧 리뷰반영: -0.3→0.0 (최소 횡보 이상만 진입, 하락추세 차단)
-GATE_TREND_1H_HALF = 0.15        # 🔧 전체점검v5: 0.1→0.15 (1H 추세 0.15%+ 만 confirm, 약한 추세 차단)
-# 🔧 데이터분석v3: ema5_slope 필터 (2nd most important factor, -14.2% diff)
-# D01[-2.6,-0.12] WR=43.3%★, D08[0.038,0.067] WR=21.8%✗ → slope양수 = 이미 올라간 후
-# 🔧 v4.0: EMA5 slope 필터 제거 (추격 판단은 VWAP만으로 충분)
-GATE_EMA5_SLOPE_MAX = 999.0      # 🔧 v4.0: 제거
-GATE_EMA5_SLOPE_CUT = 999.0      # 🔧 v4.0: 제거
 
 # ========================================
 # 📊 180신호분석 데이터 기반 필터 (거래량 TOP16 × 600 5분봉)
 # ========================================
 GATE_BODY_MIN = 0.003         # 📊 바디 하한 0.3% (body<0.5% wr29.5% → 최소 0.3% 필수)
 GATE_UW_RATIO_MIN = 0.05      # 📊 윗꼬리 하한 5% (uw<10% wr21.9% → 꼬리없는 단순양봉 차단)
-GATE_GREEN_STREAK_MAX = 5     # 🔧 v4.0: 3→5 (완화 — 5개까지 허용)
-
-# ========================================
-# 🔧 캔들분석 2차: BB/RSI/mom 필터 (23,250건 데이터)
-# ========================================
-GATE_BB_POS_HALF = 80         # 🔧 bb_pos>=80: WR=24.0% → half (밴드 상단)
-GATE_BB_POS_CUT = 85          # 🔧 전체점검v5: 100→85 (볼밴 상단 85%+ 차단, 과열 진입 방지)
-# 🔧 v4.0: MOM5 필터 제거 (RSI와 중복)
-GATE_MOM5_HALF = 999.0        # 🔧 v4.0: 제거
-GATE_MOM5_CUT = 999.0         # 🔧 v4.0: 제거
-GATE_TICK_BUY_RATIO_MIN = 0.40  # 🔧 tick_buy_ratio<0.4: 매도세 우위 → half (0.40-0.50 WR=30.6%★)
-# 🔧 데이터분석v3: RSI 1m 직접 필터 (factor importance -6.8%)
-# rsi_1m 50-60 WR=26.1%, 60-70 WR=24.0%, 70+ WR=22.8%
-GATE_RSI_1M_HALF = 55            # 🔧 rsi_1m >= 55 → half (고역 WR=24.7%)
-GATE_RSI_1M_CUT = 65             # 🔧 rsi_1m >= 65 + 1H하락 → cut (1H하락+고RSI WR=15.7%✗✗)
+GATE_GREEN_STREAK_MAX = 5     # 🔧 1010건분석: gs4+ CP74% SL33% (gs1보다 양호) → 3→5로 완화
 
 # ========================================
 # 🔧 동적 임계치 하한 (점화 완화 시 최저선)
@@ -3811,11 +3811,17 @@ IGN_MIN_ABS_KRW_10S = 3_000_000    # 🔧 FIX: 10초 절대 거래대금 하한 
 IGN_SPREAD_MAX = 0.40              # 스프레드 안정성 상한 (%)
 
 # ========================================
-# (Pre-break 전략 제거됨 — PREBREAK_ENABLED=False, stage1_gate로 통합됨)
-PREBREAK_HIGH_PCT = 0.002             # dynamic_prebreak_band()에서 참조 (메트릭 로깅용)
+# 🚀 Pre-break Probe 설정 (선행 진입)
+# ========================================
+PREBREAK_ENABLED = False              # Pre-break 비활성화 (stage1_gate로 통합)
+PREBREAK_HIGH_PCT = 0.002             # 고점 대비 0.2% 이내
+PREBREAK_POSTCHECK_SEC = 1            # 🔧 2→1초 (진입 지연 최소화, 빠른 포스트체크)
+PREBREAK_BUY_MIN = 0.60               # 최소 매수비 60%
+PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
+PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.008  # 🔧 v4.0: DYN_SL_MAX 0.8% 연동 (폴백용)
+STOP_LOSS_PCT = 0.020  # 🔧 DYN_SL_MIN 2.0% 연동 (폴백용)
 RECHECK_SEC = 3  # 🔧 업비트 데이터 기반: 평균 24h레인지 6.1%, ATR5/ATR1=2.3x → 3초 응답 필요
 
 # (IGN_BREAK_LOOKBACK, IGN_MIN_BODY, IGN_MIN_BUY, ABS_SURGE_KRW, RELAXED_X 삭제 — 미사용 상수)
@@ -3833,7 +3839,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.020  # 🔧 R:R개선: HARD_STOP_DD 2.0% 연동
+POSTCHECK_MAX_DD = 0.030  # 🔧 FIX: 3.8→3.0% (HARD_STOP_DD 3.2% 이하로 통일)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
@@ -3890,9 +3896,978 @@ def _safe_float(x, default=0.0):
         return default
 
 
-# (자동학습 시스템 제거됨 — AUTO_LEARN_ENABLED=False, 전체점검v4 코드정리)
-# (log_trade_features, update_trade_result, get_path_statistics,
-#  get_recent_trades_detail, analyze_and_update_weights, auto_learn_exit_params 제거)
+# =========================
+# 🧠 자동 가중치 학습 시스템
+# =========================
+TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
+WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
+# 🔧 자동학습 ON - 건수 기반 (매수만 학습, 매도는 고정)
+AUTO_LEARN_ENABLED = False  # 학습 비활성화 (과적합 방지 — 수동 판단 우선)
+AUTO_LEARN_APPLY = False    # 학습 결과 적용 OFF
+AUTO_LEARN_MIN_TRADES = 100 # 분석 시 최소 샘플
+AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
+AUTO_LEARN_STREAK_TRIGGER = 3  # 🔧 연속 3패 시 즉시 학습
+_trade_log_lock = threading.Lock()
+_trade_count_since_learn = 0  # 마지막 학습 이후 거래 수
+_path_report_count = 0  # 🔍 경로 리포트용 카운터
+_reported_trades = set()  # 🔧 중복 카운트 방지용 (market, entry_ts) 세트 — 유일 선언
+PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시와 맞춤)
+# 🔧 _lose_streak, _win_streak는 상단(라인 203-204)에서 선언됨
+
+FEATURE_FIELDS = [
+    "ts", "market", "entry_price", "exit_price",
+    "buy_ratio", "spread", "turn", "imbalance", "volume_surge",
+    "fresh", "score", "entry_mode",
+    "signal_tag", "filter_type",  # 🔍 경로 분석용 (signal_tag 하나로 통일)
+    "consecutive_buys", "avg_krw_per_tick", "flow_acceleration",  # 🔥 새 지표
+    # 🔥 GATE 핵심 + 초단기 미세필터 지표
+    "overheat", "fresh_age", "cv", "pstd", "best_ask_krw",
+    # 🔍 섀도우 모드용 (거래는 그대로, 나중에 분석용)
+    "shadow_flags", "would_cut", "is_prebreak",
+    # 🔍 리포트 상세: 추매여부 + 청산사유
+    "added", "exit_reason",
+    # 🔧 MFE/MAE (최고점/최저점 수익률) - 익절/손절 튜닝용
+    "mfe_pct", "mae_pct",
+    "pnl_pct", "result", "hold_sec",
+    # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 신규 필드
+    "entry_atr_pct", "entry_pstd", "entry_spread", "entry_consec",
+    "mfe_sec", "trail_dist", "trail_stop_pct", "peak_drop",
+]
+
+def log_trade_features(entry_data: dict, exit_data: dict = None):
+    """
+    거래 피처 로깅 (진입 시 호출, 청산 시 업데이트)
+    """
+    with _trade_log_lock:
+        new_file = not os.path.exists(TRADE_LOG_PATH)
+        with open(TRADE_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
+            if new_file:
+                w.writeheader()
+            row = {k: entry_data.get(k, "") for k in FEATURE_FIELDS}
+            if exit_data:
+                row.update(exit_data)
+            w.writerow(row)
+
+
+def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
+                        added: bool = False, exit_reason: str = "",
+                        mfe_pct: float = 0.0, mae_pct: float = 0.0,
+                        entry_ts: float = None, pos_snapshot: dict = None):
+    """
+    청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
+    - added: 추매 여부 (probe → confirm 승격 시 True)
+    - exit_reason: 청산 사유 (예: ATR손절, 트레일링, 얇은수익, 시간종료 등)
+    - mfe_pct: 최고 수익률 (Maximum Favorable Excursion)
+    - mae_pct: 최저 수익률 (Maximum Adverse Excursion)
+    - entry_ts: 진입 시각 (중복 방지용 - 동일 거래 식별)
+    """
+    global _trade_count_since_learn, _lose_streak, _win_streak, _path_report_count
+
+    # last_trade_was_loss는 모듈 레벨에서 정의됨 (L466) — 직접 참조
+    global last_trade_was_loss
+
+    # 🔧 FIX: (market, entry_ts) 기반 중복 방지 - 동일 거래 2회 기록 방지
+    # entry_ts가 있으면 거래 ID로 사용, 없으면 market+현재시각 기준 (호환성)
+    # 🔧 FIX: _reported_trades 접근을 _trade_log_lock으로 보호 (멀티스레드 중복 방지)
+    with _trade_log_lock:
+        if entry_ts is not None:
+            # 🔧 FIX: ms 단위로 변경 (1초 내 재진입 시 중복 판정 방지)
+            trade_id = (market, int(entry_ts * 1000))  # ms 단위
+            if trade_id in _reported_trades:
+                print(f"[UPDATE_TRADE] {market} 동일 거래 중복 스킵 (entry_ts={entry_ts:.0f})")
+                return
+            _reported_trades.add(trade_id)
+            # 오래된 항목 정리 (1시간 이상 지난 거래)
+            # 🔧 FIX: discard()는 단일 원소만 제거 → difference_update() 사용
+            now = time.time()
+            _old_trades = {t for t in _reported_trades if now - t[1] / 1000 > 3600}  # ms→sec 변환
+            _reported_trades.difference_update(_old_trades)
+        else:
+            # 🔧 호환성: entry_ts 없으면 기존 방식 (market + 30초)
+            # 🔧 FIX: ms 단위로 통일 (cleanup 로직과 단위 일치)
+            now_ts = time.time()
+            now_ms = int(now_ts * 1000)
+            recent = [t for t in _reported_trades if t[0] == market and now_ts - t[1] / 1000 < 30]
+            if recent:
+                print(f"[UPDATE_TRADE] {market} 중복 호출 스킵 (30초 내)")
+                return
+            _reported_trades.add((market, now_ms))
+
+    print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
+
+    is_win = pnl_pct > 0
+    csv_exists = os.path.exists(TRADE_LOG_PATH)
+
+    # 🔧 손실 후 동일 종목 쿨다운 2배 적용용 플래그 설정
+    last_trade_was_loss[market] = not is_win
+
+    if not csv_exists:
+        print(f"[UPDATE_TRADE] {TRADE_LOG_PATH} 파일 없음 (CSV 업데이트 스킵, 리포트는 계속)")
+    else:
+        with _trade_log_lock:
+            try:
+                rows = []
+                with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+
+                # 마지막 해당 마켓 찾아서 업데이트
+                for i in range(len(rows) - 1, -1, -1):
+                    if rows[i]["market"] == market and not rows[i].get("exit_price"):
+                        rows[i]["exit_price"] = str(exit_price)
+                        rows[i]["pnl_pct"] = f"{pnl_pct:.4f}"
+                        rows[i]["result"] = "win" if is_win else "lose"
+                        rows[i]["hold_sec"] = str(int(hold_sec))
+                        # 🔍 리포트 상세: 추매여부 + 청산사유
+                        rows[i]["added"] = "1" if added else "0"
+                        rows[i]["exit_reason"] = exit_reason
+                        # 🔧 MFE/MAE 기록 (익절/손절 튜닝용)
+                        rows[i]["mfe_pct"] = f"{mfe_pct:.4f}"
+                        rows[i]["mae_pct"] = f"{mae_pct:.4f}"
+                        # 🔧 데이터수집: 포지션에서 튜닝 메트릭 가져와서 CSV에 기록
+                        # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 제거됨)
+                        # 🔧 FIX: pos_snapshot 우선 사용 (close 후 OPEN_POSITIONS에서 이미 제거됨)
+                        with _POSITION_LOCK:
+                            _pos_for_csv = pos_snapshot if pos_snapshot else dict(OPEN_POSITIONS.get(market, {}))
+                        rows[i]["mfe_sec"] = str(_pos_for_csv.get("mfe_sec", ""))
+                        rows[i]["trail_dist"] = str(_pos_for_csv.get("trail_dist", ""))
+                        rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
+                        _mfe_f = float(rows[i].get("mfe_pct", 0) or 0)
+                        rows[i]["peak_drop"] = f"{_mfe_f - pnl_pct * 100:.4f}" if _mfe_f else ""
+                        break
+
+                # 🔧 FIX: 원자적 쓰기 (임시파일 → rename, 크래시 시 원본 보존)
+                import tempfile
+                _dir = os.path.dirname(TRADE_LOG_PATH)
+                with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
+                                                  dir=_dir, suffix=".tmp", delete=False) as tf:
+                    w = csv.DictWriter(tf, fieldnames=FEATURE_FIELDS)
+                    w.writeheader()
+                    w.writerows(rows)
+                    _tmp_path = tf.name
+                os.replace(_tmp_path, TRADE_LOG_PATH)
+            except Exception as e:
+                print(f"[TRADE_LOG_UPDATE_ERR] {e}")
+
+    # 🔧 건수 기반 학습 트리거 (매수만 학습)
+    if AUTO_LEARN_ENABLED:
+        with _trade_log_lock:
+            _trade_count_since_learn += 1
+
+        # 🔧 FIX: streak 업데이트는 record_trade()에서만 (중복 방지)
+        # - 여기서 또 업데이트하면 거래 1번에 streak 2번 올라감
+        # - record_trade()가 streak의 단일 진실 공급원(SSOT)
+
+        # 🔧 FIX: _lose_streak 읽기를 _STREAK_LOCK 아래서 수행 (스레드 안전 읽기)
+        with _STREAK_LOCK:
+            _ls_snap = _lose_streak
+
+        # 학습 조건: 10건마다 OR 연속 3패
+        with _trade_log_lock:
+            should_learn = (
+                _trade_count_since_learn >= AUTO_LEARN_INTERVAL or
+                _ls_snap >= AUTO_LEARN_STREAK_TRIGGER
+            )
+
+        if should_learn:
+            with _trade_log_lock:
+                trigger_reason = f"연속 {_ls_snap}패" if _ls_snap >= AUTO_LEARN_STREAK_TRIGGER else f"{_trade_count_since_learn}건 도달"
+                _trade_count_since_learn = 0  # 리셋
+            print(f"[AUTO_LEARN] 학습 트리거: {trigger_reason}")
+
+            try:
+                learn_result = analyze_and_update_weights()
+                if learn_result:
+                    thr = learn_result.get("thresholds", {})
+                    chg = learn_result.get("changes", {})
+
+                    # analyze_and_update_weights() 안에서 이미 GATE_* 전역을 갱신함
+                    change_detail = " | ".join(
+                        f"{k}:{v:+g}" for k, v in chg.items() if v != 0
+                    ) or "변화없음"
+
+                    tg_send(
+                        f"🧠 <b>자동학습 완료</b> ({trigger_reason})\n"
+                        f"📊 승률: {learn_result['win_rate']}% ({learn_result['wins']}승/{learn_result['loses']}패)\n"
+                        f"📈 샘플: {learn_result.get('sample_size', 0)}건\n"
+                        f"🧱 게이트 변화: {change_detail}\n"
+                        f"🎯 현재 임계치: "
+                        f"매수비≥{thr.get('GATE_BUY_RATIO_MIN', GATE_BUY_RATIO_MIN):.0%} "
+                        f"스프레드≤{thr.get('GATE_SPREAD_MAX', GATE_SPREAD_MAX):.2f}% "
+                        f"임밸≥{thr.get('GATE_IMBALANCE_MIN', GATE_IMBALANCE_MIN):.2f} "
+                        f"급등≤{thr.get('GATE_SURGE_MAX', GATE_SURGE_MAX):.1f}x "
+                        f"가속≥{thr.get('GATE_ACCEL_MIN', GATE_ACCEL_MIN):.2f}x"
+                    )
+                else:
+                    tg_send_mid(f"🧠 자동학습 시도 ({trigger_reason}) - 데이터 부족으로 스킵")
+
+                # 🧠 SL/트레일 자동학습 (게이트 학습과 동시 실행)
+                exit_learn_result = auto_learn_exit_params()
+                if exit_learn_result:
+                    ep = exit_learn_result.get("exit_params", {})
+                    ec = exit_learn_result.get("changes", {})
+                    exit_change_detail = " | ".join(
+                        f"{k}:{v:+.3f}" for k, v in ec.items() if v != 0
+                    ) or "변화없음"
+                    tg_send(
+                        f"🎚 <b>SL/트레일 자동조정</b>\n"
+                        f"📉 변화: {exit_change_detail}\n"
+                        f"🧯 현재: SL {ep.get('DYN_SL_MIN',0)*100:.2f}~{ep.get('DYN_SL_MAX',0)*100:.2f}% "
+                        f"| 트레일 {ep.get('TRAIL_DISTANCE_MIN_BASE',0)*100:.2f}% "
+                        f"| 비상 {ep.get('HARD_STOP_DD',0)*100:.1f}%"
+                    )
+            except Exception as e:
+                print(f"[AUTO_LEARN_ERR] {e}")
+
+    # 🔍 경로 리포트 (20건마다 자동 발송)
+    # 🔧 FIX: threshold 체크+리셋을 같은 lock 안에서 수행 (중복 리포트 방지)
+    with _trade_log_lock:
+        _path_report_count += 1
+        _current_report_count = _path_report_count
+        _should_send_report = _current_report_count >= PATH_REPORT_INTERVAL
+        if _should_send_report:
+            _path_report_count = 0
+    print(f"[PATH_REPORT] 카운트: {_current_report_count}/{PATH_REPORT_INTERVAL}")
+    if _should_send_report:
+        try:
+            # 경로 통계 + 상세 거래 목록 합쳐서 발송
+            path_report = get_path_statistics(50)  # 최근 50건 경로 분석
+            detail_report = get_recent_trades_detail(10)  # 최근 10건 상세
+            combined = path_report + detail_report
+            print(f"[PATH_REPORT] 리포트 발송 시도")
+            tg_send(combined)
+        except Exception as e:
+            print(f"[PATH_REPORT_ERR] {e}")
+
+def get_path_statistics(last_n: int = 100) -> str:
+    """
+    🔍 경로별 승률 통계 생성 (텔레그램 리포트용)
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return "📊 거래 기록 없음"
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        # result 컬럼이 있고 값이 있는 행만 (청산 완료된 거래)
+        if "result" not in df.columns:
+            return "📊 청산 기록 없음"
+
+        df = df[df["result"].isin(["win", "lose"])].tail(last_n)
+
+        if len(df) < 5:
+            return f"📊 데이터 부족 ({len(df)}건, 최소 5건 필요)"
+
+        total = len(df)
+        wins = len(df[df["result"] == "win"])
+        overall_wr = wins / total * 100 if total > 0 else 0
+
+        lines = [
+            f"📊 <b>경로별 승률 리포트</b> (최근 {total}건)",
+            f"📈 전체 승률: {overall_wr:.1f}% ({wins}승/{total-wins}패)",
+            "─" * 20,
+        ]
+
+        # 🔥 진입 경로별 승률 (signal_tag 기준)
+        if "signal_tag" in df.columns:
+            lines.append("<b>📍 진입 경로:</b>")
+            tag_stats = {}
+            for _, row in df.iterrows():
+                tag = str(row.get("signal_tag", "기본"))
+                if tag not in tag_stats:
+                    tag_stats[tag] = {"win": 0, "total": 0}
+                tag_stats[tag]["total"] += 1
+                if row["result"] == "win":
+                    tag_stats[tag]["win"] += 1
+
+            # 승률 순 정렬
+            sorted_tags = sorted(tag_stats.items(),
+                                 key=lambda x: (x[1]["win"]/max(x[1]["total"],1), x[1]["total"]),
+                                 reverse=True)
+            for tag, stats in sorted_tags:
+                cnt = stats["total"]
+                w = stats["win"]
+                wr = w / cnt * 100 if cnt > 0 else 0
+                star = " ✅" if wr >= overall_wr + 10 else (" ⚠️" if wr <= overall_wr - 10 else "")
+                lines.append(f"  {tag}: {cnt}건 ({wr:.0f}%){star}")
+
+            # 추천: 가장 나쁜 경로 찾기
+            lines.append("─" * 20)
+            worst = None
+            worst_wr = 100
+            for tag, stats in sorted_tags:
+                cnt = stats["total"]
+                if cnt >= 3:
+                    wr = stats["win"] / cnt * 100
+                    if wr < worst_wr:
+                        worst_wr = wr
+                        worst = tag
+
+            if worst and worst_wr < overall_wr - 5:
+                lines.append(f"💡 검토 필요: {worst} ({worst_wr:.0f}%)")
+            else:
+                lines.append("💡 특별히 나쁜 경로 없음")
+
+        # 🔧 핵심 파라미터 현황 (실시간 값 리포팅)
+        lines.append("")
+        lines.append("─" * 20)
+        lines.append("<b>⚙️ 핵심 파라미터:</b>")
+        dyn_cp = get_dynamic_checkpoint() * 100
+        trail_min = get_trail_distance_min() * 100
+        lines.append(f"  체크포인트: {dyn_cp:.2f}%")
+        lines.append(f"  트레일최소: {trail_min:.2f}%")
+        lines.append(f"  MFE타겟: {MFE_PARTIAL_TARGETS.get('기본', 0.005)*100:.1f}%")
+        lines.append(f"  ATR배수: {TRAIL_ATR_MULT}")
+        lines.append(f"  SL범위: {DYN_SL_MIN*100:.1f}~{DYN_SL_MAX*100:.1f}%")
+        lines.append(f"  프로파일: {EXIT_PROFILE}")
+
+        # 📊 entry_mode 분포
+        if "entry_mode" in df.columns:
+            lines.append("<b>📦 진입모드 분포:</b>")
+            for mode in ["probe", "half", "confirm"]:
+                mode_df = df[df["entry_mode"] == mode]
+                if len(mode_df) > 0:
+                    mode_wins = len(mode_df[mode_df["result"] == "win"])
+                    mode_wr = mode_wins / len(mode_df) * 100
+                    lines.append(f"  {mode}: {len(mode_df)}건 ({mode_wr:.0f}%)")
+
+        # 📊 평균 MFE/MAE
+        if "mfe_pct" in df.columns and "mae_pct" in df.columns:
+            avg_mfe = pd.to_numeric(df["mfe_pct"], errors="coerce").mean()
+            avg_mae = pd.to_numeric(df["mae_pct"], errors="coerce").mean()
+            lines.append(f"  평균MFE: +{avg_mfe:.2f}% / 평균MAE: {avg_mae:.2f}%")
+
+        # 📊 손절폭/트레일 튜닝 요약 (데이터 있을 때만)
+        lines.append("")
+        lines.append("─" * 20)
+        lines.append("<b>🎚 SL/트레일 튜닝 데이터:</b>")
+
+        _tuning_cols = {
+            "entry_atr_pct": ("진입ATR", "%", 3),
+            "entry_pstd": ("진입pstd", "%", 4),
+            "mfe_sec": ("MFE도달", "초", 0),
+            "hold_sec": ("보유시간", "초", 0),
+            "peak_drop": ("피크드롭", "%", 2),
+            "trail_dist": ("트레일간격", "%", 3),
+            "trail_stop_pct": ("트레일잠금", "%", 3),
+        }
+        _has_tuning = False
+        for col, (label, unit, dec) in _tuning_cols.items():
+            if col in df.columns:
+                vals = pd.to_numeric(df[col], errors="coerce").dropna()
+                if len(vals) >= 2:
+                    _has_tuning = True
+                    fmt = f"{{:.{dec}f}}"
+                    lines.append(f"  {label}: 평균{fmt.format(vals.mean())}{unit} (범위 {fmt.format(vals.min())}~{fmt.format(vals.max())}{unit})")
+
+        if not _has_tuning:
+            lines.append("  (아직 데이터 부족 — 거래 쌓이면 표시됩니다)")
+
+        # 📊 MFE 대비 실현 비율 (얼마나 잘 먹고 나왔나)
+        if "mfe_pct" in df.columns and "pnl_pct" in df.columns:
+            _mfe_s = pd.to_numeric(df["mfe_pct"], errors="coerce")
+            _pnl_s = pd.to_numeric(df["pnl_pct"], errors="coerce") * 100
+            _valid = (_mfe_s > 0) & _pnl_s.notna()
+            if _valid.sum() >= 2:
+                _capture = (_pnl_s[_valid] / _mfe_s[_valid]).mean() * 100
+                lines.append(f"  MFE캡처율: {_capture:.0f}% (100%=최고점 익절)")
+                if _capture < 40:
+                    lines.append(f"  💡 캡처율 낮음 → 트레일 간격 줄이기 검토")
+                elif _capture > 80:
+                    lines.append(f"  💡 캡처율 높음 → 현재 트레일 설정 양호")
+
+        # 📊 손절 분석 (MAE vs SL)
+        if "mae_pct" in df.columns:
+            _mae_s = pd.to_numeric(df["mae_pct"], errors="coerce").dropna()
+            _losses = df[df["result"] == "lose"]
+            if len(_losses) >= 2 and "mae_pct" in _losses.columns:
+                _loss_mae = pd.to_numeric(_losses["mae_pct"], errors="coerce").dropna()
+                if len(_loss_mae) >= 2:
+                    _avg_loss_mae = _loss_mae.mean()
+                    _sl_min_pct = DYN_SL_MIN * 100  # 소수→% 변환 (0.012→1.2%)
+                    _sl_max_pct = DYN_SL_MAX * 100
+                    lines.append(f"  패배MAE: 평균{_avg_loss_mae:.2f}% (SL {_sl_min_pct:.1f}~{_sl_max_pct:.1f}%)")
+                    if abs(_avg_loss_mae) < _sl_min_pct * 0.5:  # MAE가 SL 하한의 50% 미만 (단위 통일: 둘 다 %)
+                        lines.append(f"  💡 손절이 SL 하한 전에 발생 → SL 줄여도 될 수 있음")
+
+        return "\n".join(lines)
+
+    except ImportError:
+        return "📊 pandas 미설치 - 통계 불가"
+    except Exception as e:
+        return f"📊 통계 오류: {e}"
+
+def get_recent_trades_detail(last_n: int = 10) -> str:
+    """
+    🔍 최근 거래 상세 목록 (임계치 분석용)
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return ""
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        if "result" not in df.columns:
+            return ""
+
+        # 청산 완료된 거래만
+        df = df[df["result"].isin(["win", "lose"])].tail(last_n)
+
+        if len(df) == 0:
+            return ""
+
+        lines = [
+            "",
+            f"📋 <b>최근 {len(df)}건 상세</b>",
+            "─" * 20,
+        ]
+
+        for idx, row in df.iterrows():
+            # 기본 정보
+            market = str(row.get("market", "?"))[-6:]  # KRW-XXX에서 XXX만
+            result = row.get("result", "?")
+            pnl_raw = row.get("pnl_pct", 0) or 0
+            pnl = float(pnl_raw) * 100  # 🔧 FIX: 소수 → 퍼센트 환산
+            icon = "✅" if result == "win" else "❌"
+            pnl_str = f"+{pnl:.2f}%" if pnl > 0 else f"{pnl:.2f}%"
+
+            # 경로: signal_tag 하나로 간소화
+            signal_tag = str(row.get("signal_tag", "기본"))
+
+            # 지표들 (소수점 정리)
+            buy_r = row.get("buy_ratio", 0) or 0
+            turn = row.get("turn", 0) or 0
+            imbal = row.get("imbalance", 0) or 0
+            spread = row.get("spread", 0) or 0
+            vol_surge = row.get("volume_surge", 0) or 0
+            hold = row.get("hold_sec", 0) or 0
+
+            # 🔥 새 지표
+            cons_buys = row.get("consecutive_buys", 0) or 0
+            avg_krw = row.get("avg_krw_per_tick", 0) or 0
+            flow_accel = row.get("flow_acceleration", 1.0) or 1.0
+
+            # 🔥 GATE 핵심 지표
+            overheat = row.get("overheat", 0) or 0
+            fresh_age = row.get("fresh_age", 0) or 0
+
+            # 🚀 초단기 미세필터 지표
+            cv = row.get("cv", 0) or 0
+            pstd = row.get("pstd", 0) or 0
+            best_ask_krw = row.get("best_ask_krw", 0) or 0
+            is_prebreak = row.get("is_prebreak", 0) or 0
+
+            # 🔧 튜닝 데이터 (손절폭/트레일 간격 최적화용)
+            mfe_pct_val = float(row.get("mfe_pct", 0) or 0)
+            mae_pct_val = float(row.get("mae_pct", 0) or 0)
+            entry_atr = float(row.get("entry_atr_pct", 0) or 0)
+            entry_pstd_val = float(row.get("entry_pstd", 0) or 0)
+            entry_spread_val = float(row.get("entry_spread", 0) or 0)
+            entry_consec_val = float(row.get("entry_consec", 0) or 0)
+            mfe_sec_val = float(row.get("mfe_sec", 0) or 0)
+            trail_dist_val = float(row.get("trail_dist", 0) or 0)
+            trail_stop_val = float(row.get("trail_stop_pct", 0) or 0)
+            peak_drop_val = float(row.get("peak_drop", 0) or 0)
+
+            # 시간 (ts에서 시:분만 추출)
+            ts = str(row.get("ts", ""))
+            time_str = ts[11:16] if len(ts) >= 16 else "?"
+
+            # 가속도 이모지
+            accel_emoji = "🚀" if flow_accel >= 1.5 else ("📉" if flow_accel <= 0.7 else "")
+
+            # CV 이모지
+            cv_emoji = "🤖" if cv <= 0.45 else ("🔥" if cv >= 1.2 else "")
+            # Pre-break 마크
+            pb_mark = "⚡PB" if is_prebreak else ""
+
+            # 🔍 진입모드 + 추매 + 청산사유
+            entry_mode = str(row.get("entry_mode", "confirm"))
+            added_val = str(row.get("added", "0"))
+            was_added = added_val == "1"
+            exit_reason = str(row.get("exit_reason", "")).strip() or "미기록"
+
+            # 진입모드 이모지 (probe+추매 = 승격)
+            if entry_mode == "probe" and was_added:
+                mode_str = "🔬→✅승격"  # probe에서 추매로 confirm 승격
+            elif entry_mode == "probe":
+                mode_str = "🔬탐색"  # probe 진입, 추매 없이 청산
+            else:
+                mode_str = "✅확정"  # 처음부터 confirm 진입
+
+            # 🔧 MFE/MAE 이모지
+            mfe_emoji = "🎯" if mfe_pct_val >= 1.5 else ""
+            drop_emoji = "⚠️" if peak_drop_val >= 1.0 else ""
+
+            lines.append(
+                f"{icon} {market} {time_str} {pnl_str} {pb_mark}\n"
+                f"   {mode_str} 경로:{signal_tag}\n"
+                f"   ⏹청산:{exit_reason} ({hold:.0f}초)\n"
+                f"   매수{buy_r:.0%} 회전{turn:.1%} 임밸{imbal:.2f} 스프{spread:.2f}%\n"
+                f"   배수{vol_surge:.1f}x 연속{cons_buys:.0f} 가속{flow_accel:.1f}x{accel_emoji}\n"
+                f"   📈CV{cv:.2f}{cv_emoji} pstd{pstd:.2f}%\n"
+                f"   📐MFE+{mfe_pct_val:.2f}%({mfe_sec_val:.0f}초){mfe_emoji} MAE{mae_pct_val:.2f}% 드롭{peak_drop_val:.2f}%{drop_emoji}\n"
+                f"   🎚ATR{entry_atr:.3f}% 트레일{trail_dist_val:.3f}% 잠금{trail_stop_val:+.3f}%"
+            )
+
+        # 임계치 힌트 (승리/패배 평균 비교)
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+
+        if len(wins) >= 2 and len(loses) >= 2:
+            lines.append("─" * 20)
+            lines.append("<b>💡 승/패 평균 비교:</b>")
+
+            for col, name in [("buy_ratio", "매수비"), ("turn", "회전"), ("imbalance", "임밸"),
+                              ("spread", "스프레드"), ("volume_surge", "배수"),
+                              ("consecutive_buys", "연속매수"), ("flow_acceleration", "가속도"),
+                              ("overheat", "과열"), ("fresh_age", "틱나이"),
+                              ("cv", "CV"), ("pstd", "pstd"),
+                              # 🔧 튜닝 메트릭 승/패 비교
+                              ("entry_atr_pct", "진입ATR"), ("mfe_pct", "MFE"),
+                              ("mae_pct", "MAE"), ("peak_drop", "피크드롭"),
+                              ("mfe_sec", "MFE시간"), ("trail_dist", "트레일간격"),
+                              ("hold_sec", "보유시간")]:
+                if col in df.columns:
+                    w_avg = wins[col].mean() if col in wins.columns else 0
+                    l_avg = loses[col].mean() if col in loses.columns else 0
+                    if pd.notna(w_avg) and pd.notna(l_avg):
+                        diff = w_avg - l_avg
+                        if col == "buy_ratio":
+                            lines.append(f"  {name}: 승{w_avg:.0%} / 패{l_avg:.0%} (차이 {diff:+.0%})")
+                        elif col == "turn":
+                            lines.append(f"  {name}: 승{w_avg:.1%} / 패{l_avg:.1%} (차이 {diff:+.1%})")
+                        elif col == "spread":
+                            # spread는 이미 % 단위로 저장됨 (0.15 = 0.15%)
+                            lines.append(f"  {name}: 승{w_avg:.2f}% / 패{l_avg:.2f}% (차이 {diff:+.2f}%)")
+                        elif col in ("entry_atr_pct", "entry_pstd", "mfe_pct", "mae_pct",
+                                     "peak_drop", "trail_dist", "pstd"):
+                            # % 단위 컬럼들
+                            lines.append(f"  {name}: 승{w_avg:.2f}% / 패{l_avg:.2f}% (차이 {diff:+.2f}%)")
+                        elif col in ("hold_sec", "mfe_sec"):
+                            # 초 단위 컬럼들
+                            lines.append(f"  {name}: 승{w_avg:.0f}초 / 패{l_avg:.0f}초 (차이 {diff:+.0f}초)")
+                        else:
+                            lines.append(f"  {name}: 승{w_avg:.2f} / 패{l_avg:.2f} (차이 {diff:+.2f})")
+
+        return "\n".join(lines)
+
+    except ImportError:
+        return "📋 pandas 미설치 - 상세 불가"
+    except Exception as e:
+        return f"📋 상세 오류: {e}"
+
+def analyze_and_update_weights():
+    """
+    🔥 1단계 게이트 임계치 자동 조절
+    - 승리/패배 그룹 간 피처 분포 분석
+    - GATE_* 전역 변수 조절
+    """
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
+    global GATE_SURGE_MAX, GATE_IMBALANCE_MIN, GATE_OVERHEAT_MAX, GATE_FRESH_AGE_MAX
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
+
+    if not os.path.exists(TRADE_LOG_PATH):
+        print("[AUTO_LEARN] 거래 로그 없음")
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        # 결과가 있는 것만
+        df = df[df["result"].isin(["win", "lose"])]
+
+        if len(df) < AUTO_LEARN_MIN_TRADES:
+            print(f"[AUTO_LEARN] 데이터 부족 ({len(df)}/{AUTO_LEARN_MIN_TRADES})")
+            return None
+
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+
+        if len(wins) < 5 or len(loses) < 5:
+            print(f"[AUTO_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
+            return None
+
+        win_rate = round(len(wins) / len(df) * 100, 1)
+
+        # 승/패 평균 계산
+        stats = {}
+        for col in ["buy_ratio", "spread", "turn", "imbalance", "volume_surge", "flow_acceleration", "overheat", "fresh_age"]:
+            try:
+                w_avg = pd.to_numeric(wins[col], errors='coerce').mean()
+                l_avg = pd.to_numeric(loses[col], errors='coerce').mean()
+                # 🔧 FIX: NaN 방어 (json.dump 크래시 → 학습 결과 손실 방지)
+                if math.isnan(w_avg): w_avg = 0.0
+                if math.isnan(l_avg): l_avg = 0.0
+                stats[col] = {"win": w_avg, "lose": l_avg}
+            except Exception:
+                pass
+
+        # 조절 로직 (신뢰도 기반 동적 블렌딩)
+        # 🔧 베이지안 스무딩: 샘플 수에 따라 블렌딩 강도 조절
+        # 100건 미만: 매우 보수적 (5%), 100~300건: 표준 (10%), 300건 이상: 적극적 (15%)
+        _n_total = len(df)
+        if _n_total < 150:
+            BLEND = 0.05
+        elif _n_total < 300:
+            BLEND = 0.10
+        else:
+            BLEND = 0.15
+        # 승/패 샘플 불균형 보정: 소수 그룹이 전체의 20% 미만이면 블렌딩 절반
+        _minority_ratio = min(len(wins), len(loses)) / max(_n_total, 1)
+        if _minority_ratio < 0.20:
+            BLEND *= 0.5
+            print(f"[AUTO_LEARN] 승/패 불균형 ({_minority_ratio*100:.0f}% minority) → 블렌딩 절반 적용")
+        old_values = {
+            "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
+            "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
+            "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
+            "GATE_SURGE_MAX": GATE_SURGE_MAX,
+            "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
+            "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
+            "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
+        }
+        changes = {}
+
+        # 🔧 그림자 모드: 변경값 계산은 하되, AUTO_LEARN_APPLY=True일 때만 실제 적용
+        # 매수비: 승자 > 패자면 상향 (더 엄격)
+        if "buy_ratio" in stats:
+            w, l = stats["buy_ratio"]["win"], stats["buy_ratio"]["lose"]
+            if w > l:  # 승자가 더 높은 매수비
+                target = min(0.80, w * 0.95)  # 승자 평균의 95%
+                new_val = round(GATE_BUY_RATIO_MIN * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.55, min(0.80, new_val))  # 바운드
+                changes["GATE_BUY_RATIO_MIN"] = round(new_val - GATE_BUY_RATIO_MIN, 3)
+                if AUTO_LEARN_APPLY:
+                    GATE_BUY_RATIO_MIN = new_val
+
+        # 스프레드: 승자 < 패자면 하향 (더 엄격)
+        if "spread" in stats:
+            w, l = stats["spread"]["win"], stats["spread"]["lose"]
+            if w < l:  # 승자가 더 낮은 스프레드
+                target = max(0.08, w * 1.2)  # 승자 평균의 120%
+                new_val = round(GATE_SPREAD_MAX * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.08, min(0.35, new_val))  # 바운드
+                changes["GATE_SPREAD_MAX"] = round(new_val - GATE_SPREAD_MAX, 3)
+                if AUTO_LEARN_APPLY:
+                    GATE_SPREAD_MAX = new_val
+
+        # 임밸런스: 승자 > 패자면 상향
+        if "imbalance" in stats:
+            w, l = stats["imbalance"]["win"], stats["imbalance"]["lose"]
+            if w > l:
+                target = max(0.20, w * 0.9)
+                new_val = round(GATE_IMBALANCE_MIN * (1 - BLEND) + target * BLEND, 3)
+                new_val = max(0.15, min(0.50, new_val))
+                changes["GATE_IMBALANCE_MIN"] = round(new_val - GATE_IMBALANCE_MIN, 3)
+                if AUTO_LEARN_APPLY:
+                    GATE_IMBALANCE_MIN = new_val
+
+        # 급등: 승자 < 패자면 하향 (더 엄격)
+        if "volume_surge" in stats:
+            w, l = stats["volume_surge"]["win"], stats["volume_surge"]["lose"]
+            if w < l:
+                target = max(1.5, w * 1.3)
+                new_val = round(GATE_SURGE_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(1.5, min(6.0, new_val))
+                changes["GATE_SURGE_MAX"] = round(new_val - GATE_SURGE_MAX, 2)
+                if AUTO_LEARN_APPLY:
+                    GATE_SURGE_MAX = new_val
+
+        # 가속도: 승자 > 패자면 상향
+        if "flow_acceleration" in stats:
+            w, l = stats["flow_acceleration"]["win"], stats["flow_acceleration"]["lose"]
+            if w > l:
+                target = max(0.3, w * 0.7)
+                new_val = round(GATE_ACCEL_MIN * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(0.3, min(1.5, new_val))
+                changes["GATE_ACCEL_MIN"] = round(new_val - GATE_ACCEL_MIN, 2)
+                if AUTO_LEARN_APPLY:
+                    GATE_ACCEL_MIN = new_val
+
+        # 과열(overheat): 승자 < 패자면 하향 (더 엄격)
+        if "overheat" in stats:
+            w, l = stats["overheat"]["win"], stats["overheat"]["lose"]
+            if w < l:  # 승자가 낮은 과열
+                target = max(2.0, w * 1.3)  # 승자 평균의 130%
+                new_val = round(GATE_OVERHEAT_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(2.0, min(8.0, new_val))  # 바운드
+                changes["GATE_OVERHEAT_MAX"] = round(new_val - GATE_OVERHEAT_MAX, 2)
+                if AUTO_LEARN_APPLY:
+                    GATE_OVERHEAT_MAX = new_val
+
+        # 틱나이(fresh_age): 승자 < 패자면 하향 (더 엄격)
+        if "fresh_age" in stats:
+            w, l = stats["fresh_age"]["win"], stats["fresh_age"]["lose"]
+            if w < l:  # 승자가 낮은 틱나이 (더 신선)
+                target = max(1.0, w * 1.5)  # 승자 평균의 150%
+                new_val = round(GATE_FRESH_AGE_MAX * (1 - BLEND) + target * BLEND, 2)
+                new_val = max(1.0, min(6.0, new_val))  # 바운드
+                changes["GATE_FRESH_AGE_MAX"] = round(new_val - GATE_FRESH_AGE_MAX, 2)
+                if AUTO_LEARN_APPLY:
+                    GATE_FRESH_AGE_MAX = new_val
+
+        new_values = {
+            "GATE_BUY_RATIO_MIN": GATE_BUY_RATIO_MIN,
+            "GATE_SPREAD_MAX": GATE_SPREAD_MAX,
+            "GATE_IMBALANCE_MIN": GATE_IMBALANCE_MIN,
+            "GATE_SURGE_MAX": GATE_SURGE_MAX,
+            "GATE_ACCEL_MIN": GATE_ACCEL_MIN,
+            "GATE_OVERHEAT_MAX": GATE_OVERHEAT_MAX,
+            "GATE_FRESH_AGE_MAX": GATE_FRESH_AGE_MAX,
+            "GATE_VOL_MIN": GATE_VOL_MIN,
+        }
+
+        # 🔧 FIX: 원자적 쓰기 (크래시 시 학습 데이터 손실 방지)
+        import tempfile
+        _wdir = os.path.dirname(WEIGHTS_PATH) or "."
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                          dir=_wdir, suffix=".tmp", delete=False) as _wf:
+            json.dump({
+                "gate_thresholds": new_values,
+                "updated_at": now_kst_str(),
+                "sample_size": len(df),
+                "win_rate": win_rate,
+                "feature_stats": {k: {"win": round(v["win"], 3), "lose": round(v["lose"], 3)} for k, v in stats.items()}
+            }, _wf, ensure_ascii=False, indent=2)
+            _wf_path = _wf.name
+        os.replace(_wf_path, WEIGHTS_PATH)
+
+        print(f"[AUTO_LEARN] 게이트 임계치 업데이트: {new_values}")
+        print(f"[AUTO_LEARN] 승률: {len(wins)}/{len(df)} = {win_rate}%")
+
+        return {
+            "thresholds": new_values,
+            "old_values": old_values,
+            "changes": changes,
+            "win_rate": win_rate,
+            "wins": len(wins),
+            "loses": len(loses),
+            "sample_size": len(df)
+        }
+
+    except ImportError:
+        print("[AUTO_LEARN] pandas 미설치 - 수동 분석 필요")
+        return None
+    except Exception as e:
+        print(f"[AUTO_LEARN_ERR] {e}")
+        traceback.print_exc()
+        return None
+
+# =========================
+# 🧠 매도 파라미터 자동 튜닝
+# =========================
+EXIT_PARAMS_PATH = os.path.join(os.getcwd(), "learned_exit_params.json")
+
+# 🔧 hard_stop 제거 → 동적손절(ATR)로 대체 (DYN_SL_MIN~DYN_SL_MAX)
+DYNAMIC_EXIT_PARAMS = {}
+
+# =========================
+# 🧠 SL/트레일 자동학습 (데이터 기반 동적 조정)
+# =========================
+def auto_learn_exit_params():
+    """
+    📊 trade_features.csv의 MAE/MFE/트레일 데이터를 분석하여
+    DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE 등을 자동 조정
+
+    분석 항목:
+    1) 패배 MAE → SL 적정선 판단 (너무 넓으면 줄이고, 너무 좁으면 넓힘)
+    2) MFE 캡처율 → 트레일 간격 조정 (캡처율 낮으면 트레일 좁히기)
+    3) 승리 peak_drop → 트레일 거리 적정선
+
+    바운드:
+    - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
+    - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
+    - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.002 (0.1% ~ 0.2%)
+    """
+    global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
+
+    if not os.path.exists(TRADE_LOG_PATH):
+        print("[EXIT_LEARN] 거래 로그 없음")
+        return None
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADE_LOG_PATH)
+
+        df = df[df["result"].isin(["win", "lose"])]
+        if len(df) < AUTO_LEARN_MIN_TRADES:
+            print(f"[EXIT_LEARN] 데이터 부족 ({len(df)}/{AUTO_LEARN_MIN_TRADES})")
+            return None
+
+        wins = df[df["result"] == "win"]
+        loses = df[df["result"] == "lose"]
+        if len(wins) < 5 or len(loses) < 5:
+            print(f"[EXIT_LEARN] 승/패 샘플 부족 (승:{len(wins)}, 패:{len(loses)})")
+            return None
+
+        # 🔧 베이지안 블렌딩 (샘플 수 기반)
+        _n = len(df)
+        BLEND = 0.08 if _n < 150 else (0.12 if _n < 300 else 0.18)
+        _minority = min(len(wins), len(loses)) / max(_n, 1)
+        if _minority < 0.20:
+            BLEND *= 0.5
+
+        old_sl_min = DYN_SL_MIN
+        old_sl_max = DYN_SL_MAX
+        old_trail = TRAIL_DISTANCE_MIN_BASE
+        old_hard = HARD_STOP_DD
+        changes = {}
+
+        # =====================================================
+        # 1) 패배 MAE 분석 → DYN_SL_MIN 조정
+        # =====================================================
+        # MAE = 해당 거래의 최대 역행폭 (얼마나 빠졌다가 손절됐는지)
+        # - 패배 MAE 평균이 SL보다 훨씬 작으면 → 다른 원인으로 손절 (SL은 적정)
+        # - 패배 MAE 평균이 SL 근처면 → SL에 맞고 나간 것 (노이즈 가능 → SL 넓히기)
+        # - 패배 MAE 평균이 SL보다 크면 → SL 이후 더 빠짐 (SL 적정 or 좁혀도 됨)
+        if "mae_pct" in df.columns:
+            loss_mae = pd.to_numeric(loses["mae_pct"], errors="coerce").dropna()
+            if len(loss_mae) >= 5:
+                avg_loss_mae = abs(loss_mae.mean())  # % 단위 (예: 1.2)
+                avg_loss_mae_dec = avg_loss_mae / 100  # 소수 단위 (예: 0.012)
+
+                current_sl_pct = DYN_SL_MIN * 100  # % 단위
+
+                # 패배 MAE가 SL의 80~120% 범위 = SL 경계에서 손절 (노이즈 가능 → 넓히기)
+                if avg_loss_mae >= current_sl_pct * 0.80:
+                    # SL 경계 손절 → SL을 패배MAE의 120%로 타겟
+                    target_sl = avg_loss_mae_dec * 1.20
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        refresh_mfe_targets()
+                        print(f"[EXIT_LEARN] SL 넓힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL경계 손절)")
+
+                # 패배 MAE가 SL의 50% 미만 = SL 전에 다른 원인으로 청산 (SL 좁혀도 됨)
+                elif avg_loss_mae < current_sl_pct * 0.50:
+                    target_sl = avg_loss_mae_dec * 1.50  # MAE의 150% 정도로 축소
+                    new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
+                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
+                    if AUTO_LEARN_APPLY:
+                        DYN_SL_MIN = new_sl
+                        refresh_mfe_targets()
+                        print(f"[EXIT_LEARN] SL 좁힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL전 청산)")
+
+        # =====================================================
+        # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.8~3.5%)
+        # =====================================================
+        new_sl_max = round(DYN_SL_MIN * 1.8, 4)
+        new_sl_max = max(0.018, min(0.035, new_sl_max))
+        if abs(new_sl_max - old_sl_max) > 0.0005:
+            changes["DYN_SL_MAX"] = round(new_sl_max - old_sl_max, 4)
+            if AUTO_LEARN_APPLY:
+                DYN_SL_MAX = new_sl_max
+
+        # =====================================================
+        # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 2.5~5.0%)
+        # =====================================================
+        new_hard = round(DYN_SL_MIN * 2.5, 4)
+        new_hard = max(0.025, min(0.050, new_hard))
+        if abs(new_hard - old_hard) > 0.001:
+            changes["HARD_STOP_DD"] = round(new_hard - old_hard, 4)
+            if AUTO_LEARN_APPLY:
+                HARD_STOP_DD = new_hard
+
+        # =====================================================
+        # 4) 트레일 간격 조정 (MFE 캡처율 + 승리 peak_drop 기반)
+        # =====================================================
+        _trail_adjusted = False
+        if "mfe_pct" in df.columns and "pnl_pct" in df.columns:
+            mfe_s = pd.to_numeric(wins["mfe_pct"], errors="coerce")
+            pnl_s = pd.to_numeric(wins["pnl_pct"], errors="coerce") * 100  # % 변환
+            valid = (mfe_s > 0) & pnl_s.notna()
+            if valid.sum() >= 5:
+                capture_rate = (pnl_s[valid] / mfe_s[valid]).mean()  # 0~1 비율
+
+                # 캡처율 40% 미만 → 트레일이 넓어서 수익 흘림 → 좁히기
+                if capture_rate < 0.40:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 0.85  # 15% 축소 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 좁힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+                # 캡처율 70% 이상 → 트레일 적정 or 살짝 넓혀도 됨 (눌림 허용)
+                elif capture_rate > 0.70:
+                    target_trail = TRAIL_DISTANCE_MIN_BASE * 1.10  # 10% 확대 방향
+                    new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                    new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        _trail_adjusted = True
+                        print(f"[EXIT_LEARN] 트레일 넓힘: {old_trail*100:.2f}%→{new_trail*100:.2f}% (캡처율={capture_rate*100:.0f}%)")
+
+        # 트레일 미조정 시: 승리 peak_drop으로 보조 조정
+        if not _trail_adjusted and "peak_drop" in df.columns:
+            win_drops = pd.to_numeric(wins["peak_drop"], errors="coerce").dropna()
+            if len(win_drops) >= 5:
+                avg_drop = abs(win_drops.mean()) / 100  # % → 소수
+                # 승리 시 평균 피크드롭의 80%를 트레일 간격으로
+                target_trail = max(0.001, avg_drop * 0.80)
+                new_trail = TRAIL_DISTANCE_MIN_BASE * (1 - BLEND) + target_trail * BLEND
+                new_trail = max(0.001, min(0.002, round(new_trail, 4)))
+                if abs(new_trail - old_trail) > 0.0005:
+                    changes["TRAIL_DISTANCE_MIN_BASE"] = round(new_trail - old_trail, 4)
+                    if AUTO_LEARN_APPLY:
+                        TRAIL_DISTANCE_MIN_BASE = new_trail
+                        print(f"[EXIT_LEARN] 트레일(피크드롭): {old_trail*100:.2f}%→{new_trail*100:.2f}% (승리avg_drop={avg_drop*100:.2f}%)")
+
+        # =====================================================
+        # 5) 결과 저장
+        # =====================================================
+        result_data = {
+            "DYN_SL_MIN": DYN_SL_MIN,
+            "DYN_SL_MAX": DYN_SL_MAX,
+            "HARD_STOP_DD": HARD_STOP_DD,
+            "TRAIL_DISTANCE_MIN_BASE": TRAIL_DISTANCE_MIN_BASE,
+        }
+
+        import tempfile
+        _wdir = os.path.dirname(EXIT_PARAMS_PATH) or "."
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                          dir=_wdir, suffix=".tmp", delete=False) as _wf:
+            json.dump({
+                "exit_params": result_data,
+                "updated_at": now_kst_str(),
+                "sample_size": len(df),
+                "win_rate": round(len(wins) / len(df) * 100, 1),
+            }, _wf, ensure_ascii=False, indent=2)
+            _wf_path = _wf.name
+        os.replace(_wf_path, EXIT_PARAMS_PATH)
+
+        win_rate = round(len(wins) / len(df) * 100, 1)
+        change_detail = " | ".join(
+            f"{k}:{v:+.4f}" for k, v in changes.items() if v != 0
+        ) or "변화없음"
+
+        print(f"[EXIT_LEARN] 완료: {result_data} | 변화: {change_detail}")
+        return {
+            "exit_params": result_data,
+            "changes": changes,
+            "win_rate": win_rate,
+            "sample_size": len(df),
+        }
+
+    except ImportError:
+        print("[EXIT_LEARN] pandas 미설치")
+        return None
+    except Exception as e:
+        print(f"[EXIT_LEARN_ERR] {e}")
+        traceback.print_exc()
+        return None
 
 # 부분청산 후 추가 손절 설정
 PARTIAL_EXIT_PROFIT_DROP = 0.002   # 익절 부분청산 후 -0.2% 추가 하락 시 청산
@@ -3951,7 +4926,73 @@ def is_strong_momentum(ticks, ob):
     except Exception:
         return False
 
-# (load_exit_params, load_learned_weights 제거됨 — AUTO_LEARN 전용)
+def load_exit_params():
+    """저장된 매도 파라미터 로드"""
+    global DYNAMIC_EXIT_PARAMS
+    if os.path.exists(EXIT_PARAMS_PATH):
+        try:
+            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "exit_params" in data:
+                DYNAMIC_EXIT_PARAMS.update(data["exit_params"])
+                print(f"[EXIT_PARAMS] 로드 완료: 승률 {data.get('win_rate')}%, 평균손익 {data.get('avg_pnl')}%")
+        except Exception as e:
+            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
+
+def load_learned_weights():
+    """
+    저장된 학습 파일 로드
+    - 과거 버전 호환: "weights" 키는 무시 (스코어 시스템 폐지)
+    - 현행: "gate_thresholds"가 있으면 GATE_* 임계치 복원
+    """
+    global GATE_TURN_MAX, GATE_SPREAD_MAX
+    global GATE_ACCEL_MIN, GATE_ACCEL_MAX, GATE_BUY_RATIO_MIN
+    global GATE_SURGE_MAX, GATE_OVERHEAT_MAX, GATE_IMBALANCE_MIN, GATE_FRESH_AGE_MAX
+    global GATE_VOL_MIN, GATE_VOL_VS_MA_MIN
+    global DYN_SL_MIN, DYN_SL_MAX, HARD_STOP_DD, TRAIL_DISTANCE_MIN_BASE
+
+    if not os.path.exists(WEIGHTS_PATH):
+        print("[WEIGHTS] 학습된 파일 없음 - 기본값 사용")
+        return
+
+    try:
+        with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # (현행) 게이트 임계치 복원
+        thr = data.get("gate_thresholds")
+        if isinstance(thr, dict):
+            GATE_TURN_MAX      = thr.get("GATE_TURN_MAX",      GATE_TURN_MAX)
+            GATE_SPREAD_MAX    = thr.get("GATE_SPREAD_MAX",    GATE_SPREAD_MAX)
+            GATE_ACCEL_MIN     = thr.get("GATE_ACCEL_MIN",     GATE_ACCEL_MIN)
+            GATE_ACCEL_MAX     = thr.get("GATE_ACCEL_MAX",     GATE_ACCEL_MAX)
+            GATE_BUY_RATIO_MIN = thr.get("GATE_BUY_RATIO_MIN", GATE_BUY_RATIO_MIN)
+            GATE_SURGE_MAX     = thr.get("GATE_SURGE_MAX",     GATE_SURGE_MAX)
+            GATE_OVERHEAT_MAX  = thr.get("GATE_OVERHEAT_MAX",  GATE_OVERHEAT_MAX)
+            GATE_IMBALANCE_MIN = thr.get("GATE_IMBALANCE_MIN", GATE_IMBALANCE_MIN)
+            print(f"[WEIGHTS] 게이트 임계치 로드: {thr}")
+
+        print(f"[WEIGHTS] 업데이트: {data.get('updated_at', '?')}, 샘플: {data.get('sample_size', '?')}, 승률: {data.get('win_rate', '?')}%")
+    except Exception as e:
+        print(f"[WEIGHTS_LOAD_ERR] {e}")
+
+    # 🧠 SL/트레일 학습 결과 복원
+    if os.path.exists(EXIT_PARAMS_PATH):
+        try:
+            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
+                ep_data = json.load(f)
+            ep = ep_data.get("exit_params")
+            if isinstance(ep, dict):
+                DYN_SL_MIN = ep.get("DYN_SL_MIN", DYN_SL_MIN)
+                DYN_SL_MAX = ep.get("DYN_SL_MAX", DYN_SL_MAX)
+                HARD_STOP_DD = ep.get("HARD_STOP_DD", HARD_STOP_DD)
+                TRAIL_DISTANCE_MIN_BASE = ep.get("TRAIL_DISTANCE_MIN_BASE", TRAIL_DISTANCE_MIN_BASE)
+                refresh_mfe_targets()
+                print(f"[WEIGHTS] SL/트레일 로드: SL {DYN_SL_MIN*100:.2f}~{DYN_SL_MAX*100:.2f}% "
+                      f"| 트레일 {TRAIL_DISTANCE_MIN_BASE*100:.2f}% | 비상 {HARD_STOP_DD*100:.1f}% "
+                      f"| {ep_data.get('updated_at', '?')}")
+        except Exception as e:
+            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
 
 # =========================
 # 세션/요청(네트워크 안정화)
@@ -4362,11 +5403,6 @@ def get_top_krw_by_24h(n=TOP_N):
             if v > 0: acc.append((t["market"], v))
     acc.sort(key=lambda x: x[1], reverse=True)
     mkts = [m for m, _ in acc]
-    # 🔧 백테스트최적: 화이트리스트 필터 (양수익 코인 우선)
-    if COIN_WHITELIST_ENABLED and COIN_WHITELIST:
-        wl = [m for m in mkts if m in COIN_WHITELIST]
-        rest = [m for m in mkts if m not in COIN_WHITELIST]
-        mkts = wl + rest  # 화이트리스트 코인을 상위로 배치 (완전 차단은 아님)
     with _MKTS_CACHE_LOCK:
         _MKTS_CACHE["mkts"] = mkts
         _MKTS_CACHE["ts"] = time.time()  # 🔧 FIX: API 완료 시점 기준
@@ -5068,7 +6104,297 @@ def is_mega_breakout(c1):
         (z >= MEGA_VOL_Z) or (abs_krw >= MEGA_ABS_KRW))
 
 
-# (리테스트 함수 add_to_retest_watchlist/check_retest_entry/cleanup_retest_watchlist/is_morning_session 제거됨)
+# =========================
+# 🎯 리테스트 진입 함수들
+# =========================
+def add_to_retest_watchlist(m, peak_price, pre):
+    """
+    첫 급등 감지 시 워치리스트에 등록
+    🔧 강화: 첫 파동 품질 검증 + 5분 EMA 추세 필수
+    """
+    if not RETEST_MODE_ENABLED:
+        return
+
+    # --- 첫 파동 품질 검증: ignition_score≥3 OR (turn/imb/buy_ratio 중 2개 이상 강함) ---
+    ign_score = pre.get("ignition_score", 0)
+    _br = pre.get("buy_ratio", 0)
+    _imb = pre.get("imbalance", 0)
+    _turn = pre.get("turn_pct", 0)
+
+    strong_count = 0
+    if _br >= 0.60:
+        strong_count += 1
+    if _imb >= 0.40:
+        strong_count += 1
+    if _turn >= 5.0:
+        strong_count += 1
+
+    first_wave_real = (ign_score >= 3) or (strong_count >= 2)
+    if not first_wave_real:
+        print(f"[RETEST] {m} 첫 파동 품질 미달 (ign={ign_score}, br={_br:.2f}, imb={_imb:.2f}, turn={_turn:.1f}) → 등록 거부")
+        return
+
+    # --- 5분 EMA 추세 정렬 확인: EMA5 > EMA20 + gap ≥ RETEST_EMA_GAP_MIN ---
+    try:
+        c5 = get_minutes_candles(5, m, 25)
+        if c5 and len(c5) >= 20:
+            closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
+            ema5_val = ema_last(closes_5m, 5)
+            ema20_val = ema_last(closes_5m, 20)
+            if ema5_val and ema20_val and ema20_val > 0:
+                ema_gap = (ema5_val - ema20_val) / ema20_val
+                if ema_gap < RETEST_EMA_GAP_MIN:
+                    print(f"[RETEST] {m} 5분 EMA 정렬 미달 (EMA5-EMA20 gap={ema_gap*100:.2f}% < {RETEST_EMA_GAP_MIN*100:.1f}%) → 등록 거부")
+                    return
+            else:
+                print(f"[RETEST] {m} 5분 EMA 계산 실패 → 등록 거부")
+                return
+        else:
+            print(f"[RETEST] {m} 5분 캔들 부족 → 등록 거부")
+            return
+    except Exception as e:
+        print(f"[RETEST] {m} 5분 EMA 조회 실패: {e} → 등록 거부")
+        return
+
+    with _RETEST_LOCK:
+        if m in _RETEST_WATCHLIST:
+            return  # 이미 등록됨
+        _RETEST_WATCHLIST[m] = {
+            "peak_price": peak_price,
+            "peak_ts": time.time(),
+            "pullback_low": peak_price,  # 되돌림 저점 추적
+            "state": "watching",  # watching → pullback → bounce → ready
+            "pre": pre,
+            "entry_price": pre.get("price", peak_price),  # 원래 신호 가격
+            # 🔧 첫 파동 메타데이터 (로그/디버그용)
+            "reg_ign_score": ign_score,
+            "reg_buy_ratio": _br,
+            "reg_imbalance": _imb,
+            "reg_turn_pct": _turn,
+        }
+        print(f"[RETEST] {m} 워치리스트 등록 | 고점 {peak_price:,.0f}원 | ign={ign_score} br={_br:.2f} imb={_imb:.2f} turn={_turn:.1f} | 리테스트 대기")
+
+
+def check_retest_entry(m):
+    """
+    리테스트 조건 체크 → 진입 가능하면 pre 반환, 아니면 None
+    🔧 강화: 5분 EMA 추세 이탈 폐기 / 거래량 사망 폐기 / 재돌파 확인형 진입
+    """
+    if not RETEST_MODE_ENABLED:
+        return None
+
+    if is_coin_loss_cooldown(m):
+        return None
+
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+
+        # 타임아웃 체크
+        elapsed = time.time() - watch["peak_ts"]
+        if elapsed > RETEST_TIMEOUT_SEC:
+            print(f"[RETEST] {m} 타임아웃 ({elapsed:.0f}초) → 워치리스트 제거")
+            _RETEST_WATCHLIST.pop(m, None)
+            return None
+
+        peak_price = watch["peak_price"]
+        entry_price = watch["entry_price"]
+        state = watch["state"]
+
+    # 현재가 조회
+    try:
+        cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": m})
+        if not cur_js or len(cur_js) == 0:
+            return None
+        cur_price = cur_js[0].get("trade_price", 0)
+    except Exception:
+        return None
+
+    if cur_price <= 0:
+        return None
+
+    # 되돌림 저점 업데이트
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+        if cur_price < watch["pullback_low"]:
+            watch["pullback_low"] = cur_price
+        pullback_low = watch["pullback_low"]
+
+    # 고점 대비 하락률
+    pullback_pct = (peak_price - pullback_low) / peak_price if peak_price > 0 else 0
+    # 저점 대비 반등률
+    bounce_pct = (cur_price - pullback_low) / pullback_low if pullback_low > 0 else 0
+
+    # =====================================================
+    # 🔧 공통 안전 필터: 5분 EMA 추세 이탈 → 즉시 폐기
+    # (눌림 중이든 반등 중이든, 5분 추세가 깨지면 알파 소멸)
+    # =====================================================
+    if state in ("pullback", "bounce"):
+        try:
+            c5 = get_minutes_candles(5, m, 25)
+            if c5 and len(c5) >= 20:
+                closes_5m = [x["trade_price"] for x in c5]  # oldest→newest (get_minutes_candles가 이미 reversed)
+                ema5_val = ema_last(closes_5m, 5)
+                ema20_val = ema_last(closes_5m, 20)
+                if ema5_val and ema20_val and ema5_val < ema20_val:
+                    with _RETEST_LOCK:
+                        _RETEST_WATCHLIST.pop(m, None)
+                    print(f"[RETEST] {m} 5분 EMA 추세 이탈 (EMA5 {ema5_val:,.0f} < EMA20 {ema20_val:,.0f}) → 폐기")
+                    return None
+        except Exception:
+            pass  # API 에러 시 다음 사이클에서 재확인
+
+    # =====================================================
+    # 🔧 눌림 중 거래량 사망 체크 → 폐기
+    # (krw_per_sec 바닥이면 관심 소멸 = 재상승 기대 불가)
+    # =====================================================
+    if state in ("pullback", "bounce"):
+        try:
+            ticks = get_recent_ticks(m, 100)
+            if ticks and len(ticks) >= 5:
+                t15_stats = micro_tape_stats_from_ticks(ticks, 15)
+                if t15_stats["krw_per_sec"] < RETEST_KRW_PER_SEC_DEAD:
+                    with _RETEST_LOCK:
+                        _RETEST_WATCHLIST.pop(m, None)
+                    print(f"[RETEST] {m} 거래량 사망 (krw/s={t15_stats['krw_per_sec']:,.0f} < {RETEST_KRW_PER_SEC_DEAD:,}) → 폐기")
+                    return None
+        except Exception:
+            pass
+
+    # 상태 전이 로직
+    with _RETEST_LOCK:
+        watch = _RETEST_WATCHLIST.get(m)
+        if not watch:
+            return None
+        # 🔧 FIX: 상태 전이 직전에 state 재읽기 (안전필터에서 다른 스레드가 변경 가능)
+        state = watch["state"]
+
+        if state == "watching":
+            # 충분히 되돌림이 왔는지 체크
+            if pullback_pct >= RETEST_PULLBACK_MIN:
+                watch["state"] = "pullback"
+                print(f"[RETEST] {m} 되돌림 감지 | -{pullback_pct*100:.2f}% | state→pullback")
+
+        elif state == "pullback":
+            # 너무 많이 빠졌으면 제거
+            if pullback_pct > RETEST_PULLBACK_MAX:
+                print(f"[RETEST] {m} 과도한 되돌림 -{pullback_pct*100:.2f}% > {RETEST_PULLBACK_MAX*100:.1f}% → 제거")
+                _RETEST_WATCHLIST.pop(m, None)
+                return None
+
+            # 반등 시작 체크
+            if bounce_pct >= RETEST_BOUNCE_MIN:
+                watch["state"] = "bounce"
+                print(f"[RETEST] {m} 반등 감지 | +{bounce_pct*100:.2f}% | state→bounce")
+
+        elif state == "bounce":
+            # 🔧 FIX: API 호출은 락 바깥에서 수행 (아래에서 처리)
+            pass
+
+        elif state == "ready":
+            # 진입 조건 충족!
+            # 🔧 FIX: shallow copy 후 수정 (원본 pre dict 오염 방지 — circle_check_entry와 동일 패턴)
+            pre = dict(watch.get("pre", {}))
+            pre["retest_entry"] = True  # 리테스트 진입 마킹
+            pre["price"] = cur_price  # 현재가로 업데이트
+            pre["entry_mode"] = "half"  # 🔧 리테스트 진입은 half 강제 (burst와 리스크-리턴 구조 다름)
+            pre["signal_type"] = "retest"  # 🔧 FIX: SL 완화용 (circle과 동일 구조)
+            _RETEST_WATCHLIST.pop(m, None)  # 워치리스트에서 제거
+            print(f"[RETEST] {m} 🎯 리테스트 진입 신호! | 고점 {peak_price:,.0f} → 저점 {pullback_low:,.0f} → 현재 {cur_price:,.0f} | half 강제")
+            return pre
+
+    # -----------------------------------------------
+    # 🔧 FIX: bounce → ready API 호출을 락 바깥에서 수행 (네트워크 지연 시 블로킹 방지)
+    # -----------------------------------------------
+    if state == "bounce":
+        support_ok = cur_price >= entry_price * 0.995
+        if support_ok and bounce_pct >= RETEST_BOUNCE_MIN:
+            reentry_ok = True
+            reject_reasons = []
+
+            try:
+                ticks = get_recent_ticks(m, 100)
+                ob_raw = safe_upbit_get("https://api.upbit.com/v1/orderbook", {"markets": m})
+                ob = None
+                if ob_raw and len(ob_raw) > 0:
+                    _units = ob_raw[0].get("orderbook_units", [])
+                    if _units:
+                        ob = {
+                            "spread": ((_units[0]["ask_price"] - _units[0]["bid_price"]) /
+                                       ((_units[0]["ask_price"] + _units[0]["bid_price"]) / 2) * 100)
+                                      if _units[0]["ask_price"] > 0 else 999,
+                            "raw": ob_raw[0],
+                        }
+
+                if ticks and len(ticks) >= 5:
+                    t10_stats = micro_tape_stats_from_ticks(ticks, 10)
+
+                    if t10_stats["buy_ratio"] < RETEST_BUY_RATIO_MIN:
+                        reentry_ok = False
+                        reject_reasons.append(f"br={t10_stats['buy_ratio']:.2f}<{RETEST_BUY_RATIO_MIN}")
+
+                    fresh_ok_rt = last_two_ticks_fresh(ticks)
+                    if not fresh_ok_rt:
+                        reentry_ok = False
+                        reject_reasons.append("fresh_fail")
+
+                    if not uptick_streak_from_ticks(ticks, need=2):
+                        reentry_ok = False
+                        reject_reasons.append("no_uptick")
+                else:
+                    reentry_ok = False
+                    reject_reasons.append("ticks_insufficient")
+
+                if ob and ob.get("raw"):
+                    imb_rt = calc_orderbook_imbalance(ob)
+                    if imb_rt < RETEST_IMBALANCE_MIN:
+                        reentry_ok = False
+                        reject_reasons.append(f"imb={imb_rt:.2f}<{RETEST_IMBALANCE_MIN}")
+
+                if ob and ob.get("spread", 999) > RETEST_SPREAD_MAX:
+                    reentry_ok = False
+                    reject_reasons.append(f"spread={ob['spread']:.2f}>{RETEST_SPREAD_MAX}")
+
+            except Exception as e:
+                reentry_ok = False
+                reject_reasons.append(f"api_err:{e}")
+
+            # 🔧 FIX: 상태 전이는 락 안에서 (API 후 상태 재검증)
+            with _RETEST_LOCK:
+                watch = _RETEST_WATCHLIST.get(m)
+                if watch and watch["state"] == "bounce":
+                    if reentry_ok:
+                        watch["state"] = "ready"
+                        print(f"[RETEST] {m} 재돌파 확인 ✓ | 현재가 {cur_price:,.0f} | br/imb/fresh/uptick/spread 모두 통과 | state→ready")
+                    else:
+                        print(f"[RETEST] {m} 재진입 품질 미달 [{', '.join(reject_reasons)}] | bounce 유지")
+
+    return None
+
+
+def cleanup_retest_watchlist():
+    """타임아웃된 항목 정리"""
+    if not RETEST_MODE_ENABLED:
+        return
+    with _RETEST_LOCK:
+        now = time.time()
+        expired = [m for m, w in _RETEST_WATCHLIST.items()
+                   if now - w["peak_ts"] > RETEST_TIMEOUT_SEC]
+        for m in expired:
+            print(f"[RETEST] {m} 타임아웃 → 워치리스트 제거")
+            _RETEST_WATCHLIST.pop(m, None)
+
+
+def is_morning_session():
+    """장초 시간대인지 확인 (08:00~10:00)"""
+    try:
+        cur_hour = now_kst().hour
+        return RETEST_MORNING_HOURS[0] <= cur_hour < RETEST_MORNING_HOURS[1]
+    except Exception:
+        return False
 
 
 # =====================================================
@@ -5150,8 +6476,9 @@ def circle_register(m, pre, c1):
             "peak_after_ign": ign_high,   # 점화 이후 최고점
             "pullback_low": ign_high,     # 눌림 저점
             "reclaim_price": 0,           # 리클레임 확인 가격
-            # 원본 pre (진입 시 재사용) — 🔧 FIX(데이터분석): shallow copy로 키 오염 방지
-            "pre": dict(pre),
+            "was_below_reclaim": False,   # pullback 중 body_mid 아래 경험 여부
+            # 원본 pre (진입 시 재사용)
+            "pre": pre,
             # 메타데이터 (디버그용)
             "reg_ign_score": ign_score,
             "reg_buy_ratio": pre.get("buy_ratio", 0),
@@ -5253,6 +6580,12 @@ def circle_check_entry(m):
     pullback_pct_hist = (peak - pullback_low) / peak if peak > 0 else 0
     pullback_pct_now = (ign_high - cur_price) / ign_high if ign_high > 0 else 0
 
+    # --- was_below_reclaim 추적 (pullback 상태에서 body_mid 아래 경험 기록) ---
+    with _CIRCLE_LOCK:
+        watch = _CIRCLE_WATCHLIST.get(m)
+        if watch and watch["state"] == "pullback" and cur_price < ign_body_mid:
+            watch["was_below_reclaim"] = True
+
     # --- 과도한 눌림 체크 (역대 저점 기준 — 한번이라도 깊이 빠졌으면 구조 훼손) ---
     if pullback_pct_hist > CIRCLE_PULLBACK_MAX_PCT:
         with _CIRCLE_LOCK:
@@ -5340,7 +6673,7 @@ def circle_check_entry(m):
                 watch["reclaim_price"] = cur_price
                 print(
                     f"[CIRCLE] ⭕ {m} 리클레임 ✓ | 현재 {cur_price:,.0f} ≥ 기준선 {reclaim_level:,.0f} "
-                    f"| {candle_count}봉째 | state→reclaim"
+                    f"| 아래 체류 경험 ✓ | {candle_count}봉째 | state→reclaim"
                 )
 
         elif state == "reclaim":
@@ -5592,9 +6925,6 @@ def detect_box_range(c1, lookback=None):
         return False, {}
 
     candles = c1[-lookback:]
-    # 🔧 FIX(데이터분석): 시간순 정렬 강제 — get_minutes_candles 구현에 의존하지 않음
-    # mid_crosses, 회귀 slope 등은 oldest→newest 전제 필수
-    candles = sorted(candles, key=lambda x: x.get("candle_date_time_kst", ""))
     highs = [c["high_price"] for c in candles]
     lows = [c["low_price"] for c in candles]
     closes = [c["trade_price"] for c in candles]
@@ -5887,18 +7217,12 @@ def box_check_entry(m):
     except Exception:
         pass
 
-    # 🔧 FIX: 기본값 선언 — ticks 미정의 NameError 방지 (try 블록 전에 반드시 선언)
-    ticks = []
-    t10 = {"buy_ratio": 0.0, "krw_per_sec": 0, "n": 0, "rate": 0.0, "krw": 0}
     try:
         ticks = get_recent_ticks(m, 100)
         if not ticks or len(ticks) < 8:
             # 🔧 FIX: 틱 부족해도 캔들 반등 확인되면 진입 허용
             if not candle_bounce:
                 return None
-            # 🔧 FIX(데이터분석): 틱 부족 통과 시에도 안전한 기본값 유지
-            if not ticks:
-                ticks = []
         else:
             t10 = micro_tape_stats_from_ticks(ticks, 10)
             t30 = micro_tape_stats_from_ticks(ticks, 30)
@@ -5932,8 +7256,6 @@ def box_check_entry(m):
     except Exception:
         if not candle_bounce:
             return None
-        if not ticks:
-            ticks = []
 
     # 호가 확인 (스프레드)
     try:
@@ -6172,6 +7494,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
         except Exception as _e:
             print(f"[BOX_TRADE_RECORD_ERR] {_e}")
 
+        # 🔧 자동 학습용 결과 업데이트
+        if AUTO_LEARN_ENABLED:
+            try:
+                update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
+                                    exit_reason=sell_reason)
+            except Exception as _e:
+                print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
 
         # 🔧 FIX: 일반 매매와 동일한 헤더 형식
         tg_send(
@@ -6244,341 +7573,110 @@ def box_cleanup():
 
 
 # =========================
-# 🔧 v4.0: 시장 레짐 자동 감지 (3-레짐 전환)
-# =========================
-_MARKET_REGIME = "ranging"  # 기본값: 횡보
-_MARKET_REGIME_TS = 0.0
-_MARKET_REGIME_INTERVAL = 600  # 10분마다 갱신
-
-def detect_market_regime():
-    """
-    시장 레짐 감지 (10분마다 갱신)
-    Returns: "trending" | "ranging" | "volatile"
-    """
-    global _MARKET_REGIME, _MARKET_REGIME_TS
-    now = time.time()
-    if now - _MARKET_REGIME_TS < _MARKET_REGIME_INTERVAL:
-        return _MARKET_REGIME
-
-    try:
-        btc_c15 = get_minutes_candles(15, "KRW-BTC", 8)  # 최근 2시간
-        if not btc_c15 or len(btc_c15) < 6:
-            _MARKET_REGIME_TS = now
-            return _MARKET_REGIME
-
-        highs = [c["high_price"] for c in btc_c15]
-        lows = [c["low_price"] for c in btc_c15]
-        closes = [c["trade_price"] for c in btc_c15]
-
-        range_pct = (max(highs) - min(lows)) / max(min(lows), 1) * 100
-        trend = (closes[-1] / max(closes[0], 1) - 1) * 100
-
-        if abs(trend) >= 1.5 and range_pct >= 2.0:
-            _MARKET_REGIME = "trending"   # 추세장 → 모멘텀 전략 활성화
-        elif range_pct <= 1.0:
-            _MARKET_REGIME = "ranging"    # 횡보장 → Mean Reversion + Grid
-        else:
-            _MARKET_REGIME = "volatile"   # 변동장 → 진입 축소, SL 타이트
-
-        _MARKET_REGIME_TS = now
-        print(f"[REGIME] {_MARKET_REGIME} | BTC trend={trend:.2f}% range={range_pct:.2f}%")
-    except Exception as e:
-        print(f"[REGIME_ERR] {e}")
-        _MARKET_REGIME_TS = now
-
-    return _MARKET_REGIME
-
-
-def get_regime_strategy_weights():
-    """레짐별 전략 배분 비중 반환"""
-    regime = detect_market_regime()
-    if regime == "trending":
-        return {"momentum": 1.0, "mean_reversion": 0.0, "grid": 0.0, "max_pos": 3}
-    elif regime == "ranging":
-        return {"momentum": 0.2, "mean_reversion": 0.5, "grid": 0.3, "max_pos": 2}
-    else:  # volatile
-        return {"momentum": 0.0, "mean_reversion": 0.3, "grid": 0.0, "max_pos": 1}
-
-
-# =========================
-# 🔧 v4.0: Mean Reversion 전략 (횡보장 수익 엔진)
-# =========================
-MR_ENABLED = True
-MR_RSI_OVERSOLD = 25           # RSI(14) 1분봉 과매도 진입
-MR_RSI_EXIT = 45               # RSI 45 도달 시 익절
-MR_BB_LOWER_TOUCH = True       # 볼린저밴드 하단 터치 필수
-MR_MIN_VOL_24H = 10_000_000_000  # 최소 24시간 거래대금 100억 (유동성 확보)
-MR_SL = 0.008                  # 0.8% 손절 (밴드 아래 추가 이탈 제한)
-MR_TP = 0.006                  # 0.6% 익절 (밴드 중심 복귀)
-MR_MAX_POSITIONS = 2           # Mean Reversion 동시 포지션 한도
-MR_HORIZON_SEC = 900           # 15분 타임아웃
-MR_COOLDOWN_SEC = 600          # 같은 코인 10분 쿨다운
-MR_TRAIL_ARM = 0.004           # +0.4% 도달 시 트레일 무장
-MR_TRAIL_DIST = 0.002          # 0.2% 트레일 거리
-
-_MR_WATCHLIST = {}
-_MR_LOCK = threading.Lock()
-_MR_POSITIONS = {}  # {market: {"entry_ts": ..., "entry_price": ...}}
-_MR_LAST_ENTRY = {}  # {market: timestamp} 쿨다운용
-
-
-def _calc_rsi_from_candles(candles, period=14):
-    """1분봉에서 RSI(14) 계산"""
-    if not candles or len(candles) < period + 1:
-        return 50.0  # 기본값
-    closes = [c["trade_price"] for c in candles]
-    gains = []
-    losses = []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    if len(gains) < period:
-        return 50.0
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def _calc_bb_position(candles, period=20, std_mult=2):
-    """볼린저밴드 포지션 (0=하단, 100=상단) 계산"""
-    if not candles or len(candles) < period:
-        return 50.0
-    closes = [c["trade_price"] for c in candles[-period:]]
-    sma = sum(closes) / len(closes)
-    std = statistics.stdev(closes) if len(closes) > 1 else 0
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bb_range = upper - lower
-    if bb_range <= 0:
-        return 50.0
-    cur = closes[-1]
-    return max(0.0, min(100.0, (cur - lower) / bb_range * 100.0))
-
-
-def mean_reversion_scan(mkts, obc, c1_cache):
-    """
-    Mean Reversion 전략 스캔:
-    RSI(14) ≤ 25 + 볼린저밴드 하단 터치 → 과매도 진입
-    """
-    if not MR_ENABLED:
-        return []
-
-    regime = detect_market_regime()
-    weights = get_regime_strategy_weights()
-    if weights["mean_reversion"] <= 0:
-        return []
-
-    candidates = []
-    now = time.time()
-
-    # 현재 MR 포지션 수 확인
-    with _MR_LOCK:
-        active_mr = len([p for p in _MR_POSITIONS.values() if p.get("active")])
-    if active_mr >= MR_MAX_POSITIONS:
-        return []
-
-    for m in mkts:
-        try:
-            # 쿨다운 확인
-            if now - _MR_LAST_ENTRY.get(m, 0) < MR_COOLDOWN_SEC:
-                continue
-
-            # 이미 포지션 보유 중이면 스킵
-            with _POSITION_LOCK:
-                if m in OPEN_POSITIONS:
-                    continue
-
-            c1 = c1_cache.get(m, [])
-            if not c1 or len(c1) < 20:
-                continue
-
-            ob = obc.get(m)
-            if not ob:
-                continue
-
-            # 조건 1: RSI(14) 1분봉 ≤ 25
-            rsi_1m = _calc_rsi_from_candles(c1)
-            if rsi_1m > MR_RSI_OVERSOLD:
-                continue
-
-            # 조건 2: 볼린저밴드 하단 터치 (bb_pos ≤ 5)
-            bb_pos = _calc_bb_position(c1)
-            if MR_BB_LOWER_TOUCH and bb_pos > 5.0:
-                continue
-
-            # 조건 3: 1시간 추세 ≥ 0% (하락추세 아닌 횡보/상승에서만)
-            if len(c1) >= 20:
-                trend_1h_proxy = (c1[-1]["trade_price"] / max(c1[0]["trade_price"], 1) - 1) * 100
-            else:
-                trend_1h_proxy = 0
-            if trend_1h_proxy < 0:
-                continue
-
-            # 조건 4: 24시간 거래대금 ≥ 100억
-            cur_vol = c1[-1].get("candle_acc_trade_price", 0)
-            # 추정: 현재 1분 거래대금 × 1440 = 24시간 추정
-            est_24h_vol = cur_vol * 1440
-            if est_24h_vol < MR_MIN_VOL_24H:
-                continue
-
-            # 조건 5: 오더북 임밸런스 ≥ 0.40
-            imb = calc_orderbook_imbalance(ob)
-            if imb < 0.40:
-                continue
-
-            # 조건 6: BTC 5분 변화 > -0.5%
-            btc5 = btc_5m_change()
-            if btc5 <= -0.005:
-                continue
-
-            # 조건 7: 최근 10분 내 동일 코인 진입 없음
-            if now - _MR_LAST_ENTRY.get(m, 0) < 600:
-                continue
-
-            cur_price = c1[-1]["trade_price"]
-            candidates.append({
-                "market": m,
-                "price": cur_price,
-                "rsi": rsi_1m,
-                "bb_pos": bb_pos,
-                "imbalance": imb,
-                "strategy": "mean_reversion",
-                "signal_type": "mean_reversion",
-                "signal_tag": "MR_과매도",
-                "trade_type": "scalp",
-                "entry_mode": "half",  # Mean Reversion은 항상 half (안전)
-                "is_mr": True,
-                "mr_sl": MR_SL,
-                "mr_tp": MR_TP,
-                "ob": ob,
-            })
-            print(f"[MR_SCAN] {m} RSI={rsi_1m:.1f} BB={bb_pos:.1f}% imb={imb:.2f} → 후보")
-        except Exception as e:
-            print(f"[MR_SCAN_ERR] {m}: {e}")
-            continue
-
-    return candidates
-
-
-def mr_monitor_position(m, entry_price, volume, mr_info):
-    """Mean Reversion 포지션 모니터링"""
-    start_ts = time.time()
-    best = entry_price
-    trail_armed = False
-    trail_stop = 0.0
-
-    with _MR_LOCK:
-        _MR_POSITIONS[m] = {"active": True, "entry_ts": start_ts, "entry_price": entry_price}
-
-    try:
-        while time.time() - start_ts <= MR_HORIZON_SEC:
-            time.sleep(3)
-
-            # 포지션 존재 확인
-            with _POSITION_LOCK:
-                if m not in OPEN_POSITIONS:
-                    break
-
-            ticks = get_recent_ticks(m, 50)
-            if not ticks:
-                continue
-
-            curp = max(ticks, key=tick_ts_ms).get("trade_price", entry_price)
-            gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-
-            # 고점 갱신
-            if curp > best:
-                best = curp
-
-            # RSI 체크 (익절 조건)
-            c1 = get_minutes_candles(1, m, 20)
-            rsi_now = _calc_rsi_from_candles(c1) if c1 else 50.0
-
-            # TP: RSI ≥ 45 또는 수익률 ≥ 0.6%
-            if rsi_now >= MR_RSI_EXIT or gain >= MR_TP:
-                close_auto_position(m, f"MR_TP RSI={rsi_now:.1f} +{gain*100:.2f}%")
-                tg_send_mid(f"💰 {m} MR 익절 +{gain*100:.2f}% RSI={rsi_now:.1f}")
-                break
-
-            # SL: 수익률 ≤ -0.8%
-            if gain <= -MR_SL:
-                close_auto_position(m, f"MR_SL {gain*100:.2f}%")
-                tg_send_mid(f"🛑 {m} MR 손절 {gain*100:.2f}%")
-                break
-
-            # 트레일: +0.4% 도달 시 0.2% 트레일 무장
-            if gain >= MR_TRAIL_ARM and not trail_armed:
-                trail_armed = True
-                trail_stop = curp * (1.0 - MR_TRAIL_DIST)
-                print(f"[MR_TRAIL] {m} +{gain*100:.2f}% 트레일 무장 stop={trail_stop:,.0f}")
-            if trail_armed:
-                new_stop = curp * (1.0 - MR_TRAIL_DIST)
-                if new_stop > trail_stop:
-                    trail_stop = new_stop
-                if curp <= trail_stop:
-                    close_auto_position(m, f"MR_TRAIL +{gain*100:.2f}%")
-                    tg_send_mid(f"🔄 {m} MR 트레일 청산 +{gain*100:.2f}%")
-                    break
-
-        else:
-            # 타임아웃 → 현재 손익 기준 청산
-            gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
-            close_auto_position(m, f"MR_TIMEOUT {gain*100:+.2f}%")
-            tg_send_mid(f"⏰ {m} MR 타임아웃 {gain*100:+.2f}%")
-
-    except Exception as e:
-        print(f"[MR_MON_ERR] {m}: {e}")
-        traceback.print_exc()
-        try:
-            close_auto_position(m, f"MR모니터예외 | {e}")
-        except Exception:
-            pass
-    finally:
-        with _MR_LOCK:
-            _MR_POSITIONS.pop(m, None)
-        _MR_LAST_ENTRY[m] = time.time()
-
-
-# =========================
 # 허수 방어 / 점화 / 조기 브레이크
 # =========================
 # =========================
 # 🔧 레짐 필터 (횡보장 진입 차단) — 현재 미사용, 참조용 유지
 # =========================
-# === 오후 약세 시간대 진입 필터 ===
-# 172샘플: 오전9-12h wr59%, 오후13-17h wr28%, 저녁18-0h wr57%
-def is_afternoon_weak_period():
-    """오후 약세 시간대 필터 (14:00-16:59 진입 차단)
-    실제 데이터: 14-15시 승률 50-60% avg PnL -0.56%, 16시 승률 20% avg PnL -0.93%
-    12-13시는 60% 승률로 약세 시작이나 차단 대상에서 제외
+def is_sideways_regime(c1, lookback=20):
     """
-    _h = now_kst().hour
-    return 14 <= _h <= 16  # 14-16시만 차단 (가장 약한 시간대)
+    횡보장 판정: 최근 N봉의 고저 범위 + 볼린저밴드 폭 복합 판정
+    - 변동폭이 좁으면 횡보
+    - 볼린저밴드 폭(BB width) < 1.0% = 횡보 (XRP 0.7% 같은 케이스 포착)
+    - 횡보장에서 돌파 신호는 페이크 확률 높음
+    """
+    if len(c1) < lookback:
+        return False, 0.0
+
+    candles = c1[-lookback:]
+    highs = [c["high_price"] for c in candles]
+    lows = [c["low_price"] for c in candles]
+    closes = [c["trade_price"] for c in candles]
+
+    box_high = max(highs)
+    box_low = min(lows)
+
+    if box_low <= 0:
+        return False, 0.0
+
+    range_pct = (box_high - box_low) / box_low
+
+    # 🔧 가격대별 횡보 판정 (고정 임계값)
+    cur_price = candles[-1].get("trade_price", 0)
+    if cur_price < 1000:
+        sideways_thr = 0.008   # 1000원 미만: 0.8%
+    else:
+        sideways_thr = 0.005   # 1000원 이상: 0.5%
+
+    # 🔧 NEW: 볼린저밴드 폭 기반 횡보 판정 (range만으론 XRP 횡보 못 잡음)
+    # BB width = (upper - lower) / middle × 100
+    # 좁은 BB = 저변동 = 횡보 (돌파 신호는 페이크)
+    bb_sideways = False
+    if len(closes) >= 20:
+        sma20 = sum(closes[-20:]) / 20
+        if sma20 > 0:
+            variance = sum((c - sma20) ** 2 for c in closes[-20:]) / 20
+            std20 = variance ** 0.5
+            bb_width_pct = (2 * std20 * 2) / sma20  # (upper - lower) / middle
+            if bb_width_pct < 0.010:  # BB 폭 1.0% 미만 = 횡보
+                bb_sideways = True
+
+    is_sideways = range_pct < sideways_thr or bb_sideways
+
+    return is_sideways, range_pct
 
 
-def should_skip_afternoon_entry(pre_signal):
-    """오후 시간대 필터 적용 (매우 강한 신호는 예외 허용)"""
-    if not is_afternoon_weak_period():
-        return False
-    accel = pre_signal.get("flow_accel", 0)
-    vol_ratio = pre_signal.get("volume_surge", 0)
-    ign_ok = pre_signal.get("ign_ok", False)
-    # 예외 1: 매우 강한 가속도 + 거래량 폭증 (vol20x+)
-    if accel >= 2.0 and vol_ratio >= 20:
-        print(f"[오후필터] 예외 허용: 점화+폭증 (accel={accel:.1f}, vol={vol_ratio:.1f}x)")
-        return False
-    # 예외 2: 강력한 점화 신호
-    if ign_ok and accel >= 1.5:
-        print(f"[오후필터] 예외 허용: 강력한 점화 (accel={accel:.1f})")
-        return False
-    return True
+def calc_ema_slope(c1, period=20, lookback=5):
+    """
+    EMA 기울기 계산: 평평하면 횡보
+    - 기울기 0.1% 미만 = 횡보
+    """
+    if len(c1) < period + lookback:
+        return 0.0
+
+    closes = [c["trade_price"] for c in c1]
+
+    # 🔧 FIX: 전체 순회 1회로 ema_now + ema_prev(lookback 전 시점) 동시 추출
+    mult = 2 / (period + 1)
+    ema = closes[0]
+    ema_prev = None
+    prev_idx = len(closes) - 1 - lookback  # lookback 전 인덱스
+
+    for i, p in enumerate(closes[1:], start=1):
+        ema = p * mult + ema * (1 - mult)
+        if i == prev_idx:
+            ema_prev = ema
+
+    if not ema_prev or ema_prev <= 0:
+        return 0.0
+
+    slope = (ema - ema_prev) / ema_prev
+    return slope
+
+
+def regime_filter(m, c1, cur_price):
+    """
+    통합 레짐 필터: 횡보장/박스상단이면 진입 차단
+    Returns: (pass: bool, reason: str)
+    """
+    # 1) 횡보 판정 → 전면 차단 대신 "SIDEWAYS" 힌트 반환
+    # 호출부(detect_leader_stock)에서 점화/강돌파 예외 판단
+    is_sw, range_pct = is_sideways_regime(c1, lookback=20)
+    if is_sw:
+        return True, f"SIDEWAYS({range_pct*100:.1f}%)"  # 🔧 차단→힌트 (예외 통과 가능)
+
+    # 2) 박스 상단 근처 판정 - 🔧 비활성화 (돌파 전략에서 고점 진입은 정상)
+    # near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
+    # if near_box and box_pos == "BOX_TOP":
+    #     return False, "BOX_TOP"
+
+    # 3) EMA 기울기 판정 → 평평하면 entry_mode 다운그레이드
+    slope = calc_ema_slope(c1, period=20, lookback=5)
+    if abs(slope) < 0.001:  # 0.1% 미만 → 기울기 거의 없음
+        # 🔧 FIX: no-op 제거 → "FLAT_SLOPE" 힌트 반환 (caller에서 half로 다운그레이드)
+        return True, "FLAT_SLOPE"
+
+    return True, "OK"
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
@@ -6595,11 +7693,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
     if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
-        return None
-
-    # === 🔧 백테스트최적: 화이트리스트 필터 (손실코인 진입 차단) ===
-    if COIN_WHITELIST_ENABLED and COIN_WHITELIST and m not in COIN_WHITELIST:
-        cut("WHITELIST", f"{m} 화이트리스트 미포함")
         return None
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
@@ -6769,9 +7862,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 점화는 면제 (폭발적 모멘텀은 15분 과열 무시 가능)
     # 🔧 (제거됨) 15M_PEAK: VWAP_CHASE(추격차단) + V7차트분석(RSI/vol)이 동일 역할 → 추가 API 낭비 제거
     _entry_mode_override = None
-    _chart_rsi = 50.0      # 기본값 (V7 미실행 시 중립)
-    _chart_mom5 = 0.0      # 기본값 (V7 미실행 시 0)
-    _rsi_5m_proxy = 50.0   # 기본값 (5분봉 RSI 프록시)
 
     # === 🔧 v7 차트분석: 172샘플 다중타임프레임 검증 기반 사이즈 결정 ===
     # 📊 172신호 15분수익률 분석 결과:
@@ -6812,24 +7902,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                         else: _rsi_losses_temp -= _rd_temp
                     _rsi_rs_temp = _rsi_gains_temp / max(_rsi_losses_temp, 0.001)
                     _chart_rsi = 100 - 100 / (1 + _rsi_rs_temp)
-            except Exception:
-                pass
-
-            # 🔧 크로스TF: 5분봉 RSI 프록시 (c1 30개 → 5분단위 6개 샘플링)
-            # RSI발산(1m↑5m↓) WR=19.6%✗✗ 감지용
-            try:
-                if len(closes) >= 30:
-                    _c5_closes = [closes[i] for i in range(4, 30, 5)]  # 6 points
-                    if len(_c5_closes) >= 6:
-                        _rg5, _rl5 = 0.0, 0.0
-                        for _i5 in range(1, len(_c5_closes)):
-                            _d5 = _c5_closes[_i5] - _c5_closes[_i5 - 1]
-                            if _d5 > 0:
-                                _rg5 += _d5
-                            else:
-                                _rl5 -= _d5
-                        _rs5 = _rg5 / max(_rl5, 0.001)
-                        _rsi_5m_proxy = 100 - 100 / (1 + _rs5)
             except Exception:
                 pass
 
@@ -6875,45 +7947,25 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
                 print(f"[V7_MID_LOWVOL] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x → 중상위저거래 half")
                 _entry_mode_override = "half"
 
-            # ⑨ 🔧 캔들분석 2차: RSI>70 + vol<5x → half (23,250건: rsi_1m 70-80 WR=24.0%)
-            # ②에서 RSI>70+vol5x+=full이므로, vol<5x만 여기서 억제
-            elif _chart_rsi >= 70 and _chart_volratio < 5:
-                print(f"[V7_RSI_OVERBUY] {m} RSI{_chart_rsi:.0f}+vol{_chart_volratio:.1f}x<5 → 과매수저거래 half")
-                _entry_mode_override = "half"
-
-            # ⑩ 🔧 캔들분석 3차: mom5 과열 half (>=1%)
-            # mom5>=2% 차단은 하드컷 섹션에서 처리 (return None)
-            if _chart_mom5 >= GATE_MOM5_HALF and _entry_mode_override != "full":
-                print(f"[V7_MOM5_HALF] {m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_HALF}% → 과열 half")
-                _entry_mode_override = "half"
-
-            # ⑪ 🔧 크로스TF: RSI 다이버전스 차단 (1m↑5m↓ WR=19.6%✗✗)
-            # rsi_1m>55 AND rsi_5m_proxy<45 → 1분봉만 튀고 5분봉은 약한 가짜펌프
-            if _chart_rsi > 55 and _rsi_5m_proxy < 45 and _entry_mode_override != "full":
-                print(f"[V7_RSI_DIVERGE] {m} RSI1m={_chart_rsi:.0f}>55 + RSI5m={_rsi_5m_proxy:.0f}<45 → 다이버전스 차단")
-                _entry_mode_override = "half"
-
             # 나머지 (RSI50-60+vol2-5 등) → override 없음 (기본 사이즈 유지)
         except Exception:
             pass
 
-    # 🔧 캔들분석 2차: RSI 과매수 필터 (23,250건 기반으로 172샘플 v4 대체)
-    # 172샘플: RSI>70 wr53% → 23,250건: rsi_1m 70-80 WR=24.0% (대표본이 정확)
-    # RSI>70+vol5+는 여전히 full 유지 (콤보 효과), 나머지는 half
+    # === 🔧 v7: RSI>75 half 제거 — 172샘플에서 RSI>70 wr53% avg+0.55%로 수익구간 확인 ===
+    # 이전 v4의 RSI>75 half 강제는 22샘플 기반이었으나 172샘플로 반증됨
+    # RSI>70+vol5+가 wr67%로 최고 콤보이므로 RSI 과매수 필터 삭제
 
     # 🔧 (제거됨) OB_SELL_HEAVY: 기존 imbalance 체크 + IMB_CUT(-0.3)이 매도우위 커버 → 추가 API 호출 낭비 제거
 
     _hour_kst = now_kst().hour
 
-    # === 🔧 데이터분석v3: 시간대 필터 (23,250건 HOURLY 기반) ===
-    # 04시(18.0%✗), 05시(13.2%✗✗), 08시(19.8%✗), 13시(21.5%✗), 17시(20.9%✗), 18시(15.6%✗✗)
-    # 04,05,18시는 cut 수준, 나머지는 half
-    if not _ign_candidate:
-        if _hour_kst in (4, 5, 18):
-            cut("TIME_WORST", f"{m} {_hour_kst}시 최저승률구간 (WR<19%) → 차단")
-            return None
-        if _hour_kst in (8, 13, 17, 21) and _entry_mode_override != "full":
-            print(f"[V7_TIMEPENALTY] {m} {_hour_kst}시 저승률구간 → half 페널티")
+    # === 🔧 3929건시뮬: 시간대 half 축소 (10-18시 8h → 13-17시 4h) ===
+    # 📊 기존 10-18시: 하루 18시간 half → confirm 진입 불가 (수익 절반)
+    # 📊 시뮬: 13시 wr56%, 15시 wr57%, 17시 wr58% = 실제 약세 구간만
+    # 📊 10-12시: wr62-69% 양호 → half 불필요
+    if not _ign_candidate and 13 <= _hour_kst < 17:
+        if _entry_mode_override != "full":  # full 오버라이드 안 된 경우만
+            print(f"[V7_TIMEPENALTY] {m} 오후{_hour_kst}시 → half 페널티")
             _entry_mode_override = "half"
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
@@ -6927,41 +7979,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # === 매수비 계산 (스푸핑 방지: 비점화는 가중평균) ===
     _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
 
-    # === 🔧 캔들분석: 추세 필터 (trend_1h 프록시) ===
-    # c1은 1분봉 30개 → 30분 추세로 1시간 추세를 근사
-    # 1시간 추세 임계치를 30분 비율로 축소 적용 (×0.5)
-    # 원본: trend_1h < -0.3% WR=20.7%✗ → 30분 프록시: -0.15%
-    _trend_1h = 0.0
-    try:
-        if c1 and len(c1) >= 30:
-            _t1h_now = c1[-1]["trade_price"]
-            _t1h_ago = c1[-30]["trade_price"]  # 30분 전 (1분봉 30개)
-            _trend_1h = (_t1h_now / max(_t1h_ago, 1) - 1.0) * 100  # % 단위
-        elif c1 and len(c1) >= 20:
-            _t1h_now = c1[-1]["trade_price"]
-            _t1h_ago = c1[-20]["trade_price"]  # 20분 전 (최소)
-            _trend_1h = (_t1h_now / max(_t1h_ago, 1) - 1.0) * 100
-    except Exception:
-        pass
-
-    # 30분 프록시 임계치 = 1시간 임계치 × 0.5
-    _trend_cut = GATE_TREND_1H_MIN * 0.5   # -0.3% × 0.5 = -0.15%
-    if _trend_1h < _trend_cut and not _ign_candidate:
-        cut("TREND_1H_WEAK", f"{m} 30분추세 {_trend_1h:.2f}%<{_trend_cut:.2f}% (1H프록시, WR=20.7%✗) → 차단")
-        return None
-
-    # 🔧 크로스TF: 1H하락 + 고RSI → 차단 (WR=16.0%✗✗ 최악 조합)
-    # 30분 프록시: trend_1h < -0.05% (1H -0.1% × 0.5)
-    # 하락추세에서 RSI 높은 진입 = 꼭대기 잡기
-    if _trend_1h < -0.05 and _chart_rsi > 60 and not _ign_candidate:
-        cut("TREND_DOWN_RSI_HIGH", f"{m} 1H하락{_trend_1h:.2f}%+RSI{_chart_rsi:.0f}>60 (WR=16.0%✗✗) → 차단")
-        return None
-
     # ============================================================
     # 하드컷 — 이 조건 실패 시 어떤 스코어든 위험한 진입
     # ============================================================
     _metrics = (f"점화={ignition_score} surge={vol_surge:.2f}x 매수비={_gate_buy_ratio:.0%} "
-                f"스프레드={spread:.2f}% 가속={accel:.1f}x 1H추세={_trend_1h:+.2f}%")
+                f"스프레드={spread:.2f}% 가속={accel:.1f}x")
 
     # 1) 틱 신선도
     if not fresh_ok:
@@ -6995,12 +8017,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         return None
 
     # 6) 📊 바디 하한 (body<0.5% wr29.5% → 최소 0.3% 필수, 점화 면제)
-    # 🔧 데이터분석v3: 눌림 엔트리(EMA아래 or body음봉)에서는 작은 바디도 정상 → BODY_MIN 면제
-    # body_pct<0(음봉) WR=32.0%★ → 음봉은 mean-reversion 진입에서 유효
-    _is_pullback_body = (candle_body_pct < 0)  # 음봉 (bear candle)
-    _is_below_ema = (ema20 is not None and ema20 > 0 and cur_price < ema20)
-    _pullback_exempt = (_is_pullback_body or _is_below_ema)
-    if not _ign_candidate and not _pullback_exempt and candle_body_pct < GATE_BODY_MIN:
+    if not _ign_candidate and candle_body_pct < GATE_BODY_MIN:
         cut("BODY_MIN", f"{m} 바디과소 {candle_body_pct*100:.2f}%<{GATE_BODY_MIN*100:.1f}% | {_metrics}")
         return None
 
@@ -7015,145 +8032,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 🔧 전체점검v5: EMA20 이격 추격 차단 (0.3%+ half, 0.6%+ 차단)
-    if ema20 and ema20 > 0 and not _ign_candidate:
-        _ema_gap_pct = (cur_price / ema20 - 1.0) * 100  # % 단위
-        if _ema_gap_pct >= GATE_EMA_CHASE_MAX * 2:  # 0.6% 이상 → 차단
-            cut("EMA_CHASE", f"{m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX*2:.1f}% | {_metrics}")
-            return None
-        elif _ema_gap_pct >= GATE_EMA_CHASE_MAX:  # 0.5% 이상 → half
-            if _entry_mode == "confirm":
-                _entry_mode = "half"
-                print(f"[EMA_CHASE_HALF] {m} EMA20이격 {_ema_gap_pct:.2f}%≥{GATE_EMA_CHASE_MAX:.1f}% → half (추격방지)")
-
-    # 10) 🔧 캔들분석 2차: BB 포지션 필터
-    #    bb_pos>=100 WR=22.3%✗ (밴드 이탈), bb_pos>=80 WR=24.0% (밴드 상단)
-    #    bb_pos<20 WR=34.2%★ (밴드 하단 = 매수 유리)
-    _bb_pos = 50.0  # 기본값 (중립)
-    try:
-        if len(closes) >= 20:
-            _bb_sma20 = sum(closes[-20:]) / 20
-            _bb_std20 = (sum((x - _bb_sma20) ** 2 for x in closes[-20:]) / 20) ** 0.5
-            if _bb_std20 > 0:
-                _bb_upper = _bb_sma20 + 2 * _bb_std20
-                _bb_lower = _bb_sma20 - 2 * _bb_std20
-                _bb_range = _bb_upper - _bb_lower
-                if _bb_range > 0:
-                    _bb_pos = ((cur_price - _bb_lower) / _bb_range) * 100
-    except Exception:
-        pass
-
-    if _bb_pos >= GATE_BB_POS_CUT and not _ign_candidate:
-        cut("BB_OVERBOUGHT", f"{m} BB포지션 {_bb_pos:.0f}%≥{GATE_BB_POS_CUT}% (밴드이탈 WR=22.3%✗) | {_metrics}")
-        return None
-    if _bb_pos >= GATE_BB_POS_HALF and not _ign_candidate and _entry_mode == "confirm":
-        _entry_mode = "half"
-        print(f"[BB_HIGH] {m} BB포지션 {_bb_pos:.0f}%≥{GATE_BB_POS_HALF}% → half (밴드상단 WR=24%)")
-
-    # 🔧 캔들분석 3차: mom5>=2% → 비점화 차단 (극과열, 추격금지)
-    if _chart_mom5 >= GATE_MOM5_CUT and not _ign_candidate:
-        cut("MOM5_OVERHEAT", f"{m} mom5={_chart_mom5:.1f}%≥{GATE_MOM5_CUT}% (극과열 차단) | {_metrics}")
-        return None
-
-    # 🔧 데이터분석v3: ema5_slope 필터 (2nd most important factor, -14.2% diff)
-    # D01[-2.6,-0.12] WR=43.3%★, D08[0.038,0.067] WR=21.8%✗ → slope 양수 큼 = 추격
-    _ema5_slope = 0.0
-    try:
-        if len(closes) >= 6:
-            _ema5_now = ema_last(closes, 5)
-            _ema5_prev = ema_last(closes[:-1], 5)
-            if _ema5_now and _ema5_prev and _ema5_prev > 0:
-                _ema5_slope = (_ema5_now / _ema5_prev - 1.0) * 100  # % 단위
-    except Exception:
-        pass
-
-    if _ema5_slope >= GATE_EMA5_SLOPE_CUT and not _ign_candidate:
-        cut("EMA5_SLOPE_CUT", f"{m} ema5_slope={_ema5_slope:.3f}%≥{GATE_EMA5_SLOPE_CUT}% (극추격 WR=21.6%✗) | {_metrics}")
-        return None
-    if _ema5_slope >= GATE_EMA5_SLOPE_MAX and not _ign_candidate and _entry_mode == "confirm":
-        _entry_mode = "half"
-        print(f"[EMA5_SLOPE_HALF] {m} ema5_slope={_ema5_slope:.3f}%≥{GATE_EMA5_SLOPE_MAX}% → half (추격구간)")
-
-    # 🔧 데이터분석v3: RSI 1m 직접 과열 필터 (factor importance -6.8%)
-    # rsi_1m 50-60 WR=26.1%, 60-70 WR=24.0%, 70+ WR=22.8%
-    if not _ign_candidate:
-        if _chart_rsi >= GATE_RSI_1M_CUT and _trend_1h < 0:
-            # 1H하락+고RSI = WR=15.7%✗✗ (최악 조합) → 차단
-            cut("RSI1M_TREND_DOWN", f"{m} RSI{_chart_rsi:.0f}≥{GATE_RSI_1M_CUT}+1H하락{_trend_1h:.2f}% (WR=15.7%✗✗) | {_metrics}")
-            return None
-        if _chart_rsi >= GATE_RSI_1M_HALF and _entry_mode == "confirm":
-            _entry_mode = "half"
-            print(f"[RSI1M_HALF] {m} RSI{_chart_rsi:.0f}≥{GATE_RSI_1M_HALF} → half (고역 WR=24.7%)")
-
-    # 🔧 데이터분석v3: VWAP위+EMA위+1H하락 → 하드 블록 (WR=17.5%✗✗)
-    # 상승추세 없이 가격만 위에 있는 = 꼭대기 잡기
-    if not _ign_candidate and ema20 and ema20 > 0:
-        _ema_gap_for_cross = (cur_price / ema20 - 1.0) * 100
-        # VWAP gap은 아래서 계산되므로 여기서도 계산
-        _vwap_for_cross = calc_vwap_from_candles(c1, 20) if c1 else None
-        _vwap_gap_cross = ((cur_price / _vwap_for_cross - 1.0) * 100) if _vwap_for_cross and _vwap_for_cross > 0 else 0.0
-        if _vwap_gap_cross > 0 and _ema_gap_for_cross > 0 and _trend_1h < -0.05:
-            cut("VWAP_EMA_UP_TREND_DOWN", f"{m} VWAP+{_vwap_gap_cross:.2f}%+EMA+{_ema_gap_for_cross:.2f}%+1H{_trend_1h:.2f}% (WR=17.5%✗✗) | {_metrics}")
-            return None
-
-    # 🔧 데이터분석v3: 약추세+고서지 = 펌프 차단 (trend_1h<0 + vol_surge>=3 → 추세없는 급등)
-    if not _ign_candidate and _trend_1h < 0 and vol_surge >= 3.0:
-        if _entry_mode == "confirm":
-            _entry_mode = "half"
-            print(f"[PUMP_NOTREND] {m} 1H{_trend_1h:.2f}%<0+surge{vol_surge:.1f}x≥3 → half (추세없는 펌프)")
-
-    # 🔧 캔들분석 2차: tick_buy_ratio < 0.4 → 매도세 우위 half
-    # 23,250건: 0.40-0.50 구간 WR=30.6%★, <0.40이면 매도세 지배 → 사이즈 축소
-    if _gate_buy_ratio < GATE_TICK_BUY_RATIO_MIN and not _ign_candidate and _entry_mode == "confirm":
-        _entry_mode = "half"
-        print(f"[TICK_BUY_LOW] {m} 매수비 {_gate_buy_ratio:.0%}<{GATE_TICK_BUY_RATIO_MIN:.0%} → half (매도세우위)")
-
-    # 11) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
     #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
     if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
         _entry_mode = "half"
         print(f"[LOW_VOL_RATIO] {m} vr{vol_surge:.2f}<0.5 → half 강제 (거래량부족)")
-
-    # ============================================================
-    # 🔧 ELITE_MODE 게이트: Trend-Filtered Pullback (6조건 AND)
-    # 1) trend_1h ≥ 0.1% (Factor Importance 1위)
-    # 2) bb_pos < 40 (볼린저 하단 눌림)
-    # 3) 좋은시간대 (0,6,19,20,23시)
-    # 4) vwap_gap < 0 (VWAP 아래 = 눌림목, Factor Importance 3위)
-    # 5) RSI 1m < 35 (과매도 진입, 외부 RSI(2) 전략)
-    # 6) ema_gap < 0 (EMA20 아래 = 눌림목, Factor Importance 2위)
-    # 점화는 면제 (점화 자체가 강한 시그널이므로)
-    # ============================================================
-    if ELITE_MODE and not _ign_candidate:
-        # VWAP/EMA gap 조기 계산 (ELITE 게이트에서 필요)
-        _elite_vwap = calc_vwap_from_candles(c1, 20) if c1 else None
-        _elite_vwap_gap = ((cur_price / _elite_vwap - 1.0) * 100) if _elite_vwap and _elite_vwap > 0 else 0.0
-        _elite_ema_gap = ((cur_price / ema20 - 1.0) * 100) if ema20 and ema20 > 0 else 0.0
-
-        _elite_trend_ok = (_trend_1h >= ELITE_TREND_1H_MIN)
-        _elite_bb_ok = (_bb_pos < ELITE_BB_POS_MAX)
-        _elite_hour_ok = (_hour_kst in ELITE_GOOD_HOURS)
-        _elite_vwap_ok = (_elite_vwap_gap < ELITE_VWAP_GAP_MAX)
-        _elite_rsi_ok = (_chart_rsi < ELITE_RSI_1M_MAX)
-        _elite_ema_ok = (_elite_ema_gap < ELITE_EMA_GAP_MAX)
-
-        if not (_elite_trend_ok and _elite_bb_ok and _elite_hour_ok
-                and _elite_vwap_ok and _elite_rsi_ok and _elite_ema_ok):
-            _elite_fails = []
-            if not _elite_trend_ok:
-                _elite_fails.append(f"1H추세{_trend_1h:.2f}%<{ELITE_TREND_1H_MIN}%")
-            if not _elite_bb_ok:
-                _elite_fails.append(f"BB{_bb_pos:.0f}≥{ELITE_BB_POS_MAX}")
-            if not _elite_hour_ok:
-                _elite_fails.append(f"{_hour_kst}시∉좋은시간대")
-            if not _elite_vwap_ok:
-                _elite_fails.append(f"VWAP{_elite_vwap_gap:+.2f}%≥{ELITE_VWAP_GAP_MAX}%")
-            if not _elite_rsi_ok:
-                _elite_fails.append(f"RSI{_chart_rsi:.0f}≥{ELITE_RSI_1M_MAX}")
-            if not _elite_ema_ok:
-                _elite_fails.append(f"EMA{_elite_ema_gap:+.2f}%≥{ELITE_EMA_GAP_MAX}%")
-            cut("ELITE_GATE", f"{m} ELITE 조건 미충족: {' + '.join(_elite_fails)} → 진입 차단")
-            return None
 
     # ============================================================
     # 신호 태깅
@@ -7181,34 +8064,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 기본: half (50%) — 강한 조건 충족 시 confirm (100%)
     _is_precision = (imbalance >= 0.6 and _gate_buy_ratio >= 0.635)
     _strong_synergy = (_gate_buy_ratio >= 0.62 and imbalance >= 0.35 and vol_surge >= 1.5)
-    # 🔧 캔들분석: 최고 콤보 — trend_1h≥0.1 + vol_surge≥2 = WR 39.4%★
-    # 30분 프록시: 0.1% × 0.5 = 0.05% → 0.08% (필터 의미 유지)
-    _trend_surge_combo = (_trend_1h >= 0.08 and vol_surge >= 2.0)
-    # 🔧 크로스TF: 1H상승+저RSI = WR=41.7%★★ 최고 조합
-    # 30분 프록시: trend_1h >= 0.05% + rsi_1m < 50 → 눌림매수 최적 타이밍
-    _trend_up_low_rsi = (_trend_1h >= 0.05 and _chart_rsi < 50)
-    # 🔧 크로스TF: VWAP아래+EMA아래+1H상승 = WR=33.4%★
-    _vwap_ema_dip = (vwap_gap < 0 and ema20 and cur_price < ema20 and _trend_1h >= 0.05)
-    # 🔧 데이터분석v3: RSI발산(1m↓5m↑) = WR=34.4%★ (5m선행, mean-reversion)
-    _rsi_diverge_bullish = (_chart_rsi < 50 and _rsi_5m_proxy >= 60)
-    # 🔧 데이터분석v3: ema5_slope 음수 = WR=43.3%★ (눌림 진입)
-    _ema5_dip = (_ema5_slope <= -0.067 and _trend_1h >= 0.05)  # 눌림 + 1H상승
-    # 🔧 전체점검v4: bb_pos<40 = WR=34.2%★ (밴드 하단 매수 유리)
-    _bb_low_bonus = (_bb_pos < 40)
-    # 🔧 전체점검v4: 좋은 시간대 보너스 (WR 30%+ 구간)
-    _good_hour = (_hour_kst in (0, 6, 19, 20, 23))
-    if (_ign_candidate or _is_precision or _strong_synergy or _trend_surge_combo
-            or _trend_up_low_rsi or _vwap_ema_dip or _rsi_diverge_bullish or _ema5_dip
-            or _bb_low_bonus or _good_hour):
+    if _ign_candidate or _is_precision or _strong_synergy:
         _entry_mode = "confirm"
     else:
         _entry_mode = "half"
-
-    # 🔧 데이터분석v3: 30분 추세 <0.1% → half 강제 (0~0.1 WR=25.0%, 0.1+ WR=33.9%★)
-    _trend_half_thr = GATE_TREND_1H_HALF  # 0.1% (데이터: 0.1% 이상만 유의미한 승률)
-    if _trend_1h < _trend_half_thr and _entry_mode == "confirm" and not _ign_candidate:
-        _entry_mode = "half"
-        print(f"[TREND_HALF] {m} 30분추세 {_trend_1h:.2f}%<{_trend_half_thr}% → half 강제")
 
     # v7 차트분석 오버라이드 적용
     if _entry_mode_override == "half" and _entry_mode == "confirm":
@@ -7233,20 +8092,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         print(f"[WAVE_{_spike_wave}] {m} 2파+ 감지 → half 강제 (SL피격률85%)")
 
     # 📊 body 2%+ → half 강제 (1010건: body1-2% SL52%, body2%+ SL68%)
-    # 🔧 캔들분석: body>0.5% WR=17.0%✗ → 0.5%부터 half, 1%부터 점화도 half
-    if candle_body_pct >= 0.005 and _entry_mode == "confirm" and not _ign_candidate:
+    # 이미 많이 오른 봉 = 추격매수 → 사이즈 축소 (점화 면제: 점화는 모멘텀 우선)
+    if candle_body_pct >= 0.02 and _entry_mode == "confirm" and not _ign_candidate:
         _entry_mode = "half"
-        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥0.5% → half 강제 (추격방지)")
-    # 🔧 캔들분석: body≥1% → 점화도 half (꼭대기 진입 방지)
-    if candle_body_pct >= 0.01 and _entry_mode == "confirm" and _ign_candidate:
-        _entry_mode = "half"
-        print(f"[BODY_BIG_IGN] {m} body {candle_body_pct*100:.1f}%≥1% → 점화도 half (꼭대기방지)")
-
-    # 🔧 ELITE_MODE: 소수정예 조건을 이미 통과했으므로 confirm 강제 (full size)
-    # 이유: ELITE 게이트가 WR 44%+ 조건만 통과시키므로 half로 줄이면 기회 낭비
-    if ELITE_MODE and not _ign_candidate and _entry_mode == "half":
-        _entry_mode = "confirm"
-        print(f"[ELITE] {m} ELITE 조건 통과 → confirm 강제 (소수정예 진입)")
+        print(f"[BODY_BIG] {m} body {candle_body_pct*100:.1f}%≥2% → half 강제 (추격방지)")
 
     # 📊 연속양봉 과열: 4개 이상 → half 강제 (wr33.3% avg-0.34%)
     # 🔧 1파 면제: 1파에서 gs=4+도 안전 (데이터 cpWin83%, slHit67%)
@@ -7284,9 +8133,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "upper_wick_ratio": upper_wick_ratio,
         "green_streak": green_streak,
         "vwap_gap": round(vwap_gap, 2),
-        "trend_1h": round(_trend_1h, 2),
-        "bb_pos": round(_bb_pos, 1),
-        "ema5_slope": round(_ema5_slope, 4),
         "entry_mode": _entry_mode,
         "is_precision_pocket": _is_precision,
         "spike_wave": _spike_wave,
@@ -7717,15 +8563,35 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 
     pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
-    # 🔧 전체점검v5: SL 확대 경로 전면 차단
-    # 기존: _sl_signal_mult=1.3 (신호별), _sl_profit_mult=1.2~1.3 (수익중) → 실제 SL 1.95~2.25%
-    # 문제: TP 0.25~0.45% 대비 R:R=1:5~9 → 구조적 손실
-    # 변경: 모든 mult=1.0, SL은 설정값 그대로 적용
-    _sl_mult = 1.0
+    _sl_signal_mult = 1.0
+    _sl_profit_mult = 1.0
 
+    # 🚀 신호 유형별 완화
+    if signal_type in ("early", "ign", "mega"):
+        _sl_signal_mult = 1.3
+    elif signal_type in ("circle", "retest"):
+        _sl_signal_mult = 1.3
+
+    # 🔧 FIX: 수익구간 SL 완화를 trade_type별로 분기
+    # 기존: +0.8% 넘으면 무조건 1.8배 → scalp에서 본절 근처까지 밀려도 오래 버팀
+    # 변경: scalp는 +1.3%↑에서만 완화(1.5배), runner는 기존대로 빠르게 완화(1.8배)
+    if current_price and entry_price > 0:
+        gain = current_price / entry_price - 1.0
+        if trade_type == "scalp":
+            # scalp: 더 높은 수익에서, 더 적게 완화
+            if gain > 0.013:
+                _sl_profit_mult = 1.5
+        else:
+            # runner/기본: 빠르게 완화하여 추세 유지
+            if gain > 0.008:
+                _sl_profit_mult = 1.8
+
+    # 최대값 선택 (곱셈 폭발 제거)
+    _sl_mult = max(_sl_signal_mult, _sl_profit_mult)
     pct *= _sl_mult
 
-    max_sl = DYN_SL_MAX
+    max_sl = DYN_SL_MAX * _sl_mult
+    # 🔧 BUG FIX: DYN_SL_MIN 대신 _time_sl_min 사용 (야간 1.5% 리셋 방지)
     pct = min(max(pct, _time_sl_min), max_sl)
 
     atr_info = f"ATR {atr:.2f}원×{ATR_MULT}배"
@@ -7736,97 +8602,84 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 # =========================
 def context_exit_score(m, ticks, ob_depth_krw, entry_price, last_price, c1):
     """
-    복합 조건 기반 컨텍스트 청산 점수:
-    - 단일 신호로 청산 유도 금지
-    - 3가지 이상 독립 조건 동시 발동 시에만 높은 점수
-    - 조기 청산 방지 + 진짜 추세 역전만 감지
+    휘핑 방지형 컨텍스트 점수 (개선):
+    - 단일 신호로 청산 유도 금지 (복합 조건 누적)
+    - 추세 역전(EMA5/VWAP 이탈 + uptick 부재) 쪽에 가중치
+    - 🔧 NEW: 볼륨 확인 + 호가 임밸런스 교차검증 + 3단계 감쇄
     """
-    conditions_triggered = []
-    _ctx_ob = None
-    _ctx_imb = 0.0
+    score = 0
+    reasons = []
 
     # 테이프 변화
     w_now = _win_stats(ticks, 0, 10)
     w_early = _win_stats(ticks, 10, 30)
     decay, decay_info = buy_decay_flag(ticks)
 
-    # 조건 1: Flow drop + No uptick (복합)
-    _flow_drop = w_now["krw_per_sec"] < w_early["krw_per_sec"] * 0.60
-    _no_uptick = not uptick_streak_from_ticks(ticks, need=2)
-    if _flow_drop and _no_uptick:
-        conditions_triggered.append("FLOW_DROP+NO_UPTICK")
+    if w_now["krw_per_sec"] < w_early["krw_per_sec"] * 0.60:
+        score += 1
+        reasons.append("FLOW_DROP")
+    if not uptick_streak_from_ticks(ticks, need=2):
+        score += 1
+        reasons.append("NO_UPTICK")
+    if w_now["rate"] < 0.25:  # 너무 느리면 1점
+        score += 1
+        reasons.append("RATE_SLOW")
 
-    # 조건 2: Rate slow
-    if w_now["rate"] < 0.25:
-        conditions_triggered.append("RATE_SLOW")
-
-    # 조건 3: Cascade decay
+    # 🔧 NEW: 3단계 cascade 감쇄 감지 시 추가 +1점 (더 확실한 추세 역전 신호)
     if decay_info.get("cascade", False):
-        conditions_triggered.append("CASCADE_DECAY")
+        score += 1
+        reasons.append("CASCADE_DECAY")
 
-    # 조건 4: Orderbook sell heavy
+    # 🔧 NEW: 호가 임밸런스 교차검증 (매도 우세 + 흐름 감소 = 강한 청산 신호)
     try:
         _ctx_ob = fetch_orderbook_cache([m]).get(m)
         if _ctx_ob:
             _ctx_imb = calc_orderbook_imbalance(_ctx_ob)
-            if _ctx_imb < -0.20:
-                conditions_triggered.append(f"OB_SELL_HEAVY({_ctx_imb:.2f})")
+            if _ctx_imb < -0.20:  # 매도 압도적 우세
+                score += 1
+                reasons.append(f"OB_SELL_HEAVY({_ctx_imb:.2f})")
+            elif _ctx_imb >= 0.40 and w_now.get("buy_ratio", 0) >= 0.60:
+                # 호가도 매수우세 + 테이프도 매수 → 청산 억제
+                score = max(0, score - 1)
+                reasons.append("OB_BUY_SUPPORT")
     except Exception:
         pass
 
-    # 조건 5: VWAP 이탈
+    # 가격/컨텍스트
     vwap = vwap_from_candles_1m(c1, 20) if c1 else 0
-    if vwap and last_price < vwap:
-        conditions_triggered.append("VWAP_LOSS")
-
-    # 조건 6: EMA5 이탈
     ema5 = ema_last([x["trade_price"] for x in c1], 5) if c1 else 0
+    if vwap and last_price < vwap:
+        score += 1
+        reasons.append("VWAP_LOSS")
     if ema5 and last_price < ema5:
-        conditions_triggered.append("EMA5_LOSS")
+        score += 1
+        reasons.append("EMA5_LOSS")
 
-    # 조건 7: 수익 구간 급감
-    if last_price > entry_price * 1.008 and decay:
-        conditions_triggered.append("DECAY_AFTER_GAIN")
-
-    # 조건 8: 거래량 급감
-    if w_now["n"] >= 2 and w_early["n"] >= 3:
-        _vol_ratio = w_now["krw_per_sec"] / max(w_early["krw_per_sec"], 1)
-        if _vol_ratio < 0.30:
-            conditions_triggered.append(f"VOL_CRASH({_vol_ratio:.1%})")
-
-    # === 점수 계산: 독립 조건 수 기반 ===
-    n_conds = len(conditions_triggered)
+    # 💎 약상승/횡보 시 청산 점수 완화
     gain_now = (last_price / entry_price - 1.0)
-
-    if n_conds >= 4:
-        score = 5   # 강한 청산 신호
-    elif n_conds == 3:
-        score = 3   # 중간 신호 (CTX_EXIT_THRESHOLD 도달)
-    elif n_conds == 2:
-        score = 1   # 낮은 신호
-    else:
-        score = 0   # 신호 없음
-
-    # 완화: 약상승/횡보 시 점수 완화
+    # 🔧 before1 복원: 약상승/횡보 시 청산 점수 완화 (범위 확대)
     if -0.004 <= gain_now <= 0.008:
         score = max(0, score - 1)
-        conditions_triggered.append("MILD_GAIN_RELAX")
+        reasons.append("MILD_GAIN_RELAX")
 
-    # 완화: 수익 구간(+1% 이상)에서 점수 완화
+    # 🔧 NEW: 수익 구간(+1% 이상)에서는 청산 문턱 상향 (수익을 더 키우기)
     if gain_now >= 0.010:
         score = max(0, score - 1)
-        conditions_triggered.append("PROFIT_HOLD_RELAX")
+        reasons.append("PROFIT_HOLD_RELAX")
 
-    # 완화: 호가 매수우세 + 테이프 매수
-    try:
-        if _ctx_ob:
-            if _ctx_imb >= 0.40 and w_now.get("buy_ratio", 0) >= 0.60:
-                score = max(0, score - 1)
-                conditions_triggered.append("OB_BUY_SUPPORT")
-    except Exception:
-        pass
+    # 수익 구간에서의 급감
+    if last_price > entry_price * 1.008 and decay:
+        score += 1
+        reasons.append("DECAY_AFTER_GAIN")
 
-    return score, conditions_triggered
+    # 🔧 NEW: 거래량 확인 (볼륨 급감 시 청산 신호 강화)
+    if w_now["n"] >= 2 and w_early["n"] >= 3:
+        _vol_ratio = w_now["krw_per_sec"] / max(w_early["krw_per_sec"], 1)
+        if _vol_ratio < 0.30:  # 거래량 70% 이상 급감
+            score += 1
+            reasons.append(f"VOL_CRASH({_vol_ratio:.1%})")
+
+    return score, reasons
 
 # =========================
 # ★ 모니터링 시간 결정 (신규 추가)
@@ -7837,12 +8690,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
     - early_ok: 비교적 짧게 추세 확인
     - ignition_ok / mega_ok: 상대적으로 길게 (추세 이어질 가능성)
     - 시장 모드(TIGHT), 야간, BTC 모멘텀, 오더북 깊이 등에 따라 가/감
-    🔧 ELITE_MODE: 10분 고정 (MFE 대부분 5~10분에 형성, 이후 MAE만 증가)
     """
-    # 🔧 ELITE_MODE: 타임아웃 10분 고정 (데이터 기반 최적 홀딩 시간)
-    if ELITE_MODE:
-        return ELITE_HORIZON_SEC
-
     try:
         r = relax_knob()  # 0.0 ~ 1.5
     except Exception:
@@ -8078,8 +8926,8 @@ def monitor_position(m,
     # 🔧 수급확인 손절: 감량 후 관망모드 상태
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
-    # 🔧 전체점검v5: SL 확대 제거 — 수급확인 후에도 동일 SL 유지
-    _sl_extended_pct = eff_sl_pct  # 확대 없음
+    # 🔧 FIX: SL 확장에 캡 적용 (eff_sl_pct에 이미 1.8x 적용 가능 → 1.35x 스태킹 시 7.78% 가능)
+    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 최대 4.8%
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -8291,10 +9139,8 @@ def monitor_position(m,
                 else:
                     stop_hits += 1
                 _sl_duration = time.time() - stop_first_seen_ts
-                # 🔧 전체점검v5: 하드스톱 = DYN_SL_MAX(1.2%) 초과 시 즉시 컷
-                # 기존: eff_sl_pct×1.5 → 최대 1.95% 손실
-                # 변경: DYN_SL_MAX 고정 → 어떤 경우든 1.2% 초과 불가
-                _is_hard_stop = cur_gain <= -DYN_SL_MAX
+                # HARD_STOP: 급락(-1.5%)은 즉시 컷 (디바운스 미적용)
+                _is_hard_stop = cur_gain <= -(eff_sl_pct * 1.5)
                 # 🔧 FIX: EXIT_DEBOUNCE_N/SEC 상수 활용 + 웜업/소프트가드 중 더 둔하게
                 _db_n = EXIT_DEBOUNCE_N + (1 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
                 _db_sec = EXIT_DEBOUNCE_SEC + (2 if alive_sec < WARMUP_SEC else 0) + (1 if in_soft_guard else 0)
@@ -8305,16 +9151,9 @@ def monitor_position(m,
                 # 🔧 수급확인 손절 (Context-Aware Stop)
                 # 디바운스 통과 후 즉시 청산 대신, 수급을 보고 판단:
                 # - 추세 죽음 → 전량 청산 (기존과 동일)
-                # - 추세 살아있음 → SL 확대 (20초 관찰 제거)
+                # - 추세 살아있음 → 50% 감량 + 확장 SL로 20초 관찰
                 # - 하드스톱/본절SL은 수급확인 없이 즉시 청산
                 # ================================================================
-
-                # Momentum Guard: 60초 내 강한 매수신호 → SL 유예
-                if not _is_hard_stop and check_momentum_guard(ticks, entry_price, curp, alive_sec):
-                    print(f"[모멘텀가드] {m} 60초 내 강한 매수신호 → SL 유예")
-                    stop_first_seen_ts = 0.0
-                    stop_hits = 0
-                    continue
 
                 # 하드스톱(SL×1.5)이면 수급확인 없이 즉시 전량 청산
                 if _is_hard_stop:
@@ -8368,19 +9207,39 @@ def monitor_position(m,
                     tg_send_mid(f"🛑 {m} 수급확인손절 | -{abs(cur_gain)*100:.2f}% | 추세사망({_sl_alive_signals}/3)")
                     break
 
-                # 추세 살아있음 (신호 1개+) → SL 유지, 관찰 스킵 (Trail에 위임)
+                # 추세 살아있음 (3개 중 2개 이상 통과) → 50% 감량 + 확장 관찰
                 if not _sl_reduced:
-                    _sl_extended_pct = eff_sl_pct  # 🔧 전체점검v5: SL 확대 제거
-                    _sl_reduced = True
-                    # 디바운스 리셋
-                    stop_first_seen_ts = 0.0
-                    stop_hits = 0
-                    print(f"[수급확인] {m} 신호 생존({_sl_alive_signals}/3) → SL 확대만, 관찰 스킵")
-                    tg_send_mid(
-                        f"🔄 {m} 수급확인 | -{abs(cur_gain)*100:.2f}% "
-                        f"| 추세생존({_sl_alive_signals}/3) "
-                        f"| SL -{_sl_extended_pct*100:.1f}% (Trail 관리)"
+                    _reduce_ok, _reduce_msg, _reduce_sold = safe_partial_sell(
+                        m, 0.50,
+                        f"수급확인감량 | -{abs(cur_gain)*100:.2f}% 매수비{_sl_buy_r:.0%} "
+                        f"체결{_sl_krw_s:,.0f}/s 임밸{_sl_imb:.2f} → 추세생존({_sl_alive_signals}/3)"
                     )
+                    if _reduce_ok:
+                        # 감량 후 포지션 존재 확인 (dust 전량청산 가능)
+                        with _POSITION_LOCK:
+                            _pos_chk = OPEN_POSITIONS.get(m)
+                        if not _pos_chk:
+                            _already_closed = True
+                            verdict = "수급감량_DUST"
+                            break
+                        _sl_reduced = True
+                        _sl_reduced_ts = time.time()
+                        _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 🔧 FIX: 캡 적용 (최대 4.8%)
+                        # 디바운스 리셋 (새 기준으로 관찰 시작)
+                        stop_first_seen_ts = 0.0
+                        stop_hits = 0
+                        tg_send_mid(
+                            f"🔄 {m} 수급확인감량 50% | -{abs(cur_gain)*100:.2f}% "
+                            f"| 추세생존({_sl_alive_signals}/3) "
+                            f"| 20초 관찰 (SL -{_sl_extended_pct*100:.1f}%)"
+                        )
+                    else:
+                        # 감량 실패 → 전량 청산
+                        sl_reason = f"ATR손절(감량실패) | -{abs(cur_gain)*100:.2f}% ({atr_info})"
+                        close_auto_position(m, sl_reason)
+                        _already_closed = True
+                        verdict = "ATR손절"
+                        break
                 else:
                     # 이미 감량된 상태에서 또 SL 터치 → 잔여분 전량 청산
                     sl_reason = (f"잔여청산 | 감량 후 재하락 -{abs(cur_gain)*100:.2f}% "
@@ -8400,19 +9259,35 @@ def monitor_position(m,
                     else:
                         stop_hits = max(0, stop_hits - 1)
 
-                # 수급확인 후 SL 확대 상태에서 회복 확인 (20초 관찰 제거 → Trail에 위임)
+                # 🔧 수급확인감량 후 관망 결과 처리
                 if _sl_reduced:
-                    if _sl_recovery < 0.3:
-                        # SL선에서 충분히 멀어짐 → 일반 모드 복귀
-                        print(f"[수급확인] {m} SL 확대 후 회복 | {cur_gain*100:.2f}% → Trail 관리 전환")
-                        _sl_reduced = False
+                    _sl_observe_elapsed = time.time() - _sl_reduced_ts
+                    # 감량 후 20초 내 가격 회복 → 잔여 포지션 생존 (휩쏘 방어 성공)
+                    if _sl_recovery < 0.3 and _sl_observe_elapsed >= 5.0:
+                        # SL선에서 충분히 멀어짐(손실 30% 미만) + 5초 이상 유지
+                        print(f"[수급확인] {m} 감량 후 회복 확인 | {cur_gain*100:.2f}% | 잔여 포지션 유지")
+                        tg_send_mid(f"✅ {m} 휩쏘 방어 성공 | 감량50% 후 회복 | 잔여 트레일 전환")
+                        _sl_reduced = False  # 관망 종료, 일반 모드 복귀
+                    # 🔧 수익성패치: 관망 30→20초 (SL 근처 30초는 추세반전 확정, 추가손실 방지)
+                    elif _sl_observe_elapsed >= 20.0:
+                        _sl_final_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                        if _sl_final_gain <= -eff_sl_pct * 0.8:
+                            # 20초 지나도 SL 70% 이상 손실 유지 → 추세 반전 확정
+                            close_auto_position(m, f"관망만료청산 | 20초 후 미회복 -{abs(_sl_final_gain)*100:.2f}%")
+                            _already_closed = True
+                            verdict = "관망만료"
+                            tg_send_mid(f"🛑 {m} 관망 만료 | 20초 미회복 -{abs(_sl_final_gain)*100:.2f}% → 잔여 청산")
+                            break
+                        else:
+                            # 20초 지나고 약간 회복 → 생존 (일반 모드 복귀)
+                            print(f"[수급확인] {m} 관망 만료 | 약간 회복 {_sl_final_gain*100:.2f}% → 잔여 유지")
+                            _sl_reduced = False
 
             # === 🔧 v7 차트분석: 시간대 적응형 타임아웃 (청산 로직) ===
             # 📊 172샘플: 오전 wr59% → 30분 유지, 오후 wr28% → 20분으로 조기청산
             # 수익 중: 트레일 타이트닝 / 손실 중: 스크래치 아웃
             _entry_hour = pos.get("entry_hour", 12)
-            # 🔧 전체점검v5: 20/30분→10/15분 (MFE P50=0.413%, 5분 안에 수익 못 나면 대부분 손절)
-            _timeout_sec = 600 if 12 <= _entry_hour < 18 else 900  # 오후 10분, 그외 15분
+            _timeout_sec = 1200 if 12 <= _entry_hour < 18 else 1800  # 오후 20분, 그외 30분
             if alive_sec >= _timeout_sec:
                 if cur_gain > 0:
                     # 수익 중: 트레일링 스톱 타이트닝 (정상의 50%)
@@ -8473,33 +9348,16 @@ def monitor_position(m,
 
             # 🔧 특단조치: PROBE→CONFIRM 전환 로직 제거 (probe 폐지 → 불필요)
 
-            # === 3-Zone Exit System ===
-            # Zone 1 (0%→CP): SL만 활성, Trail 비활성
-            # Zone 2 (CP→MFE): ATR 기반 Trail 시작, Breakeven 잠금
-            # Zone 3 (MFE+): 넓은 Trail (ATR×1.5), Runner 전환
-            _mfe_target = eff_sl_pct * 2.0  # MFE 타겟 = SL × 2 (R:R=2:1)
-            _exit_zone = get_exit_zone(gain_from_entry, dyn_checkpoint, _mfe_target)
-
-            # Zone 2 진입: CP 도달 → ATR Trail 시작
+            # 🔧 before1 복원: 독립 trail_armed 블록 (단순 체크포인트 기반 무장)
             if (not trail_armed) and gain_from_entry >= dyn_checkpoint:
                 trail_armed = True
-                # ATR 계산
-                _atr_14 = calculate_atr_from_ticks(ticks, 14) if ticks and len(ticks) >= 14 else eff_sl_pct * 0.05
-                _zone_trail = get_atr_trail_distance(_atr_14, "ZONE2")
-                trail_dist = max(trail_dist_min, _zone_trail)
-                # trail_stop 최소보장 = entry × (1 + CP×0.5) (Breakeven 잠금)
-                _trail_raw = curp * (1.0 - trail_dist)
+                # 🔧 FIX: trail_stop 최소보장 = entry × (1 + CP×0.5)
+                # 기존: curp × 0.9985 → CP 직후 반락 시 +0.15% 청산 → 수수료 후 손실
+                # 수정: 최소 CP의 50%는 확보 (실질 수익 보장)
+                _trail_raw = curp * (1.0 - trail_dist_min)
                 _trail_min_floor = entry_price * (1.0 + dyn_checkpoint * 0.5)
                 trail_stop = max(_trail_raw, _trail_min_floor)
-                print(f"[ZONE2] {m} +{gain_from_entry*100:.2f}% ≥ CP → ATR Trail 무장 (ATR={_atr_14*100:.2f}% dist={trail_dist*100:.2f}%)")
-
-            # Zone 3 전환: MFE 도달 → Runner mode (넓은 Trail)
-            if trail_armed and _exit_zone == "ZONE3" and gain_from_entry >= _mfe_target:
-                _atr_14 = calculate_atr_from_ticks(ticks, 14) if ticks and len(ticks) >= 14 else eff_sl_pct * 0.05
-                _runner_trail = get_atr_trail_distance(_atr_14, "ZONE3")
-                if _runner_trail > trail_dist:
-                    print(f"[ZONE3] {m} +{gain_from_entry*100:.2f}% Runner 모드 | Trail {trail_dist*100:.2f}%→{_runner_trail*100:.2f}%")
-                    trail_dist = _runner_trail
+                print(f"[TRAIL_ARM] {m} +{gain_from_entry*100:.2f}% ≥ CP {dyn_checkpoint*100:.2f}% → 트레일 무장 (floor +{dyn_checkpoint*50:.2f}%)")
 
             # === 🔧 매도구조개선: 래칫 완화 — 트레일에 주역할 위임 ===
             # 3단계: CP(~0.3%)→본절, +3.5%→+1.8%, +5.0%→+3.0%
@@ -8711,24 +9569,26 @@ def monitor_position(m,
 
             if not checkpoint_reached and cur_gain >= dyn_checkpoint:
                 checkpoint_reached = True
-                # 3-Zone: checkpoint 도달 시 ATR 기반 Trail 무장 (Zone 2)
+                # 🔧 특단조치: trade_type 기반 청산 전략 (스캘프/러너 이진분류)
                 trail_armed = True
-                _cp_atr = calculate_atr_from_ticks(ticks, 14) if ticks and len(ticks) >= 14 else eff_sl_pct * 0.05
-                _cp_zone_trail = get_atr_trail_distance(_cp_atr, "ZONE2")
-                trail_dist = max(trail_dist_min, _cp_zone_trail)
-                trail_stop = max(trail_stop, curp * (1.0 - trail_dist), base_stop)
+                atr = atr14_from_candles(_get_c1_cached(), 14)
+                if atr and atr > 0:
+                    trail_dist = max(trail_dist_min, (atr / max(curp, 1)) * TRAIL_ATR_MULT)
+                else:
+                    trail_dist = trail_dist_min
+                trail_stop = max(trail_stop, curp * (1.0 - trail_dist), base_stop)  # 래칫: 느슨해지는 방향 덮어쓰기 방지 + base_stop 바닥 보장
                 # 본절 확보 (래칫 기본)
                 be_stop = entry_price * (1.0 + FEE_RATE + 0.0005)
                 base_stop = max(base_stop, be_stop)
-                # 래칫 stop을 OPEN_POSITIONS에 저장 (remonitor 복원용)
+                # 🔧 FIX: 래칫 stop을 OPEN_POSITIONS에 저장 (remonitor 복원용)
                 with _POSITION_LOCK:
                     _p_ratchet = OPEN_POSITIONS.get(m)
                     if _p_ratchet:
                         _p_ratchet["stop"] = base_stop
                 if trade_type == "runner":
-                    tg_send_mid(f"🏃 {m} +{cur_gain*100:.2f}% 러너 CP도달 → ATR Trail (dist={trail_dist*100:.2f}%)")
+                    tg_send_mid(f"🏃 {m} +{cur_gain*100:.2f}% 러너 CP도달 → 트레일 무장 (dist={trail_dist*100:.2f}%, 부분익절 없음)")
                 else:
-                    tg_send_mid(f"⚡ {m} +{cur_gain*100:.2f}% 스캘프 CP도달 → ATR Trail (dist={trail_dist*100:.2f}%)")
+                    tg_send_mid(f"⚡ {m} +{cur_gain*100:.2f}% 스캘프 CP도달 → 트레일 무장 (TP 대기중)")
 
             # 🔧 [제거됨] 강세모드 동적 트레일링 → 일반 트레일링(0.2% 간격)으로 대체
 
@@ -8777,14 +9637,43 @@ def monitor_position(m,
                     mfe_target *= 0.80
                 elif btc5_now >= 0.004:
                     mfe_target *= 1.30
-                # 🔧 v4.0: MFE 도달 시 전량 익절 (러너 전환 폐지)
+                # ★ 개선: 스캘프 MFE 도달 시 모멘텀 확인 → 러너 전환 or 전량익절
                 if not mfe_partial_done and max_gain >= mfe_target and (time.time() - last_exit_event_ts) >= EXIT_EVENT_COOLDOWN_SEC:
-                    # 🔧 v4.0: 무조건 전량 익절 (러너 전환 제거 → 확실한 수익 확정)
-                    close_auto_position(m, f"스캘프TP +{cur_gain_now*100:.2f}% (MFE+{max_gain*100:.2f}% 타겟{mfe_target*100:.2f}%)")
-                    _already_closed = True
-                    verdict = "스캘프_TP"
-                    tg_send_mid(f"💰 {m} 스캘프 전량익절 +{cur_gain_now*100:.2f}% | MFE+{max_gain*100:.2f}%")
-                    break
+                    # 현재 모멘텀 체크: 매수비+가속도 충분하면 러너로 전환
+                    _tp_t10 = micro_tape_stats_from_ticks(ticks, 10)
+                    _tp_buy_r = _tp_t10.get("buy_ratio", 0)
+                    _tp_accel = calc_flow_acceleration(ticks)
+                    _momentum_alive = (_tp_buy_r >= SCALP_TO_RUNNER_MIN_BUY and _tp_accel >= SCALP_TO_RUNNER_MIN_ACCEL)
+
+                    if _momentum_alive:
+                        # ★ 스캘프→러너 자동전환: 50% 익절 + 50% 러너 트레일
+                        ok, msg, sold = safe_partial_sell(
+                            m, 0.50,
+                            reason=f"스캘프→러너전환 +{cur_gain_now*100:.2f}% (매수{_tp_buy_r:.0%} 가속{_tp_accel:.1f}x)")
+                        if ok and sold > 0:
+                            # 🔧 FIX: dust방지로 전량청산됐는지 확인 (오해 알림 방지)
+                            with _POSITION_LOCK:
+                                _pos_up = OPEN_POSITIONS.get(m)
+                            if not _pos_up:
+                                _already_closed = True
+                                verdict = "스캘프_TP_DUST"
+                                break
+                            mfe_partial_done = True
+                            last_exit_event_ts = time.time()
+                            trade_type = "runner"  # ★ 러너로 승격
+                            # 🔧 FIX: OPEN_POSITIONS에도 반영 — remonitor 재호출 시 trade_type 유지
+                            with _POSITION_LOCK:
+                                _pos_up2 = OPEN_POSITIONS.get(m)
+                                if _pos_up2:
+                                    _pos_up2["trade_type"] = "runner"
+                            tg_send_mid(f"🚀 {m} 스캘프→러너 전환! 50% 익절 +{cur_gain_now*100:.2f}% | 나머지 트레일링")
+                    else:
+                        # 모멘텀 소진 → 전량 익절
+                        close_auto_position(m, f"스캘프TP +{cur_gain_now*100:.2f}% (MFE+{max_gain*100:.2f}% 타겟{mfe_target*100:.2f}%)")
+                        _already_closed = True
+                        verdict = "스캘프_TP"
+                        tg_send_mid(f"💰 {m} 스캘프 전량익절 +{cur_gain_now*100:.2f}% | MFE+{max_gain*100:.2f}%")
+                        break
                 # 🔧 매도구조개선: Plateau 전량익절 제거
                 # 이유: 횡보는 거래의 자연스러운 과정 (숨고르기)
                 #       +1.5%에서 90초 쉬다가 +3.0% 가는 거래를 +1.5%에서 잘라먹음
@@ -9193,8 +10082,6 @@ last_signal_at = {}
 recent_alerts = {}
 last_price_at_alert = {}
 last_reason = {}
-# 🔧 v4.0: 신호 관련 dict 보호 Lock (레이스컨디션으로 중복진입 방지)
-_SIGNAL_LOCK = threading.Lock()
 # last_trade_was_loss → 상단(line 458)에서 초기화됨
 ALERT_TTL = 1800
 
@@ -9244,31 +10131,29 @@ def get_cooldown_sec(market: str) -> int:
     return base
 
 def cooldown_ok(market, price=None, reason=None):
-    # 🔧 v4.0: _SIGNAL_LOCK으로 last_signal_at 등 보호 (레이스컨디션 방지)
-    with _SIGNAL_LOCK:
-        now = time.time()
-        last = last_signal_at.get(market, 0)
+    now = time.time()
+    last = last_signal_at.get(market, 0)
 
-        # ✅ 시간대별 동적 쿨다운 적용
-        cooldown = get_cooldown_sec(market)
+    # ✅ 시간대별 동적 쿨다운 적용
+    cooldown = get_cooldown_sec(market)
 
-        # 기본 쿨다운 조건
-        if (now - last) >= cooldown:
+    # 기본 쿨다운 조건
+    if (now - last) >= cooldown:
+        return True
+
+    # 히스테리시스(재돌파/되돌림 재진입 허용)는 기존 로직 유지
+    if (now - last) >= REARM_MIN_SEC:
+        lp = last_price_at_alert.get(market)
+        rebreak = (price and lp and (price >= lp * (1.0 + REARM_PRICE_GAP)))
+        reason_changed = (last_reason.get(market) != reason)
+        rebreak_small = (price and lp
+                         and (price >= lp * (1.0 + REARM_REBREAK_MIN))
+                         and not reason_changed)
+        pullback = (price and lp
+                    and (price <= lp * (1.0 - REARM_PULLBACK_MAX)))
+        if rebreak or rebreak_small or (pullback and reason_changed):
             return True
-
-        # 히스테리시스(재돌파/되돌림 재진입 허용)는 기존 로직 유지
-        if (now - last) >= REARM_MIN_SEC:
-            lp = last_price_at_alert.get(market)
-            rebreak = (price and lp and (price >= lp * (1.0 + REARM_PRICE_GAP)))
-            reason_changed = (last_reason.get(market) != reason)
-            rebreak_small = (price and lp
-                             and (price >= lp * (1.0 + REARM_REBREAK_MIN))
-                             and not reason_changed)
-            pullback = (price and lp
-                        and (price <= lp * (1.0 - REARM_PULLBACK_MAX)))
-            if rebreak or rebreak_small or (pullback and reason_changed):
-                return True
-        return False
+    return False
 
 def cleanup_expired(dic, ttl):
     now = time.time()
@@ -9437,36 +10322,6 @@ def fetch_orderbook_cache(mkts):
     return cache
 
 
-# 🔧 v4.0: 진입 직전 오더북 실시간 재조회 (캐시 30초+ 지연 문제 해결)
-def _refresh_ob_before_entry(market):
-    """진입 직전 실시간 오더북 (최대 1초 지연)"""
-    ob_raw = safe_upbit_get(
-        "https://api.upbit.com/v1/orderbook",
-        {"markets": market},
-        timeout=2
-    )
-    if ob_raw and len(ob_raw) > 0:
-        try:
-            ob = ob_raw[0]
-            units = ob.get("orderbook_units", [])[:3]
-            if not units:
-                return None
-            ask, bid = units[0]["ask_price"], units[0]["bid_price"]
-            spread = (ask - bid) / max((ask + bid) / 2, 1) * 100
-            askv = sum(u["ask_price"] * u["ask_size"] for u in units)
-            bidv = sum(u["bid_price"] * u["bid_size"] for u in units)
-            best_ask_krw = units[0]["ask_price"] * units[0]["ask_size"]
-            return {
-                "spread": spread,
-                "depth_krw": askv + bidv,
-                "best_ask_krw": best_ask_krw,
-                "raw": ob
-            }
-        except Exception as e:
-            print(f"[OB_REFRESH_ERR] {market}: {e}")
-    return None
-
-
 # =========================
 # 메인
 # =========================
@@ -9477,20 +10332,14 @@ _cursor = 0
 def main():
     global _cursor
 
+    # 🧠 시작 시 학습된 가중치 & 매도 파라미터 로드
+    if AUTO_LEARN_ENABLED:
+        load_learned_weights()
+        load_exit_params()
 
-    _elite_status = "ON" if ELITE_MODE else "OFF"
-    _elite_detail = ""
-    if ELITE_MODE:
-        _elite_detail = (
-            f"\n🎯 ELITE MODE: Trend-Filtered Pullback"
-            f"\n📋 SL={ELITE_SL*100:.1f}% | TP=분할({ELITE_TP_PARTIAL*100:.1f}%/{ELITE_TP_TRAIL*100:.1f}%) | 타임아웃={ELITE_HORIZON_SEC}초"
-            f"\n📋 조건: 1H추세≥{ELITE_TREND_1H_MIN}% + BB<{ELITE_BB_POS_MAX} + VWAP<0 + RSI<{ELITE_RSI_1M_MAX} + EMA<0 + {sorted(ELITE_GOOD_HOURS)}시"
-        )
     tg_send(
-        f"🚀 대장초입 헌터 v4.0 (구조적수술+MeanReversion) 시작\n"
-        f"📊 TOP {TOP_N} | ELITE={_elite_status} | SL={DYN_SL_MIN*100:.1f}%/{DYN_SL_MAX*100:.1f}% | {now_kst_str()}\n"
-        f"🔧 MR={'ON' if MR_ENABLED else 'OFF'} | 러너={'OFF' if RUNNER_MODE_DISABLED else 'ON'} | 레짐=자동감지"
-        f"{_elite_detail}"
+        f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
+        f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
     )
 
     # 🔧 시작 시 유령 포지션 즉시 동기화
@@ -9533,9 +10382,6 @@ def main():
             # BTC_guard 제거 — 항상 기본 모드로 실행
             tight_mode = False
 
-            # 🔧 v4.0: 시장 레짐 자동 감지 (10분마다 갱신)
-            _current_regime = detect_market_regime()
-
             # 🔧 FIX H3: pending 상태 타임아웃 세이프가드 (60초 초과 시 자동 제거)
             # - 진입 중 예외 발생 시 pending 마킹만 남아 해당 코인 영구 차단되는 버그 방지
             # - 🔧 FIX: pending_ts 기반으로 변경 (last_signal_at은 리테스트/동그라미에서 미세팅)
@@ -9557,6 +10403,115 @@ def main():
 
             # 🔧 FIX: 스파이크 트래커 만료 항목 정리 (메모리 누수 방지)
             _cleanup_spike_tracker()
+
+            # 🎯 리테스트 워치리스트 체크 (장초 2차 기회 진입)
+            if RETEST_MODE_ENABLED:
+                cleanup_retest_watchlist()  # 타임아웃 정리
+                with _RETEST_LOCK:
+                    watch_markets = list(_RETEST_WATCHLIST.keys())
+                for wm in watch_markets:
+                    try:
+                        retest_pre = check_retest_entry(wm)
+                        if retest_pre:
+                            # 🔐 락 획득 (메인/DCB 경로와 동일 패턴)
+                            if not _try_acquire_entry_lock(wm):
+                                print(f"[RETEST] {wm} already locked → skip")
+                                continue
+                            with _POSITION_LOCK:
+                                if wm in OPEN_POSITIONS:
+                                    _release_entry_lock(wm)
+                                    continue
+                                # 🔧 FIX: MAX_POSITIONS 체크 (리테스트도 포지션 한도 준수)
+                                _retest_active = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
+                                if _retest_active >= MAX_POSITIONS:
+                                    _release_entry_lock(wm)
+                                    continue
+                                OPEN_POSITIONS[wm] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
+
+                            # 리테스트 조건 충족 → 진입 (half 강제)
+                            retest_pre["entry_mode"] = "half"  # 🔧 이중 보장: 리테스트 = half 강제
+                            print(f"[RETEST] {wm} 🎯 리테스트 진입 시작! (half 강제)")
+                            c1 = get_minutes_candles(1, wm, 20)
+                            dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1, signal_type=retest_pre.get("signal_type", "normal"), market=wm)  # 🔧 FIX: signal_type 전달
+                            tg_send(f"🎯 <b>리테스트 진입</b> {wm} ⚡HALF\n"
+                                    f"• 첫 급등 후 되돌림 → 재돌파 확인\n"
+                                    f"• 현재가: {retest_pre['price']:,.0f}원\n"
+                                    f"• 모드: half (리스크 제한)")
+                            try:
+                                open_auto_position(wm, retest_pre, dyn_stop, eff_sl_pct)
+                            except Exception as e2:
+                                print(f"[RETEST_OPEN_ERR] {wm}: {e2}")
+                                with _POSITION_LOCK:
+                                    pos = OPEN_POSITIONS.get(wm)
+                                    if pos and pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(wm, None)
+                                _release_entry_lock(wm)
+                                continue
+
+                            # 🔧 FIX: 모니터 스레드 시작 (기존엔 누락 → 포지션 방치)
+                            # 🔧 FIX: open 후 state 확인 (매수 실패 시 모니터 생성 방지)
+                            with _POSITION_LOCK:
+                                _retest_pos = OPEN_POSITIONS.get(wm)
+                                if not _retest_pos or _retest_pos.get("state") != "open":
+                                    # 매수 실패 또는 pre_signal 상태 → 정리 후 스킵
+                                    if _retest_pos and _retest_pos.get("pre_signal"):
+                                        OPEN_POSITIONS.pop(wm, None)
+                                    _release_entry_lock(wm)
+                                    continue
+                                actual_entry = _retest_pos.get("entry_price", retest_pre["price"])
+                            retest_pre_copy = dict(retest_pre)
+                            def _run_retest_monitor(market, entry, pre_data):
+                                try:
+                                    monitor_position(market, entry, pre_data, tight_mode=True)
+                                    # 🔧 FIX: 모니터 종료 후 포지션 잔존 시 remonitor (방치 방지)
+                                    with _POSITION_LOCK:
+                                        _pos_after = OPEN_POSITIONS.get(market)
+                                    if _pos_after and _pos_after.get("state") == "open":
+                                        remonitor_until_close(market, entry, pre_data, tight_mode=True)
+                                except Exception as e3:
+                                    print(f"[RETEST_MON_ERR] {market}: {e3}")
+                                    traceback.print_exc()
+                                    # 🔧 FIX: 리테스트 모니터 예외 시 알림 + 잔고 확인 후 정리
+                                    try:
+                                        actual = get_balance_with_locked(market)
+                                        if actual < 0:
+                                            tg_send(f"⚠️ {market} 리테스트 모니터 오류 (잔고 조회 실패)\n• 예외: {e3}\n• 포지션 유지")
+                                        elif actual <= 1e-12:
+                                            tg_send(f"⚠️ {market} 리테스트 모니터 오류 (잔고=0, 이미 청산)\n• 예외: {e3}")
+                                            with _POSITION_LOCK:
+                                                OPEN_POSITIONS.pop(market, None)
+                                        else:
+                                            tg_send(f"🚨 {market} 리테스트 모니터 오류 → 청산 시도\n• 예외: {e3}")
+                                            close_auto_position(market, f"리테스트모니터예외 | {e3}")
+                                    except Exception as _cleanup_err:
+                                        tg_send(f"🚨 {market} 리테스트 모니터 오류 (청산 시도 실패)\n• 예외: {e3}")
+                                finally:
+                                    _release_entry_lock(market)
+                                    with _MONITOR_LOCK:
+                                        _ACTIVE_MONITORS.pop(market, None)
+                            rt_thread = threading.Thread(
+                                target=_run_retest_monitor,
+                                args=(wm, actual_entry, retest_pre_copy),
+                                daemon=True
+                            )
+                            # 🔧 FIX: 스레드 start 실패 시 락/pending orphan 방지 (일반 진입과 동일 패턴)
+                            try:
+                                rt_thread.start()
+                            except Exception as rt_thread_err:
+                                print(f"[RT_THREAD_ERR] {wm} 리테스트 모니터 스레드 생성 실패: {rt_thread_err}")
+                                _release_entry_lock(wm)
+                                with _POSITION_LOCK:
+                                    OPEN_POSITIONS.pop(wm, None)
+                                continue
+                            with _MONITOR_LOCK:
+                                _ACTIVE_MONITORS[wm] = rt_thread
+                    except Exception as e:
+                        print(f"[RETEST_ERR] {wm}: {e}")
+                        # 🔧 FIX: 리테스트 진입 오류 시 알림 발송 (무알림 포지션 유실 방지)
+                        tg_send(f"🚨 {wm} 리테스트 진입 오류\n• 예외: {e}\n• 포지션 정리됨")
+                        with _POSITION_LOCK:
+                            OPEN_POSITIONS.pop(wm, None)
+                        _release_entry_lock(wm)
 
             # ⭕ 동그라미 워치리스트 체크 (눌림→리클레임→재돌파 진입)
             if CIRCLE_ENTRY_ENABLED:
@@ -9862,110 +10817,8 @@ def main():
                 except Exception as box_scan_err:
                     print(f"[BOX_SCAN_ERR] {box_scan_err}")
 
-            # 🔧 v4.0: Mean Reversion 전략 스캔 + 진입
-            if MR_ENABLED and c1_cache:
-                try:
-                    regime_weights = get_regime_strategy_weights()
-                    if regime_weights["mean_reversion"] > 0:
-                        mr_candidates = mean_reversion_scan(shard, obc, c1_cache)
-                        for mr_cand in mr_candidates:
-                            mr_m = mr_cand["market"]
-                            try:
-                                with _POSITION_LOCK:
-                                    if mr_m in OPEN_POSITIONS:
-                                        continue
-                                    active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
-                                    if active_count >= MAX_POSITIONS:
-                                        break
-
-                                if not _try_acquire_entry_lock(mr_m):
-                                    continue
-
-                                with _POSITION_LOCK:
-                                    if mr_m in OPEN_POSITIONS:
-                                        _release_entry_lock(mr_m)
-                                        continue
-                                    OPEN_POSITIONS[mr_m] = {"state": "pending", "pre_signal": True, "pending_ts": time.time()}
-
-                                mr_stop = mr_cand["price"] * (1.0 - MR_SL)
-                                mr_sl_pct = MR_SL
-
-                                try:
-                                    open_auto_position(mr_m, mr_cand, mr_stop, mr_sl_pct)
-                                except Exception as mr_e:
-                                    print(f"[MR_OPEN_ERR] {mr_m}: {mr_e}")
-                                    with _POSITION_LOCK:
-                                        pos = OPEN_POSITIONS.get(mr_m)
-                                        if pos and pos.get("pre_signal"):
-                                            OPEN_POSITIONS.pop(mr_m, None)
-                                    _release_entry_lock(mr_m)
-                                    continue
-
-                                with _POSITION_LOCK:
-                                    _mr_pos = OPEN_POSITIONS.get(mr_m, {})
-                                    _mr_opened = (_mr_pos.get("state") == "open")
-
-                                if _mr_opened:
-                                    with _RECENT_BUY_LOCK:
-                                        _RECENT_BUY_TS[mr_m] = time.time()
-                                    with _POSITION_LOCK:
-                                        mr_entry = OPEN_POSITIONS.get(mr_m, {}).get("entry_price", mr_cand["price"])
-                                        mr_vol = OPEN_POSITIONS.get(mr_m, {}).get("volume", 0)
-
-                                    tg_send(
-                                        f"🔄 <b>[MR 과매도진입]</b> {mr_m}\n"
-                                        f"• RSI={mr_cand['rsi']:.1f} BB={mr_cand['bb_pos']:.1f}%\n"
-                                        f"• 체결가: {fmt6(mr_entry)}원\n"
-                                        f"• 손절: {fmt6(mr_stop)} (SL {MR_SL*100:.1f}%) | 목표: RSI≥{MR_RSI_EXIT} or +{MR_TP*100:.1f}%\n"
-                                        f"• 레짐: {detect_market_regime()}\n"
-                                        f"{link_for(mr_m)}"
-                                    )
-
-                                    # MR 전용 모니터 스레드
-                                    mr_info = {"mr_sl": MR_SL, "mr_tp": MR_TP}
-                                    def _run_mr_monitor(market, entry, vol, info):
-                                        try:
-                                            mr_monitor_position(market, entry, vol, info)
-                                        except Exception as mre:
-                                            print(f"[MR_MON_ERR] {market}: {mre}")
-                                            traceback.print_exc()
-                                            try:
-                                                close_auto_position(market, f"MR모니터예외 | {mre}")
-                                            except Exception:
-                                                pass
-                                        finally:
-                                            _release_entry_lock(market)
-                                            with _MONITOR_LOCK:
-                                                _ACTIVE_MONITORS.pop(market, None)
-
-                                    mr_thread = threading.Thread(
-                                        target=_run_mr_monitor,
-                                        args=(mr_m, mr_entry, mr_vol, mr_info),
-                                        daemon=True
-                                    )
-                                    try:
-                                        mr_thread.start()
-                                        with _MONITOR_LOCK:
-                                            _ACTIVE_MONITORS[mr_m] = mr_thread
-                                    except Exception as _mt_err:
-                                        print(f"[MR_THREAD_ERR] {mr_m}: {_mt_err}")
-                                        with _POSITION_LOCK:
-                                            OPEN_POSITIONS.pop(mr_m, None)
-                                        _release_entry_lock(mr_m)
-                                else:
-                                    with _POSITION_LOCK:
-                                        _pp = OPEN_POSITIONS.get(mr_m)
-                                        if _pp and _pp.get("pre_signal"):
-                                            OPEN_POSITIONS.pop(mr_m, None)
-                                    _release_entry_lock(mr_m)
-
-                            except Exception as mr_err:
-                                print(f"[MR_ERR] {mr_m}: {mr_err}")
-                                _release_entry_lock(mr_m)
-                except Exception as mr_scan_err:
-                    print(f"[MR_SCAN_ERR] {mr_scan_err}")
-
-            # (자동학습 시스템 제거됨 — 수동 판단 우선)
+            # 🔧 학습은 update_trade_result에서 건수 기반으로 자동 트리거됨
+            # (10건마다 또는 연속 3패 시 즉시 학습)
             # 매도 파라미터는 고정 (매수만 학습)
 
             for k in list(CUT_COUNTER.keys()):
@@ -10029,11 +10882,6 @@ def main():
 
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre:
-                    continue
-
-                # === 오후 약세 시간대 진입 필터 ===
-                if should_skip_afternoon_entry(pre):
-                    print(f"[오후필터] {m} 오후 약세 시간대 → 진입 스킵")
                     continue
 
                 # ⭕ 동그라미 워치리스트 등록 (점화 감지 시)
@@ -10142,46 +10990,23 @@ def main():
                         recent_alerts.pop(m, None)
                     continue
 
-                # 🔧 캔들분석: VWAP 이격 필터 (vwap_gap 0.3~1.0% WR=22.9%✗, >1.0% WR=28.7%)
-                # "추격하면 죽고, 눌림에서 사면 산다" — VWAP 아래 1%+: WR=45.2%★
+                # 🔧 postcheck 통과 후 vwap_gap 추격 체크 (추격매수 제거)
                 _post_vwap_gap = pre.get("vwap_gap", 0)
-                if _post_vwap_gap > 1.0 and not pre.get("ign_ok"):
-                    cut("VWAP_CHASE", f"{m} vwap_gap {_post_vwap_gap:.1f}%>1.0% → 추격 진입 차단")
-                    with _POSITION_LOCK:
-                        recent_alerts.pop(m, None)
-                    continue
-                if _post_vwap_gap > 0.3:
+                if _post_vwap_gap > 1.0:
                     pre["entry_mode"] = "half"
-                    print(f"[VWAP_GAP] {m} vwap_gap {_post_vwap_gap:.1f}%>0.3% → half 강제 (추격 제한)")
+                    print(f"[VWAP_GAP] {m} vwap_gap {_post_vwap_gap:.1f}%>1.0% → half 강제 (추격 제한)")
 
                 # 🔧 승률개선: 급등 허용 시 half 강제 (리스크 제한)
                 if pre.get("_surge_probe"):
                     pre["entry_mode"] = "half"
                 # 🔧 FIX: postcheck 후 재확인 제거 (이미 위에서 마킹됨)
 
-                # 🔧 캔들분석: 시간대별 필터 (23,250건 HOURLY 데이터 기반)
-                # 00시: WR=43.6% 최고 → half 해제 (확인 유지)
-                # 04-05시: WR=14.6~19.9% 최악 → 진입 차단
-                # 18시: WR=15.1% → 진입 차단 (04시급)
-                # 01-03,06-07시: 야간 half 유지
+                # 🔧 3929건시뮬: 야간 half 0-7시만 (0-9시는 9시간 → 과도)
+                # 7-8시: 3847건 데이터에서 승률차이 미미 → half 불필요
                 _night_h = now_kst().hour
-                if 4 <= _night_h <= 5:
-                    cut("NIGHT_DEAD", f"{m} {_night_h}시 유동성사망 (WR=14~20%) → 진입 차단")
-                    with _POSITION_LOCK:
-                        recent_alerts.pop(m, None)
-                    continue
-                # 🔧 크로스TF 3차: 18시 WR=15.1% (04시 18.5%보다 나쁨) → 차단
-                if _night_h == 18:
-                    cut("HOUR_18_DEAD", f"{m} 18시 WR=15.1% (04시급) → 진입 차단")
-                    with _POSITION_LOCK:
-                        recent_alerts.pop(m, None)
-                    continue
-                if 1 <= _night_h < 4 and pre.get("entry_mode") == "confirm":
+                if 0 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
-                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족)")
-                if 6 <= _night_h < 7 and pre.get("entry_mode") == "confirm":
-                    pre["entry_mode"] = "half"
-                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족)")
+                    print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
                 # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
                 # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
@@ -10234,7 +11059,11 @@ def main():
                 pocket_mark = "🎯" if pre.get("is_precision_pocket") else ""
 
                 # 🔥 경로 표시: signal_tag 하나로 간소화
-                path_str = pre.get("signal_tag", "기본")
+                filter_type = pre.get("filter_type", "stage1_gate")
+                if filter_type == "prebreak":
+                    path_str = "🚀선행진입"
+                else:
+                    path_str = pre.get("signal_tag", "기본")
 
                 # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
                 ticks_for_metrics = pre.get("ticks", [])
@@ -10354,42 +11183,31 @@ def main():
                         print("[LOG_ERR]", e)
 
                     # --- 🔥 자동매수 진입 ---
-                    # 🔧 v4.0: 진입 직전 오더북 실시간 재조회 (캐시 지연 문제 해결)
-                    _fresh_ob = _refresh_ob_before_entry(m)
-                    if _fresh_ob:
-                        pre["ob"] = _fresh_ob
-                        # 스프레드 재확인 (진입 직전 스프레드 급등 차단)
-                        if _fresh_ob.get("spread", 0) > GATE_SPREAD_MAX * 100 * 1.5:
-                            print(f"[OB_FRESH] {m} 스프레드 {_fresh_ob['spread']:.2f}% > {GATE_SPREAD_MAX*1.5:.2f}% → 진입 취소")
+                    # 🎯 리테스트 모드: 장초 첫 양봉은 워치리스트에만 등록
+                    if RETEST_MODE_ENABLED and is_morning_session():
+                        # 급등률 체크 (신호가 대비 현재가)
+                        cur_price = pre.get("price", 0)
+                        # 🔧 FIX: entry_price가 없으면 c1 시가 사용 (cur_price 폴백 시 gain=0 되어 무의미)
+                        entry_price_base = pre.get("entry_price") or (c1[-2]["trade_price"] if len(c1) >= 2 else cur_price)
+                        gain_pct = (cur_price / entry_price_base - 1.0) if entry_price_base > 0 else 0
+
+                        if gain_pct >= RETEST_PEAK_MIN_GAIN:
+                            # 첫 급등 → 워치리스트 등록 시도 (내부에서 품질 검증)
+                            add_to_retest_watchlist(m, cur_price, pre)
+                            print(f"[RETEST] {m} 장초 첫 급등 +{gain_pct*100:.2f}% | ign={pre.get('ignition_score',0)} → 워치리스트 검토 완료")
+                            # 🔧 FIX: pending 마킹 정리 (안 하면 ghost 포지션으로 남아 진입 차단)
+                            # 🔧 FIX: signal dict도 _POSITION_LOCK 안에서 정리 (일관성)
                             with _POSITION_LOCK:
-                                _pp = OPEN_POSITIONS.get(m)
-                                if _pp and _pp.get("pre_signal"):
-                                    OPEN_POSITIONS.pop(m, None)
+                                OPEN_POSITIONS.pop(m, None)
+                                # 🔧 FIX: 워치리스트만 등록하고 진입 안 한 경우 cooldown 되돌리기
+                                # (진입 안 했는데 cooldown 걸리면 리테스트/재탐지 기회 손실)
+                                last_signal_at.pop(m, None)
+                                last_price_at_alert.pop(m, None)
+                                last_reason.pop(m, None)
+                            # recent_alerts는 유지 (10초 이내 동일 종목 중복 신호 방지)
                             _release_entry_lock(m)
                             _lock_held = False
-                            continue
-
-                    # 🔧 v4.0: 진입 지연 확인 (돌파 후 3초 대기, 되돌림 0.15% 이내면 진입)
-                    if ENTRY_DELAY_SEC > 0:
-                        _delay_price_start = pre.get("price", 0)
-                        _delay_ok = True
-                        time.sleep(ENTRY_DELAY_SEC)
-                        # 지연 후 최신 가격 확인
-                        _delay_ticks = get_recent_ticks(m, 20)
-                        if _delay_ticks:
-                            _delay_cur = max(_delay_ticks, key=tick_ts_ms).get("trade_price", _delay_price_start)
-                            _delay_retrace = (_delay_price_start - _delay_cur) / max(_delay_price_start, 1)
-                            if _delay_retrace > ENTRY_MAX_RETRACEMENT:
-                                print(f"[ENTRY_DELAY] {m} 되돌림 {_delay_retrace*100:.2f}% > {ENTRY_MAX_RETRACEMENT*100:.2f}% → 가짜돌파 차단")
-                                with _POSITION_LOCK:
-                                    _pp = OPEN_POSITIONS.get(m)
-                                    if _pp and _pp.get("pre_signal"):
-                                        OPEN_POSITIONS.pop(m, None)
-                                _release_entry_lock(m)
-                                _lock_held = False
-                                continue
-                            # 되돌림 적으면 최신 가격으로 업데이트
-                            pre["price"] = _delay_cur
+                            continue  # 바로 진입하지 않고 다음 종목으로
 
                     # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
                     # open_auto_position이 reentrant=True로 재진입, 모니터 finally에서 최종 해제
