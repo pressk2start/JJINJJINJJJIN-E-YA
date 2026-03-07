@@ -3918,8 +3918,48 @@ PATH_REPORT_INTERVAL = 10  # 🔧 10건마다 발송 (최근 10건 상세 표시
 # 📊 배치 거래 리포트 (30건마다 텔레그램 종합 발송)
 # =========================
 BATCH_REPORT_INTERVAL = 30  # 30건마다 종합 리포트 발송
-_batch_report_count = 0     # 마지막 배치 리포트 이후 거래 수
 BATCH_LOG_PATH = os.path.join(os.getcwd(), "batch_reports.csv")  # 배치 요약 CSV
+
+def _restore_batch_count() -> int:
+    """봇 재시작 시 마지막 배치 리포트 이후 거래 수 복원"""
+    try:
+        if not os.path.exists(BATCH_LOG_PATH) or not os.path.exists(TRADE_LOG_PATH):
+            # 배치 리포트가 한 번도 없었으면 전체 청산 건수 카운트
+            if os.path.exists(TRADE_LOG_PATH):
+                import csv as _csv
+                with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
+                    reader = _csv.DictReader(f)
+                    count = sum(1 for row in reader if row.get("result") in ("win", "lose"))
+                restored = count % BATCH_REPORT_INTERVAL
+                print(f"[BATCH_REPORT] 카운터 복원: {restored}/{BATCH_REPORT_INTERVAL} (배치기록 없음, 전체 {count}건)")
+                return restored
+            return 0
+
+        # 마지막 배치 리포트 시각 가져오기
+        last_batch_ts = ""
+        with open(BATCH_LOG_PATH, "r", encoding="utf-8") as f:
+            import csv as _csv
+            for row in _csv.DictReader(f):
+                last_batch_ts = row.get("ts", "")
+
+        if not last_batch_ts:
+            return 0
+
+        # 마지막 배치 리포트 이후 청산된 거래 수 카운트
+        import csv as _csv
+        count = 0
+        with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                if row.get("result") in ("win", "lose") and row.get("ts", "") > last_batch_ts:
+                    count += 1
+
+        print(f"[BATCH_REPORT] 카운터 복원: {count}/{BATCH_REPORT_INTERVAL} (마지막 배치: {last_batch_ts})")
+        return count
+    except Exception as e:
+        print(f"[BATCH_REPORT] 카운터 복원 실패: {e}")
+        return 0
+
+_batch_report_count = _restore_batch_count()
 
 FEATURE_FIELDS = [
     "ts", "market", "entry_price", "exit_price",
