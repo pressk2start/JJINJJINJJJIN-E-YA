@@ -8439,6 +8439,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         signal_tag = "기본"
 
+    # 🔧 약한 시그널 차단 — 점화/강돌파만 진입 허용
+    # 근거: 약한 시그널(EMA↑/고점↑/거래량↑/기본)은 진입 직후 흔들림 → SL 피격 빈발
+    #       수수료(0.1%)+슬리피지(0.13%) 대비 MFE 부족 → 구조적 마이너스
+    _ALLOWED_SIGNALS = {"🔥점화", "강돌파 (EMA↑+고점↑)"}
+    if signal_tag not in _ALLOWED_SIGNALS:
+        return None
+
     # === VWAP gap 계산 (사이즈 조절/표시용) ===
     vwap = calc_vwap_from_candles(c1, 20)
     vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
