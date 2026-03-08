@@ -50,13 +50,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.032  # 🔧 수익개선: 4.2→3.2% (SL 2.0% 대비 1.6배, 비상청산이 SL과 너무 멀면 손실만 확대)
+HARD_STOP_DD = 0.020  # 🔧 데이터기반: 3.2→2.0% (SL 0.8% 대비 2.5배, 비상청산)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
 # 🔧 FIX: SL 단일 선언 (중복 제거됨 — 이 곳에서만 선언, 전체 모듈에서 참조)
-DYN_SL_MIN = 0.020   # 🔧 승률개선: 1.8→2.0% (알트 1분봉 노이즈 0.5~1.5% + 슬리피지 0.3% → 1.8%는 정상눌림에 휩쏘)
-DYN_SL_MAX = 0.035   # 🔧 승률개선: 3.2→3.5% (고변동 코인 정상 눌림 충분히 허용)
+DYN_SL_MIN = 0.008   # 🔧 데이터기반: 2.0→0.8% (50건 패배MAE 평균 -0.52%, SL 2%는 시간만료 유발 → 빠른컷)
+DYN_SL_MAX = 0.015   # 🔧 데이터기반: 3.5→1.5% (패배 MAE -0.63% 기준 × 2.4배 = 충분한 여유)
 
 # 🔧 통합 체크포인트: 트레일링/얇은수익/Plateau 발동 기준
 # 🔧 구조개선: SL 연동 — 체크포인트 = SL × 1.5 (의미있는 수익에서만 트레일 무장)
@@ -107,15 +107,16 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
 # 🔧 손익분기개선: R:R 2.0+ 확보 — 손익분기 55%→41%로 끌어내림
-# 핵심: SL 2.0% 기준 R:R 연동 MFE 부분익절 목표
-# SL 2.0% 기준: 점화 3.6%, 강돌파 3.0%, EMA 2.8%, 기본 2.7%
+# 🔧 데이터기반: SL 0.8% 기준 R:R 연동 MFE 부분익절 목표
+# 50건 분석: 평균MFE +0.33%, 승리MFE +0.36~0.79%
+# SL 0.8% 기준: 점화 0.56%, 강돌파 0.48%, EMA 0.44%, 기본 0.40%
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 1.8,              # SL 2.0%×1.8=3.6% (점화는 크게 먹어야)
-    "강돌파 (EMA↑+고점↑)": 1.5,  # SL 2.0%×1.5=3.0%
-    "EMA↑": 1.4,                 # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%, 수수료 차감 후 실질 R:R>1)
-    "고점↑": 1.4,                # 🔧 수익개선: 1.3→1.4 (SL 2.0%×1.4=2.8%)
-    "거래량↑": 1.35,             # 🔧 수익개선: 1.2→1.35 (SL 2.0%×1.35=2.7%, 기존 2.4%는 수수료에 먹힘)
-    "기본": 1.35,                # 🔧 수익개선: 1.2→1.35 (SL 2.0%×1.35=2.7%)
+    "🔥점화": 0.7,              # 🔧 데이터기반: SL 0.8%×0.7=0.56% (승리 평균MFE 0.36~0.79% 범위 내)
+    "강돌파 (EMA↑+고점↑)": 0.6,  # 🔧 데이터기반: SL 0.8%×0.6=0.48%
+    "EMA↑": 0.55,                # 🔧 데이터기반: SL 0.8%×0.55=0.44%
+    "고점↑": 0.55,               # 🔧 데이터기반: SL 0.8%×0.55=0.44%
+    "거래량↑": 0.50,             # 🔧 데이터기반: SL 0.8%×0.50=0.40%
+    "기본": 0.50,                # 🔧 데이터기반: SL 0.8%×0.50=0.40%
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -191,7 +192,7 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7          # 🔧 백테스트튜닝: 10→7초 (balanced 5초 대비 느슨)
-        HARD_STOP_DD = 0.030
+        HARD_STOP_DD = 0.020  # 🔧 데이터기반: SL 0.8%×2.5
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
@@ -202,7 +203,7 @@ def _apply_exit_profile():
 
     elif prof == "strict":
         WARMUP_SEC = 3          # 🔧 백테스트튜닝: 6→3초 (balanced 5초 대비 타이트)
-        HARD_STOP_DD = 0.025
+        HARD_STOP_DD = 0.016  # 🔧 데이터기반: SL 0.8%×2.0 (strict)
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
@@ -213,7 +214,7 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 5         # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 빠른 도달에 맞춤)
-        HARD_STOP_DD = 0.032   # 🔧 FIX: 4.2→3.2% (전역값과 통일, SL 2.0%×1.6 — 비상청산이 SL과 너무 멀면 손실만 확대)
+        HARD_STOP_DD = 0.020   # 🔧 데이터기반: SL 0.8%×2.5 (balanced)
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3    # 🔧 백테스트튜닝: 4→3회 (트레일 0.15% 빠른 반응)
         TRAIL_ATR_MULT = 1.0
@@ -1355,7 +1356,7 @@ def sync_orphan_positions():
 
                 # 🔧 FIX: orphan 즉시 손절 → DYN_SL_MIN 연동 (0.6% 하드코딩 제거)
                 # - 기존: -0.6% 고정 → 정상 눌림도 강제청산 (승률 하락)
-                # - 수정: DYN_SL_MIN(1.0%) 기준으로 판단 (본전략 SL과 일관)
+                # - 수정: DYN_SL_MIN(0.8%) 기준으로 판단 (본전략 SL과 일관)
                 _orphan_sl_pct = DYN_SL_MIN * 100  # 1.0%
                 if pnl_pct <= -_orphan_sl_pct:
                     print(f"[ORPHAN] {market} 이미 손절선 이하 ({pnl_pct:.2f}%) → 즉시 청산")
@@ -3436,6 +3437,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         "V7_SURGE_FAIL",                            # 🔧 BUG FIX: v7 폭발 15분 미수익 청산 (중복청산 방지)
         "스캘프_TP_DUST",                            # 🔧 BUG FIX: 스캘프 TP dust 전량청산 (중복청산 방지)
         "러너_TP_DUST",                              # 🔧 BUG FIX: 러너 TP dust 전량청산 (중복청산 방지)
+        "조기청산_무반응",                              # 🔧 데이터기반: 90초 MFE 무반응 조기청산
     }
 
     while True:
@@ -3811,7 +3813,7 @@ PREBREAK_KRW_PER_SEC_MIN = 20_000     # 최소 거래속도 (원/초)
 PREBREAK_IMBALANCE_MIN = 0.55         # 최소 호가 임밸런스 (매수우위)
 
 # 손절/모니터링
-STOP_LOSS_PCT = 0.020  # 🔧 DYN_SL_MIN 2.0% 연동 (폴백용)
+STOP_LOSS_PCT = 0.008  # 🔧 DYN_SL_MIN 0.8% 연동 (폴백용)
 RECHECK_SEC = 3  # 🔧 업비트 데이터 기반: 평균 24h레인지 6.1%, ATR5/ATR1=2.3x → 3초 응답 필요
 
 # (IGN_BREAK_LOOKBACK, IGN_MIN_BODY, IGN_MIN_BUY, ABS_SURGE_KRW, RELAXED_X 삭제 — 미사용 상수)
@@ -4689,6 +4691,7 @@ def send_batch_trade_report():
             def _categorize_reason(r):
                 r = str(r).strip()
                 if "트레일" in r: return "트레일링SL"
+                if "조기청산" in r or "무반응" in r: return "조기청산"
                 if "본절" in r or "base_stop" in r: return "본절SL"
                 if "시간만료" in r: return "시간만료"
                 if "손절" in r or "SL" in r.upper(): return "손절SL"
@@ -5065,8 +5068,8 @@ def auto_learn_exit_params():
     3) 승리 peak_drop → 트레일 거리 적정선
 
     바운드:
-    - DYN_SL_MIN: 0.008 ~ 0.020 (0.8% ~ 2.0%)
-    - DYN_SL_MAX: 0.018 ~ 0.035 (1.8% ~ 3.5%)
+    - DYN_SL_MIN: 0.005 ~ 0.012 (0.5% ~ 1.2%)
+    - DYN_SL_MAX: 0.010 ~ 0.020 (1.0% ~ 2.0%)
     - TRAIL_DISTANCE_MIN_BASE: 0.001 ~ 0.002 (0.1% ~ 0.2%)
     """
     global DYN_SL_MIN, DYN_SL_MAX, TRAIL_DISTANCE_MIN_BASE, HARD_STOP_DD
@@ -5123,7 +5126,7 @@ def auto_learn_exit_params():
                     # SL 경계 손절 → SL을 패배MAE의 120%로 타겟
                     target_sl = avg_loss_mae_dec * 1.20
                     new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
-                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    new_sl = max(0.005, min(0.012, round(new_sl, 4)))
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
@@ -5134,7 +5137,7 @@ def auto_learn_exit_params():
                 elif avg_loss_mae < current_sl_pct * 0.50:
                     target_sl = avg_loss_mae_dec * 1.50  # MAE의 150% 정도로 축소
                     new_sl = DYN_SL_MIN * (1 - BLEND) + target_sl * BLEND
-                    new_sl = max(0.008, min(0.020, round(new_sl, 4)))
+                    new_sl = max(0.005, min(0.012, round(new_sl, 4)))
                     changes["DYN_SL_MIN"] = round(new_sl - DYN_SL_MIN, 4)
                     if AUTO_LEARN_APPLY:
                         DYN_SL_MIN = new_sl
@@ -5145,7 +5148,7 @@ def auto_learn_exit_params():
         # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.8~3.5%)
         # =====================================================
         new_sl_max = round(DYN_SL_MIN * 1.8, 4)
-        new_sl_max = max(0.018, min(0.035, new_sl_max))
+        new_sl_max = max(0.010, min(0.020, new_sl_max))
         if abs(new_sl_max - old_sl_max) > 0.0005:
             changes["DYN_SL_MAX"] = round(new_sl_max - old_sl_max, 4)
             if AUTO_LEARN_APPLY:
@@ -5155,7 +5158,7 @@ def auto_learn_exit_params():
         # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 2.5~5.0%)
         # =====================================================
         new_hard = round(DYN_SL_MIN * 2.5, 4)
-        new_hard = max(0.025, min(0.050, new_hard))
+        new_hard = max(0.012, min(0.030, new_hard))
         if abs(new_hard - old_hard) > 0.001:
             changes["HARD_STOP_DD"] = round(new_hard - old_hard, 4)
             if AUTO_LEARN_APPLY:
@@ -8415,7 +8418,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("WEAK_SIGNAL", f"{m} 약신호콤보 body{candle_body_pct*100:.2f}%+vol{vol_surge:.1f}x | {_metrics}")
         return None
 
-    # 9) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
+    # 9) 🔧 데이터기반: 임밸런스 음수 필터 (승 +0.01~+0.40 vs 패 -0.14~-0.31)
+    #    임밸런스 < -0.15 = 매도세 우위 → 진입하면 대부분 패배
+    #    점화는 순간적 매수 폭발이므로 면제
+    if not _ign_candidate and imbalance < -0.15:
+        cut("IMB_NEG", f"{m} 매도우위임밸 {imbalance:.2f}<-0.15 | {_metrics}")
+        return None
+
+    # 10) 🔧 데이터기반: 배수(vol_surge) 하한 필터 (승 2.33~3.68x vs 패 1.35~1.97x)
+    #    배수 < 1.5x = 거래량 증가 미미 → 진입해도 움직임 없음
+    #    점화는 틱 기반이라 배수 낮아도 가능 → 면제
+    if not _ign_candidate and vol_surge < 1.5:
+        cut("VOL_SURGE_LOW", f"{m} 배수부족 {vol_surge:.1f}x<1.5x | {_metrics}")
+        return None
+
+    # 11) 📊 vr<0.5 → half 강제 (1010건: wr60% -56.2% / 3847건: 32.8% 차단은 과공격적)
     #    직전 5봉 대비 거래량이 절반 미만 → 신뢰도 낮은 신호 → 사이즈 축소
     if not _ign_candidate and vol_surge < 0.5 and _entry_mode == "confirm":
         _entry_mode = "half"
@@ -9079,19 +9096,19 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
     except Exception:
         r = 0.0
 
-    base = 240  # 🔧 승률개선: 150→240초 (2.5분은 너무 짧음 → 4분 기본으로 추세 확인 여유)
+    base = 150  # 🔧 데이터기반: 240→150초 (50건 분석: 60초 내 승률75%, 180초+ 승률17% → 빠른 판단)
 
     # 신호 유형 가중
     if pre.get("mega_ok"):
-        base = 360  # 🔧 승률개선: 300→360초 (메가는 6분)
+        base = 210  # 🔧 데이터기반: 360→210초 (메가도 3.5분이면 충분)
     elif pre.get("ign_ok"):
-        base = 300  # 🔧 승률개선: 240→300초 (점화는 5분)
+        base = 180  # 🔧 데이터기반: 300→180초 (점화는 3분)
     elif pre.get("botacc_ok"):
-        base = 270  # 🔧 승률개선: 210→270초
+        base = 165  # 🔧 데이터기반: 270→165초
     elif pre.get("early_ok"):
-        base = 240  # 🔧 승률개선: 180→240초
+        base = 150  # 🔧 데이터기반: 240→150초
     elif pre.get("two_green_break"):
-        base = 270  # 🔧 승률개선: 210→270초
+        base = 165  # 🔧 데이터기반: 270→165초
 
     # 오더북 깊이 기반 (깊으면 여유 있게)
     ob_depth = 0
@@ -9127,7 +9144,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
         base -= 30
 
     # 하한/상한 클램프
-    base = max(120, min(base, 480))  # 🔧 승률개선: 90~360 → 120~480 (최소 2분, 최대 8분)
+    base = max(90, min(base, 300))  # 🔧 데이터기반: 120~480 → 90~300 (최소 1.5분, 최대 5분)
     return int(base)
 
 
@@ -9506,6 +9523,20 @@ def monitor_position(m,
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
             cur_gain = (curp / entry_price - 1.0)
+
+            # === 🔧 데이터기반: 90초 무반응 조기청산 ===
+            # 50건 분석: 60초 내 승률75%, 180초+ 승률17%
+            # MFE 0.15% 미만이고 손실 중이면 더 버텨봐야 시간만료 패배
+            _EARLY_CUT_SEC = 90  # 90초 경과 체크
+            _EARLY_CUT_MFE_THRESHOLD = 0.0015  # MFE 0.15% 미만이면 무반응 판정
+            if alive_sec >= _EARLY_CUT_SEC and not trail_armed and not mfe_partial_done:
+                _cur_mfe = (best / entry_price - 1.0) if entry_price > 0 else 0
+                if _cur_mfe < _EARLY_CUT_MFE_THRESHOLD and cur_gain < -FEE_RATE:
+                    # 90초 동안 MFE 0.15% 미달 + 현재 손실 → 시간만료까지 기다려도 역전 확률 극히 낮음
+                    close_auto_position(m, f"조기청산 {alive_sec:.0f}초 MFE{_cur_mfe*100:+.2f}% 무반응")
+                    _already_closed = True
+                    verdict = "조기청산_무반응"
+                    break
 
             # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
             # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
@@ -10000,8 +10031,8 @@ def monitor_position(m,
                 # 핵심: 코인의 실제 ATR%를 기준 ATR(0.5%) 대비 비율로 MFE 스케일링
                 # - 저변동 코인(ATR 0.3%): vol_factor=0.7 → 타겟 축소 → 도달 가능한 목표
                 # - 고변동 코인(ATR 1.0%): vol_factor=1.8 → 타겟 확대 → 큰 수익 포착
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0)  # fallback 2.0 (테이블 미매칭 시 보수적)
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.0=4.0%
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 0.50)  # 🔧 데이터기반: fallback 0.50 (SL 0.8%×0.5=0.40%)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.004))  # 🔧 데이터기반: floor 0.4%
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
@@ -10066,8 +10097,8 @@ def monitor_position(m,
             else:
                 # === 러너 모드: 30% 익절 + 70% 넓은 트레일 ===
                 # 🔧 구조개선: R:R 연동 + 코인별 변동성 맞춤 MFE (러너는 더 넓게)
-                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0) + 0.3  # fallback 2.3 (러너 +0.3 보너스)
-                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.3=4.6%
+                _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 0.50) + 0.3  # 🔧 데이터기반: fallback 0.80 (러너 +0.3 보너스)
+                mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.005))  # 🔧 데이터기반: floor 0.5%
                 try:
                     c1_mfe = _get_c1_cached()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
