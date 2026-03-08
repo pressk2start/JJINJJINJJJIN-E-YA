@@ -3436,6 +3436,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
         "V7_SURGE_FAIL",                            # 🔧 BUG FIX: v7 폭발 15분 미수익 청산 (중복청산 방지)
         "스캘프_TP_DUST",                            # 🔧 BUG FIX: 스캘프 TP dust 전량청산 (중복청산 방지)
         "러너_TP_DUST",                              # 🔧 BUG FIX: 러너 TP dust 전량청산 (중복청산 방지)
+        "조기청산_무반응",                              # 🔧 데이터기반: 90초 MFE 무반응 조기청산
     }
 
     while True:
@@ -4689,6 +4690,7 @@ def send_batch_trade_report():
             def _categorize_reason(r):
                 r = str(r).strip()
                 if "트레일" in r: return "트레일링SL"
+                if "조기청산" in r or "무반응" in r: return "조기청산"
                 if "본절" in r or "base_stop" in r: return "본절SL"
                 if "시간만료" in r: return "시간만료"
                 if "손절" in r or "SL" in r.upper(): return "손절SL"
@@ -9079,19 +9081,19 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
     except Exception:
         r = 0.0
 
-    base = 240  # 🔧 승률개선: 150→240초 (2.5분은 너무 짧음 → 4분 기본으로 추세 확인 여유)
+    base = 150  # 🔧 데이터기반: 240→150초 (50건 분석: 60초 내 승률75%, 180초+ 승률17% → 빠른 판단)
 
     # 신호 유형 가중
     if pre.get("mega_ok"):
-        base = 360  # 🔧 승률개선: 300→360초 (메가는 6분)
+        base = 210  # 🔧 데이터기반: 360→210초 (메가도 3.5분이면 충분)
     elif pre.get("ign_ok"):
-        base = 300  # 🔧 승률개선: 240→300초 (점화는 5분)
+        base = 180  # 🔧 데이터기반: 300→180초 (점화는 3분)
     elif pre.get("botacc_ok"):
-        base = 270  # 🔧 승률개선: 210→270초
+        base = 165  # 🔧 데이터기반: 270→165초
     elif pre.get("early_ok"):
-        base = 240  # 🔧 승률개선: 180→240초
+        base = 150  # 🔧 데이터기반: 240→150초
     elif pre.get("two_green_break"):
-        base = 270  # 🔧 승률개선: 210→270초
+        base = 165  # 🔧 데이터기반: 270→165초
 
     # 오더북 깊이 기반 (깊으면 여유 있게)
     ob_depth = 0
@@ -9127,7 +9129,7 @@ def decide_monitor_secs(pre: dict, tight_mode: bool = False) -> int:
         base -= 30
 
     # 하한/상한 클램프
-    base = max(120, min(base, 480))  # 🔧 승률개선: 90~360 → 120~480 (최소 2분, 최대 8분)
+    base = max(90, min(base, 300))  # 🔧 데이터기반: 120~480 → 90~300 (최소 1.5분, 최대 5분)
     return int(base)
 
 
@@ -9506,6 +9508,20 @@ def monitor_position(m,
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
             cur_gain = (curp / entry_price - 1.0)
+
+            # === 🔧 데이터기반: 90초 무반응 조기청산 ===
+            # 50건 분석: 60초 내 승률75%, 180초+ 승률17%
+            # MFE 0.15% 미만이고 손실 중이면 더 버텨봐야 시간만료 패배
+            _EARLY_CUT_SEC = 90  # 90초 경과 체크
+            _EARLY_CUT_MFE_THRESHOLD = 0.0015  # MFE 0.15% 미만이면 무반응 판정
+            if alive_sec >= _EARLY_CUT_SEC and not trail_armed and not mfe_partial_done:
+                _cur_mfe = (best / entry_price - 1.0) if entry_price > 0 else 0
+                if _cur_mfe < _EARLY_CUT_MFE_THRESHOLD and cur_gain < -FEE_RATE:
+                    # 90초 동안 MFE 0.15% 미달 + 현재 손실 → 시간만료까지 기다려도 역전 확률 극히 낮음
+                    close_auto_position(m, f"조기청산 {alive_sec:.0f}초 MFE{_cur_mfe*100:+.2f}% 무반응")
+                    _already_closed = True
+                    verdict = "조기청산_무반응"
+                    break
 
             # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
             # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
