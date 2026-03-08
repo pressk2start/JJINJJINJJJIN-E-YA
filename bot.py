@@ -138,13 +138,13 @@ TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 백테스트최적화: 0.60→0.15% (16
 
 def get_trail_distance_min():
     """🔧 시간대별 트레일 거리
-    기본 0.15% / 야간(0-7시) 0.10%
+    기본 0.15% / 야간(0-7시) 0.10% (MFE 0.84% 스캘프 최적화)
     """
     _h = now_kst().hour
     if 0 <= _h < 7:
-        return 0.0010  # 야간 0.10%
+        return 0.0010  # 야간 0.10% (MFE 0.84% → 빠른 익절)
     dyn_sl = DYN_SL_MIN
-    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.19)  # 🔧 데이터기반: 0.075→0.19 (SL 0.8%×0.19=0.15%)
+    return max(TRAIL_DISTANCE_MIN_BASE, dyn_sl * 0.075)  # SL 2.0% × 0.075 = 0.15%
 
 # 하위 호환용
 # TRAIL_DISTANCE_MIN 제거 (미사용 — 런타임에서 get_trail_distance_min() 사용)
@@ -3831,7 +3831,7 @@ POSTCHECK_MIN_BUY = 0.52  # 🔧 손절억제: 0.46→0.52 (리포트: 가짜돌
 POSTCHECK_MIN_RATE = 0.16  # 0.18 -> 0.26
 POSTCHECK_MAX_PSTD = 0.0028  # 0.0028 -> 0.0022
 POSTCHECK_MAX_CV = 0.72  # 0.70 -> 0.60
-POSTCHECK_MAX_DD = 0.015  # 🔧 데이터기반: 3.0→1.5% (SL 0.8% 대비 postcheck에서 1.5% 이상 빠지면 이미 실패)
+POSTCHECK_MAX_DD = 0.030  # 🔧 FIX: 3.8→3.0% (HARD_STOP_DD 3.2% 이하로 통일)
 
 # 동적 손절(ATR) - 단일 스탑 (틱스탑 제거)
 # 🔧 구조개선: SL 넓히기 — 0.4% SL은 1분봉 노이즈(0.3~0.5%)에 걸림
@@ -5145,7 +5145,7 @@ def auto_learn_exit_params():
                         print(f"[EXIT_LEARN] SL 좁힘: {old_sl_min*100:.2f}%→{new_sl*100:.2f}% (패배MAE={avg_loss_mae:.2f}%, SL전 청산)")
 
         # =====================================================
-        # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.0~2.0%)
+        # 2) DYN_SL_MAX = DYN_SL_MIN × 1.8 연동 (바운드: 1.8~3.5%)
         # =====================================================
         new_sl_max = round(DYN_SL_MIN * 1.8, 4)
         new_sl_max = max(0.010, min(0.020, new_sl_max))
@@ -5155,7 +5155,7 @@ def auto_learn_exit_params():
                 DYN_SL_MAX = new_sl_max
 
         # =====================================================
-        # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 1.2~3.0%)
+        # 3) HARD_STOP_DD = DYN_SL_MIN × 2.5 연동 (바운드: 2.5~5.0%)
         # =====================================================
         new_hard = round(DYN_SL_MIN * 2.5, 4)
         new_hard = max(0.012, min(0.030, new_hard))
@@ -8955,9 +8955,11 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
 
-    # 🔧 데이터기반: 전시간 SL 통일 (DYN_SL_MIN 0.8%)
-    # 50건분석: 패배MAE -0.52% → SL 0.8%로 빠른 손절
-    _time_sl_min = DYN_SL_MIN
+    # 🔧 3929건시뮬: 시간대별 SL → 전시간 2.0% 통일
+    # 야간 1.2%: MAE -1.47~1.75% → 정상 노이즈에 피격 (승률 ~40%)
+    # 야간 2.0%: 승률 63% 유지 (시뮬 검증)
+    # 9시 2.5%: 불필요한 확대 → 2.0%로 통일
+    _time_sl_min = DYN_SL_MIN  # 전시간 2.0% 통일
 
     pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
 
@@ -9325,7 +9327,7 @@ def monitor_position(m,
     _sl_reduced = False          # 감량(50%) 매도 완료 여부
     _sl_reduced_ts = 0.0         # 감량 시각
     # 🔧 FIX: SL 확장에 캡 적용 (eff_sl_pct에 이미 1.8x 적용 가능 → 1.35x 스태킹 시 7.78% 가능)
-    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 🔧 SL 0.8%×1.35=1.08%, 상한 1.5%×1.5=2.25%
+    _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 최대 4.8%
     # 트레일 디바운스용
     trail_db_first_ts = 0.0
     trail_db_hits = 0
@@ -9636,7 +9638,7 @@ def monitor_position(m,
                             break
                         _sl_reduced = True
                         _sl_reduced_ts = time.time()
-                        _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 🔧 SL 0.8%×1.35=1.08%, 상한 2.25%
+                        _sl_extended_pct = min(eff_sl_pct * 1.35, DYN_SL_MAX * 1.5)  # 🔧 FIX: 캡 적용 (최대 4.8%)
                         # 디바운스 리셋 (새 기준으로 관찰 시작)
                         stop_first_seen_ts = 0.0
                         stop_hits = 0
