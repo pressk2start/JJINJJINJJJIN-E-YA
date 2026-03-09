@@ -11122,12 +11122,13 @@ def main():
                 aligned_sleep(SCAN_INTERVAL)
                 continue
 
-            # 🔧 30일분석: 잔고 부족 시 스캔 스킵 (주문금액 부족 로그 폭주 방지)
+            # 🔧 잔고 부족 시 스캔 스킵 (주문금액 부족 로그 폭주 방지)
+            # 리스크계산+최소주문+임팩트캡 등으로 실제 필요 금액은 6000원보다 훨씬 높음
+            _MIN_SCAN_KRW = 15000  # 최소 1.5만원 이상 있어야 스캔
             try:
                 _pre_accounts = get_account_info()
                 _pre_krw = get_available_krw(_pre_accounts) if _pre_accounts else 0
-                if _pre_krw < 6000:
-                    # 포지션이 있으면 모니터링은 계속 (청산은 해야 하므로)
+                if _pre_krw < _MIN_SCAN_KRW:
                     _has_positions = bool(OPEN_POSITIONS)
                     if not _has_positions:
                         aligned_sleep(SCAN_INTERVAL)
