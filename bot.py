@@ -8073,13 +8073,6 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
         return None
 
-    # === 🔧 v6 시간 필터: 13-17시 KST만 진입 허용 ===
-    # 근거: 14-16시 MFE P50 1.25-1.43%, 19시 이후 MFE<MAE (구조적 손실)
-    # 13시 포함: v6 백테스트(26코인, 50h)에서 13시도 MFE 0.62% > MAE 0.89% 근접
-    _hour_gate = now_kst().hour
-    if _hour_gate < 13 or _hour_gate >= 17:
-        return None
-
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m)
