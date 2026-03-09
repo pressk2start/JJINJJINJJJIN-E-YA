@@ -1996,17 +1996,20 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         krw_to_use = base_qty * entry_price
 
         # 🔧 FIX: 가용잔고 초과 방지 (before1 기준)
-        MAX_POSITION_RATIO = 0.30  # 🔧 과집중 완화: 50%→30% (연패 시 계좌 보호)
+        # 소액계좌(3만원 미만)는 비율 완화하여 최소주문 가능하게
+        min_order_krw = 6000
+        if krw_bal < 30000:
+            MAX_POSITION_RATIO = 0.60  # 소액: 60%까지 허용 (최소주문 확보)
+        else:
+            MAX_POSITION_RATIO = 0.30  # 일반: 30% (과집중 방지)
         if krw_to_use > krw_bal * MAX_POSITION_RATIO:
-            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 30% → 캡")
+            print(f"[SIZE_CAP] {m} 주문 {krw_to_use:,.0f} > 가용잔고 {krw_bal:,.0f}의 {int(MAX_POSITION_RATIO*100)}% → 캡")
             krw_to_use = krw_bal * MAX_POSITION_RATIO
 
         # 🔧 FIX: 최소 진입금액 6000원 (매도최소 5000원 + 버퍼 1000원)
-        # 딱 5000원 매수 시 소폭 하락만으로 매도 불가 → 6000원으로 상향하여 해결
-        min_order_krw = 6000
         if krw_to_use < min_order_krw:
-            # 🔧 소액계좌 지원: 잔고 충분하면 최소주문금액으로 상향 (리스크 초소형이라 허용)
-            if krw_bal >= min_order_krw * 2:
+            # 소액계좌 지원: 잔고가 최소주문의 1.5배 이상이면 상향
+            if krw_bal >= min_order_krw * 1.5:
                 print(f"[SIZE_BUMP] {m} 리스크계산 {krw_to_use:,.0f}원 < 최소주문 {min_order_krw:,}원 → {min_order_krw:,}원 상향 (⚠️ 리스크모델 초과)")
                 krw_to_use = min_order_krw
             else:
@@ -11124,7 +11127,7 @@ def main():
 
             # 🔧 잔고 부족 시 스캔 스킵 (주문금액 부족 로그 폭주 방지)
             # 리스크계산+최소주문+임팩트캡 등으로 실제 필요 금액은 6000원보다 훨씬 높음
-            _MIN_SCAN_KRW = 15000  # 최소 1.5만원 이상 있어야 스캔
+            _MIN_SCAN_KRW = 9000  # 최소주문 6000 × 1.5 = 9000원
             try:
                 _pre_accounts = get_account_info()
                 _pre_krw = get_available_krw(_pre_accounts) if _pre_accounts else 0
