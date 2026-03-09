@@ -8288,7 +8288,34 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             if _chart_rsi >= 60:
                 return None
 
+            # 🔧 BB 포지션 계산 (0=하단, 100=상단)
+            _bb_position = 50.0  # 기본 중립
+            try:
+                if c1 and len(c1) >= 20:
+                    _bb_closes = [x["trade_price"] for x in sorted(c1, key=lambda x: x.get("candle_date_time_kst", ""))[-20:]]
+                    _bb_sma20 = sum(_bb_closes) / 20
+                    _bb_std20 = (sum((_c - _bb_sma20) ** 2 for _c in _bb_closes) / 20) ** 0.5
+                    if _bb_std20 > 0 and _bb_sma20 > 0:
+                        _bb_upper = _bb_sma20 + 2 * _bb_std20
+                        _bb_lower = _bb_sma20 - 2 * _bb_std20
+                        _bb_position = (cur_price - _bb_lower) / (_bb_upper - _bb_lower) * 100
+                        _bb_position = max(0.0, min(100.0, _bb_position))
+            except Exception:
+                pass
+
             _hour_now = now_kst().hour
+
+            # 🔧 시간대 적응형 필터: 비프라임 시간대(13-17시 외)는 추가 필터 적용
+            # 근거: 24시간 운영하되, 야간/새벽은 BB+VR 필터로 노이즈 진입 차단
+            _is_prime_hour = 13 <= _hour_now < 17
+            if not _is_prime_hour:
+                # 비프라임: BB포지션<60 (과매수 영역 아님) + 거래량비율≥2 (실제 거래량 동반)
+                if _bb_position >= 60:
+                    print(f"[OFFHOUR_BB_CUT] {m} {_hour_now}시 BB{_bb_position:.0f}≥60 → 비프라임 BB과매수 차단")
+                    return None
+                if _chart_volratio < 2.0:
+                    print(f"[OFFHOUR_VR_CUT] {m} {_hour_now}시 VR{_chart_volratio:.1f}<2.0 → 비프라임 거래량부족 차단")
+                    return None
 
             # ① 폭발 거래량 vol20x+ → 무조건 full (wr83%, avg+2.259%)
             if _chart_volratio >= 20:
