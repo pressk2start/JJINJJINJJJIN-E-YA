@@ -8305,9 +8305,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
             _hour_now = now_kst().hour
 
-            # 🔧 476건분석: 13-20시만 거래 (13-19시 WR40-50%, 20시↓ WR4%)
-            if _hour_now < 13 or _hour_now >= 20:
-                return None
+            # 🔧 시간 필터 해제: BB<50 + VR<5 + RSI<60 필터로 24시간 운영
 
             # 🔧 476건분석: BB≥50 전 시간대 차단 (BB<25 WR57%, BB50-75 WR13%)
             if _bb_position >= 50:
