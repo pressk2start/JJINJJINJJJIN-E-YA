@@ -33,8 +33,8 @@ TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 
 TIMEFRAMES = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
-# 분석에 사용할 TF (메모리 절약: 1m 제외)
-ANALYSIS_TFS = [3, 5, 15, 30, 60]
+# 분석에 사용할 TF (1분봉 포함 — 실제 봇이 1분봉으로 진입)
+ANALYSIS_TFS = [1, 3, 5, 15, 30, 60]
 
 # 핵심 exit 전략만 (15개로 축소)
 EXIT_CONFIGS = [
@@ -461,7 +461,8 @@ def process_coin(coin, btc_regime):
                 if tf==15: candles=c15
                 elif tf==30: candles=make_nmin(c5,6)
                 elif tf==60: candles=make_nmin(c5,12)
-                elif tf==3: candles=None  # 3분봉 없으면 스킵
+                elif tf==3: candles=None
+                elif tf==1: candles=None  # 1분봉 없으면 스킵 (합성 불가)
                 if not candles or len(candles)<60:
                     continue
 
