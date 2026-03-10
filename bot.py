@@ -190,26 +190,32 @@ def collect(days=30, top_n=30):
     for i, market in enumerate(markets):
         coin = market.split("-")[1]
         print(f"\n[{i+1}/{top_n}] {coin}")
-        for tf, per_day in TIMEFRAMES:
-            total = per_day * days
-            # 1분봉은 데이터량이 크므로 최대 7일만
-            if tf == 1 and days > 7:
-                total = 1440 * 7
-            if is_collected(coin, tf, total // 2):
-                print(f"    {tf}m 있음, 스킵")
-                continue
-            print(f"    {tf}m {total}개 수집...")
-            candles = fetch_candles(tf, market, total)
-            if candles:
-                save_coin(coin, tf, candles)
-                del candles
-                gc.collect()
-            else:
-                print(f"    실패")
-            time.sleep(0.3)
+        try:
+            for tf, per_day in TIMEFRAMES:
+                total = per_day * days
+                # 1분봉은 데이터량이 크므로 최대 7일만
+                if tf == 1 and days > 7:
+                    total = 1440 * 7
+                if is_collected(coin, tf, total // 2):
+                    print(f"    {tf}m 있음, 스킵")
+                    continue
+                print(f"    {tf}m {total}개 수집...")
+                candles = fetch_candles(tf, market, total)
+                if candles:
+                    save_coin(coin, tf, candles)
+                    del candles
+                    gc.collect()
+                else:
+                    print(f"    실패")
+                time.sleep(0.3)
+        except Exception as e:
+            import traceback
+            tg(f"[수집 에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
+            continue
         elapsed = time.time() - t0
         eta = elapsed / (i + 1) * (top_n - i - 1)
-        print(f"    {elapsed/60:.1f}분 경과, ~{eta/60:.1f}분 남음")
+        if (i + 1) % 5 == 0:
+            tg(f"  수집 진행 {i+1}/{top_n} ({elapsed/60:.1f}분, ~{eta/60:.1f}분 남음)")
 
     tg(f"[수집 완료] {(time.time()-t0)/60:.1f}분")
     return coins
@@ -1306,12 +1312,17 @@ def main():
     all_results = defaultdict(list)
 
     for i, coin in enumerate(coins):
-        coin_results = process_coin(coin, btc_regime)
-        for stype, sigs in coin_results.items():
-            all_results[stype].extend(sigs)
+        try:
+            coin_results = process_coin(coin, btc_regime)
+            for stype, sigs in coin_results.items():
+                all_results[stype].extend(sigs)
+        except Exception as e:
+            import traceback
+            tg(f"[분석 에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
+            continue
         if (i + 1) % 5 == 0:
             counts = {k: len(v) for k, v in all_results.items()}
-            print(f"  진행 {i+1}/{len(coins)}: {counts}")
+            tg(f"  분석 진행 {i+1}/{len(coins)}: {counts}")
 
     for stype in all_results:
         all_results[stype].sort(key=lambda s: s["time"])
@@ -1327,7 +1338,13 @@ def main():
             tg(f"  피처 수: {len(tf_feats)}개 (다중 타임프레임)")
             break
 
-    lines = generate_report(dict(all_results))
+    tg(f"[리포트 생성 시작]")
+    try:
+        lines = generate_report(dict(all_results))
+    except Exception as e:
+        import traceback
+        tg(f"[리포트 생성 에러] {e}\n{traceback.format_exc()[-500:]}")
+        lines = [f"리포트 생성 실패: {e}"]
 
     os.makedirs(OUT_DIR, exist_ok=True)
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M")
@@ -1339,8 +1356,20 @@ def main():
     tg(f"\n[완료] {elapsed:.1f}분 소요")
     tg(f"리포트: {fpath}")
 
-    summary = "\n".join(lines[:60])
-    tg(f"\n{summary}")
+    # 리포트 분할 전송 (텔레그램 4000자 제한)
+    full_report = "\n".join(lines)
+    chunks = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 > 3800:
+            chunks.append(current)
+            current = line
+        else:
+            current = current + "\n" + line if current else line
+    if current:
+        chunks.append(current)
+    for ci, chunk in enumerate(chunks):
+        tg(f"[리포트 {ci+1}/{len(chunks)}]\n{chunk}")
 
     if os.path.exists(DATA_DIR):
         files = os.listdir(DATA_DIR)
