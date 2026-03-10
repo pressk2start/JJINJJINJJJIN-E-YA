@@ -6127,6 +6127,428 @@ def check_exclusion_filters(market, c1):
     return False, "OK"
 
 
+# ============================================================
+# v3.4 백테스트 기반 추가 지표 함수들
+# RSI, Stochastic, BB위치/폭, CCI, 이격도, 봉/ATR, 캔들패턴
+# ============================================================
+
+def calc_rsi(closes, period=14):
+    """RSI 계산 → float (0~100) or None"""
+    if not closes or len(closes) < period + 1:
+        return None
+    gains, losses = 0.0, 0.0
+    for i in range(-period, 0):
+        diff = closes[i] - closes[i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def calc_stochastic(candles, k_period=14, d_period=3):
+    """Stochastic %K, %D 계산 → (float, float) or (None, None)"""
+    if not candles or len(candles) < k_period + d_period:
+        return None, None
+    k_values = []
+    for i in range(-(k_period + d_period - 1), 1):
+        idx_start = i - k_period + 1 if i - k_period + 1 != 0 else None
+        idx_end = i + 1 if i + 1 != 0 else None
+        window = candles[idx_start:idx_end] if idx_end else candles[idx_start:]
+        if len(window) < k_period:
+            continue
+        hh = max(c.get("high_price", c["trade_price"]) for c in window)
+        ll = min(c.get("low_price", c["trade_price"]) for c in window)
+        cur = window[-1]["trade_price"]
+        if hh == ll:
+            k_values.append(50.0)
+        else:
+            k_values.append((cur - ll) / (hh - ll) * 100.0)
+    if len(k_values) < d_period:
+        return None, None
+    pct_k = k_values[-1]
+    pct_d = sum(k_values[-d_period:]) / d_period
+    return pct_k, pct_d
+
+
+def calc_bollinger_position(closes, period=20):
+    """볼린저밴드 위치 (0~100 기준, 100 초과 = 상단 이탈) + 밴드폭(%)
+    Returns: (position, width_pct) or (None, None)
+    """
+    if not closes or len(closes) < period:
+        return None, None
+    window = closes[-period:]
+    sma = sum(window) / period
+    variance = sum((x - sma) ** 2 for x in window) / period
+    std = variance ** 0.5
+    if std == 0 or sma == 0:
+        return None, None
+    upper = sma + 2 * std
+    lower = sma - 2 * std
+    band_range = upper - lower
+    if band_range == 0:
+        return None, None
+    position = (closes[-1] - lower) / band_range * 100.0
+    width_pct = band_range / sma * 100.0
+    return position, width_pct
+
+
+def calc_cci(candles, period=20):
+    """CCI (Commodity Channel Index) 계산 → float or None"""
+    if not candles or len(candles) < period:
+        return None
+    tps = []
+    for c in candles[-period:]:
+        h = c.get("high_price", c["trade_price"])
+        l = c.get("low_price", c["trade_price"])
+        cl = c["trade_price"]
+        tps.append((h + l + cl) / 3.0)
+    sma_tp = sum(tps) / period
+    mean_dev = sum(abs(tp - sma_tp) for tp in tps) / period
+    if mean_dev == 0:
+        return 0.0
+    return (tps[-1] - sma_tp) / (0.015 * mean_dev)
+
+
+def calc_disparity(closes, period=20):
+    """이격도 계산 (현재가 / SMA × 100) → float or None"""
+    if not closes or len(closes) < period:
+        return None
+    sma = sum(closes[-period:]) / period
+    if sma == 0:
+        return None
+    return closes[-1] / sma * 100.0
+
+
+def calc_candle_atr_ratio(candles, atr_period=14):
+    """현재봉 크기 / ATR 비율 → float or None"""
+    if not candles or len(candles) < atr_period + 1:
+        return None
+    trs = []
+    for i in range(-atr_period, 0):
+        c = candles[i]
+        h = c.get("high_price", c["trade_price"])
+        l = c.get("low_price", c["trade_price"])
+        prev_c = candles[i - 1]["trade_price"]
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+    atr = sum(trs) / len(trs)
+    if atr == 0:
+        return None
+    last = candles[-1]
+    candle_range = last.get("high_price", last["trade_price"]) - last.get("low_price", last["trade_price"])
+    return candle_range / atr
+
+
+def calc_mfi(candles, period=14):
+    """MFI (Money Flow Index) 계산 → float (0~100) or None"""
+    if not candles or len(candles) < period + 1:
+        return None
+    pos_flow, neg_flow = 0.0, 0.0
+    for i in range(-period, 0):
+        c = candles[i]
+        pc = candles[i - 1]
+        tp_cur = (c.get("high_price", c["trade_price"]) +
+                  c.get("low_price", c["trade_price"]) +
+                  c["trade_price"]) / 3.0
+        tp_prev = (pc.get("high_price", pc["trade_price"]) +
+                   pc.get("low_price", pc["trade_price"]) +
+                   pc["trade_price"]) / 3.0
+        vol = c.get("candle_acc_trade_volume", 0)
+        mf = tp_cur * vol
+        if tp_cur > tp_prev:
+            pos_flow += mf
+        else:
+            neg_flow += mf
+    if neg_flow == 0:
+        return 100.0
+    return 100.0 - 100.0 / (1.0 + pos_flow / neg_flow)
+
+
+def detect_engulfing(candles):
+    """감싸기(Engulfing) 패턴 감지 → bool (bullish engulfing)"""
+    if not candles or len(candles) < 2:
+        return False
+    prev, cur = candles[-2], candles[-1]
+    prev_o, prev_c = prev["opening_price"], prev["trade_price"]
+    cur_o, cur_c = cur["opening_price"], cur["trade_price"]
+    # 이전봉 음봉 + 현재봉 양봉 + 현재봉이 이전봉을 감쌈
+    if prev_c >= prev_o:
+        return False  # 이전봉이 양봉이면 불리시 감싸기 아님
+    if cur_c <= cur_o:
+        return False  # 현재봉이 음봉이면 아님
+    return cur_c > prev_o and cur_o < prev_c
+
+
+def detect_morning_star(candles):
+    """샛별(Morning Star) 패턴 감지 → bool"""
+    if not candles or len(candles) < 3:
+        return False
+    c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+    # 첫째봉: 음봉 (큰 실체)
+    if c1["trade_price"] >= c1["opening_price"]:
+        return False
+    body1 = abs(c1["trade_price"] - c1["opening_price"])
+    # 둘째봉: 작은 실체 (도지 또는 팽이)
+    body2 = abs(c2["trade_price"] - c2["opening_price"])
+    range2 = c2.get("high_price", max(c2["opening_price"], c2["trade_price"])) - \
+             c2.get("low_price", min(c2["opening_price"], c2["trade_price"]))
+    if range2 > 0 and body2 / range2 > 0.4:
+        return False  # 실체가 너무 크면 아님
+    # 셋째봉: 양봉 (첫째봉 실체 50% 이상 회복)
+    if c3["trade_price"] <= c3["opening_price"]:
+        return False
+    body3 = c3["trade_price"] - c3["opening_price"]
+    return body3 > body1 * 0.5
+
+
+def detect_hammer(candles):
+    """망치형(Hammer) 패턴 감지 → bool"""
+    if not candles or len(candles) < 1:
+        return False
+    c = candles[-1]
+    o, cl = c["opening_price"], c["trade_price"]
+    h = c.get("high_price", max(o, cl))
+    l = c.get("low_price", min(o, cl))
+    total = h - l
+    if total <= 0:
+        return False
+    body = abs(cl - o)
+    lower_wick = min(o, cl) - l
+    upper_wick = h - max(o, cl)
+    # 아래꼬리가 몸통의 2배 이상, 윗꼬리 작음
+    return lower_wick >= body * 2 and upper_wick <= body * 0.5
+
+
+def detect_doji(candles):
+    """도지 캔들 감지 (몸통/전체 < 10%) → bool"""
+    if not candles or len(candles) < 1:
+        return False
+    c = candles[-1]
+    o, cl = c["opening_price"], c["trade_price"]
+    h = c.get("high_price", max(o, cl))
+    l = c.get("low_price", min(o, cl))
+    total = h - l
+    if total <= 0:
+        return True  # 레인지 0 = 도지
+    body = abs(cl - o)
+    return (body / total) < 0.10
+
+
+def count_consecutive_bullish(candles):
+    """연속 양봉 수 (뒤에서부터 카운트) → int"""
+    if not candles:
+        return 0
+    count = 0
+    for c in reversed(candles):
+        if c["trade_price"] > c["opening_price"]:
+            count += 1
+        else:
+            break
+    return count
+
+
+# ============================================================
+# v3.4 백테스트 기반 복합 부스트/필터 엔진
+# check_backtest_boost_filters(market)
+# → 진입 신호에 대한 부스트(확신도 상승) 또는 차단 판정
+# ============================================================
+
+def check_backtest_boost_filters(market, signal_tag):
+    """v3.4 백테스트 검증된 부스트/차단 필터
+    Returns: (action, reasons)
+      action: "boost" | "block" | "pass"
+      reasons: list of str
+    """
+    boost_reasons = []
+    block_reasons = []
+
+    # === 30m 캔들 분석 ===
+    c30 = _get_candles_cached(30, market, 30)
+    if c30 and len(c30) >= 20:
+        closes30 = [c["trade_price"] for c in c30]
+
+        # 30m 봉/ATR > 1.5 (모든 신호에서 EV +0.4~1.4% — 최강 필터)
+        car30 = calc_candle_atr_ratio(c30)
+        if car30 is not None and car30 > 1.5:
+            boost_reasons.append(f"30m_봉ATR={car30:.1f}")
+
+        # 30m 감싸기 (눌림반전 EV+0.12%, 5m양봉 +0.25%)
+        if detect_engulfing(c30):
+            boost_reasons.append("30m_감싸기")
+
+        # 30m 도지 → 차단 (EV -0.28~-0.51%)
+        if detect_doji(c30):
+            block_reasons.append("30m_도지")
+
+        # 30m 모멘텀10 > 3% (20봉돌파 EV+0.34%, 거래량3배 +0.56%)
+        if len(closes30) >= 11:
+            m10_30 = closes30[-1] / max(closes30[-11], 1) - 1.0
+            if m10_30 > 0.03:
+                boost_reasons.append(f"30m_모멘텀{m10_30*100:.1f}%")
+
+        # 30m MFI > 80 (역설적 양의 EV +0.005~0.65%)
+        mfi30 = calc_mfi(c30)
+        if mfi30 is not None and mfi30 > 80:
+            boost_reasons.append(f"30m_MFI={mfi30:.0f}")
+
+        # 30m EMA정배열 3+ (5m양봉 EV+0.02%, 거래량3배 +0.14%)
+        ema5_30 = calc_ema_series(closes30, 5)
+        ema10_30 = calc_ema_series(closes30, 10)
+        ema20_30 = calc_ema_series(closes30, 20)
+        if ema5_30 and ema10_30 and ema20_30:
+            if ema5_30[-1] > ema10_30[-1] > ema20_30[-1]:
+                boost_reasons.append("30m_EMA정배열")
+
+        # 30m VR5 > 3 (거래량3배 EV+0.28%, 20봉돌파 +0.24%)
+        vols30 = [c.get("candle_acc_trade_volume", 0) for c in c30]
+        if len(vols30) >= 25:
+            recent5 = sum(vols30[-5:])
+            past_avg = sum(vols30[-25:-5]) / 20.0 if sum(vols30[-25:-5]) > 0 else 1
+            vr5_30 = recent5 / (5 * max(past_avg, 1e-10))
+            if vr5_30 > 3:
+                boost_reasons.append(f"30m_VR5={vr5_30:.1f}")
+
+    # === 60m 캔들 분석 ===
+    c60 = _get_candles_cached(60, market, 30)
+    if c60 and len(c60) >= 20:
+        closes60 = [c["trade_price"] for c in c60]
+
+        # 60m 봉/ATR > 1.5 (EV +0.5~1.0%)
+        car60 = calc_candle_atr_ratio(c60)
+        if car60 is not None and car60 > 1.5:
+            boost_reasons.append(f"60m_봉ATR={car60:.1f}")
+
+        # 60m 감싸기 (거의 모든 신호에서 EV +0.13~0.61%)
+        if detect_engulfing(c60):
+            boost_reasons.append("60m_감싸기")
+
+        # 60m 샛별 (5m양봉 EV+0.62%)
+        if detect_morning_star(c60):
+            boost_reasons.append("60m_샛별")
+
+        # 60m 망치형 (눌림반전 EV+0.15%)
+        if detect_hammer(c60):
+            boost_reasons.append("60m_망치형")
+
+        # 60m 도지 → 차단 (EV -0.26~-0.52%)
+        if detect_doji(c60):
+            block_reasons.append("60m_도지")
+
+        # 60m 위치20 > 80% (20봉돌파 EV+0.11%, 5m양봉 +0.03%, 거래량3배 +0.20%)
+        if len(c60) >= 20:
+            highs60 = [c.get("high_price", c["trade_price"]) for c in c60[-20:]]
+            lows60 = [c.get("low_price", c["trade_price"]) for c in c60[-20:]]
+            h20_60 = max(highs60)
+            l20_60 = min(lows60)
+            if h20_60 > l20_60:
+                pos20_60 = (closes60[-1] - l20_60) / (h20_60 - l20_60)
+                if pos20_60 > 0.80:
+                    boost_reasons.append(f"60m_위치{pos20_60*100:.0f}%")
+
+        # 60m MFI > 80 (15m눌림+돌파 EV+0.70%, 거래량3배 +0.60%)
+        mfi60 = calc_mfi(c60)
+        if mfi60 is not None and mfi60 > 80:
+            boost_reasons.append(f"60m_MFI={mfi60:.0f}")
+
+        # 60m EMA정배열 3+ (20봉돌파 EV+0.12%, 5m양봉 +0.01%)
+        ema5_60 = calc_ema_series(closes60, 5)
+        ema10_60 = calc_ema_series(closes60, 10)
+        ema20_60 = calc_ema_series(closes60, 20)
+        if ema5_60 and ema10_60 and ema20_60:
+            if ema5_60[-1] > ema10_60[-1] > ema20_60[-1]:
+                boost_reasons.append("60m_EMA정배열")
+
+        # 60m VR5 > 3 (거래량3배 EV+0.41%, 20봉돌파 +0.38%)
+        vols60 = [c.get("candle_acc_trade_volume", 0) for c in c60]
+        if len(vols60) >= 25:
+            recent5 = sum(vols60[-5:])
+            past_avg = sum(vols60[-25:-5]) / 20.0 if sum(vols60[-25:-5]) > 0 else 1
+            vr5_60 = recent5 / (5 * max(past_avg, 1e-10))
+            if vr5_60 > 3:
+                boost_reasons.append(f"60m_VR5={vr5_60:.1f}")
+
+        # 60m 연속양봉 3+ (15m눌림+돌파 EV+0.22%, 5m양봉 +0.29%)
+        consec = count_consecutive_bullish(c60)
+        if consec >= 3:
+            boost_reasons.append(f"60m_연속양봉{consec}")
+
+        # 60m 모멘텀10 > 3% (20봉돌파 EV+0.24%, 거래량3배 +0.38%)
+        if len(closes60) >= 11:
+            m10_60 = closes60[-1] / max(closes60[-11], 1) - 1.0
+            if m10_60 > 0.03:
+                boost_reasons.append(f"60m_모멘텀{m10_60*100:.1f}%")
+
+    # === 15m RSI 체크 (5m양봉에서 RSI 70-100일 때 EV+0.24%) ===
+    c15 = _get_candles_cached(15, market, 30)
+    if c15 and len(c15) >= 16:
+        closes15 = [c["trade_price"] for c in c15]
+        rsi15 = calc_rsi(closes15, 14)
+        if rsi15 is not None and rsi15 > 70 and signal_tag == "5m_양봉":
+            boost_reasons.append(f"15m_RSI={rsi15:.0f}")
+
+        # 15m VR20 > 2 (5m양봉 EV+0.01%)
+        vols15 = [c.get("candle_acc_trade_volume", 0) for c in c15]
+        if len(vols15) >= 25:
+            recent5 = sum(vols15[-5:])
+            past_avg = sum(vols15[-25:-5]) / 20.0 if sum(vols15[-25:-5]) > 0 else 1
+            vr20_15 = recent5 / (5 * max(past_avg, 1e-10))
+            if vr20_15 > 2:
+                boost_reasons.append(f"15m_VR20={vr20_15:.1f}")
+
+    # === 5m Stochastic < 20 + 15m Stochastic < 30 (검증통과 필터) ===
+    c5 = _get_candles_cached(5, market, 20)
+    if c5 and c15:
+        stoch_k_5, _ = calc_stochastic(c5)
+        stoch_k_15, _ = calc_stochastic(c15)
+        if (stoch_k_5 is not None and stoch_k_5 < 20 and
+            stoch_k_15 is not None and stoch_k_15 < 30 and
+            signal_tag in ("15m_눌림반전", "15m_눌림+돌파")):
+            boost_reasons.append(f"5m_Stoch{stoch_k_5:.0f}+15m_Stoch{stoch_k_15:.0f}")
+
+    # === 판정 ===
+    # 부스트 2개 이상이면 도지 차단 무시 (강한 신호)
+    if len(boost_reasons) >= 2 and block_reasons:
+        block_reasons = []  # 부스트가 강하면 도지 차단 해제
+
+    if block_reasons and not boost_reasons:
+        return "block", block_reasons
+    elif boost_reasons:
+        return "boost", boost_reasons
+    return "pass", []
+
+
+# ============================================================
+# v3.4 시간대 필터 (백테스트 기반)
+# ============================================================
+
+def check_time_filter_v34():
+    """v3.4 백테스트 기반 시간대 필터
+    Returns: (action, hour)
+      action: "boost" | "restrict" | "block" | "pass"
+    """
+    h = now_kst().hour
+
+    # 양의 EV 시간대: 09시, 22~23시 → 부스트 (entry_mode 유지/상향)
+    if h in (9, 22, 23):
+        return "boost", h
+
+    # 강한 음의 EV 시간대: 05~07시, 10~13시, 18시 → 제한
+    if h in (5, 6, 7):
+        return "restrict", h  # half 강제
+    if h in (10, 11, 12, 13):
+        return "restrict", h  # half 강제
+    if h == 18:
+        return "restrict", h  # half 강제
+
+    return "pass", h
+
+
 def tick_ts_ms(t):
     """틱 타임스탬프 추출 (ms 단위, timestamp/ts 키 통일 + 초→ms 방어)"""
     ts = t.get("timestamp")
@@ -8542,6 +8964,44 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("NO_V33_SIGNAL", f"{m} v3.3 4-로직 신호 없음")
         return None
 
+    # ============================================================
+    # v3.4 백테스트 기반 부스트/차단 필터
+    # 30m/60m 봉/ATR>1.5, 감싸기, 도지차단, 위치20>80%, MFI>80 등
+    # ============================================================
+    bt_action, bt_reasons = check_backtest_boost_filters(m, signal_tag)
+    if bt_action == "block":
+        # B그룹(half)만 차단, A그룹(confirm)은 경고만
+        if _logic_group == "B":
+            cut("BT_BLOCK", f"{m} v3.4차단: {','.join(bt_reasons)}")
+            return None
+        else:
+            # A그룹은 half로 다운그레이드
+            _entry_mode = "half"
+            print(f"[BT_WARN] {m} v3.4경고(A그룹): {','.join(bt_reasons)} → half 강제")
+    elif bt_action == "boost":
+        # 부스트 2개 이상이면 B그룹도 confirm으로 업그레이드
+        if len(bt_reasons) >= 2 and _logic_group == "B":
+            _entry_mode = "confirm"
+            print(f"[BT_BOOST] {m} v3.4부스트 {len(bt_reasons)}개: {','.join(bt_reasons[:3])} → B그룹 confirm 승격")
+        elif bt_reasons:
+            print(f"[BT_BOOST] {m} v3.4부스트: {','.join(bt_reasons[:3])}")
+
+    # ============================================================
+    # v3.4 시간대 필터 (백테스트 기반)
+    # 09/22-23시 우대, 05-07/10-13/18시 제한
+    # ============================================================
+    time_action, time_h = check_time_filter_v34()
+    if time_action == "boost":
+        # 양의 EV 시간대 → B그룹이면 confirm으로 업그레이드 가능
+        if _logic_group == "B" and _entry_mode == "half" and bt_action == "boost":
+            _entry_mode = "confirm"
+            print(f"[TIME_BOOST] {m} {time_h}시 우량시간대 + BT부스트 → confirm")
+    elif time_action == "restrict":
+        # 음의 EV 시간대 → confirm을 half로 다운그레이드
+        if _entry_mode == "confirm":
+            _entry_mode = "half"
+            print(f"[TIME_RESTRICT] {m} {time_h}시 비우량시간대 → half 강제")
+
     # === VWAP gap 계산 ===
     vwap = calc_vwap_from_candles(c1, 20)
     vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
@@ -8589,6 +9049,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "is_precision_pocket": False,
         "spike_wave": _spike_wave,
         "logic_group": _logic_group,
+        "bt_action": bt_action,
+        "bt_reasons": bt_reasons[:3] if bt_reasons else [],
+        "time_action": time_action,
     }
 
     # gate 통과 후 스파이크 카운트 갱신
