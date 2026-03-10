@@ -6,14 +6,15 @@
 API 호출량이 과다하여 멈추는 문제를 해결하기 위해
 1분봉만 별도로 수집하는 스크립트.
 
-- 기본 7일치, 기존 파일 있으면 자동 스킵
+- 기본 30일치, 기존 파일 있으면 자동 스킵
+- 청크 단위 수집+디스크 저장 (메모리 안전)
 - 부분수집도 저장
 - 종목별 진행상황 텔레그램 전송
 - 잠금파일 별도 사용
 
 사용법:
-  python collect_1m.py                              # 기본 7일, 상위 30코인
-  python collect_1m.py --days 3 --coins 10          # 3일치, 10코인
+  python collect_1m.py                              # 기본 30일, 상위 30코인
+  python collect_1m.py --days 7 --coins 10          # 7일치, 10코인
   python collect_1m.py --markets KRW-BTC,KRW-ETH    # 특정 종목만
   python collect_1m.py --force                      # 기존 파일 무시하고 재수집
 """
@@ -36,6 +37,10 @@ BASE = "https://api.upbit.com/v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "candle_data")
 LOCK_FILE = os.path.join(SCRIPT_DIR, ".collect_1m_lock")
+
+# 청크 단위 수집 설정 (메모리 보호)
+CHUNK_SIZE = 5000       # 5000개씩 메모리에 유지 → 디스크에 임시 저장
+MEM_LOG_INTERVAL = 10   # 10페이지마다 메모리 상태 로그
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
 _raw = os.getenv("TG_CHATS") or os.getenv("TELEGRAM_CHAT_ID") or ""
@@ -96,6 +101,22 @@ atexit.register(_release_lock)
 for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
     sig_mod.signal(_s, lambda s, f: (_release_lock(), sys.exit(0)))
 
+def _get_mem_mb():
+    """현재 프로세스 RSS 메모리(MB) 반환. psutil 없으면 /proc 사용."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except ImportError:
+        pass
+    try:
+        with open(f"/proc/{os.getpid()}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB → MB
+    except Exception:
+        pass
+    return -1
+
 def safe_get(url, params=None, retries=6, timeout=12):
     for i in range(retries):
         try:
@@ -149,21 +170,73 @@ def compress(c):
         "v": round(c.get("candle_acc_trade_volume", 0), 6),
     }
 
-def save_coin_1m(coin, candles):
+def _chunk_path(coin, chunk_idx):
+    """임시 청크 파일 경로"""
+    return os.path.join(DATA_DIR, f".{coin}_1m_chunk{chunk_idx}.tmp")
+
+def _save_chunk(coin, chunk_idx, chunk_data):
+    """청크를 임시 파일에 저장하고 메모리 해제"""
     os.makedirs(DATA_DIR, exist_ok=True)
-    comp = [compress(c) for c in candles]
+    fpath = _chunk_path(coin, chunk_idx)
+    with open(fpath, "w", encoding="utf-8") as f:
+        json.dump(chunk_data, f, ensure_ascii=False)
+    return len(chunk_data)
+
+def _merge_chunks_and_save(coin, num_chunks):
+    """임시 청크들을 병합하여 최종 파일 저장 (스트리밍 방식)"""
+    all_candles = []
+    for ci in range(num_chunks):
+        cp = _chunk_path(coin, ci)
+        if not os.path.exists(cp):
+            continue
+        with open(cp, "r", encoding="utf-8") as f:
+            chunk = json.load(f)
+        all_candles.extend(chunk)
+        os.remove(cp)
+        del chunk
+    gc.collect()
+
+    if not all_candles:
+        return 0
+
+    # 시간순 정렬 + 중복 제거
+    all_candles.sort(key=lambda x: x["t"])
+    seen = set()
+    deduped = []
+    for c in all_candles:
+        if c["t"] not in seen:
+            seen.add(c["t"])
+            deduped.append(c)
+    del all_candles, seen
+    gc.collect()
+
     fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
     payload = {
         "coin": coin,
         "unit": 1,
-        "count": len(comp),
-        "from": comp[0]["t"] if comp else "",
-        "to": comp[-1]["t"] if comp else "",
-        "candles": comp,
+        "count": len(deduped),
+        "from": deduped[0]["t"] if deduped else "",
+        "to": deduped[-1]["t"] if deduped else "",
+        "candles": deduped,
         "saved_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
+
+    count = len(deduped)
+    del deduped, payload
+    gc.collect()
+    return count
+
+def _cleanup_chunks(coin, max_chunks=100):
+    """비정상 종료 시 남은 청크 파일 정리"""
+    for ci in range(max_chunks):
+        cp = _chunk_path(coin, ci)
+        if os.path.exists(cp):
+            try:
+                os.remove(cp)
+            except Exception:
+                pass
 
 def get_saved_count_1m(coin):
     fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
@@ -181,26 +254,31 @@ def is_collected_1m(coin, need_count, margin_ratio=0.95):
     return saved >= int(need_count * margin_ratio)
 
 # =========================================================
-# 1분봉 수집
+# 1분봉 수집 (청크 단위 메모리 관리)
 # =========================================================
-def fetch_1m_candles(market, total_count, max_time=240, progress_prefix=""):
-    """1분봉 전용 수집기
-    - 최대 200개씩 페이지네이션
-    - max_time 초과하면 부분수집 반환
-    - 요청 간 0.35초 대기 (429 방지)
+def fetch_and_save_1m(market, coin, total_count, max_time=600, progress_prefix=""):
+    """1분봉 수집 + 청크 저장 (메모리 안전 버전)
+
+    원본 API 응답에서 to 파라미터를 유지하면서
+    CHUNK_SIZE마다 디스크에 내려놓는 구조.
     """
-    result = []
+    _cleanup_chunks(coin)
+
+    buffer = []
+    chunk_idx = 0
+    total_fetched = 0
     to = None
     start_ts = time.time()
     fails = 0
     target_pages = math.ceil(total_count / 200)
 
-    while len(result) < total_count:
-        if time.time() - start_ts > max_time:
-            print(f"{progress_prefix}시간초과 {max_time}초 → {len(result)}개까지 반환")
+    while total_fetched < total_count:
+        elapsed = time.time() - start_ts
+        if elapsed > max_time:
+            tg(f"{progress_prefix}시간초과 {int(elapsed)}초 → {total_fetched}개까지 저장")
             break
 
-        remain = total_count - len(result)
+        remain = total_count - total_fetched
         count = min(200, remain)
         params = {"market": market, "count": count}
         if to:
@@ -210,32 +288,71 @@ def fetch_1m_candles(market, total_count, max_time=240, progress_prefix=""):
 
         if not data:
             fails += 1
-            print(f"{progress_prefix}페이지 실패 {fails}/5")
             if fails >= 5:
+                tg(f"{progress_prefix}연속 {fails}회 실패, 중단 ({total_fetched}개까지)")
                 break
             time.sleep(1.0 + fails * 0.5)
             continue
 
         fails = 0
-        result.extend(data)
         got = len(data)
-        page_no = math.ceil(len(result) / 200)
-        print(f"{progress_prefix}{len(result):4d}/{total_count} 수집 (이번 {got}개, page {page_no}/{target_pages})")
+
+        # to 갱신 (다음 페이지용) — 원본 데이터에서 추출
+        if got > 0:
+            to = data[-1]["candle_date_time_utc"] + "Z"
+
+        # 압축해서 버퍼에 추가
+        for c in data:
+            buffer.append(compress(c))
+        total_fetched += got
+        del data
+
+        page_no = math.ceil(total_fetched / 200)
+        pct = total_fetched / total_count * 100
+
+        # 주기적 로그
+        if page_no % MEM_LOG_INTERVAL == 0 or got < 200:
+            mem = _get_mem_mb()
+            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
+            print(f"{progress_prefix}{total_fetched:5d}/{total_count} ({pct:.0f}%) "
+                  f"page {page_no}/{target_pages}{mem_str}")
+
+        # 청크 저장
+        if len(buffer) >= CHUNK_SIZE:
+            _save_chunk(coin, chunk_idx, buffer)
+            saved_n = len(buffer)
+            chunk_idx += 1
+            buffer.clear()
+            gc.collect()
+            mem = _get_mem_mb()
+            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
+            tg(f"{progress_prefix}청크#{chunk_idx-1} 디스크 저장 ({saved_n}개, 누적 {total_fetched}개){mem_str}")
 
         if got < 200:
             break
 
-        to = data[-1]["candle_date_time_utc"] + "Z"
         time.sleep(0.35)
 
-    result.sort(key=lambda x: x["candle_date_time_kst"])
-    return result
+    # 나머지 버퍼 저장
+    if buffer:
+        _save_chunk(coin, chunk_idx, buffer)
+        chunk_idx += 1
+        buffer.clear()
+        gc.collect()
 
-def collect_1m(days=7, top_n=30, force=False, specific_markets=None, max_time_per_coin=240):
-    """1분봉만 수집. 7일 이내 권장."""
-    if days > 7:
-        tg(f"[경고] 1분봉은 7일 초과 요청이 비효율적이라 7일로 제한")
-        days = 7
+    if chunk_idx == 0:
+        return 0
+
+    # 청크 병합 → 최종 파일
+    final_count = _merge_chunks_and_save(coin, chunk_idx)
+    return final_count
+
+
+def collect_1m(days=30, top_n=30, force=False, specific_markets=None, max_time_per_coin=600):
+    """1분봉만 수집. 30일 이내 권장."""
+    if days > 30:
+        tg(f"[경고] 1분봉은 30일 초과 요청이 비효율적이라 30일로 제한")
+        days = 30
 
     need_count = 1440 * days
 
@@ -249,8 +366,11 @@ def collect_1m(days=7, top_n=30, force=False, specific_markets=None, max_time_pe
         return []
 
     coins = [m.split("-")[1] for m in markets]
-    tg(f"[1분봉 수집 시작] days={days}, need={need_count}개, coins={len(coins)}")
+    tg(f"[1분봉 수집 시작] days={days}, need={need_count:,}개/코인, coins={len(coins)}")
     tg(f"대상: {', '.join(coins)}")
+    mem = _get_mem_mb()
+    if mem > 0:
+        tg(f"시작 메모리: {mem:.0f}MB")
 
     started = time.time()
     done = 0
@@ -265,40 +385,42 @@ def collect_1m(days=7, top_n=30, force=False, specific_markets=None, max_time_pe
             saved = get_saved_count_1m(coin)
             if (not force) and is_collected_1m(coin, need_count):
                 skipped += 1
-                tg(f"{prefix}스킵 (기존 {saved}개)")
+                tg(f"{prefix}스킵 (기존 {saved:,}개)")
                 continue
 
-            tg(f"{prefix}수집 시작 (기존 {saved}개)")
-            candles = fetch_1m_candles(
+            tg(f"{prefix}수집 시작 (기존 {saved:,}개, 목표 {need_count:,}개)")
+            count = fetch_and_save_1m(
                 market=market,
+                coin=coin,
                 total_count=need_count,
                 max_time=max_time_per_coin,
-                progress_prefix=f"{coin}: ",
+                progress_prefix=f"  {coin}: ",
             )
 
-            if candles:
-                save_coin_1m(coin, candles)
+            if count > 0:
                 done += 1
-                tg(f"{prefix}저장 완료 ({len(candles)}개)")
+                tg(f"{prefix}저장 완료 ({count:,}개)")
             else:
                 failed += 1
                 tg(f"{prefix}수집 실패 (0개)")
 
-            del candles
             gc.collect()
             time.sleep(0.6)
 
         except Exception as e:
             failed += 1
             tg(f"{prefix}예외: {e}")
+            _cleanup_chunks(coin)
 
         if idx % 5 == 0 or idx == len(markets):
             elapsed = time.time() - started
             avg = elapsed / idx
             remain = avg * (len(markets) - idx)
+            mem = _get_mem_mb()
+            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
             tg(
                 f"[진행] {idx}/{len(markets)} | 완료 {done} | 스킵 {skipped} | 실패 {failed} "
-                f"| 경과 {elapsed/60:.1f}분 | 남은 예상 {remain/60:.1f}분"
+                f"| 경과 {elapsed/60:.1f}분 | 남은 예상 {remain/60:.1f}분{mem_str}"
             )
 
     total_elapsed = time.time() - started
@@ -328,16 +450,16 @@ def main():
     _acquire_lock()
 
     parser = argparse.ArgumentParser(description="업비트 1분봉 전용 수집기")
-    parser.add_argument("--days", type=int, default=7,
-                        help="수집 일수 (기본: 7, 최대: 7)")
+    parser.add_argument("--days", type=int, default=30,
+                        help="수집 일수 (기본: 30)")
     parser.add_argument("--coins", type=int, default=30,
                         help="상위 거래대금 기준 코인 수 (기본: 30)")
     parser.add_argument("--force", action="store_true",
                         help="기존 파일 있어도 강제 재수집")
     parser.add_argument("--markets", type=str, default="",
                         help="직접 지정할 마켓. 예: KRW-BTC,KRW-ETH,KRW-XRP")
-    parser.add_argument("--max-time-per-coin", type=int, default=240,
-                        help="코인당 최대 수집 시간(초) (기본: 240)")
+    parser.add_argument("--max-time-per-coin", type=int, default=600,
+                        help="코인당 최대 수집 시간(초) (기본: 600)")
     args = parser.parse_args()
 
     tg("[시작] 1분봉 전용 수집기 실행")
