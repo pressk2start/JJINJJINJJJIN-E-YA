@@ -50,7 +50,7 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.010  # 🔧 30일분석: 1.0% (SL 0.5%×2, 비상청산)
+HARD_STOP_DD = 0.015  # 🔧 v3.3: SL 1.0%×1.5 (비상청산)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
@@ -108,14 +108,19 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 # 근거: 147개 조합 중 SL2.0/TP3.0이 13-17시에서 최적 (+74.23%, PF 1.84)
 # 신호별 차등 TP 제거 — 시간+RSI 필터가 진입 품질을 보장하므로 TP 통일 가능
 MFE_RR_MULTIPLIERS = {
-    "🔥점화": 1.0,              # SL 0.5%×1.0=0.5%
-    "강돌파 (EMA↑+고점↑)": 1.0,  # SL 0.5%×1.0=0.5%
-    "EMA↑": 1.0,                 # SL 0.5%×1.0=0.5%
-    "고점↑": 1.0,                # SL 0.5%×1.0=0.5%
-    "거래량↑": 1.0,              # SL 0.5%×1.0=0.5%
-    "기본": 1.0,                 # SL 0.5%×1.0=0.5%
-    "15m_눌림반전": 1.0,         # SL 0.5%×1.0=0.5%
-    "15m_눌림+돌파": 1.0,        # SL 0.5%×1.0=0.5%
+    # v3.3 신호 태그 (SL 1.0% 기준)
+    "20봉_고점돌파": 1.0,        # SL 1.0%×1.0=1.0%
+    "거래량3배": 1.0,            # SL 1.0%×1.0=1.0%
+    "15m_눌림반전": 1.0,         # SL 1.0%×1.0=1.0%
+    "15m_눌림+돌파": 1.0,        # SL 1.0%×1.0=1.0%
+    "5m_양봉": 1.0,              # SL 1.0%×1.0=1.0%
+    # 하위호환 (기존 태그)
+    "🔥점화": 1.0,
+    "강돌파 (EMA↑+고점↑)": 1.0,
+    "EMA↑": 1.0,
+    "고점↑": 1.0,
+    "거래량↑": 1.0,
+    "기본": 1.0,
 }
 # 하위호환: MFE_PARTIAL_TARGETS는 런타임에 SL 기반으로 계산
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -184,22 +189,22 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7
-        HARD_STOP_DD = 0.012   # 🔧 30일분석: SL 0.5%×2.4
+        HARD_STOP_DD = 0.018   # 🔧 v3.3: SL 1.0%×1.8
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 30일분석: trail 0.15% (gentle)
+        TRAIL_DISTANCE_MIN_BASE = 0.003   # 🔧 v3.3: trail 0.3% (gentle)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
         WARMUP_SEC = 3
-        HARD_STOP_DD = 0.008   # 🔧 30일분석: SL 0.5%×1.6
+        HARD_STOP_DD = 0.012   # 🔧 v3.3: SL 1.0%×1.2
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0008  # 🔧 30일분석: trail 0.08% (strict)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 v3.3: trail 0.15% (strict)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
@@ -8423,137 +8428,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # === v3.3: 하드컷 기본 체크 ===
 
-    # (old candle momentum indicators removed - v3.3 uses cross-TF filters)
-    if _uw_range > 0:
-        upper_wick_ratio = (_uw_high - max(_uw_close, _uw_open)) / _uw_range
-    else:
-        upper_wick_ratio = 0.0
-
-    # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
-    # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
-    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
-        cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
+    # ============================================================
+    # v3.3 배제 필터 (모든 로직 공통)
+    # 위치20<20%, 도지, EMA역배열, W%R<-80, MFI<20
+    # ============================================================
+    blocked, block_reason = check_exclusion_filters(m, c1)
+    if blocked:
+        cut("EXCLUSION", f"{m} 배제필터: {block_reason}")
         return None
 
-    # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
-    cur_price = cur["trade_price"]
-    cur_high = cur.get("high_price", cur_price)  # 🔧 현재봉 고가
-    closes = [x["trade_price"] for x in c1]
-    ema20 = ema_last(closes, 20) if len(closes) >= 20 else None
-    ema20_breakout = (ema20 is not None and cur_price > ema20)
-
-    # 🔧 FIX: 고점 돌파 - 윗꼬리 오탐 방지 (점화 아닐 때는 종가 확인)
-    prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
-    high_breakout_wick = (prev_high > 0 and cur_high > prev_high)  # 고가 기준 (윅 포함)
-    high_breakout_close = (prev_high > 0 and cur_price > prev_high * 1.0005)  # 종가 기준 (0.05% 버퍼)
-
-    vol_ma20 = vol_ma_from_candles(c1, period=20)
-    vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
-
-    # 🔥 점화 감지 점수 계산 (stage1_gate에 전달)
-    _, ignition_reason, ignition_score = ignition_detected(
-        market=m,
-        ticks=ticks,
-        avg_candle_volume=vol_ma20,
-        ob=ob,
-        cooldown_ms=15000
-    )
-
-    # 🔧 FIX: 점화시만 wick 허용, 비점화시 close+버퍼 (wick 페이크 감소 → 승률↑)
-    if ignition_score >= 3:
-        high_breakout = high_breakout_wick   # 점화: 폭발적 모멘텀이면 wick도 OK
-    else:
-        high_breakout = high_breakout_close  # 비점화: 종가 확인 필요 (0.05% 버퍼)
-
-    _ign_candidate = (ignition_score >= 3)
-
-    # ============================================================
-    # 🔧 30일분석: 15분봉 눌림반전 기반 진입 신호 (기존 틱기반 로직 대체)
-    # 근거: 15m_눌림반전 n=10233 WR53% avg+1.37% vs 5m양봉 n=20126 avg-0.05%
-    # ============================================================
-    _entry_mode_override = None
-    _15m_signal = None   # "15m_눌림반전" or "15m_눌림+돌파" or None
-    _rsi15 = 50.0
-
-    try:
-        # 15분봉 데이터 가져오기 (20봉 = 5시간)
-        _c15 = get_minutes_candles(15, m, 20)
-        if _c15 and len(_c15) >= 5:
-            # --- 15분봉 RSI 계산 ---
-            if len(_c15) >= 15:
-                _rsi15_closes = [x["trade_price"] for x in sorted(_c15, key=lambda x: x.get("candle_date_time_kst", ""))[-15:]]
-                _rsi15_g, _rsi15_l = 0, 0
-                for _ri in range(1, len(_rsi15_closes)):
-                    _rd = _rsi15_closes[_ri] - _rsi15_closes[_ri-1]
-                    if _rd > 0: _rsi15_g += _rd
-                    else: _rsi15_l -= _rd
-                _rsi15 = 100 - 100 / (1 + _rsi15_g / max(_rsi15_l, 0.001))
-
-            # --- 눌림반전 패턴 감지 ---
-            # 조건: 최근 3봉 중 2봉 이상 음봉(하락) → 마지막 봉이 양봉(반전)
-            _last = _c15[-1]
-            _last_close = _last["trade_price"]
-            _last_open = _last["opening_price"]
-            _is_bullish = _last_close > _last_open  # 현재봉 양봉
-
-            if _is_bullish:
-                # 이전 3봉 중 음봉 수 카운트 (눌림 확인)
-                _bearish_count = 0
-                for _bc in _c15[-4:-1]:  # 직전 3봉
-                    if _bc["trade_price"] <= _bc["opening_price"]:
-                        _bearish_count += 1
-
-                if _bearish_count >= 2:
-                    _15m_signal = "15m_눌림반전"
-
-                    # 추가: 이전봉 고가 돌파 여부 확인
-                    _prev_high = max(c.get("high_price", c["trade_price"]) for c in _c15[-4:-1])
-                    if _last_close > _prev_high:
-                        _15m_signal = "15m_눌림+돌파"
-    except Exception:
-        pass
-
-    # 15분봉 눌림반전 신호가 없으면 → 진입 차단
-    if not _15m_signal:
-        cut("NO_15M_PULLBACK", f"{m} 15분봉 눌림반전 패턴 없음")
-        return None
-
-    # --- RSI15 기반 entry_mode ---
-    # RSI15 0-30: WR73.5% avg+2.78% → full (골든존)
-    # RSI15 30-50: 양호 → confirm
-    # RSI15 50+: 주의 → half
-    if _rsi15 < 30:
-        _entry_mode_override = "full"
-        print(f"[15M_GOLDEN] {m} RSI15={_rsi15:.0f}<30 + {_15m_signal} → 골든존 full")
-    elif _rsi15 < 50:
-        _entry_mode_override = None  # 기본 confirm 유지
-    else:
-        _entry_mode_override = "half"
-        print(f"[15M_RSI_HIGH] {m} RSI15={_rsi15:.0f}≥50 + {_15m_signal} → half")
-
-    # === 🔧 승률개선: 코인별 연패 쿨다운 ===
-    # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
-    if is_coin_loss_cooldown(m):
-        cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
-        return None
-
-    # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
-
-    # === 매수비 계산 (스푸핑 방지: 비점화는 가중평균) ===
-    _gate_buy_ratio = twin["buy_ratio"] if ignition_score >= 3 else (t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3)
-
-    # ============================================================
-    # 하드컷 — 이 조건 실패 시 어떤 스코어든 위험한 진입
-    # ============================================================
-    _metrics = (f"점화={ignition_score} surge={vol_surge:.2f}x 매수비={_gate_buy_ratio:.0%} "
-                f"스프레드={spread:.2f}% 가속={accel:.1f}x")
-
-    # 1) 틱 신선도
+    # === 틱 신선도 체크 ===
     if not fresh_ok:
-        cut("FRESH", f"{m} 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {_metrics}", near_miss=False)
+        cut("FRESH", f"{m} 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초")
         return None
 
-    # 2) 스프레드 (가격대별 동적 상한)
+    # === 스프레드 체크 (가격대별 동적 상한) ===
     if cur_price > 0 and cur_price < 100:
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_LOW, SPREAD_CAP_LOW)
     elif cur_price >= 100 and cur_price < 1000:
@@ -8561,95 +8450,129 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     else:
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
     if spread > eff_spread_max:
-        cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {_metrics}", near_miss=False)
+        cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}%")
         return None
 
-    # 3) 최소 거래대금
-    if current_volume < GATE_VOL_MIN and not mega:
-        cut("VOL_MIN", f"{m} 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {_metrics}", near_miss=False)
+    # === 최소 거래대금 체크 ===
+    if current_volume < GATE_VOL_MIN:
+        cut("VOL_MIN", f"{m} 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M")
         return None
 
-    # 4) 매수비 100% 스푸핑
-    if abs(_gate_buy_ratio - 1.0) < 1e-6:
-        cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
+    # === 코인별 연패 쿨다운 ===
+    if is_coin_loss_cooldown(m):
+        cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운", near_miss=False)
         return None
 
-    # 5) 가속도 과다
-    if accel > GATE_ACCEL_MAX:
-        cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
-        return None
-
-    # 🔧 30일분석: 기존 캔들 바디/윗꼬리/WEAK_SIGNAL 필터 비활성화
-    # 15분봉 눌림반전 신호가 이미 진입 품질을 보장하므로 1분봉 캔들 형태 필터 불필요
+    # === 매수비 계산 ===
+    _gate_buy_ratio = t15["buy_ratio"] * 0.7 + t45["buy_ratio"] * 0.3
 
     # ============================================================
-    # 신호 태깅 (30일분석: 15분봉 기반)
+    # v3.3 4-로직 신호 감지 시스템
+    # Priority A: Logic 1 (20봉돌파) > Logic 2 (거래량3배)
+    # Priority B: Logic 3 (15m눌림반전) > Logic 4 (5m양봉)
     # ============================================================
-    signal_tag = _15m_signal if _15m_signal else "기본"
+    signal_tag = None
+    _entry_mode = "confirm"
+    _logic_group = None  # "A" or "B"
 
-    # === VWAP gap 계산 (사이즈 조절/표시용) ===
+    # --- Logic 1 (A): 20봉_고점돌파 + 상위TF강세 ---
+    if detect_20bar_high_breakout(c1):
+        upper_ok, upper_reason = check_upper_tf_strong(m)
+        if upper_ok:
+            signal_tag = "20봉_고점돌파"
+            _logic_group = "A"
+            _entry_mode = "confirm"
+            print(f"[LOGIC1] {m} 20봉고점돌파 + 상위TF강세 → A그룹 confirm")
+
+    # --- Logic 2 (A): 거래량3배 + 상위TF강세 ---
+    if not signal_tag:
+        vol3x_ok, vol_ratio = detect_3x_volume(c1)
+        if vol3x_ok:
+            upper_ok, upper_reason = check_upper_tf_strong(m)
+            if upper_ok:
+                signal_tag = "거래량3배"
+                _logic_group = "A"
+                _entry_mode = "confirm"
+                print(f"[LOGIC2] {m} 거래량{vol_ratio:.1f}배 + 상위TF강세 → A그룹 confirm")
+
+    # --- Logic 3 (B): 15m_눌림반전 + 15m_MACD골든 + 1h_EMA정배열 ---
+    if not signal_tag:
+        _15m_sig = detect_15m_pullback_reversal(m)
+        if _15m_sig:
+            macd_ok = check_15m_macd_golden(m)
+            ema1h_ok = check_1h_ema_alignment(m)
+            if macd_ok and ema1h_ok:
+                signal_tag = _15m_sig
+                _logic_group = "B"
+                _entry_mode = "half"  # B그룹은 보수적 진입
+                print(f"[LOGIC3] {m} {_15m_sig} + MACD골든 + 1hEMA정배열 → B그룹 half")
+
+    # --- Logic 4 (B): 5m_양봉 + 15m_MACD골든 + 1h_EMA정배열 ---
+    if not signal_tag:
+        if detect_5m_bullish_candle(m):
+            macd_ok = check_15m_macd_golden(m)
+            ema1h_ok = check_1h_ema_alignment(m)
+            if macd_ok and ema1h_ok:
+                signal_tag = "5m_양봉"
+                _logic_group = "B"
+                _entry_mode = "half"  # B그룹은 보수적 진입
+                print(f"[LOGIC4] {m} 5m양봉 + MACD골든 + 1hEMA정배열 → B그룹 half")
+
+    # === 4개 로직 모두 불충족 → 진입 차단 ===
+    if not signal_tag:
+        cut("NO_V33_SIGNAL", f"{m} v3.3 4-로직 신호 없음")
+        return None
+
+    # === VWAP gap 계산 ===
     vwap = calc_vwap_from_candles(c1, 20)
     vwap_gap = ((cur_price / vwap - 1.0) * 100) if vwap and cur_price > 0 else 0.0
 
-    # === entry_mode 결정 (30일분석: RSI15 기반) ===
-    # 기본: confirm — RSI15에 따라 override
-    _entry_mode = "confirm"
-    _is_precision = False
-    if _entry_mode_override == "half":
-        _entry_mode = "half"
-    elif _entry_mode_override == "full":
-        _entry_mode = "confirm"
-
-    # === 🔧 1파/2파 판정 (데이터: 1파 SL38% vs 2파+ SL85%) ===
-    # 조회만: count는 gate 통과 후 return pre 직전에서만 갱신
+    # === 1파/2파 판정 ===
     _now_ts = time.time()
     with _SPIKE_TRACKER_LOCK:
         _wave_info = _SPIKE_TRACKER.get(m)
         if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
-            _spike_wave = _wave_info["count"] + 1  # 현재 몇파인지만 확인 (갱신 X)
+            _spike_wave = _wave_info["count"] + 1
         else:
             _spike_wave = 1
-    _is_first_wave = (_spike_wave == 1)
 
-    # 🔧 30일분석: 2파/body/green_streak 오버라이드 비활성화
-    # 15분봉 눌림반전이 이미 추격매수를 구조적으로 방지
-
-    # === 결과 패키징 ===
+    # === 결과 패키징 (하위호환 유지) ===
     pre = {
-        "price": cur["trade_price"],
+        "price": cur_price,
         "change": price_change,
         "current_volume": current_volume,
-        "volume_surge": vol_surge,
+        "volume_surge": 1.0,
         "ob": ob,
         "tape": twin,
         "ticks": ticks,
-        "flow_accel": accel,
+        "flow_accel": 0,
         "imbalance": imbalance,
-        "turn_pct": turn_pct,
+        "turn_pct": turn * 100,
         "spread": spread,
         "buy_ratio": _gate_buy_ratio,
         "buy_ratio_conservative": min(t15["buy_ratio"], t45["buy_ratio"]),
         "fresh_ok": fresh_ok,
-        "mega": mega,
-        "filter_type": "stage1_gate",
-        "ignition_score": ignition_score,
+        "mega": False,
+        "filter_type": "v33_logic",
+        "ignition_score": 0,
         "signal_tag": signal_tag,
-        "cv": cv,
-        "pstd": pstd10,
-        "consecutive_buys": cons_buys,
-        "overheat": overheat,
-        "ign_ok": _ign_candidate,
-        "mega_ok": mega,
-        "candle_body_pct": candle_body_pct,
-        "upper_wick_ratio": upper_wick_ratio,
-        "green_streak": green_streak,
+        "cv": None,
+        "pstd": None,
+        "consecutive_buys": 0,
+        "overheat": 0,
+        "ign_ok": False,
+        "mega_ok": False,
+        "candle_body_pct": (cur_price / max(cur["opening_price"], 1) - 1),
+        "upper_wick_ratio": 0,
+        "green_streak": 0,
         "vwap_gap": round(vwap_gap, 2),
         "entry_mode": _entry_mode,
-        "is_precision_pocket": _is_precision,
+        "is_precision_pocket": False,
         "spike_wave": _spike_wave,
+        "logic_group": _logic_group,
     }
 
-    # 🔧 FIX: gate 통과 후에만 카운트 갱신 (스캔만으로 2파 판정 방지)
+    # gate 통과 후 스파이크 카운트 갱신
     with _SPIKE_TRACKER_LOCK:
         _wave_info = _SPIKE_TRACKER.get(m)
         if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
@@ -10846,8 +10769,9 @@ def main():
         load_exit_params()
 
     tg_send(
-        f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
-        f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
+        f"🚀 대장초입 헌터 v3.3 (백테스트 기반 4-로직) 시작\n"
+        f"📊 TOP {TOP_N} | SL1.0%/A0.3%/T0.2% | {now_kst_str()}\n"
+        f"📋 Logic: 20봉돌파/거래량3배/15m눌림반전/5m양봉"
     )
 
     # 🔧 시작 시 유령 포지션 즉시 동기화
@@ -11544,9 +11468,14 @@ def main():
                     pre["entry_mode"] = "half"
                     print(f"[LOSE_GATE] {m} 연패 모드제한 → half 강제 (probe 폐지)")
 
-                reason = "ign" if pre.get("ign_ok") else (
-                    "early" if pre.get("early_ok") else
-                    ("mega" if pre.get("mega_ok") else "normal"))
+                # v3.3: signal_tag 기반 reason
+                _sig_tag = pre.get("signal_tag", "")
+                if _sig_tag in ("20봉_고점돌파", "거래량3배"):
+                    reason = "normal"  # A그룹
+                elif _sig_tag in ("15m_눌림반전", "15m_눌림+돌파", "5m_양봉"):
+                    reason = "normal"  # B그룹
+                else:
+                    reason = "normal"
                 if not cooldown_ok(m, pre['price'], reason=reason):
                     # 🔧 FIX: cooldown 실패 시 recent_alerts 정리 (10초 재탐지 블록 방지)
                     with _POSITION_LOCK:
