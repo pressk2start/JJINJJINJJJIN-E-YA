@@ -15,7 +15,7 @@
   python upbit_signal_study.py --days 60
   python upbit_signal_study.py --skip-collect
 """
-import requests, time, json, os, sys, gc, argparse, math
+import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -24,6 +24,28 @@ BASE = "https://api.upbit.com/v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "candle_data")
 OUT_DIR = os.path.join(SCRIPT_DIR, "analysis_output")
+LOCK_FILE = os.path.join(SCRIPT_DIR, ".study_lock")
+
+# ── 중복 실행 방지 ──
+def _acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE) as f: old_pid=int(f.read().strip())
+            # 프로세스 살아있는지 확인
+            os.kill(old_pid, 0)
+            print(f"[잠금] 이미 실행중 (PID {old_pid}). 종료.")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError, OSError):
+            pass  # 이전 프로세스 죽음 → lock 제거하고 진행
+    with open(LOCK_FILE, "w") as f: f.write(str(os.getpid()))
+
+def _release_lock(*a):
+    try: os.remove(LOCK_FILE)
+    except: pass
+
+atexit.register(_release_lock)
+for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
+    sig_mod.signal(_s, lambda s,f: (_release_lock(), sys.exit(0)))
 
 FEE_RATE = 0.0005
 SLIPPAGE = 0.0008
@@ -31,6 +53,19 @@ TOTAL_COST = FEE_RATE * 2 + SLIPPAGE
 MIN_TRADES = 100
 TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
+MAX_SIGS_PER_COIN = 300   # 메모리 안전: 코인당 최대 신호 수
+
+# 신호 dict에 저장할 핵심 피처 (조건 필터용)
+# 나머지 전체 피처는 분포 통계를 스트리밍으로 계산
+COND_KEYS = {
+    "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
+    "macd_x","macd_h","adx","cci","willr","mfi",
+    "ema_al","disp10","disp20","ed5","ed20","ed50",
+    "vr5","vr20","m3","m5","m10","m20",
+    "pos10","pos20","vol10","vol20",
+    "hammer","inv_ham","engulf","mstar","doji","cg","cr",
+    "bar_atr","green","bbw20","uw_pct","lw_pct","body_pct",
+}
 
 # 수집 타임프레임 (1분봉은 API 부하가 크므로 기본 제외, --include-1m 옵션으로 활성화)
 COLLECT_TFS = [(3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
@@ -449,8 +484,11 @@ def find_idx(candles, sig_time):
     return r
 
 
-def process_coin(coin, btc_regime):
-    """코인 1개: 5분봉 기반 신호 → TF별 순차 피처 추출 → 청산 시뮬"""
+def process_coin(coin, btc_regime, dist_acc):
+    """코인 1개: 5분봉 기반 신호 → TF별 순차 피처 추출 → 청산 시뮬
+    dist_acc: 분포 통계 누적기 {(tf, feat_key): [값들]} — 전체 피처 누적용
+    반환: {stype: [sig_dict]} — sig_dict에는 조건 필터용 핵심 피처만 저장
+    """
     tg(f"  >> {coin} 분석 시작")
     c5 = load_candles(coin, 5)
     if len(c5) < 200: return {}
@@ -483,7 +521,7 @@ def process_coin(coin, btc_regime):
         if bar["c"]<=bar["o"]: continue
         if (bar["c"]-bar["o"])/bar["o"]*100<0.15: continue
         ei=i+1
-        if ei-last<30: continue  # 간격 30봉 (2.5시간)
+        if ei-last<30: continue
         last=ei; sigs.append((i, ei, bar))
     raw_signals["5m_양봉"] = sigs
 
@@ -519,6 +557,16 @@ def process_coin(coin, btc_regime):
         del c5, c15; gc.collect()
         return {}
 
+    # 신호 과다 시 샘플링 (메모리 보호)
+    if total_sigs > MAX_SIGS_PER_COIN:
+        ratio = MAX_SIGS_PER_COIN / total_sigs
+        for stype in raw_signals:
+            orig = raw_signals[stype]
+            step = max(1, int(1/ratio))
+            raw_signals[stype] = orig[::step][:int(len(orig)*ratio)+1]
+        total_sigs = sum(len(v) for v in raw_signals.values())
+        tg(f"    (샘플링→{total_sigs}개)")
+
     # 2단계: 모든 신호의 시간 목록 수집
     all_sig_times = set()
     for sigs in raw_signals.values():
@@ -526,8 +574,8 @@ def process_coin(coin, btc_regime):
             all_sig_times.add(bar["t"])
 
     # 3단계: TF별 순차 로드 → 피처 추출 → 해제
-    # sig_time → {feat_key: val} 캐시 (시간으로 중복 방지)
-    tf_feat_cache = defaultdict(dict)  # {sig_time: {pfx_key: val}}
+    # sig_time → {feat_key: val} — 조건용 핵심 피처만 저장
+    tf_feat_cache = defaultdict(dict)
 
     for tf in ANALYSIS_TFS:
         if tf == 5:
@@ -535,33 +583,38 @@ def process_coin(coin, btc_regime):
         else:
             candles = load_candles(coin, tf)
             if not candles or len(candles)<60:
-                # 합성 시도
                 if tf==15: candles=c15
                 elif tf==30: candles=make_nmin(c5,6)
                 elif tf==60: candles=make_nmin(c5,12)
                 elif tf==3: candles=None
-                elif tf==1: candles=None  # 1분봉 없으면 스킵 (합성 불가)
+                elif tf==1: candles=None
                 if not candles or len(candles)<60:
                     continue
 
-        # 시간→인덱스 매핑 (1회)
         if tf == 5:
-            # 5분봉은 직접 인덱스 사용하므로 매핑 불필요
             time_map = None
         else:
             time_map = {c["t"][:16]: i for i,c in enumerate(candles)}
 
         pfx = f"tf{tf}_"
         for sig_time in all_sig_times:
-            if tf == 5:
-                continue  # 5분봉은 별도 처리
+            if tf == 5: continue
             tk = sig_time[:16]
             idx = time_map.get(tk)
             if idx is None:
                 idx = find_idx(candles, sig_time)
             if idx is not None and idx >= 55:
-                feats = extract_tf_features(candles, idx, pfx)
-                tf_feat_cache[sig_time].update(feats)
+                all_feats = extract_tf_features(candles, idx, pfx)
+                # 전체 피처 → 분포 통계에 누적
+                for fk, fv in all_feats.items():
+                    short_key = fk[len(pfx):]  # "rsi14" etc
+                    dist_acc[(tf, short_key)].append(fv)
+                # 조건용 핵심만 캐시
+                for fk, fv in all_feats.items():
+                    short_key = fk[len(pfx):]
+                    if short_key in COND_KEYS:
+                        tf_feat_cache[sig_time][fk] = fv
+                del all_feats
 
         if tf != 5:
             del candles
@@ -572,10 +625,17 @@ def process_coin(coin, btc_regime):
     for sigs in raw_signals.values():
         for si5, ei, bar in sigs:
             if si5 >= 55:
-                feats = extract_tf_features(c5, si5, pfx5)
-                tf_feat_cache[bar["t"]].update(feats)
+                all_feats = extract_tf_features(c5, si5, pfx5)
+                for fk, fv in all_feats.items():
+                    short_key = fk[len(pfx5):]
+                    dist_acc[(5, short_key)].append(fv)
+                for fk, fv in all_feats.items():
+                    short_key = fk[len(pfx5):]
+                    if short_key in COND_KEYS:
+                        tf_feat_cache[bar["t"]][fk] = fv
+                del all_feats
 
-    # 4단계: 신호 → 완성된 결과 dict
+    # 4단계: 신호 → 결과 dict (핵심 피처만)
     results = {}
     cost_pct = TOTAL_COST * 100
 
@@ -601,7 +661,6 @@ def process_coin(coin, btc_regime):
                 if hp>mfe: mfe=hp; mfe_bar=j
                 if lp<mae: mae=lp
 
-            # 청산 시뮬
             exits = {}
             for ename, etype, tp, sl, arm, trail_or_n in EXIT_CONFIGS:
                 if etype=="fix":
@@ -621,7 +680,7 @@ def process_coin(coin, btc_regime):
                    "regime":regime,"dip3":dip3,"brk":brk,
                    "mfe":round(mfe,4),"mae":round(mae,4),"mfe_bar":mfe_bar,
                    "exits":exits}
-            # 다중TF 피처 병합
+            # 핵심 TF 피처만 병합 (COND_KEYS만)
             sig.update(tf_feat_cache.get(bar["t"], {}))
             built.append(sig)
         results[stype] = built
@@ -690,7 +749,7 @@ def _pct(vals, p):
 def _avg(vals):
     return sum(vals)/len(vals) if vals else 0.0
 
-def generate_report(all_results):
+def generate_report(all_results, dist_acc):
     L = []
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
     L.append(f"업비트 신호 연구 v3.2 ({ts})")
@@ -699,17 +758,11 @@ def generate_report(all_results):
     L.append("="*65)
 
     # 피처 수 + TF별 피처 현황
-    tf_counts = defaultdict(int)
-    total_feats = 0
-    for sigs in all_results.values():
-        if sigs:
-            for k in sigs[0]:
-                if k.startswith("tf"):
-                    total_feats += 1
-                    tf = k.split("_")[0]  # tf1, tf3, ...
-                    tf_counts[tf] += 1
-            break
-    L.append(f"총 피처: {total_feats}개 ({', '.join(f'{k}:{v}개' for k,v in sorted(tf_counts.items()))})")
+    tf_feat_counts = defaultdict(int)
+    for (tf, fk) in dist_acc:
+        tf_feat_counts[tf] += 1
+    total_feats = sum(tf_feat_counts.values())
+    L.append(f"총 피처: {total_feats}개 ({', '.join(f'{tf}m:{v}개' for tf,v in sorted(tf_feat_counts.items()))})")
 
     dk="TRAIL_SL0.7/A0.3/T0.2"
 
@@ -729,10 +782,10 @@ def generate_report(all_results):
         L.append(f"  {st:<16s} {fmt(m)}{star}")
 
     # ============================================================
-    # [2] TF별 지표 분포 (전체 신호 기준)
+    # [2] TF별 지표 분포 (dist_acc에서 — 전체 46개 피처)
     # ============================================================
     L.append(f"\n{'='*65}")
-    L.append("[2] TF별 지표 분포 (전체 신호)")
+    L.append("[2] TF별 지표 분포 (전체 46개 피처)")
     L.append("-"*65)
 
     all_sigs = []
@@ -758,28 +811,24 @@ def generate_report(all_results):
         ("engulf","감싸기%"), ("mstar","샛별%"),
         ("cg","연속양봉"), ("cr","연속음봉"),
         ("uw_pct","윗꼬리%"), ("lw_pct","아랫꼬리%"), ("body_pct","몸통%"),
+        ("green","양봉%"),
     ]
 
     for tf in ANALYSIS_TFS:
-        pfx = f"tf{tf}_"
-        has_data = any(pfx+"rsi14" in s for s in all_sigs[:100])
+        has_data = (tf, "rsi14") in dist_acc and len(dist_acc[(tf,"rsi14")])>0
         if not has_data: continue
 
-        L.append(f"\n  [{tf}분봉] 지표 분포:")
+        L.append(f"\n  [{tf}분봉] 지표 분포 (n={len(dist_acc.get((tf,'rsi14'),[]))}):")
         for feat_key, feat_name in key_indicators:
-            full_key = pfx + feat_key
-            vals = [s[full_key] for s in all_sigs if full_key in s]
+            vals = dist_acc.get((tf, feat_key), [])
             if not vals: continue
 
-            if feat_key in ("macd_x","hammer","inv_ham","doji","engulf","mstar"):
-                # 비율 지표 → %로 표시
+            if feat_key in ("macd_x","hammer","inv_ham","doji","engulf","mstar","green"):
                 pct = sum(1 for v in vals if v==1)/len(vals)*100
                 L.append(f"    {feat_name:12s} 발생={pct:5.1f}% (n={len(vals)})")
             elif feat_key in ("cg","cr","ema_al"):
-                # 정수 지표 → 평균+분포
                 L.append(f"    {feat_name:12s} avg={_avg(vals):+.1f} P25={_pct(vals,25):.0f} P50={_pct(vals,50):.0f} P75={_pct(vals,75):.0f}")
             else:
-                # 연속 지표 → 5분위
                 L.append(f"    {feat_name:12s} avg={_avg(vals):+.2f} P25={_pct(vals,25):+.2f} P50={_pct(vals,50):+.2f} P75={_pct(vals,75):+.2f} P95={_pct(vals,95):+.2f}")
 
     # ============================================================
@@ -1011,7 +1060,15 @@ def generate_report(all_results):
 # ================================================================
 # 메인
 # ================================================================
+def _has_enough_data(min_coins=10):
+    """수집 데이터 충분한지 확인"""
+    if not os.path.exists(DATA_DIR): return False
+    files = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
+    return len(files) >= min_coins
+
 def main():
+    _acquire_lock()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--coins", type=int, default=30)
@@ -1020,21 +1077,23 @@ def main():
     args = parser.parse_args()
     t0 = time.time()
 
+    # 데이터 있으면 자동 수집 스킵
+    if not args.skip_collect and _has_enough_data():
+        tg("[자동] 기존 데이터 감지 → 수집 스킵 (강제수집: --days 옵션으로)")
+        args.skip_collect = True
+
     if not args.skip_collect:
-        # 1단계: 핵심 TF 수집 (3,5,15,30,60)
         tg("[STEP 1/4] 핵심 타임프레임 수집")
         collect(days=args.days, top_n=args.coins, include_1m=False)
-
-        # 2단계: 1분봉 수집 (선택)
         if args.include_1m:
             tg("[STEP 1.5/4] 1분봉 수집 (7일치)")
             collect(days=min(args.days, 7), top_n=args.coins, include_1m=True)
 
-    # 3단계: 분석
+    # 분석
     coins = get_saved_coins()
-    if not coins: tg(f"[오류] 데이터 없음"); return
+    if not coins: tg("[오류] 데이터 없음"); return
 
-    tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인")
+    tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인 (신호당 핵심피처 {len(COND_KEYS)}개)")
 
     btc5 = load_candles("BTC", 5)
     btc_regime = {}
@@ -1047,31 +1106,41 @@ def main():
     del btc5; gc.collect()
 
     all_results = defaultdict(list)
+    dist_acc = defaultdict(list)  # (tf, feat_key) → [vals] 분포 통계용
+
     for i, coin in enumerate(coins):
         try:
-            cr = process_coin(coin, btc_regime)
+            cr = process_coin(coin, btc_regime, dist_acc)
             for st,sigs in cr.items():
                 all_results[st].extend(sigs)
             del cr; gc.collect()
         except Exception as e:
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
+        if (i+1) % 10 == 0:
+            tg(f"  분석 {i+1}/{len(coins)} 완료")
 
     for st in all_results:
         all_results[st].sort(key=lambda s: s["time"])
 
     tg(f"\n[STEP 3/4] 신호 감지 완료")
+    total_sigs = 0
     for st,sigs in all_results.items():
         tg(f"  {st}: {len(sigs)}건")
+        total_sigs += len(sigs)
+    tg(f"  총: {total_sigs}건 | 분포데이터: {len(dist_acc)}개 지표")
 
-    # 4단계: 리포트
+    # 리포트
     tg("[STEP 4/4] 리포트 생성")
     try:
-        lines = generate_report(dict(all_results))
+        lines = generate_report(dict(all_results), dict(dist_acc))
     except Exception as e:
         import traceback
         tg(f"[리포트에러] {e}\n{traceback.format_exc()[-500:]}")
         lines = [f"에러: {e}"]
+
+    # dist_acc 해제 (메모리)
+    del dist_acc; gc.collect()
 
     os.makedirs(OUT_DIR, exist_ok=True)
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M")
@@ -1090,11 +1159,14 @@ def main():
     if cur: chunks.append(cur)
     for ci,ch in enumerate(chunks):
         tg(f"[리포트 {ci+1}/{len(chunks)}]\n{ch}")
-        time.sleep(0.5)  # 텔레그램 flood 방지
+        time.sleep(0.5)
 
 if __name__ == "__main__":
     try: main()
-    except KeyboardInterrupt: tg("중단")
+    except KeyboardInterrupt:
+        _release_lock()
+        tg("중단")
     except Exception as e:
         import traceback
+        _release_lock()
         tg(f"[에러] {e}\n{traceback.format_exc()[-500:]}")
