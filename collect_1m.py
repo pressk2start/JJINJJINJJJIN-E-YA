@@ -6,52 +6,36 @@
 API 호출량이 과다하여 멈추는 문제를 해결하기 위해
 1분봉만 별도로 수집하는 스크립트.
 
+- 기본 7일치, 기존 파일 있으면 자동 스킵
+- 부분수집도 저장
+- 종목별 진행상황 텔레그램 전송
+- 잠금파일 별도 사용
+
 사용법:
-  python collect_1m.py                  # 기본 7일, 상위 30코인
-  python collect_1m.py --days 3         # 3일치
-  python collect_1m.py --coins 10       # 상위 10코인만
-  python collect_1m.py --coins 10 --resume  # 이미 수집된 코인 건너뛰기
+  python collect_1m.py                              # 기본 7일, 상위 30코인
+  python collect_1m.py --days 3 --coins 10          # 3일치, 10코인
+  python collect_1m.py --markets KRW-BTC,KRW-ETH    # 특정 종목만
+  python collect_1m.py --force                      # 기존 파일 무시하고 재수집
 """
 
-import requests, time, json, os, sys, gc, argparse, atexit, signal as sig_mod
+import os, sys, json, time, math, gc, argparse, atexit, signal as sig_mod
 from datetime import datetime, timedelta, timezone
+import requests
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# =========================================================
+# 기본 설정
+# =========================================================
 KST = timezone(timedelta(hours=9))
 BASE = "https://api.upbit.com/v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "candle_data")
 LOCK_FILE = os.path.join(SCRIPT_DIR, ".collect_1m_lock")
-
-# ── 중복 실행 방지 ──
-def _acquire_lock():
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)
-            print(f"[잠금] 이미 실행중 (PID {old_pid}). 종료.")
-            sys.exit(0)
-        except (ProcessLookupError, ValueError, OSError):
-            pass
-    with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-def _release_lock(*a):
-    try:
-        os.remove(LOCK_FILE)
-    except:
-        pass
-
-atexit.register(_release_lock)
-for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
-    sig_mod.signal(_s, lambda s, f: (_release_lock(), sys.exit(0)))
-
-# ── 텔레그램 ──
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except:
-    pass
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
 _raw = os.getenv("TG_CHATS") or os.getenv("TELEGRAM_CHAT_ID") or ""
@@ -61,9 +45,12 @@ for p in _raw.split(","):
     if p:
         try:
             CHAT_IDS.append(int(p))
-        except:
+        except Exception:
             pass
 
+# =========================================================
+# 공통 유틸
+# =========================================================
 def tg(msg):
     print(msg)
     if not TG_TOKEN or not CHAT_IDS:
@@ -74,34 +61,65 @@ def tg(msg):
             try:
                 r = requests.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json={"chat_id": cid, "text": chunk, "disable_web_page_preview": True},
-                    timeout=10)
+                    json={
+                        "chat_id": cid,
+                        "text": chunk,
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=10,
+                )
                 if r.status_code != 200:
                     print(f"[TG경고] {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 print(f"[TG에러] {e}")
 
-def safe_get(url, params=None, retries=3, timeout=10):
+def _acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            print(f"[잠금] 이미 실행중 (PID {old_pid}). 종료.")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    with open(LOCK_FILE, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+
+def _release_lock(*_args):
+    try:
+        os.remove(LOCK_FILE)
+    except Exception:
+        pass
+
+atexit.register(_release_lock)
+for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
+    sig_mod.signal(_s, lambda s, f: (_release_lock(), sys.exit(0)))
+
+def safe_get(url, params=None, retries=6, timeout=12):
     for i in range(retries):
         try:
             r = requests.get(url, params=params, timeout=timeout)
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 429:
-                wait = 1.5 + i * 1.5
-                print(f"  [429 Rate Limit] {wait:.1f}초 대기...")
+                wait = min(5, 1 + i)
+                print(f"[429] {url} | {wait}s 대기")
                 time.sleep(wait)
                 continue
-            time.sleep(0.5)
+            print(f"[HTTP {r.status_code}] {url} | {str(r.text)[:120]}")
+            time.sleep(0.5 + i * 0.5)
         except requests.exceptions.Timeout:
-            print(f"  [Timeout] 재시도 {i+1}/{retries}")
-            time.sleep(1)
+            print(f"[Timeout] {url} | 재시도 {i+1}/{retries}")
+            time.sleep(1 + i * 0.5)
         except Exception as e:
-            print(f"  [요청에러] {e}")
-            time.sleep(0.5)
+            print(f"[GET 에러] {url} | {e}")
+            time.sleep(0.7 + i * 0.7)
     return None
 
-# ── 종목 조회 ──
+# =========================================================
+# 마켓 조회
+# =========================================================
 def get_top_markets(n=30):
     tickers = safe_get(f"{BASE}/market/all", {"isDetails": "true"})
     if not tickers:
@@ -111,69 +129,16 @@ def get_top_markets(n=30):
     krw = [m for m in krw if m.split("-")[1] not in stable]
     all_t = []
     for i in range(0, len(krw), 100):
-        b = safe_get(f"{BASE}/ticker", {"markets": ",".join(krw[i:i+100])})
-        if b:
-            all_t.extend(b)
-        time.sleep(0.15)
+        batch = safe_get(f"{BASE}/ticker", {"markets": ",".join(krw[i:i+100])})
+        if batch:
+            all_t.extend(batch)
+        time.sleep(0.2)
     all_t.sort(key=lambda x: x.get("acc_trade_price_24h", 0), reverse=True)
     return [t["market"] for t in all_t[:n]]
 
-# ── 1분봉 수집 (느린 페이싱) ──
-def fetch_1m_candles(market, total_count, max_time=300):
-    """1분봉 수집. 느린 페이싱으로 API 부하 최소화.
-    - 페이지당 200개
-    - 요청 간 0.3초 대기 (429 방지)
-    - max_time초 초과 시 지금까지 수집한 것만 반환
-    """
-    result = []
-    to = None
-    t0 = time.time()
-    fails = 0
-    total_pages = (total_count + 199) // 200
-
-    for page in range(total_pages):
-        elapsed = time.time() - t0
-        if elapsed > max_time:
-            print(f"      시간초과 {max_time}초, {len(result)}개까지 수집")
-            break
-
-        remaining = total_count - len(result)
-        if remaining <= 0:
-            break
-
-        params = {"market": market, "count": min(200, remaining)}
-        if to:
-            params["to"] = to
-
-        data = safe_get(f"{BASE}/candles/minutes/1", params, retries=3, timeout=10)
-
-        if not data:
-            fails += 1
-            if fails >= 5:
-                print(f"      연속 {fails}회 실패, 중단")
-                break
-            time.sleep(1)
-            continue
-
-        fails = 0
-        result.extend(data)
-
-        if len(data) < 200:
-            break
-
-        to = data[-1]["candle_date_time_utc"] + "Z"
-
-        # 1분봉은 API 부하가 크므로 넉넉하게 대기
-        time.sleep(0.3)
-
-        # 진행률 표시 (10페이지마다)
-        if (page + 1) % 10 == 0:
-            pct = len(result) / total_count * 100
-            print(f"      {len(result)}/{total_count} ({pct:.0f}%) - {elapsed:.0f}초")
-
-    result.sort(key=lambda x: x["candle_date_time_kst"])
-    return result
-
+# =========================================================
+# 파일 처리
+# =========================================================
 def compress(c):
     return {
         "t": c["candle_date_time_kst"],
@@ -184,113 +149,165 @@ def compress(c):
         "v": round(c.get("candle_acc_trade_volume", 0), 6),
     }
 
-def save_coin(coin, candles):
+def save_coin_1m(coin, candles):
     os.makedirs(DATA_DIR, exist_ok=True)
     comp = [compress(c) for c in candles]
     fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
+    payload = {
+        "coin": coin,
+        "unit": 1,
+        "count": len(comp),
+        "from": comp[0]["t"] if comp else "",
+        "to": comp[-1]["t"] if comp else "",
+        "candles": comp,
+        "saved_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+    }
     with open(fpath, "w", encoding="utf-8") as f:
-        json.dump({
-            "coin": coin,
-            "unit": 1,
-            "count": len(comp),
-            "from": comp[0]["t"] if comp else "",
-            "to": comp[-1]["t"] if comp else "",
-            "candles": comp,
-        }, f, ensure_ascii=False)
-    return fpath
+        json.dump(payload, f, ensure_ascii=False)
 
-def is_collected(coin, min_count=100):
+def get_saved_count_1m(coin):
     fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
     if not os.path.exists(fpath):
-        return False
+        return 0
     try:
-        with open(fpath) as f:
+        with open(fpath, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("count", 0) >= min_count
-    except:
-        return False
+        return int(data.get("count", 0))
+    except Exception:
+        return 0
 
-# ── 메인 ──
-def main():
-    _acquire_lock()
+def is_collected_1m(coin, need_count, margin_ratio=0.95):
+    saved = get_saved_count_1m(coin)
+    return saved >= int(need_count * margin_ratio)
 
-    parser = argparse.ArgumentParser(description="업비트 1분봉 전용 수집기")
-    parser.add_argument("--days", type=int, default=7,
-                        help="수집 일수 (기본: 7, 최대 권장: 7)")
-    parser.add_argument("--coins", type=int, default=30,
-                        help="상위 N코인 (기본: 30)")
-    parser.add_argument("--resume", action="store_true",
-                        help="이미 수집된 코인 건너뛰기")
-    parser.add_argument("--max-time-per-coin", type=int, default=300,
-                        help="코인당 최대 수집 시간(초) (기본: 300)")
-    args = parser.parse_args()
+# =========================================================
+# 1분봉 수집
+# =========================================================
+def fetch_1m_candles(market, total_count, max_time=240, progress_prefix=""):
+    """1분봉 전용 수집기
+    - 최대 200개씩 페이지네이션
+    - max_time 초과하면 부분수집 반환
+    - 요청 간 0.35초 대기 (429 방지)
+    """
+    result = []
+    to = None
+    start_ts = time.time()
+    fails = 0
+    target_pages = math.ceil(total_count / 200)
 
-    # 7일 초과 시 경고
-    if args.days > 7:
-        tg(f"[경고] 1분봉 {args.days}일은 API 호출이 매우 많습니다. 7일로 제한합니다.")
-        args.days = 7
+    while len(result) < total_count:
+        if time.time() - start_ts > max_time:
+            print(f"{progress_prefix}시간초과 {max_time}초 → {len(result)}개까지 반환")
+            break
 
-    total_per_day = 1440  # 1분봉: 하루 1440개
-    total_count = total_per_day * args.days
+        remain = total_count - len(result)
+        count = min(200, remain)
+        params = {"market": market, "count": count}
+        if to:
+            params["to"] = to
 
-    tg(f"[1분봉 수집] 시작: {args.days}일, {args.coins}코인, 코인당 ~{total_count}개")
+        data = safe_get(f"{BASE}/candles/minutes/1", params=params, retries=6, timeout=12)
 
-    markets = get_top_markets(args.coins)
+        if not data:
+            fails += 1
+            print(f"{progress_prefix}페이지 실패 {fails}/5")
+            if fails >= 5:
+                break
+            time.sleep(1.0 + fails * 0.5)
+            continue
+
+        fails = 0
+        result.extend(data)
+        got = len(data)
+        page_no = math.ceil(len(result) / 200)
+        print(f"{progress_prefix}{len(result):4d}/{total_count} 수집 (이번 {got}개, page {page_no}/{target_pages})")
+
+        if got < 200:
+            break
+
+        to = data[-1]["candle_date_time_utc"] + "Z"
+        time.sleep(0.35)
+
+    result.sort(key=lambda x: x["candle_date_time_kst"])
+    return result
+
+def collect_1m(days=7, top_n=30, force=False, specific_markets=None, max_time_per_coin=240):
+    """1분봉만 수집. 7일 이내 권장."""
+    if days > 7:
+        tg(f"[경고] 1분봉은 7일 초과 요청이 비효율적이라 7일로 제한")
+        days = 7
+
+    need_count = 1440 * days
+
+    if specific_markets:
+        markets = [m.strip().upper() for m in specific_markets if m.strip()]
+    else:
+        markets = get_top_markets(top_n)
+
     if not markets:
-        tg("[오류] 종목 조회 실패")
-        return
+        tg("[오류] 대상 마켓 조회 실패")
+        return []
 
     coins = [m.split("-")[1] for m in markets]
-    tg(f"종목({len(coins)}): {', '.join(coins)}")
+    tg(f"[1분봉 수집 시작] days={days}, need={need_count}개, coins={len(coins)}")
+    tg(f"대상: {', '.join(coins)}")
 
-    t0 = time.time()
-    collected = 0
+    started = time.time()
+    done = 0
     skipped = 0
     failed = 0
 
-    for i, (market, coin) in enumerate(zip(markets, coins)):
-        # 이미 수집된 코인 건너뛰기
-        if args.resume and is_collected(coin, total_count // 2):
-            skipped += 1
-            print(f"  [{i+1}/{len(coins)}] {coin} 스킵 (이미 수집됨)")
-            continue
+    for idx, market in enumerate(markets, start=1):
+        coin = market.split("-")[1]
+        prefix = f"[{idx}/{len(markets)}] {coin} | "
 
-        print(f"  [{i+1}/{len(coins)}] {coin} 수집 시작...")
         try:
-            candles = fetch_1m_candles(market, total_count,
-                                       max_time=args.max_time_per_coin)
-            if candles and len(candles) >= 100:
-                fpath = save_coin(coin, candles)
-                tg(f"  [{i+1}/{len(coins)}] {coin}: {len(candles)}개 저장")
-                collected += 1
+            saved = get_saved_count_1m(coin)
+            if (not force) and is_collected_1m(coin, need_count):
+                skipped += 1
+                tg(f"{prefix}스킵 (기존 {saved}개)")
+                continue
+
+            tg(f"{prefix}수집 시작 (기존 {saved}개)")
+            candles = fetch_1m_candles(
+                market=market,
+                total_count=need_count,
+                max_time=max_time_per_coin,
+                progress_prefix=f"{coin}: ",
+            )
+
+            if candles:
+                save_coin_1m(coin, candles)
+                done += 1
+                tg(f"{prefix}저장 완료 ({len(candles)}개)")
             else:
-                tg(f"  [{i+1}/{len(coins)}] {coin}: 데이터 부족 ({len(candles) if candles else 0}개)")
                 failed += 1
+                tg(f"{prefix}수집 실패 (0개)")
 
             del candles
             gc.collect()
+            time.sleep(0.6)
 
         except Exception as e:
-            tg(f"  [{i+1}/{len(coins)}] {coin} 에러: {e}")
             failed += 1
+            tg(f"{prefix}예외: {e}")
 
-        # 코인 간 대기 (API 부하 분산)
-        if i < len(coins) - 1:
-            time.sleep(1)
+        if idx % 5 == 0 or idx == len(markets):
+            elapsed = time.time() - started
+            avg = elapsed / idx
+            remain = avg * (len(markets) - idx)
+            tg(
+                f"[진행] {idx}/{len(markets)} | 완료 {done} | 스킵 {skipped} | 실패 {failed} "
+                f"| 경과 {elapsed/60:.1f}분 | 남은 예상 {remain/60:.1f}분"
+            )
 
-        # 5코인마다 진행 상황 보고
-        if (i + 1) % 5 == 0:
-            elapsed = time.time() - t0
-            remaining = len(coins) - i - 1
-            eta = elapsed / (i + 1) * remaining if i > 0 else 0
-            tg(f"  진행: {i+1}/{len(coins)} (수집:{collected} 스킵:{skipped} 실패:{failed}) "
-               f"{elapsed/60:.1f}분 경과, ~{eta/60:.1f}분 남음")
+    total_elapsed = time.time() - started
+    tg(
+        f"[1분봉 수집 완료] 완료={done}, 스킵={skipped}, 실패={failed}, "
+        f"총 {total_elapsed/60:.1f}분"
+    )
 
-    elapsed = time.time() - t0
-    tg(f"\n[1분봉 수집 완료] {elapsed/60:.1f}분 소요")
-    tg(f"  수집: {collected}코인 | 스킵: {skipped}코인 | 실패: {failed}코인")
-
-    # 수집 결과 요약
+    # 최종 요약: 전체 1분봉 파일 현황
     if os.path.exists(DATA_DIR):
         files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
         total_candles = 0
@@ -298,9 +315,44 @@ def main():
             try:
                 with open(os.path.join(DATA_DIR, f)) as fp:
                     total_candles += json.load(fp).get("count", 0)
-            except:
+            except Exception:
                 pass
         tg(f"  1분봉 파일: {len(files_1m)}개 | 총 캔들: {total_candles:,}개")
+
+    return coins
+
+# =========================================================
+# 메인
+# =========================================================
+def main():
+    _acquire_lock()
+
+    parser = argparse.ArgumentParser(description="업비트 1분봉 전용 수집기")
+    parser.add_argument("--days", type=int, default=7,
+                        help="수집 일수 (기본: 7, 최대: 7)")
+    parser.add_argument("--coins", type=int, default=30,
+                        help="상위 거래대금 기준 코인 수 (기본: 30)")
+    parser.add_argument("--force", action="store_true",
+                        help="기존 파일 있어도 강제 재수집")
+    parser.add_argument("--markets", type=str, default="",
+                        help="직접 지정할 마켓. 예: KRW-BTC,KRW-ETH,KRW-XRP")
+    parser.add_argument("--max-time-per-coin", type=int, default=240,
+                        help="코인당 최대 수집 시간(초) (기본: 240)")
+    args = parser.parse_args()
+
+    tg("[시작] 1분봉 전용 수집기 실행")
+
+    specific_markets = []
+    if args.markets.strip():
+        specific_markets = [x.strip() for x in args.markets.split(",") if x.strip()]
+
+    collect_1m(
+        days=args.days,
+        top_n=args.coins,
+        force=args.force,
+        specific_markets=specific_markets if specific_markets else None,
+        max_time_per_coin=args.max_time_per_coin,
+    )
 
 
 if __name__ == "__main__":
@@ -308,8 +360,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         _release_lock()
-        tg("\n[중단] 사용자 취소")
+        tg("[중단] 사용자 중단")
     except Exception as e:
         import traceback
         _release_lock()
-        tg(f"[에러] {e}\n{traceback.format_exc()[-500:]}")
+        tg(f"[에러] {e}\n{traceback.format_exc()[-800:]}")
