@@ -46,7 +46,7 @@ MIN_TRADES = 100
 TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 MAX_HOLD_1M = 10
-MAX_SIGS_PER_COIN = 300
+MAX_SIGS_PER_COIN = 500
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -68,6 +68,13 @@ SIG_TPSL = {
     "5m_양봉":       {"tp": 1.0, "sl": 0.7},
     "20봉_고점돌파":  {"tp": 1.2, "sl": 0.8},
     "거래량3배":      {"tp": 0.8, "sl": 0.6},
+    "BB하단반등":     {"tp": 1.2, "sl": 0.8},
+    "RSI과매도반등":  {"tp": 1.0, "sl": 0.7},
+    "MACD골든":      {"tp": 1.0, "sl": 0.8},
+    "EMA정배열진입":  {"tp": 1.5, "sl": 1.0},
+    "망치형반전":     {"tp": 1.2, "sl": 0.8},
+    "5m_큰양봉":     {"tp": 0.8, "sl": 0.6},
+    "쌍바닥":        {"tp": 1.5, "sl": 1.0},
 }
 EXIT_CONFIGS = [
     ("FIX_TP0.5/SL0.5", "fix", 0.5, 0.5, 0, 0),
@@ -287,27 +294,34 @@ def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
                "from":deduped[0]["t"],"to":deduped[-1]["t"],
                "candles":deduped,
                "saved_at":datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")}
-    with open(fpath, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+    _atomic_json_write(fpath, payload)
     count = len(deduped)
     del deduped, payload; gc.collect()
     return count
+
+def _atomic_json_write(fpath, obj):
+    """원자적 JSON 쓰기 — 중간에 죽어도 파일 안 깨짐"""
+    tmp = fpath + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, fpath)  # 원자적 교체
 
 def save_coin(coin, unit, candles):
     os.makedirs(DATA_DIR, exist_ok=True)
     comp = [compress(c) for c in candles]
     fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
-    with open(fpath,"w",encoding="utf-8") as f:
-        json.dump({"coin":coin,"unit":unit,"count":len(comp),
+    _atomic_json_write(fpath, {"coin":coin,"unit":unit,"count":len(comp),
                     "from":comp[0]["t"] if comp else "",
                     "to":comp[-1]["t"] if comp else "",
-                    "candles":comp}, f, ensure_ascii=False)
+                    "candles":comp})
 
 def is_collected(coin, unit, min_count=100):
     fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
     if not os.path.exists(fpath): return False
     try:
-        with open(fpath) as f: return json.load(f).get("count",0) >= min_count
+        data = _safe_json_load(fpath)
+        if data is None: return False
+        return data.get("count",0) >= min_count
     except: return False
 
 def collect(days=30, top_n=30):
@@ -366,10 +380,41 @@ def collect(days=30, top_n=30):
 # ================================================================
 # PART 2: 지표 함수
 # ================================================================
+def _safe_json_load(fpath):
+    """JSON 로드 — 깨진 파일 자동 복구 (Extra data 등)"""
+    try:
+        with open(fpath, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"[JSON복구] {os.path.basename(fpath)}: {e}")
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                raw = f.read()
+            # Extra data → 첫 번째 유효 JSON만 파싱
+            decoder = json.JSONDecoder()
+            obj, idx = decoder.raw_decode(raw)
+            # 복구된 데이터로 덮어쓰기
+            tmp = fpath + ".fix"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+            os.replace(tmp, fpath)
+            print(f"[JSON복구] {os.path.basename(fpath)} 복구 성공")
+            return obj
+        except Exception as e2:
+            print(f"[JSON삭제] {os.path.basename(fpath)} 복구 실패, 삭제: {e2}")
+            try: os.remove(fpath)
+            except: pass
+            return None
+    except Exception as e:
+        print(f"[JSON에러] {os.path.basename(fpath)}: {e}")
+        return None
+
 def load_candles(coin, unit):
     fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
     if not os.path.exists(fpath): return []
-    with open(fpath, encoding="utf-8") as f: return json.load(f).get("candles",[])
+    data = _safe_json_load(fpath)
+    if data is None: return []
+    return data.get("candles", [])
 
 def get_saved_coins():
     if not os.path.exists(DATA_DIR): return []
@@ -645,6 +690,112 @@ def process_coin(coin, btc_regime, dist_acc):
         if ei-last<20: continue
         last=ei; sigs.append((i, ei, bar))
     raw_signals["거래량3배"] = sigs
+
+    # ── 추가 신호유형 (결과 다양성) ──
+
+    # BB하단반등: BB20 < 10 && 양봉
+    sigs=[]; last=-15
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        bar=c5[i]
+        if bar["c"]<=bar["o"]: continue
+        cl_arr=[c5[j]["c"] for j in range(max(0,i-24),i+1)]
+        bp,_=_bb(cl_arr,20)
+        if bp>=10: continue  # BB 하단 근처만
+        ei=i+1
+        if ei-last<15: continue
+        last=ei; sigs.append((i, ei, bar))
+    raw_signals["BB하단반등"] = sigs
+
+    # RSI과매도반등: RSI14 < 30이었다가 30 이상으로 올라온 시점
+    sigs=[]; last=-15
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        bar=c5[i]
+        cl_arr=[c5[j]["c"] for j in range(max(0,i-19),i+1)]
+        cl_prev=[c5[j]["c"] for j in range(max(0,i-20),i)]
+        r_now=_rsi(cl_arr,14); r_prev=_rsi(cl_prev,14)
+        if not (r_prev<30 and r_now>=30): continue
+        ei=i+1
+        if ei-last<15: continue
+        last=ei; sigs.append((i, ei, bar))
+    raw_signals["RSI과매도반등"] = sigs
+
+    # MACD골든크로스: MACD선이 시그널선 상향돌파
+    sigs=[]; last=-20
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        cl_now=[c5[j]["c"] for j in range(max(0,i-34),i+1)]
+        cl_prev=[c5[j]["c"] for j in range(max(0,i-35),i)]
+        if len(cl_now)<35 or len(cl_prev)<35: continue
+        ef_n,es_n=_ema(cl_now,12),_ema(cl_now,26)
+        ef_p,es_p=_ema(cl_prev,12),_ema(cl_prev,26)
+        if not (ef_p<=es_p and ef_n>es_n): continue  # 교차
+        ei=i+1
+        if ei-last<20: continue
+        last=ei; sigs.append((i, ei, c5[i]))
+    raw_signals["MACD골든"] = sigs
+
+    # EMA정배열진입: EMA 5>10>20>50 정배열 첫 진입 (이전 봉은 비정배열)
+    sigs=[]; last=-30
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        cl_now=[c5[j]["c"] for j in range(max(0,i-54),i+1)]
+        if len(cl_now)<50: continue
+        e5,e10,e20,e50=_ema(cl_now,5),_ema(cl_now,10),_ema(cl_now,20),_ema(cl_now,50)
+        if not (e5>e10>e20>e50): continue
+        cl_prev=[c5[j]["c"] for j in range(max(0,i-55),i)]
+        if len(cl_prev)<50: continue
+        pe5,pe10,pe20,pe50=_ema(cl_prev,5),_ema(cl_prev,10),_ema(cl_prev,20),_ema(cl_prev,50)
+        if pe5>pe10>pe20>pe50: continue  # 이미 정배열이면 스킵
+        ei=i+1
+        if ei-last<30: continue
+        last=ei; sigs.append((i, ei, c5[i]))
+    raw_signals["EMA정배열진입"] = sigs
+
+    # 망치형반전: 망치형 캔들 + 직전 3봉 하락
+    sigs=[]; last=-15
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        bar=c5[i]
+        o,h,l,c=bar["o"],bar["h"],bar["l"],bar["c"]
+        rng=h-l if h!=l else 0.0001
+        body=abs(c-o); lw=min(o,c)-l; uw=h-max(o,c)
+        if not (lw>body*2 and uw<body*0.5 and body>0): continue
+        # 직전 3봉 하락
+        if not (c5[i-1]["c"]<c5[i-1]["o"] and c5[i-2]["c"]<c5[i-2]["o"]): continue
+        ei=i+1
+        if ei-last<15: continue
+        last=ei; sigs.append((i, ei, bar))
+    raw_signals["망치형반전"] = sigs
+
+    # 5m_큰양봉: 평균 대비 2배 이상 큰 양봉 (body 기준)
+    sigs=[]; last=-20
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        bar=c5[i]
+        if bar["c"]<=bar["o"]: continue
+        body=bar["c"]-bar["o"]
+        avg_body=sum(abs(c5[j]["c"]-c5[j]["o"]) for j in range(max(0,i-20),i))/20
+        if avg_body==0 or body<avg_body*2: continue
+        ei=i+1
+        if ei-last<20: continue
+        last=ei; sigs.append((i, ei, bar))
+    raw_signals["5m_큰양봉"] = sigs
+
+    # 쌍바닥: 최근 20봉 내 비슷한 저점 2개
+    sigs=[]; last=-30
+    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
+        bar=c5[i]
+        if bar["c"]<=bar["o"]: continue
+        lows=[(j, c5[j]["l"]) for j in range(max(0,i-20),i)]
+        if len(lows)<10: continue
+        min1_j,min1_v=min(lows, key=lambda x:x[1])
+        lows2=[(j,v) for j,v in lows if abs(j-min1_j)>3]
+        if not lows2: continue
+        min2_j,min2_v=min(lows2, key=lambda x:x[1])
+        spread=abs(min1_v-min2_v)/max(min1_v,0.0001)*100
+        if spread>0.5: continue  # 0.5% 이내 비슷한 저점
+        if bar["l"]>max(min1_v,min2_v): pass  # 현재봉이 저점 위
+        else: continue
+        ei=i+1
+        if ei-last<30: continue
+        last=ei; sigs.append((i, ei, bar))
+    raw_signals["쌍바닥"] = sigs
 
     total_sigs = sum(len(v) for v in raw_signals.values())
     tg(f"    {coin} 신호: {total_sigs}개")
