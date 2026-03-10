@@ -189,11 +189,17 @@ def safe_get(url, params=None, retries=4, timeout=10):
     return None
 
 def _atomic_json_write(fpath, obj):
-    """원자적 JSON 쓰기 — 중간에 죽어도 파일 안 깨짐"""
-    tmp = fpath + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False)
-    os.replace(tmp, fpath)  # 원자적 교체
+    """원자적 JSON 쓰기 — PID 포함 tmp로 동시실행 충돌 방지"""
+    tmp = f"{fpath}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, fpath)  # 원자적 교체
+    except Exception:
+        try: os.remove(tmp)
+        except: pass
+        raise
 
 def _safe_json_load(fpath):
     """JSON 로드 — 깨진 파일 자동 복구 (Extra data 등)"""
@@ -267,14 +273,26 @@ def fetch_candles(unit, market, total_count, max_time=120):
     return result
 
 def _chunk_path_1m(coin, chunk_idx):
-    return os.path.join(DATA_DIR, f".{coin}_1m_chunk{chunk_idx}.tmp")
+    return os.path.join(DATA_DIR, f".{coin}_1m_p{os.getpid()}_chunk{chunk_idx}.tmp")
 
 def _cleanup_1m_chunks(coin, max_chunks=200):
+    """이 프로세스의 청크 + 오래된 고아 청크 정리"""
+    # 이 프로세스 청크 삭제
     for ci in range(max_chunks):
         cp = _chunk_path_1m(coin, ci)
         if os.path.exists(cp):
             try: os.remove(cp)
             except: pass
+    # 고아 청크 (다른 프로세스가 남긴 것) 정리
+    if os.path.exists(DATA_DIR):
+        for f in os.listdir(DATA_DIR):
+            if f.startswith(f".{coin}_1m_p") and f.endswith(".tmp"):
+                fp = os.path.join(DATA_DIR, f)
+                try:
+                    age = time.time() - os.path.getmtime(fp)
+                    if age > 1800:  # 30분 이상 된 고아 청크
+                        os.remove(fp)
+                except: pass
 
 def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
     """1분봉 30일치 청크 수집 (메모리 안전). 43200개도 OK."""
