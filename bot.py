@@ -53,7 +53,8 @@ TOTAL_COST = FEE_RATE * 2 + SLIPPAGE
 MIN_TRADES = 100
 TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
-MAX_SIGS_PER_COIN = 300   # 메모리 안전: 코인당 최대 신호 수
+MAX_HOLD_1M = 10           # 공통 시간제한: 10분봉 (1분봉 기준)
+MAX_SIGS_PER_COIN = 300    # 메모리 안전: 코인당 최대 신호 수
 
 # 신호 dict에 저장할 핵심 피처 (조건 필터용)
 # 나머지 전체 피처는 분포 통계를 스트리밍으로 계산
@@ -73,7 +74,17 @@ ALL_TFS = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
 # 분석에 사용할 TF (1분봉 포함 — 실제 봇이 1분봉으로 진입)
 ANALYSIS_TFS = [1, 3, 5, 15, 30, 60]
 
-# 핵심 exit 전략만 (15개로 축소)
+# ── 시그널별 TP/SL 고정 테이블 (엄격 검증 모드) ──
+# 탐색용 EXIT_CONFIGS와 별도로, 시그널 타입에 맞는 고정 TP/SL
+SIG_TPSL = {
+    "15m_눌림반전":  {"tp": 1.5, "sl": 1.0},
+    "15m_눌림+돌파": {"tp": 1.6, "sl": 1.0},
+    "5m_양봉":       {"tp": 1.0, "sl": 0.7},
+    "20봉_고점돌파":  {"tp": 1.2, "sl": 0.8},
+    "거래량3배":      {"tp": 0.8, "sl": 0.6},
+}
+
+# 탐색용 exit 전략 (기존)
 EXIT_CONFIGS = [
     ("FIX_TP0.5/SL0.5", "fix", 0.5, 0.5, 0, 0),
     ("FIX_TP0.7/SL0.7", "fix", 0.7, 0.7, 0, 0),
@@ -635,12 +646,20 @@ def process_coin(coin, btc_regime, dist_acc):
                         tf_feat_cache[bar["t"]][fk] = fv
                 del all_feats
 
-    # 4단계: 신호 → 결과 dict (핵심 피처만)
+    # 4단계: 1분봉 로드 (엄격 청산 판정용)
+    c1 = load_candles(coin, 1)
+    c1_map = {}
+    if c1 and len(c1) > 100:
+        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
+    use_1m = len(c1_map) > 100
+
+    # 5단계: 신호 → 결과 dict (핵심 피처만)
     results = {}
     cost_pct = TOTAL_COST * 100
 
     for stype, sigs_raw in raw_signals.items():
         built = []
+        tpsl = SIG_TPSL.get(stype, {"tp": 1.0, "sl": 0.7})
         for si5, ei, bar in sigs_raw:
             entry = c5[ei]["o"]
             if entry <= 0: continue
@@ -652,6 +671,7 @@ def process_coin(coin, btc_regime, dist_acc):
             dip3=1 if si5>=3 and c5[si5-3]["c"]>c5[si5-1]["c"] else 0
             brk=1 if si5>=1 and bar["c"]>c5[si5-1]["h"] else 0
 
+            # MFE/MAE (5분봉 기준)
             mb=min(MAX_HOLD_BARS, len(c5)-ei-1)
             mfe,mae,mfe_bar=0,0,0
             for j in range(1,mb+1):
@@ -661,6 +681,13 @@ def process_coin(coin, btc_regime, dist_acc):
                 if hp>mfe: mfe=hp; mfe_bar=j
                 if lp<mae: mae=lp
 
+            # ── 엄격 판정: 1분봉 기준 + 10분 제한 + 시그널별 TP/SL ──
+            strict = _sim_strict_1m(c1, c1_map, c5, ei, entry,
+                                     tpsl["tp"], tpsl["sl"], cost_pct,
+                                     bar["t"]) if use_1m else \
+                     _sim_strict_5m(c5, ei, entry, tpsl["tp"], tpsl["sl"], cost_pct)
+
+            # ── 탐색용 EXIT_CONFIGS (5분봉) ──
             exits = {}
             for ename, etype, tp, sl, arm, trail_or_n in EXIT_CONFIGS:
                 if etype=="fix":
@@ -679,15 +706,81 @@ def process_coin(coin, btc_regime, dist_acc):
             sig = {"coin":coin,"time":bar["t"],"hour":hour,"entry":entry,
                    "regime":regime,"dip3":dip3,"brk":brk,
                    "mfe":round(mfe,4),"mae":round(mae,4),"mfe_bar":mfe_bar,
-                   "exits":exits}
-            # 핵심 TF 피처만 병합 (COND_KEYS만)
+                   "exits":exits, "strict":strict, "stype_tpsl":tpsl}
             sig.update(tf_feat_cache.get(bar["t"], {}))
             built.append(sig)
         results[stype] = built
 
-    del c5, c15, tf_feat_cache, raw_signals
+    del c5, c15, c1, c1_map, tf_feat_cache, raw_signals
     gc.collect()
     return results
+
+
+def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost, sig_time):
+    """1분봉 기준 엄격 판정: TP/SL + 10분 시간제한
+    반환: {"pnl": float, "result": "TP"|"SL"|"TIMEOUT"|"BOTH_SL", "bars": int}
+    BOTH_SL: 같은 1분봉에서 TP/SL 동시 충족 → SL 처리 (보수적)
+    """
+    # 진입 시간 = c5[ei5]의 시간, 1분봉에서 해당 위치 찾기
+    entry_time = c5[ei5]["t"][:16]
+    start_idx = c1_map.get(entry_time)
+    if start_idx is None:
+        # 1분봉에서 진입 시간 못 찾음 → 5분봉 fallback
+        r = _sim_strict_5m(c5, ei5, entry, tp, sl, cost)
+        r["src"] = "5m_fb"
+        return r
+
+    max_bars = min(MAX_HOLD_1M, len(c1) - start_idx - 1)
+    if max_bars <= 0:
+        return {"pnl": 0.0, "result": "TIMEOUT", "bars": 0, "src": "1m"}
+
+    for j in range(max_bars + 1):  # j=0 부터: 진입봉 고가/저가도 체크
+        fc = c1[start_idx + j]
+        hp = (fc["h"] - entry) / entry * 100
+        lp = (fc["l"] - entry) / entry * 100
+
+        sl_hit = lp <= -sl
+        tp_hit = hp >= tp
+
+        if sl_hit and tp_hit:
+            return {"pnl": round(-sl - cost, 4), "result": "BOTH_SL", "bars": j, "src": "1m"}
+        if sl_hit:
+            return {"pnl": round(-sl - cost, 4), "result": "SL", "bars": j, "src": "1m"}
+        if tp_hit:
+            return {"pnl": round(tp - cost, 4), "result": "TP", "bars": j, "src": "1m"}
+
+    # 시간제한 도달 → 마지막 1분봉 종가로 청산
+    last_c = c1[start_idx + max_bars]["c"]
+    raw = (last_c - entry) / entry * 100
+    return {"pnl": round(raw - cost, 4), "result": "TIMEOUT", "bars": max_bars, "src": "1m"}
+
+
+def _sim_strict_5m(c5, ei5, entry, tp, sl, cost):
+    """5분봉 fallback 엄격 판정 (1분봉 없을 때)
+    2봉 = 10분 시간제한, j=0 포함 (진입봉 고/저 체크)
+    """
+    max_bars = min(2, len(c5) - ei5 - 1)
+    if max_bars <= 0:
+        return {"pnl": 0.0, "result": "TIMEOUT", "bars": 0, "src": "5m"}
+
+    for j in range(max_bars + 1):  # j=0 부터: 진입봉 포함
+        fc = c5[ei5 + j]
+        hp = (fc["h"] - entry) / entry * 100
+        lp = (fc["l"] - entry) / entry * 100
+
+        sl_hit = lp <= -sl
+        tp_hit = hp >= tp
+
+        if sl_hit and tp_hit:
+            return {"pnl": round(-sl - cost, 4), "result": "BOTH_SL", "bars": j, "src": "5m"}
+        if sl_hit:
+            return {"pnl": round(-sl - cost, 4), "result": "SL", "bars": j, "src": "5m"}
+        if tp_hit:
+            return {"pnl": round(tp - cost, 4), "result": "TP", "bars": j, "src": "5m"}
+
+    last_c = c5[ei5 + max_bars]["c"]
+    raw = (last_c - entry) / entry * 100
+    return {"pnl": round(raw - cost, 4), "result": "TIMEOUT", "bars": max_bars, "src": "5m"}
 
 
 def _sim_fix(c5,ei,entry,tp,sl,mb,cost):
@@ -767,9 +860,64 @@ def generate_report(all_results, dist_acc):
     dk="TRAIL_SL0.7/A0.3/T0.2"
 
     # ============================================================
-    # [1] 신호유형 비교 (전체 요약)
+    # [0] 엄격 판정 — 시그널별 고정 TP/SL + 1분봉 + 10분제한
     # ============================================================
-    L.append(f"\n[1] 신호유형 비교 ({dk})")
+    L.append(f"\n[0] 엄격 판정 (1분봉 기준, 10분 제한, 시그널별 고정 TP/SL)")
+    L.append("-"*65)
+    L.append(f"  {'신호유형':<14s} {'TP/SL':>7s} {'n':>5s} {'EV':>8s} {'Hit%':>5s} {'WR%':>5s} {'TP':>5s} {'SL':>5s} {'TO':>5s} {'양면':>4s} {'봉':>4s} {'1m':>4s} {'5m':>4s}")
+    L.append(f"  {'-'*95}")
+
+    total_1m = total_5m = total_5m_fb = 0
+    for st, sigs in all_results.items():
+        if not sigs: continue
+        stricts = [s["strict"] for s in sigs if "strict" in s and s["strict"]]
+        if not stricts: continue
+        tpsl = SIG_TPSL.get(st, {"tp":1.0,"sl":0.7})
+
+        n = len(stricts)
+        pnls = [s["pnl"] for s in stricts]
+        ev = sum(pnls) / n if n else 0
+        # WR = pnl > 0 비율 (TIMEOUT 포함), HitRate = TP 건수 비율
+        wins = sum(1 for p in pnls if p > 0)
+        wr = wins / n * 100 if n else 0
+
+        tp_cnt = sum(1 for s in stricts if s["result"] == "TP")
+        sl_cnt = sum(1 for s in stricts if s["result"] == "SL")
+        to_cnt = sum(1 for s in stricts if s["result"] == "TIMEOUT")
+        both_cnt = sum(1 for s in stricts if s["result"] == "BOTH_SL")
+        avg_bars = sum(s["bars"] for s in stricts) / n if n else 0
+        hit_rate = tp_cnt / n * 100 if n else 0
+
+        # 1m vs 5m fallback 사용 건수
+        n_1m = sum(1 for s in stricts if s.get("src") == "1m")
+        n_5m = sum(1 for s in stricts if s.get("src") in ("5m", "5m_fb"))
+        total_1m += n_1m; total_5m += n_5m
+
+        tp_pct = tp_cnt / n * 100
+        sl_pct = sl_cnt / n * 100
+        to_pct = to_cnt / n * 100
+        both_pct = both_cnt / n * 100
+
+        star = " ***" if ev > 0 and n >= MIN_TRADES else ""
+        L.append(f"  {st:<14s} {tpsl['tp']:+.1f}/{tpsl['sl']:-.1f} {n:5d} {ev:+8.4f}% {hit_rate:5.1f} {wr:5.1f} {tp_pct:5.1f} {sl_pct:5.1f} {to_pct:5.1f} {both_pct:4.1f} {avg_bars:4.1f} {n_1m:4d} {n_5m:4d}{star}")
+
+        # Train/Test 분리
+        si = int(n * TRAIN_RATIO)
+        for nm, sub_s in [("TR", stricts[:si]), ("TE", stricts[si:])]:
+            if len(sub_s) < 10: continue
+            sn = len(sub_s)
+            sev = sum(s["pnl"] for s in sub_s) / sn
+            swr = sum(1 for s in sub_s if s["pnl"] > 0) / sn * 100
+            s_hit = sum(1 for s in sub_s if s["result"] == "TP") / sn * 100
+            L.append(f"    {nm}: n={sn:4d} EV={sev:+.4f}% Hit={s_hit:.1f}% WR={swr:.1f}%")
+
+    L.append(f"  ── 데이터소스: 1분봉={total_1m}건, 5분봉fallback={total_5m}건 ({total_1m/(total_1m+total_5m)*100:.0f}%/{ total_5m/(total_1m+total_5m)*100:.0f}%)" if (total_1m+total_5m) > 0 else "")
+    L.append(f"  ── Hit%=TP적중률, WR%=양수PnL비율(TIMEOUT포함)")
+
+    # ============================================================
+    # [1] 탐색용 신호유형 비교 (기존 EXIT_CONFIGS)
+    # ============================================================
+    L.append(f"\n[1] 탐색용 비교 ({dk})")
     L.append("-"*65)
     ranked=[]
     for st,sigs in all_results.items():
@@ -814,12 +962,26 @@ def generate_report(all_results, dist_acc):
         ("green","양봉%"),
     ]
 
+    # 핵심 TF만 분포 상세 표시 (5m, 15m, 1h), 나머지는 요약
+    detail_tfs = {5, 15, 60}
+    # 핵심 지표만 (요약용)
+    summary_indicators = {
+        "rsi14","bb20","stoch_k","macd_x","adx","mfi","ema_al",
+        "disp20","vr5","m3","m10","pos20","vol20","hammer","engulf",
+    }
+
     for tf in ANALYSIS_TFS:
         has_data = (tf, "rsi14") in dist_acc and len(dist_acc[(tf,"rsi14")])>0
         if not has_data: continue
 
-        L.append(f"\n  [{tf}분봉] 지표 분포 (n={len(dist_acc.get((tf,'rsi14'),[]))}):")
-        for feat_key, feat_name in key_indicators:
+        n_data = len(dist_acc.get((tf,"rsi14"),[]))
+        is_detail = tf in detail_tfs
+        show_indicators = key_indicators if is_detail else \
+            [(k,n) for k,n in key_indicators if k in summary_indicators]
+
+        mode = "상세" if is_detail else "요약"
+        L.append(f"\n  [{tf}분봉] 지표 분포 [{mode}] (n={n_data}):")
+        for feat_key, feat_name in show_indicators:
             vals = dist_acc.get((tf, feat_key), [])
             if not vals: continue
 
@@ -1060,11 +1222,17 @@ def generate_report(all_results, dist_acc):
 # ================================================================
 # 메인
 # ================================================================
-def _has_enough_data(min_coins=10):
-    """수집 데이터 충분한지 확인"""
+def _has_enough_data(min_coins=10, check_1m=False):
+    """수집 데이터 충분한지 확인. check_1m=True면 1분봉도 체크"""
     if not os.path.exists(DATA_DIR): return False
-    files = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
-    return len(files) >= min_coins
+    files_5m = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
+    if len(files_5m) < min_coins:
+        return False
+    if check_1m:
+        files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
+        if len(files_1m) < min_coins:
+            return False  # 1m 없으면 수집 필요
+    return True
 
 def main():
     _acquire_lock()
@@ -1077,8 +1245,8 @@ def main():
     args = parser.parse_args()
     t0 = time.time()
 
-    # 데이터 있으면 자동 수집 스킵
-    if not args.skip_collect and _has_enough_data():
+    # 데이터 있으면 자동 수집 스킵 (--include-1m이면 1m 데이터도 확인)
+    if not args.skip_collect and _has_enough_data(check_1m=args.include_1m):
         tg("[자동] 기존 데이터 감지 → 수집 스킵 (강제수집: --days 옵션으로)")
         args.skip_collect = True
 
