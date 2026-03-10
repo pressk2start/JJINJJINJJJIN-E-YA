@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-업비트 신호 연구 v3.1 — 메모리 최적화
+업비트 신호 연구 v3.2 — 지표확장+리포트강화
 ======================================
 - 수집: 1m,3m,5m,15m,30m,1h (6TF)
 - 분석: TF별 순차 로드→피처추출→해제 (메모리 안전)
-- 지표: TF당 ~35개 피처, 총 200+개
+- 지표: TF당 ~45개 피처, 총 270+개
 - 진입: 다음 캔들 시가 (미래 누출 없음)
 - 수수료 0.18% 반영
 - EV/PF/MDD/손익비 중심 평가
@@ -32,7 +32,9 @@ MIN_TRADES = 100
 TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 
-TIMEFRAMES = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
+# 수집 타임프레임 (1분봉은 API 부하가 크므로 기본 제외, --include-1m 옵션으로 활성화)
+COLLECT_TFS = [(3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
+ALL_TFS = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
 # 분석에 사용할 TF (1분봉 포함 — 실제 봇이 1분봉으로 진입)
 ANALYSIS_TFS = [1, 3, 5, 15, 30, 60]
 
@@ -81,14 +83,14 @@ def tg(msg):
                 timeout=10)
         except: pass
 
-def safe_get(url, params=None, retries=4, timeout=10):
+def safe_get(url, params=None, retries=2, timeout=8):
     for i in range(retries):
         try:
             r = requests.get(url, params=params, timeout=timeout)
             if r.status_code == 200: return r.json()
-            if r.status_code == 429: time.sleep(2 + i*2); continue
-            time.sleep(0.5 + i)
-        except: time.sleep(1 + i)
+            if r.status_code == 429: time.sleep(1 + i); continue
+            time.sleep(0.3)
+        except: time.sleep(0.5)
     return None
 
 # ================================================================
@@ -108,17 +110,27 @@ def get_top_markets(n=30):
     all_t.sort(key=lambda x: x.get("acc_trade_price_24h",0), reverse=True)
     return [t["market"] for t in all_t[:n]]
 
-def fetch_candles(unit, market, total_count):
+def fetch_candles(unit, market, total_count, max_time=120):
+    """캔들 수집. max_time초 초과하면 지금까지 수집한 것만 반환."""
     result, to = [], None
+    t0 = time.time()
+    fails = 0
     for page in range((total_count+199)//200):
+        if time.time()-t0 > max_time:
+            print(f"      시간초과 {max_time}초, {len(result)}개까지 수집")
+            break
         params = {"market": market, "count": min(200, total_count-len(result))}
         if to: params["to"] = to
         data = safe_get(f"{BASE}/candles/minutes/{unit}", params)
-        if not data: break
+        if not data:
+            fails += 1
+            if fails >= 3: break  # 연속 3회 실패 시 중단
+            continue
+        fails = 0
         result.extend(data)
         if len(data) < 200: break
         to = data[-1]["candle_date_time_utc"] + "Z"
-        time.sleep(0.12)
+        time.sleep(0.15)
     result.sort(key=lambda x: x["candle_date_time_kst"])
     return result
 
@@ -144,24 +156,25 @@ def is_collected(coin, unit, min_count=100):
         with open(fpath) as f: return json.load(f).get("count",0) >= min_count
     except: return False
 
-def collect(days=30, top_n=30):
-    tg(f"[수집] {days}일, {top_n}코인, {len(TIMEFRAMES)}개 타임프레임")
+def collect(days=30, top_n=30, include_1m=False):
+    tfs = ALL_TFS if include_1m else COLLECT_TFS
+    tg(f"[수집] {days}일, {top_n}코인, {len(tfs)}TF {'(1m포함)' if include_1m else '(1m제외)'}")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
     tg(f"종목: {', '.join(coins)}")
-    tg(f"타임프레임: {', '.join(f'{tf}m' for tf,_ in TIMEFRAMES)}")
+    tg(f"타임프레임: {', '.join(f'{tf}m' for tf,_ in tfs)}")
     t0 = time.time()
     for i, market in enumerate(markets):
         coin = market.split("-")[1]
         try:
-            for tf, per_day in TIMEFRAMES:
+            for tf, per_day in tfs:
                 total = per_day * days
                 if tf == 1 and days > 7: total = 1440*7
                 if is_collected(coin, tf, total//2): continue
                 candles = fetch_candles(tf, market, total)
                 if candles: save_coin(coin, tf, candles); del candles; gc.collect()
-                time.sleep(0.3)
+                time.sleep(0.2)
         except Exception as e:
             tg(f"[수집에러] {coin}: {e}")
             continue
@@ -291,22 +304,58 @@ def _vol(cl,p=20):
     s=cl[-p:]; m=sum(s)/p
     return (sum((x-m)**2 for x in s)/p)**0.5/m*100 if m else 0.0
 
+def _stoch_d(hi, lo, cl, kp=14, dp=3):
+    """Stochastic %D (SMA of %K)"""
+    if len(cl)<kp+dp: return 50.0
+    ks=[]
+    for i in range(dp):
+        end=len(cl)-dp+1+i
+        hh,ll=max(hi[end-kp:end]),min(lo[end-kp:end])
+        ks.append((cl[end-1]-ll)/(hh-ll)*100 if hh!=ll else 50.0)
+    return sum(ks)/dp
+
+def _macd_hist(cl):
+    """MACD 히스토그램 값"""
+    if len(cl)<35: return 0.0
+    ef=_ema(cl,12); es=_ema(cl,26)
+    macd=ef-es
+    # signal 근사 (9봉 EMA 대신 단순 비율)
+    price=cl[-1] if cl[-1]>0 else 1
+    return round(macd/price*100,4)
+
 def _patterns(candles, idx):
-    if idx<2: return {}
-    c=candles[idx]; p1=candles[idx-1]; p2=candles[idx-2]
+    if idx<3: return {}
+    c=candles[idx]; p1=candles[idx-1]; p2=candles[idx-2]; p3=candles[idx-3] if idx>=3 else p2
     o,h,l,cl=c["o"],c["h"],c["l"],c["c"]
     rng=h-l if h!=l else 0.0001
     body=abs(cl-o); uw=h-max(o,cl); lw=min(o,cl)-l
     pat = {}
+    # 망치형
     pat["hammer"]=1 if lw>body*2 and uw<body*0.5 and body>0 else 0
+    # 역망치형
+    pat["inv_ham"]=1 if uw>body*2 and lw<body*0.5 and body>0 else 0
+    # 도지
     pat["doji"]=1 if body/rng<0.1 else 0
+    # 감싸기 (불리시)
     p1b=abs(p1["c"]-p1["o"])
     pat["engulf"]=1 if p1["c"]<p1["o"] and cl>o and body>p1b and o<=p1["c"] and cl>=p1["o"] else 0
+    # 샛별 (morning star): 하락→작은봉→큰양봉
+    p2b=abs(p2["c"]-p2["o"]); p2rng=p2["h"]-p2["l"] if p2["h"]!=p2["l"] else 0.0001
+    pat["mstar"]=1 if (p3["c"]<p3["o"]) and (p2b/p2rng<0.3) and (cl>o) and (body>p1b) else 0
+    # 연속양봉
     cg=0
-    for k in range(idx, max(idx-5,-1),-1):
+    for k in range(idx, max(idx-6,-1),-1):
         if candles[k]["c"]>candles[k]["o"]: cg+=1
         else: break
     pat["cg"]=cg
+    # 연속음봉
+    cr=0
+    for k in range(idx, max(idx-6,-1),-1):
+        if candles[k]["c"]<candles[k]["o"]: cr+=1
+        else: break
+    pat["cr"]=cr
+    # 꼬리비율
+    pat["uw_pct"]=round(uw/rng*100,1)
     pat["lw_pct"]=round(lw/rng*100,1)
     pat["body_pct"]=round(body/rng*100,1)
     return pat
@@ -316,7 +365,7 @@ def _patterns(candles, idx):
 # PART 3: 코인별 분석 (메모리 안전)
 # ================================================================
 def extract_tf_features(candles, idx, pfx):
-    """단일 TF에서 피처 추출. candles[idx]까지만 사용."""
+    """단일 TF에서 피처 추출 (~45개). candles[idx]까지만 사용."""
     if idx < 55: return {}
     f = {}
     start = idx - 54
@@ -327,34 +376,63 @@ def extract_tf_features(candles, idx, pfx):
     if len(cl)<30: return {}
     price = cl[-1] if cl[-1]>0 else 1
 
+    # RSI (7,14,21)
     f[pfx+"rsi7"]=round(_rsi(cl,7),1)
     f[pfx+"rsi14"]=round(_rsi(cl,14),1)
     f[pfx+"rsi21"]=round(_rsi(cl,21),1)
+    # BB 위치+폭 (10,20)
     bp10,bw10=_bb(cl,10); bp20,bw20=_bb(cl,20)
-    f[pfx+"bb10"]=round(bp10,1); f[pfx+"bb20"]=round(bp20,1)
-    f[pfx+"bbw20"]=round(bw20,3)
+    f[pfx+"bb10"]=round(bp10,1); f[pfx+"bbw10"]=round(bw10,3)
+    f[pfx+"bb20"]=round(bp20,1); f[pfx+"bbw20"]=round(bw20,3)
+    # MACD 골든+히스토그램
     ef,es=_ema(cl,12),_ema(cl,26)
     f[pfx+"macd_x"]=1 if ef>es else 0
-    f[pfx+"stoch"]=round(_stoch(hi,lo,cl),1)
+    f[pfx+"macd_h"]=_macd_hist(cl)
+    # Stochastic %K, %D
+    f[pfx+"stoch_k"]=round(_stoch(hi,lo,cl),1)
+    f[pfx+"stoch_d"]=round(_stoch_d(hi,lo,cl),1)
+    # ATR (변동성)
     atr=_atr(hi,lo,cl); f[pfx+"atr"]=round(atr/price*100,3) if price else 0
+    # ADX (추세강도)
     f[pfx+"adx"]=round(_adx(hi,lo,cl),1)
+    # CCI, Williams%R, MFI
     f[pfx+"cci"]=round(_cci(hi,lo,cl),1)
     f[pfx+"willr"]=round(_willr(hi,lo,cl),1)
     f[pfx+"mfi"]=round(_mfi(hi,lo,cl,vo),1)
+    # OBV 변화율
     f[pfx+"obv"]=round(_obv_chg(cl,vo),2)
+    # 이격도 (10,20)
+    f[pfx+"disp10"]=round(_disp(cl,10),2)
     f[pfx+"disp20"]=round(_disp(cl,20),2)
+    # EMA 정배열 점수
     f[pfx+"ema_al"]=_ema_align(cl)
-    for ep in [5,10,20]:
+    # EMA 거리 (5,10,20,50)
+    for ep in [5,10,20,50]:
         ev=_ema(cl,ep)
         f[pfx+f"ed{ep}"]=round((cl[-1]-ev)/ev*100,3) if ev>0 else 0
+    # 변동성 (10,20봉)
+    f[pfx+"vol10"]=round(_vol(cl,10),3)
     f[pfx+"vol20"]=round(_vol(cl,20),3)
+    # 거래량비 (5봉,20봉)
     av5=sum(vo[-6:-1])/5 if len(vo)>=6 else 1
-    f[pfx+"vr"]=round(vo[-1]/av5,2) if av5>0 else 1
-    for mp in [3,5,10]:
+    f[pfx+"vr5"]=round(vo[-1]/av5,2) if av5>0 else 1
+    if len(vo)>=21:
+        av20=sum(vo[-21:-1])/20
+        f[pfx+"vr20"]=round(vo[-1]/av20,2) if av20>0 else 1
+    else:
+        f[pfx+"vr20"]=1.0
+    # 모멘텀 (3,5,10,20)
+    for mp in [3,5,10,20]:
         f[pfx+f"m{mp}"]=round((cl[-1]-cl[-(mp+1)])/cl[-(mp+1)]*100,3) if len(cl)>mp and cl[-(mp+1)]>0 else 0
-    if len(cl)>=20:
-        hh,ll=max(cl[-20:]),min(cl[-20:])
-        f[pfx+"pos20"]=round((cl[-1]-ll)/(hh-ll)*100,1) if hh!=ll else 50.0
+    # N봉 고저 대비 위치 (10,20)
+    for np in [10,20]:
+        if len(cl)>=np:
+            hh,ll=max(cl[-np:]),min(cl[-np:])
+            f[pfx+f"pos{np}"]=round((cl[-1]-ll)/(hh-ll)*100,1) if hh!=ll else 50.0
+    # 봉크기/ATR 비율
+    bar_size=abs(candles[idx]["c"]-candles[idx]["o"])
+    f[pfx+"bar_atr"]=round(bar_size/atr,2) if atr>0 else 0
+    # 캔들패턴 (망치,역망치,도지,감싸기,샛별,연속양봉,연속음봉,꼬리비율,몸통비율)
     cp=_patterns(candles,idx)
     for k,v in cp.items(): f[pfx+k]=v
     f[pfx+"green"]=1 if candles[idx]["c"]>candles[idx]["o"] else 0
@@ -603,24 +681,41 @@ def fmt(m):
     return f"n={m['n']:>4d} EV={m['ev']:>+.4f}% PF={pf:>5s} MDD={m['mdd']:>.3f}% WR={m['wr']:>5.1f}% RR={rr:>5s} Tot={m['tp']:>+.2f}%"
 
 
+def _pct(vals, p):
+    """백분위수"""
+    if not vals: return 0.0
+    s=sorted(vals); i=int(len(s)*p/100)
+    return s[min(i,len(s)-1)]
+
+def _avg(vals):
+    return sum(vals)/len(vals) if vals else 0.0
+
 def generate_report(all_results):
     L = []
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    L.append(f"업비트 신호 연구 v3.1 ({ts})")
+    L.append(f"업비트 신호 연구 v3.2 ({ts})")
     L.append(f"비용:{TOTAL_COST*100:.2f}% | 진입:다음봉시가 | 최대:{MAX_HOLD_BARS}봉")
     L.append(f"Train/Test:{TRAIN_RATIO*100:.0f}/{(1-TRAIN_RATIO)*100:.0f} | 최소:{MIN_TRADES}건")
     L.append("="*65)
 
-    # 피처 수
+    # 피처 수 + TF별 피처 현황
+    tf_counts = defaultdict(int)
+    total_feats = 0
     for sigs in all_results.values():
         if sigs:
-            tf_f=[k for k in sigs[0] if k.startswith("tf")]
-            L.append(f"피처: {len(tf_f)}개 다중TF")
+            for k in sigs[0]:
+                if k.startswith("tf"):
+                    total_feats += 1
+                    tf = k.split("_")[0]  # tf1, tf3, ...
+                    tf_counts[tf] += 1
             break
+    L.append(f"총 피처: {total_feats}개 ({', '.join(f'{k}:{v}개' for k,v in sorted(tf_counts.items()))})")
 
     dk="TRAIL_SL0.7/A0.3/T0.2"
 
-    # [1] 유형 비교
+    # ============================================================
+    # [1] 신호유형 비교 (전체 요약)
+    # ============================================================
     L.append(f"\n[1] 신호유형 비교 ({dk})")
     L.append("-"*65)
     ranked=[]
@@ -633,20 +728,77 @@ def generate_report(all_results):
         star=" ***" if m["ev"]>0 and m["n"]>=MIN_TRADES else ""
         L.append(f"  {st:<16s} {fmt(m)}{star}")
 
-    # [2] 상세
+    # ============================================================
+    # [2] TF별 지표 분포 (전체 신호 기준)
+    # ============================================================
+    L.append(f"\n{'='*65}")
+    L.append("[2] TF별 지표 분포 (전체 신호)")
+    L.append("-"*65)
+
+    all_sigs = []
+    for sigs in all_results.values():
+        all_sigs.extend(sigs)
+
+    # 주요 지표 목록
+    key_indicators = [
+        ("rsi7","RSI7"), ("rsi14","RSI14"), ("rsi21","RSI21"),
+        ("bb10","BB10위치"), ("bb20","BB20위치"), ("bbw10","BB10폭"), ("bbw20","BB20폭"),
+        ("macd_x","MACD골든%"), ("macd_h","MACD히스토"),
+        ("stoch_k","Stoch%K"), ("stoch_d","Stoch%D"),
+        ("atr","ATR%"), ("adx","ADX"), ("cci","CCI"), ("willr","W%R"), ("mfi","MFI"),
+        ("obv","OBV변화"), ("disp10","이격도10"), ("disp20","이격도20"),
+        ("ema_al","EMA정배열"),
+        ("ed5","EMA5거리"), ("ed10","EMA10거리"), ("ed20","EMA20거리"), ("ed50","EMA50거리"),
+        ("vol10","변동성10"), ("vol20","변동성20"),
+        ("vr5","VR5"), ("vr20","VR20"),
+        ("m3","모멘텀3"), ("m5","모멘텀5"), ("m10","모멘텀10"), ("m20","모멘텀20"),
+        ("pos10","위치10"), ("pos20","위치20"),
+        ("bar_atr","봉/ATR"),
+        ("hammer","망치%"), ("inv_ham","역망치%"), ("doji","도지%"),
+        ("engulf","감싸기%"), ("mstar","샛별%"),
+        ("cg","연속양봉"), ("cr","연속음봉"),
+        ("uw_pct","윗꼬리%"), ("lw_pct","아랫꼬리%"), ("body_pct","몸통%"),
+    ]
+
+    for tf in ANALYSIS_TFS:
+        pfx = f"tf{tf}_"
+        has_data = any(pfx+"rsi14" in s for s in all_sigs[:100])
+        if not has_data: continue
+
+        L.append(f"\n  [{tf}분봉] 지표 분포:")
+        for feat_key, feat_name in key_indicators:
+            full_key = pfx + feat_key
+            vals = [s[full_key] for s in all_sigs if full_key in s]
+            if not vals: continue
+
+            if feat_key in ("macd_x","hammer","inv_ham","doji","engulf","mstar"):
+                # 비율 지표 → %로 표시
+                pct = sum(1 for v in vals if v==1)/len(vals)*100
+                L.append(f"    {feat_name:12s} 발생={pct:5.1f}% (n={len(vals)})")
+            elif feat_key in ("cg","cr","ema_al"):
+                # 정수 지표 → 평균+분포
+                L.append(f"    {feat_name:12s} avg={_avg(vals):+.1f} P25={_pct(vals,25):.0f} P50={_pct(vals,50):.0f} P75={_pct(vals,75):.0f}")
+            else:
+                # 연속 지표 → 5분위
+                L.append(f"    {feat_name:12s} avg={_avg(vals):+.2f} P25={_pct(vals,25):+.2f} P50={_pct(vals,50):+.2f} P75={_pct(vals,75):+.2f} P95={_pct(vals,95):+.2f}")
+
+    # ============================================================
+    # [3] 신호유형별 상세
+    # ============================================================
     for st, sigs in all_results.items():
         if len(sigs)<30: continue
         L.append(f"\n{'='*65}")
-        L.append(f"[2] {st} (n={len(sigs)})")
+        L.append(f"[3] {st} (n={len(sigs)})")
 
         si=int(len(sigs)*TRAIN_RATIO)
         tr,te=sigs[:si],sigs[si:]
 
+        # 청산전략 성과
+        ek_list=sorted(set(k for s in sigs for k in s["exits"]))
         for nm,sub in [("TRAIN",tr),("TEST",te),("ALL",sigs)]:
             if len(sub)<10: continue
             L.append(f"\n  [{nm} n={len(sub)}]")
             L.append(f"  청산전략 TOP5:")
-            ek_list=sorted(set(k for s in sub for k in s["exits"]))
             er=[]
             for ek in ek_list:
                 m=calc_m([s["exits"].get(ek,0) for s in sub])
@@ -656,13 +808,13 @@ def generate_report(all_results):
                 star=" ***" if m["ev"]>0 else ""
                 L.append(f"    {ek:25s} {fmt(m)}{star}")
 
-            if nm!="ALL": continue
-            mfes=sorted(s["mfe"] for s in sub)
-            maes=sorted(s["mae"] for s in sub)
-            L.append(f"\n  MFE: P25={mfes[len(mfes)//4]:+.3f}% P50={mfes[len(mfes)//2]:+.3f}% P75={mfes[3*len(mfes)//4]:+.3f}%")
-            L.append(f"  MAE: P25={maes[len(maes)//4]:+.3f}% P50={maes[len(maes)//2]:+.3f}% P75={maes[3*len(maes)//4]:+.3f}%")
+            if nm=="ALL":
+                mfes=sorted(s["mfe"] for s in sub)
+                maes=sorted(s["mae"] for s in sub)
+                L.append(f"\n  MFE: P25={mfes[len(mfes)//4]:+.3f}% P50={mfes[len(mfes)//2]:+.3f}% P75={mfes[3*len(mfes)//4]:+.3f}% P95={_pct(mfes,95):+.3f}%")
+                L.append(f"  MAE: P25={maes[len(maes)//4]:+.3f}% P50={maes[len(maes)//2]:+.3f}% P75={maes[3*len(maes)//4]:+.3f}% P95={_pct(maes,95):+.3f}%")
 
-        # 조건별
+        # 단일 조건별 EV
         L.append(f"\n  [조건별 EV] ({dk})")
         def ce(name,fn):
             sub=[s for s in sigs if fn(s)]
@@ -670,50 +822,112 @@ def generate_report(all_results):
             m=calc_m([s["exits"].get(dk,0) for s in sub])
             if m:
                 star=" ***" if m["ev"]>0 and m["n"]>=MIN_TRADES else ""
-                L.append(f"    {name:32s} {fmt(m)}{star}")
+                L.append(f"    {name:35s} {fmt(m)}{star}")
 
         for tf in ANALYSIS_TFS:
             p=f"tf{tf}_"
             has=[s for s in sigs if p+"rsi14" in s]
             if len(has)<30: continue
-            L.append(f"\n    [{tf}분봉]")
-            for lo,hi in [(0,30),(30,50),(50,70),(70,100)]:
-                ce(f"{tf}m RSI {lo}-{hi}", lambda s,lo=lo,hi=hi,k=p+"rsi14": k in s and lo<=s[k]<hi)
-            for lo,hi in [(0,20),(20,50),(50,80),(80,100)]:
-                ce(f"{tf}m BB {lo}-{hi}", lambda s,lo=lo,hi=hi,k=p+"bb20": k in s and lo<=s[k]<hi)
-            ce(f"{tf}m Stoch<20", lambda s,k=p+"stoch": k in s and s[k]<20)
+            L.append(f"\n    [{tf}분봉 조건]")
+            # RSI 구간
+            for lo_v,hi_v in [(0,30),(30,50),(50,70),(70,100)]:
+                ce(f"{tf}m RSI14 {lo_v}-{hi_v}", lambda s,lo_v=lo_v,hi_v=hi_v,k=p+"rsi14": k in s and lo_v<=s[k]<hi_v)
+            # BB 위치 구간
+            for lo_v,hi_v in [(0,20),(20,50),(50,80),(80,100)]:
+                ce(f"{tf}m BB20 {lo_v}-{hi_v}", lambda s,lo_v=lo_v,hi_v=hi_v,k=p+"bb20": k in s and lo_v<=s[k]<hi_v)
+            # Stochastic 과매도/과매수
+            ce(f"{tf}m Stoch_K<20", lambda s,k=p+"stoch_k": k in s and s[k]<20)
+            ce(f"{tf}m Stoch_D<20", lambda s,k=p+"stoch_d": k in s and s[k]<20)
+            # MACD
             ce(f"{tf}m MACD골든", lambda s,k=p+"macd_x": k in s and s[k]==1)
-            ce(f"{tf}m ADX>25", lambda s,k=p+"adx": k in s and s[k]>25)
-            ce(f"{tf}m MFI<20", lambda s,k=p+"mfi": k in s and s[k]<20)
+            ce(f"{tf}m MACD히스토>0", lambda s,k=p+"macd_h": k in s and s[k]>0)
+            # 추세/변동성
+            ce(f"{tf}m ADX>25(강추세)", lambda s,k=p+"adx": k in s and s[k]>25)
+            ce(f"{tf}m ADX<15(횡보)", lambda s,k=p+"adx": k in s and s[k]<15)
+            ce(f"{tf}m CCI<-100(과매도)", lambda s,k=p+"cci": k in s and s[k]<-100)
+            ce(f"{tf}m W%R<-80(과매도)", lambda s,k=p+"willr": k in s and s[k]<-80)
+            # 자금흐름
+            ce(f"{tf}m MFI<20(과매도)", lambda s,k=p+"mfi": k in s and s[k]<20)
+            ce(f"{tf}m MFI>80(과매수)", lambda s,k=p+"mfi": k in s and s[k]>80)
+            # EMA
             ce(f"{tf}m EMA정배열3+", lambda s,k=p+"ema_al": k in s and s[k]>=3)
+            ce(f"{tf}m EMA역배열-3이하", lambda s,k=p+"ema_al": k in s and s[k]<=-3)
+            # 이격도
+            ce(f"{tf}m 이격도20<98(하방이탈)", lambda s,k=p+"disp20": k in s and s[k]<98)
+            ce(f"{tf}m 이격도10<98", lambda s,k=p+"disp10": k in s and s[k]<98)
+            # 거래량
+            ce(f"{tf}m VR5>3(거래량급증)", lambda s,k=p+"vr5": k in s and s[k]>3)
+            ce(f"{tf}m VR20>2", lambda s,k=p+"vr20": k in s and s[k]>2)
+            # 모멘텀
+            ce(f"{tf}m 모멘텀3<-1%(하락)", lambda s,k=p+"m3": k in s and s[k]<-1)
+            ce(f"{tf}m 모멘텀10>3%(상승)", lambda s,k=p+"m10": k in s and s[k]>3)
+            # 위치
+            ce(f"{tf}m 위치20<20%(저점)", lambda s,k=p+"pos20": k in s and s[k]<20)
+            ce(f"{tf}m 위치20>80%(고점)", lambda s,k=p+"pos20": k in s and s[k]>80)
+            # 패턴
+            ce(f"{tf}m 망치형", lambda s,k=p+"hammer": k in s and s[k]==1)
+            ce(f"{tf}m 역망치", lambda s,k=p+"inv_ham": k in s and s[k]==1)
+            ce(f"{tf}m 감싸기", lambda s,k=p+"engulf": k in s and s[k]==1)
+            ce(f"{tf}m 샛별", lambda s,k=p+"mstar": k in s and s[k]==1)
+            ce(f"{tf}m 도지", lambda s,k=p+"doji": k in s and s[k]==1)
+            ce(f"{tf}m 연속양봉3+", lambda s,k=p+"cg": k in s and s[k]>=3)
+            # 봉크기
+            ce(f"{tf}m 봉/ATR>1.5(큰봉)", lambda s,k=p+"bar_atr": k in s and s[k]>1.5)
 
-        L.append(f"\n    [레짐]")
+        # BTC 레짐
+        L.append(f"\n    [BTC 레짐]")
         for r in ["상승","횡보","하락"]:
             ce(f"BTC_{r}", lambda s,r=r: s["regime"]==r)
 
-        L.append(f"\n    [시간]")
+        # 시간대
+        L.append(f"\n    [시간대]")
         for h in range(24):
             ce(f"{h:02d}시", lambda s,h=h: s["hour"]==h)
 
-        L.append(f"\n    [패턴]")
-        ce("눌림+돌파", lambda s: s.get("dip3")==1 and s.get("brk")==1)
-        ce("5m 망치형", lambda s: s.get("tf5_hammer")==1)
-        ce("5m 감싸기", lambda s: s.get("tf5_engulf")==1)
-
-        L.append(f"\n    [복합필터]")
+        # ============================================================
+        # 복합 필터 12개 (크로스TF)
+        # ============================================================
+        L.append(f"\n    [복합필터 — 크로스TF 12개]")
         combos=[
-            ("5m_RSI<50+15m_BB<40", lambda s: s.get("tf5_rsi14",50)<50 and s.get("tf15_bb20",50)<40),
-            ("15m_RSI<40+30m_RSI<40", lambda s: s.get("tf15_rsi14",50)<40 and s.get("tf30_rsi14",50)<40),
-            ("5m_Stoch<20+15m_BB<40", lambda s: s.get("tf5_stoch",50)<20 and s.get("tf15_bb20",50)<40),
-            ("15m_MACD+1h_EMA정배열", lambda s: s.get("tf15_macd_x")==1 and s.get("tf60_ema_al",0)>=3),
-            ("15m_BB<20+BTC상승", lambda s: s.get("tf15_bb20",50)<20 and s["regime"]=="상승"),
-            ("5m_RSI<40+눌림+돌파", lambda s: s.get("tf5_rsi14",50)<40 and s.get("dip3")==1 and s.get("brk")==1),
+            # 1m+5m 조합
+            ("1m_RSI<40+5m_RSI<50",
+             lambda s: s.get("tf1_rsi14",50)<40 and s.get("tf5_rsi14",50)<50),
+            ("1m_Stoch<20+5m_BB<40",
+             lambda s: s.get("tf1_stoch_k",50)<20 and s.get("tf5_bb20",50)<40),
+            # 5m+15m 조합
+            ("5m_RSI<50+15m_BB<40",
+             lambda s: s.get("tf5_rsi14",50)<50 and s.get("tf15_bb20",50)<40),
+            ("5m_Stoch<20+15m_Stoch<30",
+             lambda s: s.get("tf5_stoch_k",50)<20 and s.get("tf15_stoch_k",50)<30),
+            ("5m_MACD골든+15m_ADX>25",
+             lambda s: s.get("tf5_macd_x")==1 and s.get("tf15_adx",0)>25),
+            # 15m+30m 조합
+            ("15m_RSI<40+30m_RSI<40",
+             lambda s: s.get("tf15_rsi14",50)<40 and s.get("tf30_rsi14",50)<40),
+            ("15m_BB<20+30m_EMA정배열",
+             lambda s: s.get("tf15_bb20",50)<20 and s.get("tf30_ema_al",0)>=2),
+            # 15m+1h 조합
+            ("15m_MACD골든+1h_EMA정배열",
+             lambda s: s.get("tf15_macd_x")==1 and s.get("tf60_ema_al",0)>=3),
+            ("15m_MFI<30+1h_RSI<50",
+             lambda s: s.get("tf15_mfi",50)<30 and s.get("tf60_rsi14",50)<50),
+            # 레짐+TF 조합
+            ("15m_BB<20+BTC상승",
+             lambda s: s.get("tf15_bb20",50)<20 and s["regime"]=="상승"),
+            ("5m_RSI<40+BTC상승+15m_MACD골든",
+             lambda s: s.get("tf5_rsi14",50)<40 and s["regime"]=="상승" and s.get("tf15_macd_x")==1),
+            # 패턴+TF 조합
+            ("5m_망치+15m_과매도",
+             lambda s: s.get("tf5_hammer")==1 and s.get("tf15_rsi14",50)<40),
         ]
         for name,fn in combos:
             ce(name,fn)
 
-        # Train/Test 교차
+        # ============================================================
+        # Train→Test 교차검증
+        # ============================================================
         L.append(f"\n  [Train→Test 검증]")
+        validated = []
         for fname,ffn in combos:
             trsub=[s for s in tr if ffn(s)]
             tesub=[s for s in te if ffn(s)]
@@ -730,10 +944,48 @@ def generate_report(all_results):
                 L.append(f"      TE: {fmt(tem)}")
                 if trm and tem and trm["ev"]>0 and tem["ev"]>0:
                     L.append(f"      >>> BOTH EV>0 <<<")
+                    validated.append((fname, best_ek, trm, tem))
 
-    # [3] 결론
+        if validated:
+            L.append(f"\n  ** 검증 통과 {len(validated)}개 **")
+
+    # ============================================================
+    # [4] 최적 단일 조건 자동 탐색
+    # ============================================================
     L.append(f"\n{'='*65}")
-    L.append("[3] 결론 — TEST EV>0")
+    L.append("[4] 자동 탐색 — 단일TF 조건별 EV TOP10 (TEST기준)")
+    L.append("-"*65)
+
+    # 모든 신호 합산 기준 자동 탐색
+    if all_sigs:
+        si=int(len(all_sigs)*TRAIN_RATIO)
+        all_te=all_sigs[si:]
+        auto_results = []
+        for tf in ANALYSIS_TFS:
+            pfx=f"tf{tf}_"
+            # 연속값 지표들에 대해 자동 구간 분할
+            for feat_key in ["rsi14","rsi7","bb20","bb10","stoch_k","stoch_d","adx","cci","willr","mfi","disp10","disp20","ed5","ed20","m3","m5","m10","pos10","pos20","vr5","vr20","vol20","macd_h"]:
+                full_key=pfx+feat_key
+                vals=[s[full_key] for s in all_te if full_key in s]
+                if len(vals)<50: continue
+                # 3분위 구간
+                p33,p66=_pct(vals,33),_pct(vals,66)
+                for lo_v,hi_v,label in [(float('-inf'),p33,"하위33%"),(p33,p66,"중위33%"),(p66,float('inf'),"상위33%")]:
+                    sub=[s for s in all_te if full_key in s and lo_v<=s[full_key]<hi_v]
+                    if len(sub)<15: continue
+                    m=calc_m([s["exits"].get(dk,0) for s in sub])
+                    if m and m["ev"]>0:
+                        auto_results.append((f"{tf}m_{feat_key}_{label}",m,len(sub)))
+
+        auto_results.sort(key=lambda x:-x[1]["ev"])
+        for name,m,n in auto_results[:10]:
+            L.append(f"  {name:35s} {fmt(m)}")
+
+    # ============================================================
+    # [5] 결론
+    # ============================================================
+    L.append(f"\n{'='*65}")
+    L.append("[5] 결론 — TEST EV>0 조합")
     found=False
     for st,sigs in all_results.items():
         if len(sigs)<MIN_TRADES: continue
@@ -746,6 +998,13 @@ def generate_report(all_results):
     if not found:
         L.append("  >>> TEST EV>0 조합 없음 → 재설계 필요 <<<")
 
+    L.append(f"\n{'='*65}")
+    L.append(f"분석TF: {', '.join(f'{tf}m' for tf in ANALYSIS_TFS)}")
+    L.append(f"TF당 피처: ~45개 | 총: {total_feats}개")
+    L.append(f"복합필터: 12개 크로스TF 조합")
+    L.append(f"청산전략: {len(EXIT_CONFIGS)}개")
+    L.append("끝.")
+
     return L
 
 
@@ -757,16 +1016,25 @@ def main():
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
+    parser.add_argument("--include-1m", action="store_true", help="1분봉도 수집 (느림)")
     args = parser.parse_args()
     t0 = time.time()
 
     if not args.skip_collect:
-        collect(days=args.days, top_n=args.coins)
+        # 1단계: 핵심 TF 수집 (3,5,15,30,60)
+        tg("[STEP 1/4] 핵심 타임프레임 수집")
+        collect(days=args.days, top_n=args.coins, include_1m=False)
 
+        # 2단계: 1분봉 수집 (선택)
+        if args.include_1m:
+            tg("[STEP 1.5/4] 1분봉 수집 (7일치)")
+            collect(days=min(args.days, 7), top_n=args.coins, include_1m=True)
+
+    # 3단계: 분석
     coins = get_saved_coins()
     if not coins: tg(f"[오류] 데이터 없음"); return
 
-    tg(f"\n[분석] {len(coins)}코인")
+    tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인")
 
     btc5 = load_candles("BTC", 5)
     btc_regime = {}
@@ -792,11 +1060,12 @@ def main():
     for st in all_results:
         all_results[st].sort(key=lambda s: s["time"])
 
-    tg(f"\n[신호 완료]")
+    tg(f"\n[STEP 3/4] 신호 감지 완료")
     for st,sigs in all_results.items():
         tg(f"  {st}: {len(sigs)}건")
 
-    tg("[리포트 생성]")
+    # 4단계: 리포트
+    tg("[STEP 4/4] 리포트 생성")
     try:
         lines = generate_report(dict(all_results))
     except Exception as e:
@@ -809,10 +1078,10 @@ def main():
     fpath = os.path.join(OUT_DIR, f"signal_v3_{ts}.txt")
     with open(fpath,"w",encoding="utf-8") as f: f.write("\n".join(lines))
 
-    tg(f"\n[완료] {(time.time()-t0)/60:.1f}분")
+    tg(f"\n[완료] {(time.time()-t0)/60:.1f}분 소요")
     tg(f"리포트: {fpath}")
 
-    # 분할 전송
+    # 분할 전송 (3800자씩)
     cur=""
     chunks=[]
     for line in lines:
@@ -820,7 +1089,8 @@ def main():
         else: cur=cur+"\n"+line if cur else line
     if cur: chunks.append(cur)
     for ci,ch in enumerate(chunks):
-        tg(f"[{ci+1}/{len(chunks)}]\n{ch}")
+        tg(f"[리포트 {ci+1}/{len(chunks)}]\n{ch}")
+        time.sleep(0.5)  # 텔레그램 flood 방지
 
 if __name__ == "__main__":
     try: main()
