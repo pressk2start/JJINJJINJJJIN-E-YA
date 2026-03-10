@@ -41,6 +41,7 @@ LOCK_FILE = os.path.join(SCRIPT_DIR, ".collect_1m_lock")
 # 청크 단위 수집 설정 (메모리 보호)
 CHUNK_SIZE = 5000       # 5000개씩 메모리에 유지 → 디스크에 임시 저장
 MEM_LOG_INTERVAL = 10   # 10페이지마다 메모리 상태 로그
+HEARTBEAT_INTERVAL = 60 # 60초마다 텔레그램으로 살아있음 알람
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
 _raw = os.getenv("TG_CHATS") or os.getenv("TELEGRAM_CHAT_ID") or ""
@@ -269,6 +270,7 @@ def fetch_and_save_1m(market, coin, total_count, max_time=600, progress_prefix="
     total_fetched = 0
     to = None
     start_ts = time.time()
+    last_heartbeat = start_ts  # 하트비트 타이머
     fails = 0
     target_pages = math.ceil(total_count / 200)
 
@@ -316,6 +318,14 @@ def fetch_and_save_1m(market, coin, total_count, max_time=600, progress_prefix="
             mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
             print(f"{progress_prefix}{total_fetched:5d}/{total_count} ({pct:.0f}%) "
                   f"page {page_no}/{target_pages}{mem_str}")
+
+        # 하트비트 알람 (HEARTBEAT_INTERVAL초마다 텔레그램 전송)
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            mem = _get_mem_mb()
+            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
+            tg(f"[살아있음] {coin} 수집중 {total_fetched:,}/{total_count:,} ({pct:.0f}%) | {int(elapsed)}초 경과{mem_str}")
+            last_heartbeat = now
 
         # 청크 저장
         if len(buffer) >= CHUNK_SIZE:
@@ -424,22 +434,31 @@ def collect_1m(days=30, top_n=30, force=False, specific_markets=None, max_time_p
             )
 
     total_elapsed = time.time() - started
-    tg(
-        f"[1분봉 수집 완료] 완료={done}, 스킵={skipped}, 실패={failed}, "
-        f"총 {total_elapsed/60:.1f}분"
-    )
 
     # 최종 요약: 전체 1분봉 파일 현황
+    total_candles = 0
+    file_count = 0
     if os.path.exists(DATA_DIR):
         files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
-        total_candles = 0
+        file_count = len(files_1m)
         for f in files_1m:
             try:
                 with open(os.path.join(DATA_DIR, f)) as fp:
                     total_candles += json.load(fp).get("count", 0)
             except Exception:
                 pass
-        tg(f"  1분봉 파일: {len(files_1m)}개 | 총 캔들: {total_candles:,}개")
+
+    finish_time = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    tg(
+        f"\n{'='*50}\n"
+        f"[1분봉 수집 최종 완료]\n"
+        f"  완료: {done}코인 | 스킵: {skipped}코인 | 실패: {failed}코인\n"
+        f"  1분봉 파일: {file_count}개 | 총 캔들: {total_candles:,}개\n"
+        f"  소요시간: {total_elapsed/60:.1f}분\n"
+        f"  종료시각: {finish_time}\n"
+        f"{'='*50}\n"
+        f"수집 완료. 프로그램을 종료합니다."
+    )
 
     return coins
 
@@ -476,6 +495,9 @@ def main():
         max_time_per_coin=args.max_time_per_coin,
     )
 
+    _release_lock()
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     try:
@@ -483,7 +505,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         _release_lock()
         tg("[중단] 사용자 중단")
+        sys.exit(0)
     except Exception as e:
         import traceback
         _release_lock()
         tg(f"[에러] {e}\n{traceback.format_exc()[-800:]}")
+        sys.exit(1)
