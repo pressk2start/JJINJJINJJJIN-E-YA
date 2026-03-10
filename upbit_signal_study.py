@@ -7,7 +7,7 @@
 - 중간중간 하트비트 알람 (텔레그램)
 - 완료 후 확실한 종료 (재실행 방지)
 """
-import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod
+import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod, fcntl
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 KST = timezone(timedelta(hours=9))
@@ -21,20 +21,51 @@ LOCK_FILE = os.path.join(SCRIPT_DIR, ".study_lock")
 HEARTBEAT_INTERVAL = 90  # 90초마다 텔레그램 살아있음 알람
 CHUNK_SIZE = 5000         # 1분봉 청크 저장 단위
 
-# ── 중복 실행 방지 ──
+# ── 중복 실행 방지 (fcntl.flock 원자적 잠금) ──
+_lock_fd = None
+
 def _acquire_lock():
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE) as f: old_pid=int(f.read().strip())
-            os.kill(old_pid, 0)
-            print(f"[잠금] 이미 실행중 (PID {old_pid}). 종료.")
-            sys.exit(0)
-        except (ProcessLookupError, ValueError, OSError):
-            pass
-    with open(LOCK_FILE, "w") as f: f.write(str(os.getpid()))
+    """fcntl.flock으로 원자적 잠금. 두 프로세스가 동시에 시작해도 하나만 통과."""
+    global _lock_fd
+    # 1단계: 같은 스크립트 이미 실행중인지 프로세스 목록으로 확인
+    try:
+        import subprocess
+        my_pid = os.getpid()
+        script_name = os.path.basename(__file__)
+        result = subprocess.run(
+            ["pgrep", "-f", script_name],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            pids = [int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip()]
+            other_pids = [p for p in pids if p != my_pid]
+            if other_pids:
+                print(f"[잠금] 이미 실행중인 프로세스 감지: PID {other_pids}. 종료.")
+                sys.exit(0)
+    except Exception:
+        pass  # pgrep 없으면 flock만으로 방어
+
+    # 2단계: flock 원자적 잠금 (레이스 컨디션 완전 방지)
+    try:
+        _lock_fd = open(LOCK_FILE, "w")
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 비차단 배타적 잠금
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+    except (IOError, OSError):
+        print("[잠금] 다른 인스턴스가 실행중 (flock). 종료.")
+        sys.exit(0)
+
 def _release_lock(*a):
+    global _lock_fd
+    try:
+        if _lock_fd:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+            _lock_fd.close()
+            _lock_fd = None
+    except: pass
     try: os.remove(LOCK_FILE)
     except: pass
+
 atexit.register(_release_lock)
 for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
     sig_mod.signal(_s, lambda s,f: (_release_lock(), sys.exit(0)))
@@ -703,113 +734,152 @@ def process_coin(coin, btc_regime, dist_acc):
         last=ei; sigs.append((i, ei, bar))
     raw_signals["거래량3배"] = sigs
 
-    # ── 추가 신호유형 (결과 다양성) ──
+    # ── 추가 신호유형 (pre-compute 방식, 성능 최적화) ──
+    # 전체 close 배열 한 번만 생성 (매 봉마다 리스트 생성 방지)
+    n5 = len(c5)
+    end_idx = n5 - MAX_HOLD_BARS - 1
+    closes = [c5[j]["c"] for j in range(n5)]
+    highs = [c5[j]["h"] for j in range(n5)]
+    lows = [c5[j]["l"] for j in range(n5)]
+    opens = [c5[j]["o"] for j in range(n5)]
+    bodies = [abs(closes[j] - opens[j]) for j in range(n5)]
 
-    # BB하단반등: BB20 < 10 && 양봉
+    # pre-compute: RSI14, BB20위치, MACD교차, EMA정배열 (한 번에 전체)
+    pre_rsi = [0.0] * n5
+    pre_bb = [50.0] * n5
+    pre_macd_cross = [False] * n5  # 이 봉에서 골든크로스 발생?
+    pre_ema_aligned = [False] * n5  # 이 봉에서 정배열?
+
+    # RSI14 pre-compute
+    for i in range(20, n5):
+        pre_rsi[i] = _rsi(closes[i-19:i+1], 14)
+
+    # BB20 위치 pre-compute
+    for i in range(24, n5):
+        pre_bb[i], _ = _bb(closes[i-24:i+1], 20)
+
+    # MACD/EMA pre-compute (EMA를 증분으로 계산)
+    if n5 > 60:
+        k12 = 2.0 / 13; k26 = 2.0 / 27
+        k5 = 2.0 / 6; k10 = 2.0 / 11; k20 = 2.0 / 21; k50 = 2.0 / 51
+        ema12 = sum(closes[:12]) / 12
+        ema26 = sum(closes[:26]) / 26
+        ema5 = sum(closes[:5]) / 5
+        ema10 = sum(closes[:10]) / 10
+        ema20 = sum(closes[:20]) / 20
+        ema50 = sum(closes[:50]) / 50 if n5 >= 50 else closes[0]
+        prev_macd_diff = 0.0
+        prev_aligned = False
+        for i in range(max(26, 50), n5):
+            ema12 = closes[i] * k12 + ema12 * (1 - k12)
+            ema26 = closes[i] * k26 + ema26 * (1 - k26)
+            ema5 = closes[i] * k5 + ema5 * (1 - k5)
+            ema10 = closes[i] * k10 + ema10 * (1 - k10)
+            ema20 = closes[i] * k20 + ema20 * (1 - k20)
+            ema50 = closes[i] * k50 + ema50 * (1 - k50)
+            macd_diff = ema12 - ema26
+            if prev_macd_diff <= 0 and macd_diff > 0:
+                pre_macd_cross[i] = True
+            prev_macd_diff = macd_diff
+            aligned = ema5 > ema10 > ema20 > ema50
+            if aligned and not prev_aligned:
+                pre_ema_aligned[i] = True  # 첫 진입만
+            prev_aligned = aligned
+
+    # BB하단반등: pre-computed BB20 < 10 && 양봉
     sigs=[]; last=-15
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        bar=c5[i]
-        if bar["c"]<=bar["o"]: continue
-        cl_arr=[c5[j]["c"] for j in range(max(0,i-24),i+1)]
-        bp,_=_bb(cl_arr,20)
-        if bp>=10: continue  # BB 하단 근처만
+    for i in range(60, end_idx):
+        if closes[i] <= opens[i]: continue
+        if pre_bb[i] >= 10: continue
         ei=i+1
         if ei-last<15: continue
-        last=ei; sigs.append((i, ei, bar))
+        last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["BB하단반등"] = sigs
 
-    # RSI과매도반등: RSI14 < 30이었다가 30 이상으로 올라온 시점
+    # RSI과매도반등: pre-computed RSI14
     sigs=[]; last=-15
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        bar=c5[i]
-        cl_arr=[c5[j]["c"] for j in range(max(0,i-19),i+1)]
-        cl_prev=[c5[j]["c"] for j in range(max(0,i-20),i)]
-        r_now=_rsi(cl_arr,14); r_prev=_rsi(cl_prev,14)
-        if not (r_prev<30 and r_now>=30): continue
+    for i in range(60, end_idx):
+        if pre_rsi[i-1] >= 30 or pre_rsi[i] < 30: continue
         ei=i+1
         if ei-last<15: continue
-        last=ei; sigs.append((i, ei, bar))
+        last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["RSI과매도반등"] = sigs
 
-    # MACD골든크로스: MACD선이 시그널선 상향돌파
+    # MACD골든크로스: pre-computed
     sigs=[]; last=-20
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        cl_now=[c5[j]["c"] for j in range(max(0,i-34),i+1)]
-        cl_prev=[c5[j]["c"] for j in range(max(0,i-35),i)]
-        if len(cl_now)<35 or len(cl_prev)<35: continue
-        ef_n,es_n=_ema(cl_now,12),_ema(cl_now,26)
-        ef_p,es_p=_ema(cl_prev,12),_ema(cl_prev,26)
-        if not (ef_p<=es_p and ef_n>es_n): continue  # 교차
+    for i in range(60, end_idx):
+        if not pre_macd_cross[i]: continue
         ei=i+1
         if ei-last<20: continue
         last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["MACD골든"] = sigs
 
-    # EMA정배열진입: EMA 5>10>20>50 정배열 첫 진입 (이전 봉은 비정배열)
+    # EMA정배열진입: pre-computed
     sigs=[]; last=-30
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        cl_now=[c5[j]["c"] for j in range(max(0,i-54),i+1)]
-        if len(cl_now)<50: continue
-        e5,e10,e20,e50=_ema(cl_now,5),_ema(cl_now,10),_ema(cl_now,20),_ema(cl_now,50)
-        if not (e5>e10>e20>e50): continue
-        cl_prev=[c5[j]["c"] for j in range(max(0,i-55),i)]
-        if len(cl_prev)<50: continue
-        pe5,pe10,pe20,pe50=_ema(cl_prev,5),_ema(cl_prev,10),_ema(cl_prev,20),_ema(cl_prev,50)
-        if pe5>pe10>pe20>pe50: continue  # 이미 정배열이면 스킵
+    for i in range(60, end_idx):
+        if not pre_ema_aligned[i]: continue
         ei=i+1
         if ei-last<30: continue
         last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["EMA정배열진입"] = sigs
 
-    # 망치형반전: 망치형 캔들 + 직전 3봉 하락
+    # 망치형반전: 순수 봉 형태 (계산 가벼움)
     sigs=[]; last=-15
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        bar=c5[i]
-        o,h,l,c=bar["o"],bar["h"],bar["l"],bar["c"]
+    for i in range(60, end_idx):
+        o,h,l,cl_v=opens[i],highs[i],lows[i],closes[i]
         rng=h-l if h!=l else 0.0001
-        body=abs(c-o); lw=min(o,c)-l; uw=h-max(o,c)
+        body=abs(cl_v-o); lw=min(o,cl_v)-l; uw=h-max(o,cl_v)
         if not (lw>body*2 and uw<body*0.5 and body>0): continue
-        # 직전 3봉 하락
-        if not (c5[i-1]["c"]<c5[i-1]["o"] and c5[i-2]["c"]<c5[i-2]["o"]): continue
+        if not (closes[i-1]<opens[i-1] and closes[i-2]<opens[i-2]): continue
         ei=i+1
         if ei-last<15: continue
-        last=ei; sigs.append((i, ei, bar))
+        last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["망치형반전"] = sigs
 
-    # 5m_큰양봉: 평균 대비 2배 이상 큰 양봉 (body 기준)
+    # 5m_큰양봉: pre-computed bodies 배열 사용
     sigs=[]; last=-20
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        bar=c5[i]
-        if bar["c"]<=bar["o"]: continue
-        body=bar["c"]-bar["o"]
-        rng=range(max(0,i-20),i)
-        n_bars=len(rng) if len(rng)>0 else 1
-        avg_body=sum(abs(c5[j]["c"]-c5[j]["o"]) for j in rng)/n_bars
-        if avg_body==0 or body<avg_body*2: continue
+    # 20봉 rolling average body (한 번에 계산)
+    body_sum20 = sum(bodies[:20]) if n5 >= 20 else 0
+    for i in range(60, end_idx):
+        if closes[i] <= opens[i]: continue
+        body = closes[i] - opens[i]
+        # rolling average 갱신
+        if i >= 20:
+            body_sum20 = body_sum20 - bodies[i-20] + bodies[i-1]
+            avg_body = body_sum20 / 20
+        else:
+            avg_body = body
+        if avg_body == 0 or body < avg_body * 2: continue
         ei=i+1
         if ei-last<20: continue
-        last=ei; sigs.append((i, ei, bar))
+        last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["5m_큰양봉"] = sigs
 
-    # 쌍바닥: 최근 20봉 내 비슷한 저점 2개
+    # 쌍바닥: lows 배열 직접 참조 (리스트 생성 최소화)
     sigs=[]; last=-30
-    for i in range(60, len(c5)-MAX_HOLD_BARS-1):
-        bar=c5[i]
-        if bar["c"]<=bar["o"]: continue
-        lows=[(j, c5[j]["l"]) for j in range(max(0,i-20),i)]
-        if len(lows)<10: continue
-        min1_j,min1_v=min(lows, key=lambda x:x[1])
-        lows2=[(j,v) for j,v in lows if abs(j-min1_j)>3]
-        if not lows2: continue
-        min2_j,min2_v=min(lows2, key=lambda x:x[1])
-        spread=abs(min1_v-min2_v)/max(min1_v,0.0001)*100
-        if spread>0.5: continue  # 0.5% 이내 비슷한 저점
-        if bar["l"]>max(min1_v,min2_v): pass  # 현재봉이 저점 위
-        else: continue
+    for i in range(60, end_idx):
+        if closes[i] <= opens[i]: continue
+        # 직전 20봉 저점 2개 찾기
+        start = max(0, i-20)
+        if i - start < 10: continue
+        min1_j = start
+        for j in range(start+1, i):
+            if lows[j] < lows[min1_j]: min1_j = j
+        min2_j = -1; min2_v = float('inf')
+        for j in range(start, i):
+            if abs(j - min1_j) > 3 and lows[j] < min2_v:
+                min2_j = j; min2_v = lows[j]
+        if min2_j < 0: continue
+        spread = abs(lows[min1_j] - min2_v) / max(lows[min1_j], 0.0001) * 100
+        if spread > 0.5: continue
+        if lows[i] <= max(lows[min1_j], min2_v): continue
         ei=i+1
         if ei-last<30: continue
-        last=ei; sigs.append((i, ei, bar))
+        last=ei; sigs.append((i, ei, c5[i]))
     raw_signals["쌍바닥"] = sigs
+
+    # pre-compute 배열 해제
+    del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
 
     total_sigs = sum(len(v) for v in raw_signals.values())
     print(f"    {coin} 신호: {total_sigs}개")  # print만
