@@ -9577,9 +9577,17 @@ def monitor_position(m,
             # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
             # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
             # 🔧 수급확인감량 후: 확장 SL% 사용 (원래 SL의 135%)
+            # 🔧 FIX: trail_armed 상태에서는 일반 SL 스킵 → trail_stop이 청산 담당
+            #   (trail 무장 = 이미 +0.3% 수익 경험 → SL -1.0%보다 trail이 먼저 보호)
+            #   단, HARD_STOP(SL×1.5)은 trail 무장 여부와 무관하게 항상 작동
             _active_sl_pct = _sl_extended_pct if _sl_reduced else eff_sl_pct
             hit_pct_sl = cur_gain <= -_active_sl_pct
             hit_base_stop = (base_stop > 0 and curp <= base_stop) if not _sl_reduced else False  # 감량 후 본절SL 비활성
+            _is_hard_stop_pre = cur_gain <= -(eff_sl_pct * 1.5)
+            if trail_armed and not _is_hard_stop_pre:
+                # trail 무장 상태: 일반 SL/base_stop 스킵 → trail_stop에서 처리
+                hit_pct_sl = False
+                hit_base_stop = False
             if hit_pct_sl or hit_base_stop:
                 # 🔧 FIX: SL 디바운스 — 틱 1~2번 휩쏘에 즉시 손절 방지
                 # 연속 2회 이상 또는 2초 이상 유지 시에만 실제 청산
