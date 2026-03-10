@@ -5887,77 +5887,86 @@ def check_1h_ema_alignment(market):
 
 def check_upper_tf_strong(market):
     """상위 타임프레임 강세 필터 (Logic 1&2용)
-    조건: 30m 또는 60m 중 하나라도 다음 조건 3/4 이상 충족:
-    - EMA정배열 (EMA5>EMA10>EMA20, 최근봉)
-    - VR5 > 1.5 (최근 5봉 거래량 / 이전 20봉 평균)
-    - 모멘텀10 > 1% (10봉 전 대비 가격 변동률)
-    - 위치20 > 60% (20봉 고저 대비 현재가 위치)
-    30m/60m 중 하나만 통과하면 OK (OR 조건)
+    15m/30m/60m 조건 중 하나 이상 충족 시 통과:
+    - 15m: VR20>2, 모멘텀10>3%
+    - 30m: EMA정배열3+, VR5>3, 모멘텀10>3%
+    - 60m: EMA정배열3+, VR5>3, 모멘텀10>3%, 위치20>80%
     Returns: bool, str (reason)
     """
-    best_score = 0
-    best_reason = "데이터부족"
+    passed = []
 
+    # === 15m 조건 ===
+    c15 = _get_candles_cached(15, market, 30)
+    if c15 and len(c15) >= 21:
+        closes15 = [c["trade_price"] for c in c15]
+        vols15 = [c.get("candle_acc_trade_volume", 0) for c in c15]
+        # 15m VR20 > 2
+        if len(vols15) >= 25:
+            recent5 = sum(vols15[-5:])
+            past20 = sum(vols15[-25:-5]) / 20.0 if sum(vols15[-25:-5]) > 0 else 1
+            vr20 = recent5 / (5 * max(past20, 1e-10))
+            if vr20 > 2:
+                passed.append("15m_VR20>2")
+        # 15m 모멘텀10 > 3%
+        if len(closes15) >= 11:
+            m10 = closes15[-1] / max(closes15[-11], 1) - 1.0
+            if m10 > 0.03:
+                passed.append(f"15m_모멘텀{m10*100:.1f}%")
+
+    # === 30m / 60m 조건 ===
     for tf in [30, 60]:
         candles = _get_candles_cached(tf, market, 30)
-        if not candles or len(candles) < 21:
+        if not candles or len(candles) < 25:
             continue
         closes = [c["trade_price"] for c in candles]
-        score = 0
-        reasons = []
+        volumes = [c.get("candle_acc_trade_volume", 0) for c in candles]
 
-        # 1) EMA 정배열 (현재봉)
+        # EMA정배열3+ (최근 3봉 연속 EMA5>EMA10>EMA20)
         ema5 = calc_ema_series(closes, 5)
         ema10 = calc_ema_series(closes, 10)
         ema20 = calc_ema_series(closes, 20)
-        if ema5 and ema10 and ema20 and ema5[-1] > ema10[-1] > ema20[-1]:
-            score += 1
-        else:
-            reasons.append(f"{tf}m_EMA미정배열")
+        if ema5 and ema10 and ema20:
+            min_len = min(len(ema5), len(ema10), len(ema20))
+            if min_len >= 3:
+                aligned = 0
+                for i in range(min_len - 3, min_len):
+                    i5 = i - (len(ema5) - min_len)
+                    i10 = i - (len(ema10) - min_len)
+                    i20 = i - (len(ema20) - min_len)
+                    if i5 >= 0 and i10 >= 0 and i20 >= 0:
+                        if ema5[i5] > ema10[i10] > ema20[i20]:
+                            aligned += 1
+                if aligned >= 3:
+                    passed.append(f"{tf}m_EMA정배열3+")
 
-        # 2) VR5 > 1.5
-        volumes = [c.get("candle_acc_trade_volume", 0) for c in candles]
+        # VR5 > 3
         if len(volumes) >= 25:
             recent_vol = sum(volumes[-5:])
             past_avg = sum(volumes[-25:-5]) / 20.0 if sum(volumes[-25:-5]) > 0 else 1
             vr5 = recent_vol / (5 * max(past_avg, 1e-10))
-            if vr5 >= 1.5:
-                score += 1
-            else:
-                reasons.append(f"{tf}m_VR5={vr5:.1f}<1.5")
-        else:
-            reasons.append(f"{tf}m_VR데이터부족")
+            if vr5 > 3:
+                passed.append(f"{tf}m_VR5={vr5:.1f}")
 
-        # 3) 모멘텀10 > 1%
+        # 모멘텀10 > 3%
         if len(closes) >= 11:
-            momentum10 = (closes[-1] / max(closes[-11], 1) - 1.0)
-            if momentum10 > 0.01:
-                score += 1
-            else:
-                reasons.append(f"{tf}m_모멘텀{momentum10*100:.1f}%<1%")
+            m10 = closes[-1] / max(closes[-11], 1) - 1.0
+            if m10 > 0.03:
+                passed.append(f"{tf}m_모멘텀{m10*100:.1f}%")
 
-        # 4) 위치20 > 60%
-        if len(candles) >= 20:
+        # 위치20 > 80% (60m만)
+        if tf == 60 and len(candles) >= 20:
             highs = [c.get("high_price", c["trade_price"]) for c in candles[-20:]]
             lows = [c.get("low_price", c["trade_price"]) for c in candles[-20:]]
             h20 = max(highs)
             l20 = min(lows)
             if h20 > l20:
-                position20 = (closes[-1] - l20) / (h20 - l20)
-                if position20 >= 0.60:
-                    score += 1
-                else:
-                    reasons.append(f"{tf}m_위치{position20*100:.0f}%<60%")
+                pos20 = (closes[-1] - l20) / (h20 - l20)
+                if pos20 > 0.80:
+                    passed.append(f"60m_위치{pos20*100:.0f}%")
 
-        # 3/4 이상이면 통과
-        if score >= 3:
-            return True, f"{tf}m_OK({score}/4)"
-
-        if score > best_score:
-            best_score = score
-            best_reason = ",".join(reasons)
-
-    return False, f"상위TF미달({best_score}/4) {best_reason}"
+    if passed:
+        return True, "+".join(passed[:3])
+    return False, "상위TF조건없음"
 
 
 def detect_20bar_high_breakout(c1):
@@ -6037,26 +6046,83 @@ def detect_5m_bullish_candle(market):
 
 
 def check_exclusion_filters(market, c1):
-    """배제 필터 (진입 차단 조건) — 핵심만 적용
-    - 위치20 < 15% (극저위치 진입 금지)
-    상위TF 필터와 신호 로직이 이미 품질을 보장하므로 최소한의 배제만 적용
+    """배제 필터 (진입 차단 조건)
+    - 위치20 < 20% (저위치 진입 금지)
+    - 도지 캔들 (현재봉 몸통/전체 < 10%)
+    - EMA 역배열 (1분봉 EMA5 < EMA10 < EMA20)
+    - W%R < -80 (과매도)
+    - MFI < 20 (자금흐름 과매도)
     Returns: (bool_blocked, str_reason)
     """
     if not c1 or len(c1) < 21:
         return False, "OK"
 
+    closes = [c["trade_price"] for c in c1]
     cur = c1[-1]
     cur_price = cur["trade_price"]
 
-    # 1) 위치20 < 15% (극저위치 — 하락추세 바닥)
+    # 1) 위치20 < 20%
     highs_20 = [c.get("high_price", c["trade_price"]) for c in c1[-20:]]
     lows_20 = [c.get("low_price", c["trade_price"]) for c in c1[-20:]]
     h20 = max(highs_20)
     l20 = min(lows_20)
     if h20 > l20:
         pos20 = (cur_price - l20) / (h20 - l20)
-        if pos20 < 0.15:
-            return True, f"위치20={pos20*100:.0f}%<15%"
+        if pos20 < 0.20:
+            return True, f"위치20={pos20*100:.0f}%<20%"
+
+    # 2) 도지 캔들 (몸통/전체 < 10%)
+    o = cur["opening_price"]
+    h = cur.get("high_price", max(o, cur_price))
+    l = cur.get("low_price", min(o, cur_price))
+    body = abs(cur_price - o)
+    total = h - l
+    if total > 0 and (body / total) < 0.10:
+        return True, f"도지캔들(body/range={body/total*100:.0f}%)"
+
+    # 3) EMA 역배열 (1분봉 EMA5 < EMA10 < EMA20)
+    if len(closes) >= 20:
+        ema5 = calc_ema_series(closes, 5)
+        ema10 = calc_ema_series(closes, 10)
+        ema20 = calc_ema_series(closes, 20)
+        if ema5 and ema10 and ema20:
+            if ema5[-1] < ema10[-1] < ema20[-1]:
+                return True, "EMA역배열(5<10<20)"
+
+    # 4) W%R < -80 (Williams %R, 14기간)
+    if len(c1) >= 14:
+        highs_14 = [c.get("high_price", c["trade_price"]) for c in c1[-14:]]
+        lows_14 = [c.get("low_price", c["trade_price"]) for c in c1[-14:]]
+        hh = max(highs_14)
+        ll = min(lows_14)
+        if hh > ll:
+            wr = (hh - cur_price) / (hh - ll) * -100
+            if wr < -80:
+                return True, f"W%R={wr:.0f}<-80"
+
+    # 5) MFI < 20 (14기간 간이 계산)
+    if len(c1) >= 15:
+        pos_flow = 0
+        neg_flow = 0
+        for i in range(-14, 0):
+            tp_cur = (c1[i].get("high_price", c1[i]["trade_price"]) +
+                      c1[i].get("low_price", c1[i]["trade_price"]) +
+                      c1[i]["trade_price"]) / 3
+            tp_prev = (c1[i-1].get("high_price", c1[i-1]["trade_price"]) +
+                       c1[i-1].get("low_price", c1[i-1]["trade_price"]) +
+                       c1[i-1]["trade_price"]) / 3
+            vol = c1[i].get("candle_acc_trade_volume", 0)
+            mf = tp_cur * vol
+            if tp_cur > tp_prev:
+                pos_flow += mf
+            else:
+                neg_flow += mf
+        if neg_flow > 0:
+            mfi = 100 - 100 / (1 + pos_flow / neg_flow)
+        else:
+            mfi = 100
+        if mfi < 20:
+            return True, f"MFI={mfi:.0f}<20"
 
     return False, "OK"
 
