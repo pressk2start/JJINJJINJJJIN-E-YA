@@ -108,9 +108,18 @@ for p in _raw.split(","):
         try: CHAT_IDS.append(int(p))
         except: pass
 
+_tg_last_send = 0.0  # rate limit용
+
 def tg(msg):
+    """텔레그램 전송 (rate limit 1초)"""
+    global _tg_last_send
     print(msg)
     if not TG_TOKEN or not CHAT_IDS: return
+    # rate limit: 최소 1초 간격
+    now = time.time()
+    gap = now - _tg_last_send
+    if gap < 1.0:
+        time.sleep(1.0 - gap)
     chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)] if len(msg) > 4000 else [msg]
     for cid in CHAT_IDS:
         for chunk in chunks:
@@ -119,10 +128,15 @@ def tg(msg):
                     f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                     json={"chat_id": cid, "text": chunk, "disable_web_page_preview": True},
                     timeout=10)
-                if r.status_code != 200:
+                if r.status_code == 429:
+                    retry = int(r.headers.get("Retry-After", 3))
+                    print(f"[TG] rate limit, {retry}초 대기")
+                    time.sleep(retry)
+                elif r.status_code != 200:
                     print(f"[TG경고] {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 print(f"[TG에러] {e}")
+    _tg_last_send = time.time()
 
 def _get_mem_mb():
     try:
@@ -142,6 +156,40 @@ def safe_get(url, params=None, retries=4, timeout=10):
             time.sleep(0.3)
         except: time.sleep(0.5)
     return None
+
+def _atomic_json_write(fpath, obj):
+    """원자적 JSON 쓰기 — 중간에 죽어도 파일 안 깨짐"""
+    tmp = fpath + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, fpath)  # 원자적 교체
+
+def _safe_json_load(fpath):
+    """JSON 로드 — 깨진 파일 자동 복구 (Extra data 등)"""
+    try:
+        with open(fpath, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"[JSON복구] {os.path.basename(fpath)}: {e}")
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                raw = f.read()
+            decoder = json.JSONDecoder()
+            obj, idx = decoder.raw_decode(raw)
+            tmp = fpath + ".fix"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+            os.replace(tmp, fpath)
+            print(f"[JSON복구] {os.path.basename(fpath)} 복구 성공")
+            return obj
+        except Exception as e2:
+            print(f"[JSON삭제] {os.path.basename(fpath)} 복구 실패, 삭제: {e2}")
+            try: os.remove(fpath)
+            except: pass
+            return None
+    except Exception as e:
+        print(f"[JSON에러] {os.path.basename(fpath)}: {e}")
+        return None
 
 # ================================================================
 # PART 1: 수집
@@ -299,13 +347,6 @@ def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
     del deduped, payload; gc.collect()
     return count
 
-def _atomic_json_write(fpath, obj):
-    """원자적 JSON 쓰기 — 중간에 죽어도 파일 안 깨짐"""
-    tmp = fpath + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False)
-    os.replace(tmp, fpath)  # 원자적 교체
-
 def save_coin(coin, unit, candles):
     os.makedirs(DATA_DIR, exist_ok=True)
     comp = [compress(c) for c in candles]
@@ -380,35 +421,6 @@ def collect(days=30, top_n=30):
 # ================================================================
 # PART 2: 지표 함수
 # ================================================================
-def _safe_json_load(fpath):
-    """JSON 로드 — 깨진 파일 자동 복구 (Extra data 등)"""
-    try:
-        with open(fpath, encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"[JSON복구] {os.path.basename(fpath)}: {e}")
-        try:
-            with open(fpath, encoding="utf-8") as f:
-                raw = f.read()
-            # Extra data → 첫 번째 유효 JSON만 파싱
-            decoder = json.JSONDecoder()
-            obj, idx = decoder.raw_decode(raw)
-            # 복구된 데이터로 덮어쓰기
-            tmp = fpath + ".fix"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(obj, f, ensure_ascii=False)
-            os.replace(tmp, fpath)
-            print(f"[JSON복구] {os.path.basename(fpath)} 복구 성공")
-            return obj
-        except Exception as e2:
-            print(f"[JSON삭제] {os.path.basename(fpath)} 복구 실패, 삭제: {e2}")
-            try: os.remove(fpath)
-            except: pass
-            return None
-    except Exception as e:
-        print(f"[JSON에러] {os.path.basename(fpath)}: {e}")
-        return None
-
 def load_candles(coin, unit):
     fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
     if not os.path.exists(fpath): return []
@@ -640,7 +652,7 @@ def find_idx(candles, sig_time):
     return r
 
 def process_coin(coin, btc_regime, dist_acc):
-    tg(f"  >> {coin} 분석 시작")
+    print(f"  >> {coin} 분석 시작")  # print만 (텔레그램 폭격 방지)
     c5 = load_candles(coin, 5)
     if len(c5) < 200: return {}
     c15 = make_nmin(c5, 3)
@@ -770,7 +782,9 @@ def process_coin(coin, btc_regime, dist_acc):
         bar=c5[i]
         if bar["c"]<=bar["o"]: continue
         body=bar["c"]-bar["o"]
-        avg_body=sum(abs(c5[j]["c"]-c5[j]["o"]) for j in range(max(0,i-20),i))/20
+        rng=range(max(0,i-20),i)
+        n_bars=len(rng) if len(rng)>0 else 1
+        avg_body=sum(abs(c5[j]["c"]-c5[j]["o"]) for j in rng)/n_bars
         if avg_body==0 or body<avg_body*2: continue
         ei=i+1
         if ei-last<20: continue
@@ -798,7 +812,7 @@ def process_coin(coin, btc_regime, dist_acc):
     raw_signals["쌍바닥"] = sigs
 
     total_sigs = sum(len(v) for v in raw_signals.values())
-    tg(f"    {coin} 신호: {total_sigs}개")
+    print(f"    {coin} 신호: {total_sigs}개")  # print만
     if total_sigs == 0:
         del c5, c15; gc.collect(); return {}
 
@@ -815,10 +829,20 @@ def process_coin(coin, btc_regime, dist_acc):
         for si5, ei, bar in sigs:
             all_sig_times.add(bar["t"])
 
+    # 1m 데이터 미리 한 번만 로드 (2번 로드 방지)
+    c1 = load_candles(coin, 1)
+    c1_map = {}
+    if c1 and len(c1) > 100:
+        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
+    use_1m = len(c1_map) > 100
+
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
         if tf == 5:
             candles = c5
+        elif tf == 1:
+            candles = c1 if use_1m else None  # 이미 로드된 c1 재사용
+            if not candles or len(candles) < 60: continue
         else:
             candles = load_candles(coin, tf)
             if not candles or len(candles)<60:
@@ -826,10 +850,9 @@ def process_coin(coin, btc_regime, dist_acc):
                 elif tf==30: candles=make_nmin(c5,6)
                 elif tf==60: candles=make_nmin(c5,12)
                 elif tf==3: candles=None
-                elif tf==1: candles=None
                 if not candles or len(candles)<60: continue
         if tf == 5: time_map = None
-        else: time_map = {c["t"][:16]: i for i,c in enumerate(candles)}
+        else: time_map = {cc["t"][:16]: idx for idx,cc in enumerate(candles)}
         pfx = f"tf{tf}_"
         for sig_time in all_sig_times:
             if tf == 5: continue
@@ -840,13 +863,15 @@ def process_coin(coin, btc_regime, dist_acc):
                 all_feats = extract_tf_features(candles, idx, pfx)
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx):]
-                    dist_acc[(tf, short_key)].append(fv)
+                    lst = dist_acc[(tf, short_key)]
+                    if len(lst) < 10000:  # 메모리 보호
+                        lst.append(fv)
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx):]
                     if short_key in COND_KEYS:
                         tf_feat_cache[sig_time][fk] = fv
                 del all_feats
-        if tf != 5: del candles; gc.collect()
+        if tf not in (5, 1): del candles; gc.collect()  # c1은 아래서 사용
 
     pfx5 = "tf5_"
     for sigs in raw_signals.values():
@@ -855,18 +880,13 @@ def process_coin(coin, btc_regime, dist_acc):
                 all_feats = extract_tf_features(c5, si5, pfx5)
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx5):]
-                    dist_acc[(5, short_key)].append(fv)
+                    lst = dist_acc[(5, short_key)]
+                    if len(lst) < 10000: lst.append(fv)  # 메모리 보호
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx5):]
                     if short_key in COND_KEYS:
                         tf_feat_cache[bar["t"]][fk] = fv
                 del all_feats
-
-    c1 = load_candles(coin, 1)
-    c1_map = {}
-    if c1 and len(c1) > 100:
-        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
-    use_1m = len(c1_map) > 100
 
     results = {}
     cost_pct = TOTAL_COST * 100
