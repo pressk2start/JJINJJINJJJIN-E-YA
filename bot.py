@@ -120,14 +120,21 @@ for p in _raw.split(","):
 def tg(msg):
     print(msg)
     if not TG_TOKEN or not CHAT_IDS:
+        print("[TG] 토큰 또는 CHAT_IDS 없음 — 텔레그램 전송 스킵")
         return
+    # 4000자 초과 시 분할 전송
+    chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)] if len(msg) > 4000 else [msg]
     for cid in CHAT_IDS:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json={"chat_id": cid, "text": msg[:4000], "disable_web_page_preview": True},
-                timeout=10)
-        except: pass
+        for chunk in chunks:
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json={"chat_id": cid, "text": chunk, "disable_web_page_preview": True},
+                    timeout=10)
+                if r.status_code != 200:
+                    print(f"[TG경고] {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                print(f"[TG에러] {e}")
 
 def safe_get(url, params=None, retries=2, timeout=8):
     for i in range(retries):
@@ -683,8 +690,7 @@ def process_coin(coin, btc_regime, dist_acc):
 
             # ── 엄격 판정: 1분봉 기준 + 10분 제한 + 시그널별 TP/SL ──
             strict = _sim_strict_1m(c1, c1_map, c5, ei, entry,
-                                     tpsl["tp"], tpsl["sl"], cost_pct,
-                                     bar["t"]) if use_1m else \
+                                     tpsl["tp"], tpsl["sl"], cost_pct) if use_1m else \
                      _sim_strict_5m(c5, ei, entry, tpsl["tp"], tpsl["sl"], cost_pct)
 
             # ── 탐색용 EXIT_CONFIGS (5분봉) ──
@@ -716,7 +722,7 @@ def process_coin(coin, btc_regime, dist_acc):
     return results
 
 
-def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost, sig_time):
+def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
     """1분봉 기준 엄격 판정: TP/SL + 10분 시간제한
     반환: {"pnl": float, "result": "TP"|"SL"|"TIMEOUT"|"BOTH_SL", "bars": int}
     BOTH_SL: 같은 1분봉에서 TP/SL 동시 충족 → SL 처리 (보수적)
@@ -845,7 +851,7 @@ def _avg(vals):
 def generate_report(all_results, dist_acc):
     L = []
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    L.append(f"업비트 신호 연구 v3.2 ({ts})")
+    L.append(f"업비트 신호 연구 v3.3 ({ts})")
     L.append(f"비용:{TOTAL_COST*100:.2f}% | 진입:다음봉시가 | 최대:{MAX_HOLD_BARS}봉")
     L.append(f"Train/Test:{TRAIN_RATIO*100:.0f}/{(1-TRAIN_RATIO)*100:.0f} | 최소:{MIN_TRADES}건")
     L.append("="*65)
@@ -868,10 +874,12 @@ def generate_report(all_results, dist_acc):
     L.append(f"  {'-'*95}")
 
     total_1m = total_5m = total_5m_fb = 0
+    has_strict_data = False
     for st, sigs in all_results.items():
         if not sigs: continue
         stricts = [s["strict"] for s in sigs if "strict" in s and s["strict"]]
         if not stricts: continue
+        has_strict_data = True
         tpsl = SIG_TPSL.get(st, {"tp":1.0,"sl":0.7})
 
         n = len(stricts)
@@ -911,7 +919,9 @@ def generate_report(all_results, dist_acc):
             s_hit = sum(1 for s in sub_s if s["result"] == "TP") / sn * 100
             L.append(f"    {nm}: n={sn:4d} EV={sev:+.4f}% Hit={s_hit:.1f}% WR={swr:.1f}%")
 
-    L.append(f"  ── 데이터소스: 1분봉={total_1m}건, 5분봉fallback={total_5m}건 ({total_1m/(total_1m+total_5m)*100:.0f}%/{ total_5m/(total_1m+total_5m)*100:.0f}%)" if (total_1m+total_5m) > 0 else "")
+    if not has_strict_data:
+        L.append("  (엄격 판정 데이터 없음 — strict 키 확인 필요)")
+    L.append(f"  ── 데이터소스: 1분봉={total_1m}건, 5분봉fallback={total_5m}건 ({total_1m/(total_1m+total_5m)*100:.0f}%/{total_5m/(total_1m+total_5m)*100:.0f}%)" if (total_1m+total_5m) > 0 else "")
     L.append(f"  ── Hit%=TP적중률, WR%=양수PnL비율(TIMEOUT포함)")
 
     # ============================================================
@@ -922,9 +932,13 @@ def generate_report(all_results, dist_acc):
     ranked=[]
     for st,sigs in all_results.items():
         if not sigs: continue
-        m=calc_m([s["exits"].get(dk,0) for s in sigs])
+        pnl_list = [s["exits"].get(dk,0) for s in sigs if s.get("exits")]
+        if not pnl_list: continue
+        m=calc_m(pnl_list)
         if m: ranked.append((st,m))
     ranked.sort(key=lambda x:-x[1]["ev"])
+    if not ranked:
+        L.append("  (데이터 없음 — exits 키 확인 필요)")
     for st,m in ranked:
         star=" ***" if m["ev"]>0 and m["n"]>=MIN_TRADES else ""
         L.append(f"  {st:<16s} {fmt(m)}{star}")
@@ -1242,6 +1256,9 @@ def main():
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     parser.add_argument("--include-1m", action="store_true", help="1분봉도 수집 (느림)")
+
+    # 시작 테스트 알람 — 토큰/채팅ID/봇참여 한번에 확인
+    tg("[시작] upbit_signal_study v3.3 실행")
     args = parser.parse_args()
     t0 = time.time()
 
@@ -1327,7 +1344,7 @@ def main():
     if cur: chunks.append(cur)
     for ci,ch in enumerate(chunks):
         tg(f"[리포트 {ci+1}/{len(chunks)}]\n{ch}")
-        time.sleep(0.5)
+        time.sleep(3 if len(chunks) > 10 else 1)  # 그룹챗 분당20메시지 제한 대비
 
 if __name__ == "__main__":
     try: main()
