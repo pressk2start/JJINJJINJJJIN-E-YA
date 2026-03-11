@@ -4170,7 +4170,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             tag = pos_for_tag.get("signal_tag", "기본")
             _v4_ep = v4_get_exit_params(tag)
 
-            # 🔧 v4: HOLD 전략 (15m_눌림+돌파) → hold_bars 후 트레일로 전환
+            # 🔧 v4: HOLD 전략 (20봉돌파/5m양봉/5m큰양봉) → hold_bars 후 트레일로 전환
             _hold_bars = _v4_ep.get("hold_bars", 0)
             _max_bars = _v4_ep.get("max_bars", 60)
 
@@ -9728,7 +9728,7 @@ def monitor_position(m,
     dyn_checkpoint = max(get_dynamic_checkpoint(), _v4_ep.get("activation_pct", 0.003))
     # 🔧 v4: 트레일 간격 = trail_pct (0.2%)
     trail_dist_min = max(get_trail_distance_min(), _v4_ep.get("trail_pct", 0.002))
-    # 🔧 v4: HOLD 전략 (15m_눌림+돌파) — hold_bars 동안은 트레일 무장 안 함
+    # 🔧 v4: HOLD 전략 (20봉돌파/5m양봉/5m큰양봉: 12봉) — hold_bars 동안은 트레일 무장 안 함
     _v4_hold_bars = _v4_ep.get("hold_bars", 0)
     _v4_max_bars = _v4_ep.get("max_bars", 60)
     _v4_strategy = _v4_ep.get("strategy", "TRAIL")
@@ -10347,7 +10347,7 @@ def monitor_position(m,
             # 🔧 소프트 가드: 초기 30초간 손절/트레일 디바운스 강화 (false breakout 방어)
             in_soft_guard = alive_sec < SOFT_GUARD_SEC
 
-            # 🔧 v4: HOLD 전략 봉 카운팅 (15m_눌림+돌파: 12봉 보유 후 트레일)
+            # 🔧 v4: HOLD 전략 봉 카운팅 (20봉돌파/5m양봉/5m큰양봉: 12봉 보유 후 트레일)
             _elapsed_bars_15m = int(alive_sec / 900)  # 15분봉 기준 경과 봉 수
             _hold_complete = (_v4_hold_bars == 0) or (_elapsed_bars_15m >= _v4_hold_bars)
             # v4 max_bars 초과 시 강제 청산
