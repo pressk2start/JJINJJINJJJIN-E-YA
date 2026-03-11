@@ -68,20 +68,24 @@ def _acquire_lock():
         sys.exit(0)
 
     # 1단계: 기존 PID 파일 검증 (flock 실패 대비)
+    _script_basename = os.path.basename(os.path.abspath(__file__))  # "upbit_signal_study.py"
     try:
         if os.path.exists(LOCK_FILE):
             with open(LOCK_FILE) as f:
                 old_pid = int(f.read().strip())
             if old_pid != os.getpid() and _is_pid_alive(old_pid):
-                # 정말 같은 스크립트인지 /proc/PID/cmdline으로 확인
+                # /proc/PID/cmdline으로 같은 스크립트인지 확인
                 try:
                     with open(f"/proc/{old_pid}/cmdline", "rb") as f:
                         cmdline = f.read().decode("utf-8", errors="ignore")
-                    if "upbit_signal_study" in cmdline:
-                        print(f"[잠금] PID {old_pid} 실행중 확인. 종료.")
+                    # 스크립트 파일명 또는 모듈명으로 매칭 (실행 방식 무관)
+                    if _script_basename in cmdline or "signal_study" in cmdline:
+                        print(f"[잠금] PID {old_pid} 실행중 확인 (cmdline 매칭). 종료.")
                         sys.exit(0)
                 except (FileNotFoundError, PermissionError):
-                    pass  # /proc 접근 실패 → flock으로 방어
+                    # /proc 접근 실패해도, PID가 살아있으면 안전하게 차단
+                    print(f"[잠금] PID {old_pid} 살아있음 (/proc 접근불가). 종료.")
+                    sys.exit(0)
     except (ValueError, FileNotFoundError):
         pass
 
@@ -117,7 +121,7 @@ MIN_TRADES = 100
 TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 MAX_HOLD_1M = 10
-MAX_SIGS_PER_COIN = 500
+MAX_SIGS_PER_COIN = 200
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -131,7 +135,7 @@ COND_KEYS = {
 
 COLLECT_TFS = [(3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
 ALL_TFS = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
-ANALYSIS_TFS = [1, 3, 5, 15, 30, 60]
+ANALYSIS_TFS = [5, 15, 60]  # 핵심 TF만 (1m/3m/30m 피처추출 제거 → 속도 2배↑)
 
 SIG_TPSL = {
     "15m_눌림반전":  {"tp": 1.5, "sl": 1.0},
@@ -148,21 +152,12 @@ SIG_TPSL = {
     "쌍바닥":        {"tp": 1.5, "sl": 1.0},
 }
 EXIT_CONFIGS = [
-    ("FIX_TP0.5/SL0.5", "fix", 0.5, 0.5, 0, 0),
-    ("FIX_TP0.7/SL0.7", "fix", 0.7, 0.7, 0, 0),
     ("FIX_TP1.0/SL0.7", "fix", 1.0, 0.7, 0, 0),
-    ("FIX_TP1.0/SL1.0", "fix", 1.0, 1.0, 0, 0),
     ("FIX_TP1.5/SL1.0", "fix", 1.5, 1.0, 0, 0),
     ("TRAIL_SL0.7/A0.3/T0.2", "trail", 0, 0.7, 0.3, 0.2),
-    ("TRAIL_SL0.7/A0.5/T0.3", "trail", 0, 0.7, 0.5, 0.3),
-    ("TRAIL_SL1.0/A0.3/T0.2", "trail", 0, 1.0, 0.3, 0.2),
     ("TRAIL_SL1.0/A0.5/T0.3", "trail", 0, 1.0, 0.5, 0.3),
-    ("HOLD_6봉", "hold", 0, 0, 0, 6),
     ("HOLD_12봉", "hold", 0, 0, 0, 12),
-    ("HOLD_24봉", "hold", 0, 0, 0, 24),
-    ("TIME12_SL0.7", "time", 0, 0.7, 0, 12),
     ("TIME24_SL0.7", "time", 0, 0.7, 0, 24),
-    ("TIME24_SL1.0", "time", 0, 1.0, 0, 24),
 ]
 
 try:
@@ -968,16 +963,13 @@ def process_coin(coin, btc_regime, dist_acc):
     for tf in ANALYSIS_TFS:
         if tf == 5:
             candles = c5
-        elif tf == 1:
-            candles = c1 if use_1m else None  # 이미 로드된 c1 재사용
-            if not candles or len(candles) < 60: continue
         else:
             candles = load_candles(coin, tf)
             if not candles or len(candles)<60:
                 if tf==15: candles=c15
                 elif tf==30: candles=make_nmin(c5,6)
                 elif tf==60: candles=make_nmin(c5,12)
-                elif tf==3: candles=None
+                else: candles=None
                 if not candles or len(candles)<60: continue
         if tf == 5: time_map = None
         else: time_map = {cc["t"][:16]: idx for idx,cc in enumerate(candles)}
@@ -999,7 +991,7 @@ def process_coin(coin, btc_regime, dist_acc):
                     if short_key in COND_KEYS:
                         tf_feat_cache[sig_time][fk] = fv
                 del all_feats
-        if tf not in (5, 1): del candles; gc.collect()  # c1은 아래서 사용
+        if tf != 5: del candles; gc.collect()
 
     pfx5 = "tf5_"
     for sigs in raw_signals.values():
@@ -1313,11 +1305,8 @@ def generate_report(all_results, dist_acc):
         # 복합필터
         L.append(f"\n    [복합필터]")
         combos=[
-            ("1m_RSI<40+5m_RSI<50", lambda s: s.get("tf1_rsi14",50)<40 and s.get("tf5_rsi14",50)<50),
             ("5m_RSI<50+15m_BB<40", lambda s: s.get("tf5_rsi14",50)<50 and s.get("tf15_bb20",50)<40),
             ("5m_MACD골든+15m_ADX>25", lambda s: s.get("tf5_macd_x")==1 and s.get("tf15_adx",0)>25),
-            ("15m_RSI<40+30m_RSI<40", lambda s: s.get("tf15_rsi14",50)<40 and s.get("tf30_rsi14",50)<40),
-            ("15m_BB<20+30m_EMA정배열", lambda s: s.get("tf15_bb20",50)<20 and s.get("tf30_ema_al",0)>=2),
             ("15m_MACD골든+1h_EMA정배열", lambda s: s.get("tf15_macd_x")==1 and s.get("tf60_ema_al",0)>=3),
             ("15m_BB<20+BTC상승", lambda s: s.get("tf15_bb20",50)<20 and s["regime"]=="상승"),
             ("5m_RSI<40+BTC상승+15m_MACD골든", lambda s: s.get("tf5_rsi14",50)<40 and s["regime"]=="상승" and s.get("tf15_macd_x")==1),
