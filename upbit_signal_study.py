@@ -311,14 +311,17 @@ def _chunk_path_1m(coin, chunk_idx):
 
 def _cleanup_1m_chunks(coin, max_chunks=200):
     """이 프로세스의 청크 + 오래된 고아 청크 정리"""
+    if not os.path.exists(DATA_DIR):
+        return  # 디렉토리 자체가 없으면 정리할 것도 없음
     # 이 프로세스 청크 삭제
     for ci in range(max_chunks):
         cp = _chunk_path_1m(coin, ci)
-        if os.path.exists(cp):
-            try: os.remove(cp)
-            except: pass
+        try:
+            if os.path.exists(cp): os.remove(cp)
+        except OSError:
+            pass
     # 고아 청크 (다른 프로세스가 남긴 것) 정리
-    if os.path.exists(DATA_DIR):
+    try:
         for f in os.listdir(DATA_DIR):
             if f.startswith(f".{coin}_1m_p") and f.endswith(".tmp"):
                 fp = os.path.join(DATA_DIR, f)
@@ -326,12 +329,15 @@ def _cleanup_1m_chunks(coin, max_chunks=200):
                     age = time.time() - os.path.getmtime(fp)
                     if age > 1800:  # 30분 이상 된 고아 청크
                         os.remove(fp)
-                except: pass
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
     """1분봉 30일치 청크 수집 (메모리 안전). 43200개도 OK."""
+    os.makedirs(DATA_DIR, exist_ok=True)  # 디렉토리 먼저 보장
     _cleanup_1m_chunks(coin)
-    os.makedirs(DATA_DIR, exist_ok=True)
 
     buffer = []
     chunk_idx = 0
@@ -382,6 +388,7 @@ def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
 
         # 청크 저장 (메모리 보호)
         if len(buffer) >= CHUNK_SIZE:
+            os.makedirs(DATA_DIR, exist_ok=True)
             fpath = _chunk_path_1m(coin, chunk_idx)
             with open(fpath, "w", encoding="utf-8") as f:
                 json.dump(buffer, f, ensure_ascii=False)
@@ -394,6 +401,7 @@ def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
 
     # 나머지 버퍼 저장
     if buffer:
+        os.makedirs(DATA_DIR, exist_ok=True)
         fpath = _chunk_path_1m(coin, chunk_idx)
         with open(fpath, "w", encoding="utf-8") as f:
             json.dump(buffer, f, ensure_ascii=False)
