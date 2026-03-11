@@ -122,6 +122,7 @@ TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 MAX_HOLD_1M = 10
 MAX_SIGS_PER_COIN = 200
+USE_STRICT_1M = False  # True면 1분봉 43K개 로드 (느림), False면 5m 폴백 (빠름)
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -937,7 +938,7 @@ def process_coin(coin, btc_regime, dist_acc):
     total_sigs = sum(len(v) for v in raw_signals.values())
     print(f"    {coin} 신호: {total_sigs}개")  # print만
     if total_sigs == 0:
-        del c5, c15; gc.collect(); return {}
+        del c5, c15; return {}
 
     if total_sigs > MAX_SIGS_PER_COIN:
         ratio = MAX_SIGS_PER_COIN / total_sigs
@@ -952,12 +953,13 @@ def process_coin(coin, btc_regime, dist_acc):
         for si5, ei, bar in sigs:
             all_sig_times.add(bar["t"])
 
-    # 1m 데이터 미리 한 번만 로드 (2번 로드 방지)
-    c1 = load_candles(coin, 1)
-    c1_map = {}
-    if c1 and len(c1) > 100:
-        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
-    use_1m = len(c1_map) > 100
+    # 1m 데이터: USE_STRICT_1M 모드일 때만 로드 (기본: 5m 폴백으로 속도 우선)
+    c1 = []; c1_map = {}; use_1m = False
+    if USE_STRICT_1M:
+        c1 = load_candles(coin, 1)
+        if c1 and len(c1) > 100:
+            c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
+        use_1m = len(c1_map) > 100
 
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
@@ -991,7 +993,7 @@ def process_coin(coin, btc_regime, dist_acc):
                     if short_key in COND_KEYS:
                         tf_feat_cache[sig_time][fk] = fv
                 del all_feats
-        if tf != 5: del candles; gc.collect()
+        if tf != 5: del candles
 
     pfx5 = "tf5_"
     for sigs in raw_signals.values():
@@ -1051,7 +1053,7 @@ def process_coin(coin, btc_regime, dist_acc):
             built.append(sig)
         results[stype] = built
 
-    del c5, c15, c1, c1_map, tf_feat_cache, raw_signals; gc.collect()
+    del c5, c15, c1, c1_map, tf_feat_cache, raw_signals
     return results
 
 def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
@@ -1383,13 +1385,18 @@ def _has_enough_data(min_coins=10):
 
 def main():
     _acquire_lock()
+    global USE_STRICT_1M
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
+    parser.add_argument("--strict-1m", action="store_true",
+                        help="1분봉 엄격 판정 활성화 (느림, 기본: 5m 폴백)")
     args = parser.parse_args()
+    USE_STRICT_1M = args.strict_1m
 
-    tg("[시작] upbit_signal_study v3.3 실행 (1분봉 30일 포함)")
+    mode_str = "1분봉 엄격판정" if USE_STRICT_1M else "5m 폴백(빠름)"
+    tg(f"[시작] upbit_signal_study v3.3 실행 ({mode_str})")
     t0 = time.time()
     last_hb = t0
 
@@ -1419,7 +1426,7 @@ def main():
             t=btc5[i]["t"][:16]
             btc_regime[t]="상승" if ret>0.5 else ("하락" if ret<-0.5 else "횡보")
         tg(f"  BTC 레짐: {len(btc_regime)}시점")
-    del btc5; gc.collect()
+    del btc5
 
     all_results = defaultdict(list)
     dist_acc = defaultdict(list)
@@ -1433,17 +1440,16 @@ def main():
             tg(f"[살아있음] 분석 진행중 {i+1}/{len(coins)} | {int(now-t0)}초 경과{mem_str}")
             last_hb = now
 
-        coin_t0 = time.time()
         try:
             cr = process_coin(coin, btc_regime, dist_acc)
             for st,sigs in cr.items():
                 all_results[st].extend(sigs)
-            del cr; gc.collect()
+            del cr
         except Exception as e:
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
-        coin_elapsed = time.time() - coin_t0
         if (i+1) % 10 == 0:
+            gc.collect()  # 10코인마다 한 번만
             total_elapsed = time.time() - analysis_start
             avg_per_coin = total_elapsed / (i+1)
             remaining = avg_per_coin * (len(coins) - i - 1)
@@ -1466,7 +1472,7 @@ def main():
         import traceback
         tg(f"[리포트에러] {e}\n{traceback.format_exc()[-500:]}")
         lines = [f"에러: {e}"]
-    del dist_acc; gc.collect()
+    del dist_acc
 
     os.makedirs(OUT_DIR, exist_ok=True)
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M")
