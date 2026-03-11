@@ -9,8 +9,7 @@ import uuid
 import hashlib
 import jwt
 
-# 🔧 v4 전략 모듈 (리포트 v3.2 기반 전면 개편)
-import strategy_v4
+# 🔧 v4 전략 모듈 (리포트 v4.0 기반 전면 개편) — bot.py 통합
 
 # 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
 try:
@@ -479,6 +478,544 @@ def get_available_krw(accounts) -> float:
             return max(0.0, bal - locked)
     return 0.0
 
+
+# ================================================================
+# 🔧 v4 전략 모듈 (strategy_v4 통합 — 백테스트 리포트 v4.0 기반)
+# ================================================================
+# 핵심 원칙:
+#   1. 바닥잡기(역추세) < 강한 흐름 continuation (순추세)
+#   2. 단독 신호 = 엣지 부족 → 상위TF 필터 필수
+#   3. 검증 통과 복합필터: 5m MACD골든+15m ADX>25, 15m MACD골든+1h EMA정배열
+#   4. 자동탐색 1위: 15m 모멘텀3봉 상위 33%
+#   5. 청산: SL 0.7%, trail 느슨, HOLD 12봉 or TIME24
+# ================================================================
+
+def _v4_ema(data, period):
+    """지수이동평균 계산 (v4 전략용)"""
+    if not data or len(data) < period:
+        return None
+    k = 2.0 / (period + 1)
+    ema = sum(data[:period]) / period
+    for v in data[period:]:
+        ema = v * k + ema * (1 - k)
+    return ema
+
+
+def _v4_sma(data, period):
+    """단순이동평균 (v4 전략용)"""
+    if not data or len(data) < period:
+        return None
+    return sum(data[-period:]) / period
+
+
+def _v4_rsi(closes, period=14):
+    """RSI 계산 (v4 전략용)"""
+    if not closes or len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    if len(gains) < period:
+        return None
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss < 1e-10:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _v4_atr(candles, period=14):
+    """ATR% 계산 (캔들 리스트, 최신이 [0]) (v4 전략용)"""
+    if not candles or len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(len(candles) - 1):
+        c = candles[i]
+        prev_c = candles[i + 1]
+        h = c.get("high_price", c.get("h", 0))
+        l = c.get("low_price", c.get("l", 0))
+        prev_close = prev_c.get("trade_price", prev_c.get("c", 0))
+        if prev_close <= 0:
+            continue
+        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+        trs.append(tr / prev_close * 100.0)
+    if len(trs) < period:
+        return None
+    return sum(trs[:period]) / period
+
+
+def _v4_adx(candles, period=14):
+    """ADX 계산 (v4 전략용)"""
+    if not candles or len(candles) < period * 2 + 1:
+        return None
+    plus_dm_list, minus_dm_list, tr_list = [], [], []
+    for i in range(len(candles) - 1):
+        c = candles[i]
+        p = candles[i + 1]
+        h = c.get("high_price", c.get("h", 0))
+        l = c.get("low_price", c.get("l", 0))
+        ph = p.get("high_price", p.get("h", 0))
+        pl = p.get("low_price", p.get("l", 0))
+        pc = p.get("trade_price", p.get("c", 0))
+        if pc <= 0:
+            continue
+        up_move = h - ph
+        down_move = pl - l
+        plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+        tr_list.append(tr)
+    if len(tr_list) < period:
+        return None
+    atr_s = sum(tr_list[:period])
+    plus_di_s = sum(plus_dm_list[:period])
+    minus_di_s = sum(minus_dm_list[:period])
+    dx_list = []
+    for i in range(period, len(tr_list)):
+        atr_s = atr_s - atr_s / period + tr_list[i]
+        plus_di_s = plus_di_s - plus_di_s / period + plus_dm_list[i]
+        minus_di_s = minus_di_s - minus_di_s / period + minus_dm_list[i]
+        if atr_s > 0:
+            pdi = plus_di_s / atr_s * 100
+            mdi = minus_di_s / atr_s * 100
+            denom = pdi + mdi
+            if denom > 0:
+                dx_list.append(abs(pdi - mdi) / denom * 100)
+    if len(dx_list) < period:
+        return sum(dx_list) / len(dx_list) if dx_list else None
+    adx = sum(dx_list[:period]) / period
+    for i in range(period, len(dx_list)):
+        adx = (adx * (period - 1) + dx_list[i]) / period
+    return adx
+
+
+def _v4_macd_golden(closes, fast=12, slow=26, signal=9):
+    """MACD 골든크로스 여부 (v4 전략용)"""
+    if not closes or len(closes) < slow + signal:
+        return False, 0.0
+    ema_fast = _v4_ema(closes, fast)
+    ema_slow = _v4_ema(closes, slow)
+    if ema_fast is None or ema_slow is None:
+        return False, 0.0
+    macd_line = ema_fast - ema_slow
+    macd_values = []
+    k_f = 2.0 / (fast + 1)
+    k_s = 2.0 / (slow + 1)
+    ef = sum(closes[:fast]) / fast
+    es = sum(closes[:slow]) / slow
+    for i in range(slow, len(closes)):
+        ef = closes[i] * k_f + ef * (1 - k_f) if i >= fast else ef
+        es = closes[i] * k_s + es * (1 - k_s)
+        macd_values.append(ef - es)
+    if len(macd_values) < signal:
+        return False, macd_line
+    sig = sum(macd_values[:signal]) / signal
+    k_sig = 2.0 / (signal + 1)
+    for v in macd_values[signal:]:
+        sig = v * k_sig + sig * (1 - k_sig)
+    histogram = macd_values[-1] - sig
+    return (macd_values[-1] > sig), histogram
+
+
+def _v4_bb_position(closes, period=20):
+    """BB20 위치 (0-100) (v4 전략용)"""
+    if not closes or len(closes) < period:
+        return None, None
+    window = closes[-period:]
+    mid = sum(window) / period
+    std = (sum((x - mid) ** 2 for x in window) / period) ** 0.5
+    if std < 1e-10:
+        return 50.0, 0.0
+    upper = mid + 2 * std
+    lower = mid - 2 * std
+    band_width = upper - lower
+    if band_width < 1e-10:
+        return 50.0, 0.0
+    pos = (closes[-1] - lower) / band_width * 100.0
+    bw_pct = band_width / mid * 100.0
+    return pos, bw_pct
+
+
+def _v4_stoch_k(candles, period=14):
+    """Stochastic %K (v4 전략용)"""
+    if not candles or len(candles) < period:
+        return None
+    highs = [c.get("high_price", c.get("h", 0)) for c in candles[:period]]
+    lows = [c.get("low_price", c.get("l", 0)) for c in candles[:period]]
+    close = candles[0].get("trade_price", candles[0].get("c", 0))
+    hh = max(highs)
+    ll = min(lows)
+    if hh - ll < 1e-10:
+        return 50.0
+    return (close - ll) / (hh - ll) * 100.0
+
+
+def _v4_ema_alignment(closes, periods=(5, 10, 20, 50)):
+    """EMA 정배열 수 (v4 전략용)"""
+    if not closes or len(closes) < max(periods):
+        return 0
+    emas = []
+    for p in periods:
+        e = _v4_ema(closes, p)
+        if e is None:
+            return 0
+        emas.append(e)
+    count = 0
+    for i in range(len(emas) - 1):
+        if emas[i] > emas[i + 1]:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _v4_volume_ratio(candles, period=5):
+    """VR: 현재 거래량 / 평균 거래량 (v4 전략용)"""
+    if not candles or len(candles) < period + 1:
+        return None
+    vols = [c.get("candle_acc_trade_volume", c.get("v", 0)) for c in candles]
+    cur_vol = vols[0]
+    avg_vol = sum(vols[1:period + 1]) / period if period > 0 else 1
+    if avg_vol < 1e-10:
+        return None
+    return cur_vol / avg_vol
+
+
+def _v4_momentum(closes, period=3):
+    """모멘텀% (현재 vs N봉 전) (v4 전략용)"""
+    if not closes or len(closes) < period + 1:
+        return None
+    if closes[-(period + 1)] <= 0:
+        return None
+    return (closes[-1] / closes[-(period + 1)] - 1.0) * 100.0
+
+
+def _v4_engulfing(candles):
+    """감싸기 패턴 감지 (v4 전략용)"""
+    if not candles or len(candles) < 2:
+        return False
+    c0 = candles[0]
+    c1 = candles[1]
+    o0 = c0.get("opening_price", c0.get("o", 0))
+    c0p = c0.get("trade_price", c0.get("c", 0))
+    o1 = c1.get("opening_price", c1.get("o", 0))
+    c1p = c1.get("trade_price", c1.get("c", 0))
+    if c1p < o1 and c0p > o0:
+        if c0p > o1 and o0 < c1p:
+            return True
+    return False
+
+
+def _v4_extract_closes(candles):
+    """캔들 리스트에서 종가 추출 (시간 순서: 오래된→최신) (v4 전략용)"""
+    if not candles:
+        return []
+    closes = []
+    for c in reversed(candles):
+        p = c.get("trade_price", c.get("c", 0))
+        if p > 0:
+            closes.append(p)
+    return closes
+
+
+# --- v4 상위TF 필터 ---
+
+def _v4_check_upper_tf_filters(c5, c15, c60):
+    """상위 TF 필터 체크 — 백테스트에서 검증 통과한 필터들"""
+    filters_hit = []
+    score = 0
+    block_reason = None
+
+    c5_closes = _v4_extract_closes(c5)
+    c15_closes = _v4_extract_closes(c15)
+    c60_closes = _v4_extract_closes(c60)
+
+    # A. 차단 필터 (60m/15m 약세 → 진입 금지)
+    bb60_pos, bb60_width = _v4_bb_position(c60_closes) if c60_closes else (None, None)
+    if bb60_pos is not None and bb60_pos < 20:
+        block_reason = f"60m_BB20={bb60_pos:.0f}<20 (하락추세)"
+        return filters_hit, 0, block_reason
+
+    rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
+    if rsi60 is not None and rsi60 < 40:
+        block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
+        return filters_hit, 0, block_reason
+
+    stoch15 = _v4_stoch_k(c15) if c15 else None
+    if stoch15 is not None and stoch15 < 20:
+        block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
+        return filters_hit, 0, block_reason
+
+    # B. 핵심 복합필터
+    macd5_golden, macd5_hist = _v4_macd_golden(c5_closes) if c5_closes else (False, 0)
+    adx15 = _v4_adx(c15) if c15 else None
+    if macd5_golden and adx15 is not None and adx15 > 25:
+        filters_hit.append("5m_MACD골든+15m_ADX>25")
+        score += 30
+
+    macd15_golden, macd15_hist = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
+    ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
+    if macd15_golden and ema60_align >= 3:
+        filters_hit.append("15m_MACD골든+1h_EMA정배열")
+        score += 35
+
+    # C. 추가 우대 조건
+    vr15 = _v4_volume_ratio(c15, 5) if c15 else None
+    if vr15 is not None and vr15 > 3:
+        filters_hit.append("15m_VR5>3")
+        score += 20
+
+    vr60 = _v4_volume_ratio(c60, 5) if c60 else None
+    if vr60 is not None and vr60 > 3:
+        filters_hit.append("60m_VR5>3")
+        score += 15
+
+    if ema60_align >= 3:
+        filters_hit.append("60m_EMA정배열3+")
+        score += 15
+
+    ema15_align = _v4_ema_alignment(c15_closes) if c15_closes else 0
+    if ema15_align >= 3:
+        filters_hit.append("15m_EMA정배열3+")
+        score += 10
+
+    if c60 and _v4_engulfing(c60):
+        filters_hit.append("60m_감싸기")
+        score += 10
+
+    m3_15 = _v4_momentum(c15_closes, 3) if c15_closes else None
+    if m3_15 is not None and m3_15 > 0.22:
+        filters_hit.append("15m_m3_상위")
+        score += 15
+
+    m3_60 = _v4_momentum(c60_closes, 3) if c60_closes else None
+    if m3_60 is not None and m3_60 > 0.0:
+        filters_hit.append("60m_m3_상위")
+        score += 10
+
+    rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
+    if rsi15 is not None and rsi15 >= 70:
+        filters_hit.append("15m_RSI_고모멘텀")
+        score += 10
+
+    if rsi60 is not None and rsi60 >= 70:
+        filters_hit.append("60m_RSI_고모멘텀")
+        score += 10
+
+    if macd15_golden:
+        filters_hit.append("15m_MACD골든")
+        score += 8
+
+    if adx15 is not None and adx15 > 25:
+        filters_hit.append("15m_ADX>25")
+        score += 5
+
+    return filters_hit, score, block_reason
+
+
+# --- v4 시그널 설정 ---
+
+V4_SIGNAL_CONFIG = {
+    "거래량3배": {
+        "tier": 1,
+        "logic_group": "A",
+        "min_upper_score": 0,
+        "entry_mode": "confirm",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
+            "description": "TRAIL_SL0.7/A0.3/T0.2 (거래량3배 최적)",
+        },
+    },
+    "BB하단반등": {
+        "tier": 2,
+        "logic_group": "B",
+        "min_upper_score": 15,
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
+            "description": "TRAIL_SL0.7/A0.3/T0.2 (BB하단반등)",
+        },
+    },
+    "20봉_고점돌파": {
+        "tier": 2,
+        "logic_group": "A",
+        "min_upper_score": 15,
+        "entry_mode": "confirm",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (20봉돌파 최적)",
+        },
+    },
+    "5m_양봉": {
+        "tier": 2,
+        "logic_group": "B",
+        "min_upper_score": 20,
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (5m양봉 최적)",
+        },
+    },
+    "5m_큰양봉": {
+        "tier": 2,
+        "logic_group": "B",
+        "min_upper_score": 15,
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (5m큰양봉 최적)",
+        },
+    },
+}
+
+_V4_CONFIRM_UPGRADE_THRESHOLD = 45
+
+
+def _v4_detect_signal(c5, c15, c60):
+    """멀티TF 캔들 데이터에서 시그널 감지 (v4 전략용)"""
+    if not c5 or len(c5) < 5:
+        return None, {}
+
+    c5_closes = _v4_extract_closes(c5)
+
+    c5_0 = c5[0]
+    o5 = c5_0.get("opening_price", c5_0.get("o", 0))
+    h5 = c5_0.get("high_price", c5_0.get("h", 0))
+    l5 = c5_0.get("low_price", c5_0.get("l", 0))
+    c5p = c5_0.get("trade_price", c5_0.get("c", 0))
+
+    if c5p <= 0 or o5 <= 0:
+        return None, {}
+
+    body5 = c5p - o5
+    body5_pct = abs(body5) / o5 * 100
+    is_green5 = c5p > o5
+    range5 = h5 - l5 if h5 > l5 else 0.001
+
+    vr5 = _v4_volume_ratio(c5, 5)
+
+    # 1. 거래량3배 (Tier1)
+    if vr5 is not None and vr5 >= 3.0 and is_green5:
+        return "거래량3배", {"vr5": vr5, "body_pct": body5_pct}
+
+    # 2. 5m_큰양봉 (Tier2)
+    atr5 = _v4_atr(c5) if len(c5) >= 15 else None
+    if is_green5 and body5_pct > 0.5 and atr5 is not None:
+        if body5_pct > atr5 * 1.5:
+            return "5m_큰양봉", {"body_pct": body5_pct, "atr5": atr5}
+
+    # 3. 20봉_고점돌파 (Tier2)
+    if len(c5) >= 21:
+        highs_20 = [c.get("high_price", c.get("h", 0)) for c in c5[1:21]]
+        if highs_20:
+            prev_high = max(highs_20)
+            if c5p > prev_high and is_green5:
+                return "20봉_고점돌파", {"prev_high": prev_high, "break_pct": (c5p / prev_high - 1) * 100}
+
+    # 4. BB하단반등 (Tier2)
+    bb_pos5, bb_width5 = _v4_bb_position(c5_closes, 20) if len(c5_closes) >= 20 else (None, None)
+    if bb_pos5 is not None and len(c5) >= 2:
+        prev_closes = _v4_extract_closes(c5[1:])
+        prev_bb_pos, _ = _v4_bb_position(prev_closes, 20) if len(prev_closes) >= 20 else (None, None)
+        if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
+            return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
+
+    # 5. 5m_양봉 (Tier2)
+    body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
+    if is_green5 and body_ratio > 30 and body5_pct > 0.2:
+        return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
+
+    return None, {}
+
+
+def v4_evaluate_entry(market, c5, c15, c30, c60):
+    """멀티TF 통합 진입 판정 (v4 전략)"""
+    signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
+    if not signal_tag:
+        return None
+
+    config = V4_SIGNAL_CONFIG.get(signal_tag)
+    if not config:
+        return None
+
+    filters_hit, upper_score, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
+
+    if block_reason:
+        print(f"[V4_BLOCK] {market} {signal_tag} 차단: {block_reason}")
+        return None
+
+    min_score = config["min_upper_score"]
+    if upper_score < min_score:
+        print(f"[V4_SCORE_LOW] {market} {signal_tag} "
+              f"상위TF={upper_score}<{min_score} 필터={filters_hit}")
+        return None
+
+    entry_mode = config["entry_mode"]
+
+    if entry_mode == "half" and upper_score >= _V4_CONFIRM_UPGRADE_THRESHOLD:
+        entry_mode = "confirm"
+        filters_hit.append("UPGRADE_confirm")
+
+    key_filters = {"5m_MACD골든+15m_ADX>25", "15m_MACD골든+1h_EMA정배열"}
+    if key_filters & set(filters_hit):
+        entry_mode = "confirm"
+        if "KEY_FILTER_confirm" not in filters_hit:
+            filters_hit.append("KEY_FILTER_confirm")
+
+    exit_params = dict(config["exit"])
+
+    if upper_score >= 60:
+        exit_params["sl_pct"] = min(exit_params["sl_pct"] * 1.15, 0.010)
+        exit_params["description"] += " +SL확대(강추세)"
+
+    return {
+        "signal_tag": signal_tag,
+        "logic_group": config["logic_group"],
+        "entry_mode": entry_mode,
+        "exit_params": exit_params,
+        "filters_hit": filters_hit,
+        "upper_tf_score": upper_score,
+        "signal_details": signal_details,
+    }
+
+
+def v4_is_favorable_hour(hour, signal_tag):
+    """시간대별 유불리 판정 (v4 전략용)"""
+    if 3 <= hour <= 5:
+        return False
+    if 13 <= hour <= 17:
+        return True
+    return None
+
+
+def v4_get_exit_params(signal_tag):
+    """시그널별 청산 파라미터 반환 (v4 전략용)"""
+    config = V4_SIGNAL_CONFIG.get(signal_tag)
+    if config:
+        return dict(config["exit"])
+    return {
+        "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+        "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
+        "description": "TRAIL_SL0.7/A0.3/T0.2 (기본)",
+    }
+
+
+# ================================================================
+# (v4 전략 모듈 끝)
+# ================================================================
 
 # =========================
 # 🔥 업비트 Private API (주문/잔고/포지션 관리)
@@ -3631,7 +4168,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             with _POSITION_LOCK:
                 pos_for_tag = OPEN_POSITIONS.get(m) or {}
             tag = pos_for_tag.get("signal_tag", "기본")
-            _v4_ep = strategy_v4.get_exit_params(tag)
+            _v4_ep = v4_get_exit_params(tag)
 
             # 🔧 v4: HOLD 전략 (15m_눌림+돌파) → hold_bars 후 트레일로 전환
             _hold_bars = _v4_ep.get("hold_bars", 0)
@@ -8211,11 +8748,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _ign_candidate = (ignition_score >= 3)
 
     # ============================================================
-    # 🔧 v4 리포트 기반: strategy_v4.evaluate_entry() 통합 진입 판정
+    # 🔧 v4 리포트 기반: v4_evaluate_entry() 통합 진입 판정
     # 핵심: 상위TF 추세 강세 + 20봉돌파/거래량3배 → 트레일링
     # ============================================================
     _entry_mode_override = None
-    _v4_signal = None  # strategy_v4 반환값
+    _v4_signal = None
 
     try:
         # 멀티TF 캔들 데이터 페칭
@@ -8227,17 +8764,17 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # 시간대 필터 (불리한 시간 차단)
         _cur_hour = now_kst().hour
 
-        # strategy_v4 통합 진입 판정
-        _v4_signal = strategy_v4.evaluate_entry(m, _c5, _c15, _c30, _c60)
+        # v4 통합 진입 판정
+        _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60)
 
         if _v4_signal:
             # 시간대 필터 적용
-            _time_ok = strategy_v4.is_favorable_hour(_cur_hour, _v4_signal["signal_tag"])
+            _time_ok = v4_is_favorable_hour(_cur_hour, _v4_signal["signal_tag"])
             if _time_ok is False:  # False=불리, None=중립, True=유리
                 print(f"[V4_TIME_BAD] {m} {_v4_signal['signal_tag']} hour={_cur_hour} → 불리한 시간대")
                 _v4_signal = None
     except Exception as _v4_err:
-        print(f"[V4_ERR] {m} strategy_v4 오류: {_v4_err}")
+        print(f"[V4_ERR] {m} v4 전략 오류: {_v4_err}")
         _v4_signal = None
 
     # v4 신호 없으면 → 진입 차단
@@ -9185,7 +9722,7 @@ def monitor_position(m,
     verdict = None
 
     # === 🎯 v4: EXIT_PARAMS 기반 트레일 파라미터 ===
-    _v4_ep = pre.get("v4_exit_params") or strategy_v4.get_exit_params(signal_tag)
+    _v4_ep = pre.get("v4_exit_params") or v4_get_exit_params(signal_tag)
     checkpoint_reached = False
     # 🔧 v4: 체크포인트 = activation_pct (0.3%)
     dyn_checkpoint = max(get_dynamic_checkpoint(), _v4_ep.get("activation_pct", 0.003))
@@ -11159,7 +11696,7 @@ def main():
                     except Exception as _cr_err:
                         print(f"[CIRCLE_REG_ERR] {m}: {_cr_err}")
 
-                # === 🔧 v4: 진입 모드는 strategy_v4에서 결정 ===
+                # === 🔧 v4: 진입 모드는 v4 전략에서 결정 ===
                 # A그룹(20봉돌파/거래량3배) → confirm, B그룹(눌림+돌파/5m양봉) → half
                 _v4_group = pre.get("v4_logic_group", "A")
                 _v4_filters = pre.get("v4_filters_hit", [])
