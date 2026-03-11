@@ -137,7 +137,7 @@ COND_KEYS = {
 
 COLLECT_TFS = []  # 3m~60m은 다른 스크립트가 수집 → 여기선 1m만
 ALL_TFS = [(1, 1440)]
-ANALYSIS_TFS = [1]  # 1분봉 전용 분석
+ANALYSIS_TFS = [1, 5, 15, 60]  # 1분봉에서 전부 합성
 
 SIG_TPSL = {
     "15m_눌림반전":  {"tp": 1.5, "sl": 1.0},
@@ -1029,45 +1029,49 @@ def process_coin(coin, btc_regime, dist_acc):
         c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
     use_1m = len(c1_map) > 100
 
+    # 멀티 TF 피처 추출 (전부 1분봉에서 합성, 디스크 안 읽음)
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
-        if tf == 5:
-            candles = c5
-        elif tf == 1:
-            # 1분봉: 이미 c1에 로드됨, 없으면 스킵
+        if tf == 1:
             candles = c1 if c1 and len(c1) >= 60 else None
-            if not candles: continue
+        elif tf == 5:
+            candles = c5 if c5 and len(c5) >= 60 else None
+        elif tf == 15:
+            candles = c15 if c15 and len(c15) >= 60 else None
+        elif tf == 60:
+            candles = make_nmin(c1, 60) if c1 and len(c1) >= 3600 else None
         else:
-            candles = load_candles(coin, tf)
-            if not candles or len(candles)<60:
-                if tf==15: candles=c15
-                elif tf==30: candles=make_nmin(c5,6)
-                elif tf==60: candles=make_nmin(c5,12)
-                else: candles=None
-                if not candles or len(candles)<60: continue
-        if tf == 5: time_map = None
-        else: time_map = {cc["t"][:16]: idx for idx,cc in enumerate(candles)}
+            candles = None
+
+        if not candles or len(candles) < 60:
+            continue
+
+        if tf == 5:
+            time_map = None
+        else:
+            time_map = {cc["t"][:16]: idx for idx, cc in enumerate(candles)}
+
         pfx = f"tf{tf}_"
         for sig_time in all_sig_times:
             if tf == 5: continue
             tk = sig_time[:16]
-            idx = time_map.get(tk)
+            idx = time_map.get(tk) if time_map else None
             if idx is None: idx = find_idx(candles, sig_time)
             if idx is not None and idx >= 55:
                 all_feats = extract_tf_features(candles, idx, pfx)
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx):]
                     lst = dist_acc[(tf, short_key)]
-                    if len(lst) < 10000:  # 메모리 보호
+                    if len(lst) < 10000:
                         lst.append(fv)
                 for fk, fv in all_feats.items():
                     short_key = fk[len(pfx):]
                     if short_key in COND_KEYS:
                         tf_feat_cache[sig_time][fk] = fv
                 del all_feats
-        # time_map 즉시 해제 (1분봉은 43,200개 → map도 큼)
-        if time_map: del time_map
-        if tf not in (1, 5): del candles  # c1, c5는 아래서 사용
+
+        if time_map is not None: del time_map
+        if tf == 60: del candles; gc.collect()
 
     pfx5 = "tf5_"
     for sigs in raw_signals.values():
@@ -1378,15 +1382,17 @@ def generate_report(all_results, dist_acc):
         L.append(f"\n    [BTC 레짐]")
         for r in ["상승","횡보","하락"]:
             ce(f"BTC_{r}", lambda s,r=r: s["regime"]==r)
-        # 복합필터
+        # 복합필터 (멀티TF: 1분봉 합성 기반)
         L.append(f"\n    [복합필터]")
         combos=[
+            ("1m_RSI<40+BB<20", lambda s: s.get("tf1_rsi14",50)<40 and s.get("tf1_bb20",50)<20),
             ("5m_RSI<50+15m_BB<40", lambda s: s.get("tf5_rsi14",50)<50 and s.get("tf15_bb20",50)<40),
             ("5m_MACD골든+15m_ADX>25", lambda s: s.get("tf5_macd_x")==1 and s.get("tf15_adx",0)>25),
             ("15m_MACD골든+1h_EMA정배열", lambda s: s.get("tf15_macd_x")==1 and s.get("tf60_ema_al",0)>=3),
-            ("15m_BB<20+BTC상승", lambda s: s.get("tf15_bb20",50)<20 and s["regime"]=="상승"),
+            ("1m_과매도+BTC상승", lambda s: s.get("tf1_rsi14",50)<30 and s["regime"]=="상승"),
             ("5m_RSI<40+BTC상승+15m_MACD골든", lambda s: s.get("tf5_rsi14",50)<40 and s["regime"]=="상승" and s.get("tf15_macd_x")==1),
-            ("5m_망치+15m_과매도", lambda s: s.get("tf5_hammer")==1 and s.get("tf15_rsi14",50)<40),
+            ("1m_망치+15m_과매도", lambda s: s.get("tf1_hammer")==1 and s.get("tf15_rsi14",50)<40),
+            ("1m_Stoch<20+MACD골든", lambda s: s.get("tf1_stoch_k",50)<20 and s.get("tf1_macd_x")==1),
         ]
         for name,fn in combos: ce(name,fn)
         # Train→Test
@@ -1493,15 +1499,20 @@ def main():
         sys.exit(0)
 
     tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인")
-    btc5 = load_candles("BTC", 5)
+    # BTC 레짐: 1분봉 로드 → 5분봉 합성 → 300봉(=60*5분) 회귀
     btc_regime = {}
-    if btc5:
+    btc1 = load_candles("BTC", 1)
+    if btc1 and len(btc1) >= 300:
+        btc5 = make_nmin(btc1, 5)
         for i in range(60, len(btc5)):
             ret=(btc5[i]["c"]-btc5[i-60]["c"])/btc5[i-60]["c"]*100
             t=btc5[i]["t"][:16]
             btc_regime[t]="상승" if ret>0.5 else ("하락" if ret<-0.5 else "횡보")
-        tg(f"  BTC 레짐: {len(btc_regime)}시점")
-    del btc5
+        tg(f"  BTC 레짐: {len(btc_regime)}시점 (1m→5m 합성)")
+        del btc5
+    else:
+        tg("  BTC 레짐: 1분봉 부족 → 전부 '횡보' 처리")
+    del btc1
 
     all_results = defaultdict(list)
     dist_acc = defaultdict(list)
