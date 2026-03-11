@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-업비트 신호 연구 v3.2 — 지표확장+리포트강화
+업비트 신호 연구 v3.3 — 지표확장+리포트강화+잠금강화
 ======================================
 - 수집: 1m,3m,5m,15m,30m,1h (6TF)
 - 1분봉 30일 청크수집 (메모리 안전)
 - 중간중간 하트비트 알람 (텔레그램)
-- 완료 후 확실한 종료 (재실행 방지)
+- 완료 후 확실한 종료 (완료 마커로 재실행 방지)
+- PID 검증 + flock 이중 잠금
 """
 import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod, fcntl
 from datetime import datetime, timedelta, timezone
@@ -16,34 +17,73 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "candle_data")
 OUT_DIR = os.path.join(SCRIPT_DIR, "analysis_output")
 LOCK_FILE = os.path.join(SCRIPT_DIR, ".study_lock")
+DONE_FILE = os.path.join(SCRIPT_DIR, ".study_done")
 
 # 하트비트 설정
 HEARTBEAT_INTERVAL = 90  # 90초마다 텔레그램 살아있음 알람
 CHUNK_SIZE = 5000         # 1분봉 청크 저장 단위
+DONE_COOLDOWN = 3600      # 완료 후 재실행 방지 시간 (1시간)
 
-# ── 중복 실행 방지 (fcntl.flock 원자적 잠금) ──
+# ── 완료 마커 (재실행 방지) ──
+def _mark_done():
+    """분석 완료 시 타임스탬프 기록"""
+    try:
+        with open(DONE_FILE, "w") as f:
+            f.write(f"{time.time()}\n{os.getpid()}\n{datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+    except: pass
+
+def _is_recently_done():
+    """최근 DONE_COOLDOWN 이내에 완료된 적 있으면 True"""
+    try:
+        if not os.path.exists(DONE_FILE): return False
+        with open(DONE_FILE) as f:
+            ts = float(f.readline().strip())
+        age = time.time() - ts
+        if age < DONE_COOLDOWN:
+            return True
+        # 쿨다운 지남 → 마커 삭제
+        os.remove(DONE_FILE)
+        return False
+    except:
+        return False
+
+# ── 중복 실행 방지 (PID 파일 + fcntl.flock) ──
 _lock_fd = None
 
-def _acquire_lock():
-    """fcntl.flock으로 원자적 잠금. 두 프로세스가 동시에 시작해도 하나만 통과."""
-    global _lock_fd
-    # 1단계: 같은 스크립트 이미 실행중인지 프로세스 목록으로 확인
+def _is_pid_alive(pid):
+    """해당 PID가 살아있는지 확인"""
     try:
-        import subprocess
-        my_pid = os.getpid()
-        script_name = os.path.basename(__file__)
-        result = subprocess.run(
-            ["pgrep", "-f", script_name],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            pids = [int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip()]
-            other_pids = [p for p in pids if p != my_pid]
-            if other_pids:
-                print(f"[잠금] 이미 실행중인 프로세스 감지: PID {other_pids}. 종료.")
-                sys.exit(0)
-    except Exception:
-        pass  # pgrep 없으면 flock만으로 방어
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+def _acquire_lock():
+    """fcntl.flock + PID 검증으로 확실한 중복 방지."""
+    global _lock_fd
+
+    # 0단계: 최근 완료됐으면 즉시 종료
+    if _is_recently_done():
+        print(f"[스킵] 최근 완료됨 (쿨다운 {DONE_COOLDOWN}초). 재실행 불필요.")
+        sys.exit(0)
+
+    # 1단계: 기존 PID 파일 검증 (flock 실패 대비)
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            if old_pid != os.getpid() and _is_pid_alive(old_pid):
+                # 정말 같은 스크립트인지 /proc/PID/cmdline으로 확인
+                try:
+                    with open(f"/proc/{old_pid}/cmdline", "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="ignore")
+                    if "upbit_signal_study" in cmdline:
+                        print(f"[잠금] PID {old_pid} 실행중 확인. 종료.")
+                        sys.exit(0)
+                except (FileNotFoundError, PermissionError):
+                    pass  # /proc 접근 실패 → flock으로 방어
+    except (ValueError, FileNotFoundError):
+        pass
 
     # 2단계: flock 원자적 잠금 (레이스 컨디션 완전 방지)
     try:
@@ -1394,6 +1434,7 @@ def main():
 
     all_results = defaultdict(list)
     dist_acc = defaultdict(list)
+    analysis_start = time.time()
     for i, coin in enumerate(coins):
         # 하트비트 (분석 중간)
         now = time.time()
@@ -1403,6 +1444,7 @@ def main():
             tg(f"[살아있음] 분석 진행중 {i+1}/{len(coins)} | {int(now-t0)}초 경과{mem_str}")
             last_hb = now
 
+        coin_t0 = time.time()
         try:
             cr = process_coin(coin, btc_regime, dist_acc)
             for st,sigs in cr.items():
@@ -1411,8 +1453,12 @@ def main():
         except Exception as e:
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
+        coin_elapsed = time.time() - coin_t0
         if (i+1) % 10 == 0:
-            tg(f"  분석 {i+1}/{len(coins)} 완료")
+            total_elapsed = time.time() - analysis_start
+            avg_per_coin = total_elapsed / (i+1)
+            remaining = avg_per_coin * (len(coins) - i - 1)
+            tg(f"  분석 {i+1}/{len(coins)} 완료 ({total_elapsed:.0f}초, 예상잔여 {remaining:.0f}초)")
 
     for st in all_results:
         all_results[st].sort(key=lambda s: s["time"])
@@ -1452,13 +1498,14 @@ def main():
     # ===== 확실한 종료 =====
     total_elapsed = time.time() - t0
     finish_time = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    _mark_done()  # 완료 마커 기록 (재실행 방지)
     tg(
         f"\n{'='*50}\n"
         f"[최종 완료]\n"
         f"  소요시간: {total_elapsed/60:.1f}분\n"
         f"  종료시각: {finish_time}\n"
         f"{'='*50}\n"
-        f"모든 작업 완료. 프로그램을 종료합니다. 재실행하지 않습니다."
+        f"모든 작업 완료. 프로그램을 종료합니다. ({DONE_COOLDOWN//60}분간 재실행 차단)"
     )
     _release_lock()
     sys.exit(0)
