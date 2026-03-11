@@ -53,13 +53,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.010  # 🔧 30일분석: 1.0% (SL 0.5%×2, 비상청산)
+HARD_STOP_DD = 0.014  # 🔧 v4.1: SL 0.7%×2 = 1.4% (비상청산, SL 0.7% 기준)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
-# 🔧 v4 리포트: SL 1.0% 기본 (TRAIL_SL1.0/A0.3/T0.2)
-DYN_SL_MIN = 0.010   # 🔧 v4: SL 1.0% (리포트 v3.2 최적)
-DYN_SL_MAX = 0.015   # 🔧 v4: SL_MAX 1.5% (고변동 여유)
+# 🔧 v4.1 백테스트: SL 0.7% 기본 (TRAIL_SL0.7/A0.3/T0.2 — 거래량3배/BB하단반등 양EV)
+DYN_SL_MIN = 0.007   # 🔧 v4.1: SL 0.7% (신호연구 v4.0 최적)
+DYN_SL_MAX = 0.012   # 🔧 v4.1: SL_MAX 1.2% (고변동 여유, 기존 1.5%에서 축소)
 
 # 🔧 v4 리포트: Activation 0.3% (TRAIL_SL1.0/A0.3/T0.2)
 PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 v4: Activation 0.3%
@@ -107,12 +107,14 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
-# 🔧 v4 리포트: MFE 비율 → SL 1.0% 기준 1:1 (트레일링이 주 청산이므로 MFE 비활성화)
+# 🔧 v4.1 백테스트: MFE 비율 → SL 0.7% 기준 (HOLD_12봉 스타일, 느슨한 trail)
+# 시그널 업데이트: 15m_눌림+돌파 제거, BB하단반등/5m_큰양봉 추가
 MFE_RR_MULTIPLIERS = {
-    "20봉_고점돌파": 1.0,
-    "거래량3배": 1.0,
-    "15m_눌림+돌파": 1.0,
-    "5m_양봉": 1.0,
+    "거래량3배": 1.0,      # Tier1: 독립 양EV
+    "BB하단반등": 1.0,      # Tier2: 상위TF 필터 동반
+    "20봉_고점돌파": 1.0,   # Tier2: HOLD_12봉 최적
+    "5m_양봉": 1.0,        # Tier2: HOLD_12봉 최적
+    "5m_큰양봉": 1.0,      # Tier2: HOLD_12봉 최적 (TEST EV+0.38%)
     "기본": 1.0,
 }
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -183,33 +185,33 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7
-        HARD_STOP_DD = 0.012   # 🔧 30일분석: SL 0.5%×2.4
+        HARD_STOP_DD = 0.017   # 🔧 v4.1: SL 0.7%×2.4
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
-        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 30일분석: trail 0.15% (gentle)
+        TRAIL_DISTANCE_MIN_BASE = 0.0020  # 🔧 v4.1: trail 0.2% (gentle)
         SPIKE_RECOVERY_WINDOW = 4
         SPIKE_RECOVERY_MIN_BUY = 0.56
         CTX_EXIT_THRESHOLD = 4
 
     elif prof == "strict":
         WARMUP_SEC = 3
-        HARD_STOP_DD = 0.008   # 🔧 30일분석: SL 0.5%×1.6
+        HARD_STOP_DD = 0.011   # 🔧 v4.1: SL 0.7%×1.6
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
-        TRAIL_DISTANCE_MIN_BASE = 0.0008  # 🔧 30일분석: trail 0.08% (strict)
+        TRAIL_DISTANCE_MIN_BASE = 0.0015  # 🔧 v4.1: trail 0.15% (strict)
         SPIKE_RECOVERY_WINDOW = 2
         SPIKE_RECOVERY_MIN_BUY = 0.65
         CTX_EXIT_THRESHOLD = 2
 
     else:  # balanced
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.010   # 🔧 30일분석: SL 0.5%×2
+        HARD_STOP_DD = 0.014   # 🔧 v4.1: SL 0.7%×2
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.0
-        TRAIL_DISTANCE_MIN_BASE = 0.001  # 🔧 30일분석: trail 0.1%
+        TRAIL_DISTANCE_MIN_BASE = 0.002  # 🔧 v4.1: trail 0.2% (TRAIL_SL0.7/A0.3/T0.2)
         SPIKE_RECOVERY_WINDOW = 3
         SPIKE_RECOVERY_MIN_BUY = 0.58
         CTX_EXIT_THRESHOLD = 3
@@ -8790,7 +8792,7 @@ def dynamic_stop_loss(entry_price, c1, signal_type=None, current_price=None, tra
 
     base_pct = (atr / max(entry_price, 1)) * ATR_MULT
 
-    # 🔧 30일분석: 전시간 SL 0.5% 통일
+    # 🔧 v4.1: 전시간 SL 0.7% 통일 (백테스트 TRAIL_SL0.7 최적)
     _time_sl_min = DYN_SL_MIN
 
     pct = min(max(base_pct, max(_time_sl_min, _atr5_adjusted_min)), DYN_SL_MAX)
