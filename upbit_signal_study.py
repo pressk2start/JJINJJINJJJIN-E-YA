@@ -451,8 +451,9 @@ def is_collected(coin, unit, min_count=100):
     except: return False
 
 def collect(days=30, top_n=30):
-    """전체 TF 수집 (1분봉 포함, 30일 청크방식)"""
-    tg(f"[수집] {days}일, {top_n}코인, 6TF (1m포함 청크방식)")
+    """전체 TF 수집"""
+    tf_str = "6TF (1m포함)" if USE_STRICT_1M else "5TF (1m제외)"
+    tg(f"[수집] {days}일, {top_n}코인, {tf_str}")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
@@ -481,15 +482,16 @@ def collect(days=30, top_n=30):
                 if candles: save_coin(coin, tf, candles); del candles; gc.collect()
                 time.sleep(0.2)
 
-            # 1분봉 청크 수집 (30일 = 43200개, 메모리 안전)
-            need_1m = 1440 * days
-            if not is_collected(coin, 1, int(need_1m * 0.9)):
-                tg(f"  {coin} 1분봉 수집 시작 (목표 {need_1m:,}개)")
-                cnt = fetch_candles_1m_chunked(market, coin, need_1m, max_time=900)
-                tg(f"  {coin} 1분봉 완료: {cnt:,}개")
-                gc.collect()
-            else:
-                print(f"  {coin} 1분봉 스킵 (이미 수집됨)")
+            # 1분봉 청크 수집 (USE_STRICT_1M일 때만, 아니면 스킵)
+            if USE_STRICT_1M:
+                need_1m = 1440 * days
+                if not is_collected(coin, 1, int(need_1m * 0.9)):
+                    tg(f"  {coin} 1분봉 수집 시작 (목표 {need_1m:,}개)")
+                    cnt = fetch_candles_1m_chunked(market, coin, need_1m, max_time=900)
+                    tg(f"  {coin} 1분봉 완료: {cnt:,}개")
+                    gc.collect()
+                else:
+                    print(f"  {coin} 1분봉 스킵 (이미 수집됨)")
 
         except Exception as e:
             tg(f"[수집에러] {coin}: {e}")
@@ -1380,8 +1382,11 @@ def generate_report(all_results, dist_acc):
 def _has_enough_data(min_coins=10):
     if not os.path.exists(DATA_DIR): return False
     files_5m = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
-    files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
-    return len(files_5m) >= min_coins and len(files_1m) >= min_coins
+    if len(files_5m) < min_coins: return False
+    if USE_STRICT_1M:
+        files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
+        if len(files_1m) < min_coins: return False
+    return True
 
 def main():
     _acquire_lock()
