@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-업비트 신호 연구 v3.5 — 1분봉 전용
-==================================
-- 수집: 1분봉 30일치만 (3m~60m은 다른 스크립트가 담당)
+업비트 신호 연구 v4.0 — 1분봉 전용 고속수집
+=============================================
+- 수집: 일별 gzip jsonl + 4 worker 병렬 + 증분수집
 - 분석: 1분봉 피처 추출, 시그널은 c5(디스크 or 1m합성) 기반
 - 완료 후 확실한 종료 (완료 마커로 재실행 방지)
 - PID 검증 + flock 이중 잠금
 """
 import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod, fcntl
+import gzip, threading
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 KST = timezone(timedelta(hours=9))
 BASE = "https://api.upbit.com/v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +22,9 @@ DONE_FILE = os.path.join(SCRIPT_DIR, ".study_done")
 
 # 하트비트 설정
 HEARTBEAT_INTERVAL = 90  # 90초마다 텔레그램 살아있음 알람
-CHUNK_SIZE = 5000         # 1분봉 청크 저장 단위
 DONE_COOLDOWN = 3600      # 완료 후 재실행 방지 시간 (1시간)
+NUM_WORKERS = 4           # 병렬 수집 워커 수
+RATE_LIMIT_PER_SEC = 8    # 전역 초당 최대 API 요청 수
 
 # ── 완료 마커 (재실행 방지) ──
 def _mark_done():
@@ -212,10 +215,32 @@ def _get_mem_mb():
     except: pass
     return -1
 
+# ── requests.Session (TCP/TLS 재사용) ──
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+
+# ── 전역 rate limiter (thread-safe) ──
+_rate_lock = threading.Lock()
+_rate_timestamps = []  # 최근 요청 시각들
+
+def _rate_wait():
+    """초당 RATE_LIMIT_PER_SEC 이하로 요청 제한"""
+    with _rate_lock:
+        now = time.time()
+        # 1초 이전 기록 제거
+        while _rate_timestamps and _rate_timestamps[0] < now - 1.0:
+            _rate_timestamps.pop(0)
+        if len(_rate_timestamps) >= RATE_LIMIT_PER_SEC:
+            wait = 1.0 - (now - _rate_timestamps[0])
+            if wait > 0:
+                time.sleep(wait)
+        _rate_timestamps.append(time.time())
+
 def safe_get(url, params=None, retries=4, timeout=10):
     for i in range(retries):
+        _rate_wait()
         try:
-            r = requests.get(url, params=params, timeout=timeout)
+            r = SESSION.get(url, params=params, timeout=timeout)
             if r.status_code == 200: return r.json()
             if r.status_code == 429: time.sleep(1 + i); continue
             time.sleep(0.3)
@@ -284,253 +309,249 @@ def compress(c):
             "l":c["low_price"],"c":c["trade_price"],
             "v":round(c.get("candle_acc_trade_volume",0),6)}
 
-def fetch_candles(unit, market, total_count, max_time=120):
-    """일반 TF 수집 (3m~60m). 메모리에 모아서 반환."""
-    result, to = [], None
-    t0 = time.time()
+# ── 일별 gzip jsonl 저장 구조 ──
+# DATA_DIR/BTC/2026-03-01.jsonl.gz, DATA_DIR/BTC/2026-03-02.jsonl.gz ...
+def _coin_dir(coin):
+    return os.path.join(DATA_DIR, coin)
+
+def _day_path(coin, date_str):
+    """date_str: 'YYYY-MM-DD'"""
+    return os.path.join(_coin_dir(coin), f"{date_str}.jsonl.gz")
+
+def _get_existing_dates(coin):
+    """이미 수집된 날짜 set 반환"""
+    d = _coin_dir(coin)
+    if not os.path.exists(d): return set()
+    dates = set()
+    for f in os.listdir(d):
+        if f.endswith(".jsonl.gz") and len(f) == 19:  # YYYY-MM-DD.jsonl.gz
+            dates.add(f[:10])
+    return dates
+
+def _save_day_file(coin, date_str, rows):
+    """하루치 캔들을 gzip jsonl로 저장"""
+    d = _coin_dir(coin)
+    os.makedirs(d, exist_ok=True)
+    fpath = _day_path(coin, date_str)
+    tmp = fpath + f".{os.getpid()}.tmp"
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, fpath)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+
+def _load_day_file(fpath):
+    """일별 gzip jsonl 파일 로드"""
+    rows = []
+    try:
+        with gzip.open(fpath, "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+    except Exception:
+        pass
+    return rows
+
+def _load_coin_1m(coin, days=30):
+    """코인의 일별 파일들을 합쳐서 시간순 캔들 리스트 반환"""
+    d = _coin_dir(coin)
+    if not os.path.exists(d): return []
+    files = sorted(f for f in os.listdir(d) if f.endswith(".jsonl.gz"))
+    if not files: return []
+    # 최근 days일치만
+    cutoff = (datetime.now(KST) - timedelta(days=days+1)).strftime("%Y-%m-%d")
+    all_candles = []
+    for fname in files:
+        if fname[:10] < cutoff: continue
+        fpath = os.path.join(d, fname)
+        all_candles.extend(_load_day_file(fpath))
+    # 이미 날짜별 파일이라 대부분 정렬됨, 안전하게 정렬
+    all_candles.sort(key=lambda x: x["t"])
+    return all_candles
+
+def _fetch_one_coin(market, coin, days, existing_dates):
+    """단일 코인 1분봉 수집 (증분: 없는 날짜만)"""
+    today = datetime.now(KST).date()
+    target_dates = set()
+    for d in range(days):
+        dt = today - timedelta(days=d)
+        target_dates.add(dt.strftime("%Y-%m-%d"))
+    missing = sorted(target_dates - existing_dates, reverse=True)  # 최신→과거
+    if not missing:
+        return 0, 0, "skip"
+
+    total_saved = 0
+    total_pages = 0
+    day_buffer = {}  # date_str → list of candles
+    to = None
     fails = 0
-    for page in range((total_count+199)//200):
-        if time.time()-t0 > max_time: break
-        params = {"market": market, "count": min(200, total_count-len(result))}
+    start_ts = time.time()
+
+    # 최신부터 과거로 수집 (Upbit 기본 순서)
+    while True:
+        if time.time() - start_ts > 900:
+            break
+        params = {"market": market, "count": 200}
         if to: params["to"] = to
-        data = safe_get(f"{BASE}/candles/minutes/{unit}", params, retries=4, timeout=10)
+
+        data = safe_get(f"{BASE}/candles/minutes/1", params=params, retries=5, timeout=12)
         if not data:
             fails += 1
-            if fails >= 3: break
+            if fails >= 5: break
+            time.sleep(0.5 + fails * 0.3)
             continue
         fails = 0
-        result.extend(data)
+        total_pages += 1
+
+        oldest_date = None
+        for c in data:
+            row = compress(c)
+            date_str = row["t"][:10]  # "YYYY-MM-DD"
+            oldest_date = date_str
+            if date_str in existing_dates:
+                continue  # 이미 있는 날짜의 캔들 → 스킵
+            if date_str not in target_dates:
+                continue  # 범위 밖
+            if date_str not in day_buffer:
+                day_buffer[date_str] = []
+            day_buffer[date_str].append(row)
+
         if len(data) < 200: break
         to = data[-1]["candle_date_time_utc"] + "Z"
-        time.sleep(0.10)  # 3m~60m은 데이터량 적어 빠르게
-    result.sort(key=lambda x: x["candle_date_time_kst"])
-    return result
-
-def _chunk_path_1m(coin, chunk_idx):
-    return os.path.join(DATA_DIR, f".{coin}_1m_p{os.getpid()}_chunk{chunk_idx}.tmp")
-
-def _cleanup_1m_chunks(coin, max_chunks=200):
-    """이 프로세스의 청크 + 오래된 고아 청크 정리"""
-    if not os.path.exists(DATA_DIR):
-        return  # 디렉토리 자체가 없으면 정리할 것도 없음
-    # 이 프로세스 청크 삭제
-    for ci in range(max_chunks):
-        cp = _chunk_path_1m(coin, ci)
-        try:
-            if os.path.exists(cp): os.remove(cp)
-        except OSError:
-            pass
-    # 고아 청크 (다른 프로세스가 남긴 것) 정리
-    try:
-        for f in os.listdir(DATA_DIR):
-            if f.startswith(f".{coin}_1m_p") and f.endswith(".tmp"):
-                fp = os.path.join(DATA_DIR, f)
-                try:
-                    age = time.time() - os.path.getmtime(fp)
-                    if age > 1800:  # 30분 이상 된 고아 청크
-                        os.remove(fp)
-                except OSError:
-                    pass
-    except OSError:
-        pass
-
-def fetch_candles_1m_chunked(market, coin, total_count, max_time=900):
-    """1분봉 30일치 청크 수집 (메모리 안전). 43200개도 OK."""
-    os.makedirs(DATA_DIR, exist_ok=True)  # 디렉토리 먼저 보장
-    _cleanup_1m_chunks(coin)
-
-    buffer = []
-    chunk_idx = 0
-    total_fetched = 0
-    to = None
-    start_ts = time.time()
-    last_hb = start_ts
-    fails = 0
-
-    while total_fetched < total_count:
-        elapsed = time.time() - start_ts
-        if elapsed > max_time:
-            tg(f"    {coin} 1m 시간초과 {int(elapsed)}초 → {total_fetched}개까지")
-            break
-
-        remain = total_count - total_fetched
-        count = min(200, remain)
-        params = {"market": market, "count": count}
-        if to: params["to"] = to
-
-        data = safe_get(f"{BASE}/candles/minutes/1", params=params, retries=6, timeout=12)
-        if not data:
-            fails += 1
-            if fails >= 5:
-                tg(f"    {coin} 1m 연속 {fails}회 실패, 중단 ({total_fetched}개)")
-                break
-            time.sleep(1.0 + fails * 0.5)
-            continue
-
-        fails = 0
-        got = len(data)
-        if got > 0:
-            to = data[-1]["candle_date_time_utc"] + "Z"
-
-        for c in data:
-            buffer.append(compress(c))
-        total_fetched += got
         del data
 
-        # 하트비트 알람
-        now = time.time()
-        if now - last_hb >= HEARTBEAT_INTERVAL:
-            pct = total_fetched / total_count * 100
-            mem = _get_mem_mb()
-            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
-            tg(f"[살아있음] {coin} 1m수집 {total_fetched:,}/{total_count:,} ({pct:.0f}%) | {int(elapsed)}초{mem_str}")
-            last_hb = now
+        # 수집 범위를 벗어나면 중단 (가장 오래된 날짜가 target 밖)
+        if oldest_date and oldest_date < min(missing):
+            break
 
-        # 청크 저장 (메모리 보호)
-        if len(buffer) >= CHUNK_SIZE:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            fpath = _chunk_path_1m(coin, chunk_idx)
-            with open(fpath, "w", encoding="utf-8") as f:
-                json.dump(buffer, f, ensure_ascii=False)
-            chunk_idx += 1
-            buffer.clear()
-            gc.collect()
+        # 완료된 날짜 즉시 저장 (메모리 절약)
+        done_dates = []
+        for ds, rows in day_buffer.items():
+            if len(rows) >= 1400 or ds != oldest_date:  # 거의 하루치 채워짐 or 더 이상 이 날짜 안 옴
+                rows.sort(key=lambda x: x["t"])
+                # dedupe
+                seen = set(); deduped = []
+                for r in rows:
+                    if r["t"] not in seen: seen.add(r["t"]); deduped.append(r)
+                _save_day_file(coin, ds, deduped)
+                total_saved += len(deduped)
+                done_dates.append(ds)
+        for ds in done_dates:
+            del day_buffer[ds]
+            existing_dates.add(ds)
 
-        if got < 200: break
-        time.sleep(0.15)  # 429 에러 시 safe_get에서 자동 백오프
+    # 남은 버퍼 저장
+    for ds, rows in day_buffer.items():
+        if not rows: continue
+        rows.sort(key=lambda x: x["t"])
+        seen = set(); deduped = []
+        for r in rows:
+            if r["t"] not in seen: seen.add(r["t"]); deduped.append(r)
+        _save_day_file(coin, ds, deduped)
+        total_saved += len(deduped)
+    day_buffer.clear()
 
-    # 나머지 버퍼 저장
-    if buffer:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        fpath = _chunk_path_1m(coin, chunk_idx)
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(buffer, f, ensure_ascii=False)
-        chunk_idx += 1
-        buffer.clear()
-        gc.collect()
+    elapsed = time.time() - start_ts
+    return total_saved, total_pages, f"{elapsed:.0f}s"
 
-    if chunk_idx == 0: return 0
+# ── 수집 통계 (thread-safe) ──
+_collect_lock = threading.Lock()
+_collect_stats = {"done": 0, "skip": 0, "fail": 0, "candles": 0}
 
-    # 청크 병합 → 최종 파일
-    all_candles = []
-    for ci in range(chunk_idx):
-        cp = _chunk_path_1m(coin, ci)
-        if not os.path.exists(cp): continue
-        with open(cp, "r", encoding="utf-8") as f:
-            all_candles.extend(json.load(f))
-        os.remove(cp)
-    gc.collect()
-
-    if not all_candles: return 0
-    all_candles.sort(key=lambda x: x["t"])
-    seen = set(); deduped = []
-    for c in all_candles:
-        if c["t"] not in seen: seen.add(c["t"]); deduped.append(c)
-    del all_candles, seen; gc.collect()
-
-    fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
-    payload = {"coin":coin,"unit":1,"count":len(deduped),
-               "from":deduped[0]["t"],"to":deduped[-1]["t"],
-               "candles":deduped,
-               "saved_at":datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")}
-    _atomic_json_write(fpath, payload)
-    count = len(deduped)
-    del deduped, payload; gc.collect()
-    return count
-
-def save_coin(coin, unit, candles):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    comp = [compress(c) for c in candles]
-    fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
-    _atomic_json_write(fpath, {"coin":coin,"unit":unit,"count":len(comp),
-                    "from":comp[0]["t"] if comp else "",
-                    "to":comp[-1]["t"] if comp else "",
-                    "candles":comp})
-
-def is_collected(coin, unit, min_count=100):
-    fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
-    if not os.path.exists(fpath): return False
+def _collect_worker(market, coin, days):
+    """워커 함수: 한 코인 수집"""
     try:
-        data = _safe_json_load(fpath)
-        if data is None: return False
-        return data.get("count",0) >= min_count
-    except: return False
-
-def _is_1m_collected(coin, days=30, margin=0.90):
-    """1분봉 파일이 충분한지 확인 (90% 이상이면 스킵)"""
-    fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
-    if not os.path.exists(fpath): return False
-    try:
-        data = _safe_json_load(fpath)
-        if data is None: return False
-        need = 1440 * days
-        return data.get("count", 0) >= int(need * margin)
-    except: return False
+        existing = _get_existing_dates(coin)
+        saved, pages, info = _fetch_one_coin(market, coin, days, existing)
+        with _collect_lock:
+            if info == "skip":
+                _collect_stats["skip"] += 1
+                return coin, "skip", 0
+            elif saved > 0:
+                _collect_stats["done"] += 1
+                _collect_stats["candles"] += saved
+                return coin, "done", saved
+            else:
+                _collect_stats["fail"] += 1
+                return coin, "fail", 0
+    except Exception as e:
+        with _collect_lock:
+            _collect_stats["fail"] += 1
+        return coin, f"error: {e}", 0
 
 def collect(days=30, top_n=30):
-    """1분봉 30일치 전용 수집 (3m~60m은 다른 스크립트가 담당)"""
+    """1분봉 수집: 일별 gzip jsonl + 4 worker 병렬 + 증분"""
     if days > 30: days = 30
-    need_1m = 1440 * days  # 30일 = 43,200개
 
-    tg(f"[수집] 1분봉 전용 | {days}일, {top_n}코인, 목표 {need_1m:,}개/코인")
+    tg(f"[수집] 1분봉 | {days}일, {top_n}코인, {NUM_WORKERS} worker 병렬, 증분수집")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
     tg(f"종목: {', '.join(coins)}")
     t0 = time.time()
-    last_hb = t0
-    done_1m = 0; skip_1m = 0; fail_1m = 0
 
-    for i, market in enumerate(markets):
-        coin = market.split("-")[1]
+    # 전역 통계 리셋
+    _collect_stats["done"] = _collect_stats["skip"] = _collect_stats["fail"] = _collect_stats["candles"] = 0
 
-        # 하트비트
-        now = time.time()
-        if now - last_hb >= HEARTBEAT_INTERVAL:
-            elapsed = now - t0
-            mem = _get_mem_mb()
-            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
-            tg(f"[살아있음] 1m수집 {i+1}/{len(markets)} | {int(elapsed)}초 경과{mem_str}")
-            last_hb = now
+    results = []
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {}
+        for market in markets:
+            coin = market.split("-")[1]
+            f = executor.submit(_collect_worker, market, coin, days)
+            futures[f] = coin
 
-        try:
-            # 1분봉 30일치 수집 (청크 방식, 메모리 안전)
-            if _is_1m_collected(coin, days):
-                skip_1m += 1
+        last_hb = t0
+        for i, future in enumerate(as_completed(futures)):
+            coin_name, status, count = future.result()
+            results.append((coin_name, status, count))
+
+            # 진행 상황 출력
+            if status == "skip":
+                print(f"  {coin_name}: 스킵 (이미 수집됨)")
+            elif status == "done":
+                tg(f"  {coin_name}: {count:,}개 저장 완료")
             else:
-                tg(f"  [{i+1}/{len(markets)}] {coin} 1m수집 시작 (목표 {need_1m:,}개)")
-                count = fetch_candles_1m_chunked(
-                    market=market, coin=coin,
-                    total_count=need_1m, max_time=900,
-                )
-                if count > 0:
-                    done_1m += 1
-                    tg(f"  {coin} 1m수집 완료 ({count:,}개)")
-                else:
-                    fail_1m += 1
-                    tg(f"  {coin} 1m수집 실패")
-                gc.collect()
+                tg(f"  {coin_name}: {status}")
 
-        except Exception as e:
-            tg(f"[수집에러] {coin}: {e}")
-            _cleanup_1m_chunks(coin)
-            fail_1m += 1
-            continue
+            # 하트비트
+            now = time.time()
+            if now - last_hb >= HEARTBEAT_INTERVAL:
+                s = _collect_stats
+                mem = _get_mem_mb()
+                mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
+                tg(f"[살아있음] 수집 {i+1}/{len(markets)} | "
+                   f"완료{s['done']}/스킵{s['skip']}/실패{s['fail']} | "
+                   f"{int(now-t0)}초{mem_str}")
+                last_hb = now
 
-        if (i+1) % 5 == 0:
-            el = time.time()-t0; eta = el/(i+1)*(top_n-i-1)
-            mem = _get_mem_mb()
-            mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
-            tg(f"  수집 {i+1}/{top_n} ({el/60:.1f}분, ~{eta/60:.1f}분 남음) 1m: 완료{done_1m}/스킵{skip_1m}/실패{fail_1m}{mem_str}")
-
-    total_el = time.time()-t0
-    tg(f"[수집완료] {total_el/60:.1f}분 | 1m: 완료{done_1m}/스킵{skip_1m}/실패{fail_1m}")
+    s = _collect_stats
+    total_el = time.time() - t0
+    tg(f"[수집완료] {total_el/60:.1f}분 | {s['candles']:,}캔들 | "
+       f"완료{s['done']}/스킵{s['skip']}/실패{s['fail']}")
     return coins
 
 # ================================================================
 # PART 2: 지표 함수
 # ================================================================
 def load_candles(coin, unit):
+    if unit == 1:
+        # 새 포맷: 일별 gzip jsonl
+        candles = _load_coin_1m(coin)
+        if candles:
+            return candles
+        # fallback: 구 포맷 (마이그레이션 전 호환)
+        fpath = os.path.join(DATA_DIR, f"{coin}_1m.json")
+        if os.path.exists(fpath):
+            data = _safe_json_load(fpath)
+            if data: return data.get("candles", [])
+        return []
+    # 다른 TF는 기존 방식
     fpath = os.path.join(DATA_DIR, f"{coin}_{unit}m.json")
     if not os.path.exists(fpath): return []
     data = _safe_json_load(fpath)
@@ -538,8 +559,20 @@ def load_candles(coin, unit):
     return data.get("candles", [])
 
 def get_saved_coins():
+    """수집된 코인 목록 (일별 디렉토리 구조 기준)"""
     if not os.path.exists(DATA_DIR): return []
-    return sorted(set(f.replace("_1m.json","") for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")))
+    coins = set()
+    for name in os.listdir(DATA_DIR):
+        d = os.path.join(DATA_DIR, name)
+        if os.path.isdir(d) and not name.startswith("."):
+            # .jsonl.gz 파일이 하나라도 있으면 유효
+            if any(f.endswith(".jsonl.gz") for f in os.listdir(d)):
+                coins.add(name)
+    # fallback: 구 포맷 호환
+    for f in os.listdir(DATA_DIR):
+        if f.endswith("_1m.json"):
+            coins.add(f.replace("_1m.json", ""))
+    return sorted(coins)
 
 def make_nmin(c_small, ratio):
     out = []
@@ -1188,7 +1221,7 @@ def _avg(vals):
 def generate_report(all_results, dist_acc):
     L = []
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    L.append(f"업비트 신호 연구 v3.5 ({ts})")
+    L.append(f"업비트 신호 연구 v4.0 ({ts})")
     L.append(f"비용:{TOTAL_COST*100:.2f}% | 진입:다음봉시가 | 최대:{MAX_HOLD_BARS}봉")
     L.append(f"Train/Test:{TRAIN_RATIO*100:.0f}/{(1-TRAIN_RATIO)*100:.0f} | 최소:{MIN_TRADES}건")
     L.append("="*65)
@@ -1418,11 +1451,17 @@ def generate_report(all_results, dist_acc):
 # ================================================================
 # 메인
 # ================================================================
-def _has_enough_data(min_coins=10):
-    """1m 파일이 충분한지 확인"""
+def _has_enough_data(min_coins=10, min_days=25):
+    """충분한 코인이 충분한 일수 데이터를 가지고 있는지"""
     if not os.path.exists(DATA_DIR): return False
-    files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
-    return len(files_1m) >= min_coins
+    good = 0
+    for name in os.listdir(DATA_DIR):
+        d = os.path.join(DATA_DIR, name)
+        if not os.path.isdir(d) or name.startswith("."): continue
+        gz_files = [f for f in os.listdir(d) if f.endswith(".jsonl.gz")]
+        if len(gz_files) >= min_days:
+            good += 1
+    return good >= min_coins
 
 def main():
     _acquire_lock()
@@ -1432,17 +1471,17 @@ def main():
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
 
-    tg("[시작] upbit_signal_study v3.5 실행 (1분봉 전용: 수집+분석)")
+    tg("[시작] upbit_signal_study v4.0 (1분봉 고속수집: 일별gzip + 4worker + 증분)")
     t0 = time.time()
     last_hb = t0
 
     # 1m 데이터 충분하면 수집 스킵
     if not args.skip_collect and _has_enough_data():
-        tg("[자동] 1m 데이터 충분 → 수집 스킵")
+        tg("[자동] 1m 데이터 충분 (25일+, 10코인+) → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
-        tg("[STEP 1/4] 1분봉 30일치 수집 (이미 수집된 코인 스킵)")
+        tg("[STEP 1/4] 1분봉 수집 (일별 gzip jsonl, 증분, 4 worker 병렬)")
         collect(days=args.days, top_n=args.coins)
 
     # 분석
