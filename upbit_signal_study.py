@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-업비트 신호 연구 v3.3 — 지표확장+리포트강화+잠금강화
+업비트 신호 연구 v3.4 — 1분봉 수집 분리
 ======================================
-- 수집: 1m,3m,5m,15m,30m,1h (6TF)
-- 1분봉 30일 청크수집 (메모리 안전)
-- 중간중간 하트비트 알람 (텔레그램)
+- 수집: 3m,5m,15m,30m,1h (5TF) — 1분봉은 collect_1m.py가 담당
+- 분석: 1분봉 포함 (collect_1m.py가 수집한 파일 로드)
 - 완료 후 확실한 종료 (완료 마커로 재실행 방지)
 - PID 검증 + flock 이중 잠금
 """
@@ -122,7 +121,6 @@ TRAIN_RATIO = 0.7
 MAX_HOLD_BARS = 60
 MAX_HOLD_1M = 10
 MAX_SIGS_PER_COIN = 200
-USE_STRICT_1M = False  # True면 1분봉 43K개 로드 (느림), False면 5m 폴백 (빠름)
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -451,9 +449,8 @@ def is_collected(coin, unit, min_count=100):
     except: return False
 
 def collect(days=30, top_n=30):
-    """전체 TF 수집"""
-    tf_str = "6TF (1m포함)" if USE_STRICT_1M else "5TF (1m제외)"
-    tg(f"[수집] {days}일, {top_n}코인, {tf_str}")
+    """전체 TF 수집 (1분봉 제외 — collect_1m.py가 담당)"""
+    tg(f"[수집] {days}일, {top_n}코인, 5TF (1m은 collect_1m.py)")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
@@ -482,16 +479,8 @@ def collect(days=30, top_n=30):
                 if candles: save_coin(coin, tf, candles); del candles; gc.collect()
                 time.sleep(0.2)
 
-            # 1분봉 청크 수집 (USE_STRICT_1M일 때만, 아니면 스킵)
-            if USE_STRICT_1M:
-                need_1m = 1440 * days
-                if not is_collected(coin, 1, int(need_1m * 0.9)):
-                    tg(f"  {coin} 1분봉 수집 시작 (목표 {need_1m:,}개)")
-                    cnt = fetch_candles_1m_chunked(market, coin, need_1m, max_time=900)
-                    tg(f"  {coin} 1분봉 완료: {cnt:,}개")
-                    gc.collect()
-                else:
-                    print(f"  {coin} 1분봉 스킵 (이미 수집됨)")
+            # 1분봉 수집은 collect_1m.py가 담당 → 여기서는 스킵
+            # (이미 수집된 1m 파일은 분석 시 load_candles로 로드)
 
         except Exception as e:
             tg(f"[수집에러] {coin}: {e}")
@@ -955,13 +944,12 @@ def process_coin(coin, btc_regime, dist_acc):
         for si5, ei, bar in sigs:
             all_sig_times.add(bar["t"])
 
-    # 1m 데이터: USE_STRICT_1M 모드일 때만 로드 (기본: 5m 폴백으로 속도 우선)
-    c1 = []; c1_map = {}; use_1m = False
-    if USE_STRICT_1M:
-        c1 = load_candles(coin, 1)
-        if c1 and len(c1) > 100:
-            c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
-        use_1m = len(c1_map) > 100
+    # 1m 데이터 로드 (collect_1m.py가 미리 수집한 파일, 디스크 읽기만 ~1초)
+    c1 = load_candles(coin, 1)
+    c1_map = {}
+    if c1 and len(c1) > 100:
+        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
+    use_1m = len(c1_map) > 100
 
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
@@ -1382,26 +1370,17 @@ def generate_report(all_results, dist_acc):
 def _has_enough_data(min_coins=10):
     if not os.path.exists(DATA_DIR): return False
     files_5m = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
-    if len(files_5m) < min_coins: return False
-    if USE_STRICT_1M:
-        files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
-        if len(files_1m) < min_coins: return False
-    return True
+    return len(files_5m) >= min_coins
 
 def main():
     _acquire_lock()
-    global USE_STRICT_1M
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
-    parser.add_argument("--strict-1m", action="store_true",
-                        help="1분봉 엄격 판정 활성화 (느림, 기본: 5m 폴백)")
     args = parser.parse_args()
-    USE_STRICT_1M = args.strict_1m
 
-    mode_str = "1분봉 엄격판정" if USE_STRICT_1M else "5m 폴백(빠름)"
-    tg(f"[시작] upbit_signal_study v3.3 실행 ({mode_str})")
+    tg("[시작] upbit_signal_study v3.3 실행 (1분봉 분석 포함, 수집은 collect_1m.py)")
     t0 = time.time()
     last_hb = t0
 
