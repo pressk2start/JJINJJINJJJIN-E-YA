@@ -216,31 +216,41 @@ def _get_mem_mb():
     return -1
 
 # ── requests.Session (TCP/TLS 재사용) ──
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+_thread_local = threading.local()
+
+def get_session():
+    if not hasattr(_thread_local, "session"):
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0"})
+        _thread_local.session = s
+    return _thread_local.session
 
 # ── 전역 rate limiter (thread-safe) ──
 _rate_lock = threading.Lock()
 _rate_timestamps = []  # 최근 요청 시각들
 
 def _rate_wait():
-    """초당 RATE_LIMIT_PER_SEC 이하로 요청 제한"""
-    with _rate_lock:
-        now = time.time()
-        # 1초 이전 기록 제거
-        while _rate_timestamps and _rate_timestamps[0] < now - 1.0:
-            _rate_timestamps.pop(0)
-        if len(_rate_timestamps) >= RATE_LIMIT_PER_SEC:
+    """초당 RATE_LIMIT_PER_SEC 이하로 요청 제한 (lock 밖에서 sleep)"""
+    while True:
+        with _rate_lock:
+            now = time.time()
+            while _rate_timestamps and _rate_timestamps[0] < now - 1.0:
+                _rate_timestamps.pop(0)
+            if len(_rate_timestamps) < RATE_LIMIT_PER_SEC:
+                _rate_timestamps.append(now)
+                return
             wait = 1.0 - (now - _rate_timestamps[0])
-            if wait > 0:
-                time.sleep(wait)
-        _rate_timestamps.append(time.time())
+        # lock 해제 후 sleep → 다른 워커 블로킹 안 함
+        if wait > 0:
+            time.sleep(wait)
+        else:
+            time.sleep(0.01)
 
 def safe_get(url, params=None, retries=4, timeout=10):
     for i in range(retries):
         _rate_wait()
         try:
-            r = SESSION.get(url, params=params, timeout=timeout)
+            r = get_session().get(url, params=params, timeout=timeout)
             if r.status_code == 200: return r.json()
             if r.status_code == 429: time.sleep(1 + i); continue
             time.sleep(0.3)
@@ -375,12 +385,16 @@ def _load_coin_1m(coin, days=30):
     return all_candles
 
 def _fetch_one_coin(market, coin, days, existing_dates):
-    """단일 코인 1분봉 수집 (증분: 없는 날짜만)"""
+    """단일 코인 1분봉 수집 (증분: 없는 날짜만, 오늘은 항상 갱신)"""
     today = datetime.now(KST).date()
+    today_str = today.strftime("%Y-%m-%d")
     target_dates = set()
     for d in range(days):
         dt = today - timedelta(days=d)
         target_dates.add(dt.strftime("%Y-%m-%d"))
+    # 오늘은 항상 다시 받는다 (부분 데이터 갱신)
+    existing_dates = set(existing_dates)
+    existing_dates.discard(today_str)
     missing = sorted(target_dates - existing_dates, reverse=True)  # 최신→과거
     if not missing:
         return 0, 0, "skip"
@@ -802,15 +816,14 @@ def process_coin(coin, btc_regime, dist_acc):
         print(f"    {coin} 1분봉 부족 ({len(c1)}개), 스킵")
         return {}
 
-    # c5: 디스크에 있으면 로드, 없으면 1분봉으로부터 생성
-    c5 = load_candles(coin, 5)
+    # 전부 1분봉에서 합성 (디스크 5분봉 안 읽음 — 시점 일관성 보장)
+    c5 = make_nmin(c1, 5)
     if len(c5) < 200:
-        c5 = make_nmin(c1, 5)  # 1분봉 → 5분봉 합성
-        if len(c5) < 200:
-            print(f"    {coin} 5분봉 합성 부족 ({len(c5)}개), 스킵")
-            del c1; return {}
-        print(f"    {coin} 5분봉 합성 ({len(c5)}개)")
+        print(f"    {coin} 5분봉 합성 부족 ({len(c5)}개), 스킵")
+        del c1; return {}
+    print(f"    {coin} 5분봉 합성 ({len(c5)}개)")
     c15 = make_nmin(c5, 3)
+    c60 = make_nmin(c1, 60) if len(c1) >= 3600 else []
 
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
@@ -1008,7 +1021,7 @@ def process_coin(coin, btc_regime, dist_acc):
     total_sigs = sum(len(v) for v in raw_signals.values())
     print(f"    {coin} 신호: {total_sigs}개")  # print만
     if total_sigs == 0:
-        del c5, c15; return {}
+        del c5, c15, c60; return {}
 
     if total_sigs > MAX_SIGS_PER_COIN:
         ratio = MAX_SIGS_PER_COIN / total_sigs
@@ -1039,7 +1052,7 @@ def process_coin(coin, btc_regime, dist_acc):
         elif tf == 15:
             candles = c15 if c15 and len(c15) >= 60 else None
         elif tf == 60:
-            candles = make_nmin(c1, 60) if c1 and len(c1) >= 3600 else None
+            candles = c60 if c60 and len(c60) >= 60 else None
         else:
             candles = None
 
@@ -1071,7 +1084,6 @@ def process_coin(coin, btc_regime, dist_acc):
                 del all_feats
 
         if time_map is not None: del time_map
-        if tf == 60: del candles; gc.collect()
 
     pfx5 = "tf5_"
     for sigs in raw_signals.values():
@@ -1131,7 +1143,7 @@ def process_coin(coin, btc_regime, dist_acc):
             built.append(sig)
         results[stype] = built
 
-    del c5, c15, c1, c1_map, tf_feat_cache, raw_signals
+    del c5, c15, c60, c1, c1_map, tf_feat_cache, raw_signals
     return results
 
 def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
@@ -1562,7 +1574,7 @@ def main():
 
     os.makedirs(OUT_DIR, exist_ok=True)
     ts = datetime.now(KST).strftime("%Y%m%d_%H%M")
-    fpath = os.path.join(OUT_DIR, f"signal_v3_{ts}.txt")
+    fpath = os.path.join(OUT_DIR, f"signal_v4_{ts}.txt")
     with open(fpath,"w",encoding="utf-8") as f: f.write("\n".join(lines))
     tg(f"\n리포트: {fpath}")
 
