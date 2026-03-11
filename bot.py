@@ -112,9 +112,29 @@ def _release_lock(*a):
     try: os.remove(LOCK_FILE)
     except: pass
 
-atexit.register(_release_lock)
-for _s in (sig_mod.SIGTERM, sig_mod.SIGINT):
-    sig_mod.signal(_s, lambda s,f: (_release_lock(), sys.exit(0)))
+def _death_handler(signum, frame):
+    """프로세스 종료 시그널 포착 → 텔레그램으로 원인 전송"""
+    import signal as _sig
+    sig_name = _sig.Signals(signum).name if hasattr(_sig, 'Signals') else str(signum)
+    mem = _get_mem_mb()
+    try:
+        tg(f"[강제종료] 시그널={sig_name}({signum}) | mem={mem:.0f}MB\n프로세스가 외부에서 kill 되었습니다.")
+    except: pass
+    _release_lock()
+    sys.exit(1)
+
+def _atexit_diag():
+    """atexit: 정상종료가 아닌 경우 알림"""
+    if not os.path.exists(DONE_FILE):
+        mem = _get_mem_mb()
+        try:
+            tg(f"[비정상종료] _mark_done() 호출 없이 종료됨 | mem={mem:.0f}MB\n완료 전에 프로세스가 죽었습니다.")
+        except: pass
+    _release_lock()
+
+atexit.register(_atexit_diag)
+for _s in (sig_mod.SIGTERM, sig_mod.SIGINT, sig_mod.SIGHUP):
+    sig_mod.signal(_s, _death_handler)
 
 FEE_RATE = 0.0005
 SLIPPAGE = 0.0008
@@ -1538,6 +1558,11 @@ def main():
             tg(f"[살아있음] 분석 진행중 {i+1}/{len(coins)} | {int(now-t0)}초 경과{mem_str}")
             last_hb = now
 
+        # 20번째 이후 코인별 상세 로그 (죽는 지점 추적)
+        if i >= 19:
+            mem = _get_mem_mb()
+            tg(f"[코인시작] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
+
         try:
             cr = process_coin(coin, btc_regime, dist_acc)
             for st,sigs in cr.items():
@@ -1546,6 +1571,10 @@ def main():
         except Exception as e:
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
+
+        if i >= 19:
+            mem = _get_mem_mb()
+            tg(f"[코인완료] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
         if (i+1) % 10 == 0:
             gc.collect()  # 10코인마다 한 번만
             total_elapsed = time.time() - analysis_start
