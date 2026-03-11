@@ -9721,6 +9721,16 @@ def monitor_position(m,
 
     verdict = None
 
+    # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
+    # 🔧 BUG FIX: signal_tag를 v4_exit_params보다 먼저 로드 (UnboundLocalError 방지)
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m, {})
+    entry_mode = pos.get("entry_mode", "confirm")
+    trade_type = pos.get("trade_type", "scalp")  # 🔧 특단조치: 진입 시 결정된 스캘프/러너
+    signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
+    # 🔧 FIX: signal_type 로드 (dynamic_stop_loss 신호별 완화용 — signal_tag와 별도)
+    signal_type_for_sl = pos.get("signal_type", "normal")
+
     # === 🎯 v4: EXIT_PARAMS 기반 트레일 파라미터 ===
     _v4_ep = pre.get("v4_exit_params") or v4_get_exit_params(signal_tag)
     checkpoint_reached = False
@@ -9745,19 +9755,8 @@ def monitor_position(m,
     last_exit_event_ts = 0.0
     EXIT_EVENT_COOLDOWN_SEC = 6.0  # 부분익절 후 6초간 다른 청산 트리거 무시
 
-
     # === 🔧 MFE 기반 부분익절 상태 ===
     mfe_partial_done = False     # MFE 부분익절 완료 여부
-
-
-    # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
-    with _POSITION_LOCK:
-        pos = OPEN_POSITIONS.get(m, {})
-    entry_mode = pos.get("entry_mode", "confirm")
-    trade_type = pos.get("trade_type", "scalp")  # 🔧 특단조치: 진입 시 결정된 스캘프/러너
-    signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
-    # 🔧 FIX: signal_type 로드 (dynamic_stop_loss 신호별 완화용 — signal_tag와 별도)
-    signal_type_for_sl = pos.get("signal_type", "normal")
 
     # === 🔧 1분봉 캐시 (10초 스로틀 — 루프 내 다중 호출 방지) ===
     _c1_cache = None
