@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-업비트 신호 연구 v3.4 — 1분봉 수집 분리
-======================================
-- 수집: 3m,5m,15m,30m,1h (5TF) — 1분봉은 collect_1m.py가 담당
-- 분석: 1분봉 포함 (collect_1m.py가 수집한 파일 로드)
+업비트 신호 연구 v3.5 — 1분봉 전용
+==================================
+- 수집: 1분봉 30일치만 (3m~60m은 다른 스크립트가 담당)
+- 분석: 1분봉 피처 추출, 시그널은 c5(디스크 or 1m합성) 기반
 - 완료 후 확실한 종료 (완료 마커로 재실행 방지)
 - PID 검증 + flock 이중 잠금
 """
@@ -132,9 +132,9 @@ COND_KEYS = {
     "bar_atr","green","bbw20","uw_pct","lw_pct","body_pct",
 }
 
-COLLECT_TFS = [(3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
-ALL_TFS = [(1, 1440), (3, 480), (5, 288), (15, 96), (30, 48), (60, 24)]
-ANALYSIS_TFS = [1, 5, 15, 60]  # 1분봉 포함 전체 분석
+COLLECT_TFS = []  # 3m~60m은 다른 스크립트가 수집 → 여기선 1m만
+ALL_TFS = [(1, 1440)]
+ANALYSIS_TFS = [1]  # 1분봉 전용 분석
 
 SIG_TPSL = {
     "15m_눌림반전":  {"tp": 1.5, "sl": 1.0},
@@ -460,11 +460,11 @@ def _is_1m_collected(coin, days=30, margin=0.90):
     except: return False
 
 def collect(days=30, top_n=30):
-    """전체 TF 수집 (1분봉 30일치 포함)"""
-    if days > 30: days = 30  # 1분봉은 30일 제한
+    """1분봉 30일치 전용 수집 (3m~60m은 다른 스크립트가 담당)"""
+    if days > 30: days = 30
     need_1m = 1440 * days  # 30일 = 43,200개
 
-    tg(f"[수집] {days}일, {top_n}코인, 6TF (1m 포함)")
+    tg(f"[수집] 1분봉 전용 | {days}일, {top_n}코인, 목표 {need_1m:,}개/코인")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
@@ -476,24 +476,16 @@ def collect(days=30, top_n=30):
     for i, market in enumerate(markets):
         coin = market.split("-")[1]
 
-        # 하트비트 (코인 사이)
+        # 하트비트
         now = time.time()
         if now - last_hb >= HEARTBEAT_INTERVAL:
             elapsed = now - t0
             mem = _get_mem_mb()
             mem_str = f" | mem={mem:.0f}MB" if mem > 0 else ""
-            tg(f"[살아있음] 수집 진행중 {i+1}/{len(markets)} | {int(elapsed)}초 경과{mem_str}")
+            tg(f"[살아있음] 1m수집 {i+1}/{len(markets)} | {int(elapsed)}초 경과{mem_str}")
             last_hb = now
 
         try:
-            # 3m~60m 일반 수집
-            for tf, per_day in COLLECT_TFS:
-                total = per_day * days
-                if is_collected(coin, tf, total//2): continue
-                candles = fetch_candles(tf, market, total)
-                if candles: save_coin(coin, tf, candles); del candles; gc.collect()
-                time.sleep(0.12)
-
             # 1분봉 30일치 수집 (청크 방식, 메모리 안전)
             if _is_1m_collected(coin, days):
                 skip_1m += 1
@@ -539,7 +531,7 @@ def load_candles(coin, unit):
 
 def get_saved_coins():
     if not os.path.exists(DATA_DIR): return []
-    return sorted(set(f.replace("_5m.json","") for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")))
+    return sorted(set(f.replace("_1m.json","") for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")))
 
 def make_nmin(c_small, ratio):
     out = []
@@ -762,8 +754,21 @@ def find_idx(candles, sig_time):
 
 def process_coin(coin, btc_regime, dist_acc):
     print(f"  >> {coin} 분석 시작")  # print만 (텔레그램 폭격 방지)
+
+    # 1분봉 먼저 로드 (이 스크립트의 주 데이터)
+    c1 = load_candles(coin, 1)
+    if len(c1) < 300:
+        print(f"    {coin} 1분봉 부족 ({len(c1)}개), 스킵")
+        return {}
+
+    # c5: 디스크에 있으면 로드, 없으면 1분봉으로부터 생성
     c5 = load_candles(coin, 5)
-    if len(c5) < 200: return {}
+    if len(c5) < 200:
+        c5 = make_nmin(c1, 5)  # 1분봉 → 5분봉 합성
+        if len(c5) < 200:
+            print(f"    {coin} 5분봉 합성 부족 ({len(c5)}개), 스킵")
+            del c1; return {}
+        print(f"    {coin} 5분봉 합성 ({len(c5)}개)")
     c15 = make_nmin(c5, 3)
 
     raw_signals = {}
@@ -977,8 +982,7 @@ def process_coin(coin, btc_regime, dist_acc):
         for si5, ei, bar in sigs:
             all_sig_times.add(bar["t"])
 
-    # 1m 데이터 로드 (collect_1m.py가 미리 수집한 파일, 디스크 읽기만 ~1초)
-    c1 = load_candles(coin, 1)
+    # c1은 이미 상단에서 로드됨
     c1_map = {}
     if c1 and len(c1) > 100:
         c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
@@ -1176,7 +1180,7 @@ def _avg(vals):
 def generate_report(all_results, dist_acc):
     L = []
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    L.append(f"업비트 신호 연구 v3.4 ({ts})")
+    L.append(f"업비트 신호 연구 v3.5 ({ts})")
     L.append(f"비용:{TOTAL_COST*100:.2f}% | 진입:다음봉시가 | 최대:{MAX_HOLD_BARS}봉")
     L.append(f"Train/Test:{TRAIN_RATIO*100:.0f}/{(1-TRAIN_RATIO)*100:.0f} | 최소:{MIN_TRADES}건")
     L.append("="*65)
@@ -1407,11 +1411,10 @@ def generate_report(all_results, dist_acc):
 # 메인
 # ================================================================
 def _has_enough_data(min_coins=10):
-    """5m + 1m 파일 모두 충분한지 확인"""
+    """1m 파일이 충분한지 확인"""
     if not os.path.exists(DATA_DIR): return False
-    files_5m = [f for f in os.listdir(DATA_DIR) if f.endswith("_5m.json")]
     files_1m = [f for f in os.listdir(DATA_DIR) if f.endswith("_1m.json")]
-    return len(files_5m) >= min_coins and len(files_1m) >= min_coins
+    return len(files_1m) >= min_coins
 
 def main():
     _acquire_lock()
@@ -1421,17 +1424,17 @@ def main():
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
 
-    tg("[시작] upbit_signal_study v3.4 실행 (1분봉 30일 수집+분석 통합)")
+    tg("[시작] upbit_signal_study v3.5 실행 (1분봉 전용: 수집+분석)")
     t0 = time.time()
     last_hb = t0
 
-    # 데이터 있으면 수집 스킵 (5m+1m 모두 충분할 때만)
+    # 1m 데이터 충분하면 수집 스킵
     if not args.skip_collect and _has_enough_data():
-        tg("[자동] 기존 데이터 감지 (5m+1m 충분) → 수집 스킵")
+        tg("[자동] 1m 데이터 충분 → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
-        tg("[STEP 1/4] 전체 TF 수집 (1분봉 30일 포함, 이미 수집된 건 스킵)")
+        tg("[STEP 1/4] 1분봉 30일치 수집 (이미 수집된 코인 스킵)")
         collect(days=args.days, top_n=args.coins)
 
     # 분석
