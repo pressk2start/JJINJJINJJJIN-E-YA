@@ -729,116 +729,106 @@ def _v4_extract_closes(candles):
 # --- v4 상위TF 필터 ---
 
 def _v4_check_upper_tf_filters(c5, c15, c60):
-    """상위 TF 필터 체크 — 백테스트에서 검증 통과한 필터들"""
+    """상위 TF 필터 — AND 구조 (v4.3)
+    진입 = 시그널(별도) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
+    반환: (filters_hit, and_pass, block_reason)
+    """
     filters_hit = []
-    score = 0
     block_reason = None
 
-    c5_closes = _v4_extract_closes(c5)
     c15_closes = _v4_extract_closes(c15)
     c60_closes = _v4_extract_closes(c60)
 
-    # A. 차단 필터 (60m/15m 약세 → 진입 금지)
-    bb60_pos, bb60_width = _v4_bb_position(c60_closes) if c60_closes else (None, None)
+    # ── A. 차단 필터 (하나라도 걸리면 진입 금지) ──
+    bb60_pos, _ = _v4_bb_position(c60_closes) if c60_closes else (None, None)
     if bb60_pos is not None and bb60_pos < 20:
         block_reason = f"60m_BB20={bb60_pos:.0f}<20 (하락추세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, False, block_reason
 
     rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
     if rsi60 is not None and rsi60 < 40:
         block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, False, block_reason
 
     stoch15 = _v4_stoch_k(c15) if c15 else None
     if stoch15 is not None and stoch15 < 20:
         block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
-        return filters_hit, 0, block_reason
-
-    # B. 핵심 복합필터
-    macd5_golden, macd5_hist = _v4_macd_golden(c5_closes) if c5_closes else (False, 0)
-    adx15 = _v4_adx(c15) if c15 else None
-    if macd5_golden and adx15 is not None and adx15 > 25:
-        filters_hit.append("5m_MACD골든+15m_ADX>25")
-        score += 30
-
-    macd15_golden, macd15_hist = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
-    ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
-    if macd15_golden and ema60_align >= 3:
-        filters_hit.append("15m_MACD골든+1h_EMA정배열")
-        score += 35
-
-    # C. 추가 우대 조건
-    vr15 = _v4_volume_ratio(c15, 5) if c15 else None
-    if vr15 is not None and vr15 > 3:
-        filters_hit.append("15m_VR5>3")
-        score += 20
-
-    vr60 = _v4_volume_ratio(c60, 5) if c60 else None
-    if vr60 is not None and vr60 > 3:
-        filters_hit.append("60m_VR5>3")
-        score += 15
-
-    if ema60_align >= 3:
-        filters_hit.append("60m_EMA정배열3+")
-        score += 15
-
-    ema15_align = _v4_ema_alignment(c15_closes) if c15_closes else 0
-    if ema15_align >= 3:
-        filters_hit.append("15m_EMA정배열3+")
-        score += 10
-
-    if c60 and _v4_engulfing(c60):
-        filters_hit.append("60m_감싸기")
-        score += 10
-
-    m3_15 = _v4_momentum(c15_closes, 3) if c15_closes else None
-    if m3_15 is not None and m3_15 > 0.22:
-        filters_hit.append("15m_m3_상위")
-        score += 15
-
-    m3_60 = _v4_momentum(c60_closes, 3) if c60_closes else None
-    if m3_60 is not None and m3_60 > 0.0:
-        filters_hit.append("60m_m3_상위")
-        score += 10
+        return filters_hit, False, block_reason
 
     rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
-    if rsi15 is not None and rsi15 >= 70:
-        filters_hit.append("15m_RSI_고모멘텀")
-        score += 10
+    if rsi15 is not None and rsi15 < 35:
+        block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
+        return filters_hit, False, block_reason
 
-    if rsi60 is not None and rsi60 >= 70:
-        filters_hit.append("60m_RSI_고모멘텀")
-        score += 10
+    # ── B. AND 조건 3개 체크 ──
 
-    if macd15_golden:
+    # 1) 추세: 60m EMA정배열 ≥ 3 (필수)
+    ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
+    trend_ok = ema60_align >= 3
+    if trend_ok:
+        filters_hit.append("60m_EMA정배열")
+
+    # 2) 모멘텀: 15m MACD 골든크로스 (필수)
+    macd15_golden, _ = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
+    momentum_ok = bool(macd15_golden)
+    if momentum_ok:
         filters_hit.append("15m_MACD골든")
-        score += 8
 
-    if adx15 is not None and adx15 > 25:
+    # 3) 선택: ADX>25 OR VR5>3 (둘 중 하나, 필수)
+    adx15 = _v4_adx(c15) if c15 else None
+    vr15 = _v4_volume_ratio(c15, 5) if c15 else None
+    vr60 = _v4_volume_ratio(c60, 5) if c60 else None
+
+    adx_ok = adx15 is not None and adx15 > 25
+    vol_ok = (vr15 is not None and vr15 > 3) or (vr60 is not None and vr60 > 3)
+    option_ok = adx_ok or vol_ok
+
+    if adx_ok:
         filters_hit.append("15m_ADX>25")
-        score += 5
+    if vr15 is not None and vr15 > 3:
+        filters_hit.append("15m_VR5>3")
+    if vr60 is not None and vr60 > 3:
+        filters_hit.append("60m_VR5>3")
 
-    return filters_hit, score, block_reason
+    # ── AND 결과 ──
+    and_pass = trend_ok and momentum_ok and option_ok
+
+    return filters_hit, and_pass, block_reason
 
 
-# --- v4 시그널 설정 ---
+# ── v4.3 시그널 설정 ──
+# 진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
 
 V4_SIGNAL_CONFIG = {
     "거래량3배": {
-        "tier": 1,
-        "logic_group": "A",
-        "min_upper_score": 0,
+        "tier": 1, "logic_group": "A",
         "entry_mode": "confirm",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
             "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
-            "description": "TRAIL_SL0.7/A0.3/T0.2 (거래량3배 최적)",
+            "description": "TRAIL_SL0.7/A0.3/T0.2 (거래량3배)",
+        },
+    },
+    "5m_큰양봉": {
+        "tier": 2, "logic_group": "B",
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (5m큰양봉)",
+        },
+    },
+    "20봉_고점돌파": {
+        "tier": 2, "logic_group": "A",
+        "entry_mode": "confirm",
+        "exit": {
+            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (20봉돌파)",
         },
     },
     "BB하단반등": {
-        "tier": 2,
-        "logic_group": "B",
-        "min_upper_score": 15,
+        "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -846,42 +836,16 @@ V4_SIGNAL_CONFIG = {
             "description": "TRAIL_SL0.7/A0.3/T0.2 (BB하단반등)",
         },
     },
-    "20봉_고점돌파": {
-        "tier": 2,
-        "logic_group": "A",
-        "min_upper_score": 15,
-        "entry_mode": "confirm",
-        "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
-            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (20봉돌파 최적)",
-        },
-    },
     "5m_양봉": {
-        "tier": 2,
-        "logic_group": "B",
-        "min_upper_score": 15,    # 🔧 v4.1: 20→15 (적출율 개선, 상위TF 1개면 양EV)
+        "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
             "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (5m양봉 최적)",
-        },
-    },
-    "5m_큰양봉": {
-        "tier": 2,
-        "logic_group": "B",
-        "min_upper_score": 15,
-        "entry_mode": "half",
-        "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
-            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (5m큰양봉 최적)",
+            "description": "HOLD_12봉+TRAIL_SL0.7 (5m양봉)",
         },
     },
 }
-
-_V4_CONFIRM_UPGRADE_THRESHOLD = 45
 
 
 def _v4_detect_signal(c5, c15, c60):
@@ -933,16 +897,18 @@ def _v4_detect_signal(c5, c15, c60):
         if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
             return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
 
-    # 5. 5m_양봉 (Tier2)
+    # 5. 5m_양봉 (Tier2) — v4.2: body조건 강화 (잡신호 제거)
     body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
-    if is_green5 and body_ratio > 30 and body5_pct > 0.2:
+    if is_green5 and body_ratio > 45 and body5_pct > 0.3:
         return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
 
     return None, {}
 
 
 def v4_evaluate_entry(market, c5, c15, c30, c60):
-    """멀티TF 통합 진입 판정 (v4 전략)"""
+    """멀티TF 통합 진입 판정 — AND 구조 (v4.3)
+    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
+    """
     signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
     if not signal_tag:
         return None
@@ -951,35 +917,23 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     if not config:
         return None
 
-    filters_hit, upper_score, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
+    filters_hit, and_pass, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
 
     if block_reason:
         print(f"[V4_BLOCK] {market} {signal_tag} 차단: {block_reason}")
         return None
 
-    min_score = config["min_upper_score"]
-    if upper_score < min_score:
-        print(f"[V4_SCORE_LOW] {market} {signal_tag} "
-              f"상위TF={upper_score}<{min_score} 필터={filters_hit}")
+    if not and_pass:
+        print(f"[V4_AND_FAIL] {market} {signal_tag} 통과필터={filters_hit}")
         return None
 
     entry_mode = config["entry_mode"]
 
-    if entry_mode == "half" and upper_score >= _V4_CONFIRM_UPGRADE_THRESHOLD:
+    # confirm 업그레이드: 15m MACD골든 + 15m ADX>25 동시 충족 시
+    if "15m_MACD골든" in filters_hit and "15m_ADX>25" in filters_hit:
         entry_mode = "confirm"
-        filters_hit.append("UPGRADE_confirm")
-
-    key_filters = {"5m_MACD골든+15m_ADX>25", "15m_MACD골든+1h_EMA정배열"}
-    if key_filters & set(filters_hit):
-        entry_mode = "confirm"
-        if "KEY_FILTER_confirm" not in filters_hit:
-            filters_hit.append("KEY_FILTER_confirm")
 
     exit_params = dict(config["exit"])
-
-    if upper_score >= 60:
-        exit_params["sl_pct"] = min(exit_params["sl_pct"] * 1.15, 0.010)
-        exit_params["description"] += " +SL확대(강추세)"
 
     return {
         "signal_tag": signal_tag,
@@ -987,7 +941,6 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         "entry_mode": entry_mode,
         "exit_params": exit_params,
         "filters_hit": filters_hit,
-        "upper_tf_score": upper_score,
         "signal_details": signal_details,
     }
 
