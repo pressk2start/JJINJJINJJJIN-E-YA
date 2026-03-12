@@ -729,110 +729,110 @@ def _v4_extract_closes(candles):
 # --- v4 상위TF 필터 ---
 
 def _v4_check_upper_tf_filters(c5, c15, c60):
-    """상위 TF 필터 체크 — 백테스트에서 검증 통과한 필터들"""
+    """상위 TF 필터 — AND/OR 게이트 방식 (v4.3)
+    반환: (filters_hit, gates_passed, block_reason)
+      gates_passed = {"15m_trend", "60m_trend", "composite", "volume"} 중 통과한 것
+    """
     filters_hit = []
-    score = 0
+    gates_passed = set()
     block_reason = None
 
     c5_closes = _v4_extract_closes(c5)
     c15_closes = _v4_extract_closes(c15)
     c60_closes = _v4_extract_closes(c60)
 
-    # A. 차단 필터 (60m/15m 약세 → 진입 금지)
+    # ── A. 차단 필터 (하나라도 걸리면 진입 금지) ──
     bb60_pos, bb60_width = _v4_bb_position(c60_closes) if c60_closes else (None, None)
     if bb60_pos is not None and bb60_pos < 20:
         block_reason = f"60m_BB20={bb60_pos:.0f}<20 (하락추세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, gates_passed, block_reason
 
     rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
     if rsi60 is not None and rsi60 < 40:
         block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, gates_passed, block_reason
 
     stoch15 = _v4_stoch_k(c15) if c15 else None
     if stoch15 is not None and stoch15 < 20:
         block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, gates_passed, block_reason
 
-    # 🔧 v4.2: 15m RSI 약세 차단 추가
     rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
     if rsi15 is not None and rsi15 < 35:
         block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
-        return filters_hit, 0, block_reason
+        return filters_hit, gates_passed, block_reason
 
-    # B. 핵심 복합필터
-    macd5_golden, macd5_hist = _v4_macd_golden(c5_closes) if c5_closes else (False, 0)
+    # ── B. 지표 계산 ──
+    macd5_golden, _ = _v4_macd_golden(c5_closes) if c5_closes else (False, 0)
     adx15 = _v4_adx(c15) if c15 else None
+    macd15_golden, _ = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
+    ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
+    ema15_align = _v4_ema_alignment(c15_closes) if c15_closes else 0
+    vr15 = _v4_volume_ratio(c15, 5) if c15 else None
+    vr60 = _v4_volume_ratio(c60, 5) if c60 else None
+    m3_15 = _v4_momentum(c15_closes, 3) if c15_closes else None
+    m3_60 = _v4_momentum(c60_closes, 3) if c60_closes else None
+
+    # ── C. 핵심 복합필터 게이트 (OR: 둘 중 하나) ──
     if macd5_golden and adx15 is not None and adx15 > 25:
         filters_hit.append("5m_MACD골든+15m_ADX>25")
-        score += 30
-
-    macd15_golden, macd15_hist = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
-    ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
     if macd15_golden and ema60_align >= 3:
         filters_hit.append("15m_MACD골든+1h_EMA정배열")
-        score += 35
+    _COMPOSITE_TAGS = {"5m_MACD골든+15m_ADX>25", "15m_MACD골든+1h_EMA정배열"}
+    if _COMPOSITE_TAGS & set(filters_hit):
+        gates_passed.add("composite")
 
-    # C. 추가 우대 조건
-    vr15 = _v4_volume_ratio(c15, 5) if c15 else None
-    if vr15 is not None and vr15 > 3:
-        filters_hit.append("15m_VR5>3")
-        score += 20
-
-    vr60 = _v4_volume_ratio(c60, 5) if c60 else None
-    if vr60 is not None and vr60 > 3:
-        filters_hit.append("60m_VR5>3")
-        score += 15
-
-    if ema60_align >= 3:
-        filters_hit.append("60m_EMA정배열3+")
-        score += 15
-
-    ema15_align = _v4_ema_alignment(c15_closes) if c15_closes else 0
-    if ema15_align >= 3:
-        filters_hit.append("15m_EMA정배열3+")
-        score += 10
-
-    if c60 and _v4_engulfing(c60):
-        filters_hit.append("60m_감싸기")
-        score += 10
-
-    m3_15 = _v4_momentum(c15_closes, 3) if c15_closes else None
-    if m3_15 is not None and m3_15 > 0.22:
-        filters_hit.append("15m_m3_상위")
-        score += 15
-
-    m3_60 = _v4_momentum(c60_closes, 3) if c60_closes else None
-    if m3_60 is not None and m3_60 > 0.1:   # 🔧 v4.2: 0.0→0.1 (조건 강화)
-        filters_hit.append("60m_m3_상위")
-        score += 10
-
-    if rsi15 is not None and rsi15 >= 70:   # rsi15는 차단필터에서 이미 계산됨
-        filters_hit.append("15m_RSI_고모멘텀")
-        score += 10
-
-    if rsi60 is not None and rsi60 >= 70:
-        filters_hit.append("60m_RSI_고모멘텀")
-        score += 10
-
+    # ── D. 15m 추세 게이트 (OR: 하나라도 통과) ──
     if macd15_golden:
         filters_hit.append("15m_MACD골든")
-        score += 8
-
     if adx15 is not None and adx15 > 25:
         filters_hit.append("15m_ADX>25")
-        score += 5
+    if ema15_align >= 3:
+        filters_hit.append("15m_EMA정배열3+")
+    if m3_15 is not None and m3_15 > 0.22:
+        filters_hit.append("15m_m3_상위")
+    if rsi15 is not None and rsi15 >= 70:
+        filters_hit.append("15m_RSI_고모멘텀")
+    _15M_TAGS = {"15m_MACD골든", "15m_ADX>25", "15m_EMA정배열3+",
+                 "15m_m3_상위", "15m_RSI_고모멘텀",
+                 "5m_MACD골든+15m_ADX>25", "15m_MACD골든+1h_EMA정배열"}
+    if _15M_TAGS & set(filters_hit):
+        gates_passed.add("15m_trend")
 
-    return filters_hit, score, block_reason
+    # ── E. 60m 추세 게이트 (OR: 하나라도 통과) ──
+    if ema60_align >= 3:
+        filters_hit.append("60m_EMA정배열3+")
+    if m3_60 is not None and m3_60 > 0.1:
+        filters_hit.append("60m_m3_상위")
+    if rsi60 is not None and rsi60 >= 70:
+        filters_hit.append("60m_RSI_고모멘텀")
+    if c60 and _v4_engulfing(c60):
+        filters_hit.append("60m_감싸기")
+    _60M_TAGS = {"60m_EMA정배열3+", "60m_m3_상위", "60m_RSI_고모멘텀",
+                 "60m_감싸기", "15m_MACD골든+1h_EMA정배열"}
+    if _60M_TAGS & set(filters_hit):
+        gates_passed.add("60m_trend")
+
+    # ── F. 거래량 게이트 (OR: 하나라도 통과) ──
+    if vr15 is not None and vr15 > 3:
+        filters_hit.append("15m_VR5>3")
+    if vr60 is not None and vr60 > 3:
+        filters_hit.append("60m_VR5>3")
+    _VOL_TAGS = {"15m_VR5>3", "60m_VR5>3"}
+    if _VOL_TAGS & set(filters_hit):
+        gates_passed.add("volume")
+
+    return filters_hit, gates_passed, block_reason
 
 
-# --- v4 시그널 설정 ---
+# ── v4.3 게이트 요구조건 (AND: 모든 게이트 통과 필수) ──
+# 각 시그널별로 요구되는 게이트 목록. 게이트 내부는 OR, 게이트 간은 AND.
 
 V4_SIGNAL_CONFIG = {
     "거래량3배": {
         "tier": 1,
         "logic_group": "A",
-        "min_upper_score": 10,   # 🔧 v4.2: 0→10 (상위TF 최소확인, 잡신호 제거)
+        "required_gates": ["15m_trend"],          # 이미 5m 거래량 폭발, 15m 추세만 확인
         "entry_mode": "confirm",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -843,7 +843,7 @@ V4_SIGNAL_CONFIG = {
     "BB하단반등": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 25,   # 🔧 v4.2: 15→25 (역추세, 강한 확인 필요)
+        "required_gates": ["15m_trend", "60m_trend"],  # 역추세 → 15m AND 60m 둘 다 확인
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -854,7 +854,7 @@ V4_SIGNAL_CONFIG = {
     "20봉_고점돌파": {
         "tier": 2,
         "logic_group": "A",
-        "min_upper_score": 25,   # 🔧 v4.2: 15→25 (돌파 신뢰도 강화)
+        "required_gates": ["15m_trend", "60m_trend"],  # 돌파 → 상위TF 모두 확인
         "entry_mode": "confirm",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -865,7 +865,7 @@ V4_SIGNAL_CONFIG = {
     "5m_양봉": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 30,    # 🔧 v4.2: 15→30 (가장 빈번한 시그널, 잡신호 대폭 제거)
+        "required_gates": ["15m_trend", "60m_trend"],  # 가장 빈번 → 15m AND 60m 필수
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -876,7 +876,7 @@ V4_SIGNAL_CONFIG = {
     "5m_큰양봉": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 20,   # 🔧 v4.2: 15→20 (약간 강화)
+        "required_gates": ["15m_trend"],               # 큰양봉 자체가 강한 시그널, 15m만
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -885,8 +885,6 @@ V4_SIGNAL_CONFIG = {
         },
     },
 }
-
-_V4_CONFIRM_UPGRADE_THRESHOLD = 45
 
 
 def _v4_detect_signal(c5, c15, c60):
@@ -947,7 +945,7 @@ def _v4_detect_signal(c5, c15, c60):
 
 
 def v4_evaluate_entry(market, c5, c15, c30, c60):
-    """멀티TF 통합 진입 판정 (v4 전략)"""
+    """멀티TF 통합 진입 판정 — AND/OR 게이트 방식 (v4.3)"""
     signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
     if not signal_tag:
         return None
@@ -956,33 +954,33 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     if not config:
         return None
 
-    filters_hit, upper_score, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
+    filters_hit, gates_passed, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
 
     if block_reason:
         print(f"[V4_BLOCK] {market} {signal_tag} 차단: {block_reason}")
         return None
 
-    min_score = config["min_upper_score"]
-    if upper_score < min_score:
-        print(f"[V4_SCORE_LOW] {market} {signal_tag} "
-              f"상위TF={upper_score}<{min_score} 필터={filters_hit}")
+    # AND 게이트 체크: 요구 게이트 모두 통과해야 진입
+    required = set(config["required_gates"])
+    missing = required - gates_passed
+    if missing:
+        print(f"[V4_GATE_FAIL] {market} {signal_tag} "
+              f"미통과={missing} 통과={gates_passed} 필터={filters_hit}")
         return None
 
     entry_mode = config["entry_mode"]
 
-    if entry_mode == "half" and upper_score >= _V4_CONFIRM_UPGRADE_THRESHOLD:
+    # confirm 업그레이드: 핵심 복합필터 통과 시
+    if "composite" in gates_passed:
         entry_mode = "confirm"
-        filters_hit.append("UPGRADE_confirm")
-
-    key_filters = {"5m_MACD골든+15m_ADX>25", "15m_MACD골든+1h_EMA정배열"}
-    if key_filters & set(filters_hit):
-        entry_mode = "confirm"
-        if "KEY_FILTER_confirm" not in filters_hit:
-            filters_hit.append("KEY_FILTER_confirm")
+        if "COMPOSITE→confirm" not in filters_hit:
+            filters_hit.append("COMPOSITE→confirm")
 
     exit_params = dict(config["exit"])
 
-    if upper_score >= 60:
+    # 강추세: 15m + 60m + composite 모두 통과 시 SL 확대
+    _ALL_GATES = {"15m_trend", "60m_trend", "composite"}
+    if _ALL_GATES <= gates_passed:
         exit_params["sl_pct"] = min(exit_params["sl_pct"] * 1.15, 0.010)
         exit_params["description"] += " +SL확대(강추세)"
 
@@ -992,7 +990,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         "entry_mode": entry_mode,
         "exit_params": exit_params,
         "filters_hit": filters_hit,
-        "upper_tf_score": upper_score,
+        "gates_passed": sorted(gates_passed),
         "signal_details": signal_details,
     }
 
