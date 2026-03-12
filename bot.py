@@ -729,10 +729,12 @@ def _v4_extract_closes(candles):
 # --- v4 상위TF 필터 ---
 
 def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
-    """상위 TF 필터 — AND 구조 (v4.4)
-    기본: 시그널 AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
-    부스터: ADX>25, VR5>3, 60m감싸기 → entry_mode 업그레이드
-    거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
+    """상위 TF 필터 — AND + OR 구조 (v4.5)
+    진입 = 시그널 AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3)
+    - 추세(60m EMA정배열): 유일한 강성 AND — 안정적이고 지속시간 김
+    - 모멘텀(OR 택1): MACD골든/ADX>25/VR>3 중 하나 — 알람 빈도 확보
+    - 부스터: 60m감싸기, 60m VR5>3 등 → entry_mode 업그레이드
+    - 거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
     반환: (filters_hit, and_pass, block_reason, boosters)
     """
     filters_hit = []
@@ -779,7 +781,7 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
         if contrarian_ok:
             filters_hit.append("5m_RSI<50")
             filters_hit.append("15m_BB<40")
-            # 부스터 체크 (VR은 거래량3배에서도 강력)
+            # 부스터 체크
             vr60 = _v4_volume_ratio(c60, 5) if c60 else None
             if vr60 is not None and vr60 > 3:
                 boosters.append("60m_VR5>3")
@@ -787,52 +789,61 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
             if engulf60:
                 boosters.append("60m_감싸기")
             return filters_hit, True, block_reason, boosters
-        # 거래량3배도 일반 추세 경로로 fallback 가능
-        # (추세 상승 중 거래량 폭발도 유효하므로)
+        # fallback: 추세 상승 중 거래량 폭발도 유효 → 아래 일반 경로로
 
-    # ── C. AND 조건 2개 (핵심) ──
-
-    # 1) 추세: 60m EMA정배열 ≥ 3 (필수)
+    # ── C. 핵심 AND: 60m EMA정배열 (유일한 강성 필수조건) ──
     ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
     trend_ok = ema60_align >= 3
     if trend_ok:
         filters_hit.append("60m_EMA정배열")
 
-    # 2) 모멘텀: 15m MACD 골든크로스 (필수)
+    # ── D. 모멘텀 OR (택1 이상 충족 필요) ──
+    # 15m MACD골든, 15m ADX>25, VR5>3 중 하나만 있으면 OK
     macd15_golden, _ = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
-    momentum_ok = bool(macd15_golden)
-    if momentum_ok:
-        filters_hit.append("15m_MACD골든")
-
-    # ── D. 부스터 (필수 아님, entry_mode 업그레이드용) ──
-
-    # ADX>25 (백테스트: 양의 EV 다수)
     adx15 = _v4_adx(c15) if c15 else None
-    if adx15 is not None and adx15 > 25:
-        boosters.append("15m_ADX>25")
-
-    # VR5>3 (백테스트: 가장 강력한 단일 조건, EV +0.3~1.4%)
     vr15 = _v4_volume_ratio(c15, 5) if c15 else None
     vr60 = _v4_volume_ratio(c60, 5) if c60 else None
-    if vr15 is not None and vr15 > 3:
-        boosters.append("15m_VR5>3")
-    if vr60 is not None and vr60 > 3:
-        boosters.append("60m_VR5>3")
+
+    macd_ok = bool(macd15_golden)
+    adx_ok = adx15 is not None and adx15 > 25
+    vr15_ok = vr15 is not None and vr15 > 3
+    vr60_ok = vr60 is not None and vr60 > 3
+
+    momentum_or = macd_ok or adx_ok or vr15_ok or vr60_ok
+
+    if macd_ok:
+        filters_hit.append("15m_MACD골든")
+    if adx_ok:
+        filters_hit.append("15m_ADX>25")
+    if vr15_ok:
+        filters_hit.append("15m_VR5>3")
+    if vr60_ok:
+        filters_hit.append("60m_VR5>3")
+
+    # ── E. 부스터 (entry_mode 업그레이드용) ──
+    # 모멘텀 OR에서 2개 이상 동시 충족 → 부스터
+    momentum_count = sum([macd_ok, adx_ok, vr15_ok, vr60_ok])
+    if momentum_count >= 2:
+        boosters.append("모멘텀복합")
+
+    # 60m VR5>3 (백테스트 최강 단일 조건, EV +0.3~1.4%)
+    if vr60_ok:
+        boosters.append("60m_VR5>3_부스터")
 
     # 60m 감싸기 (백테스트: 거의 모든 시그널에서 양의 EV +0.1~0.35%)
     engulf60 = _v4_engulfing(c60) if c60 else False
     if engulf60:
         boosters.append("60m_감싸기")
 
-    # ── AND 결과 (2중 AND만 필수) ──
-    and_pass = trend_ok and momentum_ok
+    # ── AND 결과: 추세(필수) AND 모멘텀(OR 택1) ──
+    and_pass = trend_ok and momentum_or
 
     return filters_hit, and_pass, block_reason, boosters
 
 
-# ── v4.4 시그널 설정 ──
-# 진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
-# 부스터: ADX>25, VR5>3, 60m감싸기 → entry_mode confirm 업그레이드
+# ── v4.5 시그널 설정 ──
+# 진입 = 시그널(OR) AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3)
+# 부스터: 모멘텀복합(2+), 60m VR5>3, 60m감싸기 → entry_mode confirm 업그레이드
 # 거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
 
 V4_SIGNAL_CONFIG = {
@@ -943,9 +954,9 @@ def _v4_detect_signal(c5, c15, c60):
 
 
 def v4_evaluate_entry(market, c5, c15, c30, c60):
-    """멀티TF 통합 진입 판정 — AND 구조 (v4.4)
-    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
-    부스터(ADX>25, VR5>3, 60m감싸기) → entry_mode confirm 업그레이드
+    """멀티TF 통합 진입 판정 — AND+OR 구조 (v4.5)
+    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3)
+    부스터(모멘텀복합, 60m VR5>3, 60m감싸기) → entry_mode confirm 업그레이드
     거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
     """
     signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
@@ -969,11 +980,11 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     entry_mode = config["entry_mode"]
 
     # 부스터로 entry_mode 업그레이드
-    # 60m_VR5>3: 백테스트 최강 단일 조건 (EV +0.3~1.4%) → 무조건 confirm
-    if "60m_VR5>3" in boosters:
+    # 60m VR5>3 부스터: 백테스트 최강 (EV +0.3~1.4%) → confirm
+    if "60m_VR5>3_부스터" in boosters:
         entry_mode = "confirm"
-    # ADX>25 + MACD골든 동시 → confirm
-    elif "15m_ADX>25" in boosters and "15m_MACD골든" in filters_hit:
+    # 모멘텀 2개+ 동시 충족 (예: MACD골든+ADX>25) → confirm
+    elif "모멘텀복합" in boosters:
         entry_mode = "confirm"
     # 60m 감싸기 → confirm (추세 전환 확인)
     elif "60m_감싸기" in boosters:
