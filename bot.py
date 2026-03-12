@@ -745,35 +745,9 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
     c15_closes = _v4_extract_closes(c15)
     c60_closes = _v4_extract_closes(c60)
 
-    # ── A. 차단 필터 (하나라도 걸리면 진입 금지) ──
-    bb60_pos, _ = _v4_bb_position(c60_closes) if c60_closes else (None, None)
-    if bb60_pos is not None and bb60_pos < 20:
-        block_reason = f"60m_BB20={bb60_pos:.0f}<20 (하락추세)"
-        return filters_hit, False, block_reason, boosters
-
-    rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
-    if rsi60 is not None and rsi60 < 40:
-        block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
-        return filters_hit, False, block_reason, boosters
-
-    stoch15 = _v4_stoch_k(c15) if c15 else None
-    if stoch15 is not None and stoch15 < 20:
-        block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
-        return filters_hit, False, block_reason, boosters
-
-    rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
-    if rsi15 is not None and rsi15 < 35:
-        block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
-        return filters_hit, False, block_reason, boosters
-
-    # 60m Stoch_K<20 차단 (백테스트: 모든 시그널 EV -0.14~-0.54%)
-    stoch60 = _v4_stoch_k(c60) if c60 else None
-    if stoch60 is not None and stoch60 < 20:
-        block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (60m과매도)"
-        return filters_hit, False, block_reason, boosters
-
-    # ── B. 거래량3배 별도 역추세 경로 ──
-    # 백테스트: 5m_RSI<50 + 15m_BB<40 → BOTH EV>0 (과매도 반등 성격)
+    # ── A. 거래량3배 역추세 경로 (블록 필터 무시) ──
+    # 과매도 반등 시그널이므로 차단 필터보다 먼저 체크
+    # 백테스트: 5m_RSI<50 + 15m_BB<40 → BOTH EV>0
     if signal_tag == "거래량3배":
         rsi5 = _v4_rsi(c5_closes, 14) if c5_closes else None
         bb15_pos, _ = _v4_bb_position(c15_closes) if c15_closes else (None, None)
@@ -789,7 +763,18 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
             if engulf60:
                 boosters.append("60m_감싸기")
             return filters_hit, True, block_reason, boosters
-        # fallback: 추세 상승 중 거래량 폭발도 유효 → 아래 일반 경로로
+        # fallback: 역추세 조건 불충족 → 아래 일반 경로 (블록 필터 적용)
+
+    # ── B. 차단 필터 (거래량3배 외 시그널만 적용) ──
+    rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
+    if rsi60 is not None and rsi60 < 40:
+        block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
+        return filters_hit, False, block_reason, boosters
+
+    stoch60 = _v4_stoch_k(c60) if c60 else None
+    if stoch60 is not None and stoch60 < 20:
+        block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (60m과매도)"
+        return filters_hit, False, block_reason, boosters
 
     # ── C. 핵심 AND: 60m EMA정배열 (유일한 강성 필수조건) ──
     ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
