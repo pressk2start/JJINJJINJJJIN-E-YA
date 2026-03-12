@@ -728,14 +728,18 @@ def _v4_extract_closes(candles):
 
 # --- v4 상위TF 필터 ---
 
-def _v4_check_upper_tf_filters(c5, c15, c60):
-    """상위 TF 필터 — AND 구조 (v4.3)
-    진입 = 시그널(별도) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
-    반환: (filters_hit, and_pass, block_reason)
+def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
+    """상위 TF 필터 — AND 구조 (v4.4)
+    기본: 시그널 AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
+    부스터: ADX>25, VR5>3, 60m감싸기 → entry_mode 업그레이드
+    거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
+    반환: (filters_hit, and_pass, block_reason, boosters)
     """
     filters_hit = []
+    boosters = []
     block_reason = None
 
+    c5_closes = _v4_extract_closes(c5)
     c15_closes = _v4_extract_closes(c15)
     c60_closes = _v4_extract_closes(c60)
 
@@ -743,30 +747,50 @@ def _v4_check_upper_tf_filters(c5, c15, c60):
     bb60_pos, _ = _v4_bb_position(c60_closes) if c60_closes else (None, None)
     if bb60_pos is not None and bb60_pos < 20:
         block_reason = f"60m_BB20={bb60_pos:.0f}<20 (하락추세)"
-        return filters_hit, False, block_reason
+        return filters_hit, False, block_reason, boosters
 
     rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
     if rsi60 is not None and rsi60 < 40:
         block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
-        return filters_hit, False, block_reason
+        return filters_hit, False, block_reason, boosters
 
     stoch15 = _v4_stoch_k(c15) if c15 else None
     if stoch15 is not None and stoch15 < 20:
         block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
-        return filters_hit, False, block_reason
+        return filters_hit, False, block_reason, boosters
 
     rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
     if rsi15 is not None and rsi15 < 35:
         block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
-        return filters_hit, False, block_reason
+        return filters_hit, False, block_reason, boosters
 
     # 60m Stoch_K<20 차단 (백테스트: 모든 시그널 EV -0.14~-0.54%)
     stoch60 = _v4_stoch_k(c60) if c60 else None
     if stoch60 is not None and stoch60 < 20:
         block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (60m과매도)"
-        return filters_hit, False, block_reason
+        return filters_hit, False, block_reason, boosters
 
-    # ── B. AND 조건 3개 체크 ──
+    # ── B. 거래량3배 별도 역추세 경로 ──
+    # 백테스트: 5m_RSI<50 + 15m_BB<40 → BOTH EV>0 (과매도 반등 성격)
+    if signal_tag == "거래량3배":
+        rsi5 = _v4_rsi(c5_closes, 14) if c5_closes else None
+        bb15_pos, _ = _v4_bb_position(c15_closes) if c15_closes else (None, None)
+        contrarian_ok = (rsi5 is not None and rsi5 < 50) and (bb15_pos is not None and bb15_pos < 40)
+        if contrarian_ok:
+            filters_hit.append("5m_RSI<50")
+            filters_hit.append("15m_BB<40")
+            # 부스터 체크 (VR은 거래량3배에서도 강력)
+            vr60 = _v4_volume_ratio(c60, 5) if c60 else None
+            if vr60 is not None and vr60 > 3:
+                boosters.append("60m_VR5>3")
+            engulf60 = _v4_engulfing(c60) if c60 else False
+            if engulf60:
+                boosters.append("60m_감싸기")
+            return filters_hit, True, block_reason, boosters
+        # 거래량3배도 일반 추세 경로로 fallback 가능
+        # (추세 상승 중 거래량 폭발도 유효하므로)
+
+    # ── C. AND 조건 2개 (핵심) ──
 
     # 1) 추세: 60m EMA정배열 ≥ 3 (필수)
     ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
@@ -780,30 +804,36 @@ def _v4_check_upper_tf_filters(c5, c15, c60):
     if momentum_ok:
         filters_hit.append("15m_MACD골든")
 
-    # 3) 선택: ADX>25 OR VR5>3 (둘 중 하나, 필수)
+    # ── D. 부스터 (필수 아님, entry_mode 업그레이드용) ──
+
+    # ADX>25 (백테스트: 양의 EV 다수)
     adx15 = _v4_adx(c15) if c15 else None
+    if adx15 is not None and adx15 > 25:
+        boosters.append("15m_ADX>25")
+
+    # VR5>3 (백테스트: 가장 강력한 단일 조건, EV +0.3~1.4%)
     vr15 = _v4_volume_ratio(c15, 5) if c15 else None
     vr60 = _v4_volume_ratio(c60, 5) if c60 else None
-
-    adx_ok = adx15 is not None and adx15 > 25
-    vol_ok = (vr15 is not None and vr15 > 3) or (vr60 is not None and vr60 > 3)
-    option_ok = adx_ok or vol_ok
-
-    if adx_ok:
-        filters_hit.append("15m_ADX>25")
     if vr15 is not None and vr15 > 3:
-        filters_hit.append("15m_VR5>3")
+        boosters.append("15m_VR5>3")
     if vr60 is not None and vr60 > 3:
-        filters_hit.append("60m_VR5>3")
+        boosters.append("60m_VR5>3")
 
-    # ── AND 결과 ──
-    and_pass = trend_ok and momentum_ok and option_ok
+    # 60m 감싸기 (백테스트: 거의 모든 시그널에서 양의 EV +0.1~0.35%)
+    engulf60 = _v4_engulfing(c60) if c60 else False
+    if engulf60:
+        boosters.append("60m_감싸기")
 
-    return filters_hit, and_pass, block_reason
+    # ── AND 결과 (2중 AND만 필수) ──
+    and_pass = trend_ok and momentum_ok
+
+    return filters_hit, and_pass, block_reason, boosters
 
 
-# ── v4.3 시그널 설정 ──
-# 진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
+# ── v4.4 시그널 설정 ──
+# 진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
+# 부스터: ADX>25, VR5>3, 60m감싸기 → entry_mode confirm 업그레이드
+# 거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
 
 V4_SIGNAL_CONFIG = {
     "거래량3배": {
@@ -913,8 +943,10 @@ def _v4_detect_signal(c5, c15, c60):
 
 
 def v4_evaluate_entry(market, c5, c15, c30, c60):
-    """멀티TF 통합 진입 판정 — AND 구조 (v4.3)
-    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) AND 선택(ADX>25 OR VR>3)
+    """멀티TF 통합 진입 판정 — AND 구조 (v4.4)
+    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND 모멘텀(15m MACD골든) — 2중 AND
+    부스터(ADX>25, VR5>3, 60m감싸기) → entry_mode confirm 업그레이드
+    거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
     """
     signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
     if not signal_tag:
@@ -924,7 +956,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     if not config:
         return None
 
-    filters_hit, and_pass, block_reason = _v4_check_upper_tf_filters(c5, c15, c60)
+    filters_hit, and_pass, block_reason, boosters = _v4_check_upper_tf_filters(c5, c15, c60, signal_tag)
 
     if block_reason:
         print(f"[V4_BLOCK] {market} {signal_tag} 차단: {block_reason}")
@@ -936,8 +968,15 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
 
     entry_mode = config["entry_mode"]
 
-    # confirm 업그레이드: 15m MACD골든 + 15m ADX>25 동시 충족 시
-    if "15m_MACD골든" in filters_hit and "15m_ADX>25" in filters_hit:
+    # 부스터로 entry_mode 업그레이드
+    # 60m_VR5>3: 백테스트 최강 단일 조건 (EV +0.3~1.4%) → 무조건 confirm
+    if "60m_VR5>3" in boosters:
+        entry_mode = "confirm"
+    # ADX>25 + MACD골든 동시 → confirm
+    elif "15m_ADX>25" in boosters and "15m_MACD골든" in filters_hit:
+        entry_mode = "confirm"
+    # 60m 감싸기 → confirm (추세 전환 확인)
+    elif "60m_감싸기" in boosters:
         entry_mode = "confirm"
 
     exit_params = dict(config["exit"])
@@ -948,6 +987,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         "entry_mode": entry_mode,
         "exit_params": exit_params,
         "filters_hit": filters_hit,
+        "boosters": boosters,
         "signal_details": signal_details,
     }
 
@@ -8747,7 +8787,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _v4_exit_params = _v4_signal["exit_params"]
 
     print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal['logic_group']}) "
-          f"필터={_v4_signal['filters_hit']} 청산={_v4_exit_params['description']}")
+          f"필터={_v4_signal['filters_hit']} 부스터={_v4_signal.get('boosters', [])} "
+          f"청산={_v4_exit_params['description']}")
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
@@ -8870,6 +8911,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         "v4_exit_params": _v4_exit_params,
         "v4_logic_group": _v4_signal.get("logic_group", "A") if _v4_signal else "A",
         "v4_filters_hit": _v4_signal.get("filters_hit", []) if _v4_signal else [],
+        "v4_boosters": _v4_signal.get("boosters", []) if _v4_signal else [],
     }
 
     # 🔧 FIX: gate 통과 후에만 카운트 갱신 (스캔만으로 2파 판정 방지)
