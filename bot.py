@@ -754,6 +754,12 @@ def _v4_check_upper_tf_filters(c5, c15, c60):
         block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (과매도역추세)"
         return filters_hit, 0, block_reason
 
+    # 🔧 v4.2: 15m RSI 약세 차단 추가
+    rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
+    if rsi15 is not None and rsi15 < 35:
+        block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
+        return filters_hit, 0, block_reason
+
     # B. 핵심 복합필터
     macd5_golden, macd5_hist = _v4_macd_golden(c5_closes) if c5_closes else (False, 0)
     adx15 = _v4_adx(c15) if c15 else None
@@ -797,12 +803,11 @@ def _v4_check_upper_tf_filters(c5, c15, c60):
         score += 15
 
     m3_60 = _v4_momentum(c60_closes, 3) if c60_closes else None
-    if m3_60 is not None and m3_60 > 0.0:
+    if m3_60 is not None and m3_60 > 0.1:   # 🔧 v4.2: 0.0→0.1 (조건 강화)
         filters_hit.append("60m_m3_상위")
         score += 10
 
-    rsi15 = _v4_rsi(c15_closes, 14) if c15_closes else None
-    if rsi15 is not None and rsi15 >= 70:
+    if rsi15 is not None and rsi15 >= 70:   # rsi15는 차단필터에서 이미 계산됨
         filters_hit.append("15m_RSI_고모멘텀")
         score += 10
 
@@ -827,7 +832,7 @@ V4_SIGNAL_CONFIG = {
     "거래량3배": {
         "tier": 1,
         "logic_group": "A",
-        "min_upper_score": 0,
+        "min_upper_score": 10,   # 🔧 v4.2: 0→10 (상위TF 최소확인, 잡신호 제거)
         "entry_mode": "confirm",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -838,7 +843,7 @@ V4_SIGNAL_CONFIG = {
     "BB하단반등": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 15,
+        "min_upper_score": 25,   # 🔧 v4.2: 15→25 (역추세, 강한 확인 필요)
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -849,7 +854,7 @@ V4_SIGNAL_CONFIG = {
     "20봉_고점돌파": {
         "tier": 2,
         "logic_group": "A",
-        "min_upper_score": 15,
+        "min_upper_score": 25,   # 🔧 v4.2: 15→25 (돌파 신뢰도 강화)
         "entry_mode": "confirm",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -860,7 +865,7 @@ V4_SIGNAL_CONFIG = {
     "5m_양봉": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 15,    # 🔧 v4.1: 20→15 (적출율 개선, 상위TF 1개면 양EV)
+        "min_upper_score": 30,    # 🔧 v4.2: 15→30 (가장 빈번한 시그널, 잡신호 대폭 제거)
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -871,7 +876,7 @@ V4_SIGNAL_CONFIG = {
     "5m_큰양봉": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 15,
+        "min_upper_score": 20,   # 🔧 v4.2: 15→20 (약간 강화)
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
@@ -933,9 +938,9 @@ def _v4_detect_signal(c5, c15, c60):
         if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
             return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
 
-    # 5. 5m_양봉 (Tier2)
+    # 5. 5m_양봉 (Tier2) — v4.2: body조건 강화 (잡신호 제거)
     body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
-    if is_green5 and body_ratio > 30 and body5_pct > 0.2:
+    if is_green5 and body_ratio > 45 and body5_pct > 0.3:
         return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
 
     return None, {}
