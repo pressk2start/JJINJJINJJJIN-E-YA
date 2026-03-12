@@ -760,6 +760,12 @@ def _v4_check_upper_tf_filters(c5, c15, c60):
         block_reason = f"15m_RSI14={rsi15:.1f}<35 (15m약세)"
         return filters_hit, False, block_reason
 
+    # 60m Stoch_K<20 차단 (백테스트: 모든 시그널 EV -0.14~-0.54%)
+    stoch60 = _v4_stoch_k(c60) if c60 else None
+    if stoch60 is not None and stoch60 < 20:
+        block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (60m과매도)"
+        return filters_hit, False, block_reason
+
     # ── B. AND 조건 3개 체크 ──
 
     # 1) 추세: 60m EMA정배열 ≥ 3 (필수)
@@ -831,9 +837,10 @@ V4_SIGNAL_CONFIG = {
         "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            # 백테스트 TEST: SL1.0/A0.5/T0.3 → WR=71.2%, EV=+0.0925% (vs SL0.7 WR=52.1%)
+            "sl_pct": 0.010, "activation_pct": 0.005, "trail_pct": 0.003,
             "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
-            "description": "TRAIL_SL0.7/A0.3/T0.2 (BB하단반등)",
+            "description": "TRAIL_SL1.0/A0.5/T0.3 (BB하단반등 TEST최적)",
         },
     },
     "5m_양봉": {
@@ -897,9 +904,9 @@ def _v4_detect_signal(c5, c15, c60):
         if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
             return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
 
-    # 5. 5m_양봉 (Tier2) — v4.2: body조건 강화 (잡신호 제거)
+    # 5. 5m_양봉 (Tier2) — AND 필터가 잡신호 제거하므로 원래 조건 유지
     body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
-    if is_green5 and body_ratio > 45 and body5_pct > 0.3:
+    if is_green5 and body_ratio > 30 and body5_pct > 0.2:
         return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
 
     return None, {}
