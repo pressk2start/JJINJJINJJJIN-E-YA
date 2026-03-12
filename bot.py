@@ -860,7 +860,7 @@ V4_SIGNAL_CONFIG = {
     "5m_양봉": {
         "tier": 2,
         "logic_group": "B",
-        "min_upper_score": 20,
+        "min_upper_score": 15,    # 🔧 v4.1: 20→15 (적출율 개선, 상위TF 1개면 양EV)
         "entry_mode": "half",
         "exit": {
             "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
