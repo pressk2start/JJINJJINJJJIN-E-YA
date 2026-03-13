@@ -15,6 +15,7 @@ Strategy matches bot.py entry/exit logic.
 =============================================================================
 """
 
+import os
 import requests
 import time
 import json
@@ -26,6 +27,51 @@ from collections import defaultdict
 from itertools import product
 
 warnings.filterwarnings("ignore")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM
+# ─────────────────────────────────────────────────────────────────────────────
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
+_raw = os.getenv("TG_CHATS") or os.getenv("TELEGRAM_CHAT_ID") or ""
+CHAT_IDS = []
+for p in _raw.split(","):
+    p = p.strip()
+    if p:
+        try: CHAT_IDS.append(int(p))
+        except: pass
+
+_tg_last_send = 0.0
+
+def tg(msg):
+    global _tg_last_send
+    print(msg)
+    if not TG_TOKEN or not CHAT_IDS: return
+    now = time.time()
+    gap = now - _tg_last_send
+    if gap < 1.0:
+        time.sleep(1.0 - gap)
+    chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)] if len(msg) > 4000 else [msg]
+    for cid in CHAT_IDS:
+        for chunk in chunks:
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json={"chat_id": cid, "text": chunk, "disable_web_page_preview": True},
+                    timeout=10)
+                if r.status_code == 429:
+                    retry = int(r.headers.get("Retry-After", 3))
+                    time.sleep(retry)
+                elif r.status_code != 200:
+                    print(f"[TG경고] {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                print(f"[TG에러] {e}")
+    _tg_last_send = time.time()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -64,28 +110,28 @@ def safe_request(url, params=None, retries=3):
                 return resp.json()
             elif resp.status_code == 429:
                 wait = 2 ** (attempt + 1)
-                print(f"  Rate limited, waiting {wait}s...")
+                tg(f"  Rate limited, waiting {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"  HTTP {resp.status_code} for {url}, attempt {attempt+1}")
+                tg(f"  HTTP {resp.status_code} for {url}, attempt {attempt+1}")
                 time.sleep(1)
         except Exception as e:
-            print(f"  Request error: {e}, attempt {attempt+1}")
+            tg(f"  Request error: {e}, attempt {attempt+1}")
             time.sleep(2 ** attempt)
     return None
 
 
 def get_top_coins(n=30):
     """Get top N KRW market coins by 24h volume."""
-    print("📊 Fetching all KRW markets...")
+    tg("📊 Fetching all KRW markets...")
     markets = safe_request(f"{UPBIT_BASE}/market/all")
     time.sleep(RATE_LIMIT_SLEEP)
     if not markets:
-        print("ERROR: Cannot fetch markets")
+        tg("ERROR: Cannot fetch markets")
         return []
 
     krw_markets = [m["market"] for m in markets if m["market"].startswith("KRW-")]
-    print(f"  Found {len(krw_markets)} KRW markets")
+    tg(f"  Found {len(krw_markets)} KRW markets")
 
     # Fetch tickers in batches of 30 (Upbit limit for ticker endpoint)
     all_tickers = []
@@ -109,7 +155,7 @@ def get_top_coins(n=30):
             "volume_24h": t["acc_trade_price_24h"],
             "change_rate": t.get("signed_change_rate", 0),
         })
-        print(f"  {t['market']:12s}  price={t['trade_price']:>12,.0f}  vol={vol_billion:>8.1f}B KRW")
+        tg(f"  {t['market']:12s}  price={t['trade_price']:>12,.0f}  vol={vol_billion:>8.1f}B KRW")
 
     return top
 
@@ -158,7 +204,7 @@ def fetch_candles(market, timeframe, target_count=2000):
 
 def fetch_orderbook(markets):
     """Fetch current orderbook snapshots for spread analysis."""
-    print("\n📋 Fetching orderbook snapshots for spread analysis...")
+    tg("\n📋 Fetching orderbook snapshots for spread analysis...")
     orderbooks = {}
 
     for i in range(0, len(markets), 10):
@@ -587,13 +633,13 @@ def calc_stats(trades):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def print_separator(char="=", width=100):
-    print(char * width)
+    tg(char * width)
 
 
 def print_header(title):
-    print()
+    tg("")
     print_separator()
-    print(f"  {title}")
+    tg(f"  {title}")
     print_separator()
 
 
@@ -604,12 +650,12 @@ def print_results_table(results, sort_key="total_pnl", top_n=None):
         sorted_results = sorted_results[:top_n]
 
     header = f"{'CP%':>6} {'Trail%':>7} {'SL_min%':>8} {'SL_max%':>8} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'AvgMFE%':>8} {'SL':>4} {'Trail':>5} {'TO':>4}"
-    print(header)
-    print("-" * len(header))
+    tg(header)
+    tg("-" * len(header))
 
     for r in sorted_results:
         s = r["stats"]
-        print(
+        tg(
             f"{r['cp']*100:>6.2f} {r['trail']*100:>7.2f} {r['sl_min']*100:>8.2f} {r['sl_max']*100:>8.2f} | "
             f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
             f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} {s['avg_mfe']:>8.3f} "
@@ -625,13 +671,13 @@ def main():
     start_time = time.time()
 
     print_header("MASSIVE UPBIT BACKTEST v2.0")
-    print(f"Started at: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}")
-    print(f"Fee: {FEE_PER_SIDE*100:.2f}%/side | Slippage: {SLIPPAGE_PER_SIDE*100:.2f}%/side | Total RT cost: {TOTAL_COST_RT*100:.2f}%")
+    tg(f"Started at: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}")
+    tg(f"Fee: {FEE_PER_SIDE*100:.2f}%/side | Slippage: {SLIPPAGE_PER_SIDE*100:.2f}%/side | Total RT cost: {TOTAL_COST_RT*100:.2f}%")
 
     # ── Step 1: Get top coins ──
     top_coins = get_top_coins(30)
     if not top_coins:
-        print("FATAL: Could not fetch top coins")
+        tg("FATAL: Could not fetch top coins")
         sys.exit(1)
 
     markets = [c["market"] for c in top_coins]
@@ -646,12 +692,13 @@ def main():
     total_candles = 0
     total_requests = 0
 
+    coin_done = 0
+    coin_total = len(top_coins) * len(TIMEFRAMES)
     for tf_key, tf_info in TIMEFRAMES.items():
-        print(f"\n⏰ Timeframe: {tf_info['label']}")
+        tg(f"\n⏰ Timeframe: {tf_info['label']}")
         for coin in top_coins:
             market = coin["market"]
-            sys.stdout.write(f"  {market:12s} ... ")
-            sys.stdout.flush()
+            coin_done += 1
 
             candles = fetch_candles(market, tf_key, TARGET_CANDLES)
             total_requests += PAGES_NEEDED
@@ -660,13 +707,16 @@ def main():
                 indicators = prepare_indicators(candles)
                 all_data[(market, tf_key)] = indicators
                 total_candles += len(candles)
-                print(f"{len(candles):>5d} candles ✓")
+                # 5개마다 진행 알림
+                if coin_done % 5 == 0 or coin_done == coin_total:
+                    elapsed = time.time() - start_time
+                    tg(f"[수집 {coin_done}/{coin_total}] {market} {tf_info['label']} {len(candles)}개 | {elapsed:.0f}초 경과")
             else:
-                print(f"  SKIP (only {len(candles) if candles else 0} candles)")
+                tg(f"  SKIP {market} (only {len(candles) if candles else 0} candles)")
 
     elapsed_data = time.time() - start_time
-    print(f"\n📊 Data collection complete: {total_candles:,} candles across {len(all_data)} series")
-    print(f"   Time: {elapsed_data:.0f}s | API calls: ~{total_requests}")
+    tg(f"\n📊 Data collection complete: {total_candles:,} candles across {len(all_data)} series")
+    tg(f"   Time: {elapsed_data:.0f}s | API calls: ~{total_requests}")
 
     # ── Step 4: Phase 1 — Checkpoint × Trail optimization ──
     print_header("PHASE 1: Checkpoint × Trail Optimization (SL fixed at 1.5%/2.5%)")
@@ -683,8 +733,6 @@ def main():
     for cp in checkpoints:
         for tr in trails:
             combo_num += 1
-            sys.stdout.write(f"\r  Testing combo {combo_num}/{total_combos}: CP={cp*100:.2f}% Trail={tr*100:.2f}%    ")
-            sys.stdout.flush()
 
             trades, _, _, _ = run_backtest(all_data, cp, tr, fixed_sl_min, fixed_sl_max)
             stats = calc_stats(trades)
@@ -695,9 +743,10 @@ def main():
                 "stats": stats,
                 "total_pnl": stats["total_pnl"],
             })
+            if combo_num % 10 == 0 or combo_num == total_combos:
+                tg(f"[Phase1] {combo_num}/{total_combos} 진행중...")
 
-    print(f"\r  Completed {total_combos} combinations.{' ' * 30}")
-    print()
+    tg(f"[Phase1] {total_combos}개 조합 완료")
     print_results_table(phase1_results, sort_key="total_pnl")
 
     # Find best CP/Trail
@@ -705,8 +754,8 @@ def main():
     best_cp = best_p1["cp"]
     best_trail = best_p1["trail"]
 
-    print(f"\n✅ Best Phase 1: CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}%")
-    print(f"   Total PnL: {best_p1['stats']['total_pnl']:.2f}% | Win Rate: {best_p1['stats']['win_rate']:.1f}% | Trades: {best_p1['stats']['count']}")
+    tg(f"\n✅ Best Phase 1: CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}%")
+    tg(f"   Total PnL: {best_p1['stats']['total_pnl']:.2f}% | Win Rate: {best_p1['stats']['win_rate']:.1f}% | Trades: {best_p1['stats']['count']}")
 
     # ── Step 5: Phase 2 — Stop-Loss optimization ──
     print_header(f"PHASE 2: Stop-Loss Optimization (CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}% locked)")
@@ -723,8 +772,6 @@ def main():
             if sl_max <= sl_min:
                 continue
             combo_num += 1
-            sys.stdout.write(f"\r  Testing combo {combo_num}/{total_combos2}: SL_min={sl_min*100:.1f}% SL_max={sl_max*100:.1f}%    ")
-            sys.stdout.flush()
 
             trades, _, _, _ = run_backtest(all_data, best_cp, best_trail, sl_min, sl_max)
             stats = calc_stats(trades)
@@ -735,9 +782,10 @@ def main():
                 "stats": stats,
                 "total_pnl": stats["total_pnl"],
             })
+            if combo_num % 5 == 0:
+                tg(f"[Phase2] {combo_num}/{total_combos2} 진행중...")
 
-    print(f"\r  Completed {combo_num} valid combinations.{' ' * 30}")
-    print()
+    tg(f"[Phase2] {combo_num}개 조합 완료")
     print_results_table(phase2_results, sort_key="total_pnl")
 
     # Find best overall
@@ -753,7 +801,7 @@ def main():
     )
     final_stats = calc_stats(final_trades)
 
-    print(f"""
+    tg(f"""
   Checkpoint:     {best_cp*100:.2f}%
   Trail Distance: {best_trail*100:.2f}%
   SL Min:         {best_sl_min*100:.2f}%
@@ -782,12 +830,12 @@ def main():
     print_header("EXIT REASON BREAKDOWN")
 
     eb = final_stats.get("exit_breakdown", {})
-    print(f"{'Reason':>14s} | {'Count':>7} {'Pct%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
-    print("-" * 68)
+    tg(f"{'Reason':>14s} | {'Count':>7} {'Pct%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
+    tg("-" * 68)
     for reason in ["stop_loss", "trail_stop", "timeout"]:
         if reason in eb:
             r = eb[reason]
-            print(
+            tg(
                 f"{reason:>14s} | "
                 f"{r['count']:>7d} {r['pct']:>7.1f} {r['avg_gross']:>+10.4f} {r['avg_net']:>+9.4f} {r['total_net']:>+9.2f}"
             )
@@ -795,15 +843,15 @@ def main():
     if eb:
         best_exit = max(eb.items(), key=lambda x: x[1]["avg_net"])
         worst_exit = min(eb.items(), key=lambda x: x[1]["avg_net"])
-        print(f"\n  Best exit:  {best_exit[0]} (avg net {best_exit[1]['avg_net']:+.4f}%)")
-        print(f"  Worst exit: {worst_exit[0]} (avg net {worst_exit[1]['avg_net']:+.4f}%)")
+        tg(f"\n  Best exit:  {best_exit[0]} (avg net {best_exit[1]['avg_net']:+.4f}%)")
+        tg(f"  Worst exit: {worst_exit[0]} (avg net {worst_exit[1]['avg_net']:+.4f}%)")
 
     # Gross vs Net diagnosis
     if final_stats["total_gross_pnl"] > 0 and final_stats["total_pnl"] < 0:
-        print(f"\n  ⚠️ DIAGNOSIS: Gross PnL 양수 but Net PnL 음수 → 비용 모델이 수익을 잡아먹는 구조!")
-        print(f"     → 진입 빈도를 줄이거나, 수익폭이 큰 신호만 필터링 필요")
+        tg(f"\n  ⚠️ DIAGNOSIS: Gross PnL 양수 but Net PnL 음수 → 비용 모델이 수익을 잡아먹는 구조!")
+        tg(f"     → 진입 빈도를 줄이거나, 수익폭이 큰 신호만 필터링 필요")
     elif final_stats["total_gross_pnl"] < 0:
-        print(f"\n  ❌ DIAGNOSIS: Gross PnL도 음수 → 전략 자체가 음의 기댓값. 로직 재설계 필요")
+        tg(f"\n  ❌ DIAGNOSIS: Gross PnL도 음수 → 전략 자체가 음의 기댓값. 로직 재설계 필요")
 
     # ── Entry Type Comparison (Momentum vs Pullback) ──
     momentum_trades = [t for t in final_trades if t.get("entry_type") == "momentum"]
@@ -812,30 +860,30 @@ def main():
     if momentum_trades or pullback_trades:
         print_header("ENTRY TYPE COMPARISON: MOMENTUM vs PULLBACK")
 
-        print(f"{'Type':>12s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'AvgMFE%':>8} {'AvgMAE%':>8}")
-        print("-" * 100)
+        tg(f"{'Type':>12s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'AvgMFE%':>8} {'AvgMAE%':>8}")
+        tg("-" * 100)
 
         for label, trades_subset in [("momentum", momentum_trades), ("pullback", pullback_trades)]:
             if trades_subset:
                 s = calc_stats(trades_subset)
-                print(
+                tg(
                     f"{label:>12s} | "
                     f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
                     f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f} "
                     f"{s['profit_factor']:>6.2f} {s['avg_mfe']:>8.3f} {s['avg_mae']:>8.3f}"
                 )
             else:
-                print(f"{label:>12s} | {'(no trades)':>7s}")
+                tg(f"{label:>12s} | {'(no trades)':>7s}")
 
         if momentum_trades and pullback_trades:
             m_s = calc_stats(momentum_trades)
             p_s = calc_stats(pullback_trades)
             diff = p_s["avg_gross_pnl"] - m_s["avg_gross_pnl"]
-            print(f"\n  Pullback - Momentum gross diff: {diff:+.4f}%/trade")
+            tg(f"\n  Pullback - Momentum gross diff: {diff:+.4f}%/trade")
             if diff > 0:
-                print(f"  ✅ 눌림목 매수가 모멘텀 추격보다 gross 기준 {diff:+.4f}% 우위")
+                tg(f"  ✅ 눌림목 매수가 모멘텀 추격보다 gross 기준 {diff:+.4f}% 우위")
             else:
-                print(f"  ❌ 모멘텀 추격이 눌림목보다 gross 기준 {-diff:+.4f}% 우위")
+                tg(f"  ❌ 모멘텀 추격이 눌림목보다 gross 기준 {-diff:+.4f}% 우위")
 
     # ── Per-Coin Breakdown ──
     print_header("PER-COIN BREAKDOWN")
@@ -847,11 +895,11 @@ def main():
 
     coin_stats.sort(key=lambda x: x[1]["total_pnl"], reverse=True)
 
-    print(f"{'Market':>14s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'SL':>4} {'Trail':>5} {'TO':>4}")
-    print("-" * 95)
+    tg(f"{'Market':>14s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'SL':>4} {'Trail':>5} {'TO':>4}")
+    tg("-" * 95)
 
     for market, s in coin_stats:
-        print(
+        tg(
             f"{market:>14s} | "
             f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
             f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} "
@@ -859,26 +907,26 @@ def main():
         )
 
     # Top 5 / Bottom 5
-    print(f"\n  🏆 Top 5 coins:")
+    tg(f"\n  🏆 Top 5 coins:")
     for market, s in coin_stats[:5]:
-        print(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
+        tg(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
 
-    print(f"\n  💀 Bottom 5 coins:")
+    tg(f"\n  💀 Bottom 5 coins:")
     for market, s in coin_stats[-5:]:
-        print(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
+        tg(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
 
     # ── Per-Timeframe Breakdown ──
     print_header("PER-TIMEFRAME BREAKDOWN")
 
-    print(f"{'Timeframe':>10s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'AvgHold':>8} {'SL':>4} {'Trail':>5} {'TO':>4}")
-    print("-" * 100)
+    tg(f"{'Timeframe':>10s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'AvgHold':>8} {'SL':>4} {'Trail':>5} {'TO':>4}")
+    tg("-" * 100)
 
     tf_ranking = []
     for tf_label in ["1min", "3min", "5min", "15min"]:
         trades = per_tf.get(tf_label, [])
         s = calc_stats(trades)
         tf_ranking.append((tf_label, s))
-        print(
+        tg(
             f"{tf_label:>10s} | "
             f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
             f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} {s['avg_hold']:>8.1f} "
@@ -886,13 +934,13 @@ def main():
         )
 
     best_tf = max(tf_ranking, key=lambda x: x[1]["total_pnl"])
-    print(f"\n  ✅ Best timeframe: {best_tf[0]} (Total PnL: {best_tf[1]['total_pnl']:.2f}%)")
+    tg(f"\n  ✅ Best timeframe: {best_tf[0]} (Total PnL: {best_tf[1]['total_pnl']:.2f}%)")
 
     # ── Time-of-Day Analysis ──
     print_header("TIME-OF-DAY ANALYSIS (KST)")
 
-    print(f"{'Hour':>6s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'PF':>6}")
-    print("-" * 55)
+    tg(f"{'Hour':>6s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'PF':>6}")
+    tg("-" * 55)
 
     hour_stats = []
     for hour in range(24):
@@ -901,7 +949,7 @@ def main():
             s = calc_stats(trades)
             hour_stats.append((hour, s))
             marker = " 🌙" if 0 <= hour < 7 else (" ☀️" if 9 <= hour < 18 else " 🌆")
-            print(
+            tg(
                 f"{hour:>4d}시{marker} | "
                 f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
                 f"{s['profit_factor']:>6.2f}"
@@ -910,15 +958,15 @@ def main():
     if hour_stats:
         best_hour = max(hour_stats, key=lambda x: x[1]["avg_pnl"])
         worst_hour = min(hour_stats, key=lambda x: x[1]["avg_pnl"])
-        print(f"\n  ✅ Best hour:  {best_hour[0]:02d}:00 KST (Avg PnL: {best_hour[1]['avg_pnl']:+.3f}%, WR: {best_hour[1]['win_rate']:.1f}%)")
-        print(f"  ❌ Worst hour: {worst_hour[0]:02d}:00 KST (Avg PnL: {worst_hour[1]['avg_pnl']:+.3f}%, WR: {worst_hour[1]['win_rate']:.1f}%)")
+        tg(f"\n  ✅ Best hour:  {best_hour[0]:02d}:00 KST (Avg PnL: {best_hour[1]['avg_pnl']:+.3f}%, WR: {best_hour[1]['win_rate']:.1f}%)")
+        tg(f"  ❌ Worst hour: {worst_hour[0]:02d}:00 KST (Avg PnL: {worst_hour[1]['avg_pnl']:+.3f}%, WR: {worst_hour[1]['win_rate']:.1f}%)")
 
     # ── Orderbook Spread Analysis ──
     print_header("ORDERBOOK SPREAD ANALYSIS (Current Snapshot)")
 
     if orderbooks:
-        print(f"{'Market':>14s} | {'Spread%':>8} {'Imbalance':>10} {'Verdict':>12}")
-        print("-" * 55)
+        tg(f"{'Market':>14s} | {'Spread%':>8} {'Imbalance':>10} {'Verdict':>12}")
+        tg("-" * 55)
 
         ob_items = sorted(orderbooks.items(), key=lambda x: x[1]["spread_pct"])
         for market, ob in ob_items:
@@ -931,20 +979,20 @@ def main():
             else:
                 verdict = "✅ TIGHT"
 
-            print(f"{market:>14s} | {spread:>8.4f} {imb:>+10.3f} {verdict:>12}")
+            tg(f"{market:>14s} | {spread:>8.4f} {imb:>+10.3f} {verdict:>12}")
 
         wide = [m for m, ob in ob_items if ob["spread_pct"] > 0.30]
         if wide:
-            print(f"\n  ⚠️ Wide spreads (>0.30%): {', '.join(wide)}")
-            print(f"     Consider excluding these from live trading to reduce slippage.")
+            tg(f"\n  ⚠️ Wide spreads (>0.30%): {', '.join(wide)}")
+            tg(f"     Consider excluding these from live trading to reduce slippage.")
 
     # ── Holding Time Grid Experiment ──
     print_header("HOLDING TIME GRID EXPERIMENT")
-    print("  Testing different max_hold values with optimal params...\n")
+    tg("  Testing different max_hold values with optimal params...\n")
 
     hold_values = [5, 10, 15, 20, 30, 45, 60]
-    print(f"{'MaxHold':>8s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'SL%':>5} {'Trail%':>7} {'TO%':>5}")
-    print("-" * 95)
+    tg(f"{'MaxHold':>8s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'SL%':>5} {'Trail%':>7} {'TO%':>5}")
+    tg("-" * 95)
 
     hold_results = []
     for mh in hold_values:
@@ -959,7 +1007,7 @@ def main():
         hold_results.append((mh, h_stats))
 
         n = max(h_stats["count"], 1)
-        print(
+        tg(
             f"{mh:>8d} | "
             f"{h_stats['count']:>7d} {h_stats['win_rate']:>7.1f} {h_stats['avg_gross_pnl']:>+10.4f} "
             f"{h_stats['avg_pnl']:>+9.4f} {h_stats['total_pnl']:>+9.2f} "
@@ -973,11 +1021,11 @@ def main():
             TIMEFRAMES[tf_key]["max_hold"] = saved_max_holds[tf_key]
 
     best_hold = max(hold_results, key=lambda x: x[1]["total_pnl"])
-    print(f"\n  Best max_hold: {best_hold[0]} candles (Net PnL: {best_hold[1]['total_pnl']:+.2f}%)")
+    tg(f"\n  Best max_hold: {best_hold[0]} candles (Net PnL: {best_hold[1]['total_pnl']:+.2f}%)")
 
     # ── Optimal Filter Combo Search ──
     print_header("OPTIMAL FILTER COMBO SEARCH")
-    print("  Searching indicator filter combos on final trades...\n")
+    tg("  Searching indicator filter combos on final trades...\n")
 
     # Build per-trade feature vectors from indicator data
     trade_features = []
@@ -1035,9 +1083,9 @@ def main():
         }
 
         # Test single filters
-        print(f"  [Single Filters]")
-        print(f"{'Filter':>22s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
-        print("-" * 75)
+        tg(f"  [Single Filters]")
+        tg(f"{'Filter':>22s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
+        tg("-" * 75)
 
         single_results = []
         for fname, ffunc in filter_defs.items():
@@ -1046,7 +1094,7 @@ def main():
                 ptrades = [t for _, t in passed]
                 s = calc_stats(ptrades)
                 single_results.append((fname, s, len(passed)))
-                print(
+                tg(
                     f"{fname:>22s} | "
                     f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
                     f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f}"
@@ -1070,13 +1118,13 @@ def main():
         combo_results.sort(key=lambda x: x[1]["avg_gross_pnl"], reverse=True)
 
         if combo_results:
-            print(f"\n  [Top 15 Two-Filter Combos by Gross PnL]")
-            print(f"{'Combo':>45s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9}")
-            print("-" * 90)
+            tg(f"\n  [Top 15 Two-Filter Combos by Gross PnL]")
+            tg(f"{'Combo':>45s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9}")
+            tg("-" * 90)
 
             for combo_name, s, cnt in combo_results[:15]:
                 marker = " ★" if s["avg_gross_pnl"] > 0 else ""
-                print(
+                tg(
                     f"{combo_name:>45s} | "
                     f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
                     f"{s['avg_pnl']:>+9.4f}{marker}"
@@ -1085,21 +1133,21 @@ def main():
             # Profitable combos summary
             profitable = [c for c in combo_results if c[1]["avg_gross_pnl"] > 0]
             net_profitable = [c for c in combo_results if c[1]["avg_pnl"] > 0]
-            print(f"\n  Gross PnL > 0 combos: {len(profitable)} / {len(combo_results)}")
-            print(f"  Net PnL > 0 combos:   {len(net_profitable)} / {len(combo_results)}")
+            tg(f"\n  Gross PnL > 0 combos: {len(profitable)} / {len(combo_results)}")
+            tg(f"  Net PnL > 0 combos:   {len(net_profitable)} / {len(combo_results)}")
 
             if net_profitable:
-                print(f"\n  ✅ NET PROFITABLE combos:")
+                tg(f"\n  ✅ NET PROFITABLE combos:")
                 for name, s, cnt in net_profitable[:5]:
-                    print(f"     {name}: WR={s['win_rate']:.1f}% gross={s['avg_gross_pnl']:+.4f}% net={s['avg_pnl']:+.4f}% (n={cnt})")
+                    tg(f"     {name}: WR={s['win_rate']:.1f}% gross={s['avg_gross_pnl']:+.4f}% net={s['avg_pnl']:+.4f}% (n={cnt})")
     else:
-        print("  No trade features extracted - skipping combo search.")
+        tg("  No trade features extracted - skipping combo search.")
 
     # ── Summary ──
     elapsed_total = time.time() - start_time
 
     print_header("EXECUTION SUMMARY")
-    print(f"""
+    tg(f"""
   Total runtime:     {elapsed_total:.0f}s ({elapsed_total/60:.1f} minutes)
   Data collected:    {total_candles:,} candles
   Series tested:     {len(all_data)}
@@ -1111,7 +1159,7 @@ def main():
     # ── Recommendations ──
     print_header("RECOMMENDATIONS")
 
-    print(f"""
+    tg(f"""
   Based on this comprehensive backtest:
 
   1. OPTIMAL PARAMETERS:
@@ -1137,16 +1185,22 @@ def main():
         profitable_hours = [h for h, s in hour_stats if s["avg_pnl"] > 0]
         losing_hours = [h for h, s in hour_stats if s["avg_pnl"] < 0]
         if profitable_hours:
-            print(f"  5. PROFITABLE HOURS (KST): {', '.join(f'{h:02d}:00' for h in sorted(profitable_hours))}")
+            tg(f"  5. PROFITABLE HOURS (KST): {', '.join(f'{h:02d}:00' for h in sorted(profitable_hours))}")
         if losing_hours:
-            print(f"     LOSING HOURS (KST):     {', '.join(f'{h:02d}:00' for h in sorted(losing_hours))}")
-            print(f"     → Consider disabling bot during losing hours")
+            tg(f"     LOSING HOURS (KST):     {', '.join(f'{h:02d}:00' for h in sorted(losing_hours))}")
+            tg(f"     → Consider disabling bot during losing hours")
 
-    print()
+    tg("")
     print_separator()
-    print("  Backtest complete! Results above.")
+    tg("  Backtest complete! Results above.")
     print_separator()
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        tg(f"[백테스트 크래시] {e}\n{traceback.format_exc()[-1500:]}")
+        sys.exit(1)
