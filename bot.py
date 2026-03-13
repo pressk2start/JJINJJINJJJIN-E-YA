@@ -658,6 +658,37 @@ def _v4_stoch_k(candles, period=14):
     return (close - ll) / (hh - ll) * 100.0
 
 
+def _v4_mfi(candles, period=14):
+    """Money Flow Index (v4 전략용) — 5m 캔들 기준
+    v4.0 백테스트: 5m MFI<20 → 거의 모든 시그널에서 EV -0.1~-0.27% (킬러)
+    """
+    if not candles or len(candles) < period + 1:
+        return None
+    pos_flow = 0.0
+    neg_flow = 0.0
+    for i in range(period):
+        c = candles[i]
+        cp = candles[i + 1]
+        h = c.get("high_price", c.get("h", 0))
+        l = c.get("low_price", c.get("l", 0))
+        cl = c.get("trade_price", c.get("c", 0))
+        vol = c.get("candle_acc_trade_volume", c.get("v", 0))
+        tp = (h + l + cl) / 3.0
+        prev_cl = cp.get("trade_price", cp.get("c", 0))
+        prev_h = cp.get("high_price", cp.get("h", 0))
+        prev_l = cp.get("low_price", cp.get("l", 0))
+        prev_tp = (prev_h + prev_l + prev_cl) / 3.0
+        mf = tp * vol
+        if tp > prev_tp:
+            pos_flow += mf
+        elif tp < prev_tp:
+            neg_flow += mf
+    if neg_flow < 1e-10:
+        return 100.0
+    mfr = pos_flow / neg_flow
+    return 100.0 - (100.0 / (1.0 + mfr))
+
+
 def _v4_ema_alignment(closes, periods=(5, 10, 20, 50)):
     """EMA 정배열 수 (v4 전략용)"""
     if not closes or len(closes) < max(periods):
@@ -765,15 +796,35 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
             return filters_hit, True, block_reason, boosters
         # fallback: 역추세 조건 불충족 → 아래 일반 경로 (블록 필터 적용)
 
-    # ── B. 차단 필터 (거래량3배 외 시그널만 적용) ──
+    # ── B. 킬러 차단 필터 (거래량3배 외 시그널만 적용) ──
+    # v4.0 백테스트 이중확인: 양쪽 모두 강한 음의 EV
     rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
-    if rsi60 is not None and rsi60 < 40:
-        block_reason = f"60m_RSI14={rsi60:.1f}<40 (약세)"
+    if rsi60 is not None and rsi60 < 30:
+        # 🔧 v4.0: RSI<40→RSI<30 강화 (킬러, EV -0.04~-0.44%)
+        block_reason = f"60m_RSI14={rsi60:.1f}<30 (킬러)"
         return filters_hit, False, block_reason, boosters
 
     stoch60 = _v4_stoch_k(c60) if c60 else None
     if stoch60 is not None and stoch60 < 20:
-        block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (60m과매도)"
+        block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (킬러, EV -0.2~-0.5%)"
+        return filters_hit, False, block_reason, boosters
+
+    # 🔧 v4.0: 60m BB20 < 20 킬러 (EV -0.15~-0.49%)
+    bb60_pos, _ = _v4_bb_position(c60_closes, 20) if c60_closes and len(c60_closes) >= 20 else (None, None)
+    if bb60_pos is not None and bb60_pos < 20:
+        block_reason = f"60m_BB20={bb60_pos:.0f}<20 (킬러, EV -0.15~-0.49%)"
+        return filters_hit, False, block_reason, boosters
+
+    # 🔧 v4.0: 15m Stoch_K < 20 킬러 (EV -0.1~-0.42%)
+    stoch15 = _v4_stoch_k(c15) if c15 else None
+    if stoch15 is not None and stoch15 < 20:
+        block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (킬러, EV -0.1~-0.42%)"
+        return filters_hit, False, block_reason, boosters
+
+    # 🔧 v4.0: 5m MFI < 20 킬러 (EV -0.1~-0.27%)
+    mfi5 = _v4_mfi(c5) if c5 else None
+    if mfi5 is not None and mfi5 < 20:
+        block_reason = f"5m_MFI={mfi5:.0f}<20 (킬러, EV -0.1~-0.27%)"
         return filters_hit, False, block_reason, boosters
 
     # ── C. 핵심 AND: 60m EMA정배열 (유일한 강성 필수조건) ──
@@ -832,6 +883,14 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
     if engulf60:
         boosters.append("60m_감싸기")
 
+    # 🔧 v4.0: 15m 모멘텀3봉 상위33% — 전역 최강 필터 (n=576, TEST EV+0.12%, PF=1.35, WR=53.8%)
+    # 최근 3봉의 가격 변화율이 양수이고 상위권일 때 부스터
+    if c15_closes and len(c15_closes) >= 4:
+        mom3_15 = (c15_closes[0] / c15_closes[3] - 1) * 100  # 15m 3봉 모멘텀 %
+        if mom3_15 > 0.5:  # 상위33% 임계값 (약 +0.5% 이상)
+            filters_hit.append("15m_m3_상위33%")
+            boosters.append("15m_모멘텀3봉_부스터")
+
     # ── AND 결과: 추세(필수) AND 모멘텀(OR 택1) ──
     and_pass = trend_ok and momentum_or
 
@@ -878,13 +937,13 @@ V4_SIGNAL_CONFIG = {
         },
     },
     "BB하단반등": {
-        "tier": 2, "logic_group": "A",
+        "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
-            "sl_pct": 0.010,            # 🔧 v3.2: SL 1.0% 유지
-            "activation_pct": 0.005, "trail_pct": 0.003,
+            "sl_pct": 0.007,            # 🔧 v4.0: SL1.0→SL0.7 하향 (v4.0 데이터: SL0.7이 더 좋음, n=241 EV+0.01%)
+            "activation_pct": 0.003, "trail_pct": 0.002,
             "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
-            "description": "TRAIL_SL1.0/A0.5/T0.3 (BB하단반등)",
+            "description": "TRAIL_SL0.7/A0.3/T0.2 (BB하단반등 v4.0)",
         },
     },
     "5m_양봉": {
@@ -958,10 +1017,12 @@ def _v4_detect_signal(c5, c15, c60):
 
 
 def v4_evaluate_entry(market, c5, c15, c30, c60):
-    """멀티TF 통합 진입 판정 — AND+OR 구조 (v4.5)
-    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3)
-    부스터(모멘텀복합, 60m VR5>3, 60m감싸기) → entry_mode confirm 업그레이드
-    거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
+    """멀티TF 통합 진입 판정 — AND+OR 구조 (v4.5 + v4.0 백테스트 패치)
+    진입 = 시그널(OR) AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3 OR 모멘텀10>3%)
+    킬러: 60m Stoch<20, BB20<20, RSI<30, 15m Stoch<20, 5m MFI<20 → 차단
+    만능키: 15m_MACD+60m_EMA → confirm + HOLD→TRAIL 전환
+    부스터: 모멘텀복합, VR5>3, 60m감싸기, 15m모멘텀3봉 → confirm
+    BTC storm → 차단
     """
     signal_tag, signal_details = _v4_detect_signal(c5, c15, c60)
     if not signal_tag:
@@ -997,13 +1058,34 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     elif "60m_모멘텀_부스터" in boosters:
         entry_mode = "confirm"
 
-    # 🔧 v3.2: 15m_MACD골든 + 60m_EMA정배열 동시충족 = 최강 필터
-    # Train/Test BOTH EV>0 검증 통과 (눌림반전, 양봉, 거래량3배)
-    if "15m_MACD골든" in filters_hit and "60m_EMA정배열" in filters_hit:
+    # 🔧 v4.0 만능키: 15m_MACD골든 + 60m_EMA정배열 동시충족
+    # 4개 시그널에서 Train/Test 양면 검증 통과 (5m_큰양봉/눌림반전/5m_양봉/RSI과매도반등)
+    master_key = "15m_MACD골든" in filters_hit and "60m_EMA정배열" in filters_hit
+    if master_key:
         entry_mode = "confirm"  # 무조건 confirm 업그레이드
-        print(f"[V4_BEST_FILTER] {market} MACD+EMA 동시충족 → confirm")
+        boosters.append("만능키_MACD+EMA")
+        print(f"[V4_MASTER_KEY] {market} {signal_tag} MACD+EMA 동시충족 → confirm")
 
     exit_params = dict(config["exit"])
+
+    # 🔧 v4.0: 만능키 충족 시 HOLD 시그널도 TRAIL로 전환 (더 좋은 청산)
+    # 5m_양봉(EV+0.21% PF1.66), 5m_큰양봉(EV+0.39% PF1.96) 검증
+    if master_key and exit_params.get("strategy") == "HOLD":
+        exit_params["strategy"] = "TRAIL"
+        exit_params["hold_bars"] = 0
+        exit_params["activation_pct"] = 0.003
+        exit_params["trail_pct"] = 0.002
+        exit_params["description"] = exit_params["description"].replace("HOLD", "TRAIL(만능키)")
+        print(f"[V4_MASTER_KEY] {market} {signal_tag} HOLD→TRAIL 전환")
+
+    # 🔧 v4.0: BTC storm 레짐 차단 (대부분 시그널 음의 EV)
+    try:
+        btc_reg, _ = btc_volatility_regime()
+        if btc_reg == "storm":
+            print(f"[V4_BTC_STORM] {market} {signal_tag} BTC storm 차단")
+            return None
+    except Exception:
+        pass  # BTC 조회 실패 시 통과 허용
 
     return {
         "signal_tag": signal_tag,
