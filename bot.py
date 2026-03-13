@@ -37,16 +37,8 @@ SLIPPAGE_PER_SIDE = 0.0005       # 0.05%
 TOTAL_COST_RT = (FEE_PER_SIDE + SLIPPAGE_PER_SIDE) * 2  # 0.2% roundtrip
 
 CANDLES_PER_REQUEST = 200
-# 🔧 워크포워드용 60일 데이터 (Train40+Test20)
-# 5분봉: 60일 × 288 = 17,280개 / 15분봉: 60일 × 96 = 5,760개
-TARGET_CANDLES_BY_TF = {
-    "minutes/1":  86400,   # 60일 × 1440 (1분봉은 collect_1m.py에서 별도 수집 권장)
-    "minutes/3":  28800,   # 60일 × 480
-    "minutes/5":  17280,   # 60일 × 288
-    "minutes/15": 5760,    # 60일 × 96
-}
-TARGET_CANDLES = 17280  # 기본값 (5분봉 60일 기준)
-PAGES_NEEDED = TARGET_CANDLES // CANDLES_PER_REQUEST  # 87
+TARGET_CANDLES = 2000
+PAGES_NEEDED = TARGET_CANDLES // CANDLES_PER_REQUEST  # 10
 
 # Timeframes and their max hold periods (in candles)
 TIMEFRAMES = {
@@ -122,11 +114,9 @@ def get_top_coins(n=30):
     return top
 
 
-def fetch_candles(market, timeframe, target_count=None):
+def fetch_candles(market, timeframe, target_count=2000):
     """Fetch candles with pagination. Returns list oldest→newest."""
     tf_info = TIMEFRAMES[timeframe]
-    if target_count is None:
-        target_count = TARGET_CANDLES_BY_TF.get(timeframe, TARGET_CANDLES)
     all_candles = []
     to_param = None
 
@@ -663,9 +653,8 @@ def main():
             sys.stdout.write(f"  {market:12s} ... ")
             sys.stdout.flush()
 
-            tf_target = TARGET_CANDLES_BY_TF.get(tf_key, TARGET_CANDLES)
-            candles = fetch_candles(market, tf_key, tf_target)
-            total_requests += math.ceil(tf_target / CANDLES_PER_REQUEST)
+            candles = fetch_candles(market, tf_key, TARGET_CANDLES)
+            total_requests += PAGES_NEEDED
 
             if candles and len(candles) >= 50:
                 indicators = prepare_indicators(candles)
