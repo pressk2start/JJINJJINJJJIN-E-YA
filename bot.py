@@ -1703,7 +1703,7 @@ def _has_enough_data(min_coins=10, min_days=25):
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--days", type=int, default=120)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
