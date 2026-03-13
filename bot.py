@@ -1712,9 +1712,10 @@ def main():
     t0 = time.time()
     last_hb = t0
 
-    # 1m 데이터 충분하면 수집 스킵
-    if not args.skip_collect and _has_enough_data():
-        tg("[자동] 1m 데이터 충분 (25일+, 10코인+) → 수집 스킵")
+    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 80% 이상 있어야 스킵)
+    need_days = max(25, int(args.days * 0.8))
+    if not args.skip_collect and _has_enough_data(min_days=need_days):
+        tg(f"[자동] 1m 데이터 충분 ({need_days}일+, 10코인+) → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
