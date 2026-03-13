@@ -52,13 +52,13 @@ PARALLEL_WORKERS = 12
 
 # ==== Exit Control (anti-whipsaw) ====
 WARMUP_SEC = 5  # 🔧 백테스트튜닝: 8→5초 (CP 0.3% 도달이 빠르므로 워밍업 축소)
-HARD_STOP_DD = 0.014  # 🔧 v4.1: SL 0.7%×2 = 1.4% (비상청산, SL 0.7% 기준)
+HARD_STOP_DD = 0.020  # 🔧 v3.2: SL 1.0%×2 = 2.0% (비상청산, SL 1.0% 기준)
 EXIT_DEBOUNCE_SEC = 10  # 🔧 손절완화: 8→10초 (노이즈 손절 추가 억제 → 진짜 하락만 잡기)
 EXIT_DEBOUNCE_N = 3  # 🔧 백테스트튜닝: 5→3회 (트레일 0.15%에 맞춰 빠른 반응)
 
-# 🔧 v4.1 백테스트: SL 0.7% 기본 (TRAIL_SL0.7/A0.3/T0.2 — 거래량3배/BB하단반등 양EV)
-DYN_SL_MIN = 0.007   # 🔧 v4.1: SL 0.7% (신호연구 v4.0 최적)
-DYN_SL_MAX = 0.012   # 🔧 v4.1: SL_MAX 1.2% (고변동 여유, 기존 1.5%에서 축소)
+# 🔧 v3.2 백테스트: SL 1.0% 기본 (노이즈 조기손절 방지, TEST EV +0.14~0.15%)
+DYN_SL_MIN = 0.010   # 🔧 v3.2: SL 1.0% (백테스트 최적)
+DYN_SL_MAX = 0.015   # 🔧 v3.2: SL_MAX 1.5% (고변동 여유)
 
 # 🔧 v4 리포트: Activation 0.3% (TRAIL_SL1.0/A0.3/T0.2)
 PROFIT_CHECKPOINT_BASE = 0.003  # 🔧 v4: Activation 0.3%
@@ -184,7 +184,7 @@ def _apply_exit_profile():
 
     if prof == "gentle":
         WARMUP_SEC = 7
-        HARD_STOP_DD = 0.017   # 🔧 v4.1: SL 0.7%×2.4
+        HARD_STOP_DD = 0.024   # 🔧 v3.2: SL 1.0%×2.4
         EXIT_DEBOUNCE_SEC = 8
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.2
@@ -195,7 +195,7 @@ def _apply_exit_profile():
 
     elif prof == "strict":
         WARMUP_SEC = 3
-        HARD_STOP_DD = 0.011   # 🔧 v4.1: SL 0.7%×1.6
+        HARD_STOP_DD = 0.016   # 🔧 v3.2: SL 1.0%×1.6
         EXIT_DEBOUNCE_SEC = 6
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 0.90
@@ -206,7 +206,7 @@ def _apply_exit_profile():
 
     else:  # balanced
         WARMUP_SEC = 5
-        HARD_STOP_DD = 0.014   # 🔧 v4.1: SL 0.7%×2
+        HARD_STOP_DD = 0.020   # 🔧 v3.2: SL 1.0%×2
         EXIT_DEBOUNCE_SEC = 10
         EXIT_DEBOUNCE_N = 3
         TRAIL_ATR_MULT = 1.0
@@ -729,11 +729,11 @@ def _v4_extract_closes(candles):
 # --- v4 상위TF 필터 ---
 
 def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
-    """상위 TF 필터 — AND + OR 구조 (v4.5)
-    진입 = 시그널 AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3)
+    """상위 TF 필터 — AND + OR 구조 (v4.5 + v3.2 백테스트 패치)
+    진입 = 시그널 AND 추세(60m EMA정배열) AND (MACD골든 OR ADX>25 OR VR>3 OR 60m모멘텀10>3%)
     - 추세(60m EMA정배열): 유일한 강성 AND — 안정적이고 지속시간 김
-    - 모멘텀(OR 택1): MACD골든/ADX>25/VR>3 중 하나 — 알람 빈도 확보
-    - 부스터: 60m감싸기, 60m VR5>3 등 → entry_mode 업그레이드
+    - 모멘텀(OR 택1): MACD골든/ADX>25/VR>3/60m모멘텀10>3% 중 하나
+    - 부스터: 60m감싸기, 60m VR5>3, 60m모멘텀 등 → entry_mode 업그레이드
     - 거래량3배: 별도 역추세 경로 (5m_RSI<50 + 15m_BB<40)
     반환: (filters_hit, and_pass, block_reason, boosters)
     """
@@ -783,18 +783,24 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
         filters_hit.append("60m_EMA정배열")
 
     # ── D. 모멘텀 OR (택1 이상 충족 필요) ──
-    # 15m MACD골든, 15m ADX>25, VR5>3 중 하나만 있으면 OK
+    # 15m MACD골든, 15m ADX>25, VR5>3, 60m 모멘텀10>3% 중 하나만 있으면 OK
     macd15_golden, _ = _v4_macd_golden(c15_closes) if c15_closes else (False, 0)
     adx15 = _v4_adx(c15) if c15 else None
     vr15 = _v4_volume_ratio(c15, 5) if c15 else None
     vr60 = _v4_volume_ratio(c60, 5) if c60 else None
+
+    # 🔧 v3.2: 60m 모멘텀10 > 3% (거래량3배 n=82 EV+0.375% PF=2.09, 20봉돌파 n=100 EV+0.237% PF=1.65)
+    mom10_60 = None
+    if c60_closes and len(c60_closes) >= 11:
+        mom10_60 = (c60_closes[0] / c60_closes[10] - 1) * 100  # %
+    momentum_strong = mom10_60 is not None and mom10_60 > 3.0
 
     macd_ok = bool(macd15_golden)
     adx_ok = adx15 is not None and adx15 > 25
     vr15_ok = vr15 is not None and vr15 > 3
     vr60_ok = vr60 is not None and vr60 > 3
 
-    momentum_or = macd_ok or adx_ok or vr15_ok or vr60_ok
+    momentum_or = macd_ok or adx_ok or vr15_ok or vr60_ok or momentum_strong
 
     if macd_ok:
         filters_hit.append("15m_MACD골든")
@@ -804,16 +810,22 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
         filters_hit.append("15m_VR5>3")
     if vr60_ok:
         filters_hit.append("60m_VR5>3")
+    if momentum_strong:
+        filters_hit.append("60m_모멘텀10>3%")
 
     # ── E. 부스터 (entry_mode 업그레이드용) ──
     # 모멘텀 OR에서 2개 이상 동시 충족 → 부스터
-    momentum_count = sum([macd_ok, adx_ok, vr15_ok, vr60_ok])
+    momentum_count = sum([macd_ok, adx_ok, vr15_ok, vr60_ok, momentum_strong])
     if momentum_count >= 2:
         boosters.append("모멘텀복합")
 
     # 60m VR5>3 (백테스트 최강 단일 조건, EV +0.3~1.4%)
     if vr60_ok:
         boosters.append("60m_VR5>3_부스터")
+
+    # 🔧 v3.2: 60m 모멘텀 강하면 부스터 (entry_mode 업그레이드용)
+    if momentum_strong:
+        boosters.append("60m_모멘텀_부스터")
 
     # 60m 감싸기 (백테스트: 거의 모든 시그널에서 양의 EV +0.1~0.35%)
     engulf60 = _v4_engulfing(c60) if c60 else False
@@ -836,46 +848,53 @@ V4_SIGNAL_CONFIG = {
         "tier": 1, "logic_group": "A",
         "entry_mode": "confirm",
         "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "sl_pct": 0.010,            # 🔧 v3.2: 0.007→0.010 (SL 1.0%, TEST EV+0.144%, n=135, PF=1.38, WR=60.7%)
+            "activation_pct": 0.003,     # Activation 0.3% 유지
+            "trail_pct": 0.002,          # Trail 0.2% 유지
             "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
-            "description": "TRAIL_SL0.7/A0.3/T0.2 (거래량3배)",
+            "description": "TRAIL_SL1.0/A0.3/T0.2 (거래량3배 v3.2최적)",
         },
     },
     "5m_큰양봉": {
         "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "sl_pct": 0.010,            # 🔧 v3.2: 0.007→0.010 (SL 1.0%)
+            "activation_pct": 0.003,
+            "trail_pct": 0.002,
             "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (5m큰양봉)",
+            "description": "HOLD_12봉+TRAIL_SL1.0 (5m큰양봉 v3.2)",
         },
     },
     "20봉_고점돌파": {
-        "tier": 2, "logic_group": "A",
+        "tier": 1, "logic_group": "A",  # 🔧 v3.2: tier2→tier1 (TEST 최고 성능)
         "entry_mode": "confirm",
         "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
-            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (20봉돌파)",
+            "sl_pct": 0.010,            # 🔧 v3.2: 0.007→0.010 (SL 1.0%, TEST EV+0.151%, n=144, PF=1.35, WR=61.1%)
+            "activation_pct": 0.005,     # 🔧 v3.2: 0.003→0.005 (Activation 0.5%)
+            "trail_pct": 0.003,          # 🔧 v3.2: 0.002→0.003 (Trail 0.3%)
+            "hold_bars": 0, "max_bars": 60, "strategy": "TRAIL",  # 🔧 v3.2: HOLD→TRAIL
+            "description": "TRAIL_SL1.0/A0.5/T0.3 (20봉돌파 v3.2최적)",
         },
     },
     "BB하단반등": {
-        "tier": 2, "logic_group": "B",
+        "tier": 2, "logic_group": "A",
         "entry_mode": "half",
         "exit": {
-            # 백테스트 TEST: SL1.0/A0.5/T0.3 → WR=71.2%, EV=+0.0925% (vs SL0.7 WR=52.1%)
-            "sl_pct": 0.010, "activation_pct": 0.005, "trail_pct": 0.003,
+            "sl_pct": 0.010,            # 🔧 v3.2: SL 1.0% 유지
+            "activation_pct": 0.005, "trail_pct": 0.003,
             "hold_bars": 0, "max_bars": 24, "strategy": "TRAIL",
-            "description": "TRAIL_SL1.0/A0.5/T0.3 (BB하단반등 TEST최적)",
+            "description": "TRAIL_SL1.0/A0.5/T0.3 (BB하단반등)",
         },
     },
     "5m_양봉": {
         "tier": 2, "logic_group": "B",
         "entry_mode": "half",
         "exit": {
-            "sl_pct": 0.007, "activation_pct": 0.003, "trail_pct": 0.002,
+            "sl_pct": 0.010,            # 🔧 v3.2: 0.007→0.010
+            "activation_pct": 0.003, "trail_pct": 0.002,
             "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
-            "description": "HOLD_12봉+TRAIL_SL0.7 (5m양봉)",
+            "description": "HOLD_12봉+TRAIL_SL1.0 (5m양봉 v3.2)",
         },
     },
 }
@@ -974,6 +993,15 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
     # 60m 감싸기 → confirm (추세 전환 확인)
     elif "60m_감싸기" in boosters:
         entry_mode = "confirm"
+    # 🔧 v3.2: 60m 모멘텀10>3% 부스터 → confirm
+    elif "60m_모멘텀_부스터" in boosters:
+        entry_mode = "confirm"
+
+    # 🔧 v3.2: 15m_MACD골든 + 60m_EMA정배열 동시충족 = 최강 필터
+    # Train/Test BOTH EV>0 검증 통과 (눌림반전, 양봉, 거래량3배)
+    if "15m_MACD골든" in filters_hit and "60m_EMA정배열" in filters_hit:
+        entry_mode = "confirm"  # 무조건 confirm 업그레이드
+        print(f"[V4_BEST_FILTER] {market} MACD+EMA 동시충족 → confirm")
 
     exit_params = dict(config["exit"])
 
@@ -989,11 +1017,17 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
 
 
 def v4_is_favorable_hour(hour, signal_tag):
-    """시간대별 유불리 판정 (v4 전략용)"""
-    if 3 <= hour <= 5:
+    """시간대별 유불리 판정 — v3.2 백테스트 기반 개선
+    최악: 05-07시(EV -0.24~-0.36%), 10-13시(-0.17~-0.43%), 18시(-0.37%)
+    최고: 23시(+0.20%), 09시(+0.20~0.35%), 22시(+0.08%)
+    """
+    # 강력 차단 (백테스트 일관된 음EV)
+    if hour in (5, 6, 7, 10, 11, 12, 13, 18):
         return False
-    if 13 <= hour <= 17:
+    # 강력 유리 (백테스트 일관된 양EV)
+    if hour in (9, 22, 23):
         return True
+    # 중립
     return None
 
 
