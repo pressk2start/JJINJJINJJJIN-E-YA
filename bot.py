@@ -926,15 +926,22 @@ def process_coin(coin, btc_regime, dist_acc):
     if n5 > 60:
         k12 = 2.0 / 13; k26 = 2.0 / 27
         k5 = 2.0 / 6; k10 = 2.0 / 11; k20 = 2.0 / 21; k50 = 2.0 / 51
-        ema12 = sum(closes[:12]) / 12
-        ema26 = sum(closes[:26]) / 26
         ema5 = sum(closes[:5]) / 5
         ema10 = sum(closes[:10]) / 10
+        ema12 = sum(closes[:12]) / 12
         ema20 = sum(closes[:20]) / 20
+        ema26 = sum(closes[:26]) / 26
         ema50 = sum(closes[:50]) / 50 if n5 >= 50 else closes[0]
-        prev_macd_diff = 0.0
+        # EMA 워밍업: 초기화 구간 ~ 50 사이 누락 방지
+        for i in range(5, 50):
+            ema5 = closes[i] * k5 + ema5 * (1 - k5)
+            if i >= 10: ema10 = closes[i] * k10 + ema10 * (1 - k10)
+            if i >= 12: ema12 = closes[i] * k12 + ema12 * (1 - k12)
+            if i >= 20: ema20 = closes[i] * k20 + ema20 * (1 - k20)
+            if i >= 26: ema26 = closes[i] * k26 + ema26 * (1 - k26)
+        prev_macd_diff = ema12 - ema26  # 워밍업 후 초기값
         prev_aligned = False
-        for i in range(max(26, 50), n5):
+        for i in range(50, n5):
             ema12 = closes[i] * k12 + ema12 * (1 - k12)
             ema26 = closes[i] * k26 + ema26 * (1 - k26)
             ema5 = closes[i] * k5 + ema5 * (1 - k5)
@@ -1002,17 +1009,14 @@ def process_coin(coin, btc_regime, dist_acc):
 
     # 5m_큰양봉: pre-computed bodies 배열 사용
     sigs=[]; last=-20
-    # 20봉 rolling average body (한 번에 계산)
-    body_sum20 = sum(bodies[:20]) if n5 >= 20 else 0
+    # 20봉 rolling average body (i=60 시점 기준 초기화)
+    body_sum20 = sum(bodies[40:60]) if n5 >= 60 else 0
     for i in range(60, end_idx):
+        avg_body = body_sum20 / 20 if body_sum20 > 0 else 0
+        # rolling 갱신 (스킵 여부 무관하게 항상 업데이트)
+        body_sum20 = body_sum20 - bodies[i-20] + bodies[i]
         if closes[i] <= opens[i]: continue
         body = closes[i] - opens[i]
-        # rolling average 갱신
-        if i >= 20:
-            body_sum20 = body_sum20 - bodies[i-20] + bodies[i-1]
-            avg_body = body_sum20 / 20
-        else:
-            avg_body = body
         if avg_body == 0 or body < avg_body * 2: continue
         ei=i+1
         if ei-last<20: continue
@@ -1509,12 +1513,13 @@ def generate_report(all_results, dist_acc):
         if len(sigs) < WF_MIN_TRAIN + WF_MIN_TEST:
             continue
 
-        # 시그널을 시간순 정렬 (이미 main에서 정렬됨, 안전장치)
+        # 시그널을 시간순 정렬 + 날짜 미리 파싱 (성능: strptime 1회만)
         sigs_sorted = sorted(sigs, key=lambda s: s["time"])
+        for s in sigs_sorted:
+            s["_day"] = _parse_day(s["time"])
 
         # 전체 날짜 범위
-        days_all = [_parse_day(s["time"]) for s in sigs_sorted]
-        days_all = [d for d in days_all if d]
+        days_all = [s["_day"] for s in sigs_sorted if s["_day"]]
         if len(days_all) < 2:
             continue
         d_min, d_max = min(days_all), max(days_all)
@@ -1542,10 +1547,10 @@ def generate_report(all_results, dist_acc):
             if te_end > d_max + timedelta(days=1):
                 break
 
-            tr_sigs = [s for s in sigs_sorted if _parse_day(s["time"]) is not None
-                       and tr_start <= _parse_day(s["time"]) < tr_end]
-            te_sigs = [s for s in sigs_sorted if _parse_day(s["time"]) is not None
-                       and te_start <= _parse_day(s["time"]) < te_end]
+            tr_sigs = [s for s in sigs_sorted if s["_day"] is not None
+                       and tr_start <= s["_day"] < tr_end]
+            te_sigs = [s for s in sigs_sorted if s["_day"] is not None
+                       and te_start <= s["_day"] < te_end]
 
             if len(tr_sigs) >= WF_MIN_TRAIN and len(te_sigs) >= WF_MIN_TEST:
                 # Train에서 최적 청산전략 선택
@@ -1638,8 +1643,11 @@ def generate_report(all_results, dist_acc):
         if len(sigs) < WF_MIN_TRAIN + WF_MIN_TEST:
             continue
         sigs_sorted = sorted(sigs, key=lambda s: s["time"])
-        days_all = [_parse_day(s["time"]) for s in sigs_sorted]
-        days_all = [d for d in days_all if d]
+        # _day가 이미 있으면 재사용, 없으면 파싱
+        for s in sigs_sorted:
+            if "_day" not in s:
+                s["_day"] = _parse_day(s["time"])
+        days_all = [s["_day"] for s in sigs_sorted if s["_day"]]
         if len(days_all) < 2: continue
         d_min, d_max = min(days_all), max(days_all)
         if (d_max - d_min).days < WF_TRAIN_DAYS + WF_TEST_DAYS: continue
@@ -1655,10 +1663,10 @@ def generate_report(all_results, dist_acc):
             te_start = tr_end
             te_end = te_start + timedelta(days=WF_TEST_DAYS)
             if te_end > d_max + timedelta(days=1): break
-            tr_sigs = [s for s in sigs_sorted if _parse_day(s["time"]) is not None
-                       and tr_start <= _parse_day(s["time"]) < tr_end]
-            te_sigs = [s for s in sigs_sorted if _parse_day(s["time"]) is not None
-                       and te_start <= _parse_day(s["time"]) < te_end]
+            tr_sigs = [s for s in sigs_sorted if s["_day"] is not None
+                       and tr_start <= s["_day"] < tr_end]
+            te_sigs = [s for s in sigs_sorted if s["_day"] is not None
+                       and te_start <= s["_day"] < te_end]
             if len(tr_sigs) >= WF_MIN_TRAIN and len(te_sigs) >= WF_MIN_TEST:
                 best_ek, best_ev = None, -999
                 for ek in ek_list:
