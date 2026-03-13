@@ -394,8 +394,12 @@ def _load_day_file(fpath):
         pass
     return rows
 
-def _load_coin_1m(coin, days=30):
+_GLOBAL_DAYS = 60  # main()에서 args.days로 갱신
+
+def _load_coin_1m(coin, days=None):
     """코인의 일별 파일들을 합쳐서 시간순 캔들 리스트 반환"""
+    if days is None:
+        days = _GLOBAL_DAYS
     d = _coin_dir(coin)
     if not os.path.exists(d): return []
     files = sorted(f for f in os.listdir(d) if f.endswith(".jsonl.gz"))
@@ -529,7 +533,8 @@ def collect(days=30, top_n=30):
     """1분봉 수집: 일별 gzip jsonl + 4 worker 병렬 + 증분"""
     if days > 200: days = 200  # API 부하 방지 상한
 
-    tg(f"[수집] 1분봉 | {days}일, {top_n}코인, {NUM_WORKERS} worker 병렬, 증분수집")
+    tg(f"[수집] 1분봉 | {days}일, {top_n}코인, {NUM_WORKERS} worker 병렬, 증분수집\n"
+       f"※ 증분수집: 빠진 날짜만 받음, 첫 실행 시 5~15분 소요 가능")
     markets = get_top_markets(top_n)
     if not markets: tg("[오류] 종목 실패"); return []
     coins = [m.split("-")[1] for m in markets]
@@ -1727,6 +1732,9 @@ def main():
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
+
+    global _GLOBAL_DAYS
+    _GLOBAL_DAYS = args.days
 
     tg("[시작] upbit_signal_study v4.0 (1분봉 고속수집: 일별gzip + 4worker + 증분)")
     t0 = time.time()
