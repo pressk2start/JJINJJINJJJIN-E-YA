@@ -77,7 +77,7 @@ def tg(msg):
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 UPBIT_BASE = "https://api.upbit.com/v1"
-RATE_LIMIT_SLEEP = 0.12          # 10 req/sec max
+RATE_LIMIT_SLEEP = 0.15          # ~6-7 req/sec (safe margin for Upbit 10/sec limit)
 FEE_PER_SIDE = 0.0005            # 0.05%
 SLIPPAGE_PER_SIDE = 0.0005       # 0.05%
 TOTAL_COST_RT = (FEE_PER_SIDE + SLIPPAGE_PER_SIDE) * 2  # 0.2% roundtrip
@@ -101,7 +101,7 @@ KST = timezone(timedelta(hours=9))
 # DATA COLLECTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def safe_request(url, params=None, retries=3):
+def safe_request(url, params=None, retries=5):
     """Make API request with retry logic."""
     for attempt in range(retries):
         try:
@@ -109,29 +109,29 @@ def safe_request(url, params=None, retries=3):
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 429:
-                wait = 2 ** (attempt + 1)
-                tg(f"  Rate limited, waiting {wait}s...")
+                wait = min(2 ** (attempt + 1), 16)
+                print(f"[Rate limit] waiting {wait}s... (attempt {attempt+1})")
                 time.sleep(wait)
             else:
-                tg(f"  HTTP {resp.status_code} for {url}, attempt {attempt+1}")
+                print(f"[HTTP {resp.status_code}] {url}, attempt {attempt+1}")
                 time.sleep(1)
         except Exception as e:
-            tg(f"  Request error: {e}, attempt {attempt+1}")
+            print(f"[Request error] {e}, attempt {attempt+1}")
             time.sleep(2 ** attempt)
     return None
 
 
 def get_top_coins(n=30):
     """Get top N KRW market coins by 24h volume."""
-    tg("📊 Fetching all KRW markets...")
+    print("Fetching all KRW markets...")
     markets = safe_request(f"{UPBIT_BASE}/market/all")
     time.sleep(RATE_LIMIT_SLEEP)
     if not markets:
-        tg("ERROR: Cannot fetch markets")
+        tg("❌ 마켓 조회 실패")
         return []
 
     krw_markets = [m["market"] for m in markets if m["market"].startswith("KRW-")]
-    tg(f"  Found {len(krw_markets)} KRW markets")
+    print(f"  Found {len(krw_markets)} KRW markets")
 
     # Fetch tickers in batches of 30 (Upbit limit for ticker endpoint)
     all_tickers = []
@@ -206,7 +206,7 @@ def fetch_candles(market, timeframe, target_count=2000):
 
 def fetch_orderbook(markets):
     """Fetch current orderbook snapshots for spread analysis."""
-    tg("\n📋 Fetching orderbook snapshots for spread analysis...")
+    print("Fetching orderbook snapshots...")
     orderbooks = {}
 
     for i in range(0, len(markets), 10):
@@ -634,14 +634,14 @@ def calc_stats(trades):
 # DISPLAY FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_separator(char="=", width=100):
-    tg(char * width)
+def print_separator(char="=", width=80):
+    print(char * width)
 
 
 def print_header(title):
-    tg("")
+    print()
     print_separator()
-    tg(f"  {title}")
+    print(f"  {title}")
     print_separator()
 
 
@@ -693,7 +693,6 @@ def main():
     coin_done = 0
     coin_total = len(top_coins) * len(TIMEFRAMES)
     for tf_key, tf_info in TIMEFRAMES.items():
-        tg(f"\n⏰ Timeframe: {tf_info['label']}")
         for coin in top_coins:
             market = coin["market"]
             coin_done += 1
@@ -705,12 +704,14 @@ def main():
                 indicators = prepare_indicators(candles)
                 all_data[(market, tf_key)] = indicators
                 total_candles += len(candles)
-                # 5개마다 진행 알림
-                if coin_done % 5 == 0 or coin_done == coin_total:
-                    elapsed = time.time() - start_time
-                    tg(f"[수집 {coin_done}/{coin_total}] {market} {tf_info['label']} {len(candles)}개 | {elapsed:.0f}초 경과")
             else:
-                tg(f"  SKIP {market} (only {len(candles) if candles else 0} candles)")
+                print(f"  SKIP {market} {tf_info['label']} ({len(candles) if candles else 0} candles)")
+
+            # 타임프레임 전환 or 20개마다 진행 알림
+            if coin_done % 20 == 0 or coin_done == coin_total:
+                elapsed = time.time() - start_time
+                pct = coin_done / coin_total * 100
+                tg(f"📥 수집 {coin_done}/{coin_total} ({pct:.0f}%) | {elapsed:.0f}초 경과")
 
     elapsed_data = time.time() - start_time
     tg(f"✅ 수집 완료: {total_candles:,}개 캔들 | {len(all_data)}개 시리즈 | {elapsed_data:.0f}초 소요")
@@ -740,9 +741,7 @@ def main():
                 "total_pnl": stats["total_pnl"],
             })
             if combo_num % 10 == 0 or combo_num == total_combos:
-                tg(f"[Phase1] {combo_num}/{total_combos} 진행중...")
-
-    tg(f"[Phase1] {total_combos}개 조합 완료")
+                print(f"[Phase1] {combo_num}/{total_combos}")
     print_results_table(phase1_results, sort_key="total_pnl")
 
     # Find best CP/Trail
@@ -777,9 +776,7 @@ def main():
                 "total_pnl": stats["total_pnl"],
             })
             if combo_num % 5 == 0:
-                tg(f"[Phase2] {combo_num}/{total_combos2} 진행중...")
-
-    tg(f"[Phase2] {combo_num}개 조합 완료")
+                print(f"[Phase2] {combo_num}/{total_combos2}")
     print_results_table(phase2_results, sort_key="total_pnl")
 
     # Find best overall
