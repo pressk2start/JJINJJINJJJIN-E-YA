@@ -891,6 +891,16 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
             filters_hit.append("15m_m3_상위33%")
             boosters.append("15m_모멘텀3봉_부스터")
 
+    # 🔧 v4.0 패치: ed5(EMA5거리) 전역 필터 — v3.2 최강 (30m_ed5 상위33% EV+0.29%, PF=1.98)
+    # 30분봉이 없으므로 15분봉으로 대체: 현재가와 EMA5 거리가 양수(EMA5 위)면 부스터
+    if c15_closes and len(c15_closes) >= 6:
+        ema5_15 = _v4_ema(list(reversed(c15_closes)), 5)
+        if ema5_15 is not None and c15_closes[0] > 0:
+            ed5_15 = (c15_closes[0] / ema5_15 - 1) * 100  # EMA5 대비 %거리
+            if ed5_15 > 0.3:  # 상위33% 임계값
+                filters_hit.append("15m_ed5_상위33%")
+                boosters.append("15m_ed5_부스터")
+
     # ── AND 결과: 추세(필수) AND 모멘텀(OR 택1) ──
     and_pass = trend_ok and momentum_or
 
@@ -956,6 +966,19 @@ V4_SIGNAL_CONFIG = {
             "description": "HOLD_12봉+TRAIL_SL1.0 (5m양봉 v3.2)",
         },
     },
+    # 🔧 v4.0 패치: RSI과매도반등 시그널 추가
+    # TEST EV=+0.0950% (n=147, HOLD_12봉, PF=1.19, WR=46.3%, RR=1.38)
+    # 복합필터: 15m_MACD골든+1h_EMA정배열 → TE EV=+2.23% (n=15, PF=8.32)
+    "RSI과매도반등": {
+        "tier": 2, "logic_group": "B",
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.010,
+            "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL1.0 (RSI과매도반등 v4.0)",
+        },
+    },
 }
 
 
@@ -1008,7 +1031,13 @@ def _v4_detect_signal(c5, c15, c60):
         if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
             return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
 
-    # 5. 5m_양봉 (Tier2) — AND 필터가 잡신호 제거하므로 원래 조건 유지
+    # 5. RSI과매도반등 (Tier2) — v4.0 TEST EV=+0.095% (n=147, HOLD_12봉)
+    # 조건: 5m RSI14 < 30 (과매도) + 현재봉 양봉 (반등 시작)
+    rsi5 = _v4_rsi(c5_closes, 14) if len(c5_closes) >= 15 else None
+    if rsi5 is not None and rsi5 < 30 and is_green5 and body5_pct > 0.15:
+        return "RSI과매도반등", {"rsi5": rsi5, "body_pct": body5_pct}
+
+    # 6. 5m_양봉 (Tier2) — AND 필터가 잡신호 제거하므로 원래 조건 유지
     body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
     if is_green5 and body_ratio > 30 and body5_pct > 0.2:
         return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
@@ -1078,14 +1107,31 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         exit_params["description"] = exit_params["description"].replace("HOLD", "TRAIL(만능키)")
         print(f"[V4_MASTER_KEY] {market} {signal_tag} HOLD→TRAIL 전환")
 
-    # 🔧 v4.0: BTC storm 레짐 차단 (대부분 시그널 음의 EV)
+    # 🔧 v4.0 패치: BTC 레짐 세분화 (storm 차단 + 신호별 최적 레짐)
+    # v3.2: 거래량3배→BTC_횡보 best, 20봉/5m_양봉→BTC_횡보 best, 15m계열→BTC_하락 OK
+    # v4.0: 거래량3배 BTC_횡보 EV+0.041%, BB하단반등 BTC_하락 EV+0.016%
     try:
-        btc_reg, _ = btc_volatility_regime()
+        btc_reg, btc_detail = btc_volatility_regime()
         if btc_reg == "storm":
+            # storm은 무조건 차단 (모든 시그널 음의 EV)
             print(f"[V4_BTC_STORM] {market} {signal_tag} BTC storm 차단")
             return None
+        # 🔧 신호별 BTC 레짐 부스터: calm(상승)이면 특정 시그널 confirm
+        if btc_reg == "calm":
+            if signal_tag in ("거래량3배", "5m_양봉", "5m_큰양봉"):
+                boosters.append("BTC_calm_부스터")
+                if entry_mode == "half":
+                    entry_mode = "confirm"
     except Exception:
         pass  # BTC 조회 실패 시 통과 허용
+
+    # 🔧 v4.0 패치: 15m_m3 소프트 게이트 — 미충족 시 confirm→half 다운그레이드
+    # v4.0: 15m_m3_상위33% → EV +0.12% (n=576, PF=1.35)
+    # 강한 모멘텀 없이 진입하면 EV 낮아지므로, 만능키 없을 때 사이즈 축소
+    if "15m_m3_상위33%" not in filters_hit and not master_key:
+        if entry_mode == "confirm":
+            entry_mode = "half"
+            print(f"[V4_M3_GATE] {market} {signal_tag} 15m_m3 미충족 → confirm→half 다운그레이드")
 
     return {
         "signal_tag": signal_tag,
@@ -1107,7 +1153,8 @@ def v4_is_favorable_hour(hour, signal_tag):
     if hour in (5, 6, 7, 10, 11, 12, 13, 18):
         return False
     # 강력 유리 (백테스트 일관된 양EV)
-    if hour in (9, 22, 23):
+    # 🔧 v3.2 패치: 15시 추가 (20봉_고점돌파, 거래량3배 양의 EV)
+    if hour in (9, 15, 22, 23):
         return True
     # 중립
     return None
