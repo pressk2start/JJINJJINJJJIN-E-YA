@@ -101,11 +101,15 @@ KST = timezone(timedelta(hours=9))
 # DATA COLLECTION
 # ─────────────────────────────────────────────────────────────────────────────
 
+# 세션 재사용 (SSL 핸드셰이크 반복 방지, 연결 풀링)
+_session = requests.Session()
+_session.headers.update({"Accept": "application/json"})
+
 def safe_request(url, params=None, retries=5):
     """Make API request with retry logic."""
     for attempt in range(retries):
         try:
-            resp = requests.get(url, params=params, timeout=15)
+            resp = _session.get(url, params=params, timeout=15)
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 429:
@@ -115,6 +119,10 @@ def safe_request(url, params=None, retries=5):
             else:
                 print(f"[HTTP {resp.status_code}] {url}, attempt {attempt+1}")
                 time.sleep(1)
+        except (requests.exceptions.ConnectionError, requests.exceptions.SSLError) as e:
+            wait = min(2 ** (attempt + 1), 16)
+            print(f"[Connection error] {e.__class__.__name__}, retry in {wait}s (attempt {attempt+1})")
+            time.sleep(wait)
         except Exception as e:
             print(f"[Request error] {e}, attempt {attempt+1}")
             time.sleep(2 ** attempt)
@@ -130,7 +138,9 @@ def get_top_coins(n=30):
         tg("❌ 마켓 조회 실패")
         return []
 
-    krw_markets = [m["market"] for m in markets if m["market"].startswith("KRW-")]
+    # 스테이블코인/래핑토큰 제외
+    EXCLUDE = {"KRW-USDT", "KRW-USDC", "KRW-DAI", "KRW-TUSD", "KRW-BUSD", "KRW-WBTC", "KRW-WETH"}
+    krw_markets = [m["market"] for m in markets if m["market"].startswith("KRW-") and m["market"] not in EXCLUDE]
     print(f"  Found {len(krw_markets)} KRW markets")
 
     # Fetch tickers in batches of 30 (Upbit limit for ticker endpoint)
