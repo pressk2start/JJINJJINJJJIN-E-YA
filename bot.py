@@ -797,35 +797,25 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
         # fallback: 역추세 조건 불충족 → 아래 일반 경로 (블록 필터 적용)
 
     # ── B. 킬러 차단 필터 (거래량3배 외 시그널만 적용) ──
-    # v4.0 백테스트 이중확인: 양쪽 모두 강한 음의 EV
-    rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
-    if rsi60 is not None and rsi60 < 30:
-        # 🔧 v4.0: RSI<40→RSI<30 강화 (킬러, EV -0.04~-0.44%)
-        block_reason = f"60m_RSI14={rsi60:.1f}<30 (킬러)"
-        return filters_hit, False, block_reason, boosters
-
+    # 하드 킬러 2개: 가장 강한 음의 EV (차단)
     stoch60 = _v4_stoch_k(c60) if c60 else None
     if stoch60 is not None and stoch60 < 20:
         block_reason = f"60m_Stoch_K={stoch60:.0f}<20 (킬러, EV -0.2~-0.5%)"
         return filters_hit, False, block_reason, boosters
 
-    # 🔧 v4.0: 60m BB20 < 20 킬러 (EV -0.15~-0.49%)
+    rsi60 = _v4_rsi(c60_closes, 14) if c60_closes else None
+    if rsi60 is not None and rsi60 < 30:
+        block_reason = f"60m_RSI14={rsi60:.1f}<30 (킬러)"
+        return filters_hit, False, block_reason, boosters
+
+    # 소프트 킬러: 차단 대신 filters_hit에 기록 (v4_evaluate_entry에서 half 다운그레이드)
     bb60_pos, _ = _v4_bb_position(c60_closes, 20) if c60_closes and len(c60_closes) >= 20 else (None, None)
     if bb60_pos is not None and bb60_pos < 20:
-        block_reason = f"60m_BB20={bb60_pos:.0f}<20 (킬러, EV -0.15~-0.49%)"
-        return filters_hit, False, block_reason, boosters
+        filters_hit.append(f"soft_60m_BB20<20")
 
-    # 🔧 v4.0: 15m Stoch_K < 20 킬러 (EV -0.1~-0.42%)
     stoch15 = _v4_stoch_k(c15) if c15 else None
     if stoch15 is not None and stoch15 < 20:
-        block_reason = f"15m_Stoch_K={stoch15:.0f}<20 (킬러, EV -0.1~-0.42%)"
-        return filters_hit, False, block_reason, boosters
-
-    # 🔧 v4.0: 5m MFI < 20 킬러 (EV -0.1~-0.27%)
-    mfi5 = _v4_mfi(c5) if c5 else None
-    if mfi5 is not None and mfi5 < 20:
-        block_reason = f"5m_MFI={mfi5:.0f}<20 (킬러, EV -0.1~-0.27%)"
-        return filters_hit, False, block_reason, boosters
+        filters_hit.append(f"soft_15m_Stoch<20")
 
     # ── C. 핵심 AND: 60m EMA정배열 (유일한 강성 필수조건) ──
     ema60_align = _v4_ema_alignment(c60_closes) if c60_closes else 0
@@ -1066,10 +1056,15 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         boosters.append("만능키_MACD+EMA")
         print(f"[V4_MASTER_KEY] {market} {signal_tag} MACD+EMA 동시충족 → confirm")
 
+    # 🔧 v4.0 완화: soft 킬러 → half 다운그레이드 (차단 대신 보수적 진입)
+    soft_killers = [f for f in filters_hit if f.startswith("soft_")]
+    if soft_killers and entry_mode == "confirm":
+        entry_mode = "half"
+        print(f"[V4_SOFT_KILLER] {market} {signal_tag} {soft_killers} → half 다운그레이드")
+
     exit_params = dict(config["exit"])
 
     # 🔧 v4.0: 만능키 충족 시 HOLD 시그널도 TRAIL로 전환 (더 좋은 청산)
-    # 5m_양봉(EV+0.21% PF1.66), 5m_큰양봉(EV+0.39% PF1.96) 검증
     if master_key and exit_params.get("strategy") == "HOLD":
         exit_params["strategy"] = "TRAIL"
         exit_params["hold_bars"] = 0
@@ -1099,17 +1094,18 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
 
 
 def v4_is_favorable_hour(hour, signal_tag):
-    """시간대별 유불리 판정 — v3.2 백테스트 기반 개선
-    최악: 05-07시(EV -0.24~-0.36%), 10-13시(-0.17~-0.43%), 18시(-0.37%)
-    최고: 23시(+0.20%), 09시(+0.20~0.35%), 22시(+0.08%)
+    """시간대별 유불리 판정 — v4.0 완화버전
+    하드차단: 3-7시만 (새벽 저유동성)
+    소프트불리: 10-13,18시 → None(중립, 다른 필터에 위임)
+    유리: 09,22,23시 → True
     """
-    # 강력 차단 (백테스트 일관된 음EV)
-    if hour in (5, 6, 7, 10, 11, 12, 13, 18):
+    # 하드차단 (새벽 저유동성만)
+    if 3 <= hour <= 7:
         return False
-    # 강력 유리 (백테스트 일관된 양EV)
+    # 유리 (백테스트 일관된 양EV)
     if hour in (9, 22, 23):
         return True
-    # 중립
+    # 나머지 중립 (10-13,18시 포함 — 킬러 필터에 위임)
     return None
 
 
