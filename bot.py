@@ -881,6 +881,15 @@ def _v4_check_upper_tf_filters(c5, c15, c60, signal_tag=None):
             filters_hit.append("15m_m3_상위33%")
             boosters.append("15m_모멘텀3봉_부스터")
 
+    # 🔧 main 머지: 15m ed5(EMA5거리) 부스터 — v3.2 최강 (30m_ed5 상위33% EV+0.29%, PF=1.98)
+    if c15_closes and len(c15_closes) >= 6:
+        ema5_15 = _v4_ema(list(reversed(c15_closes)), 5)
+        if ema5_15 is not None and c15_closes[0] > 0:
+            ed5_15 = (c15_closes[0] / ema5_15 - 1) * 100  # EMA5 대비 %거리
+            if ed5_15 > 0.3:  # 상위33% 임계값
+                filters_hit.append("15m_ed5_상위33%")
+                boosters.append("15m_ed5_부스터")
+
     # ── AND 결과: 추세(필수) AND 모멘텀(OR 택1) ──
     and_pass = trend_ok and momentum_or
 
@@ -946,6 +955,18 @@ V4_SIGNAL_CONFIG = {
             "description": "HOLD_12봉+TRAIL_SL1.0 (5m양봉 v3.2)",
         },
     },
+    # 🔧 main 머지: RSI과매도반등 시그널 (TEST EV=+0.095%, n=147, PF=1.19)
+    # 만능키(MACD+EMA) 충족 시 TE EV=+2.23% (n=15, PF=8.32)
+    "RSI과매도반등": {
+        "tier": 2, "logic_group": "B",
+        "entry_mode": "half",
+        "exit": {
+            "sl_pct": 0.010,
+            "activation_pct": 0.003, "trail_pct": 0.002,
+            "hold_bars": 12, "max_bars": 60, "strategy": "HOLD",
+            "description": "HOLD_12봉+TRAIL_SL1.0 (RSI과매도반등 v4.0)",
+        },
+    },
 }
 
 
@@ -998,7 +1019,12 @@ def _v4_detect_signal(c5, c15, c60):
         if prev_bb_pos is not None and prev_bb_pos < 15 and bb_pos5 > prev_bb_pos and is_green5:
             return "BB하단반등", {"prev_bb": prev_bb_pos, "cur_bb": bb_pos5}
 
-    # 5. 5m_양봉 (Tier2) — AND 필터가 잡신호 제거하므로 원래 조건 유지
+    # 5. RSI과매도반등 (Tier2) — v4.0 TEST EV=+0.095% (n=147, HOLD_12봉)
+    rsi5 = _v4_rsi(c5_closes, 14) if len(c5_closes) >= 15 else None
+    if rsi5 is not None and rsi5 < 30 and is_green5 and body5_pct > 0.15:
+        return "RSI과매도반등", {"rsi5": rsi5, "body_pct": body5_pct}
+
+    # 6. 5m_양봉 (Tier2) — AND 필터가 잡신호 제거하므로 원래 조건 유지
     body_ratio = abs(body5) / range5 * 100 if range5 > 0 else 0
     if is_green5 and body_ratio > 30 and body5_pct > 0.2:
         return "5m_양봉", {"body_pct": body5_pct, "body_ratio": body_ratio}
@@ -1073,12 +1099,18 @@ def v4_evaluate_entry(market, c5, c15, c30, c60):
         exit_params["description"] = exit_params["description"].replace("HOLD", "TRAIL(만능키)")
         print(f"[V4_MASTER_KEY] {market} {signal_tag} HOLD→TRAIL 전환")
 
-    # 🔧 v4.0: BTC storm 레짐 차단 (대부분 시그널 음의 EV)
+    # 🔧 v4.0: BTC 레짐 (storm 차단 + calm 부스터)
     try:
         btc_reg, _ = btc_volatility_regime()
         if btc_reg == "storm":
             print(f"[V4_BTC_STORM] {market} {signal_tag} BTC storm 차단")
             return None
+        # 🔧 main 머지: BTC calm → 특정 시그널 half→confirm 업그레이드
+        if btc_reg == "calm":
+            if signal_tag in ("거래량3배", "5m_양봉", "5m_큰양봉"):
+                boosters.append("BTC_calm_부스터")
+                if entry_mode == "half":
+                    entry_mode = "confirm"
     except Exception:
         pass  # BTC 조회 실패 시 통과 허용
 
@@ -1103,7 +1135,8 @@ def v4_is_favorable_hour(hour, signal_tag):
     if 3 <= hour <= 7:
         return False
     # 유리 (백테스트 일관된 양EV)
-    if hour in (9, 22, 23):
+    # 🔧 main 머지: 15시 추가 (20봉_고점돌파, 거래량3배 양의 EV)
+    if hour in (9, 15, 22, 23):
         return True
     # 나머지 중립 (10-13,18시 포함 — 킬러 필터에 위임)
     return None
