@@ -527,7 +527,7 @@ def _collect_worker(market, coin, days):
 
 def collect(days=30, top_n=30):
     """1분봉 수집: 일별 gzip jsonl + 4 worker 병렬 + 증분"""
-    if days > 30: days = 30
+    if days > 200: days = 200  # API 부하 방지 상한
 
     tg(f"[수집] 1분봉 | {days}일, {top_n}코인, {NUM_WORKERS} worker 병렬, 증분수집")
     markets = get_top_markets(top_n)
