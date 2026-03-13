@@ -401,7 +401,7 @@ def _load_day_file(fpath):
         pass
     return rows
 
-_GLOBAL_DAYS = 60  # main()에서 args.days로 갱신
+_GLOBAL_DAYS = 45  # main()에서 args.days로 갱신
 
 def _load_coin_1m(coin, days=None):
     """코인의 일별 파일들을 합쳐서 시간순 캔들 리스트 반환"""
@@ -551,6 +551,7 @@ def collect(days=30, top_n=30):
     # 전역 통계 리셋
     _collect_stats["done"] = _collect_stats["skip"] = _collect_stats["fail"] = _collect_stats["candles"] = 0
 
+    COLLECT_TIMEOUT = 900  # 수집 전체 15분 제한
     results = []
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         futures = {}
@@ -560,7 +561,15 @@ def collect(days=30, top_n=30):
             futures[f] = coin
 
         last_hb = t0
+        timed_out = False
         for i, future in enumerate(as_completed(futures)):
+            # 전체 수집 타임아웃 체크
+            if time.time() - t0 > COLLECT_TIMEOUT and not timed_out:
+                timed_out = True
+                tg(f"[수집타임아웃] {COLLECT_TIMEOUT//60}분 초과 → 나머지 스킵, 있는 데이터로 분석 진행")
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
             coin_name, status, count = future.result()
             results.append((coin_name, status, count))
 
@@ -1736,7 +1745,7 @@ def _has_enough_data(min_coins=10, min_days=25):
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--days", type=int, default=45)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
@@ -1748,8 +1757,8 @@ def main():
     t0 = time.time()
     last_hb = t0
 
-    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 80% 이상 있어야 스킵)
-    need_days = max(25, int(args.days * 0.8))
+    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 70% 이상이면 스킵)
+    need_days = max(25, int(args.days * 0.7))
     if not args.skip_collect and _has_enough_data(min_days=need_days):
         tg(f"[자동] 1m 데이터 충분 ({need_days}일+, 10코인+) → 수집 스킵")
         args.skip_collect = True
