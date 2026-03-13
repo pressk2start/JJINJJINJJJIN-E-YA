@@ -164,7 +164,7 @@ COND_KEYS = {
 
 COLLECT_TFS = []  # 3m~60m은 다른 스크립트가 수집 → 여기선 1m만
 ALL_TFS = [(1, 1440)]
-ANALYSIS_TFS = [1, 5, 15, 60]  # 1분봉에서 전부 합성
+ANALYSIS_TFS = [5, 15, 60]  # 1분봉 피처 제외 (메모리 절감, c1 조기 해제)
 
 SIG_TPSL = {
     "15m_눌림반전":  {"tp": 1.5, "sl": 1.0},
@@ -852,6 +852,15 @@ def process_coin(coin, btc_regime, dist_acc):
     c15 = make_nmin(c5, 3)
     c60 = make_nmin(c1, 60) if len(c1) >= 3600 else []
 
+    # ── 메모리 최적화: c1 dict 리스트 → compact 배열 변환 ──
+    # dict 86,400개 ≈ 30MB → 배열 4개 ≈ 4MB (85% 절감)
+    c1_h = [c["h"] for c in c1]
+    c1_l = [c["l"] for c in c1]
+    c1_t = [c["t"] for c in c1]
+    c1_len = len(c1)
+    c1_map = {c1_t[i][:16]: i for i in range(c1_len)}
+    del c1  # 원본 dict 리스트 즉시 해제 (~30MB 절감)
+
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
         sigs = []; last = -20
@@ -1067,17 +1076,14 @@ def process_coin(coin, btc_regime, dist_acc):
         for si5, ei, bar in sigs:
             all_sig_times.add(bar["t"])
 
-    # c1은 이미 상단에서 로드됨
-    c1_map = {}
-    if c1 and len(c1) > 100:
-        c1_map = {c["t"][:16]: i for i, c in enumerate(c1)}
+    # c1_map, c1_h, c1_l은 이미 상단에서 compact 배열로 생성됨
     use_1m = len(c1_map) > 100
 
-    # 멀티 TF 피처 추출 (전부 1분봉에서 합성, 디스크 안 읽음)
+    # 멀티 TF 피처 추출 (tf=1 제외 — 메모리 절감, 5/15/60만 사용)
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
         if tf == 1:
-            candles = c1 if c1 and len(c1) >= 60 else None
+            continue  # c1 이미 해제됨, 5분봉 피처로 대체
         elif tf == 5:
             candles = c5 if c5 and len(c5) >= 60 else None
         elif tf == 15:
@@ -1153,7 +1159,7 @@ def process_coin(coin, btc_regime, dist_acc):
                 lp=(fc["l"]-entry)/entry*100
                 if hp>mfe: mfe=hp; mfe_bar=j
                 if lp<mae: mae=lp
-            strict = _sim_strict_1m(c1, c1_map, c5, ei, entry,
+            strict = _sim_strict_1m_compact(c1_h, c1_l, c1_len, c1_map, c5, ei, entry,
                                      tpsl["tp"], tpsl["sl"], cost_pct) if use_1m else \
                      _sim_strict_5m(c5, ei, entry, tpsl["tp"], tpsl["sl"], cost_pct)
             exits = {}
@@ -1174,26 +1180,31 @@ def process_coin(coin, btc_regime, dist_acc):
             built.append(sig)
         results[stype] = built
 
-    del c5, c15, c60, c1, c1_map, tf_feat_cache, raw_signals
+    del c5, c15, c60, c1_h, c1_l, c1_t, c1_map, tf_feat_cache, raw_signals
     return results
 
 def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
+    """legacy — 호출되지 않음, compact 버전 사용"""
+    return _sim_strict_5m(c5, ei5, entry, tp, sl, cost)
+
+def _sim_strict_1m_compact(c1_h, c1_l, c1_len, c1_map, c5, ei5, entry, tp, sl, cost):
+    """compact 배열(c1_h, c1_l)로 1분봉 시뮬레이션 — 메모리 효율"""
     entry_time = c5[ei5]["t"][:16]
     start_idx = c1_map.get(entry_time)
     if start_idx is None:
         r = _sim_strict_5m(c5, ei5, entry, tp, sl, cost); r["src"]="5m_fb"; return r
-    max_bars = min(MAX_HOLD_1M, len(c1) - start_idx - 1)
+    max_bars = min(MAX_HOLD_1M, c1_len - start_idx - 1)
     if max_bars <= 0: return {"pnl": 0.0, "result": "TIMEOUT", "bars": 0, "src": "1m"}
     for j in range(max_bars + 1):
-        fc = c1[start_idx + j]
-        hp = (fc["h"] - entry) / entry * 100; lp = (fc["l"] - entry) / entry * 100
+        idx = start_idx + j
+        hp = (c1_h[idx] - entry) / entry * 100
+        lp = (c1_l[idx] - entry) / entry * 100
         sl_hit = lp <= -sl; tp_hit = hp >= tp
         if sl_hit and tp_hit: return {"pnl": round(-sl - cost, 4), "result": "BOTH_SL", "bars": j, "src": "1m"}
         if sl_hit: return {"pnl": round(-sl - cost, 4), "result": "SL", "bars": j, "src": "1m"}
         if tp_hit: return {"pnl": round(tp - cost, 4), "result": "TP", "bars": j, "src": "1m"}
-    last_c = c1[start_idx + max_bars]["c"]
-    raw = (last_c - entry) / entry * 100
-    return {"pnl": round(raw - cost, 4), "result": "TIMEOUT", "bars": max_bars, "src": "1m"}
+    # TIMEOUT: 5분봉 종가로 대체 (c1 close 배열 없으므로)
+    r = _sim_strict_5m(c5, ei5, entry, tp, sl, cost); r["src"]="1m_to"; return r
 
 def _sim_strict_5m(c5, ei5, entry, tp, sl, cost):
     max_bars = min(2, len(c5) - ei5 - 1)
@@ -1781,15 +1792,18 @@ def main():
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
 
+        # 매 코인마다 GC (OOM 방지)
+        gc.collect()
+
         if i >= 19:
             mem = _get_mem_mb()
             tg(f"[코인완료] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
         if (i+1) % 10 == 0:
-            gc.collect()  # 10코인마다 한 번만
             total_elapsed = time.time() - analysis_start
             avg_per_coin = total_elapsed / (i+1)
             remaining = avg_per_coin * (len(coins) - i - 1)
-            tg(f"  분석 {i+1}/{len(coins)} 완료 ({total_elapsed:.0f}초, 예상잔여 {remaining:.0f}초)")
+            mem = _get_mem_mb()
+            tg(f"  분석 {i+1}/{len(coins)} 완료 ({total_elapsed:.0f}초, 예상잔여 {remaining:.0f}초) | mem={mem:.0f}MB")
 
     for st in all_results:
         all_results[st].sort(key=lambda s: s["time"])
