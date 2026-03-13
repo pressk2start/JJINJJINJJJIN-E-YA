@@ -359,10 +359,10 @@ def fetch_and_save_1m(market, coin, total_count, max_time=600, progress_prefix="
 
 
 def collect_1m(days=30, top_n=30, force=False, specific_markets=None, max_time_per_coin=600):
-    """1분봉만 수집. 30일 이내 권장."""
-    if days > 30:
-        tg(f"[경고] 1분봉은 30일 초과 요청이 비효율적이라 30일로 제한")
-        days = 30
+    """1분봉 수집. 워크포워드 검증용 최대 60일 지원."""
+    if days > 60:
+        tg(f"[경고] 1분봉 60일 초과는 API 부담이 과도하여 60일로 제한")
+        days = 60
 
     need_count = 1440 * days
 
