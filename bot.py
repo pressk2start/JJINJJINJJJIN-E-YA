@@ -145,12 +145,12 @@ MAX_HOLD_BARS = 60
 MAX_HOLD_1M = 10
 
 # ── 워크포워드 검증 설정 ──
-WF_TRAIN_DAYS = 15   # 학습 윈도우 (일) — 30일 데이터용
+WF_TRAIN_DAYS = 21   # 학습 윈도우 (일) — 60일 데이터용, 3주
 WF_TEST_DAYS  = 7    # 검증 윈도우 (일)
-WF_STEP_DAYS  = 7    # 슬라이딩 스텝 (일)
-WF_MIN_TRAIN  = 15   # fold 내 최소 학습 시그널 수
+WF_STEP_DAYS  = 5    # 슬라이딩 스텝 (일) — 겹침 증가로 폴드 수 확보
+WF_MIN_TRAIN  = 20   # fold 내 최소 학습 시그널 수
 WF_MIN_TEST   = 5    # fold 내 최소 검증 시그널 수
-MAX_SIGS_PER_COIN = 200
+MAX_SIGS_PER_COIN = 400  # 60일 데이터에 맞게 증가
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -1271,6 +1271,7 @@ def generate_report(all_results, dist_acc):
     L.append(f"업비트 신호 연구 v4.0 ({ts})")
     L.append(f"비용:{TOTAL_COST*100:.2f}% | 진입:다음봉시가 | 최대:{MAX_HOLD_BARS}봉")
     L.append(f"Train/Test:{TRAIN_RATIO*100:.0f}/{(1-TRAIN_RATIO)*100:.0f} | 최소:{MIN_TRADES}건")
+    L.append(f"WF: Train={WF_TRAIN_DAYS}일 Test={WF_TEST_DAYS}일 Step={WF_STEP_DAYS}일")
     L.append("="*65)
     tf_feat_counts = defaultdict(int)
     for (tf, fk) in dist_acc: tf_feat_counts[tf] += 1
@@ -1711,7 +1712,7 @@ def _has_enough_data(min_coins=10, min_days=25):
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
