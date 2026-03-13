@@ -8,7 +8,7 @@
 - PID 검증 + flock 이중 잠금
 """
 import requests, time, json, os, sys, gc, argparse, math, atexit, signal as sig_mod, fcntl
-import gzip, threading
+import gzip, threading, ctypes
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -241,6 +241,13 @@ def _get_mem_mb():
                     return int(line.split()[1]) / 1024
     except: pass
     return -1
+
+def _force_free():
+    """gc.collect() + malloc_trim: Python이 해제한 메모리를 OS에 실제 반환"""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except: pass
 
 # ── requests.Session (TCP/TLS 재사용) ──
 _thread_local = threading.local()
@@ -864,7 +871,8 @@ def process_coin(coin, btc_regime, dist_acc):
     c1_t = [c["t"] for c in c1]
     c1_len = len(c1)
     c1_map = {c1_t[i][:16]: i for i in range(c1_len)}
-    del c1  # 원본 dict 리스트 즉시 해제 (~30MB 절감)
+    del c1, c1_t  # 원본 dict + 시간 문자열 즉시 해제 (~32MB 절감)
+    _force_free()  # 30MB를 OS에 즉시 반환
 
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
@@ -1185,7 +1193,7 @@ def process_coin(coin, btc_regime, dist_acc):
             built.append(sig)
         results[stype] = built
 
-    del c5, c15, c60, c1_h, c1_l, c1_t, c1_map, tf_feat_cache, raw_signals
+    del c5, c15, c60, c1_h, c1_l, c1_map, tf_feat_cache, raw_signals
     return results
 
 def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
@@ -1773,6 +1781,7 @@ def main():
     else:
         tg("  BTC 레짐: 1분봉 부족 → 전부 '횡보' 처리")
     del btc1
+    _force_free()  # BTC 1분봉 메모리 OS 반환
 
     all_results = defaultdict(list)
     dist_acc = defaultdict(list)
@@ -1800,8 +1809,8 @@ def main():
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
 
-        # 매 코인마다 GC (OOM 방지)
-        gc.collect()
+        # 매 코인마다 GC + malloc_trim (OOM 방지: OS에 메모리 실제 반환)
+        _force_free()
 
         if i >= 19:
             mem = _get_mem_mb()
