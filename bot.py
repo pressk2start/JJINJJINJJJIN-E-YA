@@ -147,6 +147,7 @@ def get_top_coins(n=30):
     all_tickers.sort(key=lambda x: x.get("acc_trade_price_24h", 0), reverse=True)
 
     top = []
+    lines = []
     for t in all_tickers[:n]:
         vol_billion = t["acc_trade_price_24h"] / 1_000_000_000
         top.append({
@@ -155,8 +156,9 @@ def get_top_coins(n=30):
             "volume_24h": t["acc_trade_price_24h"],
             "change_rate": t.get("signed_change_rate", 0),
         })
-        tg(f"  {t['market']:12s}  price={t['trade_price']:>12,.0f}  vol={vol_billion:>8.1f}B KRW")
+        lines.append(f"{t['market']:12s} {t['trade_price']:>12,.0f}원 {vol_billion:>6.1f}B")
 
+    tg(f"📊 Top {len(top)} coins:\n" + "\n".join(lines))
     return top
 
 
@@ -649,18 +651,18 @@ def print_results_table(results, sort_key="total_pnl", top_n=None):
     if top_n:
         sorted_results = sorted_results[:top_n]
 
-    header = f"{'CP%':>6} {'Trail%':>7} {'SL_min%':>8} {'SL_max%':>8} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'AvgMFE%':>8} {'SL':>4} {'Trail':>5} {'TO':>4}"
-    tg(header)
-    tg("-" * len(header))
+    lines = []
+    lines.append(f"{'CP%':>6} {'Trail%':>7} {'SL_min%':>8} {'SL_max%':>8} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6}")
+    lines.append("-" * 80)
 
     for r in sorted_results:
         s = r["stats"]
-        tg(
+        lines.append(
             f"{r['cp']*100:>6.2f} {r['trail']*100:>7.2f} {r['sl_min']*100:>8.2f} {r['sl_max']*100:>8.2f} | "
             f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
-            f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} {s['avg_mfe']:>8.3f} "
-            f"{s['sl_exits']:>4d} {s['trail_exits']:>5d} {s['timeout_exits']:>4d}"
+            f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f}"
         )
+    tg("\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -670,23 +672,19 @@ def print_results_table(results, sort_key="total_pnl", top_n=None):
 def main():
     start_time = time.time()
 
-    print_header("MASSIVE UPBIT BACKTEST v2.0")
-    tg(f"Started at: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}")
-    tg(f"Fee: {FEE_PER_SIDE*100:.2f}%/side | Slippage: {SLIPPAGE_PER_SIDE*100:.2f}%/side | Total RT cost: {TOTAL_COST_RT*100:.2f}%")
+    tg(f"🚀 백테스트 시작\n{datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}\n수수료 {FEE_PER_SIDE*100:.2f}%/편도 | 슬리피지 {SLIPPAGE_PER_SIDE*100:.2f}%/편도 | 왕복비용 {TOTAL_COST_RT*100:.2f}%")
 
     # ── Step 1: Get top coins ──
     top_coins = get_top_coins(30)
     if not top_coins:
-        tg("FATAL: Could not fetch top coins")
+        tg("❌ 코인 목록 조회 실패, 종료")
         sys.exit(1)
 
     markets = [c["market"] for c in top_coins]
 
-    # ── Step 2: Fetch orderbook ──
     orderbooks = fetch_orderbook(markets)
 
-    # ── Step 3: Fetch candle data ──
-    print_header("DATA COLLECTION")
+    tg("📥 데이터 수집 시작...")
 
     all_data = {}
     total_candles = 0
@@ -715,11 +713,9 @@ def main():
                 tg(f"  SKIP {market} (only {len(candles) if candles else 0} candles)")
 
     elapsed_data = time.time() - start_time
-    tg(f"\n📊 Data collection complete: {total_candles:,} candles across {len(all_data)} series")
-    tg(f"   Time: {elapsed_data:.0f}s | API calls: ~{total_requests}")
+    tg(f"✅ 수집 완료: {total_candles:,}개 캔들 | {len(all_data)}개 시리즈 | {elapsed_data:.0f}초 소요")
 
-    # ── Step 4: Phase 1 — Checkpoint × Trail optimization ──
-    print_header("PHASE 1: Checkpoint × Trail Optimization (SL fixed at 1.5%/2.5%)")
+    tg("⚙️ Phase1: 체크포인트×트레일 최적화 시작 (SL 1.5%/2.5% 고정)")
 
     checkpoints = [0.0025, 0.0040, 0.0050, 0.0060, 0.0080, 0.0100]
     trails = [0.0015, 0.0025, 0.0035, 0.0050, 0.0070]
@@ -754,11 +750,9 @@ def main():
     best_cp = best_p1["cp"]
     best_trail = best_p1["trail"]
 
-    tg(f"\n✅ Best Phase 1: CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}%")
-    tg(f"   Total PnL: {best_p1['stats']['total_pnl']:.2f}% | Win Rate: {best_p1['stats']['win_rate']:.1f}% | Trades: {best_p1['stats']['count']}")
+    tg(f"✅ Phase1 최적: CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}%\n순익 {best_p1['stats']['total_pnl']:.2f}% | 승률 {best_p1['stats']['win_rate']:.1f}% | {best_p1['stats']['count']}건")
 
-    # ── Step 5: Phase 2 — Stop-Loss optimization ──
-    print_header(f"PHASE 2: Stop-Loss Optimization (CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}% locked)")
+    tg(f"⚙️ Phase2: 손절 최적화 시작 (CP={best_cp*100:.2f}% Trail={best_trail*100:.2f}% 고정)")
 
     sl_mins = [0.008, 0.010, 0.012, 0.015, 0.020]
     sl_maxs = [0.015, 0.020, 0.025, 0.030, 0.035]
@@ -793,97 +787,67 @@ def main():
     best_sl_min = best_p2["sl_min"]
     best_sl_max = best_p2["sl_max"]
 
-    # ── Step 6: Final run with optimal parameters ──
-    print_header("FINAL OPTIMAL PARAMETERS")
-
+    # ── 최종 결과 ──
     final_trades, per_coin, per_tf, per_hour = run_backtest(
         all_data, best_cp, best_trail, best_sl_min, best_sl_max
     )
     final_stats = calc_stats(final_trades)
 
-    tg(f"""
-  Checkpoint:     {best_cp*100:.2f}%
-  Trail Distance: {best_trail*100:.2f}%
-  SL Min:         {best_sl_min*100:.2f}%
-  SL Max:         {best_sl_max*100:.2f}%
-
-  ────────────────────────────────────
-  Win Rate:        {final_stats['win_rate']:.1f}%
-  Total Trades:    {final_stats['count']}
-  ────────────────────────────────────
-  Gross PnL (비용 없음):
-    Avg/Trade:     {final_stats['avg_gross_pnl']:+.4f}%
-    Total:         {final_stats['total_gross_pnl']:+.2f}%
-  Net PnL (슬리피지+수수료 포함):
-    Avg/Trade:     {final_stats['avg_pnl']:+.4f}%
-    Total:         {final_stats['total_pnl']:+.2f}%
-  Cost Impact:     {final_stats['avg_gross_pnl'] - final_stats['avg_pnl']:+.4f}%/trade
-  ────────────────────────────────────
-  Max Drawdown:    {final_stats['max_dd']:.2f}%
-  Profit Factor:   {final_stats['profit_factor']:.2f}
-  Avg MFE:         {final_stats['avg_mfe']:.3f}%
-  Avg MAE:         {final_stats['avg_mae']:.3f}%
-  Avg Hold:        {final_stats['avg_hold']:.1f} candles
-""")
-
-    # ── Exit Reason Breakdown ──
-    print_header("EXIT REASON BREAKDOWN")
-
+    # 청산 사유 분석
     eb = final_stats.get("exit_breakdown", {})
-    tg(f"{'Reason':>14s} | {'Count':>7} {'Pct%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
-    tg("-" * 68)
+    exit_lines = []
+    reason_kr = {"stop_loss": "손절", "trail_stop": "트레일", "timeout": "시간초과"}
     for reason in ["stop_loss", "trail_stop", "timeout"]:
         if reason in eb:
             r = eb[reason]
-            tg(
-                f"{reason:>14s} | "
-                f"{r['count']:>7d} {r['pct']:>7.1f} {r['avg_gross']:>+10.4f} {r['avg_net']:>+9.4f} {r['total_net']:>+9.2f}"
-            )
+            exit_lines.append(f"  {reason_kr.get(reason, reason)}: {r['count']}건({r['pct']:.0f}%) 평균{r['avg_net']:+.4f}%")
 
-    if eb:
-        best_exit = max(eb.items(), key=lambda x: x[1]["avg_net"])
-        worst_exit = min(eb.items(), key=lambda x: x[1]["avg_net"])
-        tg(f"\n  Best exit:  {best_exit[0]} (avg net {best_exit[1]['avg_net']:+.4f}%)")
-        tg(f"  Worst exit: {worst_exit[0]} (avg net {worst_exit[1]['avg_net']:+.4f}%)")
-
-    # Gross vs Net diagnosis
+    diagnosis = ""
     if final_stats["total_gross_pnl"] > 0 and final_stats["total_pnl"] < 0:
-        tg(f"\n  ⚠️ DIAGNOSIS: Gross PnL 양수 but Net PnL 음수 → 비용 모델이 수익을 잡아먹는 구조!")
-        tg(f"     → 진입 빈도를 줄이거나, 수익폭이 큰 신호만 필터링 필요")
+        diagnosis = "\n⚠️ 비용 제외시 수익이나 실질 손실 → 진입 빈도↓ 또는 수익폭↑ 필요"
     elif final_stats["total_gross_pnl"] < 0:
-        tg(f"\n  ❌ DIAGNOSIS: Gross PnL도 음수 → 전략 자체가 음의 기댓값. 로직 재설계 필요")
+        diagnosis = "\n❌ 비용 제외해도 손실 → 전략 자체 재설계 필요"
 
-    # ── Entry Type Comparison (Momentum vs Pullback) ──
+    tg(f"""📊 최종 결과
+━━━━━━━━━━━━━━━━━━━━
+최적 파라미터:
+  체크포인트: {best_cp*100:.2f}%
+  트레일: {best_trail*100:.2f}%
+  손절: {best_sl_min*100:.2f}%~{best_sl_max*100:.2f}%
+
+성과:
+  총 {final_stats['count']}건 | 승률 {final_stats['win_rate']:.1f}%
+  순익(비용포함): 건당 {final_stats['avg_pnl']:+.4f}% / 합계 {final_stats['total_pnl']:+.2f}%
+  총익(비용제외): 건당 {final_stats['avg_gross_pnl']:+.4f}% / 합계 {final_stats['total_gross_pnl']:+.2f}%
+  비용영향: 건당 {final_stats['avg_gross_pnl'] - final_stats['avg_pnl']:+.4f}%
+  최대낙폭: {final_stats['max_dd']:.2f}% | PF: {final_stats['profit_factor']:.2f}
+  평균홀딩: {final_stats['avg_hold']:.1f}봉
+
+청산사유:
+{chr(10).join(exit_lines)}{diagnosis}""")
+
+    # ── 진입 타입 비교 ──
     momentum_trades = [t for t in final_trades if t.get("entry_type") == "momentum"]
     pullback_trades = [t for t in final_trades if t.get("entry_type") == "pullback"]
 
     if momentum_trades or pullback_trades:
-        print_header("ENTRY TYPE COMPARISON: MOMENTUM vs PULLBACK")
-
-        tg(f"{'Type':>12s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'AvgMFE%':>8} {'AvgMAE%':>8}")
-        tg("-" * 100)
-
-        for label, trades_subset in [("momentum", momentum_trades), ("pullback", pullback_trades)]:
+        lines = ["📈 진입타입 비교"]
+        for label, trades_subset in [("모멘텀", momentum_trades), ("눌림목", pullback_trades)]:
             if trades_subset:
                 s = calc_stats(trades_subset)
-                tg(
-                    f"{label:>12s} | "
-                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
-                    f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f} "
-                    f"{s['profit_factor']:>6.2f} {s['avg_mfe']:>8.3f} {s['avg_mae']:>8.3f}"
-                )
+                lines.append(f"  {label}: {s['count']}건 승률{s['win_rate']:.0f}% 순익{s['avg_pnl']:+.4f}% PF{s['profit_factor']:.2f}")
             else:
-                tg(f"{label:>12s} | {'(no trades)':>7s}")
+                lines.append(f"  {label}: 없음")
 
         if momentum_trades and pullback_trades:
             m_s = calc_stats(momentum_trades)
             p_s = calc_stats(pullback_trades)
             diff = p_s["avg_gross_pnl"] - m_s["avg_gross_pnl"]
-            tg(f"\n  Pullback - Momentum gross diff: {diff:+.4f}%/trade")
             if diff > 0:
-                tg(f"  ✅ 눌림목 매수가 모멘텀 추격보다 gross 기준 {diff:+.4f}% 우위")
+                lines.append(f"→ 눌림목이 모멘텀보다 {diff:+.4f}% 우위")
             else:
-                tg(f"  ❌ 모멘텀 추격이 눌림목보다 gross 기준 {-diff:+.4f}% 우위")
+                lines.append(f"→ 모멘텀이 눌림목보다 {-diff:+.4f}% 우위")
+        tg("\n".join(lines))
 
     # ── Per-Coin Breakdown ──
     print_header("PER-COIN BREAKDOWN")
@@ -895,108 +859,76 @@ def main():
 
     coin_stats.sort(key=lambda x: x[1]["total_pnl"], reverse=True)
 
-    tg(f"{'Market':>14s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'SL':>4} {'Trail':>5} {'TO':>4}")
-    tg("-" * 95)
-
+    lines = [f"{'Market':>14s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'PF':>6}", "-" * 65]
     for market, s in coin_stats:
-        tg(
-            f"{market:>14s} | "
-            f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
-            f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} "
-            f"{s['sl_exits']:>4d} {s['trail_exits']:>5d} {s['timeout_exits']:>4d}"
-        )
-
-    # Top 5 / Bottom 5
-    tg(f"\n  🏆 Top 5 coins:")
+        lines.append(f"{market:>14s} | {s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} {s['profit_factor']:>6.2f}")
+    lines.append(f"\n🏆 Top 5:")
     for market, s in coin_stats[:5]:
-        tg(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
-
-    tg(f"\n  💀 Bottom 5 coins:")
+        lines.append(f"  {market}: PnL {s['total_pnl']:+.2f}% WR {s['win_rate']:.1f}%")
+    lines.append(f"\n💀 Bottom 5:")
     for market, s in coin_stats[-5:]:
-        tg(f"    {market}: Total PnL {s['total_pnl']:+.2f}% | WR {s['win_rate']:.1f}% | {s['count']} trades")
+        lines.append(f"  {market}: PnL {s['total_pnl']:+.2f}% WR {s['win_rate']:.1f}%")
+    tg("\n".join(lines))
 
     # ── Per-Timeframe Breakdown ──
     print_header("PER-TIMEFRAME BREAKDOWN")
 
-    tg(f"{'Timeframe':>10s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'MaxDD%':>7} {'PF':>6} {'AvgHold':>8} {'SL':>4} {'Trail':>5} {'TO':>4}")
-    tg("-" * 100)
-
+    lines = [f"{'TF':>6s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'PF':>6}", "-" * 55]
     tf_ranking = []
     for tf_label in ["1min", "3min", "5min", "15min"]:
         trades = per_tf.get(tf_label, [])
         s = calc_stats(trades)
         tf_ranking.append((tf_label, s))
-        tg(
-            f"{tf_label:>10s} | "
-            f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
-            f"{s['max_dd']:>7.2f} {s['profit_factor']:>6.2f} {s['avg_hold']:>8.1f} "
-            f"{s['sl_exits']:>4d} {s['trail_exits']:>5d} {s['timeout_exits']:>4d}"
-        )
+        lines.append(f"{tf_label:>6s} | {s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} {s['profit_factor']:>6.2f}")
 
     best_tf = max(tf_ranking, key=lambda x: x[1]["total_pnl"])
-    tg(f"\n  ✅ Best timeframe: {best_tf[0]} (Total PnL: {best_tf[1]['total_pnl']:.2f}%)")
+    lines.append(f"\n✅ Best: {best_tf[0]} (PnL: {best_tf[1]['total_pnl']:.2f}%)")
+    tg("\n".join(lines))
 
     # ── Time-of-Day Analysis ──
-    print_header("TIME-OF-DAY ANALYSIS (KST)")
+    print_header("시간대별 분석 (KST)")
 
-    tg(f"{'Hour':>6s} | {'Trades':>7} {'WinR%':>7} {'AvgPnL%':>8} {'TotPnL%':>9} {'PF':>6}")
-    tg("-" * 55)
-
+    lines = []
     hour_stats = []
     for hour in range(24):
         trades = per_hour.get(hour, [])
         if trades:
             s = calc_stats(trades)
             hour_stats.append((hour, s))
-            marker = " 🌙" if 0 <= hour < 7 else (" ☀️" if 9 <= hour < 18 else " 🌆")
-            tg(
-                f"{hour:>4d}시{marker} | "
-                f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_pnl']:>8.3f} {s['total_pnl']:>9.2f} "
-                f"{s['profit_factor']:>6.2f}"
-            )
+            marker = "🌙" if 0 <= hour < 7 else ("☀️" if 9 <= hour < 18 else "🌆")
+            lines.append(f"{hour:02d}시{marker} {s['count']}건 승률{s['win_rate']:.0f}% 평균{s['avg_pnl']:+.3f}%")
 
     if hour_stats:
         best_hour = max(hour_stats, key=lambda x: x[1]["avg_pnl"])
         worst_hour = min(hour_stats, key=lambda x: x[1]["avg_pnl"])
-        tg(f"\n  ✅ Best hour:  {best_hour[0]:02d}:00 KST (Avg PnL: {best_hour[1]['avg_pnl']:+.3f}%, WR: {best_hour[1]['win_rate']:.1f}%)")
-        tg(f"  ❌ Worst hour: {worst_hour[0]:02d}:00 KST (Avg PnL: {worst_hour[1]['avg_pnl']:+.3f}%, WR: {worst_hour[1]['win_rate']:.1f}%)")
+        lines.append(f"\n✅ 최고: {best_hour[0]:02d}시 (평균 {best_hour[1]['avg_pnl']:+.3f}%)")
+        lines.append(f"❌ 최악: {worst_hour[0]:02d}시 (평균 {worst_hour[1]['avg_pnl']:+.3f}%)")
+    tg("\n".join(lines))
 
     # ── Orderbook Spread Analysis ──
-    print_header("ORDERBOOK SPREAD ANALYSIS (Current Snapshot)")
+    print_header("호가 스프레드 분석")
 
     if orderbooks:
-        tg(f"{'Market':>14s} | {'Spread%':>8} {'Imbalance':>10} {'Verdict':>12}")
-        tg("-" * 55)
-
+        lines = []
         ob_items = sorted(orderbooks.items(), key=lambda x: x[1]["spread_pct"])
         for market, ob in ob_items:
             spread = ob["spread_pct"]
-            imb = ob["imbalance"]
-            if spread > 0.30:
-                verdict = "⚠️ WIDE"
-            elif spread > 0.15:
-                verdict = "🟡 OK"
-            else:
-                verdict = "✅ TIGHT"
-
-            tg(f"{market:>14s} | {spread:>8.4f} {imb:>+10.3f} {verdict:>12}")
+            verdict = "⚠️넓음" if spread > 0.30 else ("🟡보통" if spread > 0.15 else "✅좁음")
+            lines.append(f"{market:12s} 스프레드{spread:.4f}% {verdict}")
 
         wide = [m for m, ob in ob_items if ob["spread_pct"] > 0.30]
         if wide:
-            tg(f"\n  ⚠️ Wide spreads (>0.30%): {', '.join(wide)}")
-            tg(f"     Consider excluding these from live trading to reduce slippage.")
+            lines.append(f"\n⚠️ 스프레드 넓은 코인: {', '.join(wide)}")
+            lines.append(f"→ 실매매 시 제외 권장")
+        tg("\n".join(lines))
 
     # ── Holding Time Grid Experiment ──
-    print_header("HOLDING TIME GRID EXPERIMENT")
-    tg("  Testing different max_hold values with optimal params...\n")
+    print_header("홀딩 시간 실험")
 
     hold_values = [5, 10, 15, 20, 30, 45, 60]
-    tg(f"{'MaxHold':>8s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9} {'PF':>6} {'SL%':>5} {'Trail%':>7} {'TO%':>5}")
-    tg("-" * 95)
-
+    lines = []
     hold_results = []
     for mh in hold_values:
-        # Temporarily override max_hold for all timeframes
         saved_max_holds = {}
         for tf_key in TIMEFRAMES:
             saved_max_holds[tf_key] = TIMEFRAMES[tf_key]["max_hold"]
@@ -1006,28 +938,18 @@ def main():
         h_stats = calc_stats(h_trades)
         hold_results.append((mh, h_stats))
 
-        n = max(h_stats["count"], 1)
-        tg(
-            f"{mh:>8d} | "
-            f"{h_stats['count']:>7d} {h_stats['win_rate']:>7.1f} {h_stats['avg_gross_pnl']:>+10.4f} "
-            f"{h_stats['avg_pnl']:>+9.4f} {h_stats['total_pnl']:>+9.2f} "
-            f"{h_stats['profit_factor']:>6.2f} "
-            f"{h_stats['sl_exits']/n*100:>5.1f} {h_stats['trail_exits']/n*100:>7.1f} "
-            f"{h_stats['timeout_exits']/n*100:>5.1f}"
-        )
+        lines.append(f"{mh:>3d}봉 | {h_stats['count']}건 승률{h_stats['win_rate']:.0f}% 순익{h_stats['total_pnl']:+.1f}% PF{h_stats['profit_factor']:.2f}")
 
-        # Restore
         for tf_key in TIMEFRAMES:
             TIMEFRAMES[tf_key]["max_hold"] = saved_max_holds[tf_key]
 
     best_hold = max(hold_results, key=lambda x: x[1]["total_pnl"])
-    tg(f"\n  Best max_hold: {best_hold[0]} candles (Net PnL: {best_hold[1]['total_pnl']:+.2f}%)")
+    lines.append(f"\n✅ 최적 홀딩: {best_hold[0]}봉 (순익 {best_hold[1]['total_pnl']:+.2f}%)")
+    tg("\n".join(lines))
 
     # ── Optimal Filter Combo Search ──
-    print_header("OPTIMAL FILTER COMBO SEARCH")
-    tg("  Searching indicator filter combos on final trades...\n")
+    print_header("필터 콤보 탐색")
 
-    # Build per-trade feature vectors from indicator data
     trade_features = []
     for t in final_trades:
         idx = t.get("entry_idx", 0)
@@ -1045,7 +967,6 @@ def main():
             continue
         ind = inds[idx]
 
-        # Extract features available at entry time
         close = ind["close"]
         ema20 = ind["ema20"]
         rsi = ind["rsi"]
@@ -1063,7 +984,6 @@ def main():
         trade_features.append((feat, t))
 
     if trade_features:
-        # Define filter conditions to test
         filter_defs = {
             "ema_gap<=0.3": lambda f: f["ema_gap_pct"] <= 0.3,
             "ema_gap<=0.5": lambda f: f["ema_gap_pct"] <= 0.5,
@@ -1082,11 +1002,8 @@ def main():
             "is_momentum": lambda f: f.get("entry_type") == "momentum",
         }
 
-        # Test single filters
-        tg(f"  [Single Filters]")
-        tg(f"{'Filter':>22s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9} {'TotNet%':>9}")
-        tg("-" * 75)
-
+        # 단일 필터
+        lines = ["[단일 필터]"]
         single_results = []
         for fname, ffunc in filter_defs.items():
             passed = [(f, t) for f, t in trade_features if ffunc(f)]
@@ -1094,16 +1011,12 @@ def main():
                 ptrades = [t for _, t in passed]
                 s = calc_stats(ptrades)
                 single_results.append((fname, s, len(passed)))
-                tg(
-                    f"{fname:>22s} | "
-                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
-                    f"{s['avg_pnl']:>+9.4f} {s['total_pnl']:>+9.2f}"
-                )
+                lines.append(f"{fname:>20s} | {s['count']}건 승률{s['win_rate']:.0f}% 순익{s['avg_pnl']:+.4f}%")
+        tg("\n".join(lines))
 
-        # Test 2-filter combos (top combinations)
+        # 2개 조합 필터
         filter_names = list(filter_defs.keys())
         combo_results = []
-
         for i in range(len(filter_names)):
             for j in range(i + 1, len(filter_names)):
                 f1, f2 = filter_names[i], filter_names[j]
@@ -1114,86 +1027,52 @@ def main():
                     s = calc_stats(ptrades)
                     combo_results.append((f"{f1} & {f2}", s, len(passed)))
 
-        # Sort by avg_gross_pnl descending
         combo_results.sort(key=lambda x: x[1]["avg_gross_pnl"], reverse=True)
 
         if combo_results:
-            tg(f"\n  [Top 15 Two-Filter Combos by Gross PnL]")
-            tg(f"{'Combo':>45s} | {'Trades':>7} {'WinR%':>7} {'AvgGross%':>10} {'AvgNet%':>9}")
-            tg("-" * 90)
-
+            lines = ["[Top 15 필터 조합]"]
             for combo_name, s, cnt in combo_results[:15]:
-                marker = " ★" if s["avg_gross_pnl"] > 0 else ""
-                tg(
-                    f"{combo_name:>45s} | "
-                    f"{s['count']:>7d} {s['win_rate']:>7.1f} {s['avg_gross_pnl']:>+10.4f} "
-                    f"{s['avg_pnl']:>+9.4f}{marker}"
-                )
+                star = "★" if s["avg_gross_pnl"] > 0 else ""
+                lines.append(f"{star}{combo_name} | {s['count']}건 승률{s['win_rate']:.0f}% 순익{s['avg_pnl']:+.4f}%")
 
-            # Profitable combos summary
-            profitable = [c for c in combo_results if c[1]["avg_gross_pnl"] > 0]
             net_profitable = [c for c in combo_results if c[1]["avg_pnl"] > 0]
-            tg(f"\n  Gross PnL > 0 combos: {len(profitable)} / {len(combo_results)}")
-            tg(f"  Net PnL > 0 combos:   {len(net_profitable)} / {len(combo_results)}")
-
+            lines.append(f"\n순익>0 조합: {len(net_profitable)}/{len(combo_results)}개")
             if net_profitable:
-                tg(f"\n  ✅ NET PROFITABLE combos:")
+                lines.append("\n✅ 수익나는 조합:")
                 for name, s, cnt in net_profitable[:5]:
-                    tg(f"     {name}: WR={s['win_rate']:.1f}% gross={s['avg_gross_pnl']:+.4f}% net={s['avg_pnl']:+.4f}% (n={cnt})")
+                    lines.append(f"  {name}: 승률{s['win_rate']:.0f}% 순익{s['avg_pnl']:+.4f}% ({cnt}건)")
+            tg("\n".join(lines))
     else:
-        tg("  No trade features extracted - skipping combo search.")
+        tg("필터 분석할 트레이드 없음")
 
-    # ── Summary ──
+    # ── 최종 요약 ──
     elapsed_total = time.time() - start_time
 
-    print_header("EXECUTION SUMMARY")
-    tg(f"""
-  Total runtime:     {elapsed_total:.0f}s ({elapsed_total/60:.1f} minutes)
-  Data collected:    {total_candles:,} candles
-  Series tested:     {len(all_data)}
-  Phase 1 combos:    {len(phase1_results)}
-  Phase 2 combos:    {len(phase2_results)}
-  Total trades sim:  {final_stats['count']}
-""")
+    n = max(final_stats['count'], 1)
+    profit_status = "✅ 순수익" if final_stats['total_pnl'] > 0 else "❌ 순손실"
+    pf_status = "양호" if final_stats['profit_factor'] > 1.5 else "개선필요"
 
-    # ── Recommendations ──
-    print_header("RECOMMENDATIONS")
+    lines = [f"""🏁 백테스트 완료
+━━━━━━━━━━━━━━━━━━━━
+소요시간: {elapsed_total:.0f}초 ({elapsed_total/60:.1f}분)
+수집 캔들: {total_candles:,}개 | 시리즈: {len(all_data)}개
+시뮬레이션: {final_stats['count']}건
 
-    tg(f"""
-  Based on this comprehensive backtest:
-
-  1. OPTIMAL PARAMETERS:
-     - Checkpoint: {best_cp*100:.2f}%
-     - Trail:      {best_trail*100:.2f}%
-     - SL Min:     {best_sl_min*100:.2f}%
-     - SL Max:     {best_sl_max*100:.2f}%
-
-  2. BEST TIMEFRAME: {best_tf[0]}
-     → Consider focusing the bot on this timeframe
-
-  3. PROFITABILITY:
-     {"✅ Strategy is NET PROFITABLE" if final_stats['total_pnl'] > 0 else "❌ Strategy is NET LOSING — parameter tuning needed"}
-     → Profit Factor: {final_stats['profit_factor']:.2f} {"(healthy > 1.5)" if final_stats['profit_factor'] > 1.5 else "(needs improvement)"}
-
-  4. EXIT ANALYSIS:
-     → SL exits: {final_stats['sl_exits']/max(final_stats['count'],1)*100:.0f}% — {"too many, widen SL" if final_stats['sl_exits']/max(final_stats['count'],1) > 0.5 else "acceptable"}
-     → Trail exits: {final_stats['trail_exits']/max(final_stats['count'],1)*100:.0f}% — ideal primary exit
-     → Timeouts: {final_stats['timeout_exits']/max(final_stats['count'],1)*100:.0f}% — {"too many, improve signal quality" if final_stats['timeout_exits']/max(final_stats['count'],1) > 0.3 else "acceptable"}
-""")
+💡 추천사항:
+1. 최적 파라미터: CP {best_cp*100:.2f}% / Trail {best_trail*100:.2f}% / SL {best_sl_min*100:.2f}~{best_sl_max*100:.2f}%
+2. 최적 타임프레임: {best_tf[0]}
+3. 수익성: {profit_status} | PF {final_stats['profit_factor']:.2f} ({pf_status})
+4. 청산비율: 손절 {final_stats['sl_exits']/n*100:.0f}% | 트레일 {final_stats['trail_exits']/n*100:.0f}% | 시간초과 {final_stats['timeout_exits']/n*100:.0f}%"""]
 
     if hour_stats:
         profitable_hours = [h for h, s in hour_stats if s["avg_pnl"] > 0]
         losing_hours = [h for h, s in hour_stats if s["avg_pnl"] < 0]
         if profitable_hours:
-            tg(f"  5. PROFITABLE HOURS (KST): {', '.join(f'{h:02d}:00' for h in sorted(profitable_hours))}")
+            lines.append(f"5. 수익시간대: {', '.join(f'{h:02d}시' for h in sorted(profitable_hours))}")
         if losing_hours:
-            tg(f"     LOSING HOURS (KST):     {', '.join(f'{h:02d}:00' for h in sorted(losing_hours))}")
-            tg(f"     → Consider disabling bot during losing hours")
+            lines.append(f"   손실시간대: {', '.join(f'{h:02d}시' for h in sorted(losing_hours))}")
 
-    tg("")
-    print_separator()
-    tg("  Backtest complete! Results above.")
-    print_separator()
+    tg("\n".join(lines))
     sys.exit(0)
 
 
