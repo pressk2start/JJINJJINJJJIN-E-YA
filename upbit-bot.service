@@ -1,0 +1,17 @@
+[Unit]
+Description=Upbit Signal Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bots
+ExecStart=/usr/bin/python3 /home/ubuntu/bots/bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/tmp/bot_stdout.log
+StandardError=append:/tmp/bot_stdout.log
+
+[Install]
+WantedBy=multi-user.target
