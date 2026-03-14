@@ -6357,15 +6357,15 @@ def _v4_regime_filter_60m(c60):
 
 # --- 청산 파라미터 (WF 데이터 기반) ---
 _V4_EXIT_PARAMS = {
-    # Phase 1 메인: TRAIL_SL1.0/A0.5/T0.3 (60d WF 최적)
+    # Phase 1 메인: TRAIL_SL0.7/A0.3/T0.2 (WF 4폴드 전부 최적)
     "거래량3배": {
         "strategy": "TRAIL",
-        "sl_pct": 0.010,           # SL 1.0%
-        "activation_pct": 0.005,   # Activation 0.5%
-        "trail_pct": 0.003,        # Trail 0.3%
+        "sl_pct": 0.007,           # SL 0.7%
+        "activation_pct": 0.003,   # Activation 0.3%
+        "trail_pct": 0.002,        # Trail 0.2%
         "hold_bars": 0,
         "max_bars": 60,
-        "description": "TRAIL_SL1.0/A0.5/T0.3",
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
     },
     # Phase 4: 15m_눌림반전 — TRAIL_SL0.7/A0.3/T0.2 (60d WF 차선)
     "15m_눌림반전": {
