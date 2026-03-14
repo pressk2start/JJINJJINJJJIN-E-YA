@@ -33,6 +33,9 @@ def _mark_done():
         with open(DONE_FILE, "w") as f:
             f.write(f"{time.time()}\n{os.getpid()}\n{datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
     except: pass
+    # 정상 완료 → 크래시 카운터 리셋
+    try: os.remove(CRASH_FILE)
+    except: pass
 
 def _is_recently_done():
     """최근 DONE_COOLDOWN 이내에 완료된 적 있으면 True"""
@@ -52,6 +55,8 @@ def _is_recently_done():
 # ── 중복 실행 방지 (시작 마커 파일 기반 — SIGKILL에도 안전) ──
 _lock_fd = None
 RUNNING_FILE = os.path.join(SCRIPT_DIR, ".study_running")  # 시작 마커 (SIGKILL에도 남음)
+CRASH_FILE = os.path.join(SCRIPT_DIR, ".study_crashes")    # 연속 크래시 카운터
+MAX_CRASHES = 3  # 연속 크래시 이 횟수 초과 시 재시작 차단
 
 def _is_pid_alive(pid):
     """해당 PID가 살아있는지 확인"""
@@ -71,6 +76,25 @@ def _acquire_lock():
     if _is_recently_done():
         print(f"[스킵] 최근 완료됨 (쿨다운 {DONE_COOLDOWN}초). 재실행 불필요.")
         os._exit(0)
+
+    # 0-1단계: 연속 크래시 감지 → 무한 재시작 루프 방지
+    try:
+        if os.path.exists(CRASH_FILE):
+            with open(CRASH_FILE) as f:
+                parts = f.read().strip().split("\n")
+            crash_count = int(parts[0]) if parts else 0
+            crash_ts = float(parts[1]) if len(parts) > 1 else 0
+            # 30분 이상 지나면 카운터 리셋
+            if time.time() - crash_ts > 1800:
+                crash_count = 0
+                os.remove(CRASH_FILE)
+            elif crash_count >= MAX_CRASHES:
+                print(f"[차단] 연속 크래시 {crash_count}회. 30분 후 자동 리셋됩니다.")
+                tg(f"[크래시루프] 연속 {crash_count}회 크래시 감지. 자동 재시작 차단.\n"
+                   f"수동: rm .study_crashes 후 재시작")
+                os._exit(0)
+    except (ValueError, FileNotFoundError):
+        pass
 
     # 1단계: 시작 마커 파일 검증 (SIGKILL에도 남아있음)
     try:
@@ -145,10 +169,24 @@ def _death_handler(signum, frame):
     except: pass
     sys.exit(1)
 
+def _increment_crash():
+    """크래시 카운터 증가"""
+    try:
+        count = 0
+        if os.path.exists(CRASH_FILE):
+            with open(CRASH_FILE) as f:
+                parts = f.read().strip().split("\n")
+            count = int(parts[0]) if parts else 0
+        count += 1
+        with open(CRASH_FILE, "w") as f:
+            f.write(f"{count}\n{time.time():.0f}")
+    except: pass
+
 def _atexit_diag():
     """atexit: 정상종료가 아닌 경우 알림.
     비정상 종료 시에는 락 파일을 보존하여 재시작 루프를 방지."""
     if not os.path.exists(DONE_FILE):
+        _increment_crash()
         mem = _get_mem_mb()
         try:
             tg(f"[비정상종료] _mark_done() 호출 없이 종료됨 | mem={mem:.0f}MB\n"
@@ -183,7 +221,7 @@ WF_TEST_DAYS  = 7    # 검증 윈도우 (일)
 WF_STEP_DAYS  = 5    # 슬라이딩 스텝 (일) — 겹침 증가로 폴드 수 확보
 WF_MIN_TRAIN  = 20   # fold 내 최소 학습 시그널 수
 WF_MIN_TEST   = 5    # fold 내 최소 검증 시그널 수
-MAX_SIGS_PER_COIN = 400  # 60일 데이터에 맞게 증가
+MAX_SIGS_PER_COIN = 250  # OOM 방지: 코인당 시그널 수 제한
 
 COND_KEYS = {
     "rsi14","rsi7","bb20","bb10","stoch_k","stoch_d",
@@ -1568,6 +1606,7 @@ def generate_report(all_results, dist_acc):
     L.append(f"\n{'='*65}")
     L.append(f"[6] 워크포워드 검증 (Train={WF_TRAIN_DAYS}일 → Test={WF_TEST_DAYS}일, Step={WF_STEP_DAYS}일)")
     L.append("-"*65)
+    wf_summary = []  # [6-2] 종합 요약용
 
     # 시그널의 time 필드로 날짜 파싱 → datetime 객체
     from datetime import date as _date
@@ -1701,59 +1740,16 @@ def generate_report(all_results, dist_acc):
         else:
             verdict = "FAIL — 과적합 의심 또는 비수익"
         L.append(f"    판정: {verdict}")
+        # 종합 요약용 저장 (중복 계산 방지)
+        wf_summary.append((st, avg_te_ev, pos_rate, n_folds, verdict.split(" —")[0]))
 
-    # [6-2] 워크포워드 종합 요약
+    # [6-2] 워크포워드 종합 요약 (위에서 수집한 결과 재사용)
     L.append(f"\n  {'─'*50}")
     L.append(f"  [워크포워드 종합]")
-    wf_summary = []
-    for st, sigs in all_results.items():
-        if len(sigs) < WF_MIN_TRAIN + WF_MIN_TEST:
-            continue
-        sigs_sorted = sorted(sigs, key=lambda s: s["time"])
-        # _day가 이미 있으면 재사용, 없으면 파싱
-        for s in sigs_sorted:
-            if "_day" not in s:
-                s["_day"] = _parse_day(s["time"])
-        days_all = [s["_day"] for s in sigs_sorted if s["_day"]]
-        if len(days_all) < 2: continue
-        d_min, d_max = min(days_all), max(days_all)
-        if (d_max - d_min).days < WF_TRAIN_DAYS + WF_TEST_DAYS: continue
-
-        ek_list = sorted(set(k for s in sigs_sorted for k in s.get("exits", {})))
-        if not ek_list: continue
-
-        fold_start = d_min
-        te_evs_s = []
-        while True:
-            tr_start = fold_start
-            tr_end = tr_start + timedelta(days=WF_TRAIN_DAYS)
-            te_start = tr_end
-            te_end = te_start + timedelta(days=WF_TEST_DAYS)
-            if te_end > d_max + timedelta(days=1): break
-            tr_sigs = [s for s in sigs_sorted if s["_day"] is not None
-                       and tr_start <= s["_day"] < tr_end]
-            te_sigs = [s for s in sigs_sorted if s["_day"] is not None
-                       and te_start <= s["_day"] < te_end]
-            if len(tr_sigs) >= WF_MIN_TRAIN and len(te_sigs) >= WF_MIN_TEST:
-                best_ek, best_ev = None, -999
-                for ek in ek_list:
-                    m = calc_m([s["exits"].get(ek, 0) for s in tr_sigs])
-                    if m and m["ev"] > best_ev: best_ev = m["ev"]; best_ek = ek
-                if best_ek:
-                    te_m = calc_m([s["exits"].get(best_ek, 0) for s in te_sigs])
-                    te_evs_s.append(te_m["ev"] if te_m else 0)
-            fold_start += timedelta(days=WF_STEP_DAYS)
-
-        if te_evs_s:
-            avg_e = sum(te_evs_s)/len(te_evs_s)
-            pos_r = sum(1 for e in te_evs_s if e > 0)/len(te_evs_s)*100
-            tag = "PASS" if avg_e > 0 and pos_r >= 60 else ("WEAK" if avg_e > 0 else "FAIL")
-            wf_summary.append((st, avg_e, pos_r, len(te_evs_s), tag))
-
     if wf_summary:
         wf_summary.sort(key=lambda x: -x[1])
         for st, avg_e, pos_r, nf, tag in wf_summary:
-            L.append(f"    [{tag:>4s}] {st:<16s} avgTE={avg_e:+.4f}% 양수율={pos_r:.0f}% ({nf}폴드)")
+            L.append(f"    [{tag:>8s}] {st:<16s} avgTE={avg_e:+.4f}% 양수율={pos_r:.0f}% ({nf}폴드)")
     else:
         L.append(f"    >>> 워크포워드 검증 가능한 시그널 없음 <<<")
 
@@ -1825,6 +1821,7 @@ def main():
     del btc1
     _force_free()  # BTC 1분봉 메모리 OS 반환
 
+    MEM_LIMIT_MB = 400  # 메모리 상한 (OOM 방지)
     all_results = defaultdict(list)
     dist_acc = defaultdict(list)
     analysis_start = time.time()
@@ -1837,9 +1834,14 @@ def main():
             tg(f"[살아있음] 분석 진행중 {i+1}/{len(coins)} | {int(now-t0)}초 경과{mem_str}")
             last_hb = now
 
-        # 20번째 이후 코인별 상세 로그 (죽는 지점 추적)
-        if i >= 19:
-            mem = _get_mem_mb()
+        # 메모리 감시: 상한 초과 시 잔여 코인 스킵
+        mem = _get_mem_mb()
+        if mem > MEM_LIMIT_MB:
+            tg(f"[메모리경고] {mem:.0f}MB > {MEM_LIMIT_MB}MB | {i}/{len(coins)}코인 완료, 나머지 스킵")
+            break
+
+        # 코인별 상세 로그 (죽는 지점 추적)
+        if i >= 9:
             tg(f"[코인시작] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
 
         try:
@@ -1854,10 +1856,10 @@ def main():
         # 매 코인마다 GC + malloc_trim (OOM 방지: OS에 메모리 실제 반환)
         _force_free()
 
-        if i >= 19:
+        if i >= 9:
             mem = _get_mem_mb()
             tg(f"[코인완료] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
-        if (i+1) % 10 == 0:
+        if (i+1) % 5 == 0:
             total_elapsed = time.time() - analysis_start
             avg_per_coin = total_elapsed / (i+1)
             remaining = avg_per_coin * (len(coins) - i - 1)

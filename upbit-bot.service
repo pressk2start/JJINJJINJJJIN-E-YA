@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bots
+ExecStartPre=/bin/rm -f /home/ubuntu/bots/.study_running /home/ubuntu/bots/.study_lock /home/ubuntu/bots/.study_done
 ExecStart=/usr/bin/python3 /home/ubuntu/bots/bot.py
 Restart=on-failure
 RestartSec=30
