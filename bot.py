@@ -9510,10 +9510,18 @@ def monitor_position(m,
     # === 🎯 WF데이터: EXIT_PARAMS 기반 트레일 파라미터 ===
     _v4_ep = pre.get("v4_exit_params") or v4_get_exit_params(signal_tag)
     checkpoint_reached = False
-    # 🔧 WF: 체크포인트 = activation_pct (거래량3배: 0.5%, 눌림반전: 0.3%)
-    dyn_checkpoint = max(get_dynamic_checkpoint(), _v4_ep.get("activation_pct", 0.005))
-    # 🔧 WF: 트레일 간격 = trail_pct (거래량3배: 0.3%, 눌림반전: 0.2%)
-    trail_dist_min = max(get_trail_distance_min(), _v4_ep.get("trail_pct", 0.003))
+    # 🔧 WF: v4_ep activation 우선 적용 (비용바닥만 보장, 글로벌 BASE 무시)
+    # 거래량3배/눌림반전: 0.3%, EMA정배열/MACD골든: 0.5%
+    _v4_activation = _v4_ep.get("activation_pct")
+    if _v4_activation is not None:
+        _cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA  # ≈0.23% (수수료+슬립+α)
+        dyn_checkpoint = max(_cost_floor, _v4_activation)
+    else:
+        dyn_checkpoint = get_dynamic_checkpoint()
+    # 🔧 WF: v4_ep trail 직접 적용 (글로벌 TRAIL_DISTANCE_MIN_BASE 무시)
+    # 거래량3배/눌림반전: 0.2%, EMA정배열/MACD골든: 0.3%
+    _v4_trail = _v4_ep.get("trail_pct")
+    trail_dist_min = _v4_trail if _v4_trail is not None else get_trail_distance_min()
     # 🔧 WF: hold_bars (현재 모든 시그널 0)
     _v4_hold_bars = _v4_ep.get("hold_bars", 0)
     _v4_max_bars = _v4_ep.get("max_bars", 60)
