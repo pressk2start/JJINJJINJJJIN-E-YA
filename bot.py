@@ -67,10 +67,10 @@ def _acquire_lock():
     """시작 마커 파일 + flock으로 중복 방지. SIGKILL에도 안전."""
     global _lock_fd
 
-    # 0단계: 최근 완료됐으면 즉시 종료
+    # 0단계: 최근 완료됐으면 즉시 종료 (atexit 우회)
     if _is_recently_done():
         print(f"[스킵] 최근 완료됨 (쿨다운 {DONE_COOLDOWN}초). 재실행 불필요.")
-        sys.exit(0)
+        os._exit(0)
 
     # 1단계: 시작 마커 파일 검증 (SIGKILL에도 남아있음)
     try:
@@ -83,13 +83,13 @@ def _acquire_lock():
 
             if old_pid and old_pid != os.getpid():
                 if _is_pid_alive(old_pid):
-                    # 프로세스 살아있음 → 무조건 차단
-                    tg(f"[잠금] PID {old_pid} 실행중 ({run_age:.0f}초 경과). 새 인스턴스 차단.")
-                    sys.exit(0)
+                    # 프로세스 살아있음 → 차단 (print만, TG 스팸 방지)
+                    print(f"[잠금] PID {old_pid} 실행중 ({run_age:.0f}초 경과). 새 인스턴스 차단.")
+                    os._exit(0)  # atexit 우회 → [비정상종료] 오탐 방지
                 elif run_age < 300:
                     # 프로세스 죽었지만 5분 이내 시작 → 재시작 루프 방지
-                    tg(f"[잠금] 최근 비정상종료 ({run_age:.0f}초 전). 5분 쿨다운. 재시작 차단.")
-                    sys.exit(0)
+                    print(f"[잠금] 최근 비정상종료 ({run_age:.0f}초 전). 5분 쿨다운. 재시작 차단.")
+                    os._exit(0)
                 # 5분 이상 지났고 프로세스 죽음 → stale, 새로 시작 허용
                 print(f"[락해제] 이전 프로세스 PID {old_pid} 사망 ({run_age:.0f}초 전). 새로 시작.")
     except (ValueError, FileNotFoundError):
@@ -103,7 +103,7 @@ def _acquire_lock():
         _lock_fd.flush()
     except (IOError, OSError):
         print("[잠금] 다른 인스턴스가 실행중 (flock). 종료.")
-        sys.exit(0)
+        os._exit(0)
 
     # 3단계: 시작 마커 기록 (SIGKILL에도 파일로 남음)
     try:
