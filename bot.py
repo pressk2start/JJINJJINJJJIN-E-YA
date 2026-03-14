@@ -60,8 +60,10 @@ def _is_pid_alive(pid):
     except (OSError, ProcessLookupError):
         return False
 
+_LOCK_MAX_AGE = 1800  # 락 파일 최대 수명 30분 (이전 프로세스 강제종료 대비)
+
 def _acquire_lock():
-    """fcntl.flock + PID 검증으로 확실한 중복 방지."""
+    """fcntl.flock + PID + 시작시간 검증으로 확실한 중복 방지."""
     global _lock_fd
 
     # 0단계: 최근 완료됐으면 즉시 종료
@@ -69,23 +71,41 @@ def _acquire_lock():
         print(f"[스킵] 최근 완료됨 (쿨다운 {DONE_COOLDOWN}초). 재실행 불필요.")
         sys.exit(0)
 
-    # 1단계: 기존 PID 파일 검증 (flock 실패 대비)
-    _script_basename = os.path.basename(os.path.abspath(__file__))  # "upbit_signal_study.py"
+    # 1단계: 기존 락 파일 검증 (PID + 시작시간)
+    _script_basename = os.path.basename(os.path.abspath(__file__))
     try:
         if os.path.exists(LOCK_FILE):
             with open(LOCK_FILE) as f:
-                old_pid = int(f.read().strip())
+                lock_content = f.read().strip()
+            # 락 파일 형식: "PID:START_TIMESTAMP" 또는 레거시 "PID"
+            parts = lock_content.split(":")
+            old_pid = int(parts[0])
+            lock_start = float(parts[1]) if len(parts) > 1 else 0
+
+            # 시작시간 기반 중복 방지: 최근 시작된 프로세스가 있으면 차단
+            # (프로세스가 죽어서 PID 체크 실패해도, 시간 기반으로 재시작 루프 방지)
+            if lock_start > 0:
+                lock_age = time.time() - lock_start
+                if lock_age < _LOCK_MAX_AGE:
+                    if old_pid != os.getpid():
+                        # PID가 살아있는지 확인
+                        if _is_pid_alive(old_pid):
+                            print(f"[잠금] PID {old_pid} 실행중 ({lock_age:.0f}초 경과). 종료.")
+                            sys.exit(0)
+                        # PID가 죽었어도, 최근 시작(5분 이내)이면 재시작 루프 방지
+                        if lock_age < 300:
+                            print(f"[잠금] 최근 시작 후 비정상 종료 ({lock_age:.0f}초 전). 쿨다운 대기. 종료.")
+                            sys.exit(0)
+
+            # 레거시 호환: 시작시간 없으면 PID+cmdline 방식
             if old_pid != os.getpid() and _is_pid_alive(old_pid):
-                # /proc/PID/cmdline으로 같은 스크립트인지 확인
                 try:
                     with open(f"/proc/{old_pid}/cmdline", "rb") as f:
                         cmdline = f.read().decode("utf-8", errors="ignore")
-                    # 스크립트 파일명 또는 모듈명으로 매칭 (실행 방식 무관)
-                    if _script_basename in cmdline or "signal_study" in cmdline:
+                    if _script_basename in cmdline or "signal_study" in cmdline or "bot" in cmdline:
                         print(f"[잠금] PID {old_pid} 실행중 확인 (cmdline 매칭). 종료.")
                         sys.exit(0)
                 except (FileNotFoundError, PermissionError):
-                    # /proc 접근 실패해도, PID가 살아있으면 안전하게 차단
                     print(f"[잠금] PID {old_pid} 살아있음 (/proc 접근불가). 종료.")
                     sys.exit(0)
     except (ValueError, FileNotFoundError):
@@ -95,7 +115,7 @@ def _acquire_lock():
     try:
         _lock_fd = open(LOCK_FILE, "w")
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 비차단 배타적 잠금
-        _lock_fd.write(str(os.getpid()))
+        _lock_fd.write(f"{os.getpid()}:{time.time():.0f}")
         _lock_fd.flush()
     except (IOError, OSError):
         print("[잠금] 다른 인스턴스가 실행중 (flock). 종료.")
@@ -113,24 +133,45 @@ def _release_lock(*a):
     except: pass
 
 def _death_handler(signum, frame):
-    """프로세스 종료 시그널 포착 → 텔레그램으로 원인 전송"""
+    """프로세스 종료 시그널 포착 → 텔레그램으로 원인 전송.
+    락 파일은 삭제하지 않음 (시간 기반으로 재시작 루프 방지)."""
     import signal as _sig
     sig_name = _sig.Signals(signum).name if hasattr(_sig, 'Signals') else str(signum)
     mem = _get_mem_mb()
     try:
-        tg(f"[강제종료] 시그널={sig_name}({signum}) | mem={mem:.0f}MB\n프로세스가 외부에서 kill 되었습니다.")
+        tg(f"[강제종료] 시그널={sig_name}({signum}) | mem={mem:.0f}MB\n"
+           f"프로세스가 외부에서 kill 되었습니다. (5분간 재시작 차단)")
     except: pass
-    _release_lock()
+    # 락 파일 남겨둠 → _acquire_lock의 시간 기반 보호로 재시작 루프 방지
+    # flock만 해제 (파일은 삭제 안 함)
+    global _lock_fd
+    try:
+        if _lock_fd:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+            _lock_fd.close()
+            _lock_fd = None
+    except: pass
     sys.exit(1)
 
 def _atexit_diag():
-    """atexit: 정상종료가 아닌 경우 알림"""
+    """atexit: 정상종료가 아닌 경우 알림.
+    비정상 종료 시에는 락 파일을 보존하여 재시작 루프를 방지."""
     if not os.path.exists(DONE_FILE):
         mem = _get_mem_mb()
         try:
-            tg(f"[비정상종료] _mark_done() 호출 없이 종료됨 | mem={mem:.0f}MB\n완료 전에 프로세스가 죽었습니다.")
+            tg(f"[비정상종료] _mark_done() 호출 없이 종료됨 | mem={mem:.0f}MB\n"
+               f"완료 전에 프로세스가 죽었습니다. (5분간 재시작 차단)")
         except: pass
-    _release_lock()
+        # 비정상 종료 → 락 파일 보존 (시간 기반 재시작 차단)
+        global _lock_fd
+        try:
+            if _lock_fd:
+                fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+                _lock_fd.close()
+                _lock_fd = None
+        except: pass
+    else:
+        _release_lock()
 
 atexit.register(_atexit_diag)
 for _s in (sig_mod.SIGTERM, sig_mod.SIGINT, sig_mod.SIGHUP):
@@ -401,7 +442,7 @@ def _load_day_file(fpath):
         pass
     return rows
 
-_GLOBAL_DAYS = 60  # main()에서 args.days로 갱신
+_GLOBAL_DAYS = 45  # main()에서 args.days로 갱신
 
 def _load_coin_1m(coin, days=None):
     """코인의 일별 파일들을 합쳐서 시간순 캔들 리스트 반환"""
@@ -551,6 +592,7 @@ def collect(days=30, top_n=30):
     # 전역 통계 리셋
     _collect_stats["done"] = _collect_stats["skip"] = _collect_stats["fail"] = _collect_stats["candles"] = 0
 
+    COLLECT_TIMEOUT = 900  # 수집 전체 15분 제한
     results = []
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         futures = {}
@@ -560,7 +602,15 @@ def collect(days=30, top_n=30):
             futures[f] = coin
 
         last_hb = t0
+        timed_out = False
         for i, future in enumerate(as_completed(futures)):
+            # 전체 수집 타임아웃 체크
+            if time.time() - t0 > COLLECT_TIMEOUT and not timed_out:
+                timed_out = True
+                tg(f"[수집타임아웃] {COLLECT_TIMEOUT//60}분 초과 → 나머지 스킵, 있는 데이터로 분석 진행")
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
             coin_name, status, count = future.result()
             results.append((coin_name, status, count))
 
@@ -1736,7 +1786,7 @@ def _has_enough_data(min_coins=10, min_days=25):
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--days", type=int, default=45)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     args = parser.parse_args()
@@ -1748,8 +1798,8 @@ def main():
     t0 = time.time()
     last_hb = t0
 
-    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 80% 이상 있어야 스킵)
-    need_days = max(25, int(args.days * 0.8))
+    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 70% 이상이면 스킵)
+    need_days = max(25, int(args.days * 0.7))
     if not args.skip_collect and _has_enough_data(min_days=need_days):
         tg(f"[자동] 1m 데이터 충분 ({need_days}일+, 10코인+) → 수집 스킵")
         args.skip_collect = True
