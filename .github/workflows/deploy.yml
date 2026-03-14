@@ -17,5 +17,5 @@ jobs:
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
             set -e
-            cd /home/ubuntu/bots
+            cd /home/ubuntu/bot
             bash ./deploy_restart.sh
