@@ -9,8 +9,8 @@ import uuid
 import hashlib
 import jwt
 
-# 🔧 v4 전략 모듈 (리포트 v3.2 기반 전면 개편)
-import strategy_v4
+# 🔧 WF 데이터 기반 전략 모듈 (bot.py에 인라인 통합)
+# strategy_v4 함수들은 아래 "# ============ strategy_v4 통합 ============" 섹션에 정의
 
 # 🔧 PyJWT 패키지 검증 (동명이인 패키지 혼동 방지)
 try:
@@ -3634,7 +3634,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             with _POSITION_LOCK:
                 pos_for_tag = OPEN_POSITIONS.get(m) or {}
             tag = pos_for_tag.get("signal_tag", "기본")
-            _v4_ep = strategy_v4.get_exit_params(tag)
+            _v4_ep = v4_get_exit_params(tag)
 
             # 🔧 WF데이터: HOLD 전략 파라미터 (strategy_v4 exit_params에서 결정)
             _hold_bars = _v4_ep.get("hold_bars", 0)
@@ -3865,8 +3865,8 @@ def _safe_float(x, default=0.0):
 # =========================
 TRADE_LOG_PATH = os.path.join(os.getcwd(), "trade_features.csv")
 WEIGHTS_PATH = os.path.join(os.getcwd(), "learned_weights.json")
-# 🔧 자동학습 ON - 건수 기반 (매수만 학습, 매도는 고정)
-AUTO_LEARN_ENABLED = False  # 학습 비활성화 (과적합 방지 — 수동 판단 우선)
+# 🔧 WF데이터: 자동학습 완전 비활성화 (WF 고정값만 사용, 런타임 조정 금지)
+AUTO_LEARN_ENABLED = False  # 학습 트리거 OFF
 AUTO_LEARN_APPLY = False    # 학습 결과 적용 OFF
 AUTO_LEARN_MIN_TRADES = 100 # 분석 시 최소 샘플
 AUTO_LEARN_INTERVAL = 10    # 🔧 10건마다 학습
@@ -5334,23 +5334,11 @@ def load_learned_weights():
     except Exception as e:
         print(f"[WEIGHTS_LOAD_ERR] {e}")
 
-    # 🧠 SL/트레일 학습 결과 복원
-    if os.path.exists(EXIT_PARAMS_PATH):
-        try:
-            with open(EXIT_PARAMS_PATH, "r", encoding="utf-8") as f:
-                ep_data = json.load(f)
-            ep = ep_data.get("exit_params")
-            if isinstance(ep, dict):
-                DYN_SL_MIN = ep.get("DYN_SL_MIN", DYN_SL_MIN)
-                DYN_SL_MAX = ep.get("DYN_SL_MAX", DYN_SL_MAX)
-                HARD_STOP_DD = ep.get("HARD_STOP_DD", HARD_STOP_DD)
-                TRAIL_DISTANCE_MIN_BASE = ep.get("TRAIL_DISTANCE_MIN_BASE", TRAIL_DISTANCE_MIN_BASE)
-                refresh_mfe_targets()
-                print(f"[WEIGHTS] SL/트레일 로드: SL {DYN_SL_MIN*100:.2f}~{DYN_SL_MAX*100:.2f}% "
-                      f"| 트레일 {TRAIL_DISTANCE_MIN_BASE*100:.2f}% | 비상 {HARD_STOP_DD*100:.1f}% "
-                      f"| {ep_data.get('updated_at', '?')}")
-        except Exception as e:
-            print(f"[EXIT_PARAMS_LOAD_ERR] {e}")
+    # 🔧 WF데이터: SL/트레일 학습 결과 로딩 비활성화 (WF 고정값만 사용)
+    # 기존 학습 파일이 WF 데이터 기반 파라미터를 덮어쓰는 것 방지
+    # if os.path.exists(EXIT_PARAMS_PATH):
+    #     ... (비활성화됨)
+    print("[WEIGHTS] SL/트레일 = WF 데이터 고정값 사용 (학습 로딩 비활성화)")
 
 # =========================
 # 세션/요청(네트워크 안정화)
@@ -6237,6 +6225,357 @@ def ema_last(vals, period):
     return ema_series(vals, period)[-1]
 
 
+# ============================================================
+# ============ strategy_v4 통합 (WF 데이터 기반 진입 시그널) ============
+# ============================================================
+# 핵심 원칙:
+# 1. 점수(score) 시스템 사용 금지 — 모든 조건은 AND/OR 부울 로직
+# 2. 임계치는 WF 데이터에 나온 값만 사용
+# 3. 데이터에서 FAIL된 시그널은 완전 비활성화
+#
+# 활성 시그널:
+# Phase 1 (메인): 거래량3배 — VR5>3.0 AND ATR%>0.7% AND 직전봉양봉 AND 60m RSI 35~70
+# Phase 4 (조건부):
+#   - 15m_눌림반전 — 15m 눌림+반전 AND VR5>3.0 AND 60m RSI 35~70
+#   - EMA정배열진입 — EMA5>EMA20>EMA60 AND VR5>3.0 AND 60m RSI 35~70
+#   - 15m_MACD골든+1h_EMA정배열 — 15m MACD골든 AND 1h EMA정배열 AND VR5>3.0
+#
+# 비활성 시그널 (Phase 2 제거):
+#   20봉_고점돌파, 5m_양봉, 15m_눌림+돌파, RSI과매도반등, MACD골든(단독),
+#   쌍바닥, 망치형반전, BB하단반등, 5m_큰양봉
+# ============================================================
+
+def _v4_calc_rsi(closes, period=14):
+    """RSI 계산 (Wilder's smoothing)"""
+    if len(closes) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _v4_ema(vals, period):
+    """EMA 계산 — 마지막 값 반환"""
+    if not vals or len(vals) < period:
+        return None
+    k = 2.0 / (period + 1)
+    ema_val = vals[0]
+    for v in vals[1:]:
+        ema_val = v * k + ema_val * (1 - k)
+    return ema_val
+
+
+def _v4_macd(closes, fast=12, slow=26, signal=9):
+    """MACD 계산 — (macd_line, signal_line, histogram) 반환"""
+    if len(closes) < slow + signal:
+        return None, None, None
+    k_fast = 2.0 / (fast + 1)
+    k_slow = 2.0 / (slow + 1)
+    ef = closes[0]
+    es = closes[0]
+    macd_line_series = []
+    for v in closes[1:]:
+        ef = v * k_fast + ef * (1 - k_fast)
+        es = v * k_slow + es * (1 - k_slow)
+        macd_line_series.append(ef - es)
+    if len(macd_line_series) < signal:
+        return None, None, None
+    sig = _v4_ema(macd_line_series[-signal * 2:], signal) if len(macd_line_series) >= signal * 2 else _v4_ema(macd_line_series, signal)
+    macd_val = macd_line_series[-1]
+    hist = macd_val - sig if sig is not None else None
+    return macd_val, sig, hist
+
+
+def _v4_volume_ratio_5(candles):
+    """VR5: 현재봉 거래량 / 직전5봉 평균 거래량"""
+    if len(candles) < 6:
+        return 0.0
+    cur_vol = candles[-1].get("candle_acc_trade_price", 0)
+    past_vols = [c.get("candle_acc_trade_price", 0) for c in candles[-6:-1]]
+    avg = sum(past_vols) / max(len(past_vols), 1)
+    if avg <= 0:
+        return 0.0
+    return cur_vol / avg
+
+
+def _v4_atr_pct(candles, period=14):
+    """ATR% = ATR / 현재가 × 100"""
+    if len(candles) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, len(candles)):
+        h = candles[i]["high_price"]
+        l = candles[i]["low_price"]
+        pc = candles[i - 1]["trade_price"]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    atr = sum(trs[-period:]) / period if len(trs) >= period else 0
+    price = candles[-1]["trade_price"]
+    if price <= 0:
+        return 0.0
+    return (atr / price) * 100
+
+
+def _v4_is_bullish(candle):
+    """양봉 여부"""
+    return candle["trade_price"] > candle["opening_price"]
+
+
+def _v4_rsi_from_candles(candles, period=14):
+    """캔들 리스트에서 RSI 계산"""
+    closes = [c["trade_price"] for c in candles]
+    return _v4_calc_rsi(closes, period)
+
+
+def _v4_ema_from_candles(candles, period):
+    """캔들 리스트에서 EMA 마지막 값"""
+    closes = [c["trade_price"] for c in candles]
+    return _v4_ema(closes, period)
+
+
+# --- 60분봉 레짐 필터 (전 시그널 공통) ---
+# 데이터 출처: 외부분석 "60m RSI 35~70"
+def _v4_regime_filter_60m(c60):
+    """60m RSI(14) 35~70 레짐 필터"""
+    if not c60 or len(c60) < 15:
+        return False, None
+    rsi = _v4_rsi_from_candles(c60, 14)
+    if rsi is None:
+        return False, None
+    return (35.0 <= rsi <= 70.0), rsi
+
+
+# --- 청산 파라미터 (WF 데이터 기반) ---
+_V4_EXIT_PARAMS = {
+    # Phase 1 메인: TRAIL_SL1.0/A0.5/T0.3 (60d WF 최적)
+    "거래량3배": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.010,           # SL 1.0%
+        "activation_pct": 0.005,   # Activation 0.5%
+        "trail_pct": 0.003,        # Trail 0.3%
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "TRAIL_SL1.0/A0.5/T0.3",
+    },
+    # Phase 4: 15m_눌림반전 — TRAIL_SL0.7/A0.3/T0.2 (60d WF 차선)
+    "15m_눌림반전": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.007,           # SL 0.7%
+        "activation_pct": 0.003,   # Activation 0.3%
+        "trail_pct": 0.002,        # Trail 0.2%
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    # Phase 4: EMA정배열 — TRAIL_SL1.0/A0.5/T0.3
+    "EMA정배열진입": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.010,
+        "activation_pct": 0.005,
+        "trail_pct": 0.003,
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "TRAIL_SL1.0/A0.5/T0.3",
+    },
+    # Phase 4 복합: 15m_MACD골든+1h_EMA정배열 — TRAIL_SL1.0/A0.5/T0.3
+    "15m_MACD골든+1h_EMA정배열": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.010,
+        "activation_pct": 0.005,
+        "trail_pct": 0.003,
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "TRAIL_SL1.0/A0.5/T0.3",
+    },
+}
+
+_V4_DEFAULT_EXIT = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.005,
+    "trail_pct": 0.003,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "DEFAULT_TRAIL_SL1.0/A0.5/T0.3",
+}
+
+
+# --- Phase 1 (메인): 거래량3배 ---
+# VR5>3.0 AND ATR%>0.7% AND 직전봉양봉 AND 60m RSI 35~70
+def _v4_check_volume_3x(c1, c5, c15, c30, c60):
+    if not c1 or len(c1) < 7:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 <= 3.0:
+        return None
+    atr_p = _v4_atr_pct(c1, 14)
+    if atr_p <= 0.7:
+        return None
+    if not _v4_is_bullish(c1[-2]):
+        return None
+    regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
+    if not regime_ok:
+        return None
+    return {
+        "signal_tag": "거래량3배",
+        "entry_mode": "confirm",
+        "logic_group": "A",
+        "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉", f"60mRSI={rsi_60:.1f}"],
+        "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
+    }
+
+
+# --- Phase 4: 15m_눌림반전 ---
+# 15m 직전음봉+현재양봉+종가회복 AND VR5>3.0 AND 60m RSI 35~70
+def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60):
+    if not c15 or len(c15) < 3:
+        return None
+    if not c1 or len(c1) < 7:
+        return None
+    prev_15 = c15[-2]
+    cur_15 = c15[-1]
+    if prev_15["trade_price"] >= prev_15["opening_price"]:
+        return None
+    if cur_15["trade_price"] <= cur_15["opening_price"]:
+        return None
+    if cur_15["trade_price"] <= prev_15["opening_price"]:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 <= 3.0:
+        return None
+    regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
+    if not regime_ok:
+        return None
+    return {
+        "signal_tag": "15m_눌림반전",
+        "entry_mode": "confirm",
+        "logic_group": "B",
+        "filters_hit": ["15m눌림+반전", f"VR5={vr5:.1f}", f"60mRSI={rsi_60:.1f}"],
+        "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"].copy(),
+    }
+
+
+# --- Phase 4: EMA정배열진입 ---
+# 5m EMA5>EMA20>EMA60 AND VR5>3.0 AND 60m RSI 35~70
+def _v4_check_ema_alignment(c1, c5, c15, c30, c60):
+    if not c5 or len(c5) < 60:
+        return None
+    if not c1 or len(c1) < 7:
+        return None
+    ema5 = _v4_ema_from_candles(c5, 5)
+    ema20 = _v4_ema_from_candles(c5, 20)
+    ema60 = _v4_ema_from_candles(c5, 60)
+    if ema5 is None or ema20 is None or ema60 is None:
+        return None
+    if not (ema5 > ema20 > ema60):
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 <= 3.0:
+        return None
+    regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
+    if not regime_ok:
+        return None
+    return {
+        "signal_tag": "EMA정배열진입",
+        "entry_mode": "confirm",
+        "logic_group": "B",
+        "filters_hit": [f"EMA5={ema5:.0f}>EMA20={ema20:.0f}>EMA60={ema60:.0f}", f"VR5={vr5:.1f}", f"60mRSI={rsi_60:.1f}"],
+        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
+    }
+
+
+# --- Phase 4 복합: 15m_MACD골든+1h_EMA정배열 ---
+# 15m MACD골든크로스 AND 1h EMA5>EMA20 AND VR5>3.0
+def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60):
+    if not c15 or len(c15) < 35:
+        return None
+    if not c60 or len(c60) < 20:
+        return None
+    if not c1 or len(c1) < 7:
+        return None
+    closes_15 = [c["trade_price"] for c in c15]
+    macd_val, sig_val, hist = _v4_macd(closes_15)
+    if macd_val is None or sig_val is None:
+        return None
+    if macd_val <= sig_val:
+        return None
+    closes_15_prev = closes_15[:-1]
+    macd_prev, sig_prev, _ = _v4_macd(closes_15_prev)
+    if macd_prev is None or sig_prev is None:
+        return None
+    if macd_prev > sig_prev:
+        return None
+    ema5_60 = _v4_ema_from_candles(c60, 5)
+    ema20_60 = _v4_ema_from_candles(c60, 20)
+    if ema5_60 is None or ema20_60 is None:
+        return None
+    if ema5_60 <= ema20_60:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 <= 3.0:
+        return None
+    return {
+        "signal_tag": "15m_MACD골든+1h_EMA정배열",
+        "entry_mode": "confirm",
+        "logic_group": "A",
+        "filters_hit": [f"15mMACD골든(M={macd_val:.4f}>S={sig_val:.4f})", f"1hEMA정배열(E5={ema5_60:.0f}>E20={ema20_60:.0f})", f"VR5={vr5:.1f}"],
+        "exit_params": _V4_EXIT_PARAMS["15m_MACD골든+1h_EMA정배열"].copy(),
+    }
+
+
+# --- 공개 API (기존 strategy_v4.xxx 호출을 대체) ---
+
+def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
+    """
+    통합 진입 판정 — detect_leader_stock()에서 호출
+    시그널 우선순위 (OR — 먼저 매칭된 것 반환):
+    1. 거래량3배 (Phase 1 메인)
+    2. 15m_MACD골든+1h_EMA정배열 (Phase 4 복합)
+    3. 15m_눌림반전 (Phase 4 조건부)
+    4. EMA정배열진입 (Phase 4 조건부)
+    """
+    if not c1:
+        return None
+    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60)
+    if sig:
+        return sig
+    sig = _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60)
+    if sig:
+        return sig
+    sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60)
+    if sig:
+        return sig
+    sig = _v4_check_ema_alignment(c1, c5, c15, c30, c60)
+    if sig:
+        return sig
+    return None
+
+
+def v4_get_exit_params(signal_tag):
+    """시그널 태그별 청산 파라미터 반환"""
+    return _V4_EXIT_PARAMS.get(signal_tag, _V4_DEFAULT_EXIT).copy()
+
+
+def v4_is_favorable_hour(hour, signal_tag):
+    """시간대 필터 — WF 데이터에 시간대별 결과 없음 → 전 시간 허용"""
+    return True
+
+
+# ============ strategy_v4 통합 끝 ============
+
+
 def calc_vwap_from_candles(candles, lookback=20):
     """
     캔들 기반 VWAP 계산 (Volume Weighted Average Price)
@@ -6808,7 +7147,7 @@ def circle_register(m, pre, c1):
     # 🔧 WF데이터 Phase3: 60m RSI 35~70 레짐 필터 (과매도/과매수 구간 제외)
     try:
         _c60_circle = get_minutes_candles(60, m, 15) or []
-        _regime_ok, _rsi_60 = strategy_v4._regime_filter_60m(_c60_circle)
+        _regime_ok, _rsi_60 = _v4_regime_filter_60m(_c60_circle)
         if not _regime_ok:
             print(f"[CIRCLE] {m} 60m RSI={_rsi_60} 레짐 필터 미충족 (35~70 필요) → 등록 거부")
             return
@@ -6818,7 +7157,7 @@ def circle_register(m, pre, c1):
 
     # 🔧 WF데이터 Phase3: VR5 > 3.0 필수 (거래량 동반 없는 점화 = 노이즈)
     if c1 and len(c1) >= 6:
-        _vr5_circle = strategy_v4._volume_ratio_5(c1)
+        _vr5_circle = _v4_volume_ratio_5(c1)
         if _vr5_circle <= 3.0:
             print(f"[CIRCLE] {m} VR5={_vr5_circle:.1f} ≤ 3.0 → 등록 거부")
             return
@@ -7560,7 +7899,7 @@ def box_check_entry(m):
     # 🔧 WF데이터 Phase3: 60m RSI 35~70 레짐 필터
     try:
         _c60_box = get_minutes_candles(60, m, 15) or []
-        _box_regime_ok, _box_rsi_60 = strategy_v4._regime_filter_60m(_c60_box)
+        _box_regime_ok, _box_rsi_60 = _v4_regime_filter_60m(_c60_box)
         if not _box_regime_ok:
             return None
     except Exception:
@@ -7568,7 +7907,7 @@ def box_check_entry(m):
 
     # 🔧 WF데이터 Phase3: VR5 > 3.0 (거래량 동반 필수)
     if c1 and len(c1) >= 6:
-        _vr5_box = strategy_v4._volume_ratio_5(c1)
+        _vr5_box = _v4_volume_ratio_5(c1)
         if _vr5_box <= 3.0:
             return None
 
@@ -8262,11 +8601,11 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _cur_hour = now_kst().hour
 
         # strategy_v4 통합 진입 판정 (c1 전달 — VR5/ATR% 계산용)
-        _v4_signal = strategy_v4.evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1)
+        _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1)
 
         if _v4_signal:
             # 시간대 필터 적용
-            _time_ok = strategy_v4.is_favorable_hour(_cur_hour, _v4_signal["signal_tag"])
+            _time_ok = v4_is_favorable_hour(_cur_hour, _v4_signal["signal_tag"])
             if _time_ok is False:  # False=불리, None=중립, True=유리
                 print(f"[V4_TIME_BAD] {m} {_v4_signal['signal_tag']} hour={_cur_hour} → 불리한 시간대")
                 _v4_signal = None
@@ -9170,14 +9509,14 @@ def monitor_position(m,
 
     verdict = None
 
-    # === 🎯 v4: EXIT_PARAMS 기반 트레일 파라미터 ===
-    _v4_ep = pre.get("v4_exit_params") or strategy_v4.get_exit_params(signal_tag)
+    # === 🎯 WF데이터: EXIT_PARAMS 기반 트레일 파라미터 ===
+    _v4_ep = pre.get("v4_exit_params") or v4_get_exit_params(signal_tag)
     checkpoint_reached = False
-    # 🔧 v4: 체크포인트 = activation_pct (0.3%)
-    dyn_checkpoint = max(get_dynamic_checkpoint(), _v4_ep.get("activation_pct", 0.003))
-    # 🔧 v4: 트레일 간격 = trail_pct (0.2%)
-    trail_dist_min = max(get_trail_distance_min(), _v4_ep.get("trail_pct", 0.002))
-    # 🔧 v4: HOLD 전략 (15m_눌림+돌파) — hold_bars 동안은 트레일 무장 안 함
+    # 🔧 WF: 체크포인트 = activation_pct (거래량3배: 0.5%, 눌림반전: 0.3%)
+    dyn_checkpoint = max(get_dynamic_checkpoint(), _v4_ep.get("activation_pct", 0.005))
+    # 🔧 WF: 트레일 간격 = trail_pct (거래량3배: 0.3%, 눌림반전: 0.2%)
+    trail_dist_min = max(get_trail_distance_min(), _v4_ep.get("trail_pct", 0.003))
+    # 🔧 WF: hold_bars (현재 모든 시그널 0)
     _v4_hold_bars = _v4_ep.get("hold_bars", 0)
     _v4_max_bars = _v4_ep.get("max_bars", 60)
     _v4_strategy = _v4_ep.get("strategy", "TRAIL")
