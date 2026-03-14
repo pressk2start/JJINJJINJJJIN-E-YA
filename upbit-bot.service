@@ -2,6 +2,8 @@
 Description=Upbit Signal Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,8 +11,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/bots
 ExecStartPre=/bin/rm -f /home/ubuntu/bots/.study_running /home/ubuntu/bots/.study_lock /home/ubuntu/bots/.study_done
 ExecStart=/usr/bin/python3 /home/ubuntu/bots/bot.py
-Restart=on-failure
-RestartSec=30
+Restart=always
+RestartSec=60
 StandardOutput=append:/tmp/bot_stdout.log
 StandardError=append:/tmp/bot_stdout.log
 
