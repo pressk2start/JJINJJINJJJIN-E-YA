@@ -1905,7 +1905,9 @@ def _disc_analyze_coin(coin, days):
         if lb is None: continue
         feat = _disc_extract_features(candles, t)
         if feat is None: continue
-        samples.append({"coin": coin, "time": candles[t]["t"], **feat, **lb})
+        rid = lb.get("run_id", 0)
+        rk = f"{coin}_{rid}" if rid > 0 else ""
+        samples.append({"coin": coin, "time": candles[t]["t"], "run_key": rk, **feat, **lb})
     sc = sum(1 for s in samples if s["success"]==1)
     total = len(samples)
     print(f"  {coin}: {total}개 샘플, 성공 {sc}개 ({sc/total*100:.1f}%)" if total else f"  {coin}: 0개 샘플")
@@ -1914,7 +1916,7 @@ def _disc_analyze_coin(coin, days):
 def _disc_discover_rules(all_samples):
     """성공 vs 실패 피처 차이 분석"""
     if not all_samples: return {}
-    meta = {"coin","time","entry_price","mfe_5m","mae_5m","ret_close_5m","success","run_id","is_first","run_pos"}
+    meta = {"coin","time","entry_price","mfe_5m","mae_5m","ret_close_5m","success","run_id","is_first","run_pos","run_key"}
     feat_keys = [k for k in all_samples[0].keys() if k not in meta]
     success = [s for s in all_samples if s["success"]==1]
     failure = [s for s in all_samples if s["success"]==0]
@@ -1967,30 +1969,136 @@ def _disc_find_best_rules(all_samples, top_features, n_rules=10):
     rules.sort(key=lambda x: x["lift"], reverse=True)
     return rules[:n_rules]
 
-def _disc_walk_forward(all_samples, rules, train_ratio=0.67):
-    """워크포워드 검증"""
+def _disc_find_combo_rules(all_samples, single_rules, top_k=8, min_samples=100):
+    """상위 단변수 규칙 중 2조건 조합 탐색"""
+    if len(single_rules) < 2: return []
+    base = sum(s["success"] for s in all_samples)/len(all_samples) if all_samples else 0
+    candidates = single_rules[:top_k]
+    combos = []
+    for i in range(len(candidates)):
+        for j in range(i+1, len(candidates)):
+            r1, r2 = candidates[i], candidates[j]
+            if r1["feature"] == r2["feature"]: continue
+            f1, d1, th1 = r1["feature"], r1["direction"], r1["threshold"]
+            f2, d2, th2 = r2["feature"], r2["direction"], r2["threshold"]
+            hits = []
+            for s in all_samples:
+                if f1 not in s or f2 not in s: continue
+                v1, v2 = s[f1], s[f2]
+                if v1 is None or v2 is None: continue
+                c1 = v1 >= th1 if d1 == ">=" else v1 <= th1
+                c2 = v2 >= th2 if d2 == ">=" else v2 <= th2
+                if c1 and c2: hits.append(s)
+            if len(hits) < min_samples: continue
+            sr = sum(s["success"] for s in hits)/len(hits)
+            lift = sr/base if base > 0 else 0
+            if lift > 1.3:
+                combos.append({
+                    "conditions": [
+                        {"feature":f1,"direction":d1,"threshold":th1},
+                        {"feature":f2,"direction":d2,"threshold":th2}],
+                    "success_rate":round(sr*100,2), "base_rate":round(base*100,2),
+                    "lift":round(lift,2), "n_samples":len(hits)})
+    combos.sort(key=lambda x: x["lift"], reverse=True)
+    return combos[:10]
+
+def _disc_walk_forward(all_samples, rules, train_days=21, test_days=7, step_days=5):
+    """Rolling 워크포워드 검증 (train/test/step 일 단위)"""
     if not all_samples or not rules: return []
     all_samples.sort(key=lambda x: x["time"])
-    split = int(len(all_samples)*train_ratio)
-    train, test = all_samples[:split], all_samples[split:]
-    bt = sum(s["success"] for s in train)/len(train) if train else 0
-    bte = sum(s["success"] for s in test)/len(test) if test else 0
+    t_min = all_samples[0]["time"]; t_max = all_samples[-1]["time"]
+    day_ms = 86400_000
+    train_ms, test_ms, step_ms = train_days*day_ms, test_days*day_ms, step_days*day_ms
+    # fold별 결과 수집
+    rule_folds = {i: [] for i in range(len(rules))}
+    base_folds = []
+    fold_start = t_min
+    n_folds = 0
+    while fold_start + train_ms + test_ms <= t_max:
+        tr_end = fold_start + train_ms
+        te_end = tr_end + test_ms
+        train = [s for s in all_samples if fold_start <= s["time"] < tr_end]
+        test = [s for s in all_samples if tr_end <= s["time"] < te_end]
+        if len(train) < 100 or len(test) < 30:
+            fold_start += step_ms; continue
+        bte = sum(s["success"] for s in test)/len(test)
+        base_folds.append(bte)
+        for ri, rule in enumerate(rules):
+            f, d, th = rule["feature"], rule["direction"], rule["threshold"]
+            if d == ">=":
+                teh = [s for s in test if f in s and s[f]>=th]
+            else:
+                teh = [s for s in test if f in s and s[f]<=th]
+            ter = sum(s["success"] for s in teh)/len(teh) if teh else 0
+            rule_folds[ri].append({"test_rate": ter, "test_n": len(teh), "base": bte})
+        n_folds += 1
+        fold_start += step_ms
+    if n_folds == 0: return []
     results = []
-    for rule in rules:
-        f, d, th = rule["feature"], rule["direction"], rule["threshold"]
-        if d == ">=":
-            trh = [s for s in train if f in s and s[f]>=th]
-            teh = [s for s in test if f in s and s[f]>=th]
-        else:
-            trh = [s for s in train if f in s and s[f]<=th]
-            teh = [s for s in test if f in s and s[f]<=th]
-        tr = sum(s["success"] for s in trh)/len(trh) if trh else 0
-        ter = sum(s["success"] for s in teh)/len(teh) if teh else 0
-        results.append({**rule, "train_rate":round(tr*100,2), "test_rate":round(ter*100,2),
-                        "train_n":len(trh), "test_n":len(teh),
-                        "base_train":round(bt*100,2), "base_test":round(bte*100,2),
-                        "test_lift":round(ter/bte,2) if bte>0 else 0,
-                        "survived": ter > bte*1.2})
+    avg_base = sum(base_folds)/len(base_folds) if base_folds else 0
+    for ri, rule in enumerate(rules):
+        folds = rule_folds[ri]
+        if not folds:
+            results.append({**rule, "n_folds":0, "avg_test_rate":0, "avg_base":0,
+                            "avg_test_lift":0, "survived":False, "fold_details":[]}); continue
+        rates = [f["test_rate"] for f in folds]
+        lifts = [f["test_rate"]/f["base"] if f["base"]>0 else 0 for f in folds]
+        avg_rate = sum(rates)/len(rates)
+        avg_lift = sum(lifts)/len(lifts)
+        win_folds = sum(1 for l in lifts if l > 1.0)
+        results.append({**rule, "n_folds":n_folds, "avg_test_rate":round(avg_rate*100,2),
+                        "avg_base":round(avg_base*100,2), "avg_test_lift":round(avg_lift,2),
+                        "win_rate":round(win_folds/n_folds*100,1),
+                        "survived": avg_lift > 1.2 and win_folds/n_folds >= 0.5,
+                        "fold_details": folds})
+    return results
+
+def _disc_walk_forward_combo(all_samples, combos, train_days=21, test_days=7, step_days=5):
+    """Rolling 워크포워드 검증 (조합 규칙용)"""
+    if not all_samples or not combos: return []
+    all_samples.sort(key=lambda x: x["time"])
+    t_min = all_samples[0]["time"]; t_max = all_samples[-1]["time"]
+    day_ms = 86400_000
+    train_ms, test_ms, step_ms = train_days*day_ms, test_days*day_ms, step_days*day_ms
+    combo_folds = {i: [] for i in range(len(combos))}
+    base_folds = []; n_folds = 0; fold_start = t_min
+    while fold_start + train_ms + test_ms <= t_max:
+        tr_end = fold_start + train_ms; te_end = tr_end + test_ms
+        test = [s for s in all_samples if tr_end <= s["time"] < te_end]
+        if len(test) < 30:
+            fold_start += step_ms; continue
+        bte = sum(s["success"] for s in test)/len(test)
+        base_folds.append(bte)
+        for ci, combo in enumerate(combos):
+            conds = combo["conditions"]
+            hits = []
+            for s in test:
+                ok = True
+                for c in conds:
+                    f, d, th = c["feature"], c["direction"], c["threshold"]
+                    if f not in s or s[f] is None: ok = False; break
+                    if d == ">=" and s[f] < th: ok = False; break
+                    if d == "<=" and s[f] > th: ok = False; break
+                if ok: hits.append(s)
+            ter = sum(s["success"] for s in hits)/len(hits) if hits else 0
+            combo_folds[ci].append({"test_rate": ter, "test_n": len(hits), "base": bte})
+        n_folds += 1; fold_start += step_ms
+    if n_folds == 0: return []
+    avg_base = sum(base_folds)/len(base_folds)
+    results = []
+    for ci, combo in enumerate(combos):
+        folds = combo_folds[ci]
+        if not folds:
+            results.append({**combo, "n_folds":0, "avg_test_rate":0, "avg_test_lift":0, "survived":False}); continue
+        rates = [f["test_rate"] for f in folds]
+        lifts = [f["test_rate"]/f["base"] if f["base"]>0 else 0 for f in folds]
+        avg_rate = sum(rates)/len(rates)
+        avg_lift = sum(lifts)/len(lifts)
+        win_folds = sum(1 for l in lifts if l > 1.0)
+        results.append({**combo, "n_folds":n_folds, "avg_test_rate":round(avg_rate*100,2),
+                        "avg_base":round(avg_base*100,2), "avg_test_lift":round(avg_lift,2),
+                        "win_rate":round(win_folds/n_folds*100,1),
+                        "survived": avg_lift > 1.2 and win_folds/n_folds >= 0.5})
     return results
 
 def run_pattern_discovery(days=60):
@@ -2018,12 +2126,24 @@ def run_pattern_discovery(days=60):
     success = sum(s["success"] for s in all_samples)
     print(f"\n{'='*60}\n전체 샘플: {total:,}\n성공: {success:,} ({success/total*100:.2f}%)\n{'='*60}")
 
+    # is_first 샘플 분리
+    first_samples = [s for s in all_samples if s.get("is_first",0)==1 or s.get("success",0)==0]
+    fs_total = len(first_samples)
+    fs_success = sum(s["success"] for s in first_samples)
+    print(f"is_first 필터: {fs_total:,}개 (성공 {fs_success:,}, {fs_success/fs_total*100:.2f}%)" if fs_total else "")
+
     print("\n피처 분석 중...")
     feat_analysis = _disc_discover_rules(all_samples)
+    feat_analysis_first = _disc_discover_rules(first_samples)
     print("규칙 발굴 중...")
     rules = _disc_find_best_rules(all_samples, feat_analysis)
+    rules_first = _disc_find_best_rules(first_samples, feat_analysis_first)
+    print("조합 규칙 탐색 중...")
+    combo_rules = _disc_find_combo_rules(all_samples, rules)
     print("워크포워드 검증 중...")
     wf = _disc_walk_forward(all_samples, rules)
+    wf_first = _disc_walk_forward(first_samples, rules_first)
+    wf_combo = _disc_walk_forward_combo(all_samples, combo_rules)
 
     # 리포트 생성
     os.makedirs(_DISC_OUT_DIR, exist_ok=True)
@@ -2047,8 +2167,8 @@ def run_pattern_discovery(days=60):
     # 연속 성공 구간
     rl = defaultdict(int)
     for s in all_samples:
-        rid=s.get("run_id",0)
-        if rid>0: rl[(s["coin"],rid)]+=1
+        rk=s.get("run_key","")
+        if rk: rl[rk]+=1
     runs = defaultdict(int)
     for length in rl.values(): runs[length]+=1
     R.append(f"\n── 연속 성공 구간 분포 ──")
@@ -2069,23 +2189,94 @@ def run_pattern_discovery(days=60):
         R.append(f"  리프트: {rule['lift']}x  |  샘플 수: {rule['n_samples']}")
 
     # 워크포워드
-    R.append(f"\n── 워크포워드 검증 결과 ──")
-    R.append(f"{'규칙':<30} {'학습성공률':>10} {'검증성공률':>10} {'검증리프트':>10} {'생존':>6}"); R.append("-"*70)
+    n_folds_total = wf[0]["n_folds"] if wf else 0
+    R.append(f"\n── Rolling 워크포워드 검증 (train {21}d / test {7}d / step {5}d, {n_folds_total} folds) ──")
+    R.append(f"{'규칙':<30} {'평균성공률':>10} {'평균리프트':>10} {'승률':>8} {'생존':>6}"); R.append("-"*70)
     for w in wf:
         sv="O" if w["survived"] else "X"; nm=f"{w['feature']} {w['direction']} {w['threshold']}"
-        R.append(f"{nm:<30} {w['train_rate']:>9.2f}% {w['test_rate']:>9.2f}% {w['test_lift']:>9.2f}x {sv:>6}")
+        R.append(f"{nm:<30} {w['avg_test_rate']:>9.2f}% {w['avg_test_lift']:>9.2f}x {w.get('win_rate',0):>7.1f}% {sv:>6}")
     survived = [w for w in wf if w["survived"]]
     R.append(f"\n── 워크포워드 생존 규칙: {len(survived)}개 ──")
     for w in survived:
-        R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (검증 성공률: {w['test_rate']}%, 리프트: {w['test_lift']}x)")
+        R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (평균 성공률: {w['avg_test_rate']}%, 리프트: {w['avg_test_lift']}x, 승률: {w.get('win_rate',0)}%)")
+
+    # 조합 규칙
+    if combo_rules:
+        R.append(f"\n── 2조건 조합 규칙 ──")
+        for i, combo in enumerate(combo_rules):
+            conds = combo["conditions"]
+            cond_str = " AND ".join(f"{c['feature']} {c['direction']} {c['threshold']}" for c in conds)
+            R.append(f"\n조합 {i+1}: {cond_str}")
+            R.append(f"  성공률: {combo['success_rate']}% (기본: {combo['base_rate']}%)")
+            R.append(f"  리프트: {combo['lift']}x  |  샘플 수: {combo['n_samples']}")
+    if wf_combo:
+        R.append(f"\n── 조합 규칙 워크포워드 검증 ──")
+        R.append(f"{'조합':<45} {'평균성공률':>10} {'리프트':>8} {'승률':>8} {'생존':>6}"); R.append("-"*80)
+        for w in wf_combo:
+            conds = w["conditions"]
+            nm = " & ".join(f"{c['feature']}{c['direction']}{c['threshold']}" for c in conds)
+            if len(nm) > 44: nm = nm[:41] + "..."
+            sv = "O" if w["survived"] else "X"
+            R.append(f"{nm:<45} {w['avg_test_rate']:>9.2f}% {w['avg_test_lift']:>7.2f}x {w.get('win_rate',0):>7.1f}% {sv:>6}")
+        survived_combo = [w for w in wf_combo if w["survived"]]
+        R.append(f"\n── 조합 워크포워드 생존: {len(survived_combo)}개 ──")
+        for w in survived_combo:
+            cond_str = " AND ".join(f"{c['feature']} {c['direction']} {c['threshold']}" for c in w["conditions"])
+            R.append(f"  {cond_str}")
+            R.append(f"    평균 성공률: {w['avg_test_rate']}%, 리프트: {w['avg_test_lift']}x, 승률: {w.get('win_rate',0)}%")
+
+    # ── is_first 비교 분석 ──
+    R.append(f"\n{'='*70}")
+    R.append(f"── is_first==1 필터 비교 분석 ──")
+    R.append(f"전체 샘플: {total:,} (성공 {success:,}, {success/total*100:.2f}%)")
+    R.append(f"is_first 필터: {fs_total:,} (성공 {fs_success:,}, {fs_success/fs_total*100:.2f}%)" if fs_total else "is_first 필터: 0")
+    if feat_analysis_first:
+        R.append(f"\n── is_first 피처 차이 (상위 10개) ──")
+        R.append(f"{'피처':<25} {'효과(전체)':>10} {'효과(1st)':>10} {'차이':>8}"); R.append("-"*55)
+        for i,(k,info) in enumerate(feat_analysis_first.items()):
+            if i>=10: break
+            ef_all = feat_analysis.get(k,{}).get("effect_size",0)
+            R.append(f"{k:<25} {ef_all:>10.4f} {info['effect_size']:>10.4f} {info['effect_size']-ef_all:>8.4f}")
+    if wf_first:
+        survived_first = [w for w in wf_first if w["survived"]]
+        R.append(f"\n── is_first 워크포워드 생존 규칙: {len(survived_first)}개 ──")
+        for w in survived_first:
+            R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (평균 성공률: {w['avg_test_rate']}%, 리프트: {w['avg_test_lift']}x, 승률: {w.get('win_rate',0)}%)")
+
+    # ── Top 규칙 레시피 요약 ──
+    R.append(f"\n{'='*70}")
+    R.append(f"── Top 규칙 레시피 (워크포워드 생존 + lift 순) ──")
+    R.append(f"{'='*70}")
+    recipe_idx = 0
+    # 조합 규칙 생존 먼저
+    if wf_combo:
+        for w in sorted([w for w in wf_combo if w["survived"]], key=lambda x: x["avg_test_lift"], reverse=True)[:3]:
+            recipe_idx += 1
+            R.append(f"\n  Recipe #{recipe_idx} (조합)")
+            for c in w["conditions"]:
+                R.append(f"    {c['feature']} {c['direction']} {c['threshold']}")
+            R.append(f"    → 평균 성공률: {w['avg_test_rate']}%  기본: {w['avg_base']}%  리프트: {w['avg_test_lift']}x  승률: {w.get('win_rate',0)}%")
+    # 단변수 규칙 생존
+    for w in sorted(survived, key=lambda x: x["avg_test_lift"], reverse=True)[:max(0, 3-recipe_idx)]:
+        recipe_idx += 1
+        R.append(f"\n  Recipe #{recipe_idx} (단변수)")
+        R.append(f"    {w['feature']} {w['direction']} {w['threshold']}")
+        R.append(f"    → 평균 성공률: {w['avg_test_rate']}%  기본: {w['avg_base']}%  리프트: {w['avg_test_lift']}x  승률: {w.get('win_rate',0)}%")
+    if recipe_idx == 0:
+        R.append("\n  워크포워드 생존 규칙 없음 — 데이터 추가 수집 또는 피처 재설계 필요")
 
     report_text = "\n".join(R)
     rpath = os.path.join(_DISC_OUT_DIR, "discovery_report.txt")
     with open(rpath,"w",encoding="utf-8") as f: f.write(report_text)
     dpath = os.path.join(_DISC_OUT_DIR, "discovery_data.json")
     with open(dpath,"w",encoding="utf-8") as f:
-        json.dump({"feature_analysis":feat_analysis,"rules":rules,"walk_forward":wf,
-                    "stats":{"total_samples":total,"success_count":success,"success_rate":round(success/total*100,2)}},
+        wf_save = [{k:v for k,v in w.items() if k!="fold_details"} for w in wf]
+        wf_first_save = [{k:v for k,v in w.items() if k!="fold_details"} for w in wf_first]
+        json.dump({"feature_analysis":feat_analysis,"rules":rules,"walk_forward":wf_save,
+                    "combo_rules":combo_rules, "combo_walk_forward":wf_combo,
+                    "is_first_analysis":{"feature_analysis":feat_analysis_first,"rules":rules_first,"walk_forward":wf_first_save},
+                    "stats":{"total_samples":total,"success_count":success,"success_rate":round(success/total*100,2),
+                             "first_samples":fs_total,"first_success":fs_success}},
                    f, ensure_ascii=False, indent=2)
     print(f"\n{report_text}")
     print(f"\n리포트 저장: {rpath}")
