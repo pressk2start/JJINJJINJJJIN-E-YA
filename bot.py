@@ -716,6 +716,10 @@ def make_nmin(c_small, ratio):
                      "v":sum(x["v"] for x in b),"_si":i})
     return out
 
+def _tk16(t):
+    """시간 문자열을 분 단위(YYYY-MM-DDTHH:MM)로 정규화"""
+    return t[:16]
+
 def _rsi(cl, p=14):
     if len(cl)<p+1: return 50.0
     g,l=0.0,0.0
@@ -950,7 +954,7 @@ def process_coin(coin, btc_regime, dist_acc):
     c1_l = [c["l"] for c in c1]
     c1_t = [c["t"] for c in c1]
     c1_len = len(c1)
-    c1_map = {c1_t[i][:16]: i for i in range(c1_len)}
+    c1_map = {_tk16(c1_t[i]): i for i in range(c1_len)}
     del c1, c1_t  # 원본 dict + 시간 문자열 즉시 해제 (~32MB 절감)
     _force_free()  # 30MB를 OS에 즉시 반환
 
@@ -1172,13 +1176,11 @@ def process_coin(coin, btc_regime, dist_acc):
     # c1_map, c1_h, c1_l은 이미 상단에서 compact 배열로 생성됨
     use_1m = len(c1_map) > 100
 
-    # 멀티 TF 피처 추출 (tf=1 제외 — 메모리 절감, 5/15/60만 사용)
+    # 멀티 TF 피처 추출 (tf15/60: 여기서, tf5: 아래 raw_signals 루프에서 별도 처리)
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
-        if tf == 1:
-            continue  # c1 이미 해제됨, 5분봉 피처로 대체
-        elif tf == 5:
-            candles = c5 if c5 and len(c5) >= 60 else None
+        if tf in (1, 5):
+            continue  # tf1: 해제됨, tf5: 아래 raw_signals 루프에서 별도 처리
         elif tf == 15:
             candles = c15 if c15 and len(c15) >= 60 else None
         elif tf == 60:
@@ -1189,15 +1191,11 @@ def process_coin(coin, btc_regime, dist_acc):
         if not candles or len(candles) < 60:
             continue
 
-        if tf == 5:
-            time_map = None
-        else:
-            time_map = {cc["t"][:16]: idx for idx, cc in enumerate(candles)}
+        time_map = {_tk16(cc["t"]): idx for idx, cc in enumerate(candles)}
 
         pfx = f"tf{tf}_"
         for sig_time in all_sig_times:
-            if tf == 5: continue
-            tk = sig_time[:16]
+            tk = _tk16(sig_time)
             idx = time_map.get(tk) if time_map else None
             if idx is None: idx = find_idx(candles, sig_time)
             if idx is not None and idx >= 55:
@@ -1240,7 +1238,7 @@ def process_coin(coin, btc_regime, dist_acc):
             if entry <= 0: continue
             try: hour=int(bar["t"][11:13])
             except: hour=12
-            tk=bar["t"][:16]
+            tk=_tk16(bar["t"])
             regime=btc_regime.get(tk,"횡보")
             dip3=1 if si5>=3 and c5[si5-3]["c"]>c5[si5-1]["c"] else 0
             brk=1 if si5>=1 and bar["c"]>c5[si5-1]["h"] else 0
@@ -1282,7 +1280,7 @@ def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
 
 def _sim_strict_1m_compact(c1_h, c1_l, c1_len, c1_map, c5, ei5, entry, tp, sl, cost):
     """compact 배열(c1_h, c1_l)로 1분봉 시뮬레이션 — 메모리 효율"""
-    entry_time = c5[ei5]["t"][:16]
+    entry_time = _tk16(c5[ei5]["t"])
     start_idx = c1_map.get(entry_time)
     if start_idx is None:
         r = _sim_strict_5m(c5, ei5, entry, tp, sl, cost); r["src"]="5m_fb"; return r
@@ -2340,7 +2338,7 @@ def main():
         btc5 = make_nmin(btc1, 5)
         for i in range(60, len(btc5)):
             ret=(btc5[i]["c"]-btc5[i-60]["c"])/btc5[i-60]["c"]*100
-            t=btc5[i]["t"][:16]
+            t=_tk16(btc5[i]["t"])
             btc_regime[t]="상승" if ret>0.5 else ("하락" if ret<-0.5 else "횡보")
         tg(f"  BTC 레짐: {len(btc_regime)}시점 (1m→5m 합성)")
         del btc5
