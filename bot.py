@@ -1771,13 +1771,340 @@ def _has_enough_data(min_coins=10, min_days=25):
             good += 1
     return good >= min_coins
 
+# ================================================================
+# 패턴 발굴 모드 (--discover)
+# ================================================================
+_DISC_SLIPPAGE = 0.002       # 0.2% 슬리피지
+_DISC_MFE_THRESHOLD = 0.01   # 1% MFE 기준
+_DISC_MFE_WINDOW = 5         # 5분 (5개 1분봉)
+_DISC_OUT_DIR = os.path.join(SCRIPT_DIR, "discovery_output")
+
+def _disc_compute_labels(candles):
+    """각 시점 t의 MFE/MAE/종가수익률 레이블 생성"""
+    n = len(candles)
+    labels = []
+    for t in range(n):
+        if t + _DISC_MFE_WINDOW >= n:
+            labels.append(None)
+            continue
+        entry_price = candles[t + 1]["o"] * (1 + _DISC_SLIPPAGE)
+        if entry_price <= 0:
+            labels.append(None)
+            continue
+        future_highs = [candles[t + 1 + j]["h"] for j in range(_DISC_MFE_WINDOW)]
+        future_lows = [candles[t + 1 + j]["l"] for j in range(_DISC_MFE_WINDOW)]
+        close_5m = candles[t + _DISC_MFE_WINDOW]["c"]
+        mfe = max(future_highs) / entry_price - 1
+        mae = min(future_lows) / entry_price - 1
+        ret_close = close_5m / entry_price - 1
+        labels.append({
+            "entry_price": round(entry_price, 2),
+            "mfe_5m": round(mfe * 100, 4),
+            "mae_5m": round(mae * 100, 4),
+            "ret_close_5m": round(ret_close * 100, 4),
+            "success": 1 if mfe >= _DISC_MFE_THRESHOLD else 0,
+        })
+    return labels
+
+def _disc_tag_runs(labels):
+    """연속 성공 구간에 run_id, is_first 태깅"""
+    run_id = 0; in_run = False; current_pos = 0
+    for i, lb in enumerate(labels):
+        if lb is None:
+            in_run = False; continue
+        if lb["success"] == 1:
+            if not in_run:
+                run_id += 1; in_run = True; current_pos = 0
+                lb["run_id"] = run_id; lb["is_first"] = 1; lb["run_pos"] = 0
+            else:
+                current_pos += 1
+                lb["run_id"] = run_id; lb["is_first"] = 0; lb["run_pos"] = current_pos
+        else:
+            in_run = False
+            lb["run_id"] = 0; lb["is_first"] = 0; lb["run_pos"] = 0
+
+def _disc_extract_features(candles, t):
+    """시점 t의 직전 3분/15분/60분 피처 생성"""
+    if t < 60: return None
+    price = candles[t]["c"]
+    if price <= 0: return None
+    feat = {}
+    cl_60 = [candles[t-60+j]["c"] for j in range(61)]
+    hi_60 = [candles[t-60+j]["h"] for j in range(61)]
+    lo_60 = [candles[t-60+j]["l"] for j in range(61)]
+    vo_60 = [candles[t-60+j]["v"] for j in range(61)]
+    op_60 = [candles[t-60+j]["o"] for j in range(61)]
+
+    # ── 3분 피처 ──
+    cl3 = cl_60[-4:]
+    hi3, lo3, vo3 = hi_60[-3:], lo_60[-3:], vo_60[-3:]
+    feat["m3_ret"] = round((cl3[-1]-cl3[0])/cl3[0]*100, 4) if cl3[0]>0 else 0
+    green3 = sum(1 for i in range(-3,0) if cl_60[i]>op_60[i])
+    feat["m3_green_ratio"] = round(green3/3, 2)
+    feat["m3_higher_high"] = 1 if hi3[-1]>hi3[-2]>hi3[-3] else 0
+    feat["m3_higher_low"] = 1 if lo3[-1]>lo3[-2]>lo3[-3] else 0
+    v3_now = sum(vo3); v3_prev = sum(vo_60[-6:-3])
+    feat["m3_vol_ratio"] = round(v3_now/v3_prev, 2) if v3_prev>0 else 1.0
+    body = abs(candles[t]["c"]-candles[t]["o"])
+    rng = candles[t]["h"]-candles[t]["l"]
+    feat["m3_body_pct"] = round(body/price*100, 4)
+    feat["m3_lw_pct"] = round((min(candles[t]["o"],candles[t]["c"])-candles[t]["l"])/rng*100, 1) if rng>0 else 0
+    feat["m3_uw_pct"] = round((candles[t]["h"]-max(candles[t]["o"],candles[t]["c"]))/rng*100, 1) if rng>0 else 0
+
+    # ── 15분 피처 ──
+    cl15, hi15, lo15, vo15 = cl_60[-16:], hi_60[-15:], lo_60[-15:], vo_60[-15:]
+    feat["m15_ret"] = round((cl15[-1]-cl15[0])/cl15[0]*100, 4) if cl15[0]>0 else 0
+    feat["m15_volatility"] = round(_vol(cl15, min(15, len(cl15))), 3)
+    feat["m15_rsi14"] = round(_rsi(cl15, 14), 1)
+    bp, bw = _bb(cl15, min(15, len(cl15)))
+    feat["m15_bb_pos"] = round(bp, 1); feat["m15_bb_width"] = round(bw, 3)
+    v15_avg = sum(vo15)/15
+    v15_std = (sum((v-v15_avg)**2 for v in vo15)/15)**0.5
+    feat["m15_vol_zscore"] = round((vo15[-1]-v15_avg)/v15_std, 2) if v15_std>0 else 0
+    green15 = sum(1 for i in range(15) if cl_60[-15+i]>op_60[-15+i])
+    feat["m15_green_ratio"] = round(green15/15, 2)
+    hh15, ll15 = max(hi15), min(lo15)
+    feat["m15_pos"] = round((price-ll15)/(hh15-ll15)*100, 1) if hh15!=ll15 else 50.0
+    recent_low = min(lo_60[-5:])
+    feat["m15_recovery"] = round((price-recent_low)/recent_low*100, 3) if recent_low>0 else 0
+
+    # ── 60분 피처 ──
+    feat["m60_ret"] = round((cl_60[-1]-cl_60[0])/cl_60[0]*100, 4) if cl_60[0]>0 else 0
+    feat["m60_volatility"] = round(_vol(cl_60, 20), 3)
+    feat["m60_rsi14"] = round(_rsi(cl_60, 14), 1)
+    feat["m60_ema_align"] = _ema_align(cl_60)
+    feat["m60_macd_h"] = _macd_hist(cl_60)
+    b60p, b60w = _bb(cl_60, 20)
+    feat["m60_bb_pos"] = round(b60p, 1); feat["m60_bb_width"] = round(b60w, 3)
+    feat["m60_adx"] = round(_adx(hi_60, lo_60, cl_60), 1)
+    feat["m60_cci"] = round(_cci(hi_60, lo_60, cl_60), 1)
+    feat["m60_mfi"] = round(_mfi(hi_60, lo_60, cl_60, vo_60), 1)
+    v_recent = sum(vo_60[-15:])/15
+    v_old_sum = sum(vo_60[:45])
+    v_old = v_old_sum/45 if v_old_sum>0 else 1
+    feat["m60_vol_trend"] = round(v_recent/v_old, 2) if v_old>0 else 1.0
+    hh60, ll60 = max(hi_60), min(lo_60)
+    feat["m60_pos"] = round((price-ll60)/(hh60-ll60)*100, 1) if hh60!=ll60 else 50.0
+    ema20 = _ema(cl_60, 20)
+    feat["m60_ema20_gap"] = round((price-ema20)/ema20*100, 3) if ema20>0 else 0
+    for p in [5, 10, 20]:
+        feat[f"mom_{p}"] = round((cl_60[-1]-cl_60[-(p+1)])/cl_60[-(p+1)]*100, 4) if cl_60[-(p+1)]>0 else 0
+    return feat
+
+def _disc_analyze_coin(coin, days):
+    """단일 코인 패턴 분석"""
+    candles = _load_coin_1m(coin, days)
+    if len(candles) < 200:
+        print(f"  {coin}: 데이터 부족 ({len(candles)}개), 스킵"); return None
+    print(f"  {coin}: {len(candles)}개 1분봉 로드")
+    labels = _disc_compute_labels(candles)
+    _disc_tag_runs(labels)
+    samples = []
+    for t in range(len(candles)):
+        lb = labels[t]
+        if lb is None: continue
+        feat = _disc_extract_features(candles, t)
+        if feat is None: continue
+        samples.append({"coin": coin, "time": candles[t]["t"], **feat, **lb})
+    sc = sum(1 for s in samples if s["success"]==1)
+    total = len(samples)
+    print(f"  {coin}: {total}개 샘플, 성공 {sc}개 ({sc/total*100:.1f}%)" if total else f"  {coin}: 0개 샘플")
+    return samples
+
+def _disc_discover_rules(all_samples):
+    """성공 vs 실패 피처 차이 분석"""
+    if not all_samples: return {}
+    meta = {"coin","time","entry_price","mfe_5m","mae_5m","ret_close_5m","success","run_id","is_first","run_pos"}
+    feat_keys = [k for k in all_samples[0].keys() if k not in meta]
+    success = [s for s in all_samples if s["success"]==1]
+    failure = [s for s in all_samples if s["success"]==0]
+    if not success or not failure: return {}
+    results = {}
+    for key in feat_keys:
+        s_vals = [s[key] for s in success if key in s and s[key] is not None]
+        f_vals = [s[key] for s in failure if key in s and s[key] is not None]
+        if not s_vals or not f_vals: continue
+        s_mean, f_mean = sum(s_vals)/len(s_vals), sum(f_vals)/len(f_vals)
+        diff = s_mean - f_mean
+        all_vals = s_vals + f_vals
+        all_mean = sum(all_vals)/len(all_vals)
+        std = (sum((v-all_mean)**2 for v in all_vals)/len(all_vals))**0.5
+        effect = diff/std if std>0 else 0
+        results[key] = {"success_mean":round(s_mean,4), "failure_mean":round(f_mean,4),
+                         "diff":round(diff,4), "effect_size":round(effect,4),
+                         "n_success":len(s_vals), "n_failure":len(f_vals)}
+    return dict(sorted(results.items(), key=lambda x: abs(x[1]["effect_size"]), reverse=True))
+
+def _disc_find_best_rules(all_samples, top_features, n_rules=10):
+    """임계값 기반 규칙 탐색"""
+    rules = []
+    for feat_name, _ in list(top_features.items())[:20]:
+        vals = [(s[feat_name], s["success"]) for s in all_samples if feat_name in s and s[feat_name] is not None]
+        if len(vals) < 100: continue
+        vals.sort(key=lambda x: x[0])
+        n = len(vals)
+        total_s = sum(v[1] for v in vals)
+        cum = [0]*(n+1)
+        for i in range(n): cum[i+1] = cum[i] + vals[i][1]
+        best = None; base = total_s/n
+        for pct in [10,20,25,30,70,75,80,90]:
+            idx = int(n*pct/100); thr = vals[idx][0]
+            n_ab = n-idx
+            if n_ab >= 50:
+                r_ab = (total_s - cum[idx])/n_ab; lift = r_ab/base if base>0 else 0
+                if lift > 1.3 and (best is None or lift > best["lift"]):
+                    best = {"feature":feat_name,"direction":">=","threshold":round(thr,4),
+                            "success_rate":round(r_ab*100,2),"base_rate":round(base*100,2),
+                            "lift":round(lift,2),"n_samples":n_ab}
+            n_bl = idx+1
+            if n_bl >= 50:
+                r_bl = cum[idx+1]/n_bl; lift = r_bl/base if base>0 else 0
+                if lift > 1.3 and (best is None or lift > best["lift"]):
+                    best = {"feature":feat_name,"direction":"<=","threshold":round(thr,4),
+                            "success_rate":round(r_bl*100,2),"base_rate":round(base*100,2),
+                            "lift":round(lift,2),"n_samples":n_bl}
+        if best: rules.append(best)
+    rules.sort(key=lambda x: x["lift"], reverse=True)
+    return rules[:n_rules]
+
+def _disc_walk_forward(all_samples, rules, train_ratio=0.67):
+    """워크포워드 검증"""
+    if not all_samples or not rules: return []
+    all_samples.sort(key=lambda x: x["time"])
+    split = int(len(all_samples)*train_ratio)
+    train, test = all_samples[:split], all_samples[split:]
+    bt = sum(s["success"] for s in train)/len(train) if train else 0
+    bte = sum(s["success"] for s in test)/len(test) if test else 0
+    results = []
+    for rule in rules:
+        f, d, th = rule["feature"], rule["direction"], rule["threshold"]
+        if d == ">=":
+            trh = [s for s in train if f in s and s[f]>=th]
+            teh = [s for s in test if f in s and s[f]>=th]
+        else:
+            trh = [s for s in train if f in s and s[f]<=th]
+            teh = [s for s in test if f in s and s[f]<=th]
+        tr = sum(s["success"] for s in trh)/len(trh) if trh else 0
+        ter = sum(s["success"] for s in teh)/len(teh) if teh else 0
+        results.append({**rule, "train_rate":round(tr*100,2), "test_rate":round(ter*100,2),
+                        "train_n":len(trh), "test_n":len(teh),
+                        "base_train":round(bt*100,2), "base_test":round(bte*100,2),
+                        "test_lift":round(ter/bte,2) if bte>0 else 0,
+                        "survived": ter > bte*1.2})
+    return results
+
+def run_pattern_discovery(days=60):
+    """패턴 발굴 메인 실행"""
+    print("="*60)
+    print("패턴 발굴 분석기 v1.0 (bot.py --discover)")
+    print("="*60)
+    coins = get_saved_coins()
+    if not coins:
+        print("candle_data 디렉토리에 데이터가 없습니다."); return
+    print(f"\n수집된 코인: {len(coins)}개")
+    print(f"분석 대상: {days}일")
+    print(f"레이블: MFE({_DISC_MFE_WINDOW}분) >= {_DISC_MFE_THRESHOLD*100}%")
+    print(f"슬리피지: {_DISC_SLIPPAGE*100}%\n")
+
+    all_samples = []
+    for i, coin in enumerate(coins):
+        print(f"[{i+1}/{len(coins)}] {coin}")
+        samples = _disc_analyze_coin(coin, days)
+        if samples: all_samples.extend(samples)
+
+    if not all_samples:
+        print("\n분석 가능한 샘플이 없습니다."); return
+    total = len(all_samples)
+    success = sum(s["success"] for s in all_samples)
+    print(f"\n{'='*60}\n전체 샘플: {total:,}\n성공: {success:,} ({success/total*100:.2f}%)\n{'='*60}")
+
+    print("\n피처 분석 중...")
+    feat_analysis = _disc_discover_rules(all_samples)
+    print("규칙 발굴 중...")
+    rules = _disc_find_best_rules(all_samples, feat_analysis)
+    print("워크포워드 검증 중...")
+    wf = _disc_walk_forward(all_samples, rules)
+
+    # 리포트 생성
+    os.makedirs(_DISC_OUT_DIR, exist_ok=True)
+    R = []
+    R.append("="*70); R.append("패턴 발굴 분석 리포트")
+    R.append(f"생성 시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}")
+    R.append("="*70)
+    R.append(f"\n총 샘플: {total:,}")
+    R.append(f"성공 샘플: {success:,} ({success/total*100:.2f}%)")
+    R.append(f"실패 샘플: {total-success:,} ({(total-success)/total*100:.2f}%)")
+
+    # 코인별 통계
+    cs = defaultdict(lambda: {"total":0,"success":0})
+    for s in all_samples: cs[s["coin"]]["total"]+=1; cs[s["coin"]]["success"]+=s["success"]
+    R.append(f"\n── 코인별 통계 ──")
+    R.append(f"{'코인':<10} {'총샘플':>8} {'성공':>6} {'성공률':>8}"); R.append("-"*35)
+    for coin in sorted(cs.keys()):
+        st=cs[coin]; r=st["success"]/st["total"]*100 if st["total"]>0 else 0
+        R.append(f"{coin:<10} {st['total']:>8,} {st['success']:>6,} {r:>7.2f}%")
+
+    # 연속 성공 구간
+    rl = defaultdict(int)
+    for s in all_samples:
+        rid=s.get("run_id",0)
+        if rid>0: rl[(s["coin"],rid)]+=1
+    runs = defaultdict(int)
+    for length in rl.values(): runs[length]+=1
+    R.append(f"\n── 연속 성공 구간 분포 ──")
+    for length in sorted(runs.keys()): R.append(f"  {length}분 연속: {runs[length]}회")
+
+    # 피처 분석 상위 15
+    R.append(f"\n── 피처별 성공/실패 차이 (상위 15개) ──")
+    R.append(f"{'피처':<25} {'성공평균':>10} {'실패평균':>10} {'차이':>8} {'효과크기':>8}"); R.append("-"*65)
+    for i,(k,info) in enumerate(feat_analysis.items()):
+        if i>=15: break
+        R.append(f"{k:<25} {info['success_mean']:>10.4f} {info['failure_mean']:>10.4f} {info['diff']:>8.4f} {info['effect_size']:>8.4f}")
+
+    # 규칙
+    R.append(f"\n── 발굴된 규칙 후보 ──")
+    for i, rule in enumerate(rules):
+        R.append(f"\n규칙 {i+1}: {rule['feature']} {rule['direction']} {rule['threshold']}")
+        R.append(f"  성공률: {rule['success_rate']}% (기본: {rule['base_rate']}%)")
+        R.append(f"  리프트: {rule['lift']}x  |  샘플 수: {rule['n_samples']}")
+
+    # 워크포워드
+    R.append(f"\n── 워크포워드 검증 결과 ──")
+    R.append(f"{'규칙':<30} {'학습성공률':>10} {'검증성공률':>10} {'검증리프트':>10} {'생존':>6}"); R.append("-"*70)
+    for w in wf:
+        sv="O" if w["survived"] else "X"; nm=f"{w['feature']} {w['direction']} {w['threshold']}"
+        R.append(f"{nm:<30} {w['train_rate']:>9.2f}% {w['test_rate']:>9.2f}% {w['test_lift']:>9.2f}x {sv:>6}")
+    survived = [w for w in wf if w["survived"]]
+    R.append(f"\n── 워크포워드 생존 규칙: {len(survived)}개 ──")
+    for w in survived:
+        R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (검증 성공률: {w['test_rate']}%, 리프트: {w['test_lift']}x)")
+
+    report_text = "\n".join(R)
+    rpath = os.path.join(_DISC_OUT_DIR, "discovery_report.txt")
+    with open(rpath,"w",encoding="utf-8") as f: f.write(report_text)
+    dpath = os.path.join(_DISC_OUT_DIR, "discovery_data.json")
+    with open(dpath,"w",encoding="utf-8") as f:
+        json.dump({"feature_analysis":feat_analysis,"rules":rules,"walk_forward":wf,
+                    "stats":{"total_samples":total,"success_count":success,"success_rate":round(success/total*100,2)}},
+                   f, ensure_ascii=False, indent=2)
+    print(f"\n{report_text}")
+    print(f"\n리포트 저장: {rpath}")
+    print("완료!")
+
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=45)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
+    parser.add_argument("--discover", action="store_true",
+                        help="패턴 발굴 모드: 1분봉 전체 시점 분석으로 규칙 발굴")
     args = parser.parse_args()
+
+    if args.discover:
+        _release_lock()
+        run_pattern_discovery(args.days)
+        return
 
     global _GLOBAL_DAYS
     _GLOBAL_DAYS = args.days
