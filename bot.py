@@ -1533,14 +1533,10 @@ def generate_report(all_results, dist_acc):
         # 복합필터 (멀티TF: 1분봉 합성 기반)
         L.append(f"\n    [복합필터]")
         combos=[
-            ("1m_RSI<40+BB<20", lambda s: s.get("tf1_rsi14",50)<40 and s.get("tf1_bb20",50)<20),
             ("5m_RSI<50+15m_BB<40", lambda s: s.get("tf5_rsi14",50)<50 and s.get("tf15_bb20",50)<40),
             ("5m_MACD골든+15m_ADX>25", lambda s: s.get("tf5_macd_x")==1 and s.get("tf15_adx",0)>25),
             ("15m_MACD골든+1h_EMA정배열", lambda s: s.get("tf15_macd_x")==1 and s.get("tf60_ema_al",0)>=3),
-            ("1m_과매도+BTC상승", lambda s: s.get("tf1_rsi14",50)<30 and s["regime"]=="상승"),
             ("5m_RSI<40+BTC상승+15m_MACD골든", lambda s: s.get("tf5_rsi14",50)<40 and s["regime"]=="상승" and s.get("tf15_macd_x")==1),
-            ("1m_망치+15m_과매도", lambda s: s.get("tf1_hammer")==1 and s.get("tf15_rsi14",50)<40),
-            ("1m_Stoch<20+MACD골든", lambda s: s.get("tf1_stoch_k",50)<20 and s.get("tf1_macd_x")==1),
         ]
         for name,fn in combos: ce(name,fn)
         # Train→Test
@@ -2070,8 +2066,9 @@ def _disc_walk_forward_combo(all_samples, combos, train_days=21, test_days=7, st
     base_folds = []; n_folds = 0; fold_start = t_min
     while fold_start + train_ms + test_ms <= t_max:
         tr_end = fold_start + train_ms; te_end = tr_end + test_ms
+        n_train = sum(1 for s in all_samples if fold_start <= s["ts"] < tr_end)
         test = [s for s in all_samples if tr_end <= s["ts"] < te_end]
-        if len(test) < 30:
+        if n_train < 100 or len(test) < 30:
             fold_start += step_ms; continue
         bte = sum(s["success"] for s in test)/len(test)
         base_folds.append(bte)
