@@ -3628,10 +3628,6 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             tag = pos_for_tag.get("signal_tag", "기본")
             _v4_ep = v4_get_exit_params(tag)
 
-            # 🔧 WF데이터: HOLD 전략 파라미터 (strategy_v4 exit_params에서 결정)
-            _hold_bars = _v4_ep.get("hold_bars", 0)
-            _max_bars = _v4_ep.get("max_bars", 60)
-
             _fee_pct = FEE_RATE_ROUNDTRIP * 100.0
             _exit_slip_pct = get_expected_exit_slip_pct()
             _exit_slip_capped = min(_exit_slip_pct, 0.20)
@@ -8615,7 +8611,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     # ============================================================
     # 🔧 WF 데이터 기반: strategy_v4.evaluate_entry() 통합 진입 판정
-    # 활성: 거래량3배, 15m_눌림반전, EMA정배열진입, 15m_MACD골든+1h_EMA정배열
+    # 활성: 거래량3배, 15m_눌림반전, EMA정배열진입 (GATE: 1h_EMA정배열+15m_MACD골든+60mRSI≥45)
     # ============================================================
     _entry_mode_override = None
     _v4_signal = None  # strategy_v4 반환값
@@ -9539,6 +9535,13 @@ def monitor_position(m,
 
     verdict = None
 
+    # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
+    with _POSITION_LOCK:
+        pos = OPEN_POSITIONS.get(m, {})
+    entry_mode = pos.get("entry_mode", "confirm")
+    trade_type = pos.get("trade_type", "scalp")  # 🔧 특단조치: 진입 시 결정된 스캘프/러너
+    signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
+
     # === 🎯 WF데이터: EXIT_PARAMS 기반 트레일 파라미터 ===
     _v4_ep = pre.get("v4_exit_params") or v4_get_exit_params(signal_tag)
     checkpoint_reached = False
@@ -9576,12 +9579,6 @@ def monitor_position(m,
     mfe_partial_done = False     # MFE 부분익절 완료 여부
 
 
-    # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
-    with _POSITION_LOCK:
-        pos = OPEN_POSITIONS.get(m, {})
-    entry_mode = pos.get("entry_mode", "confirm")
-    trade_type = pos.get("trade_type", "scalp")  # 🔧 특단조치: 진입 시 결정된 스캘프/러너
-    signal_tag = pos.get("signal_tag", "기본")  # 🔧 MFE 익절 경로용
     # 🔧 FIX: signal_type 로드 (dynamic_stop_loss 신호별 완화용 — signal_tag와 별도)
     signal_type_for_sl = pos.get("signal_type", "normal")
 
@@ -11537,7 +11534,7 @@ def main():
                         print(f"[CIRCLE_REG_ERR] {m}: {_cr_err}")
 
                 # === 🔧 WF데이터: 진입 모드는 strategy_v4에서 결정 ===
-                # A그룹(거래량3배/15m_MACD골든+1h_EMA정배열) → confirm, B그룹(눌림반전/EMA정배열) → confirm
+                # A그룹(거래량3배) → confirm, B그룹(눌림반전/EMA정배열) → confirm (GATE 필수)
                 _v4_group = pre.get("v4_logic_group", "A")
                 _v4_filters = pre.get("v4_filters_hit", [])
 
