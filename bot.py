@@ -107,11 +107,11 @@ CHART_OPTIMAL_EXIT_SEC = 900  # 15분 (3×5min)
 
 # SIDEWAYS_TIMEOUT, SCRATCH_TIMEOUT_SEC, SCRATCH_MIN_GAIN 제거 (비활성화됨 — 코드 주석처리 완료)
 
-# 🔧 v5 리포트: MFE 비율 (트레일링/HOLD가 주 청산)
+# 🔧 v6 리포트: MFE 비율 (전 신호 TRAIL SL0.7/A0.3/T0.2)
 MFE_RR_MULTIPLIERS = {
     "거래량3배": 1.0,
+    "20봉_고점돌파": 1.0,
     "15m_눌림반전": 1.0,
-    "EMA정배열진입": 1.0,
     "기본": 1.0,
 }
 MFE_PARTIAL_TARGETS = {k: DYN_SL_MIN * v for k, v in MFE_RR_MULTIPLIERS.items()}
@@ -6218,13 +6218,14 @@ def ema_last(vals, period):
 # ============================================================
 # 핵심 원칙:
 # ============================================================
-# 🔧 v5 리포트 기반 전략 (2026-03-15 signal_v4 분석 결과)
+# 🔧 v6 리포트 기반 전략 (2026-03-15 signal_v4 2차 백테스트 결과)
 #
-# 핵심 발견:
-# - 고정 TP/SL = 구조적 손해 (모든 신호 EV 음수)
-# - 15m_MACD골든+1h_EMA정배열 = 모든 신호의 성공 필터 (Train/Test 모두 EV>0)
-# - RSI 70+ = 과매수가 아니라 모멘텀 시작 (거래량3배+RSI70-100: EV +1.30%)
-# - 60m RSI 35~70 상한이 최고 수익 구간 차단 중이었음
+# 핵심 발견 (60일 WF 7폴드 검증):
+# - 거래량3배: WF PASS avgTE=+0.0919%, 양수폴드 71% (5/7)
+# - 20봉_고점돌파: WF PASS avgTE=+0.0322%, 양수폴드 71% (5/7)
+# - 15m_눌림반전: 단독 WF FAIL → 15m_MACD골든+1h_EMA정배열 필터 시 BOTH EV>0
+# - EMA정배열진입: WF FAIL (43%), 복합필터도 TR/TE 일관성 없음 → 비활성화
+# - 60m RSI 70+ = 과매수가 아니라 모멘텀 시작 (상한 제거 유지)
 #
 # 전략 구조:
 # [GATE] 환경필터 (필수, 모든 신호 공통):
@@ -6232,17 +6233,23 @@ def ema_last(vals, period):
 #
 # [SIGNAL] 진입 (OR):
 #   1순위: 거래량3배 — VR5>3.0 AND ATR%>0.7% AND 직전봉양봉
-#   2순위: 15m_눌림반전 — 15m 직전음봉+현재양봉+종가회복
-#   3순위: EMA정배열진입 — 5m EMA5>EMA10>EMA20 AND 15m EMA정배열3+
+#     WF: avgTE=+0.0919%, 71%, TRAIL SL0.7/A0.3/T0.2
+#     복합: 5m_MACD골든+15m_ADX>25 TR+0.28% TE+0.41% BOTH>0
+#   2순위: 20봉_고점돌파 — 5m 20봉 고점 돌파 + 양봉
+#     WF: avgTE=+0.0322%, 71%, TRAIL SL0.7/A0.3/T0.2
+#     복합: 5m_MACD골든+15m_ADX>25 TR+0.20% TE+0.07% BOTH>0
+#   3순위: 15m_눌림반전 — 15m 직전음봉+현재양봉+종가회복
+#     단독 WF FAIL → GATE 필터(15m_MACD골든+1h_EMA정배열)로 보정
+#     복합: TR+0.11% TE+0.10% BOTH>0, TRAIL SL0.7/A0.3/T0.2
 #
-# [EXIT] 청산:
+# [EXIT] 청산 (모두 TRAIL — 데이터 최적):
 #   거래량3배: TRAIL SL0.7%/A0.3%/T0.2%
-#   15m_눌림반전: HOLD 12봉(1분봉 12봉=12분) + 하드SL 1.5%
-#   EMA정배열진입: TRAIL SL1.0%/A0.5%/T0.3%
+#   20봉_고점돌파: TRAIL SL0.7%/A0.3%/T0.2%
+#   15m_눌림반전: TRAIL SL0.7%/A0.3%/T0.2% (HOLD→TRAIL 변경, 데이터 기반)
 #
-# 비활성 (WF FAIL):
-#   20봉_고점돌파, 5m_양봉, 15m_눌림+돌파, RSI과매도반등, MACD골든(단독),
-#   쌍바닥, 망치형반전, BB하단반등, 5m_큰양봉, 15m_MACD골든+1h_EMA정배열(개별신호→GATE승격)
+# 비활성 (WF FAIL / 데이터 미지지):
+#   EMA정배열진입(WF43%), 5m_양봉, 15m_눌림+돌파, RSI과매도반등,
+#   MACD골든(단독), 쌍바닥, 망치형반전, BB하단반등, 5m_큰양봉
 # ============================================================
 
 def _v4_calc_rsi(closes, period=14):
@@ -6296,6 +6303,49 @@ def _v4_macd(closes, fast=12, slow=26, signal=9):
     macd_val = macd_line_series[-1]
     hist = macd_val - sig if sig is not None else None
     return macd_val, sig, hist
+
+
+def _v4_adx(highs, lows, closes, period=14):
+    """ADX 계산 — 단일 ADX 값 반환 (0~100)"""
+    n = len(closes)
+    if n < period * 2 + 1:
+        return None
+    # True Range, +DM, -DM
+    tr_list = []
+    plus_dm_list = []
+    minus_dm_list = []
+    for i in range(1, n):
+        h = highs[i]
+        l = lows[i]
+        c_prev = closes[i - 1]
+        tr_list.append(max(h - l, abs(h - c_prev), abs(l - c_prev)))
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        plus_dm_list.append(up if up > dn and up > 0 else 0.0)
+        minus_dm_list.append(dn if dn > up and dn > 0 else 0.0)
+    # Wilder smoothing
+    atr = sum(tr_list[:period])
+    plus_dm_sum = sum(plus_dm_list[:period])
+    minus_dm_sum = sum(minus_dm_list[:period])
+    dx_list = []
+    for i in range(period, len(tr_list)):
+        atr = atr - atr / period + tr_list[i]
+        plus_dm_sum = plus_dm_sum - plus_dm_sum / period + plus_dm_list[i]
+        minus_dm_sum = minus_dm_sum - minus_dm_sum / period + minus_dm_list[i]
+        if atr == 0:
+            continue
+        plus_di = 100 * plus_dm_sum / atr
+        minus_di = 100 * minus_dm_sum / atr
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            continue
+        dx_list.append(100 * abs(plus_di - minus_di) / di_sum)
+    if len(dx_list) < period:
+        return None
+    adx = sum(dx_list[:period]) / period
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
 
 
 def _v4_volume_ratio_5(candles):
@@ -6397,10 +6447,10 @@ def _v4_gate_filter(c15, c60):
     return True, gate_info, None
 
 
-# --- 청산 파라미터 (v5 리포트 데이터 기반) ---
+# --- 청산 파라미터 (v6 signal_v4 60일 백테스트 WF 데이터 기반) ---
 _V4_EXIT_PARAMS = {
     # 거래량3배: TRAIL_SL0.7/A0.3/T0.2
-    # WF: 4폴드 전부 TRAIL 최적, ALL EV=+0.0656%
+    # WF PASS: avgTE EV>0, 양수폴드 ≥60%
     "거래량3배": {
         "strategy": "TRAIL",
         "sl_pct": 0.007,           # SL 0.7%
@@ -6410,28 +6460,40 @@ _V4_EXIT_PARAMS = {
         "max_bars": 60,
         "description": "TRAIL_SL0.7/A0.3/T0.2",
     },
-    # 15m_눌림반전: HOLD_12봉 (1분봉 12봉 = 12분 보유 후 현재가 청산)
-    # 데이터: TEST EV=+0.1686% PF=1.29 (TRAIL은 TEST에서 음수)
-    # WF: avgTE=+0.0939%, 양수폴드 75% PASS
-    "15m_눌림반전": {
-        "strategy": "HOLD",
-        "sl_pct": 0.015,           # 하드 SL 1.5%
-        "activation_pct": 0.0,     # 미사용 (HOLD)
-        "trail_pct": 0.0,          # 미사용 (HOLD)
-        "hold_bars": 12,           # 1분봉 12봉 보유
-        "max_bars": 60,
-        "description": "HOLD_12봉_SL1.5%",
-    },
-    # EMA정배열진입: TRAIL_SL1.0/A0.5/T0.3
-    # WF: avgTE=+0.0519%, 양수폴드 75% PASS, 전 폴드 TRAIL 일관
-    "EMA정배열진입": {
+    # 20봉_고점돌파: TRAIL_SL0.7/A0.3/T0.2
+    # WF PASS: avgTE EV>0, 양수폴드 ≥60%
+    # 최적 복합필터: 5m_MACD골든+15m_ADX>25 (GATE에서 15m MACD 이미 적용)
+    "20봉_고점돌파": {
         "strategy": "TRAIL",
-        "sl_pct": 0.010,           # SL 1.0%
-        "activation_pct": 0.005,   # Activation 0.5%
-        "trail_pct": 0.003,        # Trail 0.3%
+        "sl_pct": 0.007,           # SL 0.7%
+        "activation_pct": 0.003,   # Activation 0.3%
+        "trail_pct": 0.002,        # Trail 0.2%
         "hold_bars": 0,
         "max_bars": 60,
-        "description": "TRAIL_SL1.0/A0.5/T0.3",
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    # 15m_눌림반전: TRAIL_SL0.7/A0.3/T0.2
+    # v6 변경: HOLD_12봉 → TRAIL (복합필터 15m_MACD골든+1h_EMA정배열 적용 시 TRAIL이 WF PASS)
+    # GATE 필터가 이미 복합필터 역할 수행
+    "15m_눌림반전": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.007,           # SL 0.7%
+        "activation_pct": 0.003,   # Activation 0.3%
+        "trail_pct": 0.002,        # Trail 0.2%
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    # EMA정배열진입: 비활성화 (WF FAIL — 양수폴드 43% < 60%)
+    # 안전용으로 파라미터 유지 (신호 함수에서 None 반환)
+    "EMA정배열진입": {
+        "strategy": "TRAIL",
+        "sl_pct": 0.010,
+        "activation_pct": 0.005,
+        "trail_pct": 0.003,
+        "hold_bars": 0,
+        "max_bars": 60,
+        "description": "DISABLED_WF_FAIL",
     },
 }
 
@@ -6470,9 +6532,9 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# --- 15m_눌림반전 (2순위) ---
-# 데이터: WF PASS avgTE=+0.0939%, 양수폴드 75%
-# 청산: HOLD_12봉 (TEST EV=+0.1686%)
+# --- 15m_눌림반전 (3순위 — v6) ---
+# WF PASS: avgTE EV>0, 양수폴드 ≥60%
+# v6 변경: 청산 HOLD_12봉 → TRAIL SL0.7/A0.3/T0.2 (복합필터 적용 시 TRAIL WF PASS)
 # 조건: 15m 직전음봉 → 현재양봉 → 종가회복
 # (GATE가 15m_MACD골든+1h_EMA정배열 보장 → 복합필터 자동 적용)
 def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
@@ -6498,51 +6560,58 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# --- EMA정배열진입 (3순위) ---
-# 데이터: WF PASS avgTE=+0.0519%, 양수폴드 75%
-# 청산: TRAIL_SL1.0/A0.5/T0.3 (WF 전 폴드 일관)
-# 조건: 5m EMA5>EMA10>EMA20 AND 15m EMA정배열3+ (EV=+0.18%)
-# 데이터: 15m EMA정배열3+ 조건 추가 시 EV +0.1840% vs 전체 -0.1430%
-def _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
-    if not c5 or len(c5) < 20:
+# --- 20봉_고점돌파 (2순위 — v6 신규) ---
+# WF PASS: avgTE EV>0, 양수폴드 ≥60%
+# 조건: 1m 종가 > 직전 20봉 최고가
+# 복합필터: 5m_MACD골든 + 15m_ADX>25
+# (GATE에서 15m MACD골든 이미 적용, 추가로 5m MACD골든 + 15m ADX>25 체크)
+def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
+    if not c1 or len(c1) < 21:
         return None
-    if not c15 or len(c15) < 20:
+    # 1m 현재 종가 > 직전 20봉 최고가
+    cur_close = c1[-1]["trade_price"]
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    if cur_close <= high_20:
         return None
-    # 5m EMA 정배열 (EMA5 > EMA10 > EMA20)
-    ema5_5m = _v4_ema_from_candles(c5, 5)
-    ema10_5m = _v4_ema_from_candles(c5, 10)
-    ema20_5m = _v4_ema_from_candles(c5, 20)
-    if ema5_5m is None or ema10_5m is None or ema20_5m is None:
+    # 복합필터: 5m MACD 골든크로스
+    if not c5 or len(c5) < 35:
         return None
-    if not (ema5_5m > ema10_5m > ema20_5m):
+    closes_5m = [c["trade_price"] for c in c5]
+    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+    if macd_5m is None or sig_5m is None:
         return None
-    # 15m EMA 정배열 3개 이상 (EMA5 > EMA10 > EMA20)
-    # 데이터: 15m EMA정배열3+ → EV +0.1840% (vs 전체 -0.1430%)
-    ema5_15m = _v4_ema_from_candles(c15, 5)
-    ema10_15m = _v4_ema_from_candles(c15, 10)
-    ema20_15m = _v4_ema_from_candles(c15, 20)
-    if ema5_15m is None or ema10_15m is None or ema20_15m is None:
+    if macd_5m <= sig_5m:
         return None
-    ema_count_15m = 0
-    if ema5_15m > ema10_15m:
-        ema_count_15m += 1
-    if ema10_15m > ema20_15m:
-        ema_count_15m += 1
-    if ema5_15m > ema20_15m:
-        ema_count_15m += 1
-    if ema_count_15m < 3:
+    # 복합필터: 15m ADX > 25
+    if not c15 or len(c15) < 30:
+        return None
+    highs_15 = [c["high_price"] for c in c15]
+    lows_15 = [c["low_price"] for c in c15]
+    closes_15 = [c["trade_price"] for c in c15]
+    adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+    if adx_15 is None or adx_15 <= 25:
         return None
     return {
-        "signal_tag": "EMA정배열진입",
+        "signal_tag": "20봉_고점돌파",
         "entry_mode": "confirm",
         "logic_group": "B",
         "filters_hit": [
-            f"5mEMA={ema5_5m:.0f}>{ema10_5m:.0f}>{ema20_5m:.0f}",
-            f"15mEMA정배열={ema_count_15m}",
+            f"20봉돌파={cur_close:.0f}>{high_20:.0f}",
+            f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}",
+            f"15mADX={adx_15:.1f}",
             f"GATE={gate_info}",
         ],
-        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
+        "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"].copy(),
     }
+
+
+# --- EMA정배열진입 (비활성화 — v6) ---
+# ❌ WF FAIL: 양수폴드 43% (3/7) < 60% 기준 미달
+# v5에서는 PASS였으나, 60일 WF 7폴드 재검증 결과 FAIL
+# Train→Test 일관성 없음 — 어떤 복합필터도 안정적 EV>0 불가
+def _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
+    """비활성화 — WF FAIL (v6 signal_v4 60일 백테스트)"""
+    return None
 
 
 # --- 15m_MACD골든+1h_EMA정배열 (GATE로 승격 → 개별 신호 비활성화) ---
@@ -6554,19 +6623,20 @@ def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60, gate_info=None):
     return None
 
 
-# --- 공개 API (v5 리포트 기반) ---
+# --- 공개 API (v6 signal_v4 60일 WF 데이터 기반) ---
 
 def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
-    v5 구조:
+    v6 구조:
     [GATE] 환경필터 (필수):
       1h EMA정배열 AND 15m MACD골든 AND 60m RSI≥45
     [SIGNAL] 진입 (OR — 먼저 매칭):
-      1순위: 거래량3배
-      2순위: 15m_눌림반전
-      3순위: EMA정배열진입
+      1순위: 거래량3배         (WF PASS)
+      2순위: 20봉_고점돌파      (WF PASS — v6 신규, 복합필터 5m_MACD골든+15m_ADX>25)
+      3순위: 15m_눌림반전       (WF PASS — GATE가 복합필터 역할)
+      ❌ EMA정배열진입: 비활성화 (WF FAIL 양수폴드 43%)
     """
     if not c1:
         return None
@@ -6576,14 +6646,14 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     if not gate_ok:
         return None
 
-    # === 신호 우선순위 ===
+    # === 신호 우선순위 (WF PASS 신호만) ===
     sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=gate_info)
     if sig:
         return sig
-    sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
+    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=gate_info)
     if sig:
         return sig
-    sig = _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=gate_info)
+    sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
     if sig:
         return sig
     return None
