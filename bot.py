@@ -945,7 +945,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     if len(c1) < 300:
         print(f"    {coin} 1분봉 부족 ({len(c1)}개), 스킵")
         return {}
-    _dbg(f"    {coin} [1/5] 로드 완료 ({len(c1)}개, {time.time()-_t0:.1f}초)")
+    _dbg(f"    {coin} [1/6] 로드 완료 ({len(c1)}개, {time.time()-_t0:.1f}초)")
 
     if time.time() > _deadline:
         _dbg(f"    {coin} 로드 후 타임아웃"); del c1; return {}
@@ -957,7 +957,10 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
         del c1; return {}
     c15 = make_nmin(c5, 3)
     c60 = make_nmin(c1, 60) if len(c1) >= 3600 else []
-    _dbg(f"    {coin} [2/5] 합성 완료 (c5={len(c5)}, c15={len(c15)}, c60={len(c60)})")
+    _dbg(f"    {coin} [2/6] 합성 완료 (c5={len(c5)}, c15={len(c15)}, c60={len(c60)})")
+
+    if time.time() > _deadline:
+        _dbg(f"    {coin} 합성 후 타임아웃"); del c1, c5, c15, c60; return {}
 
     # ── 메모리 최적화: c1 dict 리스트 → compact 배열 변환 ──
     c1_h = [c["h"] for c in c1]
@@ -969,6 +972,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
         c1_map.setdefault(_tk16(c1_t[i]), i)
     del c1, c1_t
     _force_free()
+    _dbg(f"    {coin} [3/6] compact+GC 완료 ({time.time()-_t0:.1f}초) | mem={_get_mem_mb():.0f}MB")
 
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
@@ -1035,13 +1039,51 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     pre_macd_cross = [False] * n5  # 이 봉에서 골든크로스 발생?
     pre_ema_aligned = [False] * n5  # 이 봉에서 정배열?
 
-    # RSI14 pre-compute
-    for i in range(20, n5):
-        pre_rsi[i] = _rsi(closes[i-19:i+1], 14)
+    # RSI14 pre-compute — 증분 방식 (Wilder smoothing)
+    if n5 > 15:
+        p_rsi = 14
+        avg_g = 0.0; avg_l = 0.0
+        for i in range(1, p_rsi + 1):
+            d = closes[i] - closes[i - 1]
+            if d > 0: avg_g += d
+            else: avg_l -= d
+        avg_g /= p_rsi; avg_l /= p_rsi
+        if avg_l != 0:
+            pre_rsi[p_rsi] = 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+        else:
+            pre_rsi[p_rsi] = 100.0
+        for i in range(p_rsi + 1, n5):
+            d = closes[i] - closes[i - 1]
+            g = d if d > 0 else 0.0
+            l = -d if d < 0 else 0.0
+            avg_g = (avg_g * (p_rsi - 1) + g) / p_rsi
+            avg_l = (avg_l * (p_rsi - 1) + l) / p_rsi
+            if avg_l != 0:
+                pre_rsi[i] = 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+            else:
+                pre_rsi[i] = 100.0
 
-    # BB20 위치 pre-compute
-    for i in range(24, n5):
-        pre_bb[i], _ = _bb(closes[i-24:i+1], 20)
+    # BB20 위치 pre-compute — 슬라이딩 윈도우
+    if n5 >= 20:
+        p_bb = 20
+        win = closes[:p_bb]
+        s = sum(win); sq = sum(x * x for x in win)
+        for i in range(p_bb - 1, n5):
+            if i >= p_bb:
+                old = closes[i - p_bb]
+                new = closes[i]
+                s += new - old
+                sq += new * new - old * old
+                win.append(new)  # not actually used, just update s/sq
+            m = s / p_bb
+            var = sq / p_bb - m * m
+            std = var ** 0.5 if var > 0 else 0.0
+            if std > 0 and m > 0:
+                u = m + 2 * std; lo = m - 2 * std
+                bw = u - lo
+                pre_bb[i] = (closes[i] - lo) / bw * 100 if bw != 0 else 50.0
+            else:
+                pre_bb[i] = 50.0
 
     # MACD/EMA pre-compute (EMA를 증분으로 계산)
     if n5 > 60:
@@ -1078,9 +1120,9 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
                 pre_ema_aligned[i] = True  # 첫 진입만
             prev_aligned = aligned
 
-    _dbg(f"    {coin} [3/5] pre-compute 완료 ({time.time()-_t0:.1f}초)")
+    _dbg(f"    {coin} [4/6] pre-compute 완료 ({time.time()-_t0:.1f}초)")
     if time.time() > _deadline:
-        _dbg(f"    {coin} pre-compute 타임아웃")
+        _dbg(f"    {coin} [4/6] pre-compute 타임아웃")
         del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
         del c5, c15, c60, c1_h, c1_l, c1_map; return {}
 
@@ -1177,11 +1219,11 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
 
     total_sigs = sum(len(v) for v in raw_signals.values())
-    _dbg(f"    {coin} [4/5] 신호탐지 완료: {total_sigs}개 ({time.time()-_t0:.1f}초)")
+    _dbg(f"    {coin} [5/6] 신호탐지 완료: {total_sigs}개 ({time.time()-_t0:.1f}초)")
     if total_sigs == 0:
         del c5, c15, c60; return {}
     if time.time() > _deadline:
-        _dbg(f"    {coin} 신호탐지 후 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map, raw_signals; return {}
+        _dbg(f"    {coin} [5/6] 신호탐지 후 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map, raw_signals; return {}
 
     if total_sigs > MAX_SIGS_PER_COIN:
         ratio = MAX_SIGS_PER_COIN / total_sigs
@@ -1304,7 +1346,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
             built.append(sig)
         results[stype] = built
 
-    _dbg(f"    {coin} [5/5] 완료 ({time.time()-_t0:.1f}초)")
+    _dbg(f"    {coin} [6/6] 완료 ({time.time()-_t0:.1f}초)")
     del c5, c15, c60, c1_h, c1_l, c1_map, tf_feat_cache, raw_signals
     return results
 
