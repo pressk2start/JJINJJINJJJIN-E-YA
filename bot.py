@@ -6227,19 +6227,16 @@ def ema_last(vals, period):
 # - EMA정배열진입: WF FAIL (43%), 복합필터도 TR/TE 일관성 없음 → 비활성화
 # - 60m RSI 70+ = 과매수가 아니라 모멘텀 시작 (상한 제거 유지)
 #
-# 전략 구조:
-# [GATE] 환경필터 (필수, 모든 신호 공통):
-#   1h EMA정배열 (EMA5>EMA10>EMA20) AND 15m MACD골든 AND 60m RSI ≥ 45
-#
-# [SIGNAL] 진입 (OR):
+# 전략 구조 (v6.1 — GATE 신호별 분리):
+# [SIGNAL] 진입 (OR — 먼저 매칭):
 #   1순위: 거래량3배 — VR5>3.0 AND ATR%>0.7% AND 직전봉양봉
+#     단독 WF PASS → GATE 불필요
 #     WF: avgTE=+0.0919%, 71%, TRAIL SL0.7/A0.3/T0.2
-#     복합: 5m_MACD골든+15m_ADX>25 TR+0.28% TE+0.41% BOTH>0
-#   2순위: 20봉_고점돌파 — 5m 20봉 고점 돌파 + 양봉
+#   2순위: 20봉_고점돌파 — 1m 20봉 고점 돌파
+#     자체 복합필터: 5m_MACD골든 + 15m_ADX>25
 #     WF: avgTE=+0.0322%, 71%, TRAIL SL0.7/A0.3/T0.2
-#     복합: 5m_MACD골든+15m_ADX>25 TR+0.20% TE+0.07% BOTH>0
 #   3순위: 15m_눌림반전 — 15m 직전음봉+현재양봉+종가회복
-#     단독 WF FAIL → GATE 필터(15m_MACD골든+1h_EMA정배열)로 보정
+#     단독 WF FAIL → GATE 필수 (15m_MACD골든+1h_EMA정배열+60m_RSI≥45)
 #     복합: TR+0.11% TE+0.10% BOTH>0, TRAIL SL0.7/A0.3/T0.2
 #
 # [EXIT] 청산 (모두 TRAIL — 데이터 최적):
@@ -6629,33 +6626,33 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
-    v6 구조:
-    [GATE] 환경필터 (필수):
-      1h EMA정배열 AND 15m MACD골든 AND 60m RSI≥45
+    v6.1 구조 — GATE를 신호별 분리 (백테스트 데이터 기반):
     [SIGNAL] 진입 (OR — 먼저 매칭):
-      1순위: 거래량3배         (WF PASS)
-      2순위: 20봉_고점돌파      (WF PASS — v6 신규, 복합필터 5m_MACD골든+15m_ADX>25)
-      3순위: 15m_눌림반전       (WF PASS — GATE가 복합필터 역할)
+      1순위: 거래량3배         (단독 WF PASS — GATE 불필요)
+      2순위: 20봉_고점돌파      (자체 복합필터 5m_MACD골든+15m_ADX>25)
+      3순위: 15m_눌림반전       (GATE 필수 — 단독 WF FAIL, 복합필터로 PASS)
       ❌ EMA정배열진입: 비활성화 (WF FAIL 양수폴드 43%)
     """
     if not c1:
         return None
 
-    # === GATE 필터 (모든 신호 공통 필수) ===
-    gate_ok, gate_info, gate_reason = _v4_gate_filter(c15, c60)
-    if not gate_ok:
-        return None
+    # === 1순위: 거래량3배 (단독 WF PASS — GATE 불필요) ===
+    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None)
+    if sig:
+        return sig
 
-    # === 신호 우선순위 (WF PASS 신호만) ===
-    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=gate_info)
+    # === 2순위: 20봉_고점돌파 (자체 복합필터만 — GATE 불필요) ===
+    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None)
     if sig:
         return sig
-    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=gate_info)
-    if sig:
-        return sig
-    sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
-    if sig:
-        return sig
+
+    # === 3순위: 15m_눌림반전 (GATE 필수 — 단독 FAIL, 복합필터로 PASS) ===
+    gate_ok, gate_info, gate_reason = _v4_gate_filter(c15, c60)
+    if gate_ok:
+        sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
+        if sig:
+            return sig
+
     return None
 
 
@@ -11047,9 +11044,9 @@ def main():
     # 🔧 FIX: ThreadPoolExecutor를 루프 밖에서 1회 생성 (매 루프 생성/소멸 오버헤드 제거)
     _candle_executor = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
 
-    # 🔧 주기적 헬스체크 텔레그램 알림 (30분마다)
+    # 🔧 주기적 헬스체크 텔레그램 알림 (10분마다)
     _last_heartbeat_ts = time.time()
-    _HEARTBEAT_INTERVAL = 1800  # 30분
+    _HEARTBEAT_INTERVAL = 600  # 10분
 
     # 🔧 FIX: c1_cache 초기화 (첫 반복에서 box_scan_markets에 NameError 방지)
     c1_cache = {}
