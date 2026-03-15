@@ -2327,7 +2327,7 @@ def main():
     global _GLOBAL_DAYS
     _GLOBAL_DAYS = args.days
 
-    tg("[시작] upbit_signal_study v4.0 (1분봉 고속수집: 일별gzip + 4worker + 증분)")
+    tg(f"[시작] upbit_signal_study v4.0 | {args.days}일 {args.coins}코인")
     t0 = time.time()
     last_hb = t0
 
@@ -2335,7 +2335,7 @@ def main():
     need_days = max(25, int(args.days * 0.7))
     need_coins = max(10, int(args.coins * 0.7))
     if not args.skip_collect and _has_enough_data(min_coins=need_coins, min_days=need_days):
-        tg(f"[자동] 1m 데이터 충분 ({need_days}일+ × {need_coins}코인+, 요청 {args.days}일/{args.coins}코인의 70%) → 수집 스킵")
+        tg(f"[자동] 1m 데이터 충분 → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
