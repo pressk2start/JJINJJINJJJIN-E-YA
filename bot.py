@@ -1386,8 +1386,8 @@ def generate_report(all_results, dist_acc):
     # [0] 엄격 판정
     L.append(f"\n[0] 엄격 판정 (1분봉 기준, 10분 제한, 시그널별 고정 TP/SL)")
     L.append("-"*65)
-    L.append(f"  {'신호유형':<14s} {'TP/SL':>7s} {'n':>5s} {'EV':>8s} {'Hit%':>5s} {'WR%':>5s} {'TP':>5s} {'SL':>5s} {'TO':>5s} {'양면':>4s} {'봉':>4s} {'1m':>4s} {'5m':>4s}")
-    L.append(f"  {'-'*95}")
+    L.append(f"  {'신호유형':<14s} {'TP/SL':>7s} {'n':>5s} {'EV':>8s} {'Hit%':>5s} {'WR%':>5s} {'TP':>5s} {'SL':>5s} {'TO':>5s} {'양면':>4s} {'봉':>4s} {'데이터소스(1m/to/5m/fb)':>24s}")
+    L.append(f"  {'-'*105}")
     total_1m = total_5m = 0
     for st, sigs in all_results.items():
         if not sigs: continue
@@ -1410,7 +1410,8 @@ def generate_report(all_results, dist_acc):
         total_1m += n_1m + n_1m_to; total_5m += n_5m + n_5m_fb
         tp_pct=tp_cnt/n*100; sl_pct=sl_cnt/n*100; to_pct=to_cnt/n*100; both_pct=both_cnt/n*100
         star=" ***" if ev>0 and n>=MIN_TRADES else ""
-        L.append(f"  {st:<14s} {tpsl['tp']:+.1f}/{tpsl['sl']:-.1f} {n:5d} {ev:+8.4f}% {hit_rate:5.1f} {wr:5.1f} {tp_pct:5.1f} {sl_pct:5.1f} {to_pct:5.1f} {both_pct:4.1f} {avg_bars:4.1f} 1m:{n_1m} to:{n_1m_to} 5m:{n_5m} fb:{n_5m_fb}{star}")
+        src = f"{n_1m}/{n_1m_to}/{n_5m}/{n_5m_fb}"
+        L.append(f"  {st:<14s} {tpsl['tp']:+.1f}/{tpsl['sl']:-.1f} {n:5d} {ev:+8.4f}% {hit_rate:5.1f} {wr:5.1f} {tp_pct:5.1f} {sl_pct:5.1f} {to_pct:5.1f} {both_pct:4.1f} {avg_bars:4.1f} {src:>24s}{star}")
         si = int(n * TRAIN_RATIO)
         for nm, sub_s in [("TR", stricts[:si]), ("TE", stricts[si:])]:
             if len(sub_s)<10: continue
