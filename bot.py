@@ -971,8 +971,9 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     for i in range(c1_len):
         c1_map.setdefault(_tk16(c1_t[i]), i)
     del c1, c1_t
-    _force_free()
-    _dbg(f"    {coin} [3/6] compact+GC 완료 ({time.time()-_t0:.1f}초) | mem={_get_mem_mb():.0f}MB")
+    # 주의: _force_free() 제거 — gc.collect()가 85K dict 해제 시 프리즈 유발
+    # 메인 루프에서 코인 간에만 GC 수행
+    _dbg(f"    {coin} [3/6] compact 완료 ({time.time()-_t0:.1f}초)")
 
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
@@ -2468,8 +2469,9 @@ def main():
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
 
-        # 매 코인마다 GC + malloc_trim (OOM 방지: OS에 메모리 실제 반환)
-        _force_free()
+        # 5코인마다 GC (매번 하면 gc.collect 프리즈 유발)
+        if (i + 1) % 5 == 0:
+            _force_free()
 
         if i >= 9:
             mem = _get_mem_mb()
