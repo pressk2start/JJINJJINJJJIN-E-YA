@@ -2104,7 +2104,7 @@ def _disc_walk_forward_combo(all_samples, combos, train_days=21, test_days=7, st
 def run_pattern_discovery(days=60):
     """패턴 발굴 메인 실행"""
     print("="*60)
-    print("패턴 발굴 분석기 v1.0 (bot.py --discover)")
+    print("패턴 발굴 분석기 v2.0 (bot.py --discover)")
     print("="*60)
     coins = get_saved_coins()
     if not coins:
@@ -2294,6 +2294,8 @@ def main():
 
     if args.discover:
         _release_lock()
+        if args.days < 50:
+            print(f"[주의] --days {args.days}는 rolling WF에 fold가 적을 수 있음. --days 60 이상 권장")
         run_pattern_discovery(args.days)
         return
 
