@@ -2022,9 +2022,10 @@ def _disc_walk_forward(all_samples, rules, train_days=21, test_days=7, step_days
     while fold_start + train_ms + test_ms <= t_max:
         tr_end = fold_start + train_ms
         te_end = tr_end + test_ms
-        train = [s for s in all_samples if fold_start <= s["ts"] < tr_end]
+        # train은 fold 유효성 체크용 (규칙은 이미 전체 데이터에서 발굴됨)
+        n_train = sum(1 for s in all_samples if fold_start <= s["ts"] < tr_end)
         test = [s for s in all_samples if tr_end <= s["ts"] < te_end]
-        if len(train) < 100 or len(test) < 30:
+        if n_train < 100 or len(test) < 30:
             fold_start += step_ms; continue
         bte = sum(s["success"] for s in test)/len(test)
         base_folds.append(bte)
@@ -2197,6 +2198,8 @@ def run_pattern_discovery(days=60):
     n_folds_total = wf[0]["n_folds"] if wf else 0
     R.append(f"\n── Rolling Out-of-Sample 검증 (train {21}d / test {7}d / step {5}d, {n_folds_total} folds) ──")
     R.append(f"  * 규칙은 전체 데이터에서 사전 발굴 → 각 fold test 구간에 적용하여 안정성 확인")
+    if n_folds_total < 3:
+        R.append(f"  ⚠ fold 수 {n_folds_total}개 — 신뢰도 낮음. --days 60 이상 권장")
     R.append(f"{'규칙':<30} {'평균성공률':>10} {'평균리프트':>10} {'승률':>8} {'생존':>6}"); R.append("-"*70)
     for w in wf:
         sv="O" if w["survived"] else "X"; nm=f"{w['feature']} {w['direction']} {w['threshold']}"
