@@ -1857,7 +1857,7 @@ def _disc_extract_features(candles, t):
     feat["m15_volatility"] = round(_vol(cl15, min(15, len(cl15))), 3)
     feat["m15_rsi14"] = round(_rsi(cl15, 14), 1)
     bp, bw = _bb(cl15, min(15, len(cl15)))
-    feat["m15_bb_pos"] = round(bp, 1); feat["m15_bb_width"] = round(bw, 3)
+    feat["m15_bb15_pos"] = round(bp, 1); feat["m15_bb15_width"] = round(bw, 3)
     v15_avg = sum(vo15)/15
     v15_std = (sum((v-v15_avg)**2 for v in vo15)/15)**0.5
     feat["m15_vol_zscore"] = round((vo15[-1]-v15_avg)/v15_std, 2) if v15_std>0 else 0
@@ -1907,7 +1907,9 @@ def _disc_analyze_coin(coin, days):
         if feat is None: continue
         rid = lb.get("run_id", 0)
         rk = f"{coin}_{rid}" if rid > 0 else ""
-        samples.append({"coin": coin, "time": candles[t]["t"], "run_key": rk, **feat, **lb})
+        raw_t = candles[t]["t"]
+        ts = int(datetime.strptime(raw_t[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=KST).timestamp() * 1000)
+        samples.append({"coin": coin, "time": raw_t, "ts": ts, "run_key": rk, **feat, **lb})
     sc = sum(1 for s in samples if s["success"]==1)
     total = len(samples)
     print(f"  {coin}: {total}개 샘플, 성공 {sc}개 ({sc/total*100:.1f}%)" if total else f"  {coin}: 0개 샘플")
@@ -1916,7 +1918,7 @@ def _disc_analyze_coin(coin, days):
 def _disc_discover_rules(all_samples):
     """성공 vs 실패 피처 차이 분석"""
     if not all_samples: return {}
-    meta = {"coin","time","entry_price","mfe_5m","mae_5m","ret_close_5m","success","run_id","is_first","run_pos","run_key"}
+    meta = {"coin","time","ts","entry_price","mfe_5m","mae_5m","ret_close_5m","success","run_id","is_first","run_pos","run_key"}
     feat_keys = [k for k in all_samples[0].keys() if k not in meta]
     success = [s for s in all_samples if s["success"]==1]
     failure = [s for s in all_samples if s["success"]==0]
@@ -1932,7 +1934,10 @@ def _disc_discover_rules(all_samples):
         all_mean = sum(all_vals)/len(all_vals)
         std = (sum((v-all_mean)**2 for v in all_vals)/len(all_vals))**0.5
         effect = diff/std if std>0 else 0
+        s_sorted = sorted(s_vals); f_sorted = sorted(f_vals)
+        s_med = s_sorted[len(s_sorted)//2]; f_med = f_sorted[len(f_sorted)//2]
         results[key] = {"success_mean":round(s_mean,4), "failure_mean":round(f_mean,4),
+                         "success_median":round(s_med,4), "failure_median":round(f_med,4),
                          "diff":round(diff,4), "effect_size":round(effect,4),
                          "n_success":len(s_vals), "n_failure":len(f_vals)}
     return dict(sorted(results.items(), key=lambda x: abs(x[1]["effect_size"]), reverse=True))
@@ -2003,10 +2008,10 @@ def _disc_find_combo_rules(all_samples, single_rules, top_k=8, min_samples=100):
     return combos[:10]
 
 def _disc_walk_forward(all_samples, rules, train_days=21, test_days=7, step_days=5):
-    """Rolling 워크포워드 검증 (train/test/step 일 단위)"""
+    """Rolling out-of-sample validation (사전 발굴 규칙의 시간대별 안정성 검증)"""
     if not all_samples or not rules: return []
-    all_samples.sort(key=lambda x: x["time"])
-    t_min = all_samples[0]["time"]; t_max = all_samples[-1]["time"]
+    all_samples.sort(key=lambda x: x["ts"])
+    t_min = all_samples[0]["ts"]; t_max = all_samples[-1]["ts"]
     day_ms = 86400_000
     train_ms, test_ms, step_ms = train_days*day_ms, test_days*day_ms, step_days*day_ms
     # fold별 결과 수집
@@ -2017,8 +2022,8 @@ def _disc_walk_forward(all_samples, rules, train_days=21, test_days=7, step_days
     while fold_start + train_ms + test_ms <= t_max:
         tr_end = fold_start + train_ms
         te_end = tr_end + test_ms
-        train = [s for s in all_samples if fold_start <= s["time"] < tr_end]
-        test = [s for s in all_samples if tr_end <= s["time"] < te_end]
+        train = [s for s in all_samples if fold_start <= s["ts"] < tr_end]
+        test = [s for s in all_samples if tr_end <= s["ts"] < te_end]
         if len(train) < 100 or len(test) < 30:
             fold_start += step_ms; continue
         bte = sum(s["success"] for s in test)/len(test)
@@ -2054,17 +2059,17 @@ def _disc_walk_forward(all_samples, rules, train_days=21, test_days=7, step_days
     return results
 
 def _disc_walk_forward_combo(all_samples, combos, train_days=21, test_days=7, step_days=5):
-    """Rolling 워크포워드 검증 (조합 규칙용)"""
+    """Rolling out-of-sample validation (조합 규칙용)"""
     if not all_samples or not combos: return []
-    all_samples.sort(key=lambda x: x["time"])
-    t_min = all_samples[0]["time"]; t_max = all_samples[-1]["time"]
+    all_samples.sort(key=lambda x: x["ts"])
+    t_min = all_samples[0]["ts"]; t_max = all_samples[-1]["ts"]
     day_ms = 86400_000
     train_ms, test_ms, step_ms = train_days*day_ms, test_days*day_ms, step_days*day_ms
     combo_folds = {i: [] for i in range(len(combos))}
     base_folds = []; n_folds = 0; fold_start = t_min
     while fold_start + train_ms + test_ms <= t_max:
         tr_end = fold_start + train_ms; te_end = tr_end + test_ms
-        test = [s for s in all_samples if tr_end <= s["time"] < te_end]
+        test = [s for s in all_samples if tr_end <= s["ts"] < te_end]
         if len(test) < 30:
             fold_start += step_ms; continue
         bte = sum(s["success"] for s in test)/len(test)
@@ -2140,7 +2145,7 @@ def run_pattern_discovery(days=60):
     rules_first = _disc_find_best_rules(first_samples, feat_analysis_first)
     print("조합 규칙 탐색 중...")
     combo_rules = _disc_find_combo_rules(all_samples, rules)
-    print("워크포워드 검증 중...")
+    print("Rolling OOS 검증 중...")
     wf = _disc_walk_forward(all_samples, rules)
     wf_first = _disc_walk_forward(first_samples, rules_first)
     wf_combo = _disc_walk_forward_combo(all_samples, combo_rules)
@@ -2176,10 +2181,10 @@ def run_pattern_discovery(days=60):
 
     # 피처 분석 상위 15
     R.append(f"\n── 피처별 성공/실패 차이 (상위 15개) ──")
-    R.append(f"{'피처':<25} {'성공평균':>10} {'실패평균':>10} {'차이':>8} {'효과크기':>8}"); R.append("-"*65)
+    R.append(f"{'피처':<20} {'성공평균':>9} {'실패평균':>9} {'성공중앙':>9} {'실패중앙':>9} {'효과크기':>8}"); R.append("-"*68)
     for i,(k,info) in enumerate(feat_analysis.items()):
         if i>=15: break
-        R.append(f"{k:<25} {info['success_mean']:>10.4f} {info['failure_mean']:>10.4f} {info['diff']:>8.4f} {info['effect_size']:>8.4f}")
+        R.append(f"{k:<20} {info['success_mean']:>9.4f} {info['failure_mean']:>9.4f} {info['success_median']:>9.4f} {info['failure_median']:>9.4f} {info['effect_size']:>8.4f}")
 
     # 규칙
     R.append(f"\n── 발굴된 규칙 후보 ──")
@@ -2190,13 +2195,14 @@ def run_pattern_discovery(days=60):
 
     # 워크포워드
     n_folds_total = wf[0]["n_folds"] if wf else 0
-    R.append(f"\n── Rolling 워크포워드 검증 (train {21}d / test {7}d / step {5}d, {n_folds_total} folds) ──")
+    R.append(f"\n── Rolling Out-of-Sample 검증 (train {21}d / test {7}d / step {5}d, {n_folds_total} folds) ──")
+    R.append(f"  * 규칙은 전체 데이터에서 사전 발굴 → 각 fold test 구간에 적용하여 안정성 확인")
     R.append(f"{'규칙':<30} {'평균성공률':>10} {'평균리프트':>10} {'승률':>8} {'생존':>6}"); R.append("-"*70)
     for w in wf:
         sv="O" if w["survived"] else "X"; nm=f"{w['feature']} {w['direction']} {w['threshold']}"
         R.append(f"{nm:<30} {w['avg_test_rate']:>9.2f}% {w['avg_test_lift']:>9.2f}x {w.get('win_rate',0):>7.1f}% {sv:>6}")
     survived = [w for w in wf if w["survived"]]
-    R.append(f"\n── 워크포워드 생존 규칙: {len(survived)}개 ──")
+    R.append(f"\n── OOS 생존 규칙: {len(survived)}개 ──")
     for w in survived:
         R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (평균 성공률: {w['avg_test_rate']}%, 리프트: {w['avg_test_lift']}x, 승률: {w.get('win_rate',0)}%)")
 
@@ -2210,7 +2216,7 @@ def run_pattern_discovery(days=60):
             R.append(f"  성공률: {combo['success_rate']}% (기본: {combo['base_rate']}%)")
             R.append(f"  리프트: {combo['lift']}x  |  샘플 수: {combo['n_samples']}")
     if wf_combo:
-        R.append(f"\n── 조합 규칙 워크포워드 검증 ──")
+        R.append(f"\n── 조합 규칙 Rolling OOS 검증 ──")
         R.append(f"{'조합':<45} {'평균성공률':>10} {'리프트':>8} {'승률':>8} {'생존':>6}"); R.append("-"*80)
         for w in wf_combo:
             conds = w["conditions"]
@@ -2219,7 +2225,7 @@ def run_pattern_discovery(days=60):
             sv = "O" if w["survived"] else "X"
             R.append(f"{nm:<45} {w['avg_test_rate']:>9.2f}% {w['avg_test_lift']:>7.2f}x {w.get('win_rate',0):>7.1f}% {sv:>6}")
         survived_combo = [w for w in wf_combo if w["survived"]]
-        R.append(f"\n── 조합 워크포워드 생존: {len(survived_combo)}개 ──")
+        R.append(f"\n── 조합 OOS 생존: {len(survived_combo)}개 ──")
         for w in survived_combo:
             cond_str = " AND ".join(f"{c['feature']} {c['direction']} {c['threshold']}" for c in w["conditions"])
             R.append(f"  {cond_str}")
@@ -2227,7 +2233,9 @@ def run_pattern_discovery(days=60):
 
     # ── is_first 비교 분석 ──
     R.append(f"\n{'='*70}")
-    R.append(f"── is_first==1 필터 비교 분석 ──")
+    R.append(f"── is_first 필터 비교 (연속 성공 중복 제거) ──")
+    R.append(f"  * 필터 방식: 성공 run의 첫 시점만 유지 + 실패 전체 유지 (비대칭 압축)")
+    R.append(f"  * 성공군만 줄어들므로 성공률/효과크기가 달라질 수 있음에 주의")
     R.append(f"전체 샘플: {total:,} (성공 {success:,}, {success/total*100:.2f}%)")
     R.append(f"is_first 필터: {fs_total:,} (성공 {fs_success:,}, {fs_success/fs_total*100:.2f}%)" if fs_total else "is_first 필터: 0")
     if feat_analysis_first:
@@ -2239,13 +2247,13 @@ def run_pattern_discovery(days=60):
             R.append(f"{k:<25} {ef_all:>10.4f} {info['effect_size']:>10.4f} {info['effect_size']-ef_all:>8.4f}")
     if wf_first:
         survived_first = [w for w in wf_first if w["survived"]]
-        R.append(f"\n── is_first 워크포워드 생존 규칙: {len(survived_first)}개 ──")
+        R.append(f"\n── is_first OOS 생존 규칙: {len(survived_first)}개 ──")
         for w in survived_first:
             R.append(f"  {w['feature']} {w['direction']} {w['threshold']}  (평균 성공률: {w['avg_test_rate']}%, 리프트: {w['avg_test_lift']}x, 승률: {w.get('win_rate',0)}%)")
 
     # ── Top 규칙 레시피 요약 ──
     R.append(f"\n{'='*70}")
-    R.append(f"── Top 규칙 레시피 (워크포워드 생존 + lift 순) ──")
+    R.append(f"── Top 규칙 레시피 (OOS 생존 + lift 순) ──")
     R.append(f"{'='*70}")
     recipe_idx = 0
     # 조합 규칙 생존 먼저
@@ -2263,7 +2271,7 @@ def run_pattern_discovery(days=60):
         R.append(f"    {w['feature']} {w['direction']} {w['threshold']}")
         R.append(f"    → 평균 성공률: {w['avg_test_rate']}%  기본: {w['avg_base']}%  리프트: {w['avg_test_lift']}x  승률: {w.get('win_rate',0)}%")
     if recipe_idx == 0:
-        R.append("\n  워크포워드 생존 규칙 없음 — 데이터 추가 수집 또는 피처 재설계 필요")
+        R.append("\n  OOS 생존 규칙 없음 — 데이터 추가 수집 또는 피처 재설계 필요")
 
     report_text = "\n".join(R)
     rpath = os.path.join(_DISC_OUT_DIR, "discovery_report.txt")
