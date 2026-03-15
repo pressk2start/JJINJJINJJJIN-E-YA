@@ -471,7 +471,7 @@ def _load_day_file(fpath):
         pass
     return rows
 
-_GLOBAL_DAYS = 45  # main()에서 args.days로 갱신
+_GLOBAL_DAYS = 60  # main()에서 args.days로 갱신
 
 def _load_coin_1m(coin, days=None):
     """코인의 일별 파일들을 합쳐서 시간순 캔들 리스트 반환"""
@@ -2290,7 +2290,7 @@ def run_pattern_discovery(days=60):
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=45)
+    parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--coins", type=int, default=30)
     parser.add_argument("--skip-collect", action="store_true")
     parser.add_argument("--discover", action="store_true",
@@ -2313,8 +2313,9 @@ def main():
 
     # 1m 데이터 충분하면 수집 스킵 (요청 일수의 70% 이상이면 스킵)
     need_days = max(25, int(args.days * 0.7))
-    if not args.skip_collect and _has_enough_data(min_days=need_days):
-        tg(f"[자동] 1m 데이터 충분 ({need_days}일+, 10코인+) → 수집 스킵")
+    min_coins = 10
+    if not args.skip_collect and _has_enough_data(min_coins=min_coins, min_days=need_days):
+        tg(f"[자동] 1m 데이터 충분 ({need_days}일+ × {min_coins}코인+, 요청 {args.days}일의 70%) → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
