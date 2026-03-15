@@ -975,6 +975,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
         c1_map.setdefault(c["t"][:16], i)
         c1[i] = None  # dict 참조 즉시 해제
     del c1
+    _force_free()  # 85K dict 해제된 메모리를 OS에 반환
     _dbg(f"    {coin} [3/6] compact 완료 ({time.time()-_t0:.1f}초)")
 
     raw_signals = {}
@@ -989,6 +990,9 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
             if ei-last<10 or ei>=len(c5)-MAX_HOLD_BARS: continue
             last=ei; sigs.append((si, ei, bar))
         raw_signals[name] = sigs
+
+    # c15, c60 즉시 해제 — 이후 feature extraction에서 c5로 재생성
+    del c15, c60
 
     sigs = []; last=-30
     for i in range(60, len(c5)-MAX_HOLD_BARS-1):
@@ -1024,7 +1028,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     raw_signals["거래량3배"] = sigs
 
     if time.time() > _deadline:
-        _dbg(f"    {coin} 시그널탐지 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map; return {}
+        _dbg(f"    {coin} 시그널탐지 타임아웃"); del c5, c1_h, c1_l, c1_map; return {}
 
     # ── 추가 신호유형 (pre-compute 방식, 성능 최적화) ──
     # 전체 close 배열 한 번만 생성 (매 봉마다 리스트 생성 방지)
@@ -1127,7 +1131,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     if time.time() > _deadline:
         _dbg(f"    {coin} [4/6] pre-compute 타임아웃")
         del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
-        del c5, c15, c60, c1_h, c1_l, c1_map; return {}
+        del c5, c1_h, c1_l, c1_map; return {}
 
     # BB하단반등: pre-computed BB20 < 10 && 양봉
     sigs=[]; last=-15
@@ -1224,9 +1228,9 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     total_sigs = sum(len(v) for v in raw_signals.values())
     _dbg(f"    {coin} [5/6] 신호탐지 완료: {total_sigs}개 ({time.time()-_t0:.1f}초)")
     if total_sigs == 0:
-        del c5, c15, c60; return {}
+        del c5; return {}
     if time.time() > _deadline:
-        _dbg(f"    {coin} [5/6] 신호탐지 후 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map, raw_signals; return {}
+        _dbg(f"    {coin} [5/6] 신호탐지 후 타임아웃"); del c5, c1_h, c1_l, c1_map, raw_signals; return {}
 
     if total_sigs > MAX_SIGS_PER_COIN:
         ratio = MAX_SIGS_PER_COIN / total_sigs
@@ -1245,14 +1249,17 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     use_1m = len(c1_map) > 100
 
     # 멀티 TF 피처 추출 (tf15/60: 여기서, tf5: 아래 raw_signals 루프에서 별도 처리)
+    # c15/c60은 메모리 절약 위해 앞에서 해제 → c5에서 재생성
+    c15_re = make_nmin(c5, 3)
+    c60_re = make_nmin(c5, 12) if len(c5) >= 720 else []
     tf_feat_cache = defaultdict(dict)
     for tf in ANALYSIS_TFS:
         if tf in (1, 5):
             continue  # tf1: 해제됨, tf5: 아래 raw_signals 루프에서 별도 처리
         elif tf == 15:
-            candles = c15 if c15 and len(c15) >= 60 else None
+            candles = c15_re if c15_re and len(c15_re) >= 60 else None
         elif tf == 60:
-            candles = c60 if c60 and len(c60) >= 60 else None
+            candles = c60_re if c60_re and len(c60_re) >= 60 else None
         else:
             candles = None
 
@@ -1350,7 +1357,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
         results[stype] = built
 
     _dbg(f"    {coin} [6/6] 완료 ({time.time()-_t0:.1f}초)")
-    del c5, c15, c60, c1_h, c1_l, c1_map, tf_feat_cache, raw_signals
+    del c5, c15_re, c60_re, c1_h, c1_l, c1_map, tf_feat_cache, raw_signals
     return results
 
 def _sim_strict_1m(c1, c1_map, c5, ei5, entry, tp, sl, cost):
