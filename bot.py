@@ -312,6 +312,26 @@ def _get_mem_mb():
     except: pass
     return -1
 
+COIN_TIMEOUT = 120  # 코인당 분석 최대 120초
+
+def _run_with_timeout(func, args, timeout):
+    """스레드 기반 timeout 실행. 결과 또는 None(타임아웃) 반환"""
+    result = [None]
+    exc = [None]
+    def _worker():
+        try:
+            result[0] = func(*args)
+        except Exception as e:
+            exc[0] = e
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return None, TimeoutError(f"{timeout}초 초과")
+    if exc[0]:
+        return None, exc[0]
+    return result[0], None
+
 def _force_free():
     """gc.collect() + malloc_trim: Python이 해제한 메모리를 OS에 실제 반환"""
     gc.collect()
@@ -2380,10 +2400,17 @@ def main():
             tg(f"[코인시작] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
 
         try:
-            cr = process_coin(coin, btc_regime, dist_acc)
-            for st,sigs in cr.items():
-                all_results[st].extend(sigs)
-            del cr
+            cr, err = _run_with_timeout(process_coin, (coin, btc_regime, dist_acc), COIN_TIMEOUT)
+            if err is not None:
+                if isinstance(err, TimeoutError):
+                    tg(f"[타임아웃] {coin}: {COIN_TIMEOUT}초 초과 → 스킵")
+                else:
+                    import traceback
+                    tg(f"[분석에러] {coin}: {err}")
+            elif cr:
+                for st,sigs in cr.items():
+                    all_results[st].extend(sigs)
+                del cr
         except Exception as e:
             import traceback
             tg(f"[분석에러] {coin}: {e}\n{traceback.format_exc()[-300:]}")
