@@ -938,31 +938,35 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None):
         _deadline = time.time() + COIN_TIMEOUT
 
     # 1분봉 먼저 로드 (이 스크립트의 주 데이터)
+    _t0 = time.time()
     c1 = load_candles(coin, 1)
     if len(c1) < 300:
         print(f"    {coin} 1분봉 부족 ({len(c1)}개), 스킵")
         return {}
+    print(f"    {coin} [1/5] 로드 완료 ({len(c1)}개, {time.time()-_t0:.1f}초)")
+
+    if time.time() > _deadline:
+        print(f"    {coin} 로드 후 타임아웃"); del c1; return {}
 
     # 전부 1분봉에서 합성 (디스크 5분봉 안 읽음 — 시점 일관성 보장)
     c5 = make_nmin(c1, 5)
     if len(c5) < 200:
         print(f"    {coin} 5분봉 합성 부족 ({len(c5)}개), 스킵")
         del c1; return {}
-    print(f"    {coin} 5분봉 합성 ({len(c5)}개)")
     c15 = make_nmin(c5, 3)
     c60 = make_nmin(c1, 60) if len(c1) >= 3600 else []
+    print(f"    {coin} [2/5] 합성 완료 (c5={len(c5)}, c15={len(c15)}, c60={len(c60)})")
 
     # ── 메모리 최적화: c1 dict 리스트 → compact 배열 변환 ──
-    # dict 86,400개 ≈ 30MB → 배열 4개 ≈ 4MB (85% 절감)
     c1_h = [c["h"] for c in c1]
     c1_l = [c["l"] for c in c1]
     c1_t = [c["t"] for c in c1]
     c1_len = len(c1)
     c1_map = {}
     for i in range(c1_len):
-        c1_map.setdefault(_tk16(c1_t[i]), i)  # 중복 키 시 첫 인덱스 고정
-    del c1, c1_t  # 원본 dict + 시간 문자열 즉시 해제 (~32MB 절감)
-    _force_free()  # 30MB를 OS에 즉시 반환
+        c1_map.setdefault(_tk16(c1_t[i]), i)
+    del c1, c1_t
+    _force_free()
 
     raw_signals = {}
     for name, req_brk in [("15m_눌림반전", False), ("15m_눌림+돌파", True)]:
@@ -1009,6 +1013,9 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None):
         if ei-last<20: continue
         last=ei; sigs.append((i, ei, bar))
     raw_signals["거래량3배"] = sigs
+
+    if time.time() > _deadline:
+        print(f"    {coin} 시그널탐지 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map; return {}
 
     # ── 추가 신호유형 (pre-compute 방식, 성능 최적화) ──
     # 전체 close 배열 한 번만 생성 (매 봉마다 리스트 생성 방지)
@@ -1068,6 +1075,12 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None):
             if aligned and not prev_aligned:
                 pre_ema_aligned[i] = True  # 첫 진입만
             prev_aligned = aligned
+
+    print(f"    {coin} [3/5] pre-compute 완료 ({time.time()-_t0:.1f}초)")
+    if time.time() > _deadline:
+        print(f"    {coin} pre-compute 타임아웃")
+        del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
+        del c5, c15, c60, c1_h, c1_l, c1_map; return {}
 
     # BB하단반등: pre-computed BB20 < 10 && 양봉
     sigs=[]; last=-15
@@ -1162,9 +1175,11 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None):
     del closes, highs, lows, opens, bodies, pre_rsi, pre_bb, pre_macd_cross, pre_ema_aligned
 
     total_sigs = sum(len(v) for v in raw_signals.values())
-    print(f"    {coin} 신호: {total_sigs}개")  # print만
+    print(f"    {coin} [4/5] 신호탐지 완료: {total_sigs}개 ({time.time()-_t0:.1f}초)")
     if total_sigs == 0:
         del c5, c15, c60; return {}
+    if time.time() > _deadline:
+        print(f"    {coin} 신호탐지 후 타임아웃"); del c5, c15, c60, c1_h, c1_l, c1_map, raw_signals; return {}
 
     if total_sigs > MAX_SIGS_PER_COIN:
         ratio = MAX_SIGS_PER_COIN / total_sigs
@@ -1287,6 +1302,7 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None):
             built.append(sig)
         results[stype] = built
 
+    print(f"    {coin} [5/5] 완료 ({time.time()-_t0:.1f}초)")
     del c5, c15, c60, c1_h, c1_l, c1_map, tf_feat_cache, raw_signals
     return results
 
