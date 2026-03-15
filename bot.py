@@ -66,7 +66,6 @@ def _is_pid_alive(pid):
     except (OSError, ProcessLookupError):
         return False
 
-_RUNNING_MAX_AGE = 1800  # 시작 마커 최대 수명 30분
 
 def _acquire_lock():
     """시작 마커 파일 + flock으로 중복 방지. SIGKILL에도 안전."""
@@ -923,6 +922,7 @@ def extract_tf_features(candles, idx, pfx):
     return f
 
 def find_idx(candles, sig_time):
+    """time_map miss 시 fallback — full timestamp 기준의 직전 봉 탐색 (이진탐색)"""
     lo,hi=0,len(candles)-1; r=None
     while lo<=hi:
         mid=(lo+hi)//2
@@ -1709,7 +1709,6 @@ def generate_report(all_results, dist_acc):
         n_folds = len(folds)
         avg_te_ev = sum(te_evs) / n_folds if n_folds else 0
         pos_rate = te_positive / n_folds * 100 if n_folds else 0
-        consistency = te_positive / n_folds if n_folds else 0
 
         # EV 표준편차
         if n_folds > 1:
