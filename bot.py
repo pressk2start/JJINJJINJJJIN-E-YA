@@ -962,17 +962,19 @@ def process_coin(coin, btc_regime, dist_acc, _deadline=None, _tg_debug=False):
     if time.time() > _deadline:
         _dbg(f"    {coin} 합성 후 타임아웃"); del c1, c5, c15, c60; return {}
 
-    # ── 메모리 최적화: c1 dict 리스트 → compact 배열 변환 ──
-    c1_h = [c["h"] for c in c1]
-    c1_l = [c["l"] for c in c1]
-    c1_t = [c["t"] for c in c1]
+    # ── 메모리 최적화: c1 dict → compact 배열 (스트리밍, OOM 방지) ──
+    # dict를 하나씩 처리하면서 즉시 해제 → 피크 메모리 최소화
     c1_len = len(c1)
+    c1_h = [0.0] * c1_len
+    c1_l = [0.0] * c1_len
     c1_map = {}
     for i in range(c1_len):
-        c1_map.setdefault(_tk16(c1_t[i]), i)
-    del c1, c1_t
-    # 주의: _force_free() 제거 — gc.collect()가 85K dict 해제 시 프리즈 유발
-    # 메인 루프에서 코인 간에만 GC 수행
+        c = c1[i]
+        c1_h[i] = c["h"]
+        c1_l[i] = c["l"]
+        c1_map.setdefault(c["t"][:16], i)
+        c1[i] = None  # dict 참조 즉시 해제
+    del c1
     _dbg(f"    {coin} [3/6] compact 완료 ({time.time()-_t0:.1f}초)")
 
     raw_signals = {}
