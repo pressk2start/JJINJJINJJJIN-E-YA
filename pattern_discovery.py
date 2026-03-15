@@ -230,7 +230,7 @@ def compute_labels(candles):
     """
     각 시점 t에 대해:
     - entry_price = candles[t+1].open * 1.002  (다음 봉 시가 + 0.2% 슬리피지)
-    - MFE_5m = max(candles[t+2..t+6].high) / entry_price - 1
+    - MFE_5m = max(candles[t+1..t+5].high) / entry_price - 1
     - success = MFE_5m >= 0.01
 
     추가 저장: mfe_5m, mae_5m, ret_close_5m (원시 성과값)
@@ -335,7 +335,6 @@ def extract_features(candles, t):
     hi3 = hi_60[-3:]
     lo3 = lo_60[-3:]
     vo3 = vo_60[-3:]
-    op3 = op_60[-3:]
 
     # 3분 수익률
     feat["m3_ret"] = round((cl3[-1] - cl3[-4]) / cl3[-4] * 100, 4) if cl3[-4] > 0 else 0
@@ -414,7 +413,8 @@ def extract_features(candles, t):
     feat["m60_mfi"] = round(_mfi(hi_60, lo_60, cl_60, vo_60), 1)
     # 거래량 분위기 (최근 15분 vs 이전 45분)
     v_recent = sum(vo_60[-15:]) / 15
-    v_old = sum(vo_60[:45]) / 45 if sum(vo_60[:45]) > 0 else 1
+    v_old_sum = sum(vo_60[:45])
+    v_old = v_old_sum / 45 if v_old_sum > 0 else 1
     feat["m60_vol_trend"] = round(v_recent / v_old, 2) if v_old > 0 else 1.0
     # 고점/저점 위치
     hh60 = max(hi_60)
@@ -547,23 +547,30 @@ def find_best_rules(all_samples, top_features, n_rules=10):
         if len(vals_with_label) < 100:
             continue
 
-        # 정렬 후 분위수별 성공률
+        # 정렬 후 분위수별 성공률 (정렬된 배열 슬라이싱으로 O(n) 처리)
         vals_with_label.sort(key=lambda x: x[0])
         n = len(vals_with_label)
+        total_success = sum(v[1] for v in vals_with_label)
+
+        # 누적합 미리 계산 (위/아래 성공 수를 O(1)로 구하기 위해)
+        cum_success = [0] * (n + 1)
+        for i in range(n):
+            cum_success[i + 1] = cum_success[i] + vals_with_label[i][1]
 
         best_rule = None
-        base_rate = sum(v[1] for v in vals_with_label) / n
+        base_rate = total_success / n
 
         for pct in [10, 20, 25, 30, 70, 75, 80, 90]:
             idx = int(n * pct / 100)
             threshold = vals_with_label[idx][0]
 
-            # 상위 (>=threshold)
-            above = [v for v in vals_with_label if v[0] >= threshold]
-            if len(above) >= 50:
-                rate_above = sum(v[1] for v in above) / len(above)
+            # 상위 (>=threshold): idx부터 끝까지
+            n_above = n - idx
+            if n_above >= 50:
+                success_above = total_success - cum_success[idx]
+                rate_above = success_above / n_above
                 lift = rate_above / base_rate if base_rate > 0 else 0
-                if lift > 1.3:  # 기본 성공률 대비 30% 이상 리프트
+                if lift > 1.3:
                     if best_rule is None or lift > best_rule["lift"]:
                         best_rule = {
                             "feature": feat_name,
@@ -572,13 +579,14 @@ def find_best_rules(all_samples, top_features, n_rules=10):
                             "success_rate": round(rate_above * 100, 2),
                             "base_rate": round(base_rate * 100, 2),
                             "lift": round(lift, 2),
-                            "n_samples": len(above),
+                            "n_samples": n_above,
                         }
 
-            # 하위 (<=threshold)
-            below = [v for v in vals_with_label if v[0] <= threshold]
-            if len(below) >= 50:
-                rate_below = sum(v[1] for v in below) / len(below)
+            # 하위 (<=threshold): 처음부터 idx까지
+            n_below = idx + 1
+            if n_below >= 50:
+                success_below = cum_success[idx + 1]
+                rate_below = success_below / n_below
                 lift = rate_below / base_rate if base_rate > 0 else 0
                 if lift > 1.3:
                     if best_rule is None or lift > best_rule["lift"]:
@@ -589,7 +597,7 @@ def find_best_rules(all_samples, top_features, n_rules=10):
                             "success_rate": round(rate_below * 100, 2),
                             "base_rate": round(base_rate * 100, 2),
                             "lift": round(lift, 2),
-                            "n_samples": len(below),
+                            "n_samples": n_below,
                         }
 
         if best_rule:
