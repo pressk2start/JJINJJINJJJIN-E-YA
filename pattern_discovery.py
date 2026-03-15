@@ -249,12 +249,11 @@ def compute_labels(candles):
             labels.append(None)
             continue
 
-        # t+2 ~ t+1+MFE_WINDOW (진입 봉 제외, 이후 5개 봉의 고가/저가)
-        # 실제로는 t+1봉에서 시가에 진입하므로, t+1봉의 나머지 + t+2~t+5
-        # 보수적으로: t+1 봉의 high도 포함 (진입 직후부터)
+        # t+1봉 시가에 진입 → t+1 ~ t+5 (5개 봉)의 고가/저가로 MFE/MAE 계산
+        # 5분 후 종가 = t+5봉의 종가
         future_highs = [candles[t + 1 + j]["h"] for j in range(MFE_WINDOW)]
         future_lows = [candles[t + 1 + j]["l"] for j in range(MFE_WINDOW)]
-        close_5m = candles[t + MFE_WINDOW]["c"]
+        close_5m = candles[t + MFE_WINDOW]["c"]  # = candles[t+5]["c"]
 
         mfe = max(future_highs) / entry_price - 1
         mae = min(future_lows) / entry_price - 1  # 음수
@@ -279,6 +278,7 @@ def tag_runs(labels):
     """연속 성공 구간에 run_id, is_first 태깅"""
     run_id = 0
     in_run = False
+    current_pos = 0
 
     for i, lb in enumerate(labels):
         if lb is None:
@@ -288,19 +288,15 @@ def tag_runs(labels):
             if not in_run:
                 run_id += 1
                 in_run = True
+                current_pos = 0
                 lb["run_id"] = run_id
                 lb["is_first"] = 1
                 lb["run_pos"] = 0
             else:
+                current_pos += 1
                 lb["run_id"] = run_id
                 lb["is_first"] = 0
-                lb["run_pos"] = lb.get("run_pos", 0)
-                # run_pos 업데이트
-                # 이전 것의 run_pos + 1
-                for j in range(i - 1, -1, -1):
-                    if labels[j] and labels[j].get("run_id") == run_id:
-                        lb["run_pos"] = labels[j]["run_pos"] + 1
-                        break
+                lb["run_pos"] = current_pos
         else:
             in_run = False
             lb["run_id"] = 0
@@ -590,7 +586,7 @@ def find_best_rules(all_samples, top_features, n_rules=10):
                             "feature": feat_name,
                             "direction": "<=",
                             "threshold": round(threshold, 4),
-                            "success_rate": round(rate_above * 100, 2),
+                            "success_rate": round(rate_below * 100, 2),
                             "base_rate": round(base_rate * 100, 2),
                             "lift": round(lift, 2),
                             "n_samples": len(below),
@@ -694,12 +690,15 @@ def generate_report(all_samples, feature_analysis, rules, wf_results):
         report.append(f"{coin:<10} {st['total']:>8,} {st['success']:>6,} {r:>7.2f}%")
 
     # 연속 성공 구간 통계
-    runs = defaultdict(int)
+    run_lengths = defaultdict(int)  # (coin, run_id) → length
     for s in all_samples:
-        if s.get("run_id", 0) > 0 and s.get("is_first", 0) == 1:
-            run_len = sum(1 for s2 in all_samples
-                         if s2.get("run_id") == s["run_id"] and s2.get("coin") == s["coin"])
-            runs[run_len] += 1
+        rid = s.get("run_id", 0)
+        if rid > 0:
+            key = (s["coin"], rid)
+            run_lengths[key] += 1
+    runs = defaultdict(int)
+    for length in run_lengths.values():
+        runs[length] += 1
 
     report.append(f"\n── 연속 성공 구간 분포 ──")
     for length in sorted(runs.keys()):
