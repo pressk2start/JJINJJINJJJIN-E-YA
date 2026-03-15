@@ -954,7 +954,9 @@ def process_coin(coin, btc_regime, dist_acc):
     c1_l = [c["l"] for c in c1]
     c1_t = [c["t"] for c in c1]
     c1_len = len(c1)
-    c1_map = {_tk16(c1_t[i]): i for i in range(c1_len)}
+    c1_map = {}
+    for i in range(c1_len):
+        c1_map.setdefault(_tk16(c1_t[i]), i)  # 중복 키 시 첫 인덱스 고정
     del c1, c1_t  # 원본 dict + 시간 문자열 즉시 해제 (~32MB 절감)
     _force_free()  # 30MB를 OS에 즉시 반환
 
@@ -1401,12 +1403,14 @@ def generate_report(all_results, dist_acc):
         both_cnt = sum(1 for s in stricts if s["result"]=="BOTH_SL")
         avg_bars = sum(s["bars"] for s in stricts) / n if n else 0
         hit_rate = tp_cnt / n * 100 if n else 0
-        n_1m = sum(1 for s in stricts if s.get("src") in ("1m","1m_to"))
-        n_5m = sum(1 for s in stricts if s.get("src") in ("5m","5m_fb"))
-        total_1m += n_1m; total_5m += n_5m
+        n_1m = sum(1 for s in stricts if s.get("src")=="1m")
+        n_1m_to = sum(1 for s in stricts if s.get("src")=="1m_to")
+        n_5m = sum(1 for s in stricts if s.get("src")=="5m")
+        n_5m_fb = sum(1 for s in stricts if s.get("src")=="5m_fb")
+        total_1m += n_1m + n_1m_to; total_5m += n_5m + n_5m_fb
         tp_pct=tp_cnt/n*100; sl_pct=sl_cnt/n*100; to_pct=to_cnt/n*100; both_pct=both_cnt/n*100
         star=" ***" if ev>0 and n>=MIN_TRADES else ""
-        L.append(f"  {st:<14s} {tpsl['tp']:+.1f}/{tpsl['sl']:-.1f} {n:5d} {ev:+8.4f}% {hit_rate:5.1f} {wr:5.1f} {tp_pct:5.1f} {sl_pct:5.1f} {to_pct:5.1f} {both_pct:4.1f} {avg_bars:4.1f} {n_1m:4d} {n_5m:4d}{star}")
+        L.append(f"  {st:<14s} {tpsl['tp']:+.1f}/{tpsl['sl']:-.1f} {n:5d} {ev:+8.4f}% {hit_rate:5.1f} {wr:5.1f} {tp_pct:5.1f} {sl_pct:5.1f} {to_pct:5.1f} {both_pct:4.1f} {avg_bars:4.1f} 1m:{n_1m} to:{n_1m_to} 5m:{n_5m} fb:{n_5m_fb}{star}")
         si = int(n * TRAIN_RATIO)
         for nm, sub_s in [("TR", stricts[:si]), ("TE", stricts[si:])]:
             if len(sub_s)<10: continue
@@ -1415,7 +1419,7 @@ def generate_report(all_results, dist_acc):
             s_hit=sum(1 for s in sub_s if s["result"]=="TP")/sn*100
             L.append(f"    {nm}: n={sn:4d} EV={sev:+.4f}% Hit={s_hit:.1f}% WR={swr:.1f}%")
     if (total_1m+total_5m)>0:
-        L.append(f"  -- 데이터소스: 1분봉={total_1m}건, 5분봉fb={total_5m}건 ({total_1m/(total_1m+total_5m)*100:.0f}%/{total_5m/(total_1m+total_5m)*100:.0f}%)")
+        L.append(f"  -- 데이터소스: 1m={total_1m}건 (순수+timeout), 5m={total_5m}건 (순수+fb) | 1m비율 {total_1m/(total_1m+total_5m)*100:.0f}%")
 
     # [1] 탐색용 비교
     L.append(f"\n[1] 탐색용 비교 ({dk})")
@@ -2192,6 +2196,7 @@ def run_pattern_discovery(days=60):
     n_folds_total = wf[0]["n_folds"] if wf else 0
     R.append(f"\n── Rolling Out-of-Sample 검증 (train {21}d / test {7}d / step {5}d, {n_folds_total} folds) ──")
     R.append(f"  * 규칙은 전체 데이터에서 사전 발굴 → 각 fold test 구간에 적용하여 안정성 확인")
+    R.append(f"  * 주의: 엄격한 nested out-of-sample이 아님 (규칙 후보 생성이 전체 데이터에 노출). 실전 확정 전 별도 검증 필요")
     if n_folds_total < 3:
         R.append(f"  ⚠ fold 수 {n_folds_total}개 — 신뢰도 낮음. --days 60 이상 권장")
     R.append(f"{'규칙':<30} {'평균성공률':>10} {'평균리프트':>10} {'승률':>8} {'생존':>6}"); R.append("-"*70)
