@@ -2328,7 +2328,7 @@ def main():
         tg("[STEP 1/4] 1분봉 수집 (일별 gzip jsonl, 증분, 4 worker 병렬)")
         collect(days=args.days, top_n=args.coins)
 
-    # 분석
+    # 분석 (저장된 전체 코인 대상 — 수집 범위와 다를 수 있음)
     coins = get_saved_coins()
     if not coins:
         tg("[오류] 데이터 없음")
@@ -2336,7 +2336,10 @@ def main():
         tg("\n프로그램을 종료합니다.")
         sys.exit(0)
 
-    tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인")
+    if len(coins) != args.coins:
+        tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인 (수집 요청: {args.coins}코인, 저장소 기준)")
+    else:
+        tg(f"\n[STEP 2/4] 분석 시작: {len(coins)}코인")
     # BTC 레짐: 1분봉 로드 → 5분봉 합성 → 300봉(=60*5분) 회귀
     btc_regime = {}
     btc1 = load_candles("BTC", 1)
