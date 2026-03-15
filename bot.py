@@ -2316,11 +2316,11 @@ def main():
     t0 = time.time()
     last_hb = t0
 
-    # 1m 데이터 충분하면 수집 스킵 (요청 일수의 70% 이상이면 스킵)
+    # 1m 데이터 충분하면 수집 스킵 (요청 일수/코인수의 70% 이상이면 스킵)
     need_days = max(25, int(args.days * 0.7))
-    min_coins = 10
-    if not args.skip_collect and _has_enough_data(min_coins=min_coins, min_days=need_days):
-        tg(f"[자동] 1m 데이터 충분 ({need_days}일+ × {min_coins}코인+, 요청 {args.days}일의 70%) → 수집 스킵")
+    need_coins = max(10, int(args.coins * 0.7))
+    if not args.skip_collect and _has_enough_data(min_coins=need_coins, min_days=need_days):
+        tg(f"[자동] 1m 데이터 충분 ({need_days}일+ × {need_coins}코인+, 요청 {args.days}일/{args.coins}코인의 70%) → 수집 스킵")
         args.skip_collect = True
 
     if not args.skip_collect:
