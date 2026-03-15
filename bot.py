@@ -312,25 +312,7 @@ def _get_mem_mb():
     except: pass
     return -1
 
-COIN_TIMEOUT = 120  # 코인당 분석 최대 120초
-
-def _run_with_timeout(func, args, timeout):
-    """스레드 기반 timeout 실행. 결과 또는 None(타임아웃) 반환"""
-    result = [None]
-    exc = [None]
-    def _worker():
-        try:
-            result[0] = func(*args)
-        except Exception as e:
-            exc[0] = e
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(timeout)
-    if t.is_alive():
-        return None, TimeoutError(f"{timeout}초 초과")
-    if exc[0]:
-        return None, exc[0]
-    return result[0], None
+COIN_TIMEOUT = 90  # 코인당 분석 최대 90초 (내부 협력적 timeout)
 
 def _force_free():
     """gc.collect() + malloc_trim: Python이 해제한 메모리를 OS에 실제 반환"""
@@ -950,8 +932,10 @@ def find_idx(candles, sig_time):
         else: hi=mid-1
     return r
 
-def process_coin(coin, btc_regime, dist_acc):
+def process_coin(coin, btc_regime, dist_acc, _deadline=None):
     print(f"  >> {coin} 분석 시작")  # print만 (텔레그램 폭격 방지)
+    if _deadline is None:
+        _deadline = time.time() + COIN_TIMEOUT
 
     # 1분봉 먼저 로드 (이 스크립트의 주 데이터)
     c1 = load_candles(coin, 1)
@@ -1217,6 +1201,8 @@ def process_coin(coin, btc_regime, dist_acc):
 
         pfx = f"tf{tf}_"
         for sig_time in all_sig_times:
+            if time.time() > _deadline:
+                print(f"    {coin} tf{tf} 피처추출 타임아웃"); break
             tk = _tk16(sig_time)
             idx = time_map.get(tk) if time_map else None
             if idx is None: idx = find_idx(candles, sig_time)
@@ -1236,8 +1222,12 @@ def process_coin(coin, btc_regime, dist_acc):
         if time_map is not None: del time_map
 
     pfx5 = "tf5_"
+    _tf5_timeout = False
     for sigs in raw_signals.values():
+        if _tf5_timeout: break
         for si5, ei, bar in sigs:
+            if time.time() > _deadline:
+                print(f"    {coin} tf5 피처추출 타임아웃"); _tf5_timeout = True; break
             if si5 >= 55:
                 all_feats = extract_tf_features(c5, si5, pfx5)
                 for fk, fv in all_feats.items():
@@ -1252,10 +1242,14 @@ def process_coin(coin, btc_regime, dist_acc):
 
     results = {}
     cost_pct = TOTAL_COST * 100
+    _sim_timeout = False
     for stype, sigs_raw in raw_signals.items():
+        if _sim_timeout: break
         built = []
         tpsl = SIG_TPSL.get(stype, {"tp": 1.0, "sl": 0.7})
         for si5, ei, bar in sigs_raw:
+            if time.time() > _deadline:
+                print(f"    {coin} 시뮬레이션 타임아웃 ({stype})"); _sim_timeout = True; break
             entry = c5[ei]["o"]
             if entry <= 0: continue
             try: hour=int(bar["t"][11:13])
@@ -2400,14 +2394,12 @@ def main():
             tg(f"[코인시작] {i+1}/{len(coins)} {coin} | mem={mem:.0f}MB")
 
         try:
-            cr, err = _run_with_timeout(process_coin, (coin, btc_regime, dist_acc), COIN_TIMEOUT)
-            if err is not None:
-                if isinstance(err, TimeoutError):
-                    tg(f"[타임아웃] {coin}: {COIN_TIMEOUT}초 초과 → 스킵")
-                else:
-                    import traceback
-                    tg(f"[분석에러] {coin}: {err}")
-            elif cr:
+            t_start = time.time()
+            cr = process_coin(coin, btc_regime, dist_acc)
+            elapsed_coin = time.time() - t_start
+            if elapsed_coin > COIN_TIMEOUT * 0.8:
+                tg(f"[느림] {coin}: {elapsed_coin:.0f}초 (타임아웃 근접)")
+            if cr:
                 for st,sigs in cr.items():
                     all_results[st].extend(sigs)
                 del cr
