@@ -15,7 +15,7 @@
 8. 최종 산출물: 명확한 규칙 (rule)
 """
 
-import json, os, sys, gzip, time, math
+import json, os, gzip
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -239,8 +239,8 @@ def compute_labels(candles):
     labels = []
 
     for t in range(n):
-        # t+1 봉이 있어야 진입 가능, t+6까지 있어야 5분 관찰 가능
-        if t + 1 + MFE_WINDOW >= n:
+        # t+1 봉이 있어야 진입 가능, t+5까지 있어야 5분 관찰 가능
+        if t + MFE_WINDOW >= n:
             labels.append(None)
             continue
 
@@ -363,7 +363,6 @@ def extract_features(candles, t):
     hi15 = hi_60[-15:]
     lo15 = lo_60[-15:]
     vo15 = vo_60[-15:]
-    op15 = op_60[-15:]
 
     # 수익률
     feat["m15_ret"] = round((cl15[-1] - cl15[-16]) / cl15[-16] * 100, 4) if cl15[-16] > 0 else 0
