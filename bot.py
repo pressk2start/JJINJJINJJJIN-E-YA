@@ -1401,7 +1401,7 @@ def generate_report(all_results, dist_acc):
         both_cnt = sum(1 for s in stricts if s["result"]=="BOTH_SL")
         avg_bars = sum(s["bars"] for s in stricts) / n if n else 0
         hit_rate = tp_cnt / n * 100 if n else 0
-        n_1m = sum(1 for s in stricts if s.get("src")=="1m")
+        n_1m = sum(1 for s in stricts if s.get("src") in ("1m","1m_to"))
         n_5m = sum(1 for s in stricts if s.get("src") in ("5m","5m_fb"))
         total_1m += n_1m; total_5m += n_5m
         tp_pct=tp_cnt/n*100; sl_pct=sl_cnt/n*100; to_pct=to_cnt/n*100; both_pct=both_cnt/n*100
