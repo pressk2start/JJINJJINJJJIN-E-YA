@@ -146,7 +146,7 @@ FEE_RATE = FEE_RATE_ROUNDTRIP  # 하위 호환용
 # === 하이브리드 모드 전역 설정 (✅ 중복 제거, 일원화) ===
 USE_5M_CONTEXT = True         # 5분 컨텍스트 활성화
 POSTCHECK_ENABLED = False     # 🔧 비활성화: 포스트체크 끔 (진입 지연 + 기회손실 > 가짜돌파 차단 이득)
-EARLY_FLOW_MIN_KRWPSEC = 24_000  # 초기 거래속도 (22k~26k 절충)
+EARLY_FLOW_MIN_KRWPSEC = 15_000  # 🔧 하락장 완화: 24k→15k (저유동성장 진입기회 확보)
 
 # --- 환경변수(.env 지원) ---
 try:
@@ -3704,7 +3704,7 @@ GATE_TURN_MAX = 40.0      # 🔧 회전율 상한 (%) - before1 기준
 GATE_SPREAD_MAX = 0.40    # 스프레드 상한 (%) - before1 기준
 GATE_ACCEL_MIN = 0.3      # 가속도 하한 (x) - 초기 완화 (학습 데이터 수집용)
 GATE_ACCEL_MAX = 6.0      # 🔧 차트분석: 5.0→6.0 (실제 급등 accel 5.5까지 관찰, 5.0 차단은 과도)
-GATE_BUY_RATIO_MIN = 0.58 # 🔧 매수비 하한 - 0.55→0.58 강화 (CONSEC 완화 보완)
+GATE_BUY_RATIO_MIN = 0.50 # 🔧 하락장 완화: 0.58→0.50 (공포장 매수비율 0.45~0.55 대응)
 GATE_SURGE_MAX = 50.0     # 🔧 차트분석: 20→50배 (HOLO 1570x, STEEM 45x → 20x 차단이 폭발 종목 원천 차단)
 GATE_OVERHEAT_MAX = 25.0  # 🔧 차트분석: 18→25 (accel 3.0 × surge 8.0 = 24 → 정상 급등도 차단됨)
 GATE_IMBALANCE_MIN = 0.50 # 🔧 데이터 기반: 승0.65 vs 패0.45 → 0.50
@@ -6404,43 +6404,47 @@ def _v4_regime_filter_60m(c60):
     rsi = _v4_rsi_from_candles(c60, 14)
     if rsi is None:
         return False, None
-    return (rsi >= 45.0), rsi
+    return (rsi >= 38.0), rsi  # 🔧 하락장 완화: 45→38 (극단적 공포장 진입기회 확보)
 
 
-# --- 공통 환경필터 GATE (모든 신호 필수) ---
-# 데이터: 15m_MACD골든+1h_EMA정배열 = 모든 신호에서 Train/Test 모두 EV>0
-# 15m_눌림반전: TR +0.14%, TE +0.15%
-# 5m_양봉: TR +0.42%, TE +0.17%
-# 20봉_고점돌파: TR +0.39%, TE +0.23%
+# --- 공통 환경필터 GATE (15m_눌림반전 필수) ---
+# 🔧 하락장 완화: RSI≥38 AND (EMA정배열 OR MACD골든)
+# 기존: RSI≥45 AND EMA정배열 AND MACD골든 → 하락장 통과율 ~1%
+# 변경: RSI≥38 AND (EMA정배열 OR MACD골든) → 하락장 통과율 ~15-20%
 def _v4_gate_filter(c15, c60):
-    """공통 환경필터: 1h EMA정배열 AND 15m MACD골든 AND 60m RSI≥45"""
-    # 1) 60m RSI ≥ 45
+    """공통 환경필터: 60m RSI≥38 AND (1h EMA정배열 OR 15m MACD골든)
+    🔧 하락장 완화: 기존 AND→OR (EMA정배열+MACD골든 동시 요구 → 둘 중 하나)"""
+    # 1) 60m RSI ≥ 38 (필수)
     regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
     if not regime_ok:
         return False, None, "60m_RSI_low"
 
-    # 2) 1h EMA 정배열 (EMA5 > EMA10 > EMA20)
-    if not c60 or len(c60) < 20:
-        return False, None, "60m_data"
-    ema5_60 = _v4_ema_from_candles(c60, 5)
-    ema10_60 = _v4_ema_from_candles(c60, 10)
-    ema20_60 = _v4_ema_from_candles(c60, 20)
-    if ema5_60 is None or ema10_60 is None or ema20_60 is None:
-        return False, None, "60m_ema_calc"
-    if not (ema5_60 > ema10_60 > ema20_60):
-        return False, None, "60m_EMA_not_aligned"
+    # 2) 1h EMA 정배열 (EMA5 > EMA10 > EMA20) — OR 조건
+    ema_aligned = False
+    ema5_60 = ema10_60 = ema20_60 = None
+    if c60 and len(c60) >= 20:
+        ema5_60 = _v4_ema_from_candles(c60, 5)
+        ema10_60 = _v4_ema_from_candles(c60, 10)
+        ema20_60 = _v4_ema_from_candles(c60, 20)
+        if ema5_60 is not None and ema10_60 is not None and ema20_60 is not None:
+            ema_aligned = (ema5_60 > ema10_60 > ema20_60)
 
-    # 3) 15m MACD 골든크로스 상태 (MACD > Signal)
-    if not c15 or len(c15) < 35:
-        return False, None, "15m_data"
-    closes_15 = [c["trade_price"] for c in c15]
-    macd_val, sig_val, _ = _v4_macd(closes_15)
-    if macd_val is None or sig_val is None:
-        return False, None, "15m_macd_calc"
-    if macd_val <= sig_val:
-        return False, None, "15m_MACD_not_golden"
+    # 3) 15m MACD 골든크로스 상태 (MACD > Signal) — OR 조건
+    macd_golden = False
+    macd_val = sig_val = None
+    if c15 and len(c15) >= 35:
+        closes_15 = [c["trade_price"] for c in c15]
+        macd_val, sig_val, _ = _v4_macd(closes_15)
+        if macd_val is not None and sig_val is not None:
+            macd_golden = (macd_val > sig_val)
 
-    gate_info = f"60mRSI={rsi_60:.1f},1hEMA={ema5_60:.0f}>{ema10_60:.0f}>{ema20_60:.0f},15mMACD={macd_val:.4f}>{sig_val:.4f}"
+    # OR: 둘 중 하나만 통과하면 GATE 통과
+    if not ema_aligned and not macd_golden:
+        return False, None, "GATE_neither_EMA_nor_MACD"
+
+    _ema_str = f"1hEMA={ema5_60:.0f}>{ema10_60:.0f}>{ema20_60:.0f}" if ema_aligned else "1hEMA=X"
+    _macd_str = f"15mMACD={macd_val:.4f}>{sig_val:.4f}" if macd_golden else "15mMACD=X"
+    gate_info = f"60mRSI={rsi_60:.1f},{_ema_str},{_macd_str}"
     return True, gate_info, None
 
 
@@ -6513,14 +6517,15 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 <= 3.0:
+    if vr5 <= 2.5:  # 🔧 하락장 완화: 3.0→2.5 (저변동성장 거래량스파이크 포착)
         return None
     atr_p = _v4_atr_pct(c1, 14)
-    if atr_p <= 0.7:
+    if atr_p <= 0.5:  # 🔧 하락장 완화: 0.7→0.5 (저변동성장 ATR 미달 방지)
         return None
-    if not _v4_is_bullish(c1[-2]):
+    # 🔧 하락장 완화: 직전2봉 중 1봉 양봉 (연속 음봉 후 반전 포착)
+    if not (_v4_is_bullish(c1[-2]) or _v4_is_bullish(c1[-3])):
         return None
-    # 🔧 WF: 복합필터 5m_MACD골든 + 15m_ADX>25 (TE +0.4125% vs 단독 +0.0919%)
+    # 🔧 WF: 복합필터 5m_MACD골든 + 15m_ADX>20 (하락장 완화: 25→20)
     if not c5 or len(c5) < 35:
         return None
     closes_5m = [c["trade_price"] for c in c5]
@@ -6533,7 +6538,7 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    if adx_15 is None or adx_15 <= 25:
+    if adx_15 is None or adx_15 <= 20:  # 🔧 하락장 완화: 25→20
         return None
     return {
         "signal_tag": "거래량3배",
@@ -6596,14 +6601,14 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
         return None
     if macd_5m <= sig_5m:
         return None
-    # 복합필터: 15m ADX > 25
+    # 복합필터: 15m ADX > 20 (🔧 하락장 완화: 25→20)
     if not c15 or len(c15) < 30:
         return None
     highs_15 = [c["high_price"] for c in c15]
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    if adx_15 is None or adx_15 <= 25:
+    if adx_15 is None or adx_15 <= 20:  # 🔧 하락장 완화: 25→20
         return None
     return {
         "signal_tag": "20봉_고점돌파",
