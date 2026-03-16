@@ -406,11 +406,32 @@ print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
 
 
+# ============================================================
+# 🔒 LOCK ORDERING RULE (데드락 방지)
+# ============================================================
+# 여러 lock을 동시에 획득할 때 반드시 아래 순서를 따를 것.
+# 역순 획득 금지! Nested lock 금지 — 항상 선 release 후 후 acquire.
+#
+# 순서 (번호가 작을수록 먼저 획득):
+#   1) _MEMORY_LOCK          (진입 락 메모리)
+#   2) _POSITION_LOCK        (포지션 + _CLOSING_MARKETS)
+#   3) _MONITOR_LOCK         (모니터 스레드 레지스트리)
+#   4) _ORPHAN_LOCK          (유령 포지션 감지)
+#   5) _RECENT_BUY_LOCK      (최근 매수 타임스탬프)
+#   6) _STREAK_LOCK, _COIN_LOSS_LOCK  (거래 통계)
+#   7) _RETEST_LOCK, _CIRCLE_LOCK, _BOX_LOCK  (전략별 워치리스트)
+#   8) _trade_log_lock, _CSV_LOCK  (로깅)
+#   9) _TG_SESSION_LOCK, _req_lock  (네트워크)
+#
+# 위반 방지: nested `with lock:` 사용 금지.
+#   잘못된 예: with _POSITION_LOCK: ... with _ORPHAN_LOCK: ...
+#   올바른 예: with _POSITION_LOCK: ... (release) → with _ORPHAN_LOCK: ...
+# ============================================================
+
 # 현재 열린 포지션 기록용
-# 예: { "KRW-BTC": {"entry_price":..., "volume":..., "stop":..., "sl_pct":..., "state":"open"} }
 OPEN_POSITIONS = {}
-_POSITION_LOCK = threading.Lock()  # 포지션 접근 락
-_CLOSING_MARKETS = set()  # 🔧 FIX: 중복 청산 방지용 (청산 진행 중 마켓 표시)
+_POSITION_LOCK = threading.Lock()  # [LOCK_ORDER: 2] 포지션 접근 락
+_CLOSING_MARKETS = set()  # 중복 청산 방지용
 
 
 def _pop_position_tracked(market, caller="unknown"):
@@ -2733,6 +2754,7 @@ def close_auto_position(m, reason=""):
                 is_dust = remaining_krw < 5000 and remaining > 1e-12
                 with _POSITION_LOCK:
                     pos2 = OPEN_POSITIONS.get(m)
+                    _need_orphan_add = False
                     if pos2:
                         if remaining <= 1e-12:
                             # 잔여 없음 → 포지션 제거
@@ -2741,20 +2763,23 @@ def close_auto_position(m, reason=""):
                             # 🔧 FIX: dust 잔여는 포지션 제거 + _ORPHAN_HANDLED에 등록
                             # → 유령으로 감지되지 않음 (부분청산 후 손절 방지)
                             OPEN_POSITIONS.pop(m, None)
-                            with _ORPHAN_LOCK:
-                                _ORPHAN_HANDLED.add(m)
-                            print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
-                            # 🔧 FIX: 10분 후 자동 해제 — 코인 가격 급등 시 재감지 허용
-                            def _dust_expire(_m=m):
-                                time.sleep(600)
-                                with _ORPHAN_LOCK:  # 🔧 FIX: 데몬 스레드에서 discard 시 lock 보호
-                                    _ORPHAN_HANDLED.discard(_m)
-                                print(f"[DUST_EXPIRE] {_m} _ORPHAN_HANDLED 만료 → 재감지 허용")
-                            threading.Thread(target=_dust_expire, daemon=True).start()
+                            _need_orphan_add = True  # 🔧 LOCK_ORDER: _POSITION_LOCK 밖에서 _ORPHAN_LOCK 획득
                         else:
                             pos2["volume"] = remaining
                             pos2["last_exit_ts"] = time.time()
                             OPEN_POSITIONS[m] = pos2
+                # 🔧 LOCK_ORDER FIX: _ORPHAN_LOCK은 _POSITION_LOCK 밖에서 획득 (nested lock 제거)
+                if _need_orphan_add:
+                    with _ORPHAN_LOCK:
+                        _ORPHAN_HANDLED.add(m)
+                    print(f"[AUTO] {m} dust 잔여 ({remaining_krw:.0f}원) → _ORPHAN_HANDLED 등록")
+                    # 🔧 FIX: 10분 후 자동 해제 — 코인 가격 급등 시 재감지 허용
+                    def _dust_expire(_m=m):
+                        time.sleep(600)
+                        with _ORPHAN_LOCK:
+                            _ORPHAN_HANDLED.discard(_m)
+                        print(f"[DUST_EXPIRE] {_m} _ORPHAN_HANDLED 만료 → 재감지 허용")
+                    threading.Thread(target=_dust_expire, daemon=True).start()
                 print(f"[AUTO] {m} 부분체결: {executed:.6f}/{vol:.6f} → 잔여 {remaining:.6f} ({remaining_krw:.0f}원)")
                 if remaining > 1e-12 and not is_dust:
                     tg_send(f"⚠️ <b>부분체결</b> {m}\n체결: {executed:.6f} / 잔여: {remaining:.6f}")
@@ -10817,7 +10842,7 @@ def start_watchdogs():
     """워치독 스레드들 시작: 헬스비트, 세션 리프레시, 락 청소"""
 
     def heartbeat():
-        """5분마다 상태 로깅 (조용히 죽었는지 확인용)"""
+        """5분마다 상태 로깅 + 모니터 watchdog (죽은 모니터 감지 → failsafe 청산)"""
         while True:
             try:
                 time.sleep(300)  # 5분
@@ -10825,6 +10850,34 @@ def start_watchdogs():
                 cut_summary()     # 필터 컷 카운트 요약
                 print(f"[HB] {now_kst_str()} open={len(OPEN_POSITIONS)} "
                       f"rate={_BUCKET.get('rate', 0):.2f} cap={_BUCKET.get('cap', 0):.2f}")
+
+                # === 모니터 watchdog: 포지션 있는데 모니터 죽은 경우 failsafe ===
+                with _POSITION_LOCK:
+                    open_markets = list(OPEN_POSITIONS.keys())
+                for mk in open_markets:
+                    with _MONITOR_LOCK:
+                        mon = _ACTIVE_MONITORS.get(mk)
+                    if mon is not None and mon.is_alive():
+                        continue  # 모니터 정상
+                    # 모니터가 없거나 죽은 경우
+                    with _POSITION_LOCK:
+                        pos = OPEN_POSITIONS.get(mk)
+                    if not pos:
+                        continue
+                    pos_age = time.time() - pos.get("entry_ts", time.time())
+                    if pos_age < 30:
+                        continue  # 방금 진입 — 모니터 시작 중일 수 있음
+                    # 🚨 모니터 죽은 포지션 발견 → failsafe 시장가 청산
+                    print(f"[WATCHDOG] 🚨 {mk} 모니터 죽음 감지 (age={pos_age:.0f}s) → failsafe 청산")
+                    tg_send(f"🚨 <b>WATCHDOG FAILSAFE</b> {mk}\n"
+                            f"• 모니터 스레드 죽음 감지\n"
+                            f"• 포지션 age: {pos_age:.0f}초\n"
+                            f"• 즉시 시장가 청산 시도")
+                    try:
+                        close_auto_position(mk, f"watchdog_failsafe|monitor_dead|age={pos_age:.0f}s")
+                    except Exception as wde:
+                        print(f"[WATCHDOG_CLOSE_ERR] {mk}: {wde}")
+                        tg_send(f"🚨 WATCHDOG 청산 실패 {mk}: {wde}")
             except Exception as e:
                 print(f"[HB_ERR] {e}")
 
