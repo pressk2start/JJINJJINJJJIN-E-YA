@@ -6511,8 +6511,8 @@ _V4_DEFAULT_EXIT = {
 
 # --- 거래량3배 (1순위) ---
 # 데이터: ALL EV=+0.0656%, PF=1.16, Total=+23.69%
-# 조건: VR5>3.0 AND ATR%>0.7% AND 직전봉양봉
-# (60m RSI/EMA/MACD 필터는 GATE에서 처리)
+# WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드) — 복합필터 불필요
+# 조건: VR5>2.5 AND ATR%>0.5% AND 직전2봉중1봉양봉
 def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
@@ -6525,27 +6525,13 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     # 🔧 하락장 완화: 직전2봉 중 1봉 양봉 (연속 음봉 후 반전 포착)
     if not (_v4_is_bullish(c1[-2]) or _v4_is_bullish(c1[-3])):
         return None
-    # 🔧 WF: 복합필터 5m_MACD골든 + 15m_ADX>20 (하락장 완화: 25→20)
-    if not c5 or len(c5) < 35:
-        return None
-    closes_5m = [c["trade_price"] for c in c5]
-    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-    if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
-        return None
-    if not c15 or len(c15) < 30:
-        return None
-    highs_15 = [c["high_price"] for c in c15]
-    lows_15 = [c["low_price"] for c in c15]
-    closes_15 = [c["trade_price"] for c in c15]
-    adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    if adx_15 is None or adx_15 <= 20:  # 🔧 하락장 완화: 25→20
-        return None
+    # 🔧 복합필터(5m_MACD+15m_ADX) 제거 — WF "단독 PASS" 신호이므로 불필요
+    # 복합필터는 GATE(눌림반전용)에서만 적용
     return {
         "signal_tag": "거래량3배",
         "entry_mode": "confirm",
         "logic_group": "A",
         "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
-                        f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}", f"15mADX={adx_15:.1f}",
                         f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
     }
@@ -8783,9 +8769,19 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
         return None
 
+    # 4-1) 매수비 하한 — 🔧 데드코드→실구현 (0.50, 공포장 대응)
+    if _gate_buy_ratio < GATE_BUY_RATIO_MIN:
+        cut("BUY_RATIO", f"{m} 매수비부족 {_gate_buy_ratio:.2f}<{GATE_BUY_RATIO_MIN} | {_metrics}", near_miss=True)
+        return None
+
     # 5) 가속도 과다
     if accel > GATE_ACCEL_MAX:
         cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
+        return None
+
+    # 5-1) 초기 거래속도 하한 — 🔧 데드코드→실구현 (15K원/초)
+    if t15.get("krw_per_sec", 0) < EARLY_FLOW_MIN_KRWPSEC:
+        cut("EARLY_FLOW", f"{m} 거래속도부족 {t15.get('krw_per_sec',0)/1000:.0f}K<{EARLY_FLOW_MIN_KRWPSEC/1000:.0f}K | {_metrics}", near_miss=True)
         return None
 
     # 🔧 WF데이터: 기존 캔들 바디/윗꼬리/WEAK_SIGNAL 필터 비활성화
