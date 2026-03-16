@@ -6511,8 +6511,8 @@ _V4_DEFAULT_EXIT = {
 
 # --- 거래량3배 (1순위) ---
 # 데이터: ALL EV=+0.0656%, PF=1.16, Total=+23.69%
-# WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드) — 복합필터 불필요
-# 조건: VR5>2.5 AND ATR%>0.5% AND 직전2봉중1봉양봉
+# WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드)
+# 조건: VR5>2.5 AND ATR%>0.5% AND 직전2봉중1봉양봉 AND (5m_MACD골든 OR 15m_ADX>20)
 def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
@@ -6525,14 +6525,35 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     # 🔧 하락장 완화: 직전2봉 중 1봉 양봉 (연속 음봉 후 반전 포착)
     if not (_v4_is_bullish(c1[-2]) or _v4_is_bullish(c1[-3])):
         return None
-    # 🔧 복합필터(5m_MACD+15m_ADX) 제거 — WF "단독 PASS" 신호이므로 불필요
-    # 복합필터는 GATE(눌림반전용)에서만 적용
+    # 🔧 방향성 OR 필터: 5m_MACD골든 OR 15m_ADX>20 (둘 중 하나만 통과)
+    # - AND는 하락장 ~73% 킬 (과도), 완전제거는 노이즈 진입 위험
+    # - OR = 모멘텀 방향 또는 추세 강도 중 하나는 확인 (~5-7건/일 예상)
+    macd_ok = False
+    adx_ok = False
+    macd_5m = sig_5m = None
+    adx_15 = None
+    if c5 and len(c5) >= 35:
+        closes_5m = [c["trade_price"] for c in c5]
+        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+        if macd_5m is not None and sig_5m is not None and macd_5m > sig_5m:
+            macd_ok = True
+    if c15 and len(c15) >= 30:
+        highs_15 = [c["high_price"] for c in c15]
+        lows_15 = [c["low_price"] for c in c15]
+        closes_15 = [c["trade_price"] for c in c15]
+        adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+        if adx_15 is not None and adx_15 > 20:
+            adx_ok = True
+    if not macd_ok and not adx_ok:
+        return None
+    _macd_str = f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}" if macd_ok else "5mMACD=X"
+    _adx_str = f"15mADX={adx_15:.1f}" if adx_ok else "15mADX=X"
     return {
         "signal_tag": "거래량3배",
         "entry_mode": "confirm",
         "logic_group": "A",
         "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
-                        f"GATE={gate_info}"],
+                        _macd_str, _adx_str, f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
     }
 
