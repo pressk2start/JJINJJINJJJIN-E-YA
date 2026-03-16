@@ -6520,11 +6520,28 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         return None
     if not _v4_is_bullish(c1[-2]):
         return None
+    # 🔧 WF: 복합필터 5m_MACD골든 + 15m_ADX>25 (TE +0.4125% vs 단독 +0.0919%)
+    if not c5 or len(c5) < 35:
+        return None
+    closes_5m = [c["trade_price"] for c in c5]
+    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+    if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
+        return None
+    if not c15 or len(c15) < 30:
+        return None
+    highs_15 = [c["high_price"] for c in c15]
+    lows_15 = [c["low_price"] for c in c15]
+    closes_15 = [c["trade_price"] for c in c15]
+    adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+    if adx_15 is None or adx_15 <= 25:
+        return None
     return {
         "signal_tag": "거래량3배",
         "entry_mode": "confirm",
         "logic_group": "A",
-        "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉", f"GATE={gate_info}"],
+        "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
+                        f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}", f"15mADX={adx_15:.1f}",
+                        f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
     }
 
@@ -9628,9 +9645,10 @@ def monitor_position(m,
     _v4_hold_bars = _v4_ep.get("hold_bars", 0)
     _v4_max_bars = _v4_ep.get("max_bars", 60)
     _v4_strategy = _v4_ep.get("strategy", "TRAIL")
-    # 🔧 v4: SL 오버라이드 (1.0%)
+    # 🔧 v4: SL 오버라이드 — WF 최적값 우선 적용 (글로벌 DYN_SL_MIN 무시)
+    # 거래량3배/20봉돌파/눌림반전: SL 0.7% (WF PASS), 기본: SL 1.0%
     if _v4_ep.get("sl_pct"):
-        eff_sl_pct = max(eff_sl_pct, _v4_ep["sl_pct"])
+        eff_sl_pct = _v4_ep["sl_pct"]
         base_stop = entry_price * (1 - eff_sl_pct)
 
     # === 🔥 Plateau 감지용 상태 ===
