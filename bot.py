@@ -6216,7 +6216,7 @@ def _v4_regime_filter_60m(c60):
     rsi = _v4_rsi_from_candles(c60, 14)
     if rsi is None:
         return False, None
-    return (rsi >= 38.0), rsi  # 🔧 하락장 완화: 45→38 (극단적 공포장 진입기회 확보)
+    return (rsi >= 45.0), rsi
 
 
 # --- 60m 3봉 모멘텀 레짐 필터 (전 시그널 공통 사전필터) ---
@@ -6277,9 +6277,9 @@ def _v4_gate_filter(c15, c60):
         if macd_val is not None and sig_val is not None:
             macd_golden = (macd_val > sig_val)
 
-    # OR: 둘 중 하나만 통과하면 GATE 통과
-    if not ema_aligned and not macd_golden:
-        return False, None, "GATE_neither_EMA_nor_MACD"
+    # AND: EMA정배열 + MACD골든 둘 다 필요
+    if not ema_aligned or not macd_golden:
+        return False, None, "GATE_fail_EMA_or_MACD"
 
     _ema_str = f"1hEMA={ema5_60:.0f}>{ema10_60:.0f}>{ema20_60:.0f}" if ema_aligned else "1hEMA=X"
     _macd_str = f"15mMACD={macd_val:.4f}>{sig_val:.4f}" if macd_golden else "15mMACD=X"
@@ -6356,17 +6356,14 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 <= 2.5:  # 🔧 하락장 완화: 3.0→2.5 (저변동성장 거래량스파이크 포착)
+    if vr5 <= 3.0:
         return None
     atr_p = _v4_atr_pct(c1, 14)
-    if atr_p <= 0.5:  # 🔧 하락장 완화: 0.7→0.5 (저변동성장 ATR 미달 방지)
+    if atr_p <= 0.7:
         return None
-    # 🔧 하락장 완화: 직전2봉 중 1봉 양봉 (연속 음봉 후 반전 포착)
-    if not (_v4_is_bullish(c1[-2]) or _v4_is_bullish(c1[-3])):
+    if not _v4_is_bullish(c1[-2]):
         return None
-    # 🔧 방향성 OR 필터: 5m_MACD골든 OR 15m_ADX>20 (둘 중 하나만 통과)
-    # - AND는 하락장 ~73% 킬 (과도), 완전제거는 노이즈 진입 위험
-    # - OR = 모멘텀 방향 또는 추세 강도 중 하나는 확인 (~5-7건/일 예상)
+    # 방향성 필터: 5m_MACD골든 OR 15m_ADX>20
     macd_ok = False
     adx_ok = False
     macd_5m = sig_5m = None
@@ -6454,7 +6451,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    if adx_15 is None or adx_15 <= 20:  # 🔧 하락장 완화: 25→20
+    if adx_15 is None or adx_15 <= 25:
         return None
     return {
         "signal_tag": "20봉_고점돌파",
