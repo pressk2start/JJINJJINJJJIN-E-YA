@@ -6407,6 +6407,33 @@ def _v4_regime_filter_60m(c60):
     return (rsi >= 38.0), rsi  # 🔧 하락장 완화: 45→38 (극단적 공포장 진입기회 확보)
 
 
+# --- 60m 3봉 모멘텀 레짐 필터 (전 시그널 공통 사전필터) ---
+# WF 섹션4 자동탐색: 60m_m3_상위33% TEST EV +0.24% (가장 강한 독립 피처)
+# "상위 TF 모멘텀이 상승 중일 때만 진입" = 추세 방향 확인
+def _v4_momentum_3bar_filter(c60, top_pct=0.33):
+    """60m 3봉 모멘텀 상위 백분위 필터
+    m3 = (close[i] - close[i-3]) / close[i-3]
+    최근 12개 m3 값 중 상위 top_pct(33%) 이상이면 통과
+    Returns: (pass_bool, current_m3, threshold)"""
+    if not c60 or len(c60) < 7:
+        return False, 0.0, 0.0
+    closes = [c["trade_price"] for c in c60]
+    # 사용 가능한 모든 윈도우에서 m3 계산
+    m3_values = []
+    for i in range(3, len(closes)):
+        m3 = (closes[i] - closes[i - 3]) / closes[i - 3]
+        m3_values.append(m3)
+    if len(m3_values) < 4:
+        return False, 0.0, 0.0
+    current_m3 = m3_values[-1]
+    # 상위 33% 임계값 결정 (rolling percentile)
+    sorted_m3 = sorted(m3_values)
+    threshold_idx = int(len(sorted_m3) * (1 - top_pct))
+    threshold_idx = min(threshold_idx, len(sorted_m3) - 1)
+    threshold = sorted_m3[threshold_idx]
+    return current_m3 >= threshold, current_m3, threshold
+
+
 # --- 공통 환경필터 GATE (15m_눌림반전 필수) ---
 # 🔧 하락장 완화: RSI≥38 AND (EMA정배열 OR MACD골든)
 # 기존: RSI≥45 AND EMA정배열 AND MACD골든 → 하락장 통과율 ~1%
@@ -6656,23 +6683,34 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     통합 진입 판정 — detect_leader_stock()에서 호출
 
     v6.1 구조 — GATE를 신호별 분리 (백테스트 데이터 기반):
+    [사전필터] 60m_m3 상위33% (WF섹션4: TEST EV +0.24%)
     [SIGNAL] 진입 (OR — 먼저 매칭):
-      1순위: 거래량3배         (단독 WF PASS — GATE 불필요)
-      2순위: 20봉_고점돌파      (자체 복합필터 5m_MACD골든+15m_ADX>25)
+      1순위: 거래량3배         (방향성 OR 필터: 5m_MACD OR 15m_ADX)
+      2순위: 20봉_고점돌파      (자체 복합필터 5m_MACD골든+15m_ADX>20)
       3순위: 15m_눌림반전       (GATE 필수 — 단독 WF FAIL, 복합필터로 PASS)
       ❌ EMA정배열진입: 비활성화 (WF FAIL 양수폴드 43%)
     """
     if not c1:
         return None
 
-    # === 1순위: 거래량3배 (단독 WF PASS — GATE 불필요) ===
-    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None)
+    # === 사전필터: 60m 3봉 모멘텀 상위33% ===
+    # WF 섹션4 자동탐색: 가장 강한 독립 피처 (TEST EV +0.24%)
+    # 상위 TF 모멘텀이 하락 중이면 어떤 신호도 수익성 낮음
+    m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.33)
+    if not m3_ok:
+        return None
+    m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
+
+    # === 1순위: 거래량3배 (방향성 OR 필터: 5m_MACD OR 15m_ADX) ===
+    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
+        sig["filters_hit"].append(m3_info)
         return sig
 
-    # === 2순위: 20봉_고점돌파 (자체 복합필터만 — GATE 불필요) ===
-    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None)
+    # === 2순위: 20봉_고점돌파 (자체 복합필터만) ===
+    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
+        sig["filters_hit"].append(m3_info)
         return sig
 
     # === 3순위: 15m_눌림반전 (GATE 필수 — 단독 FAIL, 복합필터로 PASS) ===
@@ -6680,6 +6718,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     if gate_ok:
         sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
         if sig:
+            sig["filters_hit"].append(m3_info)
             return sig
 
     return None
