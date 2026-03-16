@@ -6247,18 +6247,14 @@ def _v4_momentum_3bar_filter(c60, top_pct=0.33):
 
 
 # --- 공통 환경필터 GATE (15m_눌림반전 필수) ---
-# 🔧 하락장 완화: RSI≥38 AND (EMA정배열 OR MACD골든)
-# 기존: RSI≥45 AND EMA정배열 AND MACD골든 → 하락장 통과율 ~1%
-# 변경: RSI≥38 AND (EMA정배열 OR MACD골든) → 하락장 통과율 ~15-20%
 def _v4_gate_filter(c15, c60):
-    """공통 환경필터: 60m RSI≥38 AND (1h EMA정배열 OR 15m MACD골든)
-    🔧 하락장 완화: 기존 AND→OR (EMA정배열+MACD골든 동시 요구 → 둘 중 하나)"""
-    # 1) 60m RSI ≥ 38 (필수)
+    """공통 환경필터: 60m RSI≥45 AND 1h EMA정배열 AND 15m MACD골든"""
+    # 1) 60m RSI ≥ 45 (필수)
     regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
     if not regime_ok:
         return False, None, "60m_RSI_low"
 
-    # 2) 1h EMA 정배열 (EMA5 > EMA10 > EMA20) — OR 조건
+    # 2) 1h EMA 정배열 (EMA5 > EMA10 > EMA20)
     ema_aligned = False
     ema5_60 = ema10_60 = ema20_60 = None
     if c60 and len(c60) >= 20:
@@ -6268,7 +6264,7 @@ def _v4_gate_filter(c15, c60):
         if ema5_60 is not None and ema10_60 is not None and ema20_60 is not None:
             ema_aligned = (ema5_60 > ema10_60 > ema20_60)
 
-    # 3) 15m MACD 골든크로스 상태 (MACD > Signal) — OR 조건
+    # 3) 15m MACD 골든크로스 상태 (MACD > Signal)
     macd_golden = False
     macd_val = sig_val = None
     if c15 and len(c15) >= 35:
