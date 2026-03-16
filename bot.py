@@ -403,7 +403,7 @@ if os.getenv("DEBUG_KEYS") == "1":
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))  # 추매 간 최소 간격(초)
+# PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
 
 # ============================================================
@@ -5437,7 +5437,7 @@ class LRUCache:
 
 
 _TICKS_CACHE = LRUCache(maxsize=100)
-_TICKS_TTL = 2.0  # 🔧 진입지연개선: 4.5→2.0초 (stale 틱 재사용 감소 → 신선한 데이터로 조기 감지)
+# _TICKS_TTL — config.py에서 정의됨
 _C5_CACHE = LRUCache(maxsize=300)
 
 
@@ -5522,7 +5522,7 @@ def relax_knob():
 # =========================
 # 데이터 수집/캐시
 # =========================
-MKTS_CACHE_TTL = 90
+# MKTS_CACHE_TTL — config.py에서 정의됨
 _MKTS_CACHE = {"ts": 0.0, "mkts": []}
 _MKTS_CACHE_LOCK = threading.Lock()  # 🔧 FIX: TOCTOU 방어
 
@@ -10672,7 +10672,7 @@ last_reason = {}
 # 30분 내 같은 코인 재급등 → 2파로 판정
 _SPIKE_TRACKER = {}
 _SPIKE_TRACKER_LOCK = threading.Lock()  # 🔧 FIX: 멀티스레드 경쟁 방지
-_SPIKE_WAVE_WINDOW = 1800  # 30분 내 재급등 = 2파
+# _SPIKE_WAVE_WINDOW — config.py에서 정의됨
 
 def _cleanup_spike_tracker():
     """🔧 FIX: 만료된 _SPIKE_TRACKER 항목 제거 (메모리 누수 방지)"""
