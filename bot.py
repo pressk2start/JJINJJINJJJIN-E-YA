@@ -681,6 +681,12 @@ def _pipeline_report(force=False):
         for i in range(0, len(_hourly_parts), 6):
             lines.append("  " + " | ".join(_hourly_parts[i:i+6]))
 
+    # 📡 섀도우 루트 계측 (v8)
+    shadow_lines = _v4_shadow_report_lines()
+    if shadow_lines:
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.extend(shadow_lines)
+
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
     _PIPELINE_PREV_SNAPSHOT_TS = now
@@ -7150,6 +7156,42 @@ _V4_EXIT_PARAMS = {
         "max_bars": 60,
         "description": "DISABLED_WF_FAIL",
     },
+    # === v8 계측용 전략 청산 파라미터 (섀도우 모드 — 실매매 아님) ===
+    "모멘텀_스캘프": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    "60m_감싸기_돌파": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    "15m_VR폭발": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    "상위TF_정배열": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    "과매도_반등": {
+        "strategy": "TRAIL", "sl_pct": 0.010, "activation_pct": 0.005,
+        "trail_pct": 0.003, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL1.0/A0.5/T0.3",
+    },
+    "ADX_추세강화": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
+    "거래량완화": {
+        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
+        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
+        "description": "TRAIL_SL0.7/A0.3/T0.2",
+    },
 }
 
 _V4_DEFAULT_EXIT = {
@@ -7325,6 +7367,81 @@ def _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
     return None
 
 
+# --- [섀도우 전용] EMA정배열진입 실제 로직 (라이브에선 위의 None 반환) ---
+def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
+    """섀도우 계측용: EMA5>10>20 + MACD골든 + 양봉"""
+    if not c15 or len(c15) < 35:
+        return None
+    if not c60 or len(c60) < 20:
+        return None
+    if not c1 or len(c1) < 3:
+        return None
+    # 15m EMA 정배열 (5>10>20)
+    ema5_15 = _v4_ema_from_candles(c15, 5)
+    ema10_15 = _v4_ema_from_candles(c15, 10)
+    ema20_15 = _v4_ema_from_candles(c15, 20)
+    if not all(v is not None for v in [ema5_15, ema10_15, ema20_15]):
+        return None
+    if not (ema5_15 > ema10_15 > ema20_15):
+        return None
+    # 15m MACD 골든크로스
+    closes_15 = [c["trade_price"] for c in c15]
+    macd_15, sig_15, _ = _v4_macd(closes_15)
+    if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
+        return None
+    # 1m 양봉
+    if not _v4_is_bullish(c1[-1]):
+        return None
+    return {
+        "signal_tag": "EMA정배열진입",
+        "entry_mode": "confirm",
+        "logic_group": "F",
+        "filters_hit": [f"15mEMA={ema5_15:.0f}>{ema10_15:.0f}>{ema20_15:.0f}",
+                        f"15mMACD={macd_15:.4f}>{sig_15:.4f}", f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
+    }
+
+
+# --- [섀도우 전용] 거래량완화: VR5 2.0~3.0 니어미스 구간 ---
+# 기존 거래량3배(VR5>3.0)의 니어미스 — 이 구간에서도 수익 가능한지 측정
+def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
+    if not c1 or len(c1) < 7:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 2.0 or vr5 >= 3.0:  # 2.0 ~ 3.0 니어미스 구간만
+        return None
+    atr_p = _v4_atr_pct(c1, 14)
+    if atr_p <= 0.5:  # 완화: 0.7 → 0.5
+        return None
+    if not _v4_is_bullish(c1[-2]):
+        return None
+    # 방향성 필터 동일
+    macd_ok = False
+    adx_ok = False
+    if c5 and len(c5) >= 35:
+        closes_5m = [c["trade_price"] for c in c5]
+        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+        if macd_5m is not None and sig_5m is not None and macd_5m > sig_5m:
+            macd_ok = True
+    if c15 and len(c15) >= 30:
+        highs_15 = [c["high_price"] for c in c15]
+        lows_15 = [c["low_price"] for c in c15]
+        closes_15 = [c["trade_price"] for c in c15]
+        adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+        if adx_15 is not None and adx_15 > 20:
+            adx_ok = True
+    if not macd_ok and not adx_ok:
+        return None
+    return {
+        "signal_tag": "거래량완화",
+        "entry_mode": "confirm",
+        "logic_group": "D",
+        "filters_hit": [f"VR5={vr5:.1f}(니어미스)", f"ATR%={atr_p:.2f}",
+                        f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["거래량완화"].copy(),
+    }
+
+
 # --- 15m_MACD골든+1h_EMA정배열 (GATE로 승격 → 개별 신호 비활성화) ---
 # 🔧 v5: 이 조합은 모든 신호의 공통 성공 필터로 확인됨
 # → _v4_gate_filter()로 승격하여 모든 신호에 필수 적용
@@ -7334,14 +7451,290 @@ def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60, gate_info=None):
     return None
 
 
-# 🔧 v7: 전략 레지스트리 초기화 (함수 정의 완료 후)
+# ============================================================
+# 🔬 v8: 계측용 다양 진입 전략 (enabled=True, 데이터 수집 후 WF 판정)
+# 리포트 signal_v4 조건별 EV 양수 구간 기반
+# 모든 전략은 m3 사전필터(상위33%) 통과 후 평가됨
+# ============================================================
+
+
+# --- [계측5] 모멘텀_스캘프: 5m+60m RSI 동시 고점 구간 ---
+# 근거: 거래량3배 60m RSI70-100 EV=+0.3467%, 20봉돌파 60m RSI70-100 EV=+0.4947%
+# 5m RSI70-100 + 60m RSI50+ = 다중 TF 모멘텀 동기화
+def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("mom_scalp_enter")
+    if not c1 or len(c1) < 7:
+        return None
+    if not c5 or len(c5) < 15:
+        return None
+    if not c60 or len(c60) < 15:
+        return None
+    # 5m RSI >= 65 (모멘텀 상승)
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 65:
+        _pipeline_inc("mom_scalp_rsi5_fail")
+        return None
+    # 60m RSI >= 50 (상위TF 지지)
+    rsi_60m = _v4_rsi_from_candles(c60, 14)
+    if rsi_60m is None or rsi_60m < 50:
+        _pipeline_inc("mom_scalp_rsi60_fail")
+        return None
+    # 1m 현재봉 양봉
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("mom_scalp_bull_fail")
+        return None
+    # ATR 최소 (변동성 필요)
+    atr_p = _v4_atr_pct(c1, 14)
+    if atr_p < 0.5:
+        _pipeline_inc("mom_scalp_atr_fail")
+        return None
+    _pipeline_inc("mom_scalp_pass")
+    return {
+        "signal_tag": "모멘텀_스캘프",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"60mRSI={rsi_60m:.1f}",
+                        f"ATR%={atr_p:.2f}", f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"].copy(),
+    }
+
+
+# --- [계측6] 60m_감싸기_돌파: 60분봉 감싸기(Engulfing) 패턴 ---
+# 근거: 거래량3배 60m감싸기 EV=+0.8388%, 20봉돌파 60m감싸기 EV=+0.2124%
+#        5m양봉 60m감싸기 EV=+0.4222%, 쌍바닥 60m감싸기 EV=+0.1340%
+# 다수 신호에서 일관된 EV 양수 (강한 독립 피처)
+def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("60m_engulf_enter")
+    if not c60 or len(c60) < 3:
+        return None
+    if not c1 or len(c1) < 3:
+        return None
+    prev_60 = c60[-2]
+    cur_60 = c60[-1]
+    # 직전 60m봉 음봉
+    if prev_60["trade_price"] >= prev_60["opening_price"]:
+        _pipeline_inc("60m_engulf_prev_fail")
+        return None
+    # 현재 60m봉 양봉
+    if cur_60["trade_price"] <= cur_60["opening_price"]:
+        _pipeline_inc("60m_engulf_cur_fail")
+        return None
+    # 감싸기: 현재봉 몸통이 직전봉 몸통을 감쌈
+    cur_body_high = max(cur_60["trade_price"], cur_60["opening_price"])
+    cur_body_low = min(cur_60["trade_price"], cur_60["opening_price"])
+    prev_body_high = max(prev_60["trade_price"], prev_60["opening_price"])
+    prev_body_low = min(prev_60["trade_price"], prev_60["opening_price"])
+    if not (cur_body_high >= prev_body_high and cur_body_low <= prev_body_low):
+        _pipeline_inc("60m_engulf_wrap_fail")
+        return None
+    # 1m 현재봉도 양봉 (진입 타이밍)
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("60m_engulf_1m_fail")
+        return None
+    _pipeline_inc("60m_engulf_pass")
+    return {
+        "signal_tag": "60m_감싸기_돌파",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": ["60m감싸기", f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"].copy(),
+    }
+
+
+# --- [계측7] 15m_VR폭발: 15분봉 거래량 급증 ---
+# 근거: 5m양봉 15mVR5>3 EV=+0.5030%, 거래량3배 15mVR5>3 EV=+0.5900%
+#        쌍바닥 15mVR5>3 EV=+0.5623%, 5m큰양봉 15mVR5>3 EV=+0.7179%
+# 일관된 강한 EV → 15분봉 거래량 급증 = 기관/세력 진입 신호
+def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("15m_vr_enter")
+    if not c15 or len(c15) < 7:
+        return None
+    if not c1 or len(c1) < 3:
+        return None
+    # 15m VR5 계산
+    cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
+    past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+    avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
+    if avg_vol_15 <= 0:
+        return None
+    vr5_15 = cur_vol_15 / avg_vol_15
+    if vr5_15 < 3.0:
+        _pipeline_inc("15m_vr_low")
+        return None
+    # 15m 현재봉 양봉
+    if not _v4_is_bullish(c15[-1]):
+        _pipeline_inc("15m_vr_bear")
+        return None
+    # 1m 현재봉 양봉
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("15m_vr_1m_fail")
+        return None
+    _pipeline_inc("15m_vr_pass")
+    return {
+        "signal_tag": "15m_VR폭발",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": [f"15mVR5={vr5_15:.1f}", f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"].copy(),
+    }
+
+
+# --- [계측8] 상위TF_정배열_돌파: 60m EMA 정배열 + 15m MACD 골든 ---
+# 근거: 거래량3배 60mEMA정배열3+ EV=+0.1335%, 20봉돌파 60mEMA정배열3+ EV=+0.3051%
+#        5m양봉 60mEMA정배열3+ EV=+0.1091%, MACD골든 60mEMA정배열3+ EV=+0.0771%
+#        5m큰양봉 60mEMA정배열3+ EV=+0.4469%, EMA정배열 60mEMA정배열3+ EV=+0.1274%
+# 기존 GATE와 다름: m3 필터 통과 + EMA정배열만 체크 (RSI/MACD 불필요)
+def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("upper_align_enter")
+    if not c60 or len(c60) < 20:
+        return None
+    if not c15 or len(c15) < 35:
+        return None
+    if not c1 or len(c1) < 3:
+        return None
+    # 60m EMA 정배열 (EMA5 > EMA10 > EMA20)
+    ema5 = _v4_ema_from_candles(c60, 5)
+    ema10 = _v4_ema_from_candles(c60, 10)
+    ema20 = _v4_ema_from_candles(c60, 20)
+    if ema5 is None or ema10 is None or ema20 is None:
+        return None
+    if not (ema5 > ema10 > ema20):
+        _pipeline_inc("upper_align_ema_fail")
+        return None
+    # 15m MACD 골든크로스
+    closes_15 = [c["trade_price"] for c in c15]
+    macd_15, sig_15, _ = _v4_macd(closes_15)
+    if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
+        _pipeline_inc("upper_align_macd_fail")
+        return None
+    # 1m 양봉
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("upper_align_1m_fail")
+        return None
+    # ATR% >= 0.5 (최소 변동성)
+    atr_p = _v4_atr_pct(c1, 14)
+    if atr_p < 0.5:
+        _pipeline_inc("upper_align_atr_fail")
+        return None
+    _pipeline_inc("upper_align_pass")
+    return {
+        "signal_tag": "상위TF_정배열",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": [
+            f"60mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}",
+            f"15mMACD={macd_15:.4f}>{sig_15:.4f}",
+            f"ATR%={atr_p:.2f}",
+            f"GATE={gate_info}",
+        ],
+        "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"].copy(),
+    }
+
+
+# --- [계측9] 과매도_반등: 5m RSI 과매도 + MFI 저점 ---
+# 근거: 5m양봉 5mRSI<30 EV=+0.0185%, 5m양봉 5mMFI<20 EV=+0.0668%
+#        BB하단반등 5mRSI<30 EV=+0.0058%, 쌍바닥 5mRSI<30 EV=+0.1268%
+# 역추세 반등 전략 — 과매도에서 반등 시작 감지
+def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("oversold_enter")
+    if not c5 or len(c5) < 15:
+        return None
+    if not c1 or len(c1) < 3:
+        return None
+    # 5m RSI <= 35 (과매도 구간)
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m > 35:
+        _pipeline_inc("oversold_rsi_fail")
+        return None
+    # 5m 현재봉 양봉 (반등 시작)
+    if not _v4_is_bullish(c5[-1]):
+        _pipeline_inc("oversold_5m_bear")
+        return None
+    # 5m 직전봉 음봉 (하락 후 반등 패턴)
+    if _v4_is_bullish(c5[-2]):
+        _pipeline_inc("oversold_prev_bull")
+        return None
+    # 1m 양봉 확인
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("oversold_1m_fail")
+        return None
+    _pipeline_inc("oversold_pass")
+    return {
+        "signal_tag": "과매도_반등",
+        "entry_mode": "confirm",
+        "logic_group": "D",
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"GATE={gate_info}"],
+        "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
+    }
+
+
+# --- [계측10] ADX_추세강화: 다중 TF ADX 동시 강세 ---
+# 근거: 거래량3배 15mADX>25 EV=+0.1766%, 20봉돌파 15mADX>25 EV=+0.1359%
+#        5m큰양봉 15mADX>25 EV=+0.0522%, 60mADX>25 다수 양수
+# 추세 강도 필터 — 강한 추세 중 진입
+def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("adx_trend_enter")
+    if not c15 or len(c15) < 30:
+        return None
+    if not c60 or len(c60) < 30:
+        return None
+    if not c1 or len(c1) < 7:
+        return None
+    # 15m ADX > 30 (강한 추세)
+    highs_15 = [c["high_price"] for c in c15]
+    lows_15 = [c["low_price"] for c in c15]
+    closes_15 = [c["trade_price"] for c in c15]
+    adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
+    if adx_15 is None or adx_15 <= 30:
+        _pipeline_inc("adx_trend_15_fail")
+        return None
+    # 60m ADX > 25 (상위TF 추세 동기화)
+    highs_60 = [c["high_price"] for c in c60]
+    lows_60 = [c["low_price"] for c in c60]
+    closes_60 = [c["trade_price"] for c in c60]
+    adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
+    if adx_60 is None or adx_60 <= 25:
+        _pipeline_inc("adx_trend_60_fail")
+        return None
+    # 5m MACD 골든 (방향성 확인)
+    if not c5 or len(c5) < 35:
+        return None
+    closes_5m = [c["trade_price"] for c in c5]
+    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+    if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
+        _pipeline_inc("adx_trend_macd_fail")
+        return None
+    # VR 최소 (거래량 존재)
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.2:
+        _pipeline_inc("adx_trend_vr_fail")
+        return None
+    _pipeline_inc("adx_trend_pass")
+    return {
+        "signal_tag": "ADX_추세강화",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": [
+            f"15mADX={adx_15:.1f}", f"60mADX={adx_60:.1f}",
+            f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}",
+            f"VR5={vr5:.1f}", f"GATE={gate_info}",
+        ],
+        "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"].copy(),
+    }
+
+
+# 🔧 v8: 전략 레지스트리 초기화 (라이브 + 섀도우)
+# enabled=True: 실매매 가능 (A/B)
+# enabled=False: 섀도우 테스트만 (C~L)
 _STRATEGY_REGISTRY = {
+    # === 라이브 전략 (실매매) ===
     "거래량3배": {
         "check_fn": _v4_check_volume_3x,
         "exit_params": _V4_EXIT_PARAMS["거래량3배"],
         "priority": 1,
         "enabled": True,
         "pipeline_key": "vol3x",
+        "route": "A",
         "description": "VR5>3.0, ATR%>0.7%, 방향성 OR 필터",
     },
     "20봉_고점돌파": {
@@ -7350,25 +7743,160 @@ _STRATEGY_REGISTRY = {
         "priority": 2,
         "enabled": True,
         "pipeline_key": "20bar",
+        "route": "B",
         "description": "1m종가>20봉고점, 5mMACD+15mADX>25",
     },
+    # === 섀도우 전략 (기존 비활성 재검증) ===
     "15m_눌림반전": {
         "check_fn": _v4_check_15m_pullback_reversal,
         "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"],
         "priority": 3,
-        "enabled": False,  # 비활성화 (라이브 계측 우선)
+        "enabled": False,
         "pipeline_key": "15m_pb",
+        "route": "C",
         "description": "15m 음봉→양봉 반전, 종가회복",
     },
     "EMA정배열진입": {
         "check_fn": _v4_check_ema_alignment,
         "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"],
         "priority": 4,
-        "enabled": False,  # WF FAIL
+        "enabled": False,
         "pipeline_key": "ema_align",
+        "route": "F",
         "description": "비활성화 (WF FAIL 양수폴드 43%)",
     },
+    # === 섀도우 전략 (신규 계측용) ===
+    "거래량완화": {
+        "check_fn": _v4_shadow_check_volume_relaxed,
+        "exit_params": _V4_EXIT_PARAMS["거래량완화"],
+        "priority": 5,
+        "enabled": False,
+        "pipeline_key": "vol_relax",
+        "route": "D",
+        "description": "VR5 2.0~3.0 니어미스, ATR>0.5%",
+    },
+    "모멘텀_스캘프": {
+        "check_fn": _v4_check_momentum_scalp,
+        "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"],
+        "priority": 6,
+        "enabled": False,
+        "pipeline_key": "mom_scalp",
+        "route": "G",
+        "description": "5mRSI≥65+60mRSI≥50, 다중TF 모멘텀",
+    },
+    "60m_감싸기_돌파": {
+        "check_fn": _v4_check_60m_engulfing,
+        "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"],
+        "priority": 7,
+        "enabled": False,
+        "pipeline_key": "60m_engulf",
+        "route": "H",
+        "description": "60m 음→양 감싸기 패턴",
+    },
+    "15m_VR폭발": {
+        "check_fn": _v4_check_15m_vr_explosion,
+        "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"],
+        "priority": 8,
+        "enabled": False,
+        "pipeline_key": "15m_vr",
+        "route": "I",
+        "description": "15m VR5>3.0 + 양봉",
+    },
+    "상위TF_정배열": {
+        "check_fn": _v4_check_upper_tf_aligned,
+        "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"],
+        "priority": 9,
+        "enabled": False,
+        "pipeline_key": "upper_align",
+        "route": "J",
+        "description": "60m EMA정배열 + 15m MACD골든",
+    },
+    "과매도_반등": {
+        "check_fn": _v4_check_oversold_bounce,
+        "exit_params": _V4_EXIT_PARAMS["과매도_반등"],
+        "priority": 10,
+        "enabled": False,
+        "pipeline_key": "oversold",
+        "route": "K",
+        "description": "5m RSI≤35 + 음→양 반전",
+    },
+    "ADX_추세강화": {
+        "check_fn": _v4_check_adx_trend,
+        "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"],
+        "priority": 11,
+        "enabled": False,
+        "pipeline_key": "adx_trend",
+        "route": "L",
+        "description": "15mADX>30+60mADX>25+5mMACD골든",
+    },
 }
+
+# === v8: 섀도우 루트 카운터 (전 루트 독립 실행 → 시그널 빈도 측정) ===
+_SHADOW_ROUTE_LOCK = threading.Lock()
+_SHADOW_ROUTE_COUNTERS = {}  # { "route_X": {"tested": 0, "signal": 0, "coins": set()} }
+
+# 섀도우 전용 check_fn 매핑 (라이브에서 None 반환하는 전략의 실제 로직)
+_SHADOW_CHECK_OVERRIDES = {
+    "EMA정배열진입": _v4_shadow_check_ema_alignment,
+    "거래량완화": _v4_shadow_check_volume_relaxed,
+}
+
+
+def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
+    """섀도우 테스트: 모든 루트를 독립 실행하고 시그널 발생 여부 기록.
+    실매매 안 함 — 파이프라인 카운터 + 로그만 기록."""
+    results = {}
+    for strat_name, strat in _STRATEGY_REGISTRY.items():
+        route = strat.get("route", "?")
+        # 섀도우 오버라이드가 있으면 사용 (None 반환하는 함수 대체)
+        check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
+        try:
+            sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+        except Exception:
+            sig = None
+        hit = sig is not None
+        results[route] = hit
+        with _SHADOW_ROUTE_LOCK:
+            if route not in _SHADOW_ROUTE_COUNTERS:
+                _SHADOW_ROUTE_COUNTERS[route] = {"tested": 0, "signal": 0, "coins": set()}
+            _SHADOW_ROUTE_COUNTERS[route]["tested"] += 1
+            if hit:
+                _SHADOW_ROUTE_COUNTERS[route]["signal"] += 1
+                _SHADOW_ROUTE_COUNTERS[route]["coins"].add(market)
+        if hit and not strat["enabled"]:
+            # 섀도우 시그널 로그 기록
+            _shadow_log_write(now_kst_str(), market, f"SHADOW_{strat_name}", 1,
+                              "", 0, f"route={route} {m3_info}")
+    return results
+
+
+def _v4_shadow_report_lines():
+    """섀도우 루트 카운터 리포트 생성 (10분 텔레그램 리포트용)"""
+    lines = []
+    with _SHADOW_ROUTE_LOCK:
+        if not _SHADOW_ROUTE_COUNTERS:
+            return []
+        lines.append("📡 섀도우 루트 계측:")
+        sorted_routes = sorted(_SHADOW_ROUTE_COUNTERS.items())
+        for route, data in sorted_routes:
+            tested = data["tested"]
+            signal = data["signal"]
+            rate = (signal / tested * 100) if tested > 0 else 0
+            coins = len(data["coins"])
+            # 라이브 여부 표시
+            is_live = any(s.get("route") == route and s.get("enabled")
+                         for s in _STRATEGY_REGISTRY.values())
+            tag = "🟢" if is_live else "🔵"
+            strat_name = next((n for n, s in _STRATEGY_REGISTRY.items()
+                              if s.get("route") == route), route)
+            lines.append(f"  {tag}{route}:{strat_name} {signal}/{tested}({rate:.1f}%) coins={coins}")
+    return lines
+
+
+def _v4_shadow_reset_counters():
+    """섀도우 카운터 리셋 (리포트 후)"""
+    with _SHADOW_ROUTE_LOCK:
+        _SHADOW_ROUTE_COUNTERS.clear()
 
 
 def v4_get_strategy_registry():
@@ -7404,7 +7932,13 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
         return None
     m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
 
-    # === 🔧 v7: 레지스트리 기반 전략 순회 (priority 순) ===
+    # === 🔬 v8: 섀도우 테스트 (모든 루트 독립 실행, 실매매 안 함) ===
+    try:
+        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
+    except Exception as _shadow_err:
+        pass  # 섀도우 오류가 라이브에 영향 주면 안 됨
+
+    # === 🔧 v8: 레지스트리 기반 전략 순회 (priority 순, enabled만) ===
     sorted_strategies = sorted(_STRATEGY_REGISTRY.items(), key=lambda x: x[1]["priority"])
     for strat_name, strat in sorted_strategies:
         if not strat["enabled"]:
