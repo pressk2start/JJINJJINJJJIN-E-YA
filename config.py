@@ -358,6 +358,6 @@ STATE_PERSIST_INTERVAL = 30  # 30초마다 자동 저장
 # ============================================================
 SHADOW_MIN_SIGNAL_RATE = 3.0       # 시그널 발생률 최소 % (이하면 노이즈로 간주)
 SHADOW_MIN_COINS = 2               # 최소 코인 수 (1코인에서만 뜨면 무시)
-SHADOW_ALERT_ENABLED = True        # 텔레그램 섀도우 알림 on/off
+SHADOW_ALERT_ENABLED = False       # 텔레그램 섀도우 알림 off (통계는 백그라운드 수집)
 SHADOW_LOG_MIN_RATE = 1.0          # CSV 로깅 최소 시그널률 % (이하면 로그도 안 남김)
 SHADOW_ALERT_CD_SEC = 600          # 섀도우 알림 쿨다운 (기본 5분→10분)
