@@ -240,6 +240,119 @@ _BOX_LAST_EXIT = {}                    # 쿨다운 추적: { market: timestamp }
 _BOX_LAST_SCAN_TS = 0                  # 마지막 스캔 시각
 
 # =========================
+# 📊 라이브 파이프라인 계측 (Pipeline Instrumentation)
+# =========================
+# 스캔 사이클마다 누적, 10분마다 텔레그램+콘솔 리포트
+import io as _io
+
+_PIPELINE_COUNTERS_LOCK = threading.Lock()
+_PIPELINE_COUNTERS = {
+    "scan_markets": 0,          # 스캔한 마켓 수
+    "c1_ok": 0,                 # 1m 캔들 수집 성공 마켓
+    "detect_called": 0,         # detect_leader_stock 호출 수
+    "v4_called": 0,             # v4_evaluate_entry 호출 수
+    "v4_m3_fail": 0,            # 60m_m3 사전필터 탈락
+    "v4_vol3x_fail": 0,        # 거래량3배 조건 미충족
+    "v4_20bar_fail": 0,        # 20봉_고점돌파 조건 미충족
+    "v4_raw_hit": 0,           # v4 원시 신호 발생 수
+    "gate_fail_stablecoin": 0, # 스테이블코인 제외
+    "gate_fail_position": 0,   # 이미 보유
+    "gate_fail_no_ticks": 0,   # 틱 없음
+    "gate_fail_fake_flow": 0,  # 스푸핑
+    "gate_fail_no_v4": 0,      # v4 신호 없음 (총)
+    "gate_fail_coin_cd": 0,    # 코인별 연패 쿨다운
+    "gate_fail_fresh": 0,      # 틱 신선도 부족
+    "gate_fail_spread": 0,     # 스프레드 과다
+    "gate_fail_vol_min": 0,    # 거래대금 부족
+    "gate_fail_buy_ratio": 0,  # 매수비 부족
+    "gate_fail_accel": 0,      # 가속 과다
+    "gate_fail_early_flow": 0, # 거래속도 부족
+    "gate_pass": 0,            # gate 통과 (pre 반환)
+    "cooldown_block": 0,       # 쿨다운 탈락
+    "position_block": 0,       # 포지션/recent_alerts 탈락
+    "postcheck_block": 0,      # postcheck 탈락
+    "lock_block": 0,           # 락 획득 실패
+    "suspend_block": 0,        # 연패 중지
+    "send_attempt": 0,         # 최종 진입 시도 수
+    "send_success": 0,         # 진입 성공 수
+}
+_PIPELINE_LAST_REPORT_TS = 0
+_PIPELINE_REPORT_INTERVAL = 600  # 10분
+
+# 섀도우 모드 CSV 로깅 (raw signal별 한 줄)
+_SHADOW_LOG_PATH = os.path.join(os.getcwd(), "pipeline_shadow.csv")
+_SHADOW_LOG_LOCK = threading.Lock()
+_SHADOW_LOG_INITIALIZED = False
+
+
+def _pipeline_inc(key, n=1):
+    """파이프라인 카운터 증가"""
+    with _PIPELINE_COUNTERS_LOCK:
+        _PIPELINE_COUNTERS[key] = _PIPELINE_COUNTERS.get(key, 0) + n
+
+
+def _pipeline_report(force=False):
+    """10분마다 파이프라인 카운터 리포트 전송"""
+    global _PIPELINE_LAST_REPORT_TS
+    now = time.time()
+    if not force and (now - _PIPELINE_LAST_REPORT_TS) < _PIPELINE_REPORT_INTERVAL:
+        return
+    _PIPELINE_LAST_REPORT_TS = now
+    with _PIPELINE_COUNTERS_LOCK:
+        c = dict(_PIPELINE_COUNTERS)
+    lines = [
+        f"📊 <b>파이프라인 계측</b> | {now_kst_str()}",
+        f"━━━━━━━━━━━━━━━━",
+        f"🔍 스캔: {c['scan_markets']}마켓 | c1성공: {c['c1_ok']}",
+        f"🔬 detect호출: {c['detect_called']}",
+        f"📡 v4호출: {c['v4_called']} | m3탈락: {c['v4_m3_fail']}",
+        f"  거래량3배X: {c['v4_vol3x_fail']} | 20봉돌파X: {c['v4_20bar_fail']}",
+        f"🎯 v4_raw_hit: {c['v4_raw_hit']}",
+        f"━━━━━━━━━━━━━━━━",
+        f"🚫 gate탈락:",
+        f"  스테이블: {c['gate_fail_stablecoin']} | 보유중: {c['gate_fail_position']}",
+        f"  틱없음: {c['gate_fail_no_ticks']} | 스푸핑: {c['gate_fail_fake_flow']}",
+        f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
+        f"  신선도: {c['gate_fail_fresh']} | 스프레드: {c['gate_fail_spread']}",
+        f"  거래대금: {c['gate_fail_vol_min']} | 매수비: {c['gate_fail_buy_ratio']}",
+        f"  가속: {c['gate_fail_accel']} | 거래속도: {c['gate_fail_early_flow']}",
+        f"✅ gate통과: {c['gate_pass']}",
+        f"━━━━━━━━━━━━━━━━",
+        f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
+        f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
+        f"⛔ 연패중지: {c['suspend_block']}",
+        f"━━━━━━━━━━━━━━━━",
+        f"🚀 진입시도: {c['send_attempt']} | 성공: {c['send_success']}",
+    ]
+    msg = "\n".join(lines)
+    print(msg)
+    tg_send(msg)
+    # 카운터 리셋
+    with _PIPELINE_COUNTERS_LOCK:
+        for k in _PIPELINE_COUNTERS:
+            _PIPELINE_COUNTERS[k] = 0
+
+
+def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, final_alert,
+                      extra_info=""):
+    """섀도우 모드 CSV 로그 1줄 기록"""
+    global _SHADOW_LOG_INITIALIZED
+    with _SHADOW_LOG_LOCK:
+        write_header = not _SHADOW_LOG_INITIALIZED
+        try:
+            with open(_SHADOW_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(["timestamp", "market", "strategy", "raw_signal",
+                                "block_reason", "final_alert", "extra_info"])
+                    _SHADOW_LOG_INITIALIZED = True
+                w.writerow([timestamp, market, strategy, raw_signal,
+                            block_reason, final_alert, extra_info])
+        except Exception as e:
+            print(f"[SHADOW_LOG_ERR] {e}")
+
+
+# =========================
 # 🔐 프로세스 간 중복 진입 방지 (파일락 + 메모리락)
 # =========================
 # 🔧 FIX: 락에 소유자(스레드 ID) 추적 추가 - reentrant 버그 수정
@@ -6492,39 +6605,47 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     [SIGNAL] 진입 (OR — 먼저 매칭):
       1순위: 거래량3배         (방향성 OR 필터: 5m_MACD OR 15m_ADX)
       2순위: 20봉_고점돌파      (자체 복합필터 5m_MACD골든+15m_ADX>20)
-      3순위: 15m_눌림반전       (GATE 필수 — 단독 WF FAIL, 복합필터로 PASS)
+      ❌ 15m_눌림반전: 비활성화 (라이브 계측 우선, 전략 2개로 축소)
       ❌ EMA정배열진입: 비활성화 (WF FAIL 양수폴드 43%)
     """
+    _pipeline_inc("v4_called")
     if not c1:
         return None
 
     # === 사전필터: 60m 3봉 모멘텀 상위33% ===
-    # WF 섹션4 자동탐색: 가장 강한 독립 피처 (TEST EV +0.24%)
-    # 상위 TF 모멘텀이 하락 중이면 어떤 신호도 수익성 낮음
     m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.33)
     if not m3_ok:
+        _pipeline_inc("v4_m3_fail")
+        _shadow_log_write(now_kst_str(), market, "ALL", 0, "m3_fail",
+                          0, f"m3={m3_val*100:.3f}%<thr={m3_thr*100:.3f}%")
         return None
     m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
 
     # === 1순위: 거래량3배 (방향성 OR 필터: 5m_MACD OR 15m_ADX) ===
     sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
+        _pipeline_inc("v4_raw_hit")
         sig["filters_hit"].append(m3_info)
+        _shadow_log_write(now_kst_str(), market, "거래량3배", 1, "", 1, m3_info)
         return sig
+    _pipeline_inc("v4_vol3x_fail")
 
     # === 2순위: 20봉_고점돌파 (자체 복합필터만) ===
     sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
+        _pipeline_inc("v4_raw_hit")
         sig["filters_hit"].append(m3_info)
+        _shadow_log_write(now_kst_str(), market, "20봉_고점돌파", 1, "", 1, m3_info)
         return sig
+    _pipeline_inc("v4_20bar_fail")
 
-    # === 3순위: 15m_눌림반전 (GATE 필수 — 단독 FAIL, 복합필터로 PASS) ===
-    gate_ok, gate_info, gate_reason = _v4_gate_filter(c15, c60)
-    if gate_ok:
-        sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
-        if sig:
-            sig["filters_hit"].append(m3_info)
-            return sig
+    # === 3순위: 15m_눌림반전 — 비활성화 (라이브 계측 우선, 전략 2개로 축소) ===
+    # gate_ok, gate_info, gate_reason = _v4_gate_filter(c15, c60)
+    # if gate_ok:
+    #     sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
+    #     if sig:
+    #         sig["filters_hit"].append(m3_info)
+    #         return sig
 
     return None
 
@@ -8388,6 +8509,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
     if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
         cut("STABLECOIN", f"{m} 스테이블코인 제외")
+        _pipeline_inc("gate_fail_stablecoin")
         return None
 
     # === 동일 종목 중복 진입 방지 (포지션 보유 시 스킵) ===
@@ -8395,6 +8517,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         pos = OPEN_POSITIONS.get(m)
         if pos:
             # 🔧 FIX: 락 내부에서 체크해야 race condition 방지
+            _pipeline_inc("gate_fail_position")
             return None
 
     # === 틱 기반 초봉(10초) 선행 진입 시그널 ===
@@ -8433,6 +8556,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     ticks = get_recent_ticks(m, 100)
     if not ticks:
         cut("TICKS_LOW", f"{m} no ticks")
+        _pipeline_inc("gate_fail_no_ticks")
         return None
 
     # 🔧 진입지연개선: 실시간 러닝바로 price_change 보강 (캔들 확정 전 조기 감지)
@@ -8518,6 +8642,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
     if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
         cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
+        _pipeline_inc("gate_fail_fake_flow")
         return None
 
     # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
@@ -8563,6 +8688,21 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _c30 = get_minutes_candles(30, m, 20) or []
         _c60 = get_minutes_candles(60, m, 15) or []
 
+        # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
+        _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
+                    f"c30={len(_c30)} c60={len(_c60)}")
+        # MACD(26+9=35), ADX(14*2+1=29), EMA50(50), m3(7봉) 최소 길이 체크
+        _tf_short = []
+        if len(_c5) < 35:
+            _tf_short.append(f"c5<35({len(_c5)})")
+        if len(_c15) < 30:
+            _tf_short.append(f"c15<30({len(_c15)})")
+        if len(_c60) < 7:
+            _tf_short.append(f"c60<7({len(_c60)})")
+        if _tf_short:
+            _shadow_log_write(now_kst_str(), m, "CANDLE_DIAG", 0,
+                              "TF_SHORT:" + ",".join(_tf_short), 0, _tf_diag)
+
         # 시간대 필터 (불리한 시간 차단)
         _cur_hour = now_kst().hour
 
@@ -8582,6 +8722,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # v4 신호 없으면 → 진입 차단
     if not _v4_signal:
         cut("NO_V4_SIGNAL", f"{m} v4 진입 조건 미충족")
+        _pipeline_inc("gate_fail_no_v4")
         return None
 
     _15m_signal = _v4_signal["signal_tag"]
@@ -8595,6 +8736,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
     if is_coin_loss_cooldown(m):
         cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
+        _pipeline_inc("gate_fail_coin_cd")
         return None
 
     # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
@@ -8611,6 +8753,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 1) 틱 신선도
     if not fresh_ok:
         cut("FRESH", f"{m} 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_fresh")
         return None
 
     # 2) 스프레드 (가격대별 동적 상한)
@@ -8622,11 +8765,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
     if spread > eff_spread_max:
         cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_spread")
         return None
 
     # 3) 최소 거래대금
     if current_volume < GATE_VOL_MIN and not mega:
         cut("VOL_MIN", f"{m} 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_vol_min")
         return None
 
     # 4) 매수비 100% 스푸핑
@@ -8637,16 +8782,19 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 4-1) 매수비 하한 — 🔧 데드코드→실구현 (0.50, 공포장 대응)
     if _gate_buy_ratio < GATE_BUY_RATIO_MIN:
         cut("BUY_RATIO", f"{m} 매수비부족 {_gate_buy_ratio:.2f}<{GATE_BUY_RATIO_MIN} | {_metrics}", near_miss=True)
+        _pipeline_inc("gate_fail_buy_ratio")
         return None
 
     # 5) 가속도 과다
     if accel > GATE_ACCEL_MAX:
         cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_accel")
         return None
 
     # 5-1) 초기 거래속도 하한 — 🔧 데드코드→실구현 (15K원/초)
     if t15.get("krw_per_sec", 0) < EARLY_FLOW_MIN_KRWPSEC:
         cut("EARLY_FLOW", f"{m} 거래속도부족 {t15.get('krw_per_sec',0)/1000:.0f}K<{EARLY_FLOW_MIN_KRWPSEC/1000:.0f}K | {_metrics}", near_miss=True)
+        _pipeline_inc("gate_fail_early_flow")
         return None
 
     # 🔧 WF데이터: 기존 캔들 바디/윗꼬리/WEAK_SIGNAL 필터 비활성화
@@ -8714,12 +8862,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     }
 
     # 🔧 WF데이터: spike tracker 갱신 비활성화 (1파/2파 비활성화됨)
-    # with _SPIKE_TRACKER_LOCK:
-    #     _wave_info = _SPIKE_TRACKER.get(m)
-    #     if _wave_info and (_now_ts - _wave_info["ts"]) < _SPIKE_WAVE_WINDOW:
-    #         _wave_info["count"] = _spike_wave
-    #     else:
-    #         _SPIKE_TRACKER[m] = {"ts": _now_ts, "count": 1}
+
+    _pipeline_inc("gate_pass")
+    _shadow_log_write(now_kst_str(), m, signal_tag, 1, "", 0,
+                      f"gate_pass|mode={_entry_mode}|vwap_gap={vwap_gap:.2f}")
 
     return pre
 
@@ -10975,6 +11121,9 @@ def main():
             # 🔧 실패 메시지 큐 재전송
             tg_flush_failed()
 
+            # 📊 파이프라인 계측 리포트 (10분마다)
+            _pipeline_report()
+
             # 🔧 30분마다 텔레그램 헬스체크 알림
             if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
                 _last_heartbeat_ts = time.time()
@@ -11476,6 +11625,8 @@ def main():
 
             obc = fetch_orderbook_cache(shard)
 
+            _pipeline_inc("scan_markets", len(shard))
+
             c1_cache = {}
             # 🔧 FIX: 20→30 캔들 (BOX_LOOKBACK=30 요구 충족 — 돌파 감지는 20개만 슬라이싱해서 사용)
             futures = {
@@ -11489,6 +11640,8 @@ def main():
                 except Exception:
                     c1_cache[m] = []
 
+            _pipeline_inc("c1_ok", sum(1 for v in c1_cache.values() if v))
+
             # 🔧 FIX: BTC 캔들 캐시 (shard 루프 밖에서 1회만 조회 → API 절약)
             _btc_c1_cache = None
             _btc_c5_cache = None
@@ -11500,6 +11653,7 @@ def main():
                 c1 = c1_cache.get(m, [])
                 if not c1: continue
 
+                _pipeline_inc("detect_called")
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre:
                     continue
@@ -11524,9 +11678,11 @@ def main():
                 # 🔧 FIX: postcheck 전 중복 체크 + 즉시 마킹 (6초 동안 다른 스캔 차단)
                 with _POSITION_LOCK:
                     if m in OPEN_POSITIONS:
+                        _pipeline_inc("position_block")
                         continue
                     # 🔧 FIX: recent_alerts도 락 안에서 체크 (10초 이내만 차단 - postcheck 동안만)
                     if m in recent_alerts and time.time() - recent_alerts[m] < 10:
+                        _pipeline_inc("position_block")
                         continue
                     # 🔧 FIX: postcheck 전에 미리 마킹 (다른 스캔 차단)
                     recent_alerts[m] = time.time()
@@ -11535,6 +11691,9 @@ def main():
                 ok_post, post_reason = postcheck_6s(m, pre)
                 if not ok_post:
                     cut("POSTCHECK_DROP", f"{m} postcheck fail: {post_reason}")
+                    _pipeline_inc("postcheck_block")
+                    _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
+                                      f"postcheck:{post_reason}", 0)
                     # 🔧 FIX: postcheck 실패 시 recent_alerts 제거 (다음 스캔에서 재시도 가능)
                     with _POSITION_LOCK:
                         recent_alerts.pop(m, None)
@@ -11566,6 +11725,7 @@ def main():
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
                     cut("LOSE_SUSPEND", f"{m} 연패 진입중지 (잔여 {_remain}초)")
+                    _pipeline_inc("suspend_block")
                     continue
                 # 🔧 특단조치: probe 폐지 → half 강제
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
@@ -11576,6 +11736,9 @@ def main():
                     "early" if pre.get("early_ok") else
                     ("mega" if pre.get("mega_ok") else "normal"))
                 if not cooldown_ok(m, pre['price'], reason=reason):
+                    _pipeline_inc("cooldown_block")
+                    _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
+                                      "cooldown", 0)
                     # 🔧 FIX: cooldown 실패 시 recent_alerts 정리 (10초 재탐지 블록 방지)
                     with _POSITION_LOCK:
                         recent_alerts.pop(m, None)
@@ -11585,6 +11748,7 @@ def main():
                 # 🔐 파일락 획득 시도 (프로세스 간 공유)
                 if not _try_acquire_entry_lock(m):
                     print(f"[LOCK] {m} already locked → skip")
+                    _pipeline_inc("lock_block")
                     continue
                 _lock_held = True
 
@@ -11761,6 +11925,9 @@ def main():
 
                     # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
                     # open_auto_position이 reentrant=True로 재진입, 모니터 finally에서 최종 해제
+                    _pipeline_inc("send_attempt")
+                    _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
+                                      "", 1, f"ENTRY_ATTEMPT|mode={pre.get('entry_mode')}")
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
@@ -11779,6 +11946,9 @@ def main():
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
                     with _POSITION_LOCK:
                         actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", pre["price"])
+                        _entry_opened = OPEN_POSITIONS.get(m, {}).get("state") == "open"
+                    if _entry_opened:
+                        _pipeline_inc("send_success")
 
                     # 🔧 FIX: 별도 스레드에서 모니터링 실행 (메인 스캔 루프 블로킹 방지)
                     # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
