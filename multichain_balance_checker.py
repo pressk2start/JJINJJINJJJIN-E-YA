@@ -685,13 +685,16 @@ def get_balances(chain: str, address: str) -> dict:
 # ═══════════════════════════════════════════════
 def print_assets(result):
     chain = result["chain"]
+    name = result.get("name", "")
+    address = result["address"]
     assets = result.get("assets", [])
     print(f"\n{'='*60}")
-    print(f"  {chain} ({result.get('name','')})  |  {result['address']}")
+    print(f"  {chain} ({name})  |  {address}")
     print(f"{'='*60}")
     if not assets:
         print("  (잔고 없음)")
         return
+    # 보기 좋은 출력
     mx = min(max(len(a["ticker"]) for a in assets), 20)
     for a in assets:
         tk = a["ticker"]
@@ -699,6 +702,12 @@ def print_assets(result):
             tk = tk[:8] + "..." + tk[-6:]
         tag = "[native]" if a["type"] == "native" else "[token] "
         print(f"  {tag}  {tk:>{mx}s}  {a['amount']}")
+    # 엑셀 복붙용 탭 구분 출력
+    print(f"\n  ── 엑셀 복붙용 (아래를 복사하세요) ──")
+    print(f"  체인\t체인명\t주소\t타입\t티커\t잔고")
+    for a in assets:
+        atype = "native" if a["type"] == "native" else "token"
+        print(f"  {chain}\t{name}\t{address}\t{atype}\t{a['ticker']}\t{a['amount']}")
     print()
 def _parse_pairs(lines):
     """텍스트 줄들에서 (chain, address) 쌍 추출, 중복 제거"""
