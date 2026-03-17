@@ -328,8 +328,21 @@ MKTS_CACHE_TTL = 90
 # 20. MFE 시계열 추적 (진입 후 시간대별 최고수익률 기록)
 # ============================================================
 # 스냅샷 시점 (초) — 진입 후 각 시점에서의 MFE/현재가 기록
-MFE_SNAPSHOT_TIMES = [10, 30, 60, 120, 180, 300, 600]
+# 🔧 v7: 첫 2분 내 5초 간격 세분화 (초기 MFE 피크 정밀 추적)
+MFE_SNAPSHOT_TIMES = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600]
 # 시그널별 성과 통계 최소 샘플 수 (이 이상 모여야 리포트/적응형 청산에 활용)
 SIGNAL_STATS_MIN_TRADES = 5
 # 시그널별 통계 파일 경로
 SIGNAL_STATS_PATH = "signal_stats.json"
+
+# ============================================================
+# 21. MFE→Exit 자동 피드백 (시그널별 MFE 피크 기반 청산 파라미터 자동 조정)
+# ============================================================
+MFE_FEEDBACK_ENABLED = True
+MFE_FEEDBACK_MIN_TRADES = 20       # 최소 거래 수 (이 이상 모여야 피드백 적용)
+MFE_FEEDBACK_ACTIVATION_RATIO = 0.6  # activation = avg_peak_mfe × ratio (60%)
+MFE_FEEDBACK_TRAIL_RATIO = 0.35      # trail_pct = avg_peak_mfe × ratio (35%)
+MFE_FEEDBACK_MAX_ACTIVATION = 0.010  # activation 상한 1.0%
+MFE_FEEDBACK_MAX_TRAIL = 0.006       # trail 상한 0.6%
+MFE_FEEDBACK_MIN_ACTIVATION = 0.002  # activation 하한 0.2%
+MFE_FEEDBACK_MIN_TRAIL = 0.001       # trail 하한 0.1%
