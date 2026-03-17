@@ -284,6 +284,7 @@ KAIA_KNOWN_TOKENS = {
     "0xd364de0683b29e582e5713425b215b24ce804ae9": ("CENT", 18),
     "0xe993e5668a034a98cc53cc1e3bfba910119440a1": ("CELL", 18),
     "0xe3ecbfbb8f8c37c2450b9920b79755e5280a4252": ("SNTC", 18),
+    "0x96035fbdd4cb888862ee28c9d8fdadef78311cc9": ("MM", 18),
 }
 def get_kaia(addr):
     rpc = os.getenv("KAIA_RPC_URL", KAIA_RPC)
