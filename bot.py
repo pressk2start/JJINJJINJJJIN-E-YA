@@ -8683,10 +8683,10 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
 
     try:
         # 멀티TF 캔들 데이터 페칭
-        _c5 = get_minutes_candles(5, m, 30) or []
-        _c15 = get_minutes_candles(15, m, 30) or []
+        _c5 = get_minutes_candles(5, m, 50) or []
+        _c15 = get_minutes_candles(15, m, 50) or []
         _c30 = get_minutes_candles(30, m, 20) or []
-        _c60 = get_minutes_candles(60, m, 15) or []
+        _c60 = get_minutes_candles(60, m, 30) or []
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
