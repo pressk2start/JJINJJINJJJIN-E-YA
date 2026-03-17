@@ -242,26 +242,37 @@ def _blockscout_tokens(blockscout_url, addr):
         results.append((sym, value, dec, ct))
     return results
 def _bsc_batch_token_check(rpc_url, addr):
-    """BSC: 주요 토큰을 batch RPC로 조회"""
+    """BSC: 주요 토큰을 batch RPC로 조회 (청크 분할)"""
+    import time as _time
     addr_padded = "0" * 24 + addr[2:].lower()
-    calls = []
     token_list = list(BSC_KNOWN_TOKENS.items())
-    for i, (ca, (sym, dec)) in enumerate(token_list):
-        calls.append({
-            "jsonrpc": "2.0", "id": i + 1,
-            "method": "eth_call",
-            "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
-        })
-    resp = _evm_batch_rpc(rpc_url, calls)
     results = []
-    resp_map = {r["id"]: r for r in resp}
-    for i, (ca, (sym, dec)) in enumerate(token_list):
-        r = resp_map.get(i + 1, {})
-        hex_val = r.get("result", "0x0")
-        if hex_val and hex_val != "0x" and hex_val != "0x0":
-            raw = str(int(hex_val, 16))
-            if raw != "0":
-                results.append((sym, raw, dec, ca))
+    CHUNK = 15  # BSC 공개 RPC rate limit 회피
+    for start in range(0, len(token_list), CHUNK):
+        chunk = token_list[start:start + CHUNK]
+        calls = []
+        for i, (ca, (sym, dec)) in enumerate(chunk):
+            calls.append({
+                "jsonrpc": "2.0", "id": i + 1,
+                "method": "eth_call",
+                "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
+            })
+        try:
+            resp = _evm_batch_rpc(rpc_url, calls)
+            if not isinstance(resp, list):
+                continue
+            resp_map = {r["id"]: r for r in resp}
+            for i, (ca, (sym, dec)) in enumerate(chunk):
+                r = resp_map.get(i + 1, {})
+                hex_val = r.get("result", "0x0")
+                if hex_val and hex_val != "0x" and hex_val != "0x0":
+                    raw = str(int(hex_val, 16))
+                    if raw != "0":
+                        results.append((sym, raw, dec, ca))
+        except Exception:
+            pass
+        if start + CHUNK < len(token_list):
+            _time.sleep(0.3)
     return results
 def get_evm_balances(chain, addr):
     cfg = EVM_CFG[chain]
