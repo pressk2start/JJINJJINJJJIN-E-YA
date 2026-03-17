@@ -563,7 +563,7 @@ if os.getenv("DEBUG_KEYS") == "1":
 
 # 리스크 관리 — config.py에서 정의됨 (RISK_PER_TRADE, AGGRESSIVE_MODE, USE_PYRAMIDING,
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
-AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
+AUTO_TRADE = os.getenv("AUTO_TRADE", "1") == "1"
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
