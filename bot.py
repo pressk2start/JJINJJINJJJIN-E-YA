@@ -255,6 +255,21 @@ _PIPELINE_COUNTERS = {
     "v4_vol3x_fail": 0,        # 거래량3배 조건 미충족
     "v4_20bar_fail": 0,        # 20봉_고점돌파 조건 미충족
     "v4_raw_hit": 0,           # v4 원시 신호 발생 수
+    "v4_time_block": 0,        # 시간대 필터 차단
+    # -- 거래량3배 세부 탈락 --
+    "vol3x_enter": 0,          # 거래량3배 진입(m3 통과 후)
+    "vol3x_vr5_fail": 0,       # VR5 <= 3.0
+    "vol3x_atr_fail": 0,       # ATR% <= 0.7
+    "vol3x_bull_fail": 0,      # 직전봉 양봉 아님
+    "vol3x_dir_fail": 0,       # 방향성(MACD/ADX) 모두 실패
+    "vol3x_pass": 0,           # 최종 통과
+    # -- 20봉 고점돌파 세부 탈락 --
+    "20bar_enter": 0,          # 20봉돌파 진입(m3+vol3x 실패 후)
+    "20bar_len_fail": 0,       # c1 < 21
+    "20bar_price_fail": 0,     # 종가 <= 20봉 고가
+    "20bar_macd_fail": 0,      # 5m MACD 미충족
+    "20bar_adx_fail": 0,       # 15m ADX <= 25
+    "20bar_pass": 0,           # 최종 통과
     "gate_fail_stablecoin": 0, # 스테이블코인 제외
     "gate_fail_position": 0,   # 이미 보유
     "gate_fail_no_ticks": 0,   # 틱 없음
@@ -307,7 +322,11 @@ def _pipeline_report(force=False):
         f"🔬 detect호출: {c['detect_called']}",
         f"📡 v4호출: {c['v4_called']} | m3탈락: {c['v4_m3_fail']}",
         f"  거래량3배X: {c['v4_vol3x_fail']} | 20봉돌파X: {c['v4_20bar_fail']}",
-        f"🎯 v4_raw_hit: {c['v4_raw_hit']}",
+        f"🎯 v4_raw_hit: {c['v4_raw_hit']} | 시간차단: {c['v4_time_block']}",
+        f"  [거래량3배] 진입{c['vol3x_enter']} → VR5X:{c['vol3x_vr5_fail']} ATR%X:{c['vol3x_atr_fail']} "
+        f"양봉X:{c['vol3x_bull_fail']} 방향X:{c['vol3x_dir_fail']} ✅{c['vol3x_pass']}",
+        f"  [20봉돌파] 진입{c['20bar_enter']} → 길이X:{c['20bar_len_fail']} 가격X:{c['20bar_price_fail']} "
+        f"MACDX:{c['20bar_macd_fail']} ADXX:{c['20bar_adx_fail']} ✅{c['20bar_pass']}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  스테이블: {c['gate_fail_stablecoin']} | 보유중: {c['gate_fail_position']}",
@@ -331,6 +350,36 @@ def _pipeline_report(force=False):
     with _PIPELINE_COUNTERS_LOCK:
         for k in _PIPELINE_COUNTERS:
             _PIPELINE_COUNTERS[k] = 0
+
+
+_PIPELINE_MINI_LAST_TS = 0
+_PIPELINE_MINI_INTERVAL = 60  # 1분
+
+
+def _pipeline_mini_report():
+    """1분마다 v4 전략 퍼널 미니 리포트 (콘솔만, 텔레그램 X)"""
+    global _PIPELINE_MINI_LAST_TS
+    now = time.time()
+    if (now - _PIPELINE_MINI_LAST_TS) < _PIPELINE_MINI_INTERVAL:
+        return
+    _PIPELINE_MINI_LAST_TS = now
+    with _PIPELINE_COUNTERS_LOCK:
+        c = dict(_PIPELINE_COUNTERS)
+    v4 = c.get("v4_called", 0)
+    if v4 == 0:
+        return  # 스캔 없으면 skip
+    lines = [
+        f"[V4_FUNNEL] {now_kst_str()} | v4호출={v4} m3탈락={c['v4_m3_fail']}",
+        f"  거래량3배: 진입{c['vol3x_enter']} VR5X={c['vol3x_vr5_fail']} "
+        f"ATRX={c['vol3x_atr_fail']} 양봉X={c['vol3x_bull_fail']} "
+        f"방향X={c['vol3x_dir_fail']} PASS={c['vol3x_pass']}",
+        f"  20봉돌파: 진입{c['20bar_enter']} 길이X={c['20bar_len_fail']} "
+        f"가격X={c['20bar_price_fail']} MACDX={c['20bar_macd_fail']} "
+        f"ADXX={c['20bar_adx_fail']} PASS={c['20bar_pass']}",
+        f"  raw_hit={c['v4_raw_hit']} 시간차단={c['v4_time_block']} "
+        f"gate통과={c['gate_pass']}",
+    ]
+    print("\n".join(lines))
 
 
 def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, final_alert,
@@ -6462,15 +6511,19 @@ _V4_DEFAULT_EXIT = {
 # WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드)
 # 조건: VR5>2.5 AND ATR%>0.5% AND 직전2봉중1봉양봉 AND (5m_MACD골든 OR 15m_ADX>20)
 def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("vol3x_enter")
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 <= 3.0:
+        _pipeline_inc("vol3x_vr5_fail")
         return None
     atr_p = _v4_atr_pct(c1, 14)
     if atr_p <= 0.7:
+        _pipeline_inc("vol3x_atr_fail")
         return None
     if not _v4_is_bullish(c1[-2]):
+        _pipeline_inc("vol3x_bull_fail")
         return None
     # 방향성 필터: 5m_MACD골든 OR 15m_ADX>20
     macd_ok = False
@@ -6490,7 +6543,9 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         if adx_15 is not None and adx_15 > 20:
             adx_ok = True
     if not macd_ok and not adx_ok:
+        _pipeline_inc("vol3x_dir_fail")
         return None
+    _pipeline_inc("vol3x_pass")
     _macd_str = f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}" if macd_ok else "5mMACD=X"
     _adx_str = f"15mADX={adx_15:.1f}" if adx_ok else "15mADX=X"
     return {
@@ -6537,31 +6592,40 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
 # 복합필터: 5m_MACD골든 + 15m_ADX>25
 # (GATE에서 15m MACD골든 이미 적용, 추가로 5m MACD골든 + 15m ADX>25 체크)
 def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("20bar_enter")
     if not c1 or len(c1) < 21:
+        _pipeline_inc("20bar_len_fail")
         return None
     # 1m 현재 종가 > 직전 20봉 최고가
     cur_close = c1[-1]["trade_price"]
     high_20 = max(c["high_price"] for c in c1[-21:-1])
     if cur_close <= high_20:
+        _pipeline_inc("20bar_price_fail")
         return None
     # 복합필터: 5m MACD 골든크로스
     if not c5 or len(c5) < 35:
+        _pipeline_inc("20bar_macd_fail")
         return None
     closes_5m = [c["trade_price"] for c in c5]
     macd_5m, sig_5m, _ = _v4_macd(closes_5m)
     if macd_5m is None or sig_5m is None:
+        _pipeline_inc("20bar_macd_fail")
         return None
     if macd_5m <= sig_5m:
+        _pipeline_inc("20bar_macd_fail")
         return None
     # 복합필터: 15m ADX > 20 (🔧 하락장 완화: 25→20)
     if not c15 or len(c15) < 30:
+        _pipeline_inc("20bar_adx_fail")
         return None
     highs_15 = [c["high_price"] for c in c15]
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
     if adx_15 is None or adx_15 <= 25:
+        _pipeline_inc("20bar_adx_fail")
         return None
+    _pipeline_inc("20bar_pass")
     return {
         "signal_tag": "20봉_고점돌파",
         "entry_mode": "confirm",
@@ -8714,6 +8778,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
             _time_ok = v4_is_favorable_hour(_cur_hour, _v4_signal["signal_tag"])
             if _time_ok is False:  # False=불리, None=중립, True=유리
                 print(f"[V4_TIME_BAD] {m} {_v4_signal['signal_tag']} hour={_cur_hour} → 불리한 시간대")
+                _pipeline_inc("v4_time_block")
                 _v4_signal = None
     except Exception as _v4_err:
         print(f"[V4_ERR] {m} strategy_v4 오류: {_v4_err}")
@@ -11121,8 +11186,9 @@ def main():
             # 🔧 실패 메시지 큐 재전송
             tg_flush_failed()
 
-            # 📊 파이프라인 계측 리포트 (10분마다)
+            # 📊 파이프라인 계측 리포트 (10분마다 텔레그램, 1분마다 콘솔)
             _pipeline_report()
+            _pipeline_mini_report()
 
             # 🔧 30분마다 텔레그램 헬스체크 알림
             if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
