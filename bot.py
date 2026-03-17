@@ -7950,9 +7950,10 @@ _STRATEGY_REGISTRY = {
     },
 }
 
-# === v8: 섀도우 루트 카운터 (전 루트 독립 실행 → 시그널 빈도 측정) ===
-_SHADOW_ROUTE_LOCK = threading.Lock()
-_SHADOW_ROUTE_COUNTERS = {}  # { "route_X": {"tested": 0, "signal": 0, "coins": set()} }
+# === v9: 섀도우 가상매매 추적 (시그널→가격추적→승률/수익률 누적 분석) ===
+_SHADOW_LOCK = threading.Lock()
+_SHADOW_VIRTUAL_POSITIONS = []  # [{ route, strat, market, entry_price, entry_ts, evaluated }]
+_SHADOW_DEDUP = {}  # { "route_market": last_entry_ts } — 중복 방지
 
 # 섀도우 전용 check_fn 매핑 (라이브에서 None 반환하는 전략의 실제 로직)
 _SHADOW_CHECK_OVERRIDES = {
@@ -7960,36 +7961,136 @@ _SHADOW_CHECK_OVERRIDES = {
     "거래량완화": _v4_shadow_check_volume_relaxed,
 }
 
+# 누적 성과 통계: { route:strat: { signals, wins, losses, total_pnl, pnls[], mfe_1m[], mfe_3m[], mfe_5m[], coins: set } }
+_SHADOW_PERF_STATS = {}
+_SHADOW_PERF_LOCK = threading.Lock()
+_SHADOW_TRADE_COUNT = 0  # 저장 트리거용
 
-_SHADOW_ALERT_COOLDOWN = {}  # { "route_market": last_alert_ts } — 스팸 방지
+
+def _load_shadow_stats():
+    """봇 시작 시 저장된 섀도우 성과 통계 로드"""
+    global _SHADOW_PERF_STATS, _SHADOW_TRADE_COUNT
+    try:
+        if os.path.exists(SHADOW_STATS_PATH):
+            with open(SHADOW_STATS_PATH, "r", encoding="utf-8") as f:
+                _SHADOW_PERF_STATS = json.load(f)
+            # 누적 거래 수 복원
+            _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
+            print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
+    except Exception as e:
+        print(f"[SHADOW_STATS] 로드 실패: {e}")
+        _SHADOW_PERF_STATS = {}
 
 
-def _shadow_route_is_meaningful(route):
-    """섀도우 루트가 유의미한 시그널률을 보이는지 판단"""
-    with _SHADOW_ROUTE_LOCK:
-        data = _SHADOW_ROUTE_COUNTERS.get(route)
-        if not data or data["tested"] < 50:
-            return True  # 샘플 부족 시 일단 수집
-        rate = data["signal"] / data["tested"] * 100
-        coins = len(data["coins"])
-    # 시그널률이 너무 높으면 노이즈 (아무 때나 뜸)
-    if rate > 50.0:
-        return False
-    # 시그널률이 너무 낮고 코인 수도 적으면 무의미
-    if rate < SHADOW_MIN_SIGNAL_RATE and coins < SHADOW_MIN_COINS:
-        return False
-    return True
+def _save_shadow_stats():
+    """섀도우 성과 통계 파일 저장"""
+    with _SHADOW_PERF_LOCK:
+        data = copy.deepcopy(_SHADOW_PERF_STATS)
+    try:
+        tmp = SHADOW_STATS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SHADOW_STATS_PATH)
+    except Exception as e:
+        print(f"[SHADOW_STATS] 저장 실패: {e}")
+
+
+def _shadow_record_result(route, strat_name, market, entry_price, pnl_pct, mfe_snapshots):
+    """섀도우 가상매매 결과를 누적 통계에 기록"""
+    global _SHADOW_TRADE_COUNT
+    key = f"{route}:{strat_name}"
+    is_win = pnl_pct > 0
+    with _SHADOW_PERF_LOCK:
+        if key not in _SHADOW_PERF_STATS:
+            _SHADOW_PERF_STATS[key] = {
+                "route": route, "strat": strat_name,
+                "signals": 0, "wins": 0, "losses": 0,
+                "total_pnl": 0.0, "pnls": [],
+                "mfe_1m": [], "mfe_3m": [], "mfe_5m": [],
+                "coins": [],
+            }
+        s = _SHADOW_PERF_STATS[key]
+        s["signals"] += 1
+        if is_win:
+            s["wins"] += 1
+        else:
+            s["losses"] += 1
+        s["total_pnl"] = round(s["total_pnl"] + pnl_pct, 6)
+        s["pnls"].append(round(pnl_pct, 5))
+        if len(s["pnls"]) > 200:
+            s["pnls"] = s["pnls"][-200:]
+        # MFE 스냅샷 기록
+        for sec_key, list_key in [(60, "mfe_1m"), (180, "mfe_3m"), (300, "mfe_5m")]:
+            val = mfe_snapshots.get(sec_key, 0)
+            s[list_key].append(round(val, 5))
+            if len(s[list_key]) > 200:
+                s[list_key] = s[list_key][-200:]
+        # 코인 종류 추적
+        coin = market.split("-")[-1] if "-" in market else market
+        if coin not in s["coins"]:
+            s["coins"].append(coin)
+            if len(s["coins"]) > 50:
+                s["coins"] = s["coins"][-50:]
+        _SHADOW_TRADE_COUNT += 1
+
+    # N건마다 저장
+    if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
+        _save_shadow_stats()
+
+
+def _shadow_evaluate_positions():
+    """만료된 섀도우 가상포지션 평가 — 메인 루프에서 주기 호출"""
+    now = time.time()
+    to_evaluate = []
+    with _SHADOW_LOCK:
+        remaining = []
+        for vp in _SHADOW_VIRTUAL_POSITIONS:
+            if now - vp["entry_ts"] >= SHADOW_EVAL_SEC:
+                to_evaluate.append(vp)
+            else:
+                remaining.append(vp)
+        _SHADOW_VIRTUAL_POSITIONS[:] = remaining
+
+    for vp in to_evaluate:
+        market = vp["market"]
+        entry_price = vp["entry_price"]
+        try:
+            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market}, retries=1)
+            if not cur_js:
+                continue
+            cur_price = cur_js[0].get("trade_price", 0)
+            if cur_price <= 0 or entry_price <= 0:
+                continue
+        except Exception:
+            continue
+
+        pnl_pct = (cur_price - entry_price) / entry_price
+        # MFE 근사치 (현재가 기준 — 실시간 추적은 불가하므로 최종 시점 스냅샷)
+        mfe_snapshots = {300: max(pnl_pct, 0)}
+        # 가상 SL/TP 적용
+        if pnl_pct <= -SHADOW_VIRTUAL_SL:
+            pnl_pct = -SHADOW_VIRTUAL_SL
+        elif pnl_pct >= SHADOW_VIRTUAL_TP:
+            pnl_pct = SHADOW_VIRTUAL_TP
+
+        _shadow_record_result(vp["route"], vp["strat"], market, entry_price, pnl_pct, mfe_snapshots)
+
+    # 중복 방지 캐시 정리
+    with _SHADOW_LOCK:
+        stale = [k for k, v in _SHADOW_DEDUP.items() if now - v > SHADOW_DEDUP_CD_SEC * 2]
+        for k in stale:
+            _SHADOW_DEDUP.pop(k, None)
 
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
-    """섀도우 테스트: 모든 루트를 독립 실행하고 시그널 발생 여부 기록.
-    실매매 안 함 — 카운터 + 로그 + 텔레그램 알람(유의미한 섀도우 시그널만)."""
+    """섀도우 테스트: 비활성 전략에 시그널이 뜨면 가상 포지션 등록.
+    실매매 안 함 — 가상 진입 → 일정 시간 후 평가 → 승률/수익률 누적."""
     results = {}
     now_ts = time.time()
-    shadow_hits = []  # 이번 사이클에서 발생한 섀도우 시그널 수집
+    entry_price = c1[-1]["trade_price"] if c1 else 0
+
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
-        # 섀도우 오버라이드가 있으면 사용 (None 반환하는 함수 대체)
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
         try:
             sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
@@ -7997,92 +8098,73 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             sig = None
         hit = sig is not None
         results[route] = hit
-        with _SHADOW_ROUTE_LOCK:
-            if route not in _SHADOW_ROUTE_COUNTERS:
-                _SHADOW_ROUTE_COUNTERS[route] = {"tested": 0, "signal": 0, "coins": set()}
-            _SHADOW_ROUTE_COUNTERS[route]["tested"] += 1
-            if hit:
-                _SHADOW_ROUTE_COUNTERS[route]["signal"] += 1
-                _SHADOW_ROUTE_COUNTERS[route]["coins"].add(market)
-        if hit and not strat["enabled"]:
-            # 유의미한 루트만 로그/알림 (노이즈 필터링)
-            if not _shadow_route_is_meaningful(route):
-                continue
 
-            # 섀도우 시그널 로그 기록 (최소 시그널률 이상만)
-            with _SHADOW_ROUTE_LOCK:
-                _rd = _SHADOW_ROUTE_COUNTERS.get(route, {})
-                _rate = (_rd["signal"] / _rd["tested"] * 100) if _rd.get("tested", 0) > 0 else 0
-            if _rate >= SHADOW_LOG_MIN_RATE or _rd.get("tested", 0) < 50:
-                _shadow_log_write(now_kst_str(), market, f"SHADOW_{strat_name}", 1,
-                                  "", 0, f"route={route} rate={_rate:.1f}% {m3_info}")
-
-            # 텔레그램 알람 (쿨다운 적용 + on/off 스위치)
-            if not SHADOW_ALERT_ENABLED:
-                continue
-            _cd_key = f"{route}_{market}"
-            _last_alert = _SHADOW_ALERT_COOLDOWN.get(_cd_key, 0)
-            if now_ts - _last_alert >= SHADOW_ALERT_CD_SEC:
-                _SHADOW_ALERT_COOLDOWN[_cd_key] = now_ts
-                _coin = market.split("-")[-1] if "-" in market else market
-                _price = c1[-1]["trade_price"] if c1 else 0
-                _filters = sig.get("filters_hit", []) if sig else []
-                shadow_hits.append(
-                    f"🔵 SHADOW [{route}:{strat_name}] {_coin} ₩{_price:,.0f}\n"
-                    f"  {' | '.join(str(f) for f in _filters[:4])}\n"
-                    f"  rate={_rate:.1f}% | {m3_info}"
-                )
-    # 섀도우 시그널 모아서 한 번에 전송 (스팸 방지)
-    if shadow_hits:
-        _msg = f"📡 섀도우 시그널 감지 ({len(shadow_hits)}건)\n" + "\n".join(shadow_hits[:3])
-        try:
-            tg_send(_msg)
-        except Exception:
-            pass
-    # 오래된 쿨다운 정리 (1시간 이상)
-    _stale = [k for k, v in _SHADOW_ALERT_COOLDOWN.items() if now_ts - v > 3600]
-    for k in _stale:
-        _SHADOW_ALERT_COOLDOWN.pop(k, None)
+        if hit and not strat["enabled"] and entry_price > 0:
+            # 중복 진입 방지
+            dedup_key = f"{route}_{market}"
+            with _SHADOW_LOCK:
+                last_entry = _SHADOW_DEDUP.get(dedup_key, 0)
+                if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
+                    continue
+                if len(_SHADOW_VIRTUAL_POSITIONS) >= SHADOW_MAX_VIRTUAL_POS:
+                    continue
+                _SHADOW_DEDUP[dedup_key] = now_ts
+                _SHADOW_VIRTUAL_POSITIONS.append({
+                    "route": route,
+                    "strat": strat_name,
+                    "market": market,
+                    "entry_price": entry_price,
+                    "entry_ts": now_ts,
+                })
     return results
 
 
 def _v4_shadow_report_lines():
-    """섀도우 루트 카운터 리포트 생성 (10분 텔레그램 리포트용)
-    유의미한 루트만 표시 (노이즈 루트는 ⚪로 축약)"""
+    """섀도우 가상매매 성과 리포트 (10분 텔레그램 리포트용)
+    루트별 시그널수, 승률, 평균수익률, MFE 표시"""
     lines = []
-    noise_count = 0
-    with _SHADOW_ROUTE_LOCK:
-        if not _SHADOW_ROUTE_COUNTERS:
+    with _SHADOW_PERF_LOCK:
+        if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 섀도우 루트 계측:")
-        sorted_routes = sorted(_SHADOW_ROUTE_COUNTERS.items())
-        for route, data in sorted_routes:
-            tested = data["tested"]
-            signal = data["signal"]
-            rate = (signal / tested * 100) if tested > 0 else 0
-            coins = len(data["coins"])
-            # 라이브 여부 표시
-            is_live = any(s.get("route") == route and s.get("enabled")
-                         for s in _STRATEGY_REGISTRY.values())
-            strat_name = next((n for n, s in _STRATEGY_REGISTRY.items()
-                              if s.get("route") == route), route)
-            if is_live:
+        lines.append("📡 섀도우 가상매매 성과:")
+        sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
+                              key=lambda x: x[1].get("signals", 0), reverse=True)
+        for key, s in sorted_stats:
+            n = s.get("signals", 0)
+            if n < 1:
+                continue
+            wins = s.get("wins", 0)
+            wr = wins / n * 100
+            avg_pnl = s.get("total_pnl", 0) / n * 100  # %로 변환
+            coins = len(s.get("coins", []))
+            # MFE 평균
+            mfe_5m = s.get("mfe_5m", [])
+            avg_mfe = statistics.mean(mfe_5m) * 100 if mfe_5m else 0
+            # 승률 기반 이모지
+            if wr >= 55:
                 tag = "🟢"
-            elif _shadow_route_is_meaningful(route):
-                tag = "🔵"
+            elif wr >= 45:
+                tag = "🟡"
             else:
-                noise_count += 1
-                continue  # 노이즈 루트는 리포트에서 제외
-            lines.append(f"  {tag}{route}:{strat_name} {signal}/{tested}({rate:.1f}%) coins={coins}")
-    if noise_count > 0:
-        lines.append(f"  ⚪ 노이즈 {noise_count}개 루트 생략")
+                tag = "🔴"
+            route = s.get("route", "?")
+            strat = s.get("strat", "?")
+            lines.append(
+                f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
+                f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%"
+                f" ({coins}코인)"
+            )
+    # 현재 추적 중인 가상포지션 수
+    with _SHADOW_LOCK:
+        active = len(_SHADOW_VIRTUAL_POSITIONS)
+    if active > 0:
+        lines.append(f"  ⏳ 추적 중: {active}건")
     return lines
 
 
 def _v4_shadow_reset_counters():
-    """섀도우 카운터 리셋 (리포트 후)"""
-    with _SHADOW_ROUTE_LOCK:
-        _SHADOW_ROUTE_COUNTERS.clear()
+    """섀도우 카운터 리셋 — 가상매매 성과는 리셋하지 않음 (누적)"""
+    pass  # 성과 통계는 누적 유지, 리셋 대상 없음
 
 
 def v4_get_strategy_registry():
@@ -12641,6 +12723,9 @@ def main():
     # 💾 이전 세션 상태 복원 (TRADE_HISTORY, streak, 코인 손실 등)
     _load_bot_state()
 
+    # 📡 섀도우 가상매매 누적 통계 로드
+    _load_shadow_stats()
+
     tg_send(
         f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
         f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
@@ -12675,6 +12760,9 @@ def main():
 
             # 💾 상태 영속화 (주기적 저장)
             _save_bot_state()
+
+            # 📡 섀도우 가상포지션 평가 (만료된 것 → 승률/수익률 누적)
+            _shadow_evaluate_positions()
 
             # 🔧 실패 메시지 큐 재전송
             tg_flush_failed()

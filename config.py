@@ -354,10 +354,13 @@ STATE_PERSIST_PATH = os.path.join(os.getcwd(), "bot_state.json")
 STATE_PERSIST_INTERVAL = 30  # 30초마다 자동 저장
 
 # ============================================================
-# 23. 섀도우 시그널 필터링 (유의미한 통계만 수집)
+# 23. 섀도우 가상매매 추적 (시그널 발생 → 가격 추적 → 승률/수익률 누적)
 # ============================================================
-SHADOW_MIN_SIGNAL_RATE = 3.0       # 시그널 발생률 최소 % (이하면 노이즈로 간주)
-SHADOW_MIN_COINS = 2               # 최소 코인 수 (1코인에서만 뜨면 무시)
-SHADOW_ALERT_ENABLED = False       # 텔레그램 섀도우 알림 off (통계는 백그라운드 수집)
-SHADOW_LOG_MIN_RATE = 1.0          # CSV 로깅 최소 시그널률 % (이하면 로그도 안 남김)
-SHADOW_ALERT_CD_SEC = 600          # 섀도우 알림 쿨다운 (기본 5분→10분)
+SHADOW_EVAL_SEC = 300              # 시그널 후 몇 초 뒤 성과 평가 (5분)
+SHADOW_EVAL_MFE_SEC = [60, 180, 300]  # MFE 스냅샷 시점 (1분, 3분, 5분)
+SHADOW_VIRTUAL_SL = 0.010         # 가상 손절선 1.0%
+SHADOW_VIRTUAL_TP = 0.010         # 가상 익절선 1.0%
+SHADOW_STATS_PATH = os.path.join(os.getcwd(), "shadow_stats.json")
+SHADOW_STATS_SAVE_INTERVAL = 10   # N건마다 저장
+SHADOW_MAX_VIRTUAL_POS = 30       # 동시 추적 가상포지션 상한
+SHADOW_DEDUP_CD_SEC = 300         # 같은 루트+코인 중복 진입 방지 (5분)
