@@ -7842,10 +7842,16 @@ _SHADOW_CHECK_OVERRIDES = {
 }
 
 
+_SHADOW_ALERT_COOLDOWN = {}  # { "route_market": last_alert_ts } — 스팸 방지
+_SHADOW_ALERT_CD_SEC = 300   # 같은 루트+코인 조합은 5분에 1번만 알람
+
+
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     """섀도우 테스트: 모든 루트를 독립 실행하고 시그널 발생 여부 기록.
-    실매매 안 함 — 파이프라인 카운터 + 로그만 기록."""
+    실매매 안 함 — 카운터 + 로그 + 텔레그램 알람(섀도우 시그널)."""
     results = {}
+    now_ts = time.time()
+    shadow_hits = []  # 이번 사이클에서 발생한 섀도우 시그널 수집
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
         # 섀도우 오버라이드가 있으면 사용 (None 반환하는 함수 대체)
@@ -7867,6 +7873,30 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             # 섀도우 시그널 로그 기록
             _shadow_log_write(now_kst_str(), market, f"SHADOW_{strat_name}", 1,
                               "", 0, f"route={route} {m3_info}")
+            # 텔레그램 알람 (쿨다운 적용 — 같은 루트+코인 5분 간격)
+            _cd_key = f"{route}_{market}"
+            _last_alert = _SHADOW_ALERT_COOLDOWN.get(_cd_key, 0)
+            if now_ts - _last_alert >= _SHADOW_ALERT_CD_SEC:
+                _SHADOW_ALERT_COOLDOWN[_cd_key] = now_ts
+                _coin = market.split("-")[-1] if "-" in market else market
+                _price = c1[-1]["trade_price"] if c1 else 0
+                _filters = sig.get("filters_hit", []) if sig else []
+                shadow_hits.append(
+                    f"🔵 SHADOW [{route}:{strat_name}] {_coin} ₩{_price:,.0f}\n"
+                    f"  {' | '.join(str(f) for f in _filters[:4])}\n"
+                    f"  {m3_info}"
+                )
+    # 섀도우 시그널 모아서 한 번에 전송 (스팸 방지)
+    if shadow_hits:
+        _msg = f"📡 섀도우 시그널 감지 ({len(shadow_hits)}건)\n" + "\n".join(shadow_hits[:5])
+        try:
+            tg_send(_msg)
+        except Exception:
+            pass
+    # 오래된 쿨다운 정리 (1시간 이상)
+    _stale = [k for k, v in _SHADOW_ALERT_COOLDOWN.items() if now_ts - v > 3600]
+    for k in _stale:
+        _SHADOW_ALERT_COOLDOWN.pop(k, None)
     return results
 
 
@@ -7925,18 +7955,23 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     if m3_thr != 0:
         with _PIPELINE_VALUE_TRACKER_LOCK:
             _PIPELINE_VALUE_TRACKER["m3_pct"]["threshold"] = m3_thr * 100
+    m3_info = f"60m_m3={m3_val*100:.3f}%" if m3_val else "m3=N/A"
+    if m3_ok:
+        m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
+
+    # === 🔬 v8: 섀도우 테스트 — m3 무관하게 항상 실행 ===
+    # 계측 목적: m3 탈락 코인에서도 개별 전략 시그널 빈도를 측정
+    try:
+        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
+    except Exception:
+        pass  # 섀도우 오류가 라이브에 영향 주면 안 됨
+
+    # m3 탈락 시 라이브 진입 차단 (섀도우는 이미 위에서 실행됨)
     if not m3_ok:
         _pipeline_inc("v4_m3_fail")
         _shadow_log_write(now_kst_str(), market, "ALL", 0, "m3_fail",
                           0, f"m3={m3_val*100:.3f}%<thr={m3_thr*100:.3f}%")
         return None
-    m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
-
-    # === 🔬 v8: 섀도우 테스트 (모든 루트 독립 실행, 실매매 안 함) ===
-    try:
-        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
-    except Exception as _shadow_err:
-        pass  # 섀도우 오류가 라이브에 영향 주면 안 됨
 
     # === 🔧 v8: 레지스트리 기반 전략 순회 (priority 순, enabled만) ===
     sorted_strategies = sorted(_STRATEGY_REGISTRY.items(), key=lambda x: x[1]["priority"])
