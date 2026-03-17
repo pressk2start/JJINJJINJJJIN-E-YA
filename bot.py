@@ -1097,6 +1097,11 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본"):
                 _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
                 print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
 
+    # 💾 거래 발생 시 즉시 상태 저장 (재시작 시 손실 방지)
+    global _LAST_STATE_PERSIST_TS
+    _LAST_STATE_PERSIST_TS = 0  # 강제 저장 트리거
+    _save_bot_state()
+
 
 def is_coin_loss_cooldown(market: str) -> bool:
     """🔧 승률개선: 코인별 연패 쿨다운 체크
@@ -1318,6 +1323,120 @@ def get_all_signal_stats_report() -> str:
 
 # 봇 시작 시 통계 로드 (모듈 임포트 시 실행)
 _load_signal_stats()
+
+
+# ============================================================
+# 💾 상태 영속화 (서버 재시작 시에도 TRADE_HISTORY, streak, 코인별 손실 누적 유지)
+# ============================================================
+_LAST_STATE_PERSIST_TS = 0
+
+
+def _save_bot_state():
+    """봇 상태를 JSON 파일에 저장 (주기적 호출)"""
+    global _LAST_STATE_PERSIST_TS
+    now = time.time()
+    if now - _LAST_STATE_PERSIST_TS < STATE_PERSIST_INTERVAL:
+        return
+    _LAST_STATE_PERSIST_TS = now
+    try:
+        # TRADE_HISTORY 수집
+        trade_hist = list(TRADE_HISTORY)
+
+        # 코인별 손실 기록 수집
+        with _COIN_LOSS_LOCK:
+            coin_loss = copy.deepcopy(_COIN_LOSS_HISTORY)
+
+        # streak 수집
+        with _STREAK_LOCK:
+            streaks = {"lose": _lose_streak, "win": _win_streak,
+                       "suspend_until": _ENTRY_SUSPEND_UNTIL}
+
+        # OPEN_POSITIONS 수집 (재시작 시 유령포지션 복구용)
+        with _POSITION_LOCK:
+            positions = {}
+            for m, p in OPEN_POSITIONS.items():
+                if p.get("state") == "open":
+                    positions[m] = {
+                        k: v for k, v in p.items()
+                        if isinstance(v, (str, int, float, bool, type(None)))
+                    }
+
+        state = {
+            "saved_at": now,
+            "trade_history": trade_hist,
+            "coin_loss_history": coin_loss,
+            "streaks": streaks,
+            "open_positions": positions,
+        }
+        tmp_path = STATE_PERSIST_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, STATE_PERSIST_PATH)
+    except Exception as e:
+        print(f"[STATE_PERSIST] 저장 실패: {e}")
+
+
+def _load_bot_state():
+    """봇 시작 시 저장된 상태 복원"""
+    global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL
+    try:
+        if not os.path.exists(STATE_PERSIST_PATH):
+            print("[STATE_PERSIST] 저장된 상태 없음 — 초기 상태로 시작")
+            return
+        with open(STATE_PERSIST_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        saved_at = state.get("saved_at", 0)
+        age_min = (time.time() - saved_at) / 60
+        print(f"[STATE_PERSIST] 상태 파일 발견 (저장 시점: {age_min:.1f}분 전)")
+
+        # TRADE_HISTORY 복원
+        hist = state.get("trade_history", [])
+        if hist:
+            TRADE_HISTORY.clear()
+            for t in hist:
+                TRADE_HISTORY.append(t)
+            print(f"[STATE_PERSIST] TRADE_HISTORY 복원: {len(hist)}건")
+
+        # 코인별 손실 기록 복원 (쿨다운 만료된 것은 제외)
+        coin_loss = state.get("coin_loss_history", {})
+        if coin_loss:
+            now_ts = time.time()
+            restored = 0
+            with _COIN_LOSS_LOCK:
+                for market, losses in coin_loss.items():
+                    recent = [ts for ts in losses if now_ts - ts < COIN_LOSS_COOLDOWN]
+                    if recent:
+                        _COIN_LOSS_HISTORY[market] = recent
+                        restored += 1
+            print(f"[STATE_PERSIST] COIN_LOSS_HISTORY 복원: {restored}개 코인")
+
+        # streak 복원
+        streaks = state.get("streaks", {})
+        if streaks:
+            with _STREAK_LOCK:
+                _lose_streak = streaks.get("lose", 0)
+                _win_streak = streaks.get("win", 0)
+                sus = streaks.get("suspend_until", 0)
+                # 재시작 시점에도 아직 유효한 진입 금지만 복원
+                if sus > time.time():
+                    _ENTRY_SUSPEND_UNTIL = sus
+                    print(f"[STATE_PERSIST] 진입 금지 복원: {(sus - time.time()):.0f}초 남음")
+            print(f"[STATE_PERSIST] streak 복원: 연패={_lose_streak} 연승={_win_streak}")
+
+        # OPEN_POSITIONS 복원 (참고 정보 — 실제 잔고는 orphan_sync가 처리)
+        positions = state.get("open_positions", {})
+        if positions:
+            with _POSITION_LOCK:
+                for m, p in positions.items():
+                    if m not in OPEN_POSITIONS:
+                        p["restored"] = True  # 복원된 포지션 표시
+                        OPEN_POSITIONS[m] = p
+            print(f"[STATE_PERSIST] OPEN_POSITIONS 복원: {len(positions)}개 (orphan_sync에서 검증)")
+
+        print(f"[STATE_PERSIST] ✅ 상태 복원 완료")
+    except Exception as e:
+        print(f"[STATE_PERSIST] 복원 실패: {e}")
 
 
 # ============================================================
@@ -7843,12 +7962,28 @@ _SHADOW_CHECK_OVERRIDES = {
 
 
 _SHADOW_ALERT_COOLDOWN = {}  # { "route_market": last_alert_ts } — 스팸 방지
-_SHADOW_ALERT_CD_SEC = 300   # 같은 루트+코인 조합은 5분에 1번만 알람
+
+
+def _shadow_route_is_meaningful(route):
+    """섀도우 루트가 유의미한 시그널률을 보이는지 판단"""
+    with _SHADOW_ROUTE_LOCK:
+        data = _SHADOW_ROUTE_COUNTERS.get(route)
+        if not data or data["tested"] < 50:
+            return True  # 샘플 부족 시 일단 수집
+        rate = data["signal"] / data["tested"] * 100
+        coins = len(data["coins"])
+    # 시그널률이 너무 높으면 노이즈 (아무 때나 뜸)
+    if rate > 50.0:
+        return False
+    # 시그널률이 너무 낮고 코인 수도 적으면 무의미
+    if rate < SHADOW_MIN_SIGNAL_RATE and coins < SHADOW_MIN_COINS:
+        return False
+    return True
 
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     """섀도우 테스트: 모든 루트를 독립 실행하고 시그널 발생 여부 기록.
-    실매매 안 함 — 카운터 + 로그 + 텔레그램 알람(섀도우 시그널)."""
+    실매매 안 함 — 카운터 + 로그 + 텔레그램 알람(유의미한 섀도우 시그널만)."""
     results = {}
     now_ts = time.time()
     shadow_hits = []  # 이번 사이클에서 발생한 섀도우 시그널 수집
@@ -7870,13 +8005,24 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 _SHADOW_ROUTE_COUNTERS[route]["signal"] += 1
                 _SHADOW_ROUTE_COUNTERS[route]["coins"].add(market)
         if hit and not strat["enabled"]:
-            # 섀도우 시그널 로그 기록
-            _shadow_log_write(now_kst_str(), market, f"SHADOW_{strat_name}", 1,
-                              "", 0, f"route={route} {m3_info}")
-            # 텔레그램 알람 (쿨다운 적용 — 같은 루트+코인 5분 간격)
+            # 유의미한 루트만 로그/알림 (노이즈 필터링)
+            if not _shadow_route_is_meaningful(route):
+                continue
+
+            # 섀도우 시그널 로그 기록 (최소 시그널률 이상만)
+            with _SHADOW_ROUTE_LOCK:
+                _rd = _SHADOW_ROUTE_COUNTERS.get(route, {})
+                _rate = (_rd["signal"] / _rd["tested"] * 100) if _rd.get("tested", 0) > 0 else 0
+            if _rate >= SHADOW_LOG_MIN_RATE or _rd.get("tested", 0) < 50:
+                _shadow_log_write(now_kst_str(), market, f"SHADOW_{strat_name}", 1,
+                                  "", 0, f"route={route} rate={_rate:.1f}% {m3_info}")
+
+            # 텔레그램 알람 (쿨다운 적용 + on/off 스위치)
+            if not SHADOW_ALERT_ENABLED:
+                continue
             _cd_key = f"{route}_{market}"
             _last_alert = _SHADOW_ALERT_COOLDOWN.get(_cd_key, 0)
-            if now_ts - _last_alert >= _SHADOW_ALERT_CD_SEC:
+            if now_ts - _last_alert >= SHADOW_ALERT_CD_SEC:
                 _SHADOW_ALERT_COOLDOWN[_cd_key] = now_ts
                 _coin = market.split("-")[-1] if "-" in market else market
                 _price = c1[-1]["trade_price"] if c1 else 0
@@ -7884,11 +8030,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 shadow_hits.append(
                     f"🔵 SHADOW [{route}:{strat_name}] {_coin} ₩{_price:,.0f}\n"
                     f"  {' | '.join(str(f) for f in _filters[:4])}\n"
-                    f"  {m3_info}"
+                    f"  rate={_rate:.1f}% | {m3_info}"
                 )
     # 섀도우 시그널 모아서 한 번에 전송 (스팸 방지)
     if shadow_hits:
-        _msg = f"📡 섀도우 시그널 감지 ({len(shadow_hits)}건)\n" + "\n".join(shadow_hits[:5])
+        _msg = f"📡 섀도우 시그널 감지 ({len(shadow_hits)}건)\n" + "\n".join(shadow_hits[:3])
         try:
             tg_send(_msg)
         except Exception:
@@ -7901,8 +8047,10 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
 
 
 def _v4_shadow_report_lines():
-    """섀도우 루트 카운터 리포트 생성 (10분 텔레그램 리포트용)"""
+    """섀도우 루트 카운터 리포트 생성 (10분 텔레그램 리포트용)
+    유의미한 루트만 표시 (노이즈 루트는 ⚪로 축약)"""
     lines = []
+    noise_count = 0
     with _SHADOW_ROUTE_LOCK:
         if not _SHADOW_ROUTE_COUNTERS:
             return []
@@ -7916,10 +8064,18 @@ def _v4_shadow_report_lines():
             # 라이브 여부 표시
             is_live = any(s.get("route") == route and s.get("enabled")
                          for s in _STRATEGY_REGISTRY.values())
-            tag = "🟢" if is_live else "🔵"
             strat_name = next((n for n, s in _STRATEGY_REGISTRY.items()
                               if s.get("route") == route), route)
+            if is_live:
+                tag = "🟢"
+            elif _shadow_route_is_meaningful(route):
+                tag = "🔵"
+            else:
+                noise_count += 1
+                continue  # 노이즈 루트는 리포트에서 제외
             lines.append(f"  {tag}{route}:{strat_name} {signal}/{tested}({rate:.1f}%) coins={coins}")
+    if noise_count > 0:
+        lines.append(f"  ⚪ 노이즈 {noise_count}개 루트 생략")
     return lines
 
 
@@ -12482,6 +12638,9 @@ def main():
         load_learned_weights()
         load_exit_params()
 
+    # 💾 이전 세션 상태 복원 (TRADE_HISTORY, streak, 코인 손실 등)
+    _load_bot_state()
+
     tg_send(
         f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
         f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
@@ -12513,6 +12672,9 @@ def main():
                     hf.write(f"{time.time()}\n")
             except Exception:
                 pass
+
+            # 💾 상태 영속화 (주기적 저장)
+            _save_bot_state()
 
             # 🔧 실패 메시지 큐 재전송
             tg_flush_failed()

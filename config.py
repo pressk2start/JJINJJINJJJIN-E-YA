@@ -346,3 +346,18 @@ MFE_FEEDBACK_MAX_ACTIVATION = 0.010  # activation 상한 1.0%
 MFE_FEEDBACK_MAX_TRAIL = 0.006       # trail 상한 0.6%
 MFE_FEEDBACK_MIN_ACTIVATION = 0.002  # activation 하한 0.2%
 MFE_FEEDBACK_MIN_TRAIL = 0.001       # trail 하한 0.1%
+
+# ============================================================
+# 22. 상태 영속화 (서버 재시작 시에도 누적 데이터 유지)
+# ============================================================
+STATE_PERSIST_PATH = os.path.join(os.getcwd(), "bot_state.json")
+STATE_PERSIST_INTERVAL = 30  # 30초마다 자동 저장
+
+# ============================================================
+# 23. 섀도우 시그널 필터링 (유의미한 통계만 수집)
+# ============================================================
+SHADOW_MIN_SIGNAL_RATE = 3.0       # 시그널 발생률 최소 % (이하면 노이즈로 간주)
+SHADOW_MIN_COINS = 2               # 최소 코인 수 (1코인에서만 뜨면 무시)
+SHADOW_ALERT_ENABLED = True        # 텔레그램 섀도우 알림 on/off
+SHADOW_LOG_MIN_RATE = 1.0          # CSV 로깅 최소 시그널률 % (이하면 로그도 안 남김)
+SHADOW_ALERT_CD_SEC = 600          # 섀도우 알림 쿨다운 (기본 5분→10분)
