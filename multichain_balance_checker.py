@@ -26,7 +26,7 @@ multichain_balance_checker.py  v5.0  — API 키 없이 동작
   TRONGRID_API_KEY, KAIASCAN_API_KEY, SOL_RPC_URL, XRP_RPC_URL, ARDOR_NODE_URL
 """
 from __future__ import annotations
-import os, sys, json, requests
+import os, sys, json, time, requests
 from decimal import Decimal, InvalidOperation
 from typing import Any, List, Optional
 TIMEOUT = 20
@@ -700,17 +700,187 @@ def print_assets(result):
         tag = "[native]" if a["type"] == "native" else "[token] "
         print(f"  {tag}  {tk:>{mx}s}  {a['amount']}")
     print()
+def _parse_pairs(lines):
+    """텍스트 줄들에서 (chain, address) 쌍 추출, 중복 제거"""
+    pairs = []
+    seen = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace(",", " ").replace("\t", " ").split()
+        if len(parts) < 2:
+            print(f"  [건너뜀] 형식 오류: {line}")
+            continue
+        chain = parts[0].upper().strip()
+        address = parts[1].strip()
+        if chain not in CHAINS:
+            print(f"  [건너뜀] 미지원 체인: {chain}")
+            continue
+        key = (chain, address.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((chain, address))
+    return pairs
+def batch_text():
+    """텍스트 일괄 입력 모드"""
+    cl = list(CHAINS.keys())
+    print("\n┌─ 지원 체인 ─────────────────────────────────┐")
+    for i, ck in enumerate(cl, 1):
+        print(f"│  {ck:<6s} ({CHAINS[ck][0]})")
+    print("└─────────────────────────────────────────────┘")
+    print("\n[배치 입력] 체인 주소를 한 줄씩 입력하세요.")
+    print("  형식: CHAIN ADDRESS  (예: ETH 0xabc...)")
+    print("  빈 줄 입력하면 조회 시작\n")
+    lines = []
+    while True:
+        try:
+            line = input("  > ").strip()
+        except EOFError:
+            break
+        if not line:
+            break
+        lines.append(line)
+    pairs = _parse_pairs(lines)
+    if not pairs:
+        print("  조회할 항목이 없습니다.")
+        return []
+    print(f"\n총 {len(pairs)}개 조회 시작...\n")
+    all_results = []
+    for i, (chain, address) in enumerate(pairs, 1):
+        print(f"[{i}/{len(pairs)}] {chain} {address[:20]}...")
+        try:
+            result = get_balances(chain, address)
+            print_assets(result)
+            all_results.append(result)
+        except Exception as e:
+            print(f"  [오류] {e}\n")
+            all_results.append({"chain": chain, "address": address, "error": str(e)})
+    return all_results
+def batch_excel(filepath):
+    """엑셀 파일 입력 → 조회 → 엑셀 파일 출력"""
+    try:
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    except ImportError:
+        print("  [오류] openpyxl 패키지가 필요합니다: pip install openpyxl")
+        return
+    if not os.path.isfile(filepath):
+        print(f"  [오류] 파일을 찾을 수 없습니다: {filepath}")
+        return
+    # 엑셀 읽기
+    wb = load_workbook(filepath, read_only=True)
+    ws = wb.active
+    lines = []
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        cells = [str(c).strip() if c else "" for c in row]
+        # 첫 번째 열=체인, 두 번째 열=주소
+        if len(cells) >= 2 and cells[0] and cells[1]:
+            chain_val = cells[0].upper().strip()
+            # 헤더 행 건너뛰기
+            if chain_val in ("CHAIN", "체인", "메인넷", "MAINNET", "NETWORK"):
+                continue
+            lines.append(f"{cells[0]} {cells[1]}")
+    wb.close()
+    pairs = _parse_pairs(lines)
+    if not pairs:
+        print("  엑셀에서 유효한 항목을 찾지 못했습니다.")
+        print("  형식: A열=체인(ETH,BTC,...), B열=주소")
+        return
+    print(f"\n엑셀에서 {len(pairs)}개 항목 로드 완료. 조회 시작...\n")
+    # 조회
+    all_results = []
+    for i, (chain, address) in enumerate(pairs, 1):
+        print(f"[{i}/{len(pairs)}] {chain} {address[:20]}...")
+        try:
+            result = get_balances(chain, address)
+            print_assets(result)
+            all_results.append(result)
+        except Exception as e:
+            print(f"  [오류] {e}\n")
+            all_results.append({"chain": chain, "address": address, "error": str(e), "assets": []})
+    # 엑셀 출력
+    out_wb = Workbook()
+    ws_out = out_wb.active
+    ws_out.title = "잔고 조회 결과"
+    # 스타일
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill("solid", fgColor="4472C4")
+    header_font_w = Font(bold=True, size=11, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"))
+    # 헤더
+    headers = ["체인", "체인명", "주소", "티커", "잔고", "타입", "컨트랙트"]
+    for c, h in enumerate(headers, 1):
+        cell = ws_out.cell(row=1, column=c, value=h)
+        cell.font = header_font_w
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = thin_border
+    row_num = 2
+    for result in all_results:
+        if "error" in result and not result.get("assets"):
+            ws_out.cell(row=row_num, column=1, value=result["chain"])
+            ws_out.cell(row=row_num, column=3, value=result["address"])
+            ws_out.cell(row=row_num, column=5, value=f"[오류] {result['error']}")
+            for c in range(1, 8):
+                ws_out.cell(row=row_num, column=c).border = thin_border
+            row_num += 1
+            continue
+        chain = result["chain"]
+        name = result.get("name", "")
+        address = result["address"]
+        for a in result.get("assets", []):
+            ws_out.cell(row=row_num, column=1, value=chain).border = thin_border
+            ws_out.cell(row=row_num, column=2, value=name).border = thin_border
+            ws_out.cell(row=row_num, column=3, value=address).border = thin_border
+            ws_out.cell(row=row_num, column=4, value=a["ticker"]).border = thin_border
+            amt_cell = ws_out.cell(row=row_num, column=5, value=a["amount"])
+            amt_cell.alignment = Alignment(horizontal="right")
+            amt_cell.border = thin_border
+            ws_out.cell(row=row_num, column=6, value=a.get("type", "")).border = thin_border
+            ws_out.cell(row=row_num, column=7, value=a.get("contract") or "").border = thin_border
+            row_num += 1
+    # 열 너비 조정
+    ws_out.column_dimensions["A"].width = 8
+    ws_out.column_dimensions["B"].width = 14
+    ws_out.column_dimensions["C"].width = 48
+    ws_out.column_dimensions["D"].width = 14
+    ws_out.column_dimensions["E"].width = 30
+    ws_out.column_dimensions["F"].width = 10
+    ws_out.column_dimensions["G"].width = 48
+    # 출력 파일명
+    base = os.path.splitext(filepath)[0]
+    out_path = f"{base}_결과.xlsx"
+    out_wb.save(out_path)
+    print(f"\n{'='*60}")
+    print(f"  결과 저장 완료: {out_path}")
+    print(f"  총 {row_num - 2}행 기록")
+    print(f"{'='*60}\n")
 def interactive():
     cl = list(CHAINS.keys())
     while True:
         print("\n┌─ 지원 체인 (API 키 불필요) ──────────────────┐")
         for i, ck in enumerate(cl, 1):
             print(f"│  {i:2d}. {ck:<6s} ({CHAINS[ck][0]})")
+        print("├─────────────────────────────────────────────┤")
+        print("│   B. 배치 입력 (여러 체인+주소 한번에)")
+        print("│   X. 엑셀 파일 입력/출력 (.xlsx)")
         print("│   0. 종료")
         print("└─────────────────────────────────────────────┘")
-        sel = input("체인 번호 선택: ").strip()
+        sel = input("선택: ").strip()
         if sel == "0" or sel.lower() in ("q", "quit", "exit"):
             break
+        if sel.upper() == "B":
+            batch_text()
+            continue
+        if sel.upper() == "X":
+            fp = input("엑셀 파일 경로 (.xlsx): ").strip()
+            if fp:
+                batch_excel(fp)
+            continue
         if sel.isdigit():
             idx = int(sel) - 1
             if not (0 <= idx < len(cl)):
@@ -736,5 +906,7 @@ if __name__ == "__main__":
                              ensure_ascii=False, indent=2))
         except Exception as e:
             print(json.dumps({"error": str(e)}, ensure_ascii=False, indent=2))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith(".xlsx"):
+        batch_excel(sys.argv[1])
     else:
         interactive()
