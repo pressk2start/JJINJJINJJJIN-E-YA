@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-multichain_balance_checker.py  v4.0  — API 키 없이 동작
+multichain_balance_checker.py  v5.0  — API 키 없이 동작
 대화형: 체인 선택 → 주소 입력 → native + token 잔고 조회
 소수점 끝자리까지 정확히 보존
-지원 (17종):
+지원 (18종):
   BTC          mempool.space (무료, 키 불필요)
-  LTC          Trezor Blockbook (무료)
+  LTC          litecoinspace.org / Trezor Blockbook 폴백 (무료)
   BCH          Zelcore Blockbook (무료)
   RVN          Ravencoin Blockbook (무료)
-  ETH          공개 RPC + eth_call balanceOf (무료)
-  BNB          공개 RPC + eth_call balanceOf (무료)
-  POL          공개 RPC + eth_call balanceOf (무료)
-  KAIA         공개 RPC + Kaiascan (무료)
+  ETH          공개 RPC + Blockscout v2 토큰 (무료)
+  BNB          공개 RPC + 주요토큰 batch RPC (무료)
+  POL          공개 RPC + Blockscout v2 토큰 (무료)
+  KAIA         공개 RPC + Kaiascan (키 있으면 토큰 조회)
   SGB          공개 RPC (무료)
   XRP          공식 Ripple RPC (무료)
   XLM          Horizon API (무료)
   SOL          공개 RPC (무료)
   TRX          TronGrid (무료, 키 있으면 rate limit ↑)
-  ONT          공식 노드 (무료)
+  ONT          공식 노드 다중 폴백 (무료)
   ARDR         Jelurida 공개 노드 (무료)
+  IGNIS        Ardor child chain 2 (무료)
   EOS          Hyperion (무료)
   PCI          scan.payprotocol.io (무료, 비공식)
 선택 환경변수 (없어도 동작, 있으면 rate limit 완화):
@@ -30,7 +31,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, List, Optional
 TIMEOUT = 20
 S = requests.Session()
-S.headers.update({"User-Agent": "multichain-balance-checker/4.0"})
+S.headers.update({"User-Agent": "multichain-balance-checker/5.0"})
 # ═══════════════════════════════════════════════
 #  공통 유틸
 # ═══════════════════════════════════════════════
@@ -82,10 +83,29 @@ def get_btc(addr):
     raw = str(funded - spent)
     return [R("BTC", addr, "BTC", fmt(raw, 8), raw, 8, None, "native")]
 # ═══════════════════════════════════════════════
-#  LTC  — Trezor Blockbook (키 불필요)
+#  LTC  — 다중 폴백 (키 불필요)
 # ═══════════════════════════════════════════════
 def get_ltc(addr):
-    d = http_get(f"https://ltc1.trezor.io/api/v2/address/{addr}?details=basic")
+    # litecoinspace.org (mempool 방식)
+    try:
+        d = http_get(f"https://litecoinspace.org/api/address/{addr}")
+        cs = d["chain_stats"]
+        ms = d["mempool_stats"]
+        funded = cs["funded_txo_sum"] + ms["funded_txo_sum"]
+        spent  = cs["spent_txo_sum"]  + ms["spent_txo_sum"]
+        raw = str(funded - spent)
+        return [R("LTC", addr, "LTC", fmt(raw, 8), raw, 8, None, "native")]
+    except Exception:
+        pass
+    # Trezor Blockbook 폴백
+    try:
+        d = http_get(f"https://ltc1.trezor.io/api/v2/address/{addr}?details=basic")
+        raw = str(d.get("balance", "0"))
+        return [R("LTC", addr, "LTC", fmt(raw, 8), raw, 8, None, "native")]
+    except Exception:
+        pass
+    # BlockCypher 최종 폴백
+    d = http_get(f"https://api.blockcypher.com/v1/ltc/main/addrs/{addr}/balance")
     raw = str(d.get("balance", "0"))
     return [R("LTC", addr, "LTC", fmt(raw, 8), raw, 8, None, "native")]
 # ═══════════════════════════════════════════════
@@ -109,111 +129,198 @@ def get_rvn(addr):
 # ═══════════════════════════════════════════════
 #  EVM 공통: 공개 RPC (ETH / BNB / POL)
 #  native = eth_getBalance
-#  token  = Ankr 무료 getAccountBalance (multi-token 한방 조회)
+#  token  = Blockscout v2 (ETH, POL) / batch RPC (BNB)
 # ═══════════════════════════════════════════════
 EVM_CFG = {
     "ETH": {
         "rpc": "https://ethereum-rpc.publicnode.com",
-        "ankr": "eth",
+        "blockscout": "https://eth.blockscout.com",
         "dec": 18,
     },
     "BNB": {
         "rpc": "https://bsc-dataseed.bnbchain.org",
-        "ankr": "bsc",
+        "blockscout": None,  # BSC Blockscout 미지원
         "dec": 18,
     },
     "POL": {
         "rpc": "https://polygon-bor-rpc.publicnode.com",
-        "ankr": "polygon",
+        "blockscout": "https://polygon.blockscout.com",
         "dec": 18,
     },
+}
+# BSC 주요 BEP20 토큰 (batch RPC용)
+BSC_KNOWN_TOKENS = {
+    "0x55d398326f99059fF775485246999027B3197955": ("USDT", 18),
+    "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d": ("USDC", 18),
+    "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56": ("BUSD", 18),
+    "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c": ("WBNB", 18),
+    "0x2170Ed0880ac9A755fd29B2688956BD959F933F8": ("ETH", 18),
+    "0x1D2F0da169ceB9fC7B3144628dB156f3F6c60dBE": ("XRP", 18),
+    "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c": ("BTCB", 18),
+    "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82": ("CAKE", 18),
+    "0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47": ("ADA", 18),
+    "0xbA2aE424d960c26247Dd6c32edC70B295c744C43": ("DOGE", 8),
+    "0x1CE0c2827e2eF14D5C4f29a091d735A204794041": ("AVAX", 18),
+    "0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD": ("LINK", 18),
+    "0x7083609fCE4d1d8Dc0C979AAb8c869Ea2C873402": ("DOT", 18),
+    "0x4338665CBB7B2485A8855A139b75D5e34AB0DB94": ("LTC", 18),
+    "0x8fF795a6F4D97E7887C79beA79aba5cc76444aDf": ("BCH", 18),
+    "0x1Fa4a73a3F0133f0025378af00236f3aBDEE5D63": ("NEAR", 18),
+    "0xCE7de646e7208a4Ef112cb6ed5038FA6cC6b12e3": ("TRX", 6),
+    "0xCC42724C6683B7E57334c4E856f4c9965ED682bD": ("MATIC", 18),
+    "0x570A5D26f7765Ecb712C0924E4De545B89fD43dF": ("SOL", 18),
+    "0x76A797A59Ba2C17726896976B7B3747BfD1d220f": ("TON", 9),
 }
 def _evm_rpc(rpc_url, method, params):
     return http_post(rpc_url, {
         "jsonrpc": "2.0", "id": 1, "method": method, "params": params
     })
+def _evm_batch_rpc(rpc_url, calls):
+    """배치 RPC 요청"""
+    r = S.post(rpc_url, json=calls, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+def _blockscout_tokens(blockscout_url, addr):
+    """Blockscout v2 API로 토큰 잔고 조회"""
+    url = f"{blockscout_url}/api/v2/addresses/{addr}/token-balances"
+    data = http_get(url)
+    if not isinstance(data, list):
+        return []
+    results = []
+    for item in data:
+        token = item.get("token", {})
+        value = str(item.get("value", "0"))
+        if value == "0" or not value:
+            continue
+        sym = token.get("symbol") or token.get("name") or "UNKNOWN"
+        dec = int(token.get("decimals") or 0)
+        ct = token.get("address_hash") or token.get("address") or ""
+        ttype = token.get("type", "ERC-20")
+        if ttype not in ("ERC-20",):
+            continue
+        results.append((sym, value, dec, ct))
+    return results
+def _bsc_batch_token_check(rpc_url, addr):
+    """BSC: 주요 토큰을 batch RPC로 조회"""
+    addr_padded = "0" * 24 + addr[2:].lower()
+    calls = []
+    token_list = list(BSC_KNOWN_TOKENS.items())
+    for i, (ca, (sym, dec)) in enumerate(token_list):
+        calls.append({
+            "jsonrpc": "2.0", "id": i + 1,
+            "method": "eth_call",
+            "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
+        })
+    resp = _evm_batch_rpc(rpc_url, calls)
+    results = []
+    resp_map = {r["id"]: r for r in resp}
+    for i, (ca, (sym, dec)) in enumerate(token_list):
+        r = resp_map.get(i + 1, {})
+        hex_val = r.get("result", "0x0")
+        if hex_val and hex_val != "0x" and hex_val != "0x0":
+            raw = str(int(hex_val, 16))
+            if raw != "0":
+                results.append((sym, raw, dec, ca))
+    return results
 def get_evm_balances(chain, addr):
     cfg = EVM_CFG[chain]
     # native
     resp = _evm_rpc(cfg["rpc"], "eth_getBalance", [addr, "latest"])
     raw = hex2int(resp["result"])
     results = [R(chain, addr, chain, fmt(raw, cfg["dec"]), raw, cfg["dec"], None, "native")]
-    # tokens via Ankr 무료 Advanced API (키 불필요)
+    # tokens
+    token_results = []
     try:
-        ankr_resp = http_post("https://rpc.ankr.com/multichain", {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "ankr_getAccountBalance",
-            "params": {
-                "walletAddress": addr,
-                "blockchain": [cfg["ankr"]],
-                "onlyWhitelisted": False,
-                "pageSize": 50,
-            }
-        })
-        for asset in ankr_resp.get("result", {}).get("assets", []):
-            sym = asset.get("tokenSymbol") or asset.get("tokenName") or "UNKNOWN"
-            ct = asset.get("contractAddress") or ""
-            dec = int(asset.get("tokenDecimals", 0) or 0)
-            # native는 위에서 이미 추가했으므로 skip
-            if asset.get("tokenType", "").upper() == "NATIVE":
-                continue
-            # balanceRawInteger로 정확한 자릿수 보존
-            raw_int = str(asset.get("balanceRawInteger", "")).strip()
-            if raw_int and raw_int.isdigit() and raw_int != "0":
-                results.append(R(chain, addr, sym, fmt(raw_int, dec),
-                                 raw_int, dec, ct))
-            else:
-                # fallback: 이미 변환된 balance 문자열
-                bal_str = asset.get("balance", "0")
-                if bal_str in ("0", "0.0", ""):
-                    continue
-                results.append(R(chain, addr, sym, noexp(bal_str), None, dec, ct))
+        if cfg.get("blockscout"):
+            token_results = _blockscout_tokens(cfg["blockscout"], addr)
+        elif chain == "BNB":
+            token_results = _bsc_batch_token_check(cfg["rpc"], addr)
     except Exception:
-        pass  # Ankr 실패 시 native만
+        # BSC fallback: batch RPC
+        if chain == "BNB":
+            try:
+                token_results = _bsc_batch_token_check(cfg["rpc"], addr)
+            except Exception:
+                pass
+    for sym, raw_val, dec, ct in token_results:
+        results.append(R(chain, addr, sym, fmt(raw_val, dec), raw_val, dec, ct))
     return results
 # ═══════════════════════════════════════════════
-#  KAIA  — 공개 RPC + Kaiascan (키 없어도 동작)
+#  KAIA  — 공개 RPC + Kaiascan (키 필수)
 # ═══════════════════════════════════════════════
 KAIA_RPC = "https://public-en.node.kaia.io"
+# KAIA 주요 토큰 (batch RPC 폴백용)
+KAIA_KNOWN_TOKENS = {
+    "0xceE8FAF64bB97a73bb51E115Aa89C17FfA8dD167": ("oUSDT", 6),
+    "0x754288077D0fF82AF7a5317C7CB8c444D421d103": ("oUSDC", 6),
+    "0x5C74070FDeA071359b86082bd9f9b3dEaafbe32b": ("oKLAY", 18),
+    "0x34d21b1e550D73cee41151c77F3c73359527a396": ("oETH", 18),
+    "0x16D0e1fBD024c600Ca7BF8120Bd834E240F1801b": ("oWBTC", 8),
+    "0x5096dB80B21Ef45230C9E423C373f1FC9C0198dd": ("WEMIX", 18),
+}
 def get_kaia(addr):
     rpc = os.getenv("KAIA_RPC_URL", KAIA_RPC)
     resp = _evm_rpc(rpc, "eth_getBalance", [addr, "latest"])
     raw = hex2int(resp["result"])
     results = [R("KAIA", addr, "KAIA", fmt(raw, 18), raw, 18, None, "native")]
-    # tokens
-    hdr = {"accept": "application/json"}
+    # Kaiascan API (키 있을 때만)
     kk = os.getenv("KAIASCAN_API_KEY", "").strip()
+    token_found = False
     if kk:
-        hdr["x-api-key"] = kk
-    page = 1
-    while True:
+        hdr = {"accept": "application/json", "x-api-key": kk}
+        page = 1
+        while True:
+            try:
+                data = http_get(
+                    "https://mainnet-oapi.kaiascan.io/api/v1/accounts/fungible-token-balances",
+                    headers=hdr,
+                    params={"accountAddress": addr, "page": page, "size": 100}
+                )
+            except Exception:
+                break
+            items = (data.get("result", {}).get("items")
+                     or data.get("result", {}).get("results")
+                     or data.get("items") or data.get("results") or [])
+            if not items:
+                break
+            token_found = True
+            for it in items:
+                r = str(it.get("balance") or it.get("token_balance") or "0")
+                if r == "0": continue
+                sym = it.get("token_symbol") or it.get("symbol") or "UNKNOWN"
+                d = it.get("token_decimal") or it.get("decimals")
+                ct = it.get("contract_address") or it.get("token_address")
+                if d is None:
+                    amt, dv = r, None
+                else:
+                    dv = int(d)
+                    amt = fmt(r, dv)
+                results.append(R("KAIA", addr, sym, amt, r, dv, ct))
+            if len(items) < 100: break
+            page += 1
+    # Kaiascan 실패 또는 키 없을 때 → batch RPC로 주요 토큰 확인
+    if not token_found:
         try:
-            data = http_get(
-                "https://mainnet-oapi.kaiascan.io/api/v1/accounts/fungible-token-balances",
-                headers=hdr,
-                params={"accountAddress": addr, "page": page, "size": 100}
-            )
+            addr_padded = "0" * 24 + addr[2:].lower()
+            calls = []
+            token_list = list(KAIA_KNOWN_TOKENS.items())
+            for i, (ca, (sym, dec)) in enumerate(token_list):
+                calls.append({
+                    "jsonrpc": "2.0", "id": i + 1,
+                    "method": "eth_call",
+                    "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
+                })
+            resp_list = _evm_batch_rpc(rpc, calls)
+            resp_map = {r["id"]: r for r in resp_list}
+            for i, (ca, (sym, dec)) in enumerate(token_list):
+                r = resp_map.get(i + 1, {})
+                hex_val = r.get("result", "0x0")
+                if hex_val and hex_val != "0x" and hex_val != "0x0":
+                    rv = str(int(hex_val, 16))
+                    if rv != "0":
+                        results.append(R("KAIA", addr, sym, fmt(rv, dec), rv, dec, ca))
         except Exception:
-            break
-        items = (data.get("result", {}).get("items")
-                 or data.get("result", {}).get("results")
-                 or data.get("items") or data.get("results") or [])
-        if not items:
-            break
-        for it in items:
-            r = str(it.get("balance") or it.get("token_balance") or "0")
-            if r == "0": continue
-            sym = it.get("token_symbol") or it.get("symbol") or "UNKNOWN"
-            d = it.get("token_decimal") or it.get("decimals")
-            ct = it.get("contract_address") or it.get("token_address")
-            if d is None:
-                amt, dv = r, None
-            else:
-                dv = int(d)
-                amt = fmt(r, dv)
-            results.append(R("KAIA", addr, sym, amt, r, dv, ct))
-        if len(items) < 100: break
-        page += 1
+            pass
     return results
 # ═══════════════════════════════════════════════
 #  SGB (Songbird) — 공개 RPC
@@ -225,7 +332,22 @@ def get_sgb(addr):
     return [R("SGB", addr, "SGB", fmt(raw, 18), raw, 18, None, "native")]
 # ═══════════════════════════════════════════════
 #  XRP  — 공식 Ripple RPC (키 불필요)
+#  40자 hex currency code 디코딩 지원
 # ═══════════════════════════════════════════════
+def _xrp_decode_currency(code: str) -> str:
+    """XRPL currency code 디코딩: 3자=그대로, 40자hex=디코딩"""
+    if not code:
+        return "UNKNOWN"
+    if len(code) == 3:
+        return code
+    if len(code) == 40:
+        try:
+            decoded = bytes.fromhex(code).decode("ascii", errors="ignore").strip("\x00").strip()
+            if decoded and decoded.isprintable():
+                return decoded
+        except Exception:
+            pass
+    return code
 def get_xrp(addr):
     rpc = os.getenv("XRP_RPC_URL", "https://s1.ripple.com:51234/")
     info = http_post(rpc, {"method": "account_info",
@@ -236,7 +358,8 @@ def get_xrp(addr):
     results = [R("XRP", addr, "XRP", fmt(raw_drops, 6), raw_drops, 6, None, "native")]
     for ln in lines["result"].get("lines", []):
         bal = noexp(str(ln["balance"]))
-        cur = ln.get("currency", "UNKNOWN")
+        cur_raw = ln.get("currency", "UNKNOWN")
+        cur = _xrp_decode_currency(cur_raw)
         issuer = ln.get("account")
         if bal not in ("0", "0.0", "0.000000", ""):
             results.append(R("XRP", addr, cur, bal, None, None, issuer,
@@ -291,6 +414,20 @@ def _trx_hdr():
     k = os.getenv("TRONGRID_API_KEY", "").strip()
     if k: h["TRON-PRO-API-KEY"] = k
     return h
+def _trx_decode_name(val):
+    """TronGrid가 hex로 반환하는 토큰명을 디코딩"""
+    if not val:
+        return None
+    s = str(val)
+    # hex 문자열인지 확인 (0-9, a-f만 포함, 짝수 길이)
+    if len(s) >= 2 and len(s) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in s):
+        try:
+            decoded = bytes.fromhex(s).decode("utf-8").strip("\x00").strip()
+            if decoded and decoded.isprintable():
+                return decoded
+        except Exception:
+            pass
+    return s
 def get_trx(addr):
     hdr = _trx_hdr()
     acct = http_post("https://api.trongrid.io/wallet/getaccount",
@@ -307,7 +444,8 @@ def get_trx(addr):
                 try:
                     ci = http_get(f"https://api.trongrid.io/v1/contracts/{ca}", headers=hdr)
                     cd = ci.get("data", [{}])[0]
-                    sym = cd.get("symbol") or cd.get("name") or ca[:8]
+                    raw_sym = cd.get("symbol") or cd.get("name") or ca[:8]
+                    sym = _trx_decode_name(raw_sym) or ca[:8]
                     dec = int(cd.get("decimals", 0) or 0)
                 except Exception:
                     sym, dec = ca[:8], 0
@@ -316,14 +454,26 @@ def get_trx(addr):
         pass
     return results
 # ═══════════════════════════════════════════════
-#  ONT  — 공식 노드 (키 불필요)
-#  ONT: decimals=9, ONG: decimals=18 (balancev2는 raw 최소단위 반환)
+#  ONT  — 공식 노드 다중 폴백 (키 불필요)
+#  ONT: decimals=9, ONG: decimals=18
 # ═══════════════════════════════════════════════
+ONT_ENDPOINTS = [
+    "https://dappnode1.ont.io:10334",
+    "http://dappnode1.ont.io:20334",
+    "http://dappnode2.ont.io:20334",
+]
 def get_ont(addr):
-    data = http_get(f"https://dappnode1.ont.io:20334/api/v1/balancev2/{addr}")
+    data = None
+    for ep in ONT_ENDPOINTS:
+        try:
+            data = http_get(f"{ep}/api/v1/balancev2/{addr}")
+            break
+        except Exception:
+            continue
+    if data is None:
+        raise RuntimeError("ONT 노드 접속 실패 — 모든 엔드포인트 응답 없음")
     result = data.get("Result") or data.get("result") or {}
     results = []
-    # balancev2는 raw 최소단위 반환: ONT=9 decimals, ONG=18 decimals
     if "ont" in result:
         raw_ont = str(result["ont"])
         results.append(R("ONT", addr, "ONT", fmt(raw_ont, 9), raw_ont, 9, None, "native"))
@@ -343,12 +493,36 @@ def get_ardr(addr):
                      "account": addr, "includeAssetInfo": "true"})
     raw_nqt = str(native.get("balanceNQT", "0"))
     results = [R("ARDR", addr, "ARDR", fmt(raw_nqt, 8), raw_nqt, 8, None, "native")]
+    # IGNIS (child chain 2) 잔고도 함께 표시
+    try:
+        ignis = _ardor({"requestType": "getBalance", "chain": "2", "account": addr})
+        ignis_raw = str(ignis.get("balanceNQT", "0"))
+        if ignis_raw != "0":
+            results.append(R("ARDR", addr, "IGNIS", fmt(ignis_raw, 8), ignis_raw, 8, None, "token"))
+    except Exception:
+        pass
     for a in assets.get("accountAssets", []):
         rq = str(a.get("quantityQNT", "0"))
         if rq == "0": continue
         d = int(a.get("decimals", 0) or 0)
         sym = a.get("name") or a.get("asset") or "ASSET"
         results.append(R("ARDR", addr, sym, fmt(rq, d), rq, d, a.get("asset")))
+    return results
+# ═══════════════════════════════════════════════
+#  IGNIS  — Ardor child chain 2 (키 불필요)
+# ═══════════════════════════════════════════════
+def get_ignis(addr):
+    native = _ardor({"requestType": "getBalance", "chain": "2", "account": addr})
+    raw_nqt = str(native.get("balanceNQT", "0"))
+    results = [R("IGNIS", addr, "IGNIS", fmt(raw_nqt, 8), raw_nqt, 8, None, "native")]
+    # ARDR 잔고도 참고로 표시
+    try:
+        ardr = _ardor({"requestType": "getBalance", "chain": "1", "account": addr})
+        ardr_raw = str(ardr.get("balanceNQT", "0"))
+        if ardr_raw != "0":
+            results.append(R("IGNIS", addr, "ARDR", fmt(ardr_raw, 8), ardr_raw, 8, None, "token"))
+    except Exception:
+        pass
     return results
 # ═══════════════════════════════════════════════
 #  EOS  — Hyperion (공개 엔드포인트 기본 내장)
@@ -366,16 +540,25 @@ def get_eos(addr):
         tokens = []
     results = []
     for it in tokens:
-        af = it.get("amount") or it.get("currency") or it.get("balance")
+        sym = it.get("symbol") or "UNKNOWN"
         ct = it.get("contract") or it.get("account") or it.get("code")
-        if isinstance(af, str) and " " in af:
-            amt, sym = af.split(" ", 1)
+        # amount는 숫자(float/int) 또는 "123.4567 EOS" 형태 문자열
+        raw_amount = it.get("amount")
+        if raw_amount is None:
+            raw_amount = it.get("balance", 0)
+        if isinstance(raw_amount, str) and " " in raw_amount:
+            amt_str, sym = raw_amount.split(" ", 1)
+        elif isinstance(raw_amount, (int, float)):
+            amt_str = noexp(str(raw_amount))
         else:
-            sym = it.get("symbol", "UNKNOWN")
-            amt = str(it.get("balance", "0"))
-        amt = noexp(amt)
-        dec = len(amt.split(".")[1]) if "." in amt else 0
-        results.append(R("EOS", addr, sym, amt, None, dec, ct,
+            amt_str = noexp(str(raw_amount))
+        # precision 정보 활용
+        prec = it.get("precision")
+        if prec is not None:
+            # precision에 맞게 소수점 포맷
+            amt_str = f"{float(amt_str):.{int(prec)}f}"
+        dec = len(amt_str.split(".")[1]) if "." in amt_str else 0
+        results.append(R("EOS", addr, sym, amt_str, None, dec, ct,
                          "native" if sym == "EOS" else "token"))
     return results
 # ═══════════════════════════════════════════════
@@ -390,28 +573,29 @@ def get_pci(addr):
     except Exception:
         pass
     raise RuntimeError(
-        "PCI 잔고 조회 실패 — scan.payprotocol.io에서 직접 확인하세요")
+        "PCI 잔고 조회 실패 — scan.payprotocol.io 서비스 상태를 확인하세요 (현재 다운 가능)")
 # ═══════════════════════════════════════════════
 #  체인 목록
 # ═══════════════════════════════════════════════
 CHAINS = {
-    "BTC":  ("Bitcoin",       get_btc),
-    "LTC":  ("Litecoin",      get_ltc),
-    "BCH":  ("Bitcoin Cash",  get_bch),
-    "RVN":  ("Ravencoin",     get_rvn),
-    "ETH":  ("Ethereum",      lambda a: get_evm_balances("ETH", a)),
-    "BNB":  ("BNB Chain",     lambda a: get_evm_balances("BNB", a)),
-    "POL":  ("Polygon",       lambda a: get_evm_balances("POL", a)),
-    "KAIA": ("Kaia",          get_kaia),
-    "SGB":  ("Songbird",      get_sgb),
-    "XRP":  ("XRP Ledger",    get_xrp),
-    "XLM":  ("Stellar",       get_xlm),
-    "SOL":  ("Solana",        get_sol),
-    "TRX":  ("Tron",          get_trx),
-    "ONT":  ("Ontology",      get_ont),
-    "ARDR": ("Ardor",         get_ardr),
-    "EOS":  ("EOS",           get_eos),
-    "PCI":  ("Paycoin",       get_pci),
+    "BTC":   ("Bitcoin",       get_btc),
+    "LTC":   ("Litecoin",      get_ltc),
+    "BCH":   ("Bitcoin Cash",  get_bch),
+    "RVN":   ("Ravencoin",     get_rvn),
+    "ETH":   ("Ethereum",      lambda a: get_evm_balances("ETH", a)),
+    "BNB":   ("BNB Chain",     lambda a: get_evm_balances("BNB", a)),
+    "POL":   ("Polygon",       lambda a: get_evm_balances("POL", a)),
+    "KAIA":  ("Kaia",          get_kaia),
+    "SGB":   ("Songbird",      get_sgb),
+    "XRP":   ("XRP Ledger",    get_xrp),
+    "XLM":   ("Stellar",       get_xlm),
+    "SOL":   ("Solana",        get_sol),
+    "TRX":   ("Tron",          get_trx),
+    "ONT":   ("Ontology",      get_ont),
+    "ARDR":  ("Ardor",         get_ardr),
+    "IGNIS": ("Ignis",         get_ignis),
+    "EOS":   ("EOS",           get_eos),
+    "PCI":   ("Paycoin",       get_pci),
 }
 def get_balances(chain: str, address: str) -> dict:
     chain = chain.upper().strip()
