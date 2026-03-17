@@ -7950,9 +7950,11 @@ _STRATEGY_REGISTRY = {
     },
 }
 
-# === v9: 섀도우 가상매매 추적 (시그널→가격추적→승률/수익률 누적 분석) ===
+# === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
 _SHADOW_LOCK = threading.Lock()
-_SHADOW_VIRTUAL_POSITIONS = []  # [{ route, strat, market, entry_price, entry_ts, evaluated }]
+# 가상포지션: { route, strat, market, entry_price, entry_ts,
+#               best_price, trail_armed, trail_stop, exit_params, bars, exit_reason }
+_SHADOW_VIRTUAL_POSITIONS = []
 _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts } — 중복 방지
 
 # 섀도우 전용 check_fn 매핑 (라이브에서 None 반환하는 전략의 실제 로직)
@@ -7961,10 +7963,10 @@ _SHADOW_CHECK_OVERRIDES = {
     "거래량완화": _v4_shadow_check_volume_relaxed,
 }
 
-# 누적 성과 통계: { route:strat: { signals, wins, losses, total_pnl, pnls[], mfe_1m[], mfe_3m[], mfe_5m[], coins: set } }
+# 누적 성과 통계
 _SHADOW_PERF_STATS = {}
 _SHADOW_PERF_LOCK = threading.Lock()
-_SHADOW_TRADE_COUNT = 0  # 저장 트리거용
+_SHADOW_TRADE_COUNT = 0
 
 
 def _load_shadow_stats():
@@ -7974,7 +7976,6 @@ def _load_shadow_stats():
         if os.path.exists(SHADOW_STATS_PATH):
             with open(SHADOW_STATS_PATH, "r", encoding="utf-8") as f:
                 _SHADOW_PERF_STATS = json.load(f)
-            # 누적 거래 수 복원
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -7995,7 +7996,7 @@ def _save_shadow_stats():
         print(f"[SHADOW_STATS] 저장 실패: {e}")
 
 
-def _shadow_record_result(route, strat_name, market, entry_price, pnl_pct, mfe_snapshots):
+def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec):
     """섀도우 가상매매 결과를 누적 통계에 기록"""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
@@ -8005,8 +8006,8 @@ def _shadow_record_result(route, strat_name, market, entry_price, pnl_pct, mfe_s
             _SHADOW_PERF_STATS[key] = {
                 "route": route, "strat": strat_name,
                 "signals": 0, "wins": 0, "losses": 0,
-                "total_pnl": 0.0, "pnls": [],
-                "mfe_1m": [], "mfe_3m": [], "mfe_5m": [],
+                "total_pnl": 0.0, "pnls": [], "mfes": [],
+                "exit_reasons": {}, "hold_secs": [],
                 "coins": [],
             }
         s = _SHADOW_PERF_STATS[key]
@@ -8019,13 +8020,16 @@ def _shadow_record_result(route, strat_name, market, entry_price, pnl_pct, mfe_s
         s["pnls"].append(round(pnl_pct, 5))
         if len(s["pnls"]) > 200:
             s["pnls"] = s["pnls"][-200:]
-        # MFE 스냅샷 기록
-        for sec_key, list_key in [(60, "mfe_1m"), (180, "mfe_3m"), (300, "mfe_5m")]:
-            val = mfe_snapshots.get(sec_key, 0)
-            s[list_key].append(round(val, 5))
-            if len(s[list_key]) > 200:
-                s[list_key] = s[list_key][-200:]
-        # 코인 종류 추적
+        s["mfes"].append(round(mfe_pct, 5))
+        if len(s["mfes"]) > 200:
+            s["mfes"] = s["mfes"][-200:]
+        # 청산 사유별 카운트
+        s["exit_reasons"][exit_reason] = s["exit_reasons"].get(exit_reason, 0) + 1
+        # 보유 시간
+        s["hold_secs"].append(round(hold_sec, 1))
+        if len(s["hold_secs"]) > 200:
+            s["hold_secs"] = s["hold_secs"][-200:]
+        # 코인 종류
         coin = market.split("-")[-1] if "-" in market else market
         if coin not in s["coins"]:
             s["coins"].append(coin)
@@ -8033,47 +8037,120 @@ def _shadow_record_result(route, strat_name, market, entry_price, pnl_pct, mfe_s
                 s["coins"] = s["coins"][-50:]
         _SHADOW_TRADE_COUNT += 1
 
-    # N건마다 저장
     if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
         _save_shadow_stats()
 
 
-def _shadow_evaluate_positions():
-    """만료된 섀도우 가상포지션 평가 — 메인 루프에서 주기 호출"""
+def _shadow_sim_exit(vp, cur_price):
+    """가상포지션에 실제 청산 로직(TRAIL) 시뮬레이션 적용.
+    Returns: (closed: bool, exit_reason: str)
+
+    청산 조건 (실제 monitor_position과 동일):
+    1. 손절 (SL): 현재가 ≤ entry × (1 - sl_pct)
+    2. 체크포인트 도달 → 트레일링 활성화: 최고가 대비 trail_pct 이상 하락 시 청산
+    3. 타임아웃: max_bars × RECHECK_SEC 초과 보유 시 청산
+    """
+    entry_price = vp["entry_price"]
+    ep = vp["exit_params"]
+    sl_pct = ep.get("sl_pct", 0.007)
+    activation_pct = ep.get("activation_pct", 0.003)
+    trail_pct = ep.get("trail_pct", 0.002)
+    max_bars = ep.get("max_bars", 60)
+
     now = time.time()
-    to_evaluate = []
+    hold_sec = now - vp["entry_ts"]
+    pnl = (cur_price - entry_price) / entry_price
+
+    # 최고가 갱신
+    if cur_price > vp["best_price"]:
+        vp["best_price"] = cur_price
+
+    mfe = (vp["best_price"] - entry_price) / entry_price
+
+    # 1) 손절 (SL)
+    if pnl <= -sl_pct:
+        return True, "손절SL"
+
+    # 2) 체크포인트 도달 → 트레일링
+    cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
+    checkpoint = max(cost_floor, activation_pct)
+    if mfe >= checkpoint:
+        if not vp["trail_armed"]:
+            vp["trail_armed"] = True
+            vp["trail_stop"] = vp["best_price"] * (1 - trail_pct)
+        else:
+            # 트레일 스톱 갱신 (최고가 따라 올림)
+            new_stop = vp["best_price"] * (1 - trail_pct)
+            if new_stop > vp["trail_stop"]:
+                vp["trail_stop"] = new_stop
+
+    # 트레일 스톱 히트
+    if vp["trail_armed"] and cur_price <= vp["trail_stop"]:
+        trail_pnl = (vp["trail_stop"] - entry_price) / entry_price
+        if trail_pnl > 0:
+            return True, "트레일익절"
+        else:
+            return True, "트레일본절"
+
+    # 3) 타임아웃 (max_bars × RECHECK_SEC)
+    if hold_sec >= max_bars * RECHECK_SEC:
+        return True, "타임아웃"
+
+    # 4) 본절 스톱 (체크포인트 도달 후 원가 이하 복귀)
+    if mfe >= checkpoint and pnl <= 0:
+        return True, "본절SL"
+
+    vp["bars"] += 1
+    return False, ""
+
+
+def _shadow_evaluate_positions():
+    """섀도우 가상포지션에 청산 로직 적용 — 메인 루프 매 사이클 호출"""
+    now = time.time()
+    with _SHADOW_LOCK:
+        if not _SHADOW_VIRTUAL_POSITIONS:
+            return
+        markets = list(set(vp["market"] for vp in _SHADOW_VIRTUAL_POSITIONS))
+
+    # 시세 일괄 조회 (API 호출 절약)
+    price_map = {}
+    for i in range(0, len(markets), 10):
+        batch = markets[i:i+10]
+        try:
+            js = safe_upbit_get("https://api.upbit.com/v1/ticker",
+                                {"markets": ",".join(batch)}, retries=1)
+            if js:
+                for t in js:
+                    price_map[t["market"]] = t.get("trade_price", 0)
+        except Exception:
+            pass
+
+    closed_results = []
     with _SHADOW_LOCK:
         remaining = []
         for vp in _SHADOW_VIRTUAL_POSITIONS:
-            if now - vp["entry_ts"] >= SHADOW_EVAL_SEC:
-                to_evaluate.append(vp)
+            cur_price = price_map.get(vp["market"], 0)
+            if cur_price <= 0:
+                remaining.append(vp)
+                continue
+            closed, reason = _shadow_sim_exit(vp, cur_price)
+            if closed:
+                entry_price = vp["entry_price"]
+                pnl = (cur_price - entry_price) / entry_price
+                mfe = (vp["best_price"] - entry_price) / entry_price
+                hold = now - vp["entry_ts"]
+                # 손절 시 PnL을 SL값으로 클램프
+                if reason == "손절SL":
+                    pnl = max(pnl, -vp["exit_params"].get("sl_pct", 0.007))
+                closed_results.append((vp, pnl, mfe, reason, hold))
             else:
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
 
-    for vp in to_evaluate:
-        market = vp["market"]
-        entry_price = vp["entry_price"]
-        try:
-            cur_js = safe_upbit_get("https://api.upbit.com/v1/ticker", {"markets": market}, retries=1)
-            if not cur_js:
-                continue
-            cur_price = cur_js[0].get("trade_price", 0)
-            if cur_price <= 0 or entry_price <= 0:
-                continue
-        except Exception:
-            continue
-
-        pnl_pct = (cur_price - entry_price) / entry_price
-        # MFE 근사치 (현재가 기준 — 실시간 추적은 불가하므로 최종 시점 스냅샷)
-        mfe_snapshots = {300: max(pnl_pct, 0)}
-        # 가상 SL/TP 적용
-        if pnl_pct <= -SHADOW_VIRTUAL_SL:
-            pnl_pct = -SHADOW_VIRTUAL_SL
-        elif pnl_pct >= SHADOW_VIRTUAL_TP:
-            pnl_pct = SHADOW_VIRTUAL_TP
-
-        _shadow_record_result(vp["route"], vp["strat"], market, entry_price, pnl_pct, mfe_snapshots)
+    # 결과 기록
+    for vp, pnl, mfe, reason, hold in closed_results:
+        _shadow_record_result(vp["route"], vp["strat"], vp["market"],
+                              pnl, mfe, reason, hold)
 
     # 중복 방지 캐시 정리
     with _SHADOW_LOCK:
@@ -8083,8 +8160,8 @@ def _shadow_evaluate_positions():
 
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
-    """섀도우 테스트: 비활성 전략에 시그널이 뜨면 가상 포지션 등록.
-    실매매 안 함 — 가상 진입 → 일정 시간 후 평가 → 승률/수익률 누적."""
+    """섀도우 테스트: 비활성 전략에 시그널 발생 시 가상 포지션 등록.
+    실매매 안 함 — 가상 진입 → 실제 청산 로직 시뮬레이션 → 승률/수익률 누적."""
     results = {}
     now_ts = time.time()
     entry_price = c1[-1]["trade_price"] if c1 else 0
@@ -8100,8 +8177,9 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         results[route] = hit
 
         if hit and not strat["enabled"] and entry_price > 0:
-            # 중복 진입 방지
             dedup_key = f"{route}_{market}"
+            # 해당 전략의 청산 파라미터 가져오기
+            ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
             with _SHADOW_LOCK:
                 last_entry = _SHADOW_DEDUP.get(dedup_key, 0)
                 if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
@@ -8115,13 +8193,18 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "market": market,
                     "entry_price": entry_price,
                     "entry_ts": now_ts,
+                    "best_price": entry_price,
+                    "trail_armed": False,
+                    "trail_stop": 0.0,
+                    "exit_params": ep,
+                    "bars": 0,
                 })
     return results
 
 
 def _v4_shadow_report_lines():
     """섀도우 가상매매 성과 리포트 (10분 텔레그램 리포트용)
-    루트별 시그널수, 승률, 평균수익률, MFE 표시"""
+    루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 표시"""
     lines = []
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
@@ -8135,11 +8218,14 @@ def _v4_shadow_report_lines():
                 continue
             wins = s.get("wins", 0)
             wr = wins / n * 100
-            avg_pnl = s.get("total_pnl", 0) / n * 100  # %로 변환
+            avg_pnl = s.get("total_pnl", 0) / n * 100
             coins = len(s.get("coins", []))
             # MFE 평균
-            mfe_5m = s.get("mfe_5m", [])
-            avg_mfe = statistics.mean(mfe_5m) * 100 if mfe_5m else 0
+            mfes = s.get("mfes", [])
+            avg_mfe = statistics.mean(mfes) * 100 if mfes else 0
+            # 평균 보유시간
+            holds = s.get("hold_secs", [])
+            avg_hold = statistics.mean(holds) if holds else 0
             # 승률 기반 이모지
             if wr >= 55:
                 tag = "🟢"
@@ -8152,8 +8238,14 @@ def _v4_shadow_report_lines():
             lines.append(
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
                 f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%"
-                f" ({coins}코인)"
+                f" 평균{avg_hold:.0f}초 ({coins}코인)"
             )
+            # 청산 사유 분포 (상위 3개)
+            reasons = s.get("exit_reasons", {})
+            if reasons:
+                top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3]
+                reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
+                lines.append(f"    └ {reason_str}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
@@ -8163,8 +8255,8 @@ def _v4_shadow_report_lines():
 
 
 def _v4_shadow_reset_counters():
-    """섀도우 카운터 리셋 — 가상매매 성과는 리셋하지 않음 (누적)"""
-    pass  # 성과 통계는 누적 유지, 리셋 대상 없음
+    """섀도우 카운터 리셋 — 성과 통계는 누적 유지"""
+    pass
 
 
 def v4_get_strategy_registry():
