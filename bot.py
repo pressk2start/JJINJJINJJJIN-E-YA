@@ -293,6 +293,7 @@ _PIPELINE_COUNTERS = {
 }
 _PIPELINE_LAST_REPORT_TS = 0
 _PIPELINE_REPORT_INTERVAL = 600  # 10분
+_PIPELINE_START_TS = time.time()  # 누적 계측 시작 시각
 
 # 섀도우 모드 CSV 로깅 (raw signal별 한 줄)
 _SHADOW_LOG_PATH = os.path.join(os.getcwd(), "pipeline_shadow.csv")
@@ -315,8 +316,9 @@ def _pipeline_report(force=False):
     _PIPELINE_LAST_REPORT_TS = now
     with _PIPELINE_COUNTERS_LOCK:
         c = dict(_PIPELINE_COUNTERS)
+    elapsed_min = (now - _PIPELINE_START_TS) / 60
     lines = [
-        f"📊 <b>파이프라인 계측</b> | {now_kst_str()}",
+        f"📊 <b>파이프라인 계측 (누적 {elapsed_min:.0f}분)</b> | {now_kst_str()}",
         f"━━━━━━━━━━━━━━━━",
         f"🔍 스캔: {c['scan_markets']}마켓 | c1성공: {c['c1_ok']}",
         f"🔬 detect호출: {c['detect_called']}",
@@ -346,10 +348,6 @@ def _pipeline_report(force=False):
     msg = "\n".join(lines)
     print(msg)
     tg_send(msg)
-    # 카운터 리셋
-    with _PIPELINE_COUNTERS_LOCK:
-        for k in _PIPELINE_COUNTERS:
-            _PIPELINE_COUNTERS[k] = 0
 
 
 _PIPELINE_MINI_LAST_TS = 0
@@ -563,7 +561,7 @@ if os.getenv("DEBUG_KEYS") == "1":
 
 # 리스크 관리 — config.py에서 정의됨 (RISK_PER_TRADE, AGGRESSIVE_MODE, USE_PYRAMIDING,
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
-AUTO_TRADE = os.getenv("AUTO_TRADE", "1") == "1"
+AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
