@@ -1314,6 +1314,60 @@ def get_all_signal_stats_report() -> str:
 _load_signal_stats()
 
 
+# ============================================================
+# 🔧 v7: MFE→Exit 자동 피드백 시스템
+# 시그널별 평균 MFE 피크 시점/크기를 기반으로 trail activation, TP 자동 조정
+# ============================================================
+def mfe_feedback_exit_params(signal_tag: str, base_params: dict) -> dict:
+    """
+    시그널별 누적 MFE 통계를 기반으로 청산 파라미터 자동 조정
+    - avg_peak_mfe × 0.6 → activation_pct (체크포인트)
+    - avg_peak_mfe × 0.35 → trail_pct (트레일 간격)
+    - median_peak_sec → max_bars 조정 (피크 이후 과도한 홀딩 방지)
+    Returns: 조정된 exit_params (base_params 변형)
+    """
+    if not MFE_FEEDBACK_ENABLED:
+        return base_params
+
+    summary = get_signal_stats_summary(signal_tag)
+    if not summary or summary.get("trades", 0) < MFE_FEEDBACK_MIN_TRADES:
+        return base_params
+
+    avg_mfe = summary.get("avg_mfe", 0)  # 소수 단위 (0.005 = 0.5%)
+    if avg_mfe <= 0:
+        return base_params
+
+    # MFE 시계열에서 피크 MFE 값 찾기
+    mfe_timeline = summary.get("avg_mfe_timeline", {})
+    if mfe_timeline:
+        peak_mfe_val = max(mfe_timeline.values())
+        peak_mfe_sec = int(max(mfe_timeline, key=lambda k: mfe_timeline[k]))
+    else:
+        peak_mfe_val = avg_mfe
+        peak_mfe_sec = summary.get("median_peak_sec", 60)
+
+    # 피드백 파라미터 계산
+    fb_activation = peak_mfe_val * MFE_FEEDBACK_ACTIVATION_RATIO
+    fb_trail = peak_mfe_val * MFE_FEEDBACK_TRAIL_RATIO
+
+    # 상하한 클램프
+    fb_activation = max(MFE_FEEDBACK_MIN_ACTIVATION, min(MFE_FEEDBACK_MAX_ACTIVATION, fb_activation))
+    fb_trail = max(MFE_FEEDBACK_MIN_TRAIL, min(MFE_FEEDBACK_MAX_TRAIL, fb_trail))
+
+    # max_bars: 피크 시점 + 여유 (피크 후 60초 추가)
+    fb_max_bars = max(30, min(120, (peak_mfe_sec + 60) // 60 * 60 // RECHECK_SEC))
+
+    adjusted = base_params.copy()
+    adjusted["activation_pct"] = round(fb_activation, 5)
+    adjusted["trail_pct"] = round(fb_trail, 5)
+    adjusted["max_bars"] = fb_max_bars
+    adjusted["_mfe_feedback"] = True  # 피드백 적용 마커
+    adjusted["_fb_peak_mfe"] = round(peak_mfe_val * 100, 3)  # 디버그용 (%)
+    adjusted["_fb_peak_sec"] = peak_mfe_sec
+
+    return adjusted
+
+
 def get_adaptive_risk() -> float:
     """
     최근 승률 + streak 기반 RISK_PER_TRADE 가변 조정
@@ -2833,6 +2887,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _entry_atr = atr14_from_candles(_entry_c1, 14) if _entry_c1 else None
         _entry_atr_pct = (_entry_atr / avg_price * 100) if (_entry_atr and avg_price > 0) else 0.0
 
+        # 🔧 v7: 진입 컨텍스트 스냅샷 — 핵심 지표값 기록 (사후 분석/피드백용)
+        _ctx_rsi = _v4_rsi_from_candles(_entry_c1, 14) if _entry_c1 and len(_entry_c1) >= 15 else None
+        _ctx_vr5 = _v4_volume_ratio_5(_entry_c1) if _entry_c1 and len(_entry_c1) >= 6 else 0.0
+        _ctx_buy_ratio = pre.get("buy_ratio", 0)
+        _ctx_spread = pre.get("spread", 0)
+        _ctx_accel = pre.get("flow_accel", 0)
+
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
                 "entry_price": avg_price,
@@ -2851,6 +2912,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_pstd": round(_entry_pstd * 100, 4),     # 진입시 가격표준편차 (10초) — % 단위 (pstd 통일)
                 "entry_spread": round(pre.get("spread", 0), 4),  # 진입시 스프레드
                 "entry_consec": pre.get("consecutive_buys", 0),  # 진입시 연속매수
+                # 🔧 v7: 진입 컨텍스트 스냅샷 (사후 분석/MFE 피드백용)
+                "entry_rsi": round(_ctx_rsi, 2) if _ctx_rsi is not None else None,  # 1m RSI(14)
+                "entry_vr5": round(_ctx_vr5, 2),                 # VR5 (현재봉/직전5봉 거래량비)
+                "entry_buy_ratio": round(_ctx_buy_ratio, 4),     # 매수비율
+                "entry_accel": round(_ctx_accel, 3),             # 유입가속도
                 # 📦 전략 태그 (박스/돌파/동그라미 구분)
                 "entry_hour": now_kst().hour,  # 🔧 v7: 시간대별 청산 타임아웃 차별화용
                 "strategy": "box" if pre.get("is_box") else
@@ -3009,6 +3075,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_pstd": round(_entry_pstd * 100, 4),
                 "entry_spread": round(ob.get("spread", 0), 4),
                 "entry_consec": cons_buys,
+                # 🔧 v7: 진입 컨텍스트 스냅샷
+                "entry_rsi": round(_ctx_rsi, 2) if _ctx_rsi is not None else None,
+                "entry_vr5": round(_ctx_vr5, 2),
+                "entry_buy_ratio": round(_ctx_buy_ratio, 4),
+                "entry_accel": round(_ctx_accel, 3),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
@@ -4469,6 +4540,8 @@ FEATURE_FIELDS = [
     # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 신규 필드
     "entry_atr_pct", "entry_pstd", "entry_spread", "entry_consec",
     "mfe_sec", "trail_dist", "trail_stop_pct", "peak_drop",
+    # 🔧 v7: 진입 컨텍스트 스냅샷 필드
+    "entry_rsi", "entry_vr5", "entry_buy_ratio", "entry_accel",
 ]
 
 def log_trade_features(entry_data: dict, exit_data: dict = None):
@@ -7090,6 +7163,18 @@ _V4_DEFAULT_EXIT = {
 }
 
 
+# ============================================================
+# 🔧 v7: 독립 매수 전략 레지스트리
+# 각 전략이 자체 진입 조건 + 자체 청산 파라미터를 가진 독립 모듈
+# check_fn: 진입 판정 함수 (c1,c5,c15,c30,c60,gate_info) → dict|None
+# exit_params: 해당 전략 전용 청산 파라미터
+# priority: 평가 순서 (낮을수록 우선)
+# enabled: 활성화 여부
+# ============================================================
+# 주의: _STRATEGY_REGISTRY는 check_fn 정의 후 아래에서 초기화됨
+_STRATEGY_REGISTRY = {}  # 함수 정의 후 채워짐
+
+
 # --- 거래량3배 (1순위) ---
 # 데이터: ALL EV=+0.0656%, PF=1.16, Total=+23.69%
 # WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드)
@@ -7249,19 +7334,58 @@ def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60, gate_info=None):
     return None
 
 
+# 🔧 v7: 전략 레지스트리 초기화 (함수 정의 완료 후)
+_STRATEGY_REGISTRY = {
+    "거래량3배": {
+        "check_fn": _v4_check_volume_3x,
+        "exit_params": _V4_EXIT_PARAMS["거래량3배"],
+        "priority": 1,
+        "enabled": True,
+        "pipeline_key": "vol3x",
+        "description": "VR5>3.0, ATR%>0.7%, 방향성 OR 필터",
+    },
+    "20봉_고점돌파": {
+        "check_fn": _v4_check_20bar_breakout,
+        "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"],
+        "priority": 2,
+        "enabled": True,
+        "pipeline_key": "20bar",
+        "description": "1m종가>20봉고점, 5mMACD+15mADX>25",
+    },
+    "15m_눌림반전": {
+        "check_fn": _v4_check_15m_pullback_reversal,
+        "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"],
+        "priority": 3,
+        "enabled": False,  # 비활성화 (라이브 계측 우선)
+        "pipeline_key": "15m_pb",
+        "description": "15m 음봉→양봉 반전, 종가회복",
+    },
+    "EMA정배열진입": {
+        "check_fn": _v4_check_ema_alignment,
+        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"],
+        "priority": 4,
+        "enabled": False,  # WF FAIL
+        "pipeline_key": "ema_align",
+        "description": "비활성화 (WF FAIL 양수폴드 43%)",
+    },
+}
+
+
+def v4_get_strategy_registry():
+    """전략 레지스트리 조회 (외부 모듈/텔레그램 커맨드용)"""
+    return {k: {kk: vv for kk, vv in v.items() if kk != "check_fn"}
+            for k, v in _STRATEGY_REGISTRY.items()}
+
+
 # --- 공개 API (v6 signal_v4 60일 WF 데이터 기반) ---
 
 def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
-    v6.1 구조 — GATE를 신호별 분리 (백테스트 데이터 기반):
+    🔧 v7: 전략 레지스트리 기반 루프 (독립 모듈화)
     [사전필터] 60m_m3 상위33% (WF섹션4: TEST EV +0.24%)
-    [SIGNAL] 진입 (OR — 먼저 매칭):
-      1순위: 거래량3배         (방향성 OR 필터: 5m_MACD OR 15m_ADX)
-      2순위: 20봉_고점돌파      (자체 복합필터 5m_MACD골든+15m_ADX>20)
-      ❌ 15m_눌림반전: 비활성화 (라이브 계측 우선, 전략 2개로 축소)
-      ❌ EMA정배열진입: 비활성화 (WF FAIL 양수폴드 43%)
+    [SIGNAL] 레지스트리 우선순위 순서대로 평가 (먼저 매칭되면 반환)
     """
     _pipeline_inc("v4_called")
     if not c1:
@@ -7269,7 +7393,6 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
 
     # === 사전필터: 60m 3봉 모멘텀 상위33% ===
     m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.33)
-    # 📈 m3 실측값 기록 (통과/탈락 모두)
     _pipeline_track_value("m3_pct", m3_val * 100 if m3_val else None, market, passed=m3_ok)
     if m3_thr != 0:
         with _PIPELINE_VALUE_TRACKER_LOCK:
@@ -7281,44 +7404,30 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
         return None
     m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
 
-    # === 1순위: 거래량3배 (방향성 OR 필터: 5m_MACD OR 15m_ADX) ===
-    sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=m3_info)
-    if sig:
-        _pipeline_inc("v4_raw_hit")
-        _pipeline_hourly_inc("raw_hit")
-        _pipeline_strategy_pass("거래량3배")
-        _pipeline_record_signal_coin(market, "거래량3배")
-        sig["filters_hit"].append(m3_info)
-        _shadow_log_write(now_kst_str(), market, "거래량3배", 1, "", 1, m3_info)
-        return sig
-    _pipeline_inc("v4_vol3x_fail")
-
-    # === 2순위: 20봉_고점돌파 (자체 복합필터만) ===
-    sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=m3_info)
-    if sig:
-        _pipeline_inc("v4_raw_hit")
-        _pipeline_hourly_inc("raw_hit")
-        _pipeline_strategy_pass("20봉_고점돌파")
-        _pipeline_record_signal_coin(market, "20봉_고점돌파")
-        sig["filters_hit"].append(m3_info)
-        _shadow_log_write(now_kst_str(), market, "20봉_고점돌파", 1, "", 1, m3_info)
-        return sig
-    _pipeline_inc("v4_20bar_fail")
-
-    # === 3순위: 15m_눌림반전 — 비활성화 (라이브 계측 우선, 전략 2개로 축소) ===
-    # gate_ok, gate_info, gate_reason = _v4_gate_filter(c15, c60)
-    # if gate_ok:
-    #     sig = _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=gate_info)
-    #     if sig:
-    #         sig["filters_hit"].append(m3_info)
-    #         return sig
+    # === 🔧 v7: 레지스트리 기반 전략 순회 (priority 순) ===
+    sorted_strategies = sorted(_STRATEGY_REGISTRY.items(), key=lambda x: x[1]["priority"])
+    for strat_name, strat in sorted_strategies:
+        if not strat["enabled"]:
+            continue
+        check_fn = strat["check_fn"]
+        sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+        if sig:
+            _pipeline_inc("v4_raw_hit")
+            _pipeline_hourly_inc("raw_hit")
+            _pipeline_strategy_pass(strat_name)
+            _pipeline_record_signal_coin(market, strat_name)
+            sig["filters_hit"].append(m3_info)
+            _shadow_log_write(now_kst_str(), market, strat_name, 1, "", 1, m3_info)
+            return sig
+        _pipeline_inc(f"v4_{strat['pipeline_key']}_fail")
 
     return None
 
 
 def v4_get_exit_params(signal_tag):
-    """시그널 태그별 청산 파라미터 반환"""
-    return _V4_EXIT_PARAMS.get(signal_tag, _V4_DEFAULT_EXIT).copy()
+    """시그널 태그별 청산 파라미터 반환 (🔧 v7: MFE 피드백 자동 적용)"""
+    base = _V4_EXIT_PARAMS.get(signal_tag, _V4_DEFAULT_EXIT).copy()
+    return mfe_feedback_exit_params(signal_tag, base)
 
 
 def v4_is_favorable_hour(hour, signal_tag):
