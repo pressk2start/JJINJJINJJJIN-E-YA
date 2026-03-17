@@ -282,54 +282,9 @@ KAIA_KNOWN_TOKENS = {
     "0xa7b4c080c7b9815980a7fb7c4b2bf1e021609cba": ("LTR", 18),
     "0x472fac08cf4836bee54343edfb49023746b27933": ("SPIN", 18),
     "0xd364de0683b29e582e5713425b215b24ce804ae9": ("CENT", 18),
+    "0xe993e5668a034a98cc53cc1e3bfba910119440a1": ("CELL", 18),
+    "0xe3ecbfbb8f8c37c2450b9920b79755e5280a4252": ("SNTC", 18),
 }
-# ERC20 Transfer 이벤트 topic
-_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-def _decode_abi_string(hex_str):
-    """ABI 인코딩된 string 반환값 디코딩"""
-    if not hex_str or hex_str == "0x":
-        return None
-    h = hex_str[2:]
-    if len(h) >= 128:
-        slen = int(h[64:128], 16)
-        if slen > 0 and 128 + slen * 2 <= len(h):
-            return bytes.fromhex(h[128:128 + slen * 2]).decode("utf-8", errors="replace")
-    return None
-def _kaia_discover_tokens(rpc, addr):
-    """Transfer 이벤트 로그를 스캔해서 주소가 보유한 토큰 컨트랙트 탐색"""
-    addr_topic = "0x" + "0" * 24 + addr[2:].lower()
-    # 최신 블록 번호
-    resp = http_post(rpc, {"jsonrpc": "2.0", "id": 1,
-                           "method": "eth_blockNumber", "params": []})
-    latest = int(resp["result"], 16)
-    contracts = set()
-    chunk = 5000000
-    for i in range(20):  # 최대 1억 블록 탐색
-        from_b = max(0, latest - (i + 1) * chunk)
-        to_b = latest - i * chunk
-        if from_b >= to_b:
-            continue
-        # 수신 Transfer 이벤트
-        try:
-            data = http_post(rpc, {"jsonrpc": "2.0", "id": 1,
-                                   "method": "eth_getLogs",
-                                   "params": [{"fromBlock": hex(from_b), "toBlock": hex(to_b),
-                                               "topics": [_TRANSFER_TOPIC, None, addr_topic]}]})
-            for log in data.get("result", []):
-                contracts.add(log["address"].lower())
-        except Exception:
-            pass
-        # 송신 Transfer 이벤트
-        try:
-            data = http_post(rpc, {"jsonrpc": "2.0", "id": 1,
-                                   "method": "eth_getLogs",
-                                   "params": [{"fromBlock": hex(from_b), "toBlock": hex(to_b),
-                                               "topics": [_TRANSFER_TOPIC, addr_topic, None]}]})
-            for log in data.get("result", []):
-                contracts.add(log["address"].lower())
-        except Exception:
-            pass
-    return contracts
 def get_kaia(addr):
     rpc = os.getenv("KAIA_RPC_URL", KAIA_RPC)
     resp = _evm_rpc(rpc, "eth_getBalance", [addr, "latest"])
@@ -370,38 +325,21 @@ def get_kaia(addr):
                 results.append(R("KAIA", addr, sym, amt, r, dv, ct))
             if len(items) < 100: break
             page += 1
-    # Kaiascan 실패 또는 키 없을 때 → 동적 토큰 탐색 + 알려진 토큰 체크
+    # Kaiascan 키 없을 때 → batch RPC로 알려진 토큰 체크 (빠름)
     if not token_found:
         addr_padded = "0" * 24 + addr[2:].lower()
-        # 1) Transfer 이벤트 로그로 토큰 컨트랙트 탐색
-        discovered = set()
+        token_list = list(KAIA_KNOWN_TOKENS.items())
+        calls = []
+        for i, (ca, (sym, dec)) in enumerate(token_list):
+            calls.append({
+                "jsonrpc": "2.0", "id": i + 1,
+                "method": "eth_call",
+                "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
+            })
         try:
-            discovered = _kaia_discover_tokens(rpc, addr)
-        except Exception:
-            pass
-        # 2) 알려진 토큰 + 탐색된 토큰 합치기
-        all_tokens = dict(KAIA_KNOWN_TOKENS)
-        for ca in discovered:
-            if ca not in {k.lower() for k in all_tokens}:
-                all_tokens[ca] = None  # 이름/소수점 모름 → RPC로 조회
-        # 3) batch RPC로 잔고 확인
-        token_list = list(all_tokens.items())
-        # 50개씩 배치 처리
-        for batch_start in range(0, len(token_list), 50):
-            batch = token_list[batch_start:batch_start + 50]
-            calls = []
-            for i, (ca, info) in enumerate(batch):
-                calls.append({
-                    "jsonrpc": "2.0", "id": i + 1,
-                    "method": "eth_call",
-                    "params": [{"to": ca, "data": "0x70a08231" + addr_padded}, "latest"]
-                })
-            try:
-                resp_list = _evm_batch_rpc(rpc, calls)
-            except Exception:
-                continue
+            resp_list = _evm_batch_rpc(rpc, calls)
             resp_map = {r2["id"]: r2 for r2 in resp_list}
-            for i, (ca, info) in enumerate(batch):
+            for i, (ca, (sym, dec)) in enumerate(token_list):
                 r2 = resp_map.get(i + 1, {})
                 hex_val = r2.get("result", "0x0")
                 if not hex_val or hex_val in ("0x", "0x0", "0x" + "0" * 64):
@@ -409,25 +347,9 @@ def get_kaia(addr):
                 rv = str(int(hex_val, 16))
                 if rv == "0":
                     continue
-                if info:
-                    sym, dec = info
-                else:
-                    # 동적 탐색된 토큰 → RPC로 symbol, decimals 조회
-                    try:
-                        meta_calls = [
-                            {"jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                             "params": [{"to": ca, "data": "0x95d89b41"}, "latest"]},
-                            {"jsonrpc": "2.0", "id": 2, "method": "eth_call",
-                             "params": [{"to": ca, "data": "0x313ce567"}, "latest"]},
-                        ]
-                        meta_resp = _evm_batch_rpc(rpc, meta_calls)
-                        meta_map = {m["id"]: m.get("result", "0x") for m in meta_resp}
-                        sym = _decode_abi_string(meta_map.get(1, "0x")) or ca[:10]
-                        dec_hex = meta_map.get(2, "0x0")
-                        dec = int(dec_hex, 16) if dec_hex and dec_hex != "0x" else 18
-                    except Exception:
-                        sym, dec = ca[:10], 18
                 results.append(R("KAIA", addr, sym, fmt(rv, dec), rv, dec, ca))
+        except Exception:
+            pass
     return results
 # ═══════════════════════════════════════════════
 #  SGB (Songbird) — 공개 RPC
@@ -706,8 +628,21 @@ def get_eos(addr):
 #  PCI (Paycoin) — scan.payprotocol.io
 # ═══════════════════════════════════════════════
 def get_pci(addr):
+    url = f"https://scan.payprotocol.io/api/account/{addr}"
+    # 1) 일반 요청
     try:
-        data = http_get(f"https://scan.payprotocol.io/api/account/{addr}")
+        data = http_get(url)
+        if isinstance(data, dict):
+            return [R("PCI", addr, "PCI", noexp(str(data.get("balance", "0"))),
+                       None, None, None, "native")]
+    except Exception:
+        pass
+    # 2) SSL 인증서 오류 우회 재시도
+    try:
+        r = requests.get(url, timeout=TIMEOUT, verify=False,
+                         headers={"User-Agent": "multichain-balance-checker/5.0"})
+        r.raise_for_status()
+        data = r.json()
         if isinstance(data, dict):
             return [R("PCI", addr, "PCI", noexp(str(data.get("balance", "0"))),
                        None, None, None, "native")]
