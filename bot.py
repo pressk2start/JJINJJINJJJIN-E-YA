@@ -1104,6 +1104,216 @@ def is_coin_loss_cooldown(market: str) -> bool:
         return len(recent) >= COIN_LOSS_MAX
 
 
+# ============================================================
+# 📊 시그널별 성과 통계 + MFE 시계열 추적 시스템
+# ============================================================
+# 메모리 누적 통계: { signal_tag: { trades, wins, total_pnl, mfe_timeline: {10: [...], 30: [...], ...} } }
+_SIGNAL_STATS = {}
+_SIGNAL_STATS_LOCK = threading.Lock()
+
+
+def _load_signal_stats():
+    """봇 시작 시 저장된 시그널 통계 로드"""
+    global _SIGNAL_STATS
+    try:
+        if os.path.exists(SIGNAL_STATS_PATH):
+            with open(SIGNAL_STATS_PATH, "r", encoding="utf-8") as f:
+                _SIGNAL_STATS = json.load(f)
+            print(f"[SIGNAL_STATS] 로드 완료: {len(_SIGNAL_STATS)}개 시그널 타입")
+    except Exception as e:
+        print(f"[SIGNAL_STATS] 로드 실패: {e}")
+        _SIGNAL_STATS = {}
+
+
+def _save_signal_stats():
+    """시그널 통계를 파일에 저장 (주기적 호출)"""
+    with _SIGNAL_STATS_LOCK:
+        data = copy.deepcopy(_SIGNAL_STATS)
+    try:
+        with open(SIGNAL_STATS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[SIGNAL_STATS] 저장 실패: {e}")
+
+
+def update_signal_stats(signal_tag: str, pnl_pct: float, mfe_snapshots: dict,
+                        entry_mode: str = "confirm", exit_reason: str = "",
+                        hold_sec: float = 0, mfe_pct: float = 0, mae_pct: float = 0):
+    """
+    시그널별 성과 통계 업데이트
+    - signal_tag: 진입 시그널 태그 (거래량3배, 20봉_고점돌파, 점화, 강돌파, 기본 등)
+    - pnl_pct: 최종 수익률 (소수 단위)
+    - mfe_snapshots: {10: 0.23, 30: 0.45, 60: 0.67, ...} 각 시점 MFE% (소수 단위)
+    - mfe_pct/mae_pct: 최종 MFE/MAE (소수 단위)
+    """
+    is_win = pnl_pct > 0
+    with _SIGNAL_STATS_LOCK:
+        if signal_tag not in _SIGNAL_STATS:
+            _SIGNAL_STATS[signal_tag] = {
+                "trades": 0, "wins": 0, "total_pnl": 0.0,
+                "mfe_timeline": {str(t): [] for t in MFE_SNAPSHOT_TIMES},
+                "avg_mfe": 0.0, "avg_mae": 0.0,
+                "best_pnl": 0.0, "worst_pnl": 0.0,
+                "exit_reasons": {},
+                "entry_modes": {"confirm": 0, "half": 0},
+                "mfe_peaks": [],  # 최고 MFE 도달 시점(초) 리스트
+                "hold_secs": [],  # 보유 시간 리스트
+            }
+        s = _SIGNAL_STATS[signal_tag]
+        s["trades"] += 1
+        if is_win:
+            s["wins"] += 1
+        s["total_pnl"] += pnl_pct
+
+        # MFE/MAE 이동평균 업데이트
+        n = s["trades"]
+        s["avg_mfe"] = s["avg_mfe"] * (n - 1) / n + mfe_pct / n
+        s["avg_mae"] = s["avg_mae"] * (n - 1) / n + mae_pct / n
+        s["best_pnl"] = max(s["best_pnl"], pnl_pct)
+        s["worst_pnl"] = min(s["worst_pnl"], pnl_pct)
+
+        # MFE 시계열 스냅샷 저장 (최근 100건만 유지)
+        for t_sec, mfe_val in mfe_snapshots.items():
+            t_key = str(t_sec)
+            if t_key not in s["mfe_timeline"]:
+                s["mfe_timeline"][t_key] = []
+            s["mfe_timeline"][t_key].append(round(mfe_val, 5))
+            if len(s["mfe_timeline"][t_key]) > 100:
+                s["mfe_timeline"][t_key] = s["mfe_timeline"][t_key][-100:]
+
+        # 청산 사유 카운트
+        reason_cat = _categorize_exit_reason(exit_reason)
+        s["exit_reasons"][reason_cat] = s["exit_reasons"].get(reason_cat, 0) + 1
+
+        # 진입 모드 카운트
+        if entry_mode in s["entry_modes"]:
+            s["entry_modes"][entry_mode] += 1
+
+        # MFE 피크 시점 기록 (최고점이 몇 초에 나왔는지)
+        if mfe_snapshots:
+            peak_time = max(mfe_snapshots, key=lambda k: mfe_snapshots[k])
+            s["mfe_peaks"].append(int(peak_time))
+            if len(s["mfe_peaks"]) > 100:
+                s["mfe_peaks"] = s["mfe_peaks"][-100:]
+
+        # 보유시간 기록
+        if hold_sec > 0:
+            s["hold_secs"].append(round(hold_sec, 1))
+            if len(s["hold_secs"]) > 100:
+                s["hold_secs"] = s["hold_secs"][-100:]
+
+    # 통계 파일 저장 (10건마다)
+    if n % 10 == 0:
+        _save_signal_stats()
+
+
+def _categorize_exit_reason(reason: str) -> str:
+    """청산 사유를 카테고리로 분류"""
+    r = str(reason).strip()
+    if "트레일" in r:
+        return "트레일링"
+    if "본절" in r or "base_stop" in r:
+        return "본절SL"
+    if "하드스톱" in r:
+        return "하드스톱"
+    if "감량" in r or "수급확인" in r:
+        return "수급확인SL"
+    if "타임아웃" in r or "시간" in r or "만료" in r:
+        return "타임아웃"
+    if "손절" in r or "ATR" in r:
+        return "ATR손절"
+    if "폭발" in r:
+        return "폭발청산"
+    if "Plateau" in r or "고원" in r:
+        return "고원청산"
+    return r[:10] if r else "미분류"
+
+
+def get_signal_stats_summary(signal_tag: str) -> dict:
+    """특정 시그널의 성과 요약 반환 (청산 전략 최적화용)"""
+    with _SIGNAL_STATS_LOCK:
+        s = _SIGNAL_STATS.get(signal_tag)
+        if not s or s["trades"] < SIGNAL_STATS_MIN_TRADES:
+            return {}
+        wr = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
+        avg_pnl = s["total_pnl"] / s["trades"] if s["trades"] > 0 else 0
+
+        # MFE 시계열 평균 계산
+        avg_mfe_timeline = {}
+        for t_key, vals in s["mfe_timeline"].items():
+            if vals:
+                avg_mfe_timeline[t_key] = round(statistics.mean(vals), 5)
+
+        # MFE 피크 시점 중앙값
+        median_peak_sec = 0
+        if s["mfe_peaks"]:
+            sorted_peaks = sorted(s["mfe_peaks"])
+            median_peak_sec = sorted_peaks[len(sorted_peaks) // 2]
+
+        return {
+            "trades": s["trades"],
+            "win_rate": round(wr, 1),
+            "avg_pnl": round(avg_pnl, 5),
+            "avg_mfe": round(s["avg_mfe"], 5),
+            "avg_mae": round(s["avg_mae"], 5),
+            "avg_mfe_timeline": avg_mfe_timeline,
+            "median_peak_sec": median_peak_sec,
+            "best_pnl": s["best_pnl"],
+            "worst_pnl": s["worst_pnl"],
+            "top_exit_reason": max(s["exit_reasons"], key=s["exit_reasons"].get) if s["exit_reasons"] else "N/A",
+        }
+
+
+def get_all_signal_stats_report() -> str:
+    """전체 시그널 성과 리포트 텍스트 생성 (텔레그램 발송용)"""
+    with _SIGNAL_STATS_LOCK:
+        if not _SIGNAL_STATS:
+            return ""
+        stats_list = []
+        for tag, s in _SIGNAL_STATS.items():
+            if s["trades"] < SIGNAL_STATS_MIN_TRADES:
+                continue
+            wr = s["wins"] / s["trades"] * 100
+            avg_pnl = s["total_pnl"] / s["trades"] * 100  # % 단위
+            avg_mfe = s["avg_mfe"] * 100
+            avg_mae = s["avg_mae"] * 100
+            # MFE 시계열: 1분 시점 평균
+            mfe_60 = 0
+            if "60" in s["mfe_timeline"] and s["mfe_timeline"]["60"]:
+                mfe_60 = statistics.mean(s["mfe_timeline"]["60"]) * 100
+            # 피크 시점 중앙값
+            peak_sec = 0
+            if s["mfe_peaks"]:
+                sorted_p = sorted(s["mfe_peaks"])
+                peak_sec = sorted_p[len(sorted_p) // 2]
+            stats_list.append((tag, s["trades"], wr, avg_pnl, avg_mfe, avg_mae, mfe_60, peak_sec))
+
+    if not stats_list:
+        return ""
+
+    stats_list.sort(key=lambda x: x[3], reverse=True)  # PnL 순
+    lines = [
+        f"{'─' * 32}",
+        "<b>🎯 시그널별 MFE 분석:</b>",
+    ]
+    for tag, cnt, wr, avg_pnl, avg_mfe, avg_mae, mfe_60, peak_sec in stats_list:
+        emoji = "🟢" if avg_pnl > 0 else "🔴"
+        lines.append(
+            f"  {emoji} <b>{tag}</b> ({cnt}건 승률{wr:.0f}%)"
+        )
+        lines.append(
+            f"    PnL{avg_pnl:+.2f}% MFE+{avg_mfe:.2f}% MAE{avg_mae:.2f}%"
+        )
+        lines.append(
+            f"    1분MFE+{mfe_60:.2f}% 피크{peak_sec}초"
+        )
+    return "\n".join(lines)
+
+
+# 봇 시작 시 통계 로드 (모듈 임포트 시 실행)
+_load_signal_stats()
+
+
 def get_adaptive_risk() -> float:
     """
     최근 승률 + streak 기반 RISK_PER_TRADE 가변 조정
@@ -3411,6 +3621,8 @@ def close_auto_position(m, reason=""):
                 f"• 보유: {_hold_sec:.0f}초 | MFE: +{_mfe_val:.2f}% ({_mfe_sec_val:.0f}초) | MAE: {_mae_val:.2f}%\n"
                 f"• 피크드롭: {_peak_drop:.2f}% | 트레일: {_trail_dist_val:.3f}% (잠금 {_trail_stop_val:+.3f}%)\n"
                 f"• 진입ATR: {_entry_atr_val:.3f}% | pstd: {_entry_pstd_val:.4f}% | SL: {_pos_data.get('sl_pct', 0)*100:.2f}%\n"
+                f"• 시그널: {_pos_data.get('signal_tag', '?')} ({_pos_data.get('signal_type', '?')}) | 모드: {_pos_data.get('entry_mode', '?')}\n"
+                f"• MFE시계열: {' → '.join(f'{k}초:+{v*100:.2f}%' for k, v in sorted(_pos_data.get('mfe_snapshots', {}).items(), key=lambda x: int(x[0])))}\n"
                 f"====================================\n"
                 f"{link_for(m)}"
             )
@@ -4375,6 +4587,28 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             except Exception as e:
                 print(f"[TRADE_LOG_UPDATE_ERR] {e}")
 
+    # 📊 시그널별 성과 통계 + MFE 시계열 업데이트
+    try:
+        _pos_data = pos_snapshot or {}
+        _sig_tag = _pos_data.get("signal_tag", "기본")
+        _entry_mode = _pos_data.get("entry_mode", "confirm")
+        _mfe_snaps = _pos_data.get("mfe_snapshots", {})
+        # mfe_pct/mae_pct를 소수 단위로 변환 (% → 소수: 0.5% → 0.005)
+        _mfe_dec = mfe_pct / 100.0 if abs(mfe_pct) > 0.1 else mfe_pct
+        _mae_dec = mae_pct / 100.0 if abs(mae_pct) > 0.1 else mae_pct
+        update_signal_stats(
+            signal_tag=_sig_tag,
+            pnl_pct=pnl_pct,
+            mfe_snapshots=_mfe_snaps,
+            entry_mode=_entry_mode,
+            exit_reason=exit_reason,
+            hold_sec=hold_sec,
+            mfe_pct=_mfe_dec,
+            mae_pct=_mae_dec,
+        )
+    except Exception as _ss_err:
+        print(f"[SIGNAL_STATS_ERR] {market}: {_ss_err}")
+
     # 🔧 건수 기반 학습 트리거 (매수만 학습)
     if AUTO_LEARN_ENABLED:
         with _trade_log_lock:
@@ -5061,7 +5295,13 @@ def send_batch_trade_report():
                     emoji = "🟢" if m_pnl > 0 else "🔴"
                     lines.append(f"  {emoji} {mode}: {len(mode_df)}건 승률{m_wr:.0f}% PnL{m_pnl:+.2f}%")
 
-        # ─── 9. 진단 요약 (자동 인사이트) ───
+        # ─── 9. 시그널별 MFE 시계열 분석 (메모리 통계) ───
+        _sig_report = get_all_signal_stats_report()
+        if _sig_report:
+            lines.append("")
+            lines.append(_sig_report)
+
+        # ─── 10. 진단 요약 (자동 인사이트) ───
         lines.append("")
         lines.append(f"{'─' * 32}")
         lines.append("<b>🧠 자동 진단:</b>")
@@ -10089,6 +10329,12 @@ def monitor_position(m,
 
     verdict = None
 
+    # === 📊 MFE 시계열 스냅샷 추적 ===
+    _mfe_snapshots = {}          # {10: 최고MFE%, 30: 최고MFE%, ...} 각 시점까지의 최고 수익률
+    _mfe_snap_best = {}          # {10: best_price, 30: best_price, ...} 각 시점까지의 최고가
+    _mfe_snap_done = set()       # 이미 기록 완료된 시점 (중복 방지)
+    _mfe_snap_cur_prices = {}    # {10: 현재가, 30: 현재가, ...} 각 시점의 현재가 (MFE뿐 아니라 실시간 수익률도)
+
     # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -10238,6 +10484,14 @@ def monitor_position(m,
             best = max(best, curp)
             worst = min(worst, curp)
 
+            # 📊 MFE 시계열 스냅샷: 각 시점까지의 최고 수익률 기록
+            for snap_sec in MFE_SNAPSHOT_TIMES:
+                if snap_sec not in _mfe_snap_done and alive_sec >= snap_sec:
+                    _mfe_snap_best[snap_sec] = best
+                    _mfe_snap_cur_prices[snap_sec] = curp
+                    _mfe_snapshots[snap_sec] = (best / entry_price - 1.0) if entry_price > 0 else 0
+                    _mfe_snap_done.add(snap_sec)
+
             # 🔧 before1 복원: Probe/Half/Confirm 스크래치 비활성화
             # 조기 탈출은 정상 눌림→반등 기회를 박탈하여 승률 하락 원인
             # ATR 기반 동적 손절이 충분히 보호하므로 추가 스크래치 불필요
@@ -10263,6 +10517,9 @@ def monitor_position(m,
                         # 트레일 미무장이라도 잠재 트레일 거리 기록 (튜닝 참고용)
                         pos_now["trail_dist"] = round(trail_dist_min * 100, 3)
                         pos_now["trail_stop_pct"] = 0.0
+                    # 📊 MFE 시계열 스냅샷 저장 (청산 시 record_trade에서 활용)
+                    pos_now["mfe_snapshots"] = dict(_mfe_snapshots)
+                    pos_now["mfe_snap_prices"] = dict(_mfe_snap_cur_prices)
                     OPEN_POSITIONS[m] = pos_now
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
