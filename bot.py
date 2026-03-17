@@ -392,10 +392,10 @@ _PIPELINE_VALUE_TRACKER_LOCK = threading.Lock()
 _PIPELINE_VALUE_TRACKER = {
     # 각 키: {"values": deque(maxlen=500), "near_miss": count (기준 근처 탈락)}
     "m3_pct":       {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
-    "vr5":          {"values": deque(maxlen=500), "threshold": 3.0, "near_miss": 0},
-    "atr_pct":      {"values": deque(maxlen=500), "threshold": 0.7, "near_miss": 0},
+    "vr5":          {"values": deque(maxlen=500), "threshold": 2.5, "near_miss": 0},
+    "atr_pct":      {"values": deque(maxlen=500), "threshold": 0.5, "near_miss": 0},
     "adx_15_vol3x": {"values": deque(maxlen=500), "threshold": 20.0, "near_miss": 0},
-    "adx_15_20bar": {"values": deque(maxlen=500), "threshold": 25.0, "near_miss": 0},
+    "adx_15_20bar": {"values": deque(maxlen=500), "threshold": 20.0, "near_miss": 0},
     "20bar_gap_pct": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
     "gate_spread":  {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
     "gate_buy_ratio": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
@@ -7344,17 +7344,20 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     _pipeline_inc("vol3x_enter")
     if not c1 or len(c1) < 7:
         return None
+    # 🔧 v9: VR5 3.0→2.5 (리포트 니어미스 46건, 주석과 코드 일치시킴)
     vr5 = _v4_volume_ratio_5(c1)
-    _pipeline_track_value("vr5", vr5, None, passed=(vr5 > 3.0))
-    if vr5 <= 3.0:
+    _pipeline_track_value("vr5", vr5, None, passed=(vr5 > 2.5))
+    if vr5 <= 2.5:
         _pipeline_inc("vol3x_vr5_fail")
         return None
+    # 🔧 v9: ATR% 0.7→0.5 (리포트 니어미스 8건, 실시간 avg=0.24로 0.7 불가)
     atr_p = _v4_atr_pct(c1, 14)
-    _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.7))
-    if atr_p <= 0.7:
+    _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.5))
+    if atr_p <= 0.5:
         _pipeline_inc("vol3x_atr_fail")
         return None
-    if not _v4_is_bullish(c1[-2]):
+    # 🔧 v9: 직전2봉 중 1봉 양봉 (주석대로 완화)
+    if not (_v4_is_bullish(c1[-2]) or (len(c1) >= 3 and _v4_is_bullish(c1[-3]))):
         _pipeline_inc("vol3x_bull_fail")
         return None
     # 방향성 필터: 5m_MACD골든 OR 15m_ADX>20
@@ -7420,10 +7423,10 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
 
 
 # --- 20봉_고점돌파 (2순위 — v6 신규) ---
-# WF PASS: avgTE EV>0, 양수폴드 ≥60%
+# WF PASS: avgTE=+0.0322%, 양수폴드=71% (5/7)
 # 조건: 1m 종가 > 직전 20봉 최고가
-# 복합필터: 5m_MACD골든 + 15m_ADX>25
-# (GATE에서 15m MACD골든 이미 적용, 추가로 5m MACD골든 + 15m ADX>25 체크)
+# 복합필터: 5m_MACD골든 + 15m_ADX>20 (🔧 v9: 25→20 완화)
+# 검증: 5m_MACD골든+15m_ADX>25 → TR=+0.1962%, TE=+0.0715% BOTH EV>0
 def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     _pipeline_inc("20bar_enter")
     if not c1 or len(c1) < 21:
@@ -7450,7 +7453,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     if macd_5m <= sig_5m:
         _pipeline_inc("20bar_macd_fail")
         return None
-    # 복합필터: 15m ADX > 20 (🔧 하락장 완화: 25→20)
+    # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
     if not c15 or len(c15) < 30:
         _pipeline_inc("20bar_adx_fail")
         return None
@@ -7458,8 +7461,8 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    _pipeline_track_value("adx_15_20bar", adx_15, None, passed=(adx_15 is not None and adx_15 > 25))
-    if adx_15 is None or adx_15 <= 25:
+    _pipeline_track_value("adx_15_20bar", adx_15, None, passed=(adx_15 is not None and adx_15 > 20))
+    if adx_15 is None or adx_15 <= 20:
         _pipeline_inc("20bar_adx_fail")
         return None
     _pipeline_inc("20bar_pass")
@@ -7527,10 +7530,10 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 2.0 or vr5 >= 3.0:  # 2.0 ~ 3.0 니어미스 구간만
+    if vr5 < 1.5 or vr5 >= 2.5:  # 🔧 v9: 기존 2.0~3.0 → 1.5~2.5 (본체 2.5로 변경됨)
         return None
     atr_p = _v4_atr_pct(c1, 14)
-    if atr_p <= 0.5:  # 완화: 0.7 → 0.5
+    if atr_p <= 0.3:  # 🔧 v9: 0.5 → 0.3 (본체 0.5로 변경됨)
         return None
     if not _v4_is_bullish(c1[-2]):
         return None
@@ -7854,7 +7857,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,
         "pipeline_key": "vol3x",
         "route": "A",
-        "description": "VR5>3.0, ATR%>0.7%, 방향성 OR 필터",
+        "description": "VR5>2.5, ATR%>0.5%, 직전2봉양봉, 방향성 OR 필터",
     },
     "20봉_고점돌파": {
         "check_fn": _v4_check_20bar_breakout,
@@ -7863,7 +7866,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,
         "pipeline_key": "20bar",
         "route": "B",
-        "description": "1m종가>20봉고점, 5mMACD+15mADX>25",
+        "description": "1m종가>20봉고점, 5mMACD+15mADX>20",
     },
     # === 섀도우 전략 (기존 비활성 재검증) ===
     "15m_눌림반전": {
@@ -8271,16 +8274,18 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
-    🔧 v7: 전략 레지스트리 기반 루프 (독립 모듈화)
-    [사전필터] 60m_m3 상위33% (WF섹션4: TEST EV +0.24%)
+    🔧 v9: 전략 레지스트리 기반 루프 (독립 모듈화)
+    [사전필터] 60m_m3 상위50% (🔧 v9: 33%→50% 완화, 시그널 부족 해소)
     [SIGNAL] 레지스트리 우선순위 순서대로 평가 (먼저 매칭되면 반환)
     """
     _pipeline_inc("v4_called")
     if not c1:
         return None
 
-    # === 사전필터: 60m 3봉 모멘텀 상위33% ===
-    m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.33)
+    # === 사전필터: 60m 3봉 모멘텀 상위50% ===
+    # 🔧 v9: 0.33→0.50 완화 (60 니어미스, 78% 탈락 → 시그널 부족 해소)
+    # 리포트 섹션4: 60m_m3_상위33% TEST EV +0.24% 유지하되 필터 강도 완화
+    m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.50)
     _pipeline_track_value("m3_pct", m3_val * 100 if m3_val else None, market, passed=m3_ok)
     if m3_thr != 0:
         with _PIPELINE_VALUE_TRACKER_LOCK:
