@@ -414,72 +414,106 @@ def _trx_hdr():
     k = os.getenv("TRONGRID_API_KEY", "").strip()
     if k: h["TRON-PRO-API-KEY"] = k
     return h
-def _trx_decode_name(val):
-    """TronGrid가 hex로 반환하는 토큰명을 디코딩"""
-    if not val:
-        return None
-    s = str(val)
-    # hex 문자열인지 확인 (0-9, a-f만 포함, 짝수 길이)
-    if len(s) >= 2 and len(s) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in s):
-        try:
-            decoded = bytes.fromhex(s).decode("utf-8").strip("\x00").strip()
-            if decoded and decoded.isprintable():
-                return decoded
-        except Exception:
-            pass
-    return s
 def get_trx(addr):
     hdr = _trx_hdr()
+    # native TRX
     acct = http_post("https://api.trongrid.io/wallet/getaccount",
                      {"address": addr, "visible": True}, headers=hdr)
     raw_sun = str(acct.get("balance", 0))
     results = [R("TRX", addr, "TRX", fmt(raw_sun, 6), raw_sun, 6, None, "native")]
-    # TRC20
+    # TronScan token_asset_overview — 토큰명, decimals, 잔고를 한 번에 조회
     try:
-        data = http_get(f"https://api.trongrid.io/v1/accounts/{addr}", headers=hdr)
-        for token_map in data.get("data", [{}])[0].get("trc20", []):
-            for ca, rb in token_map.items():
-                rs = str(rb)
-                if rs == "0": continue
-                try:
-                    ci = http_get(f"https://api.trongrid.io/v1/contracts/{ca}", headers=hdr)
-                    cd = ci.get("data", [{}])[0]
-                    raw_sym = cd.get("symbol") or cd.get("name") or ca[:8]
-                    sym = _trx_decode_name(raw_sym) or ca[:8]
-                    dec = int(cd.get("decimals", 0) or 0)
-                except Exception:
-                    sym, dec = ca[:8], 0
-                results.append(R("TRX", addr, sym, fmt(rs, dec), rs, dec, ca))
+        data = http_get(
+            "https://apilist.tronscanapi.com/api/account/token_asset_overview",
+            params={"address": addr}
+        )
+        for tok in data.get("data", []):
+            sym = tok.get("tokenAbbr") or tok.get("tokenName") or "UNKNOWN"
+            dec = int(tok.get("tokenDecimal", 0) or 0)
+            raw_bal = str(tok.get("balance", "0"))
+            ttype = tok.get("tokenType", "")
+            ct = tok.get("tokenId") or tok.get("contractAddress") or ""
+            # native TRX는 위에서 이미 처리
+            if sym.lower() == "trx" and ttype in ("trc10", ""):
+                continue
+            if raw_bal == "0":
+                continue
+            results.append(R("TRX", addr, sym, fmt(raw_bal, dec), raw_bal, dec, ct,
+                             "native" if ttype == "" else "token"))
     except Exception:
-        pass
+        # TronScan 실패 시 TronGrid fallback (토큰명 제한적)
+        try:
+            tg = http_get(f"https://api.trongrid.io/v1/accounts/{addr}", headers=hdr)
+            for token_map in tg.get("data", [{}])[0].get("trc20", []):
+                for ca, rb in token_map.items():
+                    rs = str(rb)
+                    if rs == "0": continue
+                    # 개별 contract 조회 대신 주소 축약 표시
+                    results.append(R("TRX", addr, ca[:8] + "…", rs, rs, 0, ca))
+        except Exception:
+            pass
     return results
 # ═══════════════════════════════════════════════
 #  ONT  — 공식 노드 다중 폴백 (키 불필요)
 #  ONT: decimals=9, ONG: decimals=18
 # ═══════════════════════════════════════════════
-ONT_ENDPOINTS = [
+ONT_RPC_ENDPOINTS = [
     "https://dappnode1.ont.io:10334",
     "http://dappnode1.ont.io:20334",
     "http://dappnode2.ont.io:20334",
 ]
 def get_ont(addr):
+    # 1) native (ONT, ONG) via RPC
     data = None
-    for ep in ONT_ENDPOINTS:
+    for ep in ONT_RPC_ENDPOINTS:
         try:
             data = http_get(f"{ep}/api/v1/balancev2/{addr}")
             break
         except Exception:
             continue
-    if data is None:
-        raise RuntimeError("ONT 노드 접속 실패 — 모든 엔드포인트 응답 없음")
-    result = data.get("Result") or data.get("result") or {}
     results = []
-    if "ont" in result:
-        raw_ont = str(result["ont"])
-        results.append(R("ONT", addr, "ONT", fmt(raw_ont, 9), raw_ont, 9, None, "native"))
-    if "ong" in result:
-        raw_ong = str(result["ong"])
-        results.append(R("ONT", addr, "ONG", fmt(raw_ong, 18), raw_ong, 18, None, "token"))
+    if data:
+        result = data.get("Result") or data.get("result") or {}
+        if "ont" in result:
+            raw_ont = str(result["ont"])
+            results.append(R("ONT", addr, "ONT", fmt(raw_ont, 9), raw_ont, 9, None, "native"))
+        if "ong" in result:
+            raw_ong = str(result["ong"])
+            results.append(R("ONT", addr, "ONG", fmt(raw_ong, 18), raw_ong, 18, None, "token"))
+    # 2) explorer.ont.io v2 — native + OEP4 + ORC20 토큰
+    try:
+        # native 폴백 (RPC 실패 시)
+        if not results:
+            nd = http_get(f"https://explorer.ont.io/v2/addresses/{addr}/native/balances")
+            for item in nd.get("result", []):
+                name = item.get("asset_name", "")
+                bal = noexp(str(item.get("balance", "0")))
+                if name == "ont" and bal not in ("0", "0.0"):
+                    results.append(R("ONT", addr, "ONT", bal, None, 9, None, "native"))
+                elif name == "ong" and bal not in ("0", "0.0"):
+                    results.append(R("ONT", addr, "ONG", bal, None, 18, None, "token"))
+        # OEP4 토큰
+        oep4 = http_get(f"https://explorer.ont.io/v2/addresses/{addr}/oep4/balances")
+        for item in oep4.get("result", []):
+            bal = noexp(str(item.get("balance", "0")))
+            if bal in ("0", "0.0", ""):
+                continue
+            sym = item.get("asset_name") or "UNKNOWN"
+            ct = item.get("contract_hash")
+            results.append(R("ONT", addr, sym, bal, None, None, ct))
+        # ORC20 토큰
+        orc20 = http_get(f"https://explorer.ont.io/v2/addresses/{addr}/orc20/balances")
+        for item in orc20.get("result", []):
+            bal = noexp(str(item.get("balance", "0")))
+            if bal in ("0", "0.0", ""):
+                continue
+            sym = item.get("asset_name") or "UNKNOWN"
+            ct = item.get("contract_hash")
+            results.append(R("ONT", addr, sym, bal, None, None, ct))
+    except Exception:
+        pass
+    if not results:
+        raise RuntimeError("ONT 잔고 조회 실패 — 노드 및 Explorer 응답 없음")
     return results
 # ═══════════════════════════════════════════════
 #  ARDR  — Jelurida 공개 노드 (키 불필요)
