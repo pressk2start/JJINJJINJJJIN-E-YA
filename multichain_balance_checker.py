@@ -702,69 +702,33 @@ def print_assets(result):
         tag = "[native]" if a["type"] == "native" else "[token] "
         print(f"  {tag}  {tk:>{mx}s}  {a['amount']}")
     print()
-def _save_results_xlsx(all_results, out_path=None):
-    """조회 결과 리스트를 .xlsx 파일로 저장"""
-    try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-    except ImportError:
-        print("  [오류] openpyxl 패키지 필요: pip install openpyxl")
-        return
+def _print_csv(all_results):
+    """조회 결과를 CSV 형식으로 콘솔에 출력 (복사→.csv저장→엑셀)"""
+    import csv, io
     if not all_results:
         return
-    if out_path is None:
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = f"잔고조회_{ts}.xlsx"
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "잔고 조회 결과"
-    header_fill = PatternFill("solid", fgColor="4472C4")
-    header_font = Font(bold=True, size=11, color="FFFFFF")
-    thin_border = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"))
-    headers = ["체인", "체인명", "주소", "타입", "티커", "잔고", "컨트랙트"]
-    for c, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = thin_border
-    row_num = 2
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["체인", "체인명", "주소", "타입", "티커", "잔고", "컨트랙트"])
     for result in all_results:
         if "error" in result and not result.get("assets"):
-            ws.cell(row=row_num, column=1, value=result.get("chain", ""))
-            ws.cell(row=row_num, column=3, value=result.get("address", ""))
-            ws.cell(row=row_num, column=6, value=f"[오류] {result['error']}")
-            for c in range(1, 8):
-                ws.cell(row=row_num, column=c).border = thin_border
-            row_num += 1
+            w.writerow([result.get("chain",""), "", result.get("address",""),
+                        "", "", f"[오류] {result['error']}", ""])
             continue
         chain = result["chain"]
         name = result.get("name", "")
         address = result["address"]
         for a in result.get("assets", []):
-            ws.cell(row=row_num, column=1, value=chain).border = thin_border
-            ws.cell(row=row_num, column=2, value=name).border = thin_border
-            ws.cell(row=row_num, column=3, value=address).border = thin_border
             atype = "native" if a["type"] == "native" else "token"
-            ws.cell(row=row_num, column=4, value=atype).border = thin_border
-            ws.cell(row=row_num, column=5, value=a["ticker"]).border = thin_border
-            amt_cell = ws.cell(row=row_num, column=6, value=a["amount"])
-            amt_cell.alignment = Alignment(horizontal="right")
-            amt_cell.border = thin_border
-            ws.cell(row=row_num, column=7, value=a.get("contract") or "").border = thin_border
-            row_num += 1
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 48
-    ws.column_dimensions["D"].width = 10
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 30
-    ws.column_dimensions["G"].width = 48
-    wb.save(out_path)
-    print(f"\n  >> 엑셀 저장 완료: {out_path}  ({row_num - 2}행)\n")
+            w.writerow([chain, name, address, atype,
+                        a["ticker"], a["amount"], a.get("contract") or ""])
+    print(f"\n{'='*60}")
+    print("  ↓↓↓ 아래 CSV를 전체 복사 → 메모장에 붙여넣기 → .csv로 저장 → 엑셀에서 열기")
+    print(f"{'='*60}")
+    print(buf.getvalue())
+    print(f"{'='*60}")
+    print("  ↑↑↑ 여기까지 복사")
+    print(f"{'='*60}\n")
 def _parse_pairs(lines):
     """텍스트 줄들에서 (chain, address) 쌍 추출, 중복 제거"""
     pairs = []
@@ -822,7 +786,7 @@ def batch_text():
         except Exception as e:
             print(f"  [오류] {e}\n")
             all_results.append({"chain": chain, "address": address, "error": str(e)})
-    _save_results_xlsx(all_results)
+    _print_csv(all_results)
     return all_results
 def batch_excel(filepath):
     """엑셀 파일 입력 → 조회 → 엑셀 파일 출력"""
@@ -862,7 +826,7 @@ def batch_excel(filepath):
             print(f"  [오류] {e}\n")
             all_results.append({"chain": chain, "address": address, "error": str(e), "assets": []})
     base = os.path.splitext(filepath)[0]
-    _save_results_xlsx(all_results, f"{base}_결과.xlsx")
+    _print_csv(all_results)
 def interactive():
     cl = list(CHAINS.keys())
     all_results = []
@@ -907,7 +871,7 @@ def interactive():
         if input("계속? (Enter=계속 / q=종료): ").strip().lower() in ("q", "quit", "exit"):
             break
     if all_results:
-        _save_results_xlsx(all_results)
+        _print_csv(all_results)
 if __name__ == "__main__":
     if len(sys.argv) == 3:
         try:
