@@ -11933,6 +11933,9 @@ def main():
     # 🔧 FIX: c1_cache 초기화 (첫 반복에서 box_scan_markets에 NameError 방지)
     c1_cache = {}
 
+    # 🔧 FIX: _scan_cycle_start 초기화 (첫 반복에서 레이턴시 기록 시 NameError 방지)
+    _scan_cycle_start = time.time()
+
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
