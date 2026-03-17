@@ -295,6 +295,215 @@ _PIPELINE_LAST_REPORT_TS = 0
 _PIPELINE_REPORT_INTERVAL = 600  # 10분
 _PIPELINE_START_TS = time.time()  # 누적 계측 시작 시각
 
+# ======================================================================
+# 📊 확장 파이프라인 계측 — delta, conversion, 코인별, 시간대별, 레이턴시
+# ======================================================================
+_PIPELINE_PREV_SNAPSHOT = {}          # 이전 리포트 시점 카운터 스냅샷 (delta 계산용)
+_PIPELINE_PREV_SNAPSHOT_TS = time.time()
+
+# 코인별 탈락 히트맵: {market: {reason: count}}
+_PIPELINE_COIN_HITS = {}
+_PIPELINE_COIN_HITS_LOCK = threading.Lock()
+
+# 전략별 통과 추적: {"거래량3배": count, "20봉_고점돌파": count}
+_PIPELINE_STRATEGY_PASS = {"거래량3배": 0, "20봉_고점돌파": 0}
+_PIPELINE_STRATEGY_LOCK = threading.Lock()
+
+# 시간대별 신호 분포 (0~23시)
+_PIPELINE_HOURLY_SIGNALS = [0] * 24    # raw_hit
+_PIPELINE_HOURLY_GATE_PASS = [0] * 24  # gate_pass
+_PIPELINE_HOURLY_SUCCESS = [0] * 24    # send_success
+_PIPELINE_HOURLY_LOCK = threading.Lock()
+
+# 스캔 사이클 레이턴시 추적
+_PIPELINE_SCAN_LATENCIES = deque(maxlen=200)  # 최근 200 사이클 (ms)
+_PIPELINE_SCAN_LAT_LOCK = threading.Lock()
+
+# gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
+_PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
+_PIPELINE_PASS_METRICS_LOCK = threading.Lock()
+
+# 근접 탈락 (near-miss) 추적: gate 직전 단계에서 탈락한 건
+_PIPELINE_NEAR_MISS = deque(maxlen=50)
+_PIPELINE_NEAR_MISS_LOCK = threading.Lock()
+
+
+def _pipeline_coin_hit(market, reason):
+    """코인별 탈락 사유 기록"""
+    coin = market.split("-")[-1] if "-" in market else market
+    with _PIPELINE_COIN_HITS_LOCK:
+        if coin not in _PIPELINE_COIN_HITS:
+            _PIPELINE_COIN_HITS[coin] = {}
+        _PIPELINE_COIN_HITS[coin][reason] = _PIPELINE_COIN_HITS[coin].get(reason, 0) + 1
+
+
+def _pipeline_strategy_pass(strategy_name):
+    """전략별 통과 카운트 기록"""
+    with _PIPELINE_STRATEGY_LOCK:
+        _PIPELINE_STRATEGY_PASS[strategy_name] = _PIPELINE_STRATEGY_PASS.get(strategy_name, 0) + 1
+
+
+def _pipeline_hourly_inc(stage):
+    """시간대별 신호 카운트 증가 (stage: 'raw_hit' | 'gate_pass' | 'success')"""
+    try:
+        h = datetime.now(timezone(timedelta(hours=9))).hour
+    except Exception:
+        h = 0
+    with _PIPELINE_HOURLY_LOCK:
+        if stage == "raw_hit":
+            _PIPELINE_HOURLY_SIGNALS[h] += 1
+        elif stage == "gate_pass":
+            _PIPELINE_HOURLY_GATE_PASS[h] += 1
+        elif stage == "success":
+            _PIPELINE_HOURLY_SUCCESS[h] += 1
+
+
+def _pipeline_record_scan_latency(elapsed_ms):
+    """스캔 사이클 소요시간 기록 (ms)"""
+    with _PIPELINE_SCAN_LAT_LOCK:
+        _PIPELINE_SCAN_LATENCIES.append(elapsed_ms)
+
+
+def _pipeline_record_pass_metrics(market, metrics_dict):
+    """gate 통과 시 핵심 지표 스냅샷 저장"""
+    with _PIPELINE_PASS_METRICS_LOCK:
+        _PIPELINE_PASS_METRICS.append({
+            "ts": time.time(),
+            "market": market,
+            **metrics_dict
+        })
+
+
+def _pipeline_record_near_miss(market, reason, metrics_str):
+    """gate 직전 근접 탈락 기록"""
+    with _PIPELINE_NEAR_MISS_LOCK:
+        _PIPELINE_NEAR_MISS.append({
+            "ts": time.time(),
+            "market": market,
+            "reason": reason,
+            "metrics": metrics_str
+        })
+
+
+# ======================================================================
+# 📈 값 분포 추적기 — "얼마나 아깝게 탈락했는지" 실측값 기록
+# ======================================================================
+_PIPELINE_VALUE_TRACKER_LOCK = threading.Lock()
+_PIPELINE_VALUE_TRACKER = {
+    # 각 키: {"values": deque(maxlen=500), "near_miss": count (기준 근처 탈락)}
+    "m3_pct":       {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "vr5":          {"values": deque(maxlen=500), "threshold": 3.0, "near_miss": 0},
+    "atr_pct":      {"values": deque(maxlen=500), "threshold": 0.7, "near_miss": 0},
+    "adx_15_vol3x": {"values": deque(maxlen=500), "threshold": 20.0, "near_miss": 0},
+    "adx_15_20bar": {"values": deque(maxlen=500), "threshold": 25.0, "near_miss": 0},
+    "20bar_gap_pct": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "gate_spread":  {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "gate_buy_ratio": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "gate_vol_krw": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "gate_accel":   {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+    "gate_flow_kps": {"values": deque(maxlen=500), "threshold": 0.0, "near_miss": 0},
+}
+
+# 시그널 발생 종목 기록 (최근 50개)
+_PIPELINE_SIGNAL_COINS = deque(maxlen=50)
+_PIPELINE_SIGNAL_COINS_LOCK = threading.Lock()
+
+
+def _pipeline_track_value(key, value, market=None, passed=False):
+    """지표 실측값 기록 + 근접 탈락(near-miss) 자동 판정
+
+    near-miss: 탈락했지만 기준값과 20% 이내 차이인 경우
+    """
+    if value is None:
+        return
+    with _PIPELINE_VALUE_TRACKER_LOCK:
+        tracker = _PIPELINE_VALUE_TRACKER.get(key)
+        if not tracker:
+            return
+        tracker["values"].append(value)
+        thr = tracker["threshold"]
+        if not passed and thr != 0:
+            # 기준 대비 20% 이내면 near-miss
+            margin = abs(thr) * 0.2
+            if abs(value - thr) <= margin:
+                tracker["near_miss"] += 1
+                # 근접 탈락 상세 기록
+                _pipeline_record_near_miss(
+                    market or "?", key,
+                    f"{key}={value:.4f} thr={thr:.4f} gap={value-thr:+.4f}")
+
+
+def _pipeline_record_signal_coin(market, strategy):
+    """시그널 발생 종목 기록"""
+    with _PIPELINE_SIGNAL_COINS_LOCK:
+        _PIPELINE_SIGNAL_COINS.append({
+            "ts": time.time(),
+            "market": market,
+            "strategy": strategy
+        })
+
+
+def _pipeline_value_summary():
+    """값 분포 통계 요약 반환 (리포트용)"""
+    result = {}
+    with _PIPELINE_VALUE_TRACKER_LOCK:
+        for key, tracker in _PIPELINE_VALUE_TRACKER.items():
+            vals = list(tracker["values"])
+            if not vals:
+                result[key] = {"max": 0, "avg": 0, "min": 0, "n": 0,
+                               "near_miss": tracker["near_miss"], "thr": tracker["threshold"]}
+                continue
+            result[key] = {
+                "max": max(vals),
+                "avg": sum(vals) / len(vals),
+                "min": min(vals),
+                "n": len(vals),
+                "near_miss": tracker["near_miss"],
+                "thr": tracker["threshold"],
+            }
+    return result
+
+
+def _pipeline_gauge_csv_write():
+    """pipeline_gauge.csv에 현재 값 분포 + 카운터 스냅샷 1줄 기록"""
+    gauge_path = os.path.join(os.getcwd(), "pipeline_gauge.csv")
+    try:
+        vs = _pipeline_value_summary()
+        with _PIPELINE_COUNTERS_LOCK:
+            c = dict(_PIPELINE_COUNTERS)
+        write_header = not os.path.exists(gauge_path)
+        with open(gauge_path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if write_header:
+                header = ["timestamp",
+                          "v4_called", "v4_raw_hit", "gate_pass", "send_success",
+                          "m3_avg", "m3_max", "m3_nm",
+                          "vr5_avg", "vr5_max", "vr5_nm",
+                          "atr_avg", "atr_max", "atr_nm",
+                          "adx_vol3x_avg", "adx_vol3x_max", "adx_vol3x_nm",
+                          "adx_20bar_avg", "adx_20bar_max", "adx_20bar_nm",
+                          "20bar_gap_avg", "20bar_gap_max", "20bar_gap_nm",
+                          "spread_avg", "buy_ratio_avg", "vol_krw_avg",
+                          "accel_avg", "flow_kps_avg"]
+                w.writerow(header)
+            def _g(k, f_name):
+                return round(vs.get(k, {}).get(f_name, 0), 6)
+            w.writerow([
+                datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S"),
+                c.get("v4_called", 0), c.get("v4_raw_hit", 0),
+                c.get("gate_pass", 0), c.get("send_success", 0),
+                _g("m3_pct", "avg"), _g("m3_pct", "max"), _g("m3_pct", "near_miss"),
+                _g("vr5", "avg"), _g("vr5", "max"), _g("vr5", "near_miss"),
+                _g("atr_pct", "avg"), _g("atr_pct", "max"), _g("atr_pct", "near_miss"),
+                _g("adx_15_vol3x", "avg"), _g("adx_15_vol3x", "max"), _g("adx_15_vol3x", "near_miss"),
+                _g("adx_15_20bar", "avg"), _g("adx_15_20bar", "max"), _g("adx_15_20bar", "near_miss"),
+                _g("20bar_gap_pct", "avg"), _g("20bar_gap_pct", "max"), _g("20bar_gap_pct", "near_miss"),
+                _g("gate_spread", "avg"), _g("gate_buy_ratio", "avg"), _g("gate_vol_krw", "avg"),
+                _g("gate_accel", "avg"), _g("gate_flow_kps", "avg"),
+            ])
+    except Exception as e:
+        print(f"[GAUGE_CSV_ERR] {e}")
+
 # 섀도우 모드 CSV 로깅 (raw signal별 한 줄)
 _SHADOW_LOG_PATH = os.path.join(os.getcwd(), "pipeline_shadow.csv")
 _SHADOW_LOG_LOCK = threading.Lock()
@@ -308,8 +517,8 @@ def _pipeline_inc(key, n=1):
 
 
 def _pipeline_report(force=False):
-    """10분마다 파이프라인 카운터 리포트 전송"""
-    global _PIPELINE_LAST_REPORT_TS
+    """10분마다 파이프라인 카운터 리포트 전송 (확장판: delta, 전환율, 값분포, 니어미스, Top-N)"""
+    global _PIPELINE_LAST_REPORT_TS, _PIPELINE_PREV_SNAPSHOT, _PIPELINE_PREV_SNAPSHOT_TS
     now = time.time()
     if not force and (now - _PIPELINE_LAST_REPORT_TS) < _PIPELINE_REPORT_INTERVAL:
         return
@@ -317,34 +526,171 @@ def _pipeline_report(force=False):
     with _PIPELINE_COUNTERS_LOCK:
         c = dict(_PIPELINE_COUNTERS)
     elapsed_min = (now - _PIPELINE_START_TS) / 60
+    delta_min = (now - _PIPELINE_PREV_SNAPSHOT_TS) / 60 if _PIPELINE_PREV_SNAPSHOT else elapsed_min
+
+    # delta 계산 (이번 구간 변화량)
+    prev = _PIPELINE_PREV_SNAPSHOT or {}
+    def d(key):
+        return c.get(key, 0) - prev.get(key, 0)
+    def pct(num, denom):
+        return f"{num/max(denom,1)*100:.1f}%" if denom else "N/A"
+
+    # 전환율 계산
+    _v4 = c["v4_called"]
+    _raw = c["v4_raw_hit"]
+    _gp = c["gate_pass"]
+    _succ = c["send_success"]
+    _det = c["detect_called"]
+
     lines = [
-        f"📊 <b>파이프라인 계측 (누적 {elapsed_min:.0f}분)</b> | {now_kst_str()}",
+        f"📊 <b>파이프라인 계측 (누적 {elapsed_min:.0f}분 | Δ{delta_min:.0f}분)</b>",
         f"━━━━━━━━━━━━━━━━",
         f"🔍 스캔: {c['scan_markets']}마켓 | c1성공: {c['c1_ok']}",
-        f"🔬 detect호출: {c['detect_called']}",
-        f"📡 v4호출: {c['v4_called']} | m3탈락: {c['v4_m3_fail']}",
+        f"🔬 detect: {_det}(Δ{d('detect_called')})",
+        f"📡 v4: {_v4}(Δ{d('v4_called')}) | m3X: {c['v4_m3_fail']}(Δ{d('v4_m3_fail')})",
         f"  거래량3배X: {c['v4_vol3x_fail']} | 20봉돌파X: {c['v4_20bar_fail']}",
-        f"🎯 v4_raw_hit: {c['v4_raw_hit']} | 시간차단: {c['v4_time_block']}",
+        f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c['v4_time_block']}",
+        f"━ 전략 세부 ━",
         f"  [거래량3배] 진입{c['vol3x_enter']} → VR5X:{c['vol3x_vr5_fail']} ATR%X:{c['vol3x_atr_fail']} "
         f"양봉X:{c['vol3x_bull_fail']} 방향X:{c['vol3x_dir_fail']} ✅{c['vol3x_pass']}",
         f"  [20봉돌파] 진입{c['20bar_enter']} → 길이X:{c['20bar_len_fail']} 가격X:{c['20bar_price_fail']} "
         f"MACDX:{c['20bar_macd_fail']} ADXX:{c['20bar_adx_fail']} ✅{c['20bar_pass']}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
-        f"  스테이블: {c['gate_fail_stablecoin']} | 보유중: {c['gate_fail_position']}",
-        f"  틱없음: {c['gate_fail_no_ticks']} | 스푸핑: {c['gate_fail_fake_flow']}",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
         f"  신선도: {c['gate_fail_fresh']} | 스프레드: {c['gate_fail_spread']}",
         f"  거래대금: {c['gate_fail_vol_min']} | 매수비: {c['gate_fail_buy_ratio']}",
         f"  가속: {c['gate_fail_accel']} | 거래속도: {c['gate_fail_early_flow']}",
-        f"✅ gate통과: {c['gate_pass']}",
+        f"✅ gate통과: {_gp}(Δ{d('gate_pass')})",
         f"━━━━━━━━━━━━━━━━",
         f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
         f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
         f"⛔ 연패중지: {c['suspend_block']}",
+        f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
         f"━━━━━━━━━━━━━━━━",
-        f"🚀 진입시도: {c['send_attempt']} | 성공: {c['send_success']}",
+        f"📈 <b>퍼널 전환율</b>",
+        f"  detect→v4: {pct(_v4, _det)} | v4→raw: {pct(_raw, _v4)}",
+        f"  raw→gate: {pct(_gp, _raw)} | gate→성공: {pct(_succ, _gp)}",
+        f"  <b>전체: detect→성공 {pct(_succ, _det)}</b>",
     ]
+
+    # 📈 값 분포 + 니어미스
+    vs = _pipeline_value_summary()
+    val_lines = ["━━━━━━━━━━━━━━━━", "📉 <b>값 분포 (max/avg) + 니어미스</b>"]
+    _m3 = vs.get("m3_pct", {})
+    if _m3.get("n", 0) > 0:
+        val_lines.append(f"  m3%: max={_m3['max']:.3f} avg={_m3['avg']:.3f} thr={_m3['thr']:.3f} 🎯NM={_m3['near_miss']}")
+    _vr5 = vs.get("vr5", {})
+    if _vr5.get("n", 0) > 0:
+        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.0 🎯NM={_vr5['near_miss']}")
+    _atr = vs.get("atr_pct", {})
+    if _atr.get("n", 0) > 0:
+        val_lines.append(f"  ATR%: max={_atr['max']:.2f} avg={_atr['avg']:.2f} thr=0.7 🎯NM={_atr['near_miss']}")
+    _adx_v = vs.get("adx_15_vol3x", {})
+    _adx_b = vs.get("adx_15_20bar", {})
+    if _adx_v.get("n", 0) > 0:
+        val_lines.append(f"  ADX(vol3x): max={_adx_v['max']:.1f} avg={_adx_v['avg']:.1f} thr=20 🎯NM={_adx_v['near_miss']}")
+    if _adx_b.get("n", 0) > 0:
+        val_lines.append(f"  ADX(20bar): max={_adx_b['max']:.1f} avg={_adx_b['avg']:.1f} thr=25 🎯NM={_adx_b['near_miss']}")
+    _gap = vs.get("20bar_gap_pct", {})
+    if _gap.get("n", 0) > 0:
+        val_lines.append(f"  20봉gap%: max={_gap['max']:.2f} avg={_gap['avg']:.2f} 🎯NM={_gap['near_miss']}")
+    lines.extend(val_lines)
+
+    # 📊 gate 지표 평균
+    _gs = vs.get("gate_spread", {})
+    _gb = vs.get("gate_buy_ratio", {})
+    _gv = vs.get("gate_vol_krw", {})
+    _ga = vs.get("gate_accel", {})
+    _gf = vs.get("gate_flow_kps", {})
+    if any(v.get("n", 0) > 0 for v in [_gs, _gb, _gv]):
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("📊 <b>gate 진입 지표 평균</b>")
+        if _gs.get("n"): lines.append(f"  스프레드: avg={_gs['avg']:.2f}% max={_gs['max']:.2f}%")
+        if _gb.get("n"): lines.append(f"  매수비: avg={_gb['avg']:.0%} min={_gb['min']:.0%}")
+        if _gv.get("n"): lines.append(f"  거래대금: avg={_gv['avg']:.0f}M max={_gv['max']:.0f}M")
+        if _ga.get("n"): lines.append(f"  가속: avg={_ga['avg']:.1f}x max={_ga['max']:.1f}x")
+        if _gf.get("n"): lines.append(f"  거래속도: avg={_gf['avg']:.0f}K/s max={_gf['max']:.0f}K/s")
+
+    # 🏆 전략별 통과 비율
+    with _PIPELINE_STRATEGY_LOCK:
+        strat = dict(_PIPELINE_STRATEGY_PASS)
+    strat_total = sum(strat.values())
+    if strat_total > 0:
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("🏆 <b>전략별 시그널</b>")
+        for sname, scount in sorted(strat.items(), key=lambda x: -x[1]):
+            lines.append(f"  {sname}: {scount} ({scount/strat_total*100:.0f}%)")
+
+    # 🪙 Top-5 탈락 코인
+    with _PIPELINE_COIN_HITS_LOCK:
+        coin_totals = {coin: sum(reasons.values()) for coin, reasons in _PIPELINE_COIN_HITS.items()}
+    if coin_totals:
+        top_coins = sorted(coin_totals.items(), key=lambda x: -x[1])[:5]
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("🪙 <b>Top-5 탈락 코인</b>")
+        for coin, cnt in top_coins:
+            reasons = _PIPELINE_COIN_HITS.get(coin, {})
+            top_reason = max(reasons, key=reasons.get) if reasons else "?"
+            lines.append(f"  {coin}: {cnt}회 (주사유: {top_reason})")
+
+    # 💡 최근 시그널 종목
+    with _PIPELINE_SIGNAL_COINS_LOCK:
+        recent_signals = list(_PIPELINE_SIGNAL_COINS)
+    if recent_signals:
+        # 최근 5개
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("💡 <b>최근 시그널 종목</b>")
+        for sig in recent_signals[-5:]:
+            _sig_market = sig["market"].split("-")[-1] if "-" in sig["market"] else sig["market"]
+            lines.append(f"  {_sig_market} [{sig['strategy']}]")
+
+    # 🎯 가장 아까운 근접 탈락 (최근 3개)
+    with _PIPELINE_NEAR_MISS_LOCK:
+        nm_list = list(_PIPELINE_NEAR_MISS)
+    if nm_list:
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("🎯 <b>근접 탈락 (아깝게 놓친 것)</b>")
+        for nm in nm_list[-3:]:
+            _nm_market = nm["market"].split("-")[-1] if "-" in nm["market"] else nm["market"]
+            lines.append(f"  {_nm_market}: {nm['metrics']}")
+
+    # ⏱️ 스캔 레이턴시
+    with _PIPELINE_SCAN_LAT_LOCK:
+        lat_list = list(_PIPELINE_SCAN_LATENCIES)
+    if lat_list:
+        lat_avg = sum(lat_list) / len(lat_list)
+        lat_max = max(lat_list)
+        lat_p95 = sorted(lat_list)[int(len(lat_list) * 0.95)] if len(lat_list) >= 5 else lat_max
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append(f"⏱️ 스캔 레이턴시: avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
+
+    # 🕐 시간대별 신호 (non-zero만)
+    with _PIPELINE_HOURLY_LOCK:
+        h_sig = list(_PIPELINE_HOURLY_SIGNALS)
+        h_gp = list(_PIPELINE_HOURLY_GATE_PASS)
+        h_succ = list(_PIPELINE_HOURLY_SUCCESS)
+    _hourly_parts = []
+    for h in range(24):
+        if h_sig[h] > 0 or h_gp[h] > 0 or h_succ[h] > 0:
+            _hourly_parts.append(f"{h}시:{h_sig[h]}/{h_gp[h]}/{h_succ[h]}")
+    if _hourly_parts:
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("🕐 <b>시간대별 (raw/gate/성공)</b>")
+        # 6개씩 한 줄
+        for i in range(0, len(_hourly_parts), 6):
+            lines.append("  " + " | ".join(_hourly_parts[i:i+6]))
+
+    # 스냅샷 갱신 (다음 리포트의 delta 계산용)
+    _PIPELINE_PREV_SNAPSHOT = dict(c)
+    _PIPELINE_PREV_SNAPSHOT_TS = now
+
+    # 📊 pipeline_gauge.csv 자동 기록
+    try:
+        _pipeline_gauge_csv_write()
+    except Exception:
+        pass
+
     msg = "\n".join(lines)
     print(msg)
     tg_send(msg)
@@ -6513,10 +6859,12 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
+    _pipeline_track_value("vr5", vr5, None, passed=(vr5 > 3.0))
     if vr5 <= 3.0:
         _pipeline_inc("vol3x_vr5_fail")
         return None
     atr_p = _v4_atr_pct(c1, 14)
+    _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.7))
     if atr_p <= 0.7:
         _pipeline_inc("vol3x_atr_fail")
         return None
@@ -6538,6 +6886,7 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         lows_15 = [c["low_price"] for c in c15]
         closes_15 = [c["trade_price"] for c in c15]
         adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+        _pipeline_track_value("adx_15_vol3x", adx_15, None, passed=(adx_15 is not None and adx_15 > 20))
         if adx_15 is not None and adx_15 > 20:
             adx_ok = True
     if not macd_ok and not adx_ok:
@@ -6597,6 +6946,9 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     # 1m 현재 종가 > 직전 20봉 최고가
     cur_close = c1[-1]["trade_price"]
     high_20 = max(c["high_price"] for c in c1[-21:-1])
+    # 📈 20봉 gap% 기록 (종가-고점 괴리 → 양수=돌파, 음수=미달)
+    _20bar_gap = ((cur_close / max(high_20, 1)) - 1.0) * 100
+    _pipeline_track_value("20bar_gap_pct", _20bar_gap, None, passed=(cur_close > high_20))
     if cur_close <= high_20:
         _pipeline_inc("20bar_price_fail")
         return None
@@ -6620,6 +6972,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
+    _pipeline_track_value("adx_15_20bar", adx_15, None, passed=(adx_15 is not None and adx_15 > 25))
     if adx_15 is None or adx_15 <= 25:
         _pipeline_inc("20bar_adx_fail")
         return None
@@ -6676,6 +7029,11 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
 
     # === 사전필터: 60m 3봉 모멘텀 상위33% ===
     m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.33)
+    # 📈 m3 실측값 기록 (통과/탈락 모두)
+    _pipeline_track_value("m3_pct", m3_val * 100 if m3_val else None, market, passed=m3_ok)
+    if m3_thr != 0:
+        with _PIPELINE_VALUE_TRACKER_LOCK:
+            _PIPELINE_VALUE_TRACKER["m3_pct"]["threshold"] = m3_thr * 100
     if not m3_ok:
         _pipeline_inc("v4_m3_fail")
         _shadow_log_write(now_kst_str(), market, "ALL", 0, "m3_fail",
@@ -6687,6 +7045,9 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     sig = _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
         _pipeline_inc("v4_raw_hit")
+        _pipeline_hourly_inc("raw_hit")
+        _pipeline_strategy_pass("거래량3배")
+        _pipeline_record_signal_coin(market, "거래량3배")
         sig["filters_hit"].append(m3_info)
         _shadow_log_write(now_kst_str(), market, "거래량3배", 1, "", 1, m3_info)
         return sig
@@ -6696,6 +7057,9 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     sig = _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=m3_info)
     if sig:
         _pipeline_inc("v4_raw_hit")
+        _pipeline_hourly_inc("raw_hit")
+        _pipeline_strategy_pass("20봉_고점돌파")
+        _pipeline_record_signal_coin(market, "20봉_고점돌파")
         sig["filters_hit"].append(m3_info)
         _shadow_log_write(now_kst_str(), market, "20봉_고점돌파", 1, "", 1, m3_info)
         return sig
@@ -8786,6 +9150,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if not _v4_signal:
         cut("NO_V4_SIGNAL", f"{m} v4 진입 조건 미충족")
         _pipeline_inc("gate_fail_no_v4")
+        _pipeline_coin_hit(m, "no_v4")
         return None
 
     _15m_signal = _v4_signal["signal_tag"]
@@ -8813,10 +9178,18 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _metrics = (f"점화={ignition_score} surge={vol_surge:.2f}x 매수비={_gate_buy_ratio:.0%} "
                 f"스프레드={spread:.2f}% 가속={accel:.1f}x")
 
+    # 📈 gate 진입 지표 값 기록 (통과/탈락 무관하게 모든 v4 시그널에 대해)
+    _pipeline_track_value("gate_spread", spread, m, passed=True)  # 일단 기록 (탈락 시 아래서 재기록)
+    _pipeline_track_value("gate_buy_ratio", _gate_buy_ratio, m, passed=True)
+    _pipeline_track_value("gate_vol_krw", current_volume / 1e6, m, passed=True)
+    _pipeline_track_value("gate_accel", accel, m, passed=True)
+    _pipeline_track_value("gate_flow_kps", t15.get("krw_per_sec", 0) / 1000, m, passed=True)
+
     # 1) 틱 신선도
     if not fresh_ok:
         cut("FRESH", f"{m} 틱신선도부족 {fresh_age:.1f}초>{fresh_max_age:.1f}초 | {_metrics}", near_miss=False)
         _pipeline_inc("gate_fail_fresh")
+        _pipeline_coin_hit(m, "fresh")
         return None
 
     # 2) 스프레드 (가격대별 동적 상한)
@@ -8829,35 +9202,46 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if spread > eff_spread_max:
         cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {_metrics}", near_miss=False)
         _pipeline_inc("gate_fail_spread")
+        _pipeline_coin_hit(m, "spread")
+        _pipeline_track_value("gate_spread", spread, m, passed=False)
         return None
 
     # 3) 최소 거래대금
     if current_volume < GATE_VOL_MIN and not mega:
         cut("VOL_MIN", f"{m} 거래대금부족 {current_volume/1e6:.0f}M<{GATE_VOL_MIN/1e6:.0f}M | {_metrics}", near_miss=False)
         _pipeline_inc("gate_fail_vol_min")
+        _pipeline_coin_hit(m, "vol_min")
+        _pipeline_track_value("gate_vol_krw", current_volume / 1e6, m, passed=False)
         return None
 
     # 4) 매수비 100% 스푸핑
     if abs(_gate_buy_ratio - 1.0) < 1e-6:
         cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
+        _pipeline_coin_hit(m, "spoof")
         return None
 
     # 4-1) 매수비 하한 — 🔧 데드코드→실구현 (0.50, 공포장 대응)
     if _gate_buy_ratio < GATE_BUY_RATIO_MIN:
         cut("BUY_RATIO", f"{m} 매수비부족 {_gate_buy_ratio:.2f}<{GATE_BUY_RATIO_MIN} | {_metrics}", near_miss=True)
         _pipeline_inc("gate_fail_buy_ratio")
+        _pipeline_coin_hit(m, "buy_ratio")
+        _pipeline_track_value("gate_buy_ratio", _gate_buy_ratio, m, passed=False)
         return None
 
     # 5) 가속도 과다
     if accel > GATE_ACCEL_MAX:
         cut("ACCEL_MAX", f"{m} 가속과다 {accel:.1f}x>{GATE_ACCEL_MAX}x | {_metrics}", near_miss=False)
         _pipeline_inc("gate_fail_accel")
+        _pipeline_coin_hit(m, "accel")
+        _pipeline_track_value("gate_accel", accel, m, passed=False)
         return None
 
     # 5-1) 초기 거래속도 하한 — 🔧 데드코드→실구현 (15K원/초)
     if t15.get("krw_per_sec", 0) < EARLY_FLOW_MIN_KRWPSEC:
         cut("EARLY_FLOW", f"{m} 거래속도부족 {t15.get('krw_per_sec',0)/1000:.0f}K<{EARLY_FLOW_MIN_KRWPSEC/1000:.0f}K | {_metrics}", near_miss=True)
         _pipeline_inc("gate_fail_early_flow")
+        _pipeline_coin_hit(m, "early_flow")
+        _pipeline_track_value("gate_flow_kps", t15.get("krw_per_sec", 0) / 1000, m, passed=False)
         return None
 
     # 🔧 WF데이터: 기존 캔들 바디/윗꼬리/WEAK_SIGNAL 필터 비활성화
@@ -8927,6 +9311,17 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     # 🔧 WF데이터: spike tracker 갱신 비활성화 (1파/2파 비활성화됨)
 
     _pipeline_inc("gate_pass")
+    _pipeline_hourly_inc("gate_pass")
+    _pipeline_record_pass_metrics(m, {
+        "signal_tag": signal_tag,
+        "spread": spread,
+        "buy_ratio": _gate_buy_ratio,
+        "vol_surge": vol_surge,
+        "accel": accel,
+        "ignition": ignition_score,
+        "vwap_gap": vwap_gap,
+        "flow_kps": t15.get("krw_per_sec", 0) / 1000,
+    })
     _shadow_log_write(now_kst_str(), m, signal_tag, 1, "", 0,
                       f"gate_pass|mode={_entry_mode}|vwap_gap={vwap_gap:.2f}")
 
@@ -11184,6 +11579,10 @@ def main():
             # 🔧 실패 메시지 큐 재전송
             tg_flush_failed()
 
+            # 📊 스캔 사이클 레이턴시 기록
+            _scan_cycle_elapsed = (time.time() - _scan_cycle_start) * 1000
+            _pipeline_record_scan_latency(_scan_cycle_elapsed)
+
             # 📊 파이프라인 계측 리포트 (10분마다 텔레그램, 1분마다 콘솔)
             _pipeline_report()
             _pipeline_mini_report()
@@ -11687,6 +12086,8 @@ def main():
             shard = list(dict.fromkeys(shard))
             _cursor = (end) % len(mkts_all)
 
+            _scan_cycle_start = time.time()
+
             obc = fetch_orderbook_cache(shard)
 
             _pipeline_inc("scan_markets", len(shard))
@@ -12013,6 +12414,7 @@ def main():
                         _entry_opened = OPEN_POSITIONS.get(m, {}).get("state") == "open"
                     if _entry_opened:
                         _pipeline_inc("send_success")
+                        _pipeline_hourly_inc("success")
 
                     # 🔧 FIX: 별도 스레드에서 모니터링 실행 (메인 스캔 루프 블로킹 방지)
                     # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
