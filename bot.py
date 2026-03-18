@@ -7391,6 +7391,9 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
                         _macd_str, _adx_str, f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
+        "indicators": {"vr5": round(vr5, 2), "atr_pct": round(atr_p, 4),
+                        "adx_15": round(adx_15, 2) if adx_ok and adx_15 is not None else 0,
+                        "macd_5m": round(macd_5m, 6) if macd_ok and macd_5m is not None else 0},
     }
 
 
@@ -7481,6 +7484,8 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"].copy(),
+        "indicators": {"gap_pct": round(_20bar_gap, 4), "adx_15": round(adx_15, 2),
+                        "macd_5m": round(macd_5m, 6)},
     }
 
 
