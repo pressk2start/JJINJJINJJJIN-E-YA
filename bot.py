@@ -8347,7 +8347,7 @@ def _v4_shadow_report_lines():
             # 🔬 승/패 진입 지표 평균 비교
             win_ind = s.get("win_indicators", [])
             loss_ind = s.get("loss_indicators", [])
-            if len(win_ind) >= 3 and len(loss_ind) >= 3:
+            if win_ind or loss_ind:
                 ind_parts = []
                 # 모든 지표 키 수집
                 all_keys = set()
@@ -8358,10 +8358,10 @@ def _v4_shadow_report_lines():
                 for ik in sorted(all_keys):
                     w_vals = [d[ik] for d in win_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
                     l_vals = [d[ik] for d in loss_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
-                    if w_vals and l_vals:
-                        w_avg = sum(w_vals) / len(w_vals)
-                        l_avg = sum(l_vals) / len(l_vals)
-                        ind_parts.append(f"{ik}:W{w_avg:.2f}/L{l_avg:.2f}")
+                    if w_vals or l_vals:
+                        w_str = f"W{sum(w_vals)/len(w_vals):.2f}({len(w_vals)})" if w_vals else "W:-"
+                        l_str = f"L{sum(l_vals)/len(l_vals):.2f}({len(l_vals)})" if l_vals else "L:-"
+                        ind_parts.append(f"{ik}:{w_str}/{l_str}")
                 if ind_parts:
                     lines.append(f"    📊 {' | '.join(ind_parts)}")
     # 현재 추적 중인 가상포지션 수
