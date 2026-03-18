@@ -7391,6 +7391,9 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
                         _macd_str, _adx_str, f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
+        "indicators": {"vr5": round(vr5, 2), "atr_pct": round(atr_p, 4),
+                        "adx_15": round(adx_15, 2) if adx_ok and adx_15 is not None else 0,
+                        "macd_5m": round(macd_5m, 6) if macd_ok and macd_5m is not None else 0},
     }
 
 
@@ -7413,12 +7416,16 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     # 종가 > 직전봉 시가 (회복)
     if cur_15["trade_price"] <= prev_15["opening_price"]:
         return None
+    # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
+    prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
+    recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
     return {
         "signal_tag": "15m_눌림반전",
         "entry_mode": "confirm",
         "logic_group": "B",
         "filters_hit": ["15m눌림+반전", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"].copy(),
+        "indicators": {"recovery_ratio": round(recovery, 2)},
     }
 
 
@@ -7477,6 +7484,8 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"].copy(),
+        "indicators": {"gap_pct": round(_20bar_gap, 4), "adx_15": round(adx_15, 2),
+                        "macd_5m": round(macd_5m, 6)},
     }
 
 
@@ -7521,6 +7530,8 @@ def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"15mEMA={ema5_15:.0f}>{ema10_15:.0f}>{ema20_15:.0f}",
                         f"15mMACD={macd_15:.4f}>{sig_15:.4f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
+        "indicators": {"ema5_15": round(ema5_15, 2), "ema10_15": round(ema10_15, 2),
+                        "ema20_15": round(ema20_15, 2), "macd_15": round(macd_15, 6)},
     }
 
 
@@ -7561,6 +7572,9 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"VR5={vr5:.1f}(니어미스)", f"ATR%={atr_p:.2f}",
                         f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량완화"].copy(),
+        "indicators": {"vr5": round(vr5, 2), "atr_pct": round(atr_p, 4),
+                        "adx_15": round(adx_15, 2) if adx_ok and adx_15 is not None else 0,
+                        "macd_5m": round(macd_5m, 6) if macd_ok and macd_5m is not None else 0},
     }
 
 
@@ -7618,6 +7632,8 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"60mRSI={rsi_60m:.1f}",
                         f"ATR%={atr_p:.2f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"].copy(),
+        "indicators": {"rsi_5m": round(rsi_5m, 2), "rsi_60m": round(rsi_60m, 2),
+                        "atr_pct": round(atr_p, 4)},
     }
 
 
@@ -7653,6 +7669,10 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
     if not _v4_is_bullish(c1[-1]):
         _pipeline_inc("60m_engulf_1m_fail")
         return None
+    # 감싸기 비율: 현재봉 몸통 / 직전봉 몸통
+    prev_body = max(prev_body_high - prev_body_low, 1)
+    cur_body = cur_body_high - cur_body_low
+    engulf_ratio = round(cur_body / prev_body, 2) if prev_body > 0 else 0
     _pipeline_inc("60m_engulf_pass")
     return {
         "signal_tag": "60m_감싸기_돌파",
@@ -7660,6 +7680,7 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "C",
         "filters_hit": ["60m감싸기", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"].copy(),
+        "indicators": {"engulf_ratio": engulf_ratio},
     }
 
 
@@ -7698,6 +7719,7 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "C",
         "filters_hit": [f"15mVR5={vr5_15:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"].copy(),
+        "indicators": {"vr5_15m": round(vr5_15, 2)},
     }
 
 
@@ -7750,6 +7772,9 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"].copy(),
+        "indicators": {"ema5_60": round(ema5, 2), "ema10_60": round(ema10, 2),
+                        "ema20_60": round(ema20, 2), "macd_15": round(macd_15, 6),
+                        "atr_pct": round(atr_p, 4)},
     }
 
 
@@ -7787,6 +7812,7 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "D",
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
+        "indicators": {"rsi_5m": round(rsi_5m, 2)},
     }
 
 
@@ -7842,6 +7868,8 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
             f"VR5={vr5:.1f}", f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"].copy(),
+        "indicators": {"adx_15": round(adx_15, 2), "adx_60": round(adx_60, 2),
+                        "macd_5m": round(macd_5m, 6), "vr5": round(vr5, 2)},
     }
 
 
@@ -7979,6 +8007,23 @@ def _load_shadow_stats():
         if os.path.exists(SHADOW_STATS_PATH):
             with open(SHADOW_STATS_PATH, "r", encoding="utf-8") as f:
                 _SHADOW_PERF_STATS = json.load(f)
+            # 🔧 마이그레이션: 누락 필드 보완 (이전 버전 호환)
+            for key, s in _SHADOW_PERF_STATS.items():
+                if "mfes" not in s:
+                    s["mfes"] = []
+                if "hold_secs" not in s:
+                    s["hold_secs"] = []
+                if "coins" not in s:
+                    s["coins"] = []
+                if "exit_reasons" not in s:
+                    s["exit_reasons"] = {}
+                if "pnls" not in s:
+                    s["pnls"] = []
+                # 승/패 분리 지표 통계
+                if "win_indicators" not in s:
+                    s["win_indicators"] = []
+                if "loss_indicators" not in s:
+                    s["loss_indicators"] = []
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -7999,8 +8044,8 @@ def _save_shadow_stats():
         print(f"[SHADOW_STATS] 저장 실패: {e}")
 
 
-def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec):
-    """섀도우 가상매매 결과를 누적 통계에 기록"""
+def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec, indicators=None):
+    """섀도우 가상매매 결과를 누적 통계에 기록 (진입 지표값 승/패 분리 저장)"""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -8012,8 +8057,14 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "total_pnl": 0.0, "pnls": [], "mfes": [],
                 "exit_reasons": {}, "hold_secs": [],
                 "coins": [],
+                "win_indicators": [], "loss_indicators": [],
             }
         s = _SHADOW_PERF_STATS[key]
+        # 마이그레이션: 기존 데이터에 승패 지표 필드 없을 경우
+        if "win_indicators" not in s:
+            s["win_indicators"] = []
+        if "loss_indicators" not in s:
+            s["loss_indicators"] = []
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8038,6 +8089,15 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
+        # 🔬 진입 지표값 승/패 분리 저장 (최근 200건씩)
+        if indicators:
+            target = s["win_indicators"] if is_win else s["loss_indicators"]
+            target.append(indicators)
+            if len(target) > 200:
+                if is_win:
+                    s["win_indicators"] = target[-200:]
+                else:
+                    s["loss_indicators"] = target[-200:]
         _SHADOW_TRADE_COUNT += 1
 
     if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
@@ -8145,15 +8205,15 @@ def _shadow_evaluate_positions():
                 # 손절 시 PnL을 SL값으로 클램프
                 if reason == "손절SL":
                     pnl = max(pnl, -vp["exit_params"].get("sl_pct", 0.007))
-                closed_results.append((vp, pnl, mfe, reason, hold))
+                closed_results.append((vp, pnl, mfe, reason, hold, vp.get("indicators", {})))
             else:
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
 
     # 결과 기록
-    for vp, pnl, mfe, reason, hold in closed_results:
+    for vp, pnl, mfe, reason, hold, indicators in closed_results:
         _shadow_record_result(vp["route"], vp["strat"], vp["market"],
-                              pnl, mfe, reason, hold)
+                              pnl, mfe, reason, hold, indicators)
 
     # 중복 방지 캐시 정리
     with _SHADOW_LOCK:
@@ -8201,6 +8261,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "trail_stop": 0.0,
                     "exit_params": ep,
                     "bars": 0,
+                    "indicators": sig.get("indicators", {}),
                 })
     return results
 
@@ -8249,6 +8310,26 @@ def _v4_shadow_report_lines():
                 top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3]
                 reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
                 lines.append(f"    └ {reason_str}")
+            # 🔬 승/패 진입 지표 평균 비교
+            win_ind = s.get("win_indicators", [])
+            loss_ind = s.get("loss_indicators", [])
+            if len(win_ind) >= 3 and len(loss_ind) >= 3:
+                ind_parts = []
+                # 모든 지표 키 수집
+                all_keys = set()
+                for d in win_ind[-50:]:
+                    all_keys.update(d.keys())
+                for d in loss_ind[-50:]:
+                    all_keys.update(d.keys())
+                for ik in sorted(all_keys):
+                    w_vals = [d[ik] for d in win_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
+                    l_vals = [d[ik] for d in loss_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
+                    if w_vals and l_vals:
+                        w_avg = sum(w_vals) / len(w_vals)
+                        l_avg = sum(l_vals) / len(l_vals)
+                        ind_parts.append(f"{ik}:W{w_avg:.2f}/L{l_avg:.2f}")
+                if ind_parts:
+                    lines.append(f"    📊 {' | '.join(ind_parts)}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
