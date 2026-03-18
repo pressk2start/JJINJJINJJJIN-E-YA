@@ -8318,10 +8318,10 @@ def _v4_shadow_report_lines():
             coins = len(s.get("coins", []))
             # MFE 평균
             mfes = s.get("mfes", [])
-            avg_mfe = statistics.mean(mfes) * 100 if mfes else 0
+            avg_mfe = statistics.mean(mfes) * 100 if mfes else None
             # 평균 보유시간
             holds = s.get("hold_secs", [])
-            avg_hold = statistics.mean(holds) if holds else 0
+            avg_hold = statistics.mean(holds) if holds else None
             # 승률 기반 이모지
             if wr >= 55:
                 tag = "🟢"
@@ -8331,10 +8331,12 @@ def _v4_shadow_report_lines():
                 tag = "🔴"
             route = s.get("route", "?")
             strat = s.get("strat", "?")
+            mfe_str = f"MFE{avg_mfe:+.2f}%" if avg_mfe is not None else "MFE:N/A"
+            hold_str = f"평균{avg_hold:.0f}초" if avg_hold is not None else "평균:N/A"
             lines.append(
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
-                f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%"
-                f" 평균{avg_hold:.0f}초 ({coins}코인)"
+                f" PnL{avg_pnl:+.2f}% {mfe_str}"
+                f" {hold_str} ({coins}코인)"
             )
             # 청산 사유 분포 (상위 3개)
             reasons = s.get("exit_reasons", {})
