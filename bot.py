@@ -8051,11 +8051,17 @@ def _load_shadow_stats():
                     s["exit_reasons"] = {}
                 if "pnls" not in s:
                     s["pnls"] = []
-                # 승/패 분리 지표 통계
-                if "win_indicators" not in s:
-                    s["win_indicators"] = []
-                if "loss_indicators" not in s:
-                    s["loss_indicators"] = []
+                # 마이그레이션: 불필요 필드 정리
+                for _old_key in ("avg_mfe", "avg_hold", "mfe_n",
+                                 "win_avg_mfe", "win_avg_hold", "win_avg_pnl",
+                                 "loss_avg_mfe", "loss_avg_hold", "loss_avg_pnl"):
+                    s.pop(_old_key, None)
+                if "win_ind_avg" not in s:
+                    old_win = s.pop("win_indicators", [])
+                    s["win_ind_avg"], s["win_ind_cnt"] = _calc_ind_avg(old_win)
+                if "loss_ind_avg" not in s:
+                    old_loss = s.pop("loss_indicators", [])
+                    s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8076,8 +8082,23 @@ def _save_shadow_stats():
         print(f"[SHADOW_STATS] 저장 실패: {e}")
 
 
+def _calc_ind_avg(ind_list):
+    """indicators 리스트 → (키별 평균 dict, 키별 건수 dict)"""
+    if not ind_list:
+        return {}, {}
+    totals = {}
+    counts = {}
+    for d in ind_list:
+        for k, v in d.items():
+            if isinstance(v, (int, float)):
+                totals[k] = totals.get(k, 0.0) + v
+                counts[k] = counts.get(k, 0) + 1
+    avg = {k: round(totals[k] / counts[k], 6) for k in totals}
+    return avg, counts
+
+
 def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec, indicators=None):
-    """섀도우 가상매매 결과를 누적 통계에 기록 (진입 지표값 승/패 분리 저장)"""
+    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 업데이트)"""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -8089,14 +8110,23 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "total_pnl": 0.0, "pnls": [], "mfes": [],
                 "exit_reasons": {}, "hold_secs": [],
                 "coins": [],
-                "win_indicators": [], "loss_indicators": [],
+                "win_ind_avg": {}, "win_ind_cnt": {},
+                "loss_ind_avg": {}, "loss_ind_cnt": {},
             }
         s = _SHADOW_PERF_STATS[key]
-        # 마이그레이션: 기존 데이터에 승패 지표 필드 없을 경우
-        if "win_indicators" not in s:
-            s["win_indicators"] = []
-        if "loss_indicators" not in s:
-            s["loss_indicators"] = []
+        # 마이그레이션: 불필요 필드 정리 + 지표 평균 필드
+        for _old_key in ("avg_mfe", "avg_hold", "mfe_n",
+                         "win_avg_mfe", "win_avg_hold", "win_avg_pnl",
+                         "loss_avg_mfe", "loss_avg_hold", "loss_avg_pnl"):
+            s.pop(_old_key, None)
+        if "win_ind_avg" not in s:
+            old_win = s.pop("win_indicators", [])
+            s["win_ind_avg"] = _calc_ind_avg(old_win)
+            s["win_ind_n"] = len(old_win)
+        if "loss_ind_avg" not in s:
+            old_loss = s.pop("loss_indicators", [])
+            s["loss_ind_avg"] = _calc_ind_avg(old_loss)
+            s["loss_ind_n"] = len(old_loss)
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8121,15 +8151,24 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
-        # 🔬 진입 지표값 승/패 분리 저장 (최근 200건씩)
+        # 🔬 진입 지표값 승/패 점진적 평균 업데이트 (키별 건수 추적)
         if indicators:
-            target = s["win_indicators"] if is_win else s["loss_indicators"]
-            target.append(indicators)
-            if len(target) > 200:
-                if is_win:
-                    s["win_indicators"] = target[-200:]
-                else:
-                    s["loss_indicators"] = target[-200:]
+            if is_win:
+                avg_key, cnt_key = "win_ind_avg", "win_ind_cnt"
+            else:
+                avg_key, cnt_key = "loss_ind_avg", "loss_ind_cnt"
+            avg = s.get(avg_key, {})
+            cnt = s.get(cnt_key, {})
+            for k, v in indicators.items():
+                if isinstance(v, (int, float)):
+                    cnt[k] = cnt.get(k, 0) + 1
+                    cn = cnt[k]
+                    if cn == 1:
+                        avg[k] = round(v, 6)
+                    else:
+                        avg[k] = round(avg[k] * (cn - 1) / cn + v / cn, 6)
+            s[avg_key] = avg
+            s[cnt_key] = cnt
         _SHADOW_TRADE_COUNT += 1
 
     if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
@@ -8316,12 +8355,6 @@ def _v4_shadow_report_lines():
             wr = wins / n * 100
             avg_pnl = s.get("total_pnl", 0) / n * 100
             coins = len(s.get("coins", []))
-            # MFE 평균
-            mfes = s.get("mfes", [])
-            avg_mfe = statistics.mean(mfes) * 100 if mfes else None
-            # 평균 보유시간
-            holds = s.get("hold_secs", [])
-            avg_hold = statistics.mean(holds) if holds else None
             # 승률 기반 이모지
             if wr >= 55:
                 tag = "🟢"
@@ -8331,12 +8364,9 @@ def _v4_shadow_report_lines():
                 tag = "🔴"
             route = s.get("route", "?")
             strat = s.get("strat", "?")
-            mfe_str = f"MFE{avg_mfe:+.2f}%" if avg_mfe is not None else "MFE:N/A"
-            hold_str = f"평균{avg_hold:.0f}초" if avg_hold is not None else "평균:N/A"
             lines.append(
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
-                f" PnL{avg_pnl:+.2f}% {mfe_str}"
-                f" {hold_str} ({coins}코인)"
+                f" PnL{avg_pnl:+.2f}% ({coins}코인)"
             )
             # 청산 사유 분포 (상위 3개)
             reasons = s.get("exit_reasons", {})
@@ -8344,26 +8374,17 @@ def _v4_shadow_report_lines():
                 top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3]
                 reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
                 lines.append(f"    └ {reason_str}")
-            # 🔬 승/패 진입 지표 평균 비교
-            win_ind = s.get("win_indicators", [])
-            loss_ind = s.get("loss_indicators", [])
-            if len(win_ind) >= 3 and len(loss_ind) >= 3:
-                ind_parts = []
-                # 모든 지표 키 수집
-                all_keys = set()
-                for d in win_ind[-50:]:
-                    all_keys.update(d.keys())
-                for d in loss_ind[-50:]:
-                    all_keys.update(d.keys())
+            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
+            w_ind = s.get("win_ind_avg", {})
+            w_cnt = s.get("win_ind_cnt", {})
+            l_ind = s.get("loss_ind_avg", {})
+            l_cnt = s.get("loss_ind_cnt", {})
+            if w_ind or l_ind:
+                all_keys = set(w_ind.keys()) | set(l_ind.keys())
                 for ik in sorted(all_keys):
-                    w_vals = [d[ik] for d in win_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
-                    l_vals = [d[ik] for d in loss_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
-                    if w_vals and l_vals:
-                        w_avg = sum(w_vals) / len(w_vals)
-                        l_avg = sum(l_vals) / len(l_vals)
-                        ind_parts.append(f"{ik}:W{w_avg:.2f}/L{l_avg:.2f}")
-                if ind_parts:
-                    lines.append(f"    📊 {' | '.join(ind_parts)}")
+                    w_str = f"W{w_ind[ik]:.2f}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
+                    l_str = f"L{l_ind[ik]:.2f}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
+                    lines.append(f"    📊{ik}: {w_str} / {l_str}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
