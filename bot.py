@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re, atexit, signal
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1331,11 +1331,11 @@ _load_signal_stats()
 _LAST_STATE_PERSIST_TS = 0
 
 
-def _save_bot_state():
-    """봇 상태를 JSON 파일에 저장 (주기적 호출)"""
+def _save_bot_state(force=False):
+    """봇 상태를 JSON 파일에 저장 (주기적 호출, force=True면 쿨다운 무시)"""
     global _LAST_STATE_PERSIST_TS
     now = time.time()
-    if now - _LAST_STATE_PERSIST_TS < STATE_PERSIST_INTERVAL:
+    if not force and now - _LAST_STATE_PERSIST_TS < STATE_PERSIST_INTERVAL:
         return
     _LAST_STATE_PERSIST_TS = now
     try:
@@ -1374,6 +1374,38 @@ def _save_bot_state():
         os.replace(tmp_path, STATE_PERSIST_PATH)
     except Exception as e:
         print(f"[STATE_PERSIST] 저장 실패: {e}")
+
+
+def _shutdown_save_all():
+    """종료 시 모든 통계 강제 저장 (데이터 유실 방지)"""
+    print("[SHUTDOWN] 종료 감지 — 통계 강제 저장 중...")
+    try:
+        _save_bot_state(force=True)
+    except Exception as e:
+        print(f"[SHUTDOWN] bot_state 저장 실패: {e}")
+    try:
+        _save_signal_stats()
+    except Exception as e:
+        print(f"[SHUTDOWN] signal_stats 저장 실패: {e}")
+    try:
+        _save_shadow_stats()
+    except Exception as e:
+        print(f"[SHUTDOWN] shadow_stats 저장 실패: {e}")
+    print("[SHUTDOWN] 강제 저장 완료")
+
+
+atexit.register(_shutdown_save_all)
+
+
+def _signal_handler(signum, frame):
+    """SIGTERM/SIGINT 수신 시 저장 후 종료"""
+    print(f"[SHUTDOWN] 시그널 {signum} 수신")
+    _shutdown_save_all()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def _load_bot_state():
