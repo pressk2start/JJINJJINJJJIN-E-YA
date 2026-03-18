@@ -8051,11 +8051,21 @@ def _load_shadow_stats():
                     s["exit_reasons"] = {}
                 if "pnls" not in s:
                     s["pnls"] = []
-                # 승/패 분리 지표 통계
-                if "win_indicators" not in s:
-                    s["win_indicators"] = []
-                if "loss_indicators" not in s:
-                    s["loss_indicators"] = []
+                # 점진적 평균 마이그레이션
+                if "avg_mfe" not in s:
+                    mfes = s.get("mfes", [])
+                    s["avg_mfe"] = sum(mfes) / len(mfes) if mfes else 0.0
+                if "avg_hold" not in s:
+                    holds = s.get("hold_secs", [])
+                    s["avg_hold"] = sum(holds) / len(holds) if holds else 0.0
+                if "win_ind_avg" not in s:
+                    old_win = s.pop("win_indicators", [])
+                    s["win_ind_avg"] = _calc_ind_avg(old_win)
+                    s["win_ind_n"] = len(old_win)
+                if "loss_ind_avg" not in s:
+                    old_loss = s.pop("loss_indicators", [])
+                    s["loss_ind_avg"] = _calc_ind_avg(old_loss)
+                    s["loss_ind_n"] = len(old_loss)
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8076,8 +8086,22 @@ def _save_shadow_stats():
         print(f"[SHADOW_STATS] 저장 실패: {e}")
 
 
+def _calc_ind_avg(ind_list):
+    """indicators 리스트 → 키별 평균 dict"""
+    if not ind_list:
+        return {}
+    totals = {}
+    counts = {}
+    for d in ind_list:
+        for k, v in d.items():
+            if isinstance(v, (int, float)):
+                totals[k] = totals.get(k, 0.0) + v
+                counts[k] = counts.get(k, 0) + 1
+    return {k: round(totals[k] / counts[k], 6) for k in totals}
+
+
 def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec, indicators=None):
-    """섀도우 가상매매 결과를 누적 통계에 기록 (진입 지표값 승/패 분리 저장)"""
+    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 업데이트)"""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -8089,14 +8113,27 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "total_pnl": 0.0, "pnls": [], "mfes": [],
                 "exit_reasons": {}, "hold_secs": [],
                 "coins": [],
-                "win_indicators": [], "loss_indicators": [],
+                "avg_mfe": 0.0, "avg_hold": 0.0,
+                "win_ind_avg": {}, "win_ind_n": 0,
+                "loss_ind_avg": {}, "loss_ind_n": 0,
             }
         s = _SHADOW_PERF_STATS[key]
-        # 마이그레이션: 기존 데이터에 승패 지표 필드 없을 경우
-        if "win_indicators" not in s:
-            s["win_indicators"] = []
-        if "loss_indicators" not in s:
-            s["loss_indicators"] = []
+        # 마이그레이션: 점진적 평균 필드 없으면 추가
+        if "avg_mfe" not in s:
+            mfes = s.get("mfes", [])
+            s["avg_mfe"] = sum(mfes) / len(mfes) if mfes else 0.0
+        if "avg_hold" not in s:
+            holds = s.get("hold_secs", [])
+            s["avg_hold"] = sum(holds) / len(holds) if holds else 0.0
+        if "win_ind_avg" not in s:
+            # 기존 win_indicators 리스트 → 평균으로 변환
+            old_win = s.pop("win_indicators", [])
+            s["win_ind_avg"] = _calc_ind_avg(old_win)
+            s["win_ind_n"] = len(old_win)
+        if "loss_ind_avg" not in s:
+            old_loss = s.pop("loss_indicators", [])
+            s["loss_ind_avg"] = _calc_ind_avg(old_loss)
+            s["loss_ind_n"] = len(old_loss)
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8109,6 +8146,10 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
         s["mfes"].append(round(mfe_pct, 5))
         if len(s["mfes"]) > 200:
             s["mfes"] = s["mfes"][-200:]
+        # MFE/보유시간 점진적 평균
+        n = s["signals"]
+        s["avg_mfe"] = s.get("avg_mfe", 0.0) * (n - 1) / n + mfe_pct / n
+        s["avg_hold"] = s.get("avg_hold", 0.0) * (n - 1) / n + hold_sec / n
         # 청산 사유별 카운트
         s["exit_reasons"][exit_reason] = s["exit_reasons"].get(exit_reason, 0) + 1
         # 보유 시간
@@ -8121,15 +8162,20 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
-        # 🔬 진입 지표값 승/패 분리 저장 (최근 200건씩)
+        # 🔬 진입 지표값 승/패 점진적 평균 업데이트
         if indicators:
-            target = s["win_indicators"] if is_win else s["loss_indicators"]
-            target.append(indicators)
-            if len(target) > 200:
-                if is_win:
-                    s["win_indicators"] = target[-200:]
-                else:
-                    s["loss_indicators"] = target[-200:]
+            if is_win:
+                avg_key, n_key = "win_ind_avg", "win_ind_n"
+            else:
+                avg_key, n_key = "loss_ind_avg", "loss_ind_n"
+            s[n_key] = s.get(n_key, 0) + 1
+            cur_n = s[n_key]
+            avg = s.get(avg_key, {})
+            for k, v in indicators.items():
+                if isinstance(v, (int, float)):
+                    old = avg.get(k, 0.0)
+                    avg[k] = round(old * (cur_n - 1) / cur_n + v / cur_n, 6)
+            s[avg_key] = avg
         _SHADOW_TRADE_COUNT += 1
 
     if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
@@ -8316,12 +8362,9 @@ def _v4_shadow_report_lines():
             wr = wins / n * 100
             avg_pnl = s.get("total_pnl", 0) / n * 100
             coins = len(s.get("coins", []))
-            # MFE 평균
-            mfes = s.get("mfes", [])
-            avg_mfe = statistics.mean(mfes) * 100 if mfes else None
-            # 평균 보유시간
-            holds = s.get("hold_secs", [])
-            avg_hold = statistics.mean(holds) if holds else None
+            # MFE/보유시간 점진적 평균
+            avg_mfe = s.get("avg_mfe", 0) * 100 if s.get("avg_mfe", 0) != 0 else None
+            avg_hold = s.get("avg_hold") if s.get("avg_hold", 0) != 0 else None
             # 승률 기반 이모지
             if wr >= 55:
                 tag = "🟢"
@@ -8345,23 +8388,17 @@ def _v4_shadow_report_lines():
                 reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
                 lines.append(f"    └ {reason_str}")
             # 🔬 승/패 진입 지표 평균 비교
-            win_ind = s.get("win_indicators", [])
-            loss_ind = s.get("loss_indicators", [])
-            if win_ind or loss_ind:
+            w_avg = s.get("win_ind_avg", {})
+            w_n = s.get("win_ind_n", 0)
+            l_avg = s.get("loss_ind_avg", {})
+            l_n = s.get("loss_ind_n", 0)
+            if w_avg or l_avg:
+                all_keys = set(w_avg.keys()) | set(l_avg.keys())
                 ind_parts = []
-                # 모든 지표 키 수집
-                all_keys = set()
-                for d in win_ind[-50:]:
-                    all_keys.update(d.keys())
-                for d in loss_ind[-50:]:
-                    all_keys.update(d.keys())
                 for ik in sorted(all_keys):
-                    w_vals = [d[ik] for d in win_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
-                    l_vals = [d[ik] for d in loss_ind[-50:] if ik in d and isinstance(d[ik], (int, float))]
-                    if w_vals or l_vals:
-                        w_str = f"W{sum(w_vals)/len(w_vals):.2f}({len(w_vals)})" if w_vals else "W:-"
-                        l_str = f"L{sum(l_vals)/len(l_vals):.2f}({len(l_vals)})" if l_vals else "L:-"
-                        ind_parts.append(f"{ik}:{w_str}/{l_str}")
+                    w_str = f"W{w_avg[ik]:.2f}({w_n})" if ik in w_avg else "W:-"
+                    l_str = f"L{l_avg[ik]:.2f}({l_n})" if ik in l_avg else "L:-"
+                    ind_parts.append(f"{ik}:{w_str}/{l_str}")
                 if ind_parts:
                     lines.append(f"    📊 {' | '.join(ind_parts)}")
     # 현재 추적 중인 가상포지션 수
