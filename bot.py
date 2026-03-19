@@ -12759,10 +12759,13 @@ def tg_send(t, retry=3):
     🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
     🔧 FIX: 4096자 초과 메시지 자동 분할 (Telegram API 제한)
     """
-    # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력
+    # TG_TOKEN 없거나 CHAT_IDS가 비어 있으면 콘솔에만 출력 + 경고
     if not TG_TOKEN or not CHAT_IDS:
-        print(t)
-        return True
+        missing = []
+        if not TG_TOKEN: missing.append("TG_TOKEN")
+        if not CHAT_IDS: missing.append("CHAT_IDS")
+        print(f"[TG_WARNING] 텔레그램 미설정({', '.join(missing)}) - 콘솔만 출력: {t[:80]}")
+        return False
 
     # 🔧 FIX: Telegram 4096자 제한 → 초과 시 분할 전송 (잘림 방지)
     # 🔧 FIX: 재귀 대신 반복문 사용 (줄바꿈 없는 긴 문자열의 무한재귀 방지)
@@ -13026,7 +13029,7 @@ def validate_config():
         errors.append(f"MIN_TURNOVER={MIN_TURNOVER} 범위 오류 (0~1)")
     if TICKS_BUY_RATIO < 0.5 or TICKS_BUY_RATIO > 1:
         errors.append(f"TICKS_BUY_RATIO={TICKS_BUY_RATIO} 범위 오류 (0.5~1)")
-    if not TG_TOKEN or not CHAT_IDS: warnings.append("텔레그램 미설정 - 콘솔 출력만 사용")
+    if not TG_TOKEN or not CHAT_IDS: errors.append("텔레그램 미설정 (TELEGRAM_TOKEN, TG_CHATS 환경변수 필수)")
     if _BUCKET.get("rate", 0) <= 0: warnings.append("토큰버킷 rate<=0 → 0.1로 클램프")
     if _BUCKET.get("cap", 0) <= 0: warnings.append("토큰버킷 cap<=0 → 1.0로 클램프")
     if warnings:
