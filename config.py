@@ -271,11 +271,7 @@ MEGA_ABS_KRW = 4_000_000
 # ============================================================
 # 14. 포지션 관리
 # ============================================================
-try:
-    MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
-except ValueError:
-    print("[CONFIG] MAX_POSITIONS 파싱 실패 → 기본값 5")
-    MAX_POSITIONS = 5
+MAX_POSITIONS = _safe_int("MAX_POSITIONS", 5)
 PARTIAL_PENDING_TIMEOUT = 30.0
 DUST_PREVENT_KRW = 6000
 

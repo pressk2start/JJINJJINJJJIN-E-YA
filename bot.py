@@ -699,10 +699,9 @@ def _pipeline_report(force=False):
     print(msg)
     tg_send(msg)
 
-    # 🔧 FIX: 리포트 전송 후 섀도우 통계 초기화 (다음 구간 측정용)
+    # 섀도우 통계 저장 (매 리포트 시, 누적 유지)
     try:
-        _save_shadow_stats()  # 현재 통계 저장 후
-        _v4_shadow_reset_counters()  # 리셋
+        _save_shadow_stats()
     except Exception:
         pass
 
@@ -4332,10 +4331,10 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
             time.sleep(5)
             continue
         if actual <= 1e-12:
-            # 🔧 FIX: 매수 직후 300초 내에는 잔고=0이어도 API 지연 가능 → 다음 사이클 대기
+            # 🔧 FIX: 매수 직후 120초 내에는 잔고=0이어도 API 지연 가능 → 다음 사이클 대기
             with _RECENT_BUY_LOCK:
                 buy_age_loop = time.time() - _RECENT_BUY_TS.get(m, 0)
-            if buy_age_loop < 300:
+            if buy_age_loop < 120:  # 🔧 FIX: 300→120 (초기 진입체크와 일관성)
                 print(f"[REMONITOR] {m} 잔고=0이지만 매수 {buy_age_loop:.0f}초 전 → API 지연 가능, 다음 사이클 대기")
                 time.sleep(5)
                 continue
@@ -5206,7 +5205,7 @@ def get_recent_trades_detail(last_n: int = 10) -> str:
             exit_reason = str(row.get("exit_reason", "")).strip() or "미기록"
 
             # 진입모드 이모지 (probe+추매 = 승격)
-            if entry_mode == "probe" and was_added:
+            if entry_mode == "probe_added" or (entry_mode == "probe" and was_added):
                 mode_str = "🔬→✅승격"  # probe에서 추매로 confirm 승격
             elif entry_mode == "probe":
                 mode_str = "🔬탐색"  # probe 진입, 추매 없이 청산
@@ -7551,7 +7550,7 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     # 종가 > 직전봉 시가 (회복)
     if cur_15["trade_price"] <= prev_15["opening_price"]:
         return None
-    # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
+    # 회복비율: (현재종가 - 직전종가) / 직전봉 몸통 크기
     prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
     recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
     # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
@@ -11761,6 +11760,7 @@ def monitor_position(m,
     _local_ob_snap_ts = 0.0
     _local_ob_snap_cache = pre.get("ob", {})
 
+    alive_sec = 0.0  # 🔧 FIX: alive_sec 초기화 (MFE 스냅샷에서 NameError 방지)
     try:
         while time.time() - start_ts <= horizon:  # 🔧 before1 복원 (MAX_RUNTIME→horizon)
             time.sleep(RECHECK_SEC)
@@ -12765,12 +12765,16 @@ def tg_send(t, retry=3):
         return True
 
     # 🔧 FIX: Telegram 4096자 제한 → 초과 시 분할 전송 (잘림 방지)
+    # 🔧 FIX: 재귀 대신 반복문 사용 (줄바꿈 없는 긴 문자열의 무한재귀 방지)
     if len(t) > 4000:
         chunks = _tg_split_message(t, max_len=4000)
         ok_all = True
         for i, chunk in enumerate(chunks):
             if i > 0:
                 time.sleep(0.3)  # rate-limit 방지
+            # 안전장치: 분할 후에도 4000 초과면 강제 절단
+            if len(chunk) > 4000:
+                chunk = chunk[:3950] + "\n...(강제절단)"
             if not tg_send(chunk, retry=retry):
                 ok_all = False
         return ok_all
@@ -14137,7 +14141,7 @@ def main():
                                     # 🔧 FIX: 매수 직후 300초 내 잔고=0은 API 지연일 수 있음 → 포지션 유지
                                     with _RECENT_BUY_LOCK:
                                         buy_age = time.time() - _RECENT_BUY_TS.get(market, 0)
-                                    if buy_age < 300:
+                                    if buy_age < 120:  # 🔧 FIX: 300→120 (전체 일관성)
                                         tg_send(f"⚠️ {market} 모니터링 오류 (매수 {buy_age:.0f}초 전, 잔고=0 but 포지션 유지)\n• 예외: {e}")
                                     else:
                                         # 잔고 0이면 이미 청산됨 → 알람만 발송
