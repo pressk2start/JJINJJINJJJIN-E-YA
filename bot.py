@@ -7180,6 +7180,95 @@ def _v4_ema_from_candles(candles, period):
     return _v4_ema(closes, period)
 
 
+# === 공통 지표 수집 (모든 전략 교차분석용) ===
+def _collect_universal_indicators(c1, c5, c15, c30, c60):
+    """모든 전략 진입 시점에 호출 — 전체 지표를 한번에 수집.
+    각 전략의 고유 indicators에 병합하여 W/L 교차분석 가능하게 함."""
+    ui = {}
+    # --- 1m 지표 ---
+    if c1 and len(c1) >= 7:
+        ui["vr5"] = round(_v4_volume_ratio_5(c1), 2)
+        ui["atr_pct"] = round(_v4_atr_pct(c1, 14), 4)
+    # --- 5m 지표 ---
+    if c5 and len(c5) >= 15:
+        rsi_5m = _v4_rsi_from_candles(c5, 14)
+        if rsi_5m is not None:
+            ui["rsi_5m"] = round(rsi_5m, 2)
+        if len(c5) >= 35:
+            closes_5m = [c["trade_price"] for c in c5]
+            macd_5m, sig_5m, hist_5m = _v4_macd(closes_5m)
+            if macd_5m is not None:
+                ui["macd_5m"] = round(macd_5m, 6)
+            if hist_5m is not None:
+                ui["macd_hist_5m"] = round(hist_5m, 6)
+    # --- 15m 지표 ---
+    if c15 and len(c15) >= 30:
+        highs_15 = [c["high_price"] for c in c15]
+        lows_15 = [c["low_price"] for c in c15]
+        closes_15 = [c["trade_price"] for c in c15]
+        adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
+        if adx_15 is not None:
+            ui["adx_15"] = round(adx_15, 2)
+        rsi_15m = _v4_rsi_from_candles(c15, 14)
+        if rsi_15m is not None:
+            ui["rsi_15m"] = round(rsi_15m, 2)
+        if len(c15) >= 35:
+            macd_15, sig_15, hist_15 = _v4_macd(closes_15)
+            if macd_15 is not None:
+                ui["macd_15"] = round(macd_15, 6)
+            if hist_15 is not None:
+                ui["macd_hist_15"] = round(hist_15, 6)
+            ema5_15 = _v4_ema_from_candles(c15, 5)
+            ema10_15 = _v4_ema_from_candles(c15, 10)
+            ema20_15 = _v4_ema_from_candles(c15, 20)
+            if ema5_15 is not None and ema10_15 is not None and ema20_15 is not None:
+                # EMA 정배열 정도: (ema5-ema20)/ema20 * 100 → 양수=정배열
+                ui["ema_spread_15"] = round((ema5_15 - ema20_15) / max(ema20_15, 1) * 100, 4)
+        # 15m VR5
+        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
+        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
+        if avg_vol_15 > 0:
+            ui["vr5_15m"] = round(cur_vol_15 / avg_vol_15, 2)
+    # --- 60m 지표 ---
+    if c60 and len(c60) >= 15:
+        rsi_60m = _v4_rsi_from_candles(c60, 14)
+        if rsi_60m is not None:
+            ui["rsi_60m"] = round(rsi_60m, 2)
+        if len(c60) >= 20:
+            ema5_60 = _v4_ema_from_candles(c60, 5)
+            ema10_60 = _v4_ema_from_candles(c60, 10)
+            ema20_60 = _v4_ema_from_candles(c60, 20)
+            if ema5_60 is not None and ema10_60 is not None and ema20_60 is not None:
+                ui["ema_spread_60"] = round((ema5_60 - ema20_60) / max(ema20_60, 1) * 100, 4)
+        if len(c60) >= 30:
+            highs_60 = [c["high_price"] for c in c60]
+            lows_60 = [c["low_price"] for c in c60]
+            closes_60 = [c["trade_price"] for c in c60]
+            adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
+            if adx_60 is not None:
+                ui["adx_60"] = round(adx_60, 2)
+        # 60m 3봉 모멘텀
+        if len(c60) >= 4:
+            closes_60 = [c["trade_price"] for c in c60]
+            m3 = (closes_60[-1] - closes_60[-4]) / max(closes_60[-4], 1)
+            ui["m3_60m"] = round(m3 * 100, 4)
+        # 60m 감싸기 비율
+        if len(c60) >= 2:
+            prev_60 = c60[-2]
+            cur_60 = c60[-1]
+            prev_body = abs(prev_60["opening_price"] - prev_60["trade_price"])
+            cur_body = abs(cur_60["opening_price"] - cur_60["trade_price"])
+            if prev_body > 0:
+                ui["engulf_ratio_60"] = round(cur_body / prev_body, 2)
+    # --- 1m 추가: 20봉 gap ---
+    if c1 and len(c1) >= 21:
+        cur_close = c1[-1]["trade_price"]
+        high_20 = max(c["high_price"] for c in c1[-21:-1])
+        ui["gap_20bar"] = round(((cur_close / max(high_20, 1)) - 1.0) * 100, 4)
+    return ui
+
+
 # --- 60분봉 레짐 필터 (전 시그널 공통) ---
 # 🔧 v5: RSI 상한 제거 (데이터: RSI 70+ 구간이 최고 수익)
 # 거래량3배+15m_RSI70-100: EV +1.30%, PF 7.58
@@ -7451,11 +7540,14 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
     prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
     recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
+    # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
+    if recovery < 1.5:
+        return None
     return {
         "signal_tag": "15m_눌림반전",
         "entry_mode": "confirm",
         "logic_group": "B",
-        "filters_hit": ["15m눌림+반전", f"GATE={gate_info}"],
+        "filters_hit": ["15m눌림+반전", f"회복={recovery:.2f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"].copy(),
         "indicators": {"recovery_ratio": round(recovery, 2)},
     }
@@ -7532,7 +7624,8 @@ def _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
 
 # --- [섀도우 전용] EMA정배열진입 실제 로직 (라이브에선 위의 None 반환) ---
 def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
-    """섀도우 계측용: EMA5>10>20 + MACD골든 + 양봉"""
+    """섀도우 계측용: EMA5>10>20 + MACD골든 + 양봉
+    🔧 v10: W/L — macd_15 W12.74/L182.55 → MACD 낮을수록 승률↑ → 상한 50 추가"""
     if not c15 or len(c15) < 35:
         return None
     if not c60 or len(c60) < 20:
@@ -7551,6 +7644,9 @@ def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
     closes_15 = [c["trade_price"] for c in c15]
     macd_15, sig_15, _ = _v4_macd(closes_15)
     if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
+        return None
+    # 🔧 v10: MACD 상한 — W12.74 vs L182.55 → MACD 너무 높으면 이미 과열
+    if macd_15 > 50:
         return None
     # 1m 양봉
     if not _v4_is_bullish(c1[-1]):
@@ -7597,6 +7693,14 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
             adx_ok = True
     if not macd_ok and not adx_ok:
         return None
+    # 🔧 v10: W/L — atr W0.52/L0.58 → 낮을수록 승률↑ → ATR 상한 0.55 추가
+    if atr_p > 0.55:
+        return None
+    # 🔧 v10: W/L — macd_5m W-1.15/L0.27 → 음수 MACD가 이김 → MACD 양수면 제외
+    if macd_ok and macd_5m is not None and macd_5m > 0:
+        # MACD 양수여도 ADX가 있으면 통과 허용
+        if not adx_ok:
+            return None
     return {
         "signal_tag": "거래량완화",
         "entry_mode": "confirm",
@@ -7630,6 +7734,7 @@ def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60, gate_info=None):
 # 근거: 거래량3배 60m RSI70-100 EV=+0.3467%, 20봉돌파 60m RSI70-100 EV=+0.4947%
 # 5m RSI70-100 + 60m RSI50+ = 다중 TF 모멘텀 동기화
 def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
+    """🔧 v10: W/L — SL 40건 최다탈락. rsi 차이 미미 → ATR 상한+60m RSI 상향+ADX 추가"""
     _pipeline_inc("mom_scalp_enter")
     if not c1 or len(c1) < 7:
         return None
@@ -7637,24 +7742,35 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
         return None
     if not c60 or len(c60) < 15:
         return None
-    # 5m RSI >= 65 (모멘텀 상승)
+    # 5m RSI >= 68 (🔧 v10: 65→68, 더 강한 모멘텀만)
     rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 65:
+    if rsi_5m is None or rsi_5m < 68:
         _pipeline_inc("mom_scalp_rsi5_fail")
         return None
-    # 60m RSI >= 50 (상위TF 지지)
+    # 60m RSI >= 55 (🔧 v10: 50→55, W67.37/L65.40 → 높을수록 좋음)
     rsi_60m = _v4_rsi_from_candles(c60, 14)
-    if rsi_60m is None or rsi_60m < 50:
+    if rsi_60m is None or rsi_60m < 55:
         _pipeline_inc("mom_scalp_rsi60_fail")
         return None
     # 1m 현재봉 양봉
     if not _v4_is_bullish(c1[-1]):
         _pipeline_inc("mom_scalp_bull_fail")
         return None
-    # ATR 최소 (변동성 필요)
+    # ATR 범위 (🔧 v10: W0.97/L1.01 → 낮을수록 약간 유리 → 상한 1.2 추가)
     atr_p = _v4_atr_pct(c1, 14)
-    if atr_p < 0.5:
+    if atr_p < 0.5 or atr_p > 1.2:
         _pipeline_inc("mom_scalp_atr_fail")
+        return None
+    # 🔧 v10: 15m ADX 추가 — 추세 존재 확인 (SL 40건 = 방향 없이 진입)
+    if c15 and len(c15) >= 30:
+        highs_15 = [c["high_price"] for c in c15]
+        lows_15 = [c["low_price"] for c in c15]
+        closes_15 = [c["trade_price"] for c in c15]
+        adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
+        if adx_15 is None or adx_15 < 20:
+            _pipeline_inc("mom_scalp_adx_fail")
+            return None
+    else:
         return None
     _pipeline_inc("mom_scalp_pass")
     return {
@@ -7662,10 +7778,10 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "C",
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"60mRSI={rsi_60m:.1f}",
-                        f"ATR%={atr_p:.2f}", f"GATE={gate_info}"],
+                        f"ATR%={atr_p:.2f}", f"ADX15={adx_15:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"].copy(),
         "indicators": {"rsi_5m": round(rsi_5m, 2), "rsi_60m": round(rsi_60m, 2),
-                        "atr_pct": round(atr_p, 4)},
+                        "atr_pct": round(atr_p, 4), "adx_15": round(adx_15, 2)},
     }
 
 
@@ -7705,12 +7821,25 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
     prev_body = max(prev_body_high - prev_body_low, 1)
     cur_body = cur_body_high - cur_body_low
     engulf_ratio = round(cur_body / prev_body, 2) if prev_body > 0 else 0
+    # 🔧 v10: W/L — engulf W2.04/L1.71 → 높을수록 승률↑ → 최소 1.8 요구
+    if engulf_ratio < 1.8:
+        _pipeline_inc("60m_engulf_ratio_fail")
+        return None
+    # 🔧 v10: 15m ADX 추가 — SL 38건 = 방향 없는 감싸기 제거
+    if c15 and len(c15) >= 30:
+        highs_15 = [c["high_price"] for c in c15]
+        lows_15 = [c["low_price"] for c in c15]
+        closes_15 = [c["trade_price"] for c in c15]
+        adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
+        if adx_15 is not None and adx_15 < 18:
+            _pipeline_inc("60m_engulf_adx_fail")
+            return None
     _pipeline_inc("60m_engulf_pass")
     return {
         "signal_tag": "60m_감싸기_돌파",
         "entry_mode": "confirm",
         "logic_group": "C",
-        "filters_hit": ["60m감싸기", f"GATE={gate_info}"],
+        "filters_hit": ["60m감싸기", f"비율={engulf_ratio:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"].copy(),
         "indicators": {"engulf_ratio": engulf_ratio},
     }
@@ -7736,6 +7865,11 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
     if vr5_15 < 3.0:
         _pipeline_inc("15m_vr_low")
         return None
+    # 🔧 v10: W/L — vr5_15m W7.25/L9.99 → 낮을수록 승률↑ → 상한 8.0 추가
+    # VR 너무 높으면 이미 과열/펌프 끝자락
+    if vr5_15 > 8.0:
+        _pipeline_inc("15m_vr_overheat")
+        return None
     # 15m 현재봉 양봉
     if not _v4_is_bullish(c15[-1]):
         _pipeline_inc("15m_vr_bear")
@@ -7744,6 +7878,13 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
     if not _v4_is_bullish(c1[-1]):
         _pipeline_inc("15m_vr_1m_fail")
         return None
+    # 🔧 v10: 5m MACD 방향성 추가 — SL 27건/108건 = 25% → 방향 필터 필요
+    if c5 and len(c5) >= 35:
+        closes_5m = [c["trade_price"] for c in c5]
+        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
+        if macd_5m is not None and sig_5m is not None and macd_5m <= sig_5m:
+            _pipeline_inc("15m_vr_macd_fail")
+            return None
     _pipeline_inc("15m_vr_pass")
     return {
         "signal_tag": "15m_VR폭발",
@@ -7792,6 +7933,22 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
     if atr_p < 0.5:
         _pipeline_inc("upper_align_atr_fail")
         return None
+    # 🔧 v10: W/L — SL 60건/169건=35% 최다탈락 → 강한 추세 필터 필요
+    # EMA 간격 최소 요구: (ema5-ema20)/ema20 > 0.1% → 의미있는 정배열만
+    ema_gap_pct = (ema5 - ema20) / max(ema20, 1) * 100
+    if ema_gap_pct < 0.1:
+        _pipeline_inc("upper_align_gap_fail")
+        return None
+    # 🔧 v10: 15m MACD 상한 — macd_15 W3.51/L2.85 → 차이 미미하지만 SL 줄이려면
+    # 60m ADX 추가 — 추세 강도 확인
+    if len(c60) >= 30:
+        highs_60 = [c["high_price"] for c in c60]
+        lows_60 = [c["low_price"] for c in c60]
+        closes_60 = [c["trade_price"] for c in c60]
+        adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
+        if adx_60 is not None and adx_60 < 20:
+            _pipeline_inc("upper_align_adx60_fail")
+            return None
     _pipeline_inc("upper_align_pass")
     return {
         "signal_tag": "상위TF_정배열",
@@ -7800,13 +7957,13 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [
             f"60mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}",
             f"15mMACD={macd_15:.4f}>{sig_15:.4f}",
-            f"ATR%={atr_p:.2f}",
+            f"ATR%={atr_p:.2f}", f"EMAgap={ema_gap_pct:.2f}%",
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"].copy(),
         "indicators": {"ema5_60": round(ema5, 2), "ema10_60": round(ema10, 2),
                         "ema20_60": round(ema20, 2), "macd_15": round(macd_15, 6),
-                        "atr_pct": round(atr_p, 4)},
+                        "atr_pct": round(atr_p, 4), "ema_gap_pct": round(ema_gap_pct, 4)},
     }
 
 
@@ -7825,6 +7982,11 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     if rsi_5m is None or rsi_5m > 35:
         _pipeline_inc("oversold_rsi_fail")
         return None
+    # 🔧 v10: W/L — rsi W29.37/L29.87 → 거의 차이 없음 → RSI만으론 부족
+    # RSI 하한 추가: 너무 깊은 과매도(RSI<20)는 폭락 중이라 반등 실패
+    if rsi_5m < 20:
+        _pipeline_inc("oversold_too_deep")
+        return None
     # 5m 현재봉 양봉 (반등 시작)
     if not _v4_is_bullish(c5[-1]):
         _pipeline_inc("oversold_5m_bear")
@@ -7837,14 +7999,28 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     if not _v4_is_bullish(c1[-1]):
         _pipeline_inc("oversold_1m_fail")
         return None
+    # 🔧 v10: 반등 강도 확인 — 현재 양봉이 직전 음봉의 50% 이상 회복
+    cur_5m_body = c5[-1]["trade_price"] - c5[-1]["opening_price"]
+    prev_5m_body = abs(c5[-2]["opening_price"] - c5[-2]["trade_price"])
+    bounce_ratio = cur_5m_body / max(prev_5m_body, 1)
+    if bounce_ratio < 0.5:
+        _pipeline_inc("oversold_bounce_weak")
+        return None
+    # 🔧 v10: 60m RSI > 35 추가 — 상위TF도 최소한 낙폭 과대가 아니어야 반등 가능
+    if c60 and len(c60) >= 15:
+        rsi_60m = _v4_rsi_from_candles(c60, 14)
+        if rsi_60m is not None and rsi_60m < 35:
+            _pipeline_inc("oversold_60m_too_low")
+            return None
     _pipeline_inc("oversold_pass")
     return {
         "signal_tag": "과매도_반등",
         "entry_mode": "confirm",
         "logic_group": "D",
-        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"GATE={gate_info}"],
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"반등={bounce_ratio:.1f}",
+                        f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 2)},
+        "indicators": {"rsi_5m": round(rsi_5m, 2), "bounce_ratio": round(bounce_ratio, 2)},
     }
 
 
@@ -7884,10 +8060,17 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
     if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
         _pipeline_inc("adx_trend_macd_fail")
         return None
-    # VR 최소 (거래량 존재)
+    # VR 최소 (🔧 v10: W/L — vr5 W8.00/L6.42 → 높을수록 승률↑ → 1.2→2.0 상향)
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.2:
+    if vr5 < 2.0:
         _pipeline_inc("adx_trend_vr_fail")
+        return None
+    # 🔧 v10: W/L — macd_5m W-956/L-1557 → 둘 다 음수이나 W가 덜 음수
+    # MACD 히스토그램이 상승 전환 중인지 확인
+    hist_5m = macd_5m - sig_5m if sig_5m is not None else 0
+    # 🔧 v10: 1m 양봉 추가 — 타이밍 확인 (기존에 없었음)
+    if not _v4_is_bullish(c1[-1]):
+        _pipeline_inc("adx_trend_1m_fail")
         return None
     _pipeline_inc("adx_trend_pass")
     return {
@@ -8295,10 +8478,14 @@ def _shadow_evaluate_positions():
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     """섀도우 테스트: 비활성 전략에 시그널 발생 시 가상 포지션 등록.
-    실매매 안 함 — 가상 진입 → 실제 청산 로직 시뮬레이션 → 승률/수익률 누적."""
+    실매매 안 함 — 가상 진입 → 실제 청산 로직 시뮬레이션 → 승률/수익률 누적.
+    v10: 공통 지표 수집 후 각 전략 고유 지표와 병합 (자기 지표 우선, 타 지표 추가)"""
     results = {}
     now_ts = time.time()
     entry_price = c1[-1]["trade_price"] if c1 else 0
+
+    # 공통 지표 한 번만 계산 (모든 전략에 공유)
+    universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
 
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
@@ -8310,10 +8497,16 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         hit = sig is not None
         results[route] = hit
 
-        if hit and not strat["enabled"] and entry_price > 0:
+        if hit and entry_price > 0:
             dedup_key = f"{route}_{market}"
             # 해당 전략의 청산 파라미터 가져오기
             ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
+            # 지표 병합: 공통 지표(15개) 기반 + 자기 고유 지표로 덮어쓰기
+            # → 전략별 핵심 지표뿐 아니라 전체 유니버설 지표를 W/L로 수집
+            #   (전략과 무관한 지표에서 유의미한 차이 발견 → 추가 필터 후보)
+            merged_ind = dict(universal_ind)  # 공통 지표 복사
+            own_ind = sig.get("indicators", {})
+            merged_ind.update(own_ind)  # 자기 고유 지표가 우선
             with _SHADOW_LOCK:
                 last_entry = _SHADOW_DEDUP.get(dedup_key, 0)
                 if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
@@ -8332,19 +8525,20 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "trail_stop": 0.0,
                     "exit_params": ep,
                     "bars": 0,
-                    "indicators": sig.get("indicators", {}),
+                    "indicators": merged_ind,
                 })
     return results
 
 
 def _v4_shadow_report_lines():
-    """섀도우 가상매매 성과 리포트 (10분 텔레그램 리포트용)
-    루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 표시"""
+    """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
+    루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
+    v11: 라이브(A,B) + 섀도우(C~L) 전체 11개 시나리오 지표 수집"""
     lines = []
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 섀도우 가상매매 성과:")
+        lines.append("📡 전 시나리오 가상매매 지표 W/L:")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         for key, s in sorted_stats:
