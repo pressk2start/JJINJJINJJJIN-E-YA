@@ -702,10 +702,9 @@ def _pipeline_report(force=False):
     print(msg)
     tg_send(msg)
 
-    # 🔧 FIX: 리포트 전송 후 섀도우 통계 초기화 (다음 구간 측정용)
+    # 섀도우 통계 저장 (누적 — 초기화하지 않음)
     try:
-        _save_shadow_stats()  # 현재 통계 저장 후
-        _v4_shadow_reset_counters()  # 리셋
+        _save_shadow_stats()
     except Exception:
         pass
 
@@ -8608,11 +8607,8 @@ def _v4_shadow_report_lines():
 
 
 def _v4_shadow_reset_counters():
-    """섀도우 성과 통계 리셋 — 리포트 전송 후 호출하여 다음 구간 측정"""
-    global _SHADOW_TRADE_COUNT
-    with _SHADOW_PERF_LOCK:
-        _SHADOW_PERF_STATS.clear()
-        _SHADOW_TRADE_COUNT = 0
+    """(비활성) 섀도우 통계는 누적 유지 — 초기화하지 않음"""
+    pass
 
 
 def v4_get_strategy_registry():
