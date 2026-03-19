@@ -331,6 +331,9 @@ def _pipeline_coin_hit(market, reason):
     coin = market.split("-")[-1] if "-" in market else market
     with _PIPELINE_COIN_HITS_LOCK:
         if coin not in _PIPELINE_COIN_HITS:
+            # 🔧 FIX: 무한 증가 방지 — 최대 120개 코인만 추적
+            if len(_PIPELINE_COIN_HITS) >= 120:
+                _PIPELINE_COIN_HITS.clear()
             _PIPELINE_COIN_HITS[coin] = {}
         _PIPELINE_COIN_HITS[coin][reason] = _PIPELINE_COIN_HITS[coin].get(reason, 0) + 1
 
@@ -659,7 +662,7 @@ def _pipeline_report(force=False):
     if lat_list:
         lat_avg = sum(lat_list) / len(lat_list)
         lat_max = max(lat_list)
-        lat_p95 = sorted(lat_list)[int(len(lat_list) * 0.95)] if len(lat_list) >= 5 else lat_max
+        lat_p95 = sorted(lat_list)[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] if len(lat_list) >= 5 else lat_max
         lines.append("━━━━━━━━━━━━━━━━")
         lines.append(f"⏱️ 스캔 레이턴시: avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
 
@@ -1599,7 +1602,8 @@ def upbit_private_get(path, params=None, timeout=7):
         headers = _make_auth_headers(params or {})
         _throttle()
         try:
-            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            with _SESSION_REFRESH_LOCK:
+                sess = SESSION  # 🔧 FIX: 락으로 보호 (세션 리프레시 레이스 방지)
             r = sess.get(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)  # 0.5s, 1s, 2s
@@ -1608,8 +1612,8 @@ def upbit_private_get(path, params=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except (requests.exceptions.ConnectionError, ValueError) as e:
-            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
+        except (requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
+            # 🔧 FIX: HTTPError 추가 (400/401/403 등에서 크래시 방지)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
                 print(f"[API_RETRY] GET {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
@@ -1629,7 +1633,8 @@ def upbit_private_post(path, body=None, timeout=7):
         headers = _make_auth_headers(body)
         _throttle()
         try:
-            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            with _SESSION_REFRESH_LOCK:
+                sess = SESSION  # 🔧 FIX: 락으로 보호 (세션 리프레시 레이스 방지)
             r = sess.post(url, headers=headers, json=body, timeout=timeout)
             # 429: 항상 재시도 (rate limit = 미처리 보장)
             # 500/502/503: 주문이면 재시도 금지 (이미 처리됐을 수 있음)
@@ -1641,8 +1646,8 @@ def upbit_private_post(path, body=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except (requests.exceptions.ConnectionError, ValueError) as e:
-            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
+        except (requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
+            # 🔧 FIX: HTTPError 추가 (400/401/403 등에서 크래시 방지)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
                 print(f"[API_RETRY] POST {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
@@ -1735,7 +1740,8 @@ def upbit_private_delete(path, params=None, timeout=7):
         headers = _make_auth_headers(params)
         _throttle()
         try:
-            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            with _SESSION_REFRESH_LOCK:
+                sess = SESSION  # 🔧 FIX: 락으로 보호 (세션 리프레시 레이스 방지)
             r = sess.delete(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
@@ -1744,8 +1750,8 @@ def upbit_private_delete(path, params=None, timeout=7):
                 continue
             r.raise_for_status()
             return r.json()
-        except (requests.exceptions.ConnectionError, ValueError) as e:
-            # 🔧 FIX: ValueError = JSONDecodeError (HTML 응답, WAF 차단 등)
+        except (requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
+            # 🔧 FIX: HTTPError 추가 (400/401/403 등에서 크래시 방지)
             if _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
                 print(f"[API_RETRY] DELETE {path} → {type(e).__name__}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
@@ -2360,7 +2366,8 @@ def sync_orphan_positions():
                 _RECENT_BUY_TS.pop(k, None)
 
         # 🔧 다음 사이클을 위해 현재 마켓 저장 (신규 매수 오탐 방지)
-        _PREV_SYNC_MARKETS = current_markets.copy()
+        with _ORPHAN_LOCK:
+            _PREV_SYNC_MARKETS = current_markets.copy()
 
         # 🔧 FIX: 첫 sync 완료 → 이후부터는 2사이클 확인 복원
         if _ORPHAN_FIRST_SYNC:
