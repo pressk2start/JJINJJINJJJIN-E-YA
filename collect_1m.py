@@ -301,7 +301,12 @@ def fetch_and_save_1m(market, coin, total_count, max_time=600, progress_prefix="
 
         # to 갱신 (다음 페이지용) — 원본 데이터에서 추출
         if got > 0:
-            to = data[-1]["candle_date_time_utc"] + "Z"
+            new_to = data[-1]["candle_date_time_utc"] + "Z"
+            # 🔧 FIX: 동일 to값 반복 시 무한루프 방지
+            if new_to == to:
+                print(f"{progress_prefix}페이지네이션 정체 (to={to}) → 중단")
+                break
+            to = new_to
 
         # 압축해서 버퍼에 추가
         for c in data:

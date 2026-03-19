@@ -243,8 +243,6 @@ _BOX_LAST_SCAN_TS = 0                  # 마지막 스캔 시각
 # 📊 라이브 파이프라인 계측 (Pipeline Instrumentation)
 # =========================
 # 스캔 사이클마다 누적, 10분마다 텔레그램+콘솔 리포트
-import io as _io
-
 _PIPELINE_COUNTERS_LOCK = threading.Lock()
 _PIPELINE_COUNTERS = {
     "scan_markets": 0,          # 스캔한 마켓 수
@@ -994,6 +992,7 @@ _MONITOR_LOCK = threading.Lock()
 
 # 🔧 손실 후 쿨다운 추적 (상단 선언으로 초기화 순서 보장)
 last_trade_was_loss = {}
+_TRADE_LOSS_LOCK = threading.Lock()  # 🔧 FIX: last_trade_was_loss 스레드 안전 보호
 
 # 🔧 유령 포지션 동기화
 _LAST_ORPHAN_SYNC = 0
@@ -1600,7 +1599,8 @@ def upbit_private_get(path, params=None, timeout=7):
         headers = _make_auth_headers(params or {})
         _throttle()
         try:
-            r = SESSION.get(url, headers=headers, params=params, timeout=timeout)
+            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            r = sess.get(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)  # 0.5s, 1s, 2s
                 print(f"[API_RETRY] GET {path} → {r.status_code}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
@@ -1629,7 +1629,8 @@ def upbit_private_post(path, body=None, timeout=7):
         headers = _make_auth_headers(body)
         _throttle()
         try:
-            r = SESSION.post(url, headers=headers, json=body, timeout=timeout)
+            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            r = sess.post(url, headers=headers, json=body, timeout=timeout)
             # 429: 항상 재시도 (rate limit = 미처리 보장)
             # 500/502/503: 주문이면 재시도 금지 (이미 처리됐을 수 있음)
             _retry_codes = (429,) if _is_order else (429, 500, 502, 503)
@@ -1734,7 +1735,8 @@ def upbit_private_delete(path, params=None, timeout=7):
         headers = _make_auth_headers(params)
         _throttle()
         try:
-            r = SESSION.delete(url, headers=headers, params=params, timeout=timeout)
+            sess = SESSION  # 🔧 FIX: 로컬 참조 복사 (세션 리프레시 레이스 방지)
+            r = sess.delete(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 500, 502, 503) and _attempt < _max_retries:
                 _wait = 0.5 * (2 ** _attempt)
                 print(f"[API_RETRY] DELETE {path} → {r.status_code}, {_wait:.1f}초 후 재시도 ({_attempt+1}/{_max_retries})")
@@ -3436,7 +3438,9 @@ def add_auto_position(m, cur_price, reason=""):
         pos["volume"] = new_vol
         pos["added"] = True
         pos["last_add_ts"] = time.time()
-        pos["entry_mode"] = "confirm"  # ✅ probe → confirm 승격 자동반영
+        # 🔧 FIX: 원래 entry_mode 보존 (추매했다고 confirm으로 덮어쓰면 추적 부정확)
+        if pos.get("entry_mode") == "probe":
+            pos["entry_mode"] = "probe_added"  # probe에서 추매 = 별도 추적
 
         # 🔧 FIX: 평단 변경 시 dict 추적 상태 완전 리셋
         # (mfe/mae + ctx_close_count + partial_state + breakeven_set)
@@ -4262,7 +4266,7 @@ def remonitor_until_close(m, entry_price, pre, tight_mode=False):
     with _RECENT_BUY_LOCK:
         buy_age = time.time() - _RECENT_BUY_TS.get(m, 0)
     if bal_check >= 0 and bal_check <= 1e-12:
-        if buy_age < 300:
+        if buy_age < 120:  # 🔧 FIX: 300→120초 (5분은 너무 길어 고스트 포지션 위험)
             print(f"[REMONITOR] {m} 진입 전 잔고=0이지만 매수 {buy_age:.0f}초 전 → API 지연 가능, 계속 진행")
         else:
             print(f"[REMONITOR] {m} 진입 전 잔고=0 확인 → 스킵")
@@ -4774,7 +4778,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     csv_exists = os.path.exists(TRADE_LOG_PATH)
 
     # 🔧 손실 후 동일 종목 쿨다운 2배 적용용 플래그 설정
-    last_trade_was_loss[market] = not is_win
+    with _TRADE_LOSS_LOCK:
+        last_trade_was_loss[market] = not is_win
 
     if not csv_exists:
         print(f"[UPDATE_TRADE] {TRADE_LOG_PATH} 파일 없음 (CSV 업데이트 스킵, 리포트는 계속)")
@@ -8357,8 +8362,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s[avg_key] = avg
             s[cnt_key] = cnt
         _SHADOW_TRADE_COUNT += 1
+        _should_save = (_SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0)  # 🔧 FIX: 락 안에서 체크
 
-    if _SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0:
+    if _should_save:
         _save_shadow_stats()
 
 
@@ -8460,9 +8466,8 @@ def _shadow_evaluate_positions():
                 pnl = (cur_price - entry_price) / entry_price
                 mfe = (vp["best_price"] - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
-                # 손절 시 PnL을 SL값으로 클램프
-                if reason == "손절SL":
-                    pnl = max(pnl, -vp["exit_params"].get("sl_pct", 0.007))
+                # 손절 시 PnL 클램프: 슬리피지로 SL보다 더 빠졌을 수 있으므로 실제값 사용
+                # 🔧 FIX: max() 제거 — 실제 손실을 SL값으로 축소하면 통계 왜곡
                 closed_results.append((vp, pnl, mfe, reason, hold, vp.get("indicators", {})))
             else:
                 remaining.append(vp)
@@ -12712,25 +12717,33 @@ def monitor_position(m,
 # 알림
 # =========================
 def _tg_split_message(text, max_len=4000):
-    """긴 메시지를 구분선(━━━) 기준으로 분할, 각 파트 max_len 이내"""
+    """긴 메시지를 구분선(━━━) 기준으로 분할, 각 파트 max_len 이내
+    🔧 FIX: 구분선 재결합 시 중복 방지, 줄바꿈 보존"""
     sep = "━━━━━━━━━━━━━━━━"
-    sections = text.split(sep)
+    # 구분선 기준 분할 후 각 섹션에 구분선 포함하여 재조립
+    parts = text.split(sep)
+    # 첫 파트 제외, 나머지는 구분선 앞에 붙여줌
+    sections = [parts[0]]
+    for p in parts[1:]:
+        sections.append(sep + p)
+
     chunks = []
     current = ""
-    for i, sec in enumerate(sections):
-        candidate = current + (sep if current and i > 0 else "") + sec
-        if len(candidate) > max_len and current:
-            chunks.append(current.rstrip())
-            current = sec.lstrip("\n")
+    for sec in sections:
+        if not current:
+            current = sec
+        elif len(current) + len(sec) <= max_len:
+            current += sec
         else:
-            current = candidate
+            if current.strip():
+                chunks.append(current.rstrip())
+            current = sec.lstrip("\n")
     if current.strip():
         chunks.append(current.rstrip())
-    # 안전장치: 단일 섹션이 max_len 초과 시 강제 분할
+    # 안전장치: 단일 섹션이 max_len 초과 시 줄바꿈 기준 강제 분할
     final = []
     for chunk in chunks:
         while len(chunk) > max_len:
-            # 줄바꿈 기준으로 자르기
             cut = chunk[:max_len].rfind("\n")
             if cut < max_len // 2:
                 cut = max_len
@@ -12954,7 +12967,9 @@ def get_cooldown_sec(market: str) -> int:
     # 🔧 손실 후 동일 종목 재진입 쿨다운 (시간대별 차등)
     # - 9시대: 1.5배 (장초반 급등 기회 보호, 6분→4.5분)
     # - 그 외: 2배 (기존 유지)
-    if last_trade_was_loss.get(market, False):
+    with _TRADE_LOSS_LOCK:
+        _was_loss = last_trade_was_loss.get(market, False)
+    if _was_loss:
         loss_mult = 1.5 if h == 9 else 2
         return int(base * loss_mult)
 
@@ -13185,6 +13200,7 @@ def fetch_orderbook_cache(mkts):
 # =========================
 SHARD_SIZE = TOP_N
 _cursor = 0
+_cursor_lock = threading.Lock()  # 🔧 FIX: _cursor 레이스 컨디션 방지
 
 
 def main():
@@ -13740,14 +13756,16 @@ def main():
             except Exception:
                 pass
 
-            start = _cursor
-            end = _cursor + SHARD_SIZE
+            # 🔧 FIX: _cursor 읽기/쓰기를 락으로 보호 (레이스 컨디션 방지)
+            with _cursor_lock:
+                start = _cursor
+                end = _cursor + SHARD_SIZE
+                _cursor = (end) % len(mkts_all)
             shard = mkts_all[start:end]
             if len(shard) < SHARD_SIZE:
                 shard += mkts_all[:(SHARD_SIZE - len(shard))]
             # 🔧 FIX: shard 중복 제거 (wrap-around 시 중복 방지)
             shard = list(dict.fromkeys(shard))
-            _cursor = (end) % len(mkts_all)
 
             _scan_cycle_start = time.time()
 
@@ -14186,6 +14204,21 @@ def main():
 
         except KeyboardInterrupt:
             print("Stopped by user.")
+            # 🔧 FIX: 그레이스풀 셧다운 (상태 저장 + 스레드 정리)
+            try:
+                _save_bot_state()
+                print("[SHUTDOWN] 봇 상태 저장 완료")
+            except Exception as _se:
+                print(f"[SHUTDOWN] 상태 저장 실패: {_se}")
+            try:
+                _candle_executor.shutdown(wait=False)
+                print("[SHUTDOWN] ThreadPoolExecutor 종료")
+            except Exception:
+                pass
+            try:
+                tg_send("🛑 봇 수동 종료 (KeyboardInterrupt)")
+            except Exception:
+                pass
             break
         except Exception as e:
             print("[MAIN_ERR]", e)
