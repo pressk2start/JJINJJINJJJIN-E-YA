@@ -7197,10 +7197,12 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60):
         if len(c5) >= 35:
             closes_5m = [c["trade_price"] for c in c5]
             macd_5m, sig_5m, hist_5m = _v4_macd(closes_5m)
+            price_5m = closes_5m[-1] if closes_5m[-1] > 0 else 1
+            # MACD를 가격대비 bps(만분율)로 정규화 → 코인간 비교 가능
             if macd_5m is not None:
-                ui["macd_5m"] = round(macd_5m, 6)
+                ui["macd_5m_bps"] = round(macd_5m / price_5m * 10000, 2)
             if hist_5m is not None:
-                ui["macd_hist_5m"] = round(hist_5m, 6)
+                ui["macd_hist_5m_bps"] = round(hist_5m / price_5m * 10000, 2)
     # --- 15m 지표 ---
     if c15 and len(c15) >= 30:
         highs_15 = [c["high_price"] for c in c15]
@@ -7214,10 +7216,12 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60):
             ui["rsi_15m"] = round(rsi_15m, 2)
         if len(c15) >= 35:
             macd_15, sig_15, hist_15 = _v4_macd(closes_15)
+            price_15 = closes_15[-1] if closes_15[-1] > 0 else 1
+            # MACD를 가격대비 bps(만분율)로 정규화
             if macd_15 is not None:
-                ui["macd_15"] = round(macd_15, 6)
+                ui["macd_15_bps"] = round(macd_15 / price_15 * 10000, 2)
             if hist_15 is not None:
-                ui["macd_hist_15"] = round(hist_15, 6)
+                ui["macd_hist_15_bps"] = round(hist_15 / price_15 * 10000, 2)
             ema5_15 = _v4_ema_from_candles(c15, 5)
             ema10_15 = _v4_ema_from_candles(c15, 10)
             ema20_15 = _v4_ema_from_candles(c15, 20)
@@ -7512,9 +7516,7 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
                         _macd_str, _adx_str, f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
-        "indicators": {"vr5": round(vr5, 2), "atr_pct": round(atr_p, 4),
-                        "adx_15": round(adx_15, 2) if adx_ok and adx_15 is not None else 0,
-                        "macd_5m": round(macd_5m, 6) if macd_ok and macd_5m is not None else 0},
+        "indicators": {},  # 유니버설 지표로 통합 (vr5,atr_pct,adx_15,macd_5m)
     }
 
 
@@ -7608,8 +7610,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"].copy(),
-        "indicators": {"gap_pct": round(_20bar_gap, 4), "adx_15": round(adx_15, 2),
-                        "macd_5m": round(macd_5m, 6)},
+        "indicators": {},  # 유니버설 지표로 통합 (gap_20bar,adx_15,macd_5m)
     }
 
 
@@ -7658,8 +7659,7 @@ def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"15mEMA={ema5_15:.0f}>{ema10_15:.0f}>{ema20_15:.0f}",
                         f"15mMACD={macd_15:.4f}>{sig_15:.4f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
-        "indicators": {"ema5_15": round(ema5_15, 2), "ema10_15": round(ema10_15, 2),
-                        "ema20_15": round(ema20_15, 2), "macd_15": round(macd_15, 6)},
+        "indicators": {},  # raw EMA가격 제거 (코인간 평균 무의미), 유니버설 ema_spread_15로 대체
     }
 
 
@@ -7708,9 +7708,7 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"VR5={vr5:.1f}(니어미스)", f"ATR%={atr_p:.2f}",
                         f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["거래량완화"].copy(),
-        "indicators": {"vr5": round(vr5, 2), "atr_pct": round(atr_p, 4),
-                        "adx_15": round(adx_15, 2) if adx_ok and adx_15 is not None else 0,
-                        "macd_5m": round(macd_5m, 6) if macd_ok and macd_5m is not None else 0},
+        "indicators": {},  # 유니버설 지표로 통합 (vr5,atr_pct,adx_15,macd_5m)
     }
 
 
@@ -7780,8 +7778,7 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"60mRSI={rsi_60m:.1f}",
                         f"ATR%={atr_p:.2f}", f"ADX15={adx_15:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"].copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 2), "rsi_60m": round(rsi_60m, 2),
-                        "atr_pct": round(atr_p, 4), "adx_15": round(adx_15, 2)},
+        "indicators": {},  # 유니버설 지표로 통합 (rsi_5m,rsi_60m,atr_pct,adx_15)
     }
 
 
@@ -7841,7 +7838,7 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "C",
         "filters_hit": ["60m감싸기", f"비율={engulf_ratio:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"].copy(),
-        "indicators": {"engulf_ratio": engulf_ratio},
+        "indicators": {"engulf_ratio": engulf_ratio},  # 고유지표 (유니버설 engulf_ratio_60과 별도)
     }
 
 
@@ -7892,7 +7889,7 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "C",
         "filters_hit": [f"15mVR5={vr5_15:.1f}", f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"].copy(),
-        "indicators": {"vr5_15m": round(vr5_15, 2)},
+        "indicators": {},  # 유니버설 지표로 통합 (vr5_15m)
     }
 
 
@@ -7961,9 +7958,7 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
             f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"].copy(),
-        "indicators": {"ema5_60": round(ema5, 2), "ema10_60": round(ema10, 2),
-                        "ema20_60": round(ema20, 2), "macd_15": round(macd_15, 6),
-                        "atr_pct": round(atr_p, 4), "ema_gap_pct": round(ema_gap_pct, 4)},
+        "indicators": {"ema_gap_pct": round(ema_gap_pct, 4)},  # 고유지표만 (raw EMA제거, 나머지 유니버설 통합)
     }
 
 
@@ -8083,8 +8078,7 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
             f"VR5={vr5:.1f}", f"GATE={gate_info}",
         ],
         "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"].copy(),
-        "indicators": {"adx_15": round(adx_15, 2), "adx_60": round(adx_60, 2),
-                        "macd_5m": round(macd_5m, 6), "vr5": round(vr5, 2)},
+        "indicators": {},  # 유니버설 지표로 통합 (adx_15,adx_60,macd_5m,vr5)
     }
 
 
@@ -8245,6 +8239,16 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
+                # v11 마이그레이션: 유니버설 지표 통합 — 기존 핵심지표 only 데이터 리셋
+                # 기존에 전략 고유 지표만 수집되어 유니버설 15개 지표가 누락된 상태
+                # → 지표 W/L 필드만 리셋하여 유니버설 지표가 새로 수집되게 함
+                # (signals, wins, losses, total_pnl 등 성과 통계는 보존)
+                if not s.get("_v11_ind_reset"):
+                    s["win_ind_avg"] = {}
+                    s["win_ind_cnt"] = {}
+                    s["loss_ind_avg"] = {}
+                    s["loss_ind_cnt"] = {}
+                    s["_v11_ind_reset"] = True
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
