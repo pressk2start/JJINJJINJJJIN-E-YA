@@ -8304,12 +8304,16 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s.pop(_old_key, None)
         if "win_ind_avg" not in s:
             old_win = s.pop("win_indicators", [])
-            s["win_ind_avg"] = _calc_ind_avg(old_win)
-            s["win_ind_n"] = len(old_win)
+            s["win_ind_avg"], s["win_ind_cnt"] = _calc_ind_avg(old_win)
+        s.pop("win_ind_n", None)  # 구 필드 정리
+        if "win_ind_cnt" not in s:
+            s["win_ind_cnt"] = {}
         if "loss_ind_avg" not in s:
             old_loss = s.pop("loss_indicators", [])
-            s["loss_ind_avg"] = _calc_ind_avg(old_loss)
-            s["loss_ind_n"] = len(old_loss)
+            s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
+        s.pop("loss_ind_n", None)  # 구 필드 정리
+        if "loss_ind_cnt" not in s:
+            s["loss_ind_cnt"] = {}
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
