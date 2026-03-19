@@ -701,6 +701,13 @@ def _pipeline_report(force=False):
     print(msg)
     tg_send(msg)
 
+    # 🔧 FIX: 리포트 전송 후 섀도우 통계 초기화 (다음 구간 측정용)
+    try:
+        _save_shadow_stats()  # 현재 통계 저장 후
+        _v4_shadow_reset_counters()  # 리셋
+    except Exception:
+        pass
+
 
 _PIPELINE_MINI_LAST_TS = 0
 _PIPELINE_MINI_INTERVAL = 60  # 1분
@@ -8589,8 +8596,11 @@ def _v4_shadow_report_lines():
 
 
 def _v4_shadow_reset_counters():
-    """섀도우 카운터 리셋 — 성과 통계는 누적 유지"""
-    pass
+    """섀도우 성과 통계 리셋 — 리포트 전송 후 호출하여 다음 구간 측정"""
+    global _SHADOW_TRADE_COUNT
+    with _SHADOW_PERF_LOCK:
+        _SHADOW_PERF_STATS.clear()
+        _SHADOW_TRADE_COUNT = 0
 
 
 def v4_get_strategy_registry():
@@ -12701,6 +12711,36 @@ def monitor_position(m,
 # =========================
 # 알림
 # =========================
+def _tg_split_message(text, max_len=4000):
+    """긴 메시지를 구분선(━━━) 기준으로 분할, 각 파트 max_len 이내"""
+    sep = "━━━━━━━━━━━━━━━━"
+    sections = text.split(sep)
+    chunks = []
+    current = ""
+    for i, sec in enumerate(sections):
+        candidate = current + (sep if current and i > 0 else "") + sec
+        if len(candidate) > max_len and current:
+            chunks.append(current.rstrip())
+            current = sec.lstrip("\n")
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current.rstrip())
+    # 안전장치: 단일 섹션이 max_len 초과 시 강제 분할
+    final = []
+    for chunk in chunks:
+        while len(chunk) > max_len:
+            # 줄바꿈 기준으로 자르기
+            cut = chunk[:max_len].rfind("\n")
+            if cut < max_len // 2:
+                cut = max_len
+            final.append(chunk[:cut])
+            chunk = chunk[cut:].lstrip("\n")
+        if chunk.strip():
+            final.append(chunk)
+    return final if final else [text[:max_len]]
+
+
 def tg_send(t, retry=3):
     """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)
     🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
@@ -12711,9 +12751,16 @@ def tg_send(t, retry=3):
         print(t)
         return True
 
-    # 🔧 FIX: Telegram 4096자 제한 → 초과 시 잘라서 전송 (청산 reason이 길면 잘림 방지)
+    # 🔧 FIX: Telegram 4096자 제한 → 초과 시 분할 전송 (잘림 방지)
     if len(t) > 4000:
-        t = t[:3950] + "\n...(잘림)"
+        chunks = _tg_split_message(t, max_len=4000)
+        ok_all = True
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                time.sleep(0.3)  # rate-limit 방지
+            if not tg_send(chunk, retry=retry):
+                ok_all = False
+        return ok_all
 
     def _tg_post(payload):
         """_TG_SESSION으로 전송, 실패 시 새 세션 시도
