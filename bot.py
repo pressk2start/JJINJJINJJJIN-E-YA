@@ -8497,11 +8497,13 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         hit = sig is not None
         results[route] = hit
 
-        if hit and not strat["enabled"] and entry_price > 0:
+        if hit and entry_price > 0:
             dedup_key = f"{route}_{market}"
             # 해당 전략의 청산 파라미터 가져오기
             ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
-            # 지표 병합: 공통 지표 기반 + 자기 고유 지표로 덮어쓰기 (자기 거 우선)
+            # 지표 병합: 공통 지표(15개) 기반 + 자기 고유 지표로 덮어쓰기
+            # → 전략별 핵심 지표뿐 아니라 전체 유니버설 지표를 W/L로 수집
+            #   (전략과 무관한 지표에서 유의미한 차이 발견 → 추가 필터 후보)
             merged_ind = dict(universal_ind)  # 공통 지표 복사
             own_ind = sig.get("indicators", {})
             merged_ind.update(own_ind)  # 자기 고유 지표가 우선
@@ -8529,13 +8531,14 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
 
 
 def _v4_shadow_report_lines():
-    """섀도우 가상매매 성과 리포트 (10분 텔레그램 리포트용)
-    루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 표시"""
+    """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
+    루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
+    v11: 라이브(A,B) + 섀도우(C~L) 전체 11개 시나리오 지표 수집"""
     lines = []
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 섀도우 가상매매 성과:")
+        lines.append("📡 전 시나리오 가상매매 지표 W/L:")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         for key, s in sorted_stats:
