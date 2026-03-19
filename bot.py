@@ -701,6 +701,13 @@ def _pipeline_report(force=False):
     print(msg)
     tg_send(msg)
 
+    # 🔧 FIX: 리포트 전송 후 섀도우 통계 초기화 (다음 구간 측정용)
+    try:
+        _save_shadow_stats()  # 현재 통계 저장 후
+        _v4_shadow_reset_counters()  # 리셋
+    except Exception:
+        pass
+
 
 _PIPELINE_MINI_LAST_TS = 0
 _PIPELINE_MINI_INTERVAL = 60  # 1분
@@ -8015,7 +8022,7 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"반등={bounce_ratio:.1f}",
                         f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 2), "bounce_ratio": round(bounce_ratio, 2)},
+        "indicators": {"bounce_ratio": round(bounce_ratio, 2)},  # rsi_5m은 유니버설로 통합
     }
 
 
@@ -8239,16 +8246,15 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-                # v11 마이그레이션: 유니버설 지표 통합 — 기존 핵심지표 only 데이터 리셋
-                # 기존에 전략 고유 지표만 수집되어 유니버설 15개 지표가 누락된 상태
-                # → 지표 W/L 필드만 리셋하여 유니버설 지표가 새로 수집되게 함
-                # (signals, wins, losses, total_pnl 등 성과 통계는 보존)
-                if not s.get("_v11_ind_reset"):
-                    s["win_ind_avg"] = {}
-                    s["win_ind_cnt"] = {}
-                    s["loss_ind_avg"] = {}
-                    s["loss_ind_cnt"] = {}
-                    s["_v11_ind_reset"] = True
+            # v11 전체 초기화: 유니버설 지표 통합 + MACD bps 정규화
+            # 기존 데이터는 핵심지표만 수집, 임계치/키 변경으로 호환 불가
+            # → 전체 통계 리셋하여 새 17개 유니버설 지표로 처음부터 수집
+            _needs_v11_reset = any(
+                not s.get("_v11_full_reset") for s in _SHADOW_PERF_STATS.values()
+            )
+            if _needs_v11_reset:
+                print("[SHADOW_STATS] v11 전체 초기화: 유니버설 지표 통합으로 기존 데이터 리셋")
+                _SHADOW_PERF_STATS = {}
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8299,25 +8305,15 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "coins": [],
                 "win_ind_avg": {}, "win_ind_cnt": {},
                 "loss_ind_avg": {}, "loss_ind_cnt": {},
+                "_v11_full_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
-        # 마이그레이션: 불필요 필드 정리 + 지표 평균 필드
-        for _old_key in ("avg_mfe", "avg_hold", "mfe_n",
-                         "win_avg_mfe", "win_avg_hold", "win_avg_pnl",
-                         "loss_avg_mfe", "loss_avg_hold", "loss_avg_pnl"):
-            s.pop(_old_key, None)
-        if "win_ind_avg" not in s:
-            old_win = s.pop("win_indicators", [])
-            s["win_ind_avg"], s["win_ind_cnt"] = _calc_ind_avg(old_win)
-        s.pop("win_ind_n", None)  # 구 필드 정리
-        if "win_ind_cnt" not in s:
-            s["win_ind_cnt"] = {}
-        if "loss_ind_avg" not in s:
-            old_loss = s.pop("loss_indicators", [])
-            s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-        s.pop("loss_ind_n", None)  # 구 필드 정리
-        if "loss_ind_cnt" not in s:
-            s["loss_ind_cnt"] = {}
+        # v11 이후: 구 마이그레이션 불필요 (전체 리셋 완료)
+        # 필드 보장만 수행
+        for _field, _default in (("win_ind_avg", {}), ("win_ind_cnt", {}),
+                                  ("loss_ind_avg", {}), ("loss_ind_cnt", {})):
+            if _field not in s:
+                s[_field] = _default
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8493,7 +8489,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     entry_price = c1[-1]["trade_price"] if c1 else 0
 
     # 공통 지표 한 번만 계산 (모든 전략에 공유)
-    universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
+    try:
+        universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
+    except Exception as e:
+        print(f"[SHADOW] universal_ind 수집 실패: {e}")
+        universal_ind = {}
 
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
@@ -8596,8 +8596,11 @@ def _v4_shadow_report_lines():
 
 
 def _v4_shadow_reset_counters():
-    """섀도우 카운터 리셋 — 성과 통계는 누적 유지"""
-    pass
+    """섀도우 성과 통계 리셋 — 리포트 전송 후 호출하여 다음 구간 측정"""
+    global _SHADOW_TRADE_COUNT
+    with _SHADOW_PERF_LOCK:
+        _SHADOW_PERF_STATS.clear()
+        _SHADOW_TRADE_COUNT = 0
 
 
 def v4_get_strategy_registry():
@@ -8636,8 +8639,8 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     # 계측 목적: m3 탈락 코인에서도 개별 전략 시그널 빈도를 측정
     try:
         _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
-    except Exception:
-        pass  # 섀도우 오류가 라이브에 영향 주면 안 됨
+    except Exception as e:
+        print(f"[SHADOW] 섀도우 테스트 오류: {e}")  # 라이브에 영향 안 줌
 
     # m3 탈락 시 라이브 진입 차단 (섀도우는 이미 위에서 실행됨)
     if not m3_ok:
@@ -12708,6 +12711,36 @@ def monitor_position(m,
 # =========================
 # 알림
 # =========================
+def _tg_split_message(text, max_len=4000):
+    """긴 메시지를 구분선(━━━) 기준으로 분할, 각 파트 max_len 이내"""
+    sep = "━━━━━━━━━━━━━━━━"
+    sections = text.split(sep)
+    chunks = []
+    current = ""
+    for i, sec in enumerate(sections):
+        candidate = current + (sep if current and i > 0 else "") + sec
+        if len(candidate) > max_len and current:
+            chunks.append(current.rstrip())
+            current = sec.lstrip("\n")
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current.rstrip())
+    # 안전장치: 단일 섹션이 max_len 초과 시 강제 분할
+    final = []
+    for chunk in chunks:
+        while len(chunk) > max_len:
+            # 줄바꿈 기준으로 자르기
+            cut = chunk[:max_len].rfind("\n")
+            if cut < max_len // 2:
+                cut = max_len
+            final.append(chunk[:cut])
+            chunk = chunk[cut:].lstrip("\n")
+        if chunk.strip():
+            final.append(chunk)
+    return final if final else [text[:max_len]]
+
+
 def tg_send(t, retry=3):
     """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)
     🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
@@ -12718,9 +12751,16 @@ def tg_send(t, retry=3):
         print(t)
         return True
 
-    # 🔧 FIX: Telegram 4096자 제한 → 초과 시 잘라서 전송 (청산 reason이 길면 잘림 방지)
+    # 🔧 FIX: Telegram 4096자 제한 → 초과 시 분할 전송 (잘림 방지)
     if len(t) > 4000:
-        t = t[:3950] + "\n...(잘림)"
+        chunks = _tg_split_message(t, max_len=4000)
+        ok_all = True
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                time.sleep(0.3)  # rate-limit 방지
+            if not tg_send(chunk, retry=retry):
+                ok_all = False
+        return ok_all
 
     def _tg_post(payload):
         """_TG_SESSION으로 전송, 실패 시 새 세션 시도
