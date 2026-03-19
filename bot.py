@@ -8015,7 +8015,7 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"반등={bounce_ratio:.1f}",
                         f"GATE={gate_info}"],
         "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 2), "bounce_ratio": round(bounce_ratio, 2)},
+        "indicators": {"bounce_ratio": round(bounce_ratio, 2)},  # rsi_5m은 유니버설로 통합
     }
 
 
@@ -8239,16 +8239,15 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-                # v11 마이그레이션: 유니버설 지표 통합 — 기존 핵심지표 only 데이터 리셋
-                # 기존에 전략 고유 지표만 수집되어 유니버설 15개 지표가 누락된 상태
-                # → 지표 W/L 필드만 리셋하여 유니버설 지표가 새로 수집되게 함
-                # (signals, wins, losses, total_pnl 등 성과 통계는 보존)
-                if not s.get("_v11_ind_reset"):
-                    s["win_ind_avg"] = {}
-                    s["win_ind_cnt"] = {}
-                    s["loss_ind_avg"] = {}
-                    s["loss_ind_cnt"] = {}
-                    s["_v11_ind_reset"] = True
+            # v11 전체 초기화: 유니버설 지표 통합 + MACD bps 정규화
+            # 기존 데이터는 핵심지표만 수집, 임계치/키 변경으로 호환 불가
+            # → 전체 통계 리셋하여 새 17개 유니버설 지표로 처음부터 수집
+            _needs_v11_reset = any(
+                not s.get("_v11_full_reset") for s in _SHADOW_PERF_STATS.values()
+            )
+            if _needs_v11_reset:
+                print("[SHADOW_STATS] v11 전체 초기화: 유니버설 지표 통합으로 기존 데이터 리셋")
+                _SHADOW_PERF_STATS = {}
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8299,25 +8298,15 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "coins": [],
                 "win_ind_avg": {}, "win_ind_cnt": {},
                 "loss_ind_avg": {}, "loss_ind_cnt": {},
+                "_v11_full_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
-        # 마이그레이션: 불필요 필드 정리 + 지표 평균 필드
-        for _old_key in ("avg_mfe", "avg_hold", "mfe_n",
-                         "win_avg_mfe", "win_avg_hold", "win_avg_pnl",
-                         "loss_avg_mfe", "loss_avg_hold", "loss_avg_pnl"):
-            s.pop(_old_key, None)
-        if "win_ind_avg" not in s:
-            old_win = s.pop("win_indicators", [])
-            s["win_ind_avg"], s["win_ind_cnt"] = _calc_ind_avg(old_win)
-        s.pop("win_ind_n", None)  # 구 필드 정리
-        if "win_ind_cnt" not in s:
-            s["win_ind_cnt"] = {}
-        if "loss_ind_avg" not in s:
-            old_loss = s.pop("loss_indicators", [])
-            s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-        s.pop("loss_ind_n", None)  # 구 필드 정리
-        if "loss_ind_cnt" not in s:
-            s["loss_ind_cnt"] = {}
+        # v11 이후: 구 마이그레이션 불필요 (전체 리셋 완료)
+        # 필드 보장만 수행
+        for _field, _default in (("win_ind_avg", {}), ("win_ind_cnt", {}),
+                                  ("loss_ind_avg", {}), ("loss_ind_cnt", {})):
+            if _field not in s:
+                s[_field] = _default
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8493,7 +8482,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     entry_price = c1[-1]["trade_price"] if c1 else 0
 
     # 공통 지표 한 번만 계산 (모든 전략에 공유)
-    universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
+    try:
+        universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
+    except Exception as e:
+        print(f"[SHADOW] universal_ind 수집 실패: {e}")
+        universal_ind = {}
 
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
@@ -8636,8 +8629,8 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     # 계측 목적: m3 탈락 코인에서도 개별 전략 시그널 빈도를 측정
     try:
         _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
-    except Exception:
-        pass  # 섀도우 오류가 라이브에 영향 주면 안 됨
+    except Exception as e:
+        print(f"[SHADOW] 섀도우 테스트 오류: {e}")  # 라이브에 영향 안 줌
 
     # m3 탈락 시 라이브 진입 차단 (섀도우는 이미 위에서 실행됨)
     if not m3_ok:
