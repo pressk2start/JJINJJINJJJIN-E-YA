@@ -65,6 +65,9 @@ EARLY_FLOW_MIN_KRWPSEC = 15_000
 # 5. 청산 프로파일 (gentle / balanced / strict)
 # ============================================================
 EXIT_PROFILE = os.getenv("EXIT_PROFILE", "balanced").lower()
+if EXIT_PROFILE not in ("gentle", "balanced", "strict"):
+    print(f"[CONFIG] EXIT_PROFILE '{EXIT_PROFILE}' 미지원 → balanced 사용")
+    EXIT_PROFILE = "balanced"
 
 # ★ _apply_exit_profile()에서 프로파일별 덮어쓰기 (기본값 = balanced)
 SPIKE_RECOVERY_WINDOW = 3
@@ -268,7 +271,11 @@ MEGA_ABS_KRW = 4_000_000
 # ============================================================
 # 14. 포지션 관리
 # ============================================================
-MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
+try:
+    MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
+except ValueError:
+    print("[CONFIG] MAX_POSITIONS 파싱 실패 → 기본값 5")
+    MAX_POSITIONS = 5
 PARTIAL_PENDING_TIMEOUT = 30.0
 DUST_PREVENT_KRW = 6000
 
@@ -308,15 +315,29 @@ _SPIKE_WAVE_WINDOW = 1800
 # ============================================================
 # 18. 리스크 관리 (env 기본값)
 # ============================================================
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.002"))
+def _safe_float(key, default):
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        print(f"[CONFIG] {key} 파싱 실패 → 기본값 {default}")
+        return default
+
+def _safe_int(key, default):
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        print(f"[CONFIG] {key} 파싱 실패 → 기본값 {default}")
+        return default
+
+RISK_PER_TRADE = _safe_float("RISK_PER_TRADE", 0.002)
 AGGRESSIVE_MODE = os.getenv("AGGRESSIVE_MODE", "1") == "1"
 USE_PYRAMIDING = False
-SEED_RISK_FRACTION = float(os.getenv("SEED_RISK_FRACTION", "0.55"))
-ADD_RISK_FRACTION = float(os.getenv("ADD_RISK_FRACTION", "0.55"))
-PYRAMID_ADD_MIN_GAIN = float(os.getenv("PYRAMID_ADD_MIN_GAIN", "0.010"))
-PYRAMID_ADD_FLOW_MIN_BUY = float(os.getenv("PYRAMID_ADD_FLOW_MIN_BUY", "0.60"))
-PYRAMID_ADD_FLOW_MIN_KRWPSEC = float(os.getenv("PYRAMID_ADD_FLOW_MIN_KRWPSEC", "25000"))
-PYRAMID_ADD_COOLDOWN_SEC = int(os.getenv("PYRAMID_ADD_COOLDOWN_SEC", "12"))
+SEED_RISK_FRACTION = _safe_float("SEED_RISK_FRACTION", 0.55)
+ADD_RISK_FRACTION = _safe_float("ADD_RISK_FRACTION", 0.55)
+PYRAMID_ADD_MIN_GAIN = _safe_float("PYRAMID_ADD_MIN_GAIN", 0.010)
+PYRAMID_ADD_FLOW_MIN_BUY = _safe_float("PYRAMID_ADD_FLOW_MIN_BUY", 0.60)
+PYRAMID_ADD_FLOW_MIN_KRWPSEC = _safe_float("PYRAMID_ADD_FLOW_MIN_KRWPSEC", 25000)
+PYRAMID_ADD_COOLDOWN_SEC = _safe_int("PYRAMID_ADD_COOLDOWN_SEC", 12)
 
 # ============================================================
 # 19. 캐시 TTL
