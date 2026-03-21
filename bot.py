@@ -7493,6 +7493,10 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     if vr5 <= 2.5:
         _pipeline_inc("vol3x_vr5_fail")
         return None
+    # 🔧 v11: W/L — vr5 W12.20/L5.79 (2.1x) → 폭발적 거래량만 승률↑
+    if vr5 < 8.0:
+        _pipeline_inc("vol3x_vr5_v11_fail")
+        return None
     # 🔧 v9: ATR% 0.7→0.5 (리포트 니어미스 8건, 실시간 avg=0.24로 0.7 불가)
     atr_p = _v4_atr_pct(c1, 14)
     _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.5))
@@ -7563,6 +7567,13 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
     if recovery < 1.5:
         return None
+    # 🔧 v11: W/L — vr5_15m W1.24/L9.24 (0.13x) → 15분 거래량 과열=반전 실패
+    if len(c15) >= 6:
+        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _av15 = sum(_pv15) / max(len(_pv15), 1)
+        if _av15 > 0 and (_cv15 / _av15) >= 3.0:
+            return None
     return {
         "signal_tag": "15m_눌림반전",
         "entry_mode": "confirm",
@@ -7616,6 +7627,14 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     if adx_15 is None or adx_15 <= 20:
         _pipeline_inc("20bar_adx_fail")
         return None
+    # 🔧 v11: W/L — vr5_15m W2.02/L0.88 (2.3x) → 15분 거래량 동반 없는 돌파=허돌파
+    if c15 and len(c15) >= 6:
+        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _av15 = sum(_pv15) / max(len(_pv15), 1)
+        if _av15 > 0 and (_cv15 / _av15) < 1.5:
+            _pipeline_inc("20bar_vr15_v11_fail")
+            return None
     _pipeline_inc("20bar_pass")
     return {
         "signal_tag": "20봉_고점돌파",
@@ -7670,6 +7689,13 @@ def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
     # 1m 양봉
     if not _v4_is_bullish(c1[-1]):
         return None
+    # 🔧 v11: W/L — vr5_15m W2.10/L3.62 (0.58x) → 15분 거래량 과열 시 정배열 후 급락
+    if len(c15) >= 6:
+        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _av15 = sum(_pv15) / max(len(_pv15), 1)
+        if _av15 > 0 and (_cv15 / _av15) >= 2.5:
+            return None
     return {
         "signal_tag": "EMA정배열진입",
         "entry_mode": "confirm",
@@ -7714,6 +7740,16 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
     # 🔧 v10: W/L — atr W0.52/L0.58 → 낮을수록 승률↑ → ATR 상한 0.55 추가
     if atr_p > 0.55:
         return None
+    # 🔧 v11: W/L — macd_hist_15_bps W-1.06/L2.96 → 히스토 음수→양전환 직전이 최적
+    if c15 and len(c15) >= 35:
+        _cl15 = [c["trade_price"] for c in c15]
+        _m15, _s15, _ = _v4_macd(_cl15)
+        if _m15 is not None and _s15 is not None:
+            _hist15 = _m15 - _s15
+            _price15 = _cl15[-1] if _cl15[-1] > 0 else 1
+            _hist15_bps = _hist15 / _price15 * 10000
+            if _hist15_bps >= 1.0:
+                return None
     # 🔧 v10: W/L — macd_5m W-1.15/L0.27 → 음수 MACD가 이김 → MACD 양수면 제외
     if macd_ok and macd_5m is not None and macd_5m > 0:
         # MACD 양수여도 ADX가 있으면 통과 허용
@@ -7788,6 +7824,11 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
             return None
     else:
         return None
+    # 🔧 v11: W/L — vr5 W2.64/L0.75 (3.5x) → 거래량 없는 RSI 과열은 가짜 모멘텀
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.5:
+        _pipeline_inc("mom_scalp_vr5_v11_fail")
+        return None
     _pipeline_inc("mom_scalp_pass")
     return {
         "signal_tag": "모멘텀_스캘프",
@@ -7849,6 +7890,14 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         if adx_15 is not None and adx_15 < 18:
             _pipeline_inc("60m_engulf_adx_fail")
             return None
+    # 🔧 v11: W/L — vr5_15m W1.04/L2.37 (0.44x) → 15분 거래량 펌프 동반=되돌림
+    if c15 and len(c15) >= 6:
+        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _av15 = sum(_pv15) / max(len(_pv15), 1)
+        if _av15 > 0 and (_cv15 / _av15) >= 1.5:
+            _pipeline_inc("60m_engulf_vr15_v11_fail")
+            return None
     _pipeline_inc("60m_engulf_pass")
     return {
         "signal_tag": "60m_감싸기_돌파",
@@ -7899,6 +7948,14 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         macd_5m, sig_5m, _ = _v4_macd(closes_5m)
         if macd_5m is not None and sig_5m is not None and macd_5m <= sig_5m:
             _pipeline_inc("15m_vr_macd_fail")
+            return None
+    # 🔧 v11: W/L — gap_20bar W0.03/L-8.32 (극단) → 고점 대비 -3% 이하=데드캣바운스
+    if c1 and len(c1) >= 21:
+        _cur_cl = c1[-1]["trade_price"]
+        _high20 = max(c["high_price"] for c in c1[-21:-1])
+        _gap20 = ((_cur_cl / max(_high20, 1)) - 1.0) * 100
+        if _gap20 < -3.0:
+            _pipeline_inc("15m_vr_gap20_v11_fail")
             return None
     _pipeline_inc("15m_vr_pass")
     return {
@@ -7964,6 +8021,17 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
         if adx_60 is not None and adx_60 < 20:
             _pipeline_inc("upper_align_adx60_fail")
             return None
+    # 🔧 v11: W/L — macd_hist_5m_bps W16.46/L8.77 (1.88x) → 5분 MACD 가속 중만 유효
+    if c5 and len(c5) >= 35:
+        _cl5 = [c["trade_price"] for c in c5]
+        _m5, _s5, _ = _v4_macd(_cl5)
+        if _m5 is not None and _s5 is not None:
+            _hist5 = _m5 - _s5
+            _price5 = _cl5[-1] if _cl5[-1] > 0 else 1
+            _hist5_bps = _hist5 / _price5 * 10000
+            if _hist5_bps < 12:
+                _pipeline_inc("upper_align_hist5_v11_fail")
+                return None
     _pipeline_inc("upper_align_pass")
     return {
         "signal_tag": "상위TF_정배열",
@@ -8016,7 +8084,8 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     cur_5m_body = c5[-1]["trade_price"] - c5[-1]["opening_price"]
     prev_5m_body = abs(c5[-2]["opening_price"] - c5[-2]["trade_price"])
     bounce_ratio = cur_5m_body / max(prev_5m_body, 1)
-    if bounce_ratio < 0.5:
+    # 🔧 v11: W/L — bounce_ratio W625.97/L0.98 (극단) → 강한 반등만 진짜 반전 (0.5→2.0)
+    if bounce_ratio < 2.0:
         _pipeline_inc("oversold_bounce_weak")
         return None
     # 🔧 v10: 60m RSI > 35 추가 — 상위TF도 최소한 낙폭 과대가 아니어야 반등 가능
@@ -8085,6 +8154,14 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
     if not _v4_is_bullish(c1[-1]):
         _pipeline_inc("adx_trend_1m_fail")
         return None
+    # 🔧 v11: W/L — vr5_15m W2.20/L0.67 (3.28x) → 15분 거래량 없으면 추세 지속 실패
+    if c15 and len(c15) >= 6:
+        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _av15 = sum(_pv15) / max(len(_pv15), 1)
+        if _av15 > 0 and (_cv15 / _av15) < 1.5:
+            _pipeline_inc("adx_trend_vr15_v11_fail")
+            return None
     _pipeline_inc("adx_trend_pass")
     return {
         "signal_tag": "ADX_추세강화",
