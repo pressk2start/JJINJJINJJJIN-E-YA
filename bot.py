@@ -8334,14 +8334,14 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-            # v11 전체 초기화: 유니버설 지표 통합 + MACD bps 정규화
-            # 기존 데이터는 핵심지표만 수집, 임계치/키 변경으로 호환 불가
-            # → 전체 통계 리셋하여 새 17개 유니버설 지표로 처음부터 수집
+            # v11.1 전체 초기화: 전략별 W/L 최유의미 필터 추가로 기존 데이터 무효
+            # A:vr5>=8, B:vr15>=1.5, C:vr15<3, D:hist15<1bps, F:vr15<2.5,
+            # G:vr5>=1.5, H:vr15<1.5, I:gap>=-3, J:hist5>=12bps, K:bounce>=2, L:vr15>=1.5
             _needs_v11_reset = any(
-                not s.get("_v11_full_reset") for s in _SHADOW_PERF_STATS.values()
+                not s.get("_v11_filters_reset") for s in _SHADOW_PERF_STATS.values()
             )
             if _needs_v11_reset:
-                print("[SHADOW_STATS] v11 전체 초기화: 유니버설 지표 통합으로 기존 데이터 리셋")
+                print("[SHADOW_STATS] v11.1 전체 초기화: 전략별 W/L 필터 추가로 기존 데이터 리셋")
                 _SHADOW_PERF_STATS = {}
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
@@ -8393,7 +8393,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "coins": [],
                 "win_ind_avg": {}, "win_ind_cnt": {},
                 "loss_ind_avg": {}, "loss_ind_cnt": {},
-                "_v11_full_reset": True,
+                "_v11_filters_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
         # v11 이후: 구 마이그레이션 불필요 (전체 리셋 완료)
