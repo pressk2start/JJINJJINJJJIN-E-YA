@@ -8334,15 +8334,17 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
-            # v11.1 전체 초기화: 전략별 W/L 최유의미 필터 추가로 기존 데이터 무효
-            # A:vr5>=8, B:vr15>=1.5, C:vr15<3, D:hist15<1bps, F:vr15<2.5,
-            # G:vr5>=1.5, H:vr15<1.5, I:gap>=-3, J:hist5>=12bps, K:bounce>=2, L:vr15>=1.5
-            _needs_v11_reset = any(
-                not s.get("_v11_filters_reset") for s in _SHADOW_PERF_STATS.values()
-            )
-            if _needs_v11_reset:
-                print("[SHADOW_STATS] v11.1 전체 초기화: 전략별 W/L 필터 추가로 기존 데이터 리셋")
+            # v11.1 1회성 리셋: 전략별 W/L 필터 추가로 기존 데이터 무효
+            # 마커 파일로 리셋 완료 여부 판정 → 봇 재시작해도 다시 리셋 안 함
+            _v11_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v11_filters_reset_done")
+            if not os.path.exists(_v11_marker):
+                print("[SHADOW_STATS] v11.1 1회 초기화: 전략별 W/L 필터 추가로 기존 데이터 리셋")
                 _SHADOW_PERF_STATS = {}
+                try:
+                    with open(_v11_marker, "w") as f:
+                        f.write("v11.1 filters reset done\n")
+                except Exception:
+                    pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
