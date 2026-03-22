@@ -7977,16 +7977,17 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         if _gap20 < -3.0:
             _pipeline_inc("15m_vr_gap20_v11_fail")
             return None
-    # 🔧 v12: W/L 125건 — adx_60 W47.93(34) / L37.36(91) (+28%)
-    #   60m ADX 높을수록 상위TF 추세 확립 → VR폭발이 추세 동행 → 승률↑ → 최소 40 요구
-    if c60 and len(c60) >= 30:
-        _highs_60i = [c["high_price"] for c in c60]
-        _lows_60i = [c["low_price"] for c in c60]
-        _closes_60i = [c["trade_price"] for c in c60]
-        _adx_60i = _v4_adx(_highs_60i, _lows_60i, _closes_60i, 14)
-        if _adx_60i is not None and _adx_60i < 40:
-            _pipeline_inc("15m_vr_adx60_v12_fail")
-            return None
+    # 🔧 v12: W/L 125건 — macd_15_bps W23.29(34) / L6.84(91) (3.4배)
+    #   15m MACD bps 높을수록 모멘텀 동반 VR폭발 → 승률↑ → 최소 15 요구
+    if c15 and len(c15) >= 35:
+        _closes_15i = [c["trade_price"] for c in c15]
+        _macd_15i, _sig_15i, _ = _v4_macd(_closes_15i)
+        _price_15i = _closes_15i[-1] if _closes_15i[-1] > 0 else 1
+        if _macd_15i is not None:
+            _macd_bps_i = _macd_15i / _price_15i * 10000
+            if _macd_bps_i < 15:
+                _pipeline_inc("15m_vr_macd15_v12_fail")
+                return None
     _pipeline_inc("15m_vr_pass")
     return {
         "signal_tag": "15m_VR폭발",
@@ -8365,14 +8366,14 @@ def _load_shadow_stats():
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
             # v12 1회성 리셋: F/H/I에 W/L 임계치 필터 추가로 기존 데이터 무효
-            # F: ema_spread_60>=1.0 (W1.36/L0.82, 1887건), H: macd_15_bps>=10 (W18.5/L1.3, 137건), I: adx_60>=40 (W47.9/L37.4, 125건)
+            # F: ema_spread_60>=1.0 (W1.36/L0.82, 1887건), H: macd_15_bps>=10 (W18.5/L1.3, 137건), I: macd_15_bps>=15 (W23.3/L6.8, 125건)
             _v12_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v12_filters_reset_done")
             if not os.path.exists(_v12_marker):
-                print("[SHADOW_STATS] v12 1회 초기화: F(ema_spread_60≥1.0) H(macd_15_bps≥10) I(adx_60≥40) 필터 추가 → 전체 리셋")
+                print("[SHADOW_STATS] v12 1회 초기화: F(ema_spread_60≥1.0) H(macd_15_bps≥10) I(macd_15_bps≥15) 필터 추가 → 전체 리셋")
                 print("[SHADOW_STATS] 근거:")
                 print("[SHADOW_STATS]   F:EMA정배열 1887건 — ema_spread_60 W1.36(493건)/L0.82(1394건) +66% → 60m추세 확실할때만 진입")
                 print("[SHADOW_STATS]   H:60m감싸기 137건 — macd_15_bps W18.47(35건)/L1.31(102건) 14배 → 모멘텀 동반 감싸기만 진입")
-                print("[SHADOW_STATS]   I:15mVR폭발 125건 — adx_60 W47.93(34건)/L37.36(91건) +28% → 상위TF 추세 확립시만 진입")
+                print("[SHADOW_STATS]   I:15mVR폭발 125건 — macd_15_bps W23.29(34건)/L6.84(91건) 3.4배 → 모멘텀 동반 VR폭발만 진입")
                 _SHADOW_PERF_STATS = {}
                 try:
                     with open(_v12_marker, "w") as f:
