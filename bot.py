@@ -8686,8 +8686,9 @@ def _shadow_evaluate_positions():
                 vp["worst_price"] = cur_price
             hold_sec_now = now - vp["entry_ts"]
             for snap_s in _SHADOW_PNL_SNAP_SECS:
-                if snap_s not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
-                    vp.setdefault("pnl_curve", {})[snap_s] = round(
+                sk = str(snap_s)
+                if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
+                    vp.setdefault("pnl_curve", {})[sk] = round(
                         (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
 
             closed, reason = _shadow_sim_exit(vp, cur_price)
