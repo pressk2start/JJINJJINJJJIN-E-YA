@@ -8366,6 +8366,12 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
+                # v13 마이그레이션: Welford 분산 + MAE + PnL 곡선 필드 보장
+                for _f, _d in (("win_ind_m2", {}), ("loss_ind_m2", {}),
+                               ("mae_sum", 0.0), ("mae_cnt", 0),
+                               ("pnl_curve_sum", {}), ("pnl_curve_cnt", {})):
+                    if _f not in s:
+                        s[_f] = _d
             # v12 1회성 리셋: F/H/I에 W/L 임계치 필터 추가로 기존 데이터 무효
             # F: ema_spread_60>=1.0 (W1.36/L0.82, 1887건), H: macd_15_bps>=10 (W18.5/L1.3, 137건), I: macd_15_bps>=15 (W23.3/L6.8, 125건)
             _v12_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v12_filters_reset_done")
