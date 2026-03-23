@@ -8321,7 +8321,8 @@ _SHADOW_LOCK = threading.Lock()
 # 가상포지션: { route, strat, market, entry_price, entry_ts,
 #               best_price, trail_armed, trail_stop, exit_params, bars, exit_reason }
 _SHADOW_VIRTUAL_POSITIONS = []
-_SHADOW_DEDUP = {}  # { "route_market": last_entry_ts } — 중복 방지
+_SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
+_SHADOW_PNL_SNAP_SECS = [30, 60, 90, 120, 150, 180]  # PnL 곡선 스냅샷 시점(초) — 중복 방지
 
 # 섀도우 전용 check_fn 매핑 (라이브에서 None 반환하는 전략의 실제 로직)
 _SHADOW_CHECK_OVERRIDES = {
@@ -8365,6 +8366,12 @@ def _load_shadow_stats():
                 if "loss_ind_avg" not in s:
                     old_loss = s.pop("loss_indicators", [])
                     s["loss_ind_avg"], s["loss_ind_cnt"] = _calc_ind_avg(old_loss)
+                # v13 마이그레이션: Welford 분산 + MAE + PnL 곡선 필드 보장
+                for _f, _d in (("win_ind_m2", {}), ("loss_ind_m2", {}),
+                               ("mae_sum", 0.0), ("mae_cnt", 0),
+                               ("pnl_curve_sum", {}), ("pnl_curve_cnt", {})):
+                    if _f not in s:
+                        s[_f] = _d
             # v12 1회성 리셋: F/H/I에 W/L 임계치 필터 추가로 기존 데이터 무효
             # F: ema_spread_60>=1.0 (W1.36/L0.82, 1887건), H: macd_15_bps>=10 (W18.5/L1.3, 137건), I: macd_15_bps>=15 (W23.3/L6.8, 125건)
             _v12_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v12_filters_reset_done")
@@ -8415,8 +8422,76 @@ def _calc_ind_avg(ind_list):
     return avg, counts
 
 
-def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec, indicators=None):
-    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 업데이트)"""
+def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
+    """W/L 지표 자동 분석 — 통계적으로 유의미한 차이를 가진 지표 탐지.
+
+    Welford M2 기반 분산으로 effect size (Cohen's d) 계산:
+      d = |mean_W - mean_L| / pooled_std
+    d ≥ threshold이고 양측 샘플 ≥ min_samples일 때 필터 후보로 추천.
+
+    Returns: { "route:strat": [ {ind, effect, direction, w_avg, l_avg, threshold_suggest}, ... ] }
+    """
+    import math
+    results = {}
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            w_avg = s.get("win_ind_avg", {})
+            w_cnt = s.get("win_ind_cnt", {})
+            w_m2 = s.get("win_ind_m2", {})
+            l_avg = s.get("loss_ind_avg", {})
+            l_cnt = s.get("loss_ind_cnt", {})
+            l_m2 = s.get("loss_ind_m2", {})
+            if not w_avg and not l_avg:
+                continue
+            findings = []
+            all_keys = set(w_avg.keys()) & set(l_avg.keys())
+            for ik in sorted(all_keys):
+                nw = w_cnt.get(ik, 0)
+                nl = l_cnt.get(ik, 0)
+                if nw < min_samples or nl < min_samples:
+                    continue
+                mw = w_avg[ik]
+                ml = l_avg[ik]
+                diff = abs(mw - ml)
+                if diff < 1e-9:
+                    continue
+                # Welford variance: var = M2 / n
+                var_w = w_m2.get(ik, 0) / nw if nw > 1 else 0
+                var_l = l_m2.get(ik, 0) / nl if nl > 1 else 0
+                pooled_var = (var_w * nw + var_l * nl) / (nw + nl)
+                if pooled_var <= 0:
+                    continue
+                pooled_std = math.sqrt(pooled_var)
+                effect = diff / pooled_std
+                if effect < effect_threshold:
+                    continue
+                # 방향: W > L이면 "높을수록 좋다" → ≥ 기준 추천
+                if mw > ml:
+                    direction = "≥"
+                    threshold_suggest = round((mw + ml) / 2, 3)
+                else:
+                    direction = "≤"
+                    threshold_suggest = round((mw + ml) / 2, 3)
+                # 승률 개선 추정 (정규분포 가정, 간이)
+                # 해당 threshold 적용 시 필터링되는 L 비율 추정
+                findings.append({
+                    "ind": ik,
+                    "effect": round(effect, 2),
+                    "direction": direction,
+                    "w_avg": round(mw, 3),
+                    "l_avg": round(ml, 3),
+                    "threshold": threshold_suggest,
+                    "n_w": nw, "n_l": nl,
+                })
+            if findings:
+                findings.sort(key=lambda x: x["effect"], reverse=True)
+                results[key] = findings[:5]  # 상위 5개만
+    return results
+
+
+def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec,
+                          indicators=None, mae=None, pnl_curve=None):
+    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 + Welford 분산)"""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -8430,13 +8505,19 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "coins": [],
                 "win_ind_avg": {}, "win_ind_cnt": {},
                 "loss_ind_avg": {}, "loss_ind_cnt": {},
+                "win_ind_m2": {}, "loss_ind_m2": {},
+                "mae_sum": 0.0, "mae_cnt": 0,
+                "pnl_curve_sum": {}, "pnl_curve_cnt": {},
                 "_v11_filters_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
         # v11 이후: 구 마이그레이션 불필요 (전체 리셋 완료)
         # 필드 보장만 수행
         for _field, _default in (("win_ind_avg", {}), ("win_ind_cnt", {}),
-                                  ("loss_ind_avg", {}), ("loss_ind_cnt", {})):
+                                  ("loss_ind_avg", {}), ("loss_ind_cnt", {}),
+                                  ("win_ind_m2", {}), ("loss_ind_m2", {}),
+                                  ("mae_sum", 0.0), ("mae_cnt", 0),
+                                  ("pnl_curve_sum", {}), ("pnl_curve_cnt", {})):
             if _field not in s:
                 s[_field] = _default
         s["signals"] += 1
@@ -8463,24 +8544,44 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
-        # 🔬 진입 지표값 승/패 점진적 평균 업데이트 (키별 건수 추적)
+        # 🔬 진입 지표값 승/패 점진적 평균 + Welford 분산 업데이트
         if indicators:
             if is_win:
-                avg_key, cnt_key = "win_ind_avg", "win_ind_cnt"
+                avg_key, cnt_key, m2_key = "win_ind_avg", "win_ind_cnt", "win_ind_m2"
             else:
-                avg_key, cnt_key = "loss_ind_avg", "loss_ind_cnt"
+                avg_key, cnt_key, m2_key = "loss_ind_avg", "loss_ind_cnt", "loss_ind_m2"
             avg = s.get(avg_key, {})
             cnt = s.get(cnt_key, {})
+            m2 = s.get(m2_key, {})
             for k, v in indicators.items():
                 if isinstance(v, (int, float)):
                     cnt[k] = cnt.get(k, 0) + 1
                     cn = cnt[k]
                     if cn == 1:
                         avg[k] = round(v, 6)
+                        m2[k] = 0.0
                     else:
-                        avg[k] = round(avg[k] * (cn - 1) / cn + v / cn, 6)
+                        old_avg = avg[k]
+                        avg[k] = round(old_avg + (v - old_avg) / cn, 6)
+                        # Welford: M2 += (x - old_mean) * (x - new_mean)
+                        m2[k] = round(m2[k] + (v - old_avg) * (v - avg[k]), 6)
             s[avg_key] = avg
             s[cnt_key] = cnt
+            s[m2_key] = m2
+        # MAE 누적
+        if mae is not None:
+            s["mae_sum"] = round(s.get("mae_sum", 0.0) + mae, 6)
+            s["mae_cnt"] = s.get("mae_cnt", 0) + 1
+        # PnL 곡선 스냅샷 누적
+        if pnl_curve:
+            cs = s.get("pnl_curve_sum", {})
+            cc = s.get("pnl_curve_cnt", {})
+            for sec_key, pval in pnl_curve.items():
+                sk = str(sec_key)
+                cs[sk] = round(cs.get(sk, 0.0) + pval, 6)
+                cc[sk] = cc.get(sk, 0) + 1
+            s["pnl_curve_sum"] = cs
+            s["pnl_curve_cnt"] = cc
         _SHADOW_TRADE_COUNT += 1
         _should_save = (_SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0)  # 🔧 FIX: 락 안에서 체크
 
@@ -8580,23 +8681,35 @@ def _shadow_evaluate_positions():
             if cur_price <= 0:
                 remaining.append(vp)
                 continue
+            # MAE + PnL 곡선 스냅샷 갱신
+            if cur_price < vp.get("worst_price", vp["entry_price"]):
+                vp["worst_price"] = cur_price
+            hold_sec_now = now - vp["entry_ts"]
+            for snap_s in _SHADOW_PNL_SNAP_SECS:
+                sk = str(snap_s)
+                if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
+                    vp.setdefault("pnl_curve", {})[sk] = round(
+                        (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
+
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
                 pnl = (cur_price - entry_price) / entry_price
                 mfe = (vp["best_price"] - entry_price) / entry_price
+                mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
-                # 손절 시 PnL 클램프: 슬리피지로 SL보다 더 빠졌을 수 있으므로 실제값 사용
                 # 🔧 FIX: max() 제거 — 실제 손실을 SL값으로 축소하면 통계 왜곡
-                closed_results.append((vp, pnl, mfe, reason, hold, vp.get("indicators", {})))
+                closed_results.append((vp, pnl, mfe, mae, reason, hold,
+                                       vp.get("indicators", {}), vp.get("pnl_curve", {})))
             else:
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
 
     # 결과 기록
-    for vp, pnl, mfe, reason, hold, indicators in closed_results:
+    for vp, pnl, mfe, mae, reason, hold, indicators, pnl_curve in closed_results:
         _shadow_record_result(vp["route"], vp["strat"], vp["market"],
-                              pnl, mfe, reason, hold, indicators)
+                              pnl, mfe, reason, hold, indicators,
+                              mae=mae, pnl_curve=pnl_curve)
 
     # 중복 방지 캐시 정리
     with _SHADOW_LOCK:
@@ -8654,11 +8767,13 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "entry_price": entry_price,
                     "entry_ts": now_ts,
                     "best_price": entry_price,
+                    "worst_price": entry_price,
                     "trail_armed": False,
                     "trail_stop": 0.0,
                     "exit_params": ep,
                     "bars": 0,
                     "indicators": merged_ind,
+                    "pnl_curve": {},
                 })
     return results
 
@@ -8691,9 +8806,16 @@ def _v4_shadow_report_lines():
                 tag = "🔴"
             route = s.get("route", "?")
             strat = s.get("strat", "?")
+            # MFE / MAE 평균
+            avg_mfe = sum(s.get("mfes", [])) / max(len(s.get("mfes", [])), 1) * 100
+            mae_cnt = s.get("mae_cnt", 0)
+            avg_mae_str = ""
+            if mae_cnt > 0:
+                avg_mae = s.get("mae_sum", 0) / mae_cnt * 100
+                avg_mae_str = f" MAE{avg_mae:+.2f}%"
             lines.append(
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
-                f" PnL{avg_pnl:+.2f}% ({coins}코인)"
+                f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
             )
             # 청산 사유 분포 (상위 3개)
             reasons = s.get("exit_reasons", {})
@@ -8701,6 +8823,18 @@ def _v4_shadow_report_lines():
                 top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3]
                 reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
                 lines.append(f"    └ {reason_str}")
+            # PnL 시간곡선
+            cs = s.get("pnl_curve_sum", {})
+            cc = s.get("pnl_curve_cnt", {})
+            if cs:
+                curve_parts = []
+                for snap_s in _SHADOW_PNL_SNAP_SECS:
+                    sk = str(snap_s)
+                    if sk in cs and cc.get(sk, 0) > 0:
+                        avg_snap = cs[sk] / cc[sk] * 100
+                        curve_parts.append(f"{snap_s}s:{avg_snap:+.2f}%")
+                if curve_parts:
+                    lines.append(f"    ⏱️ {' → '.join(curve_parts)}")
             # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
             w_ind = s.get("win_ind_avg", {})
             w_cnt = s.get("win_ind_cnt", {})
@@ -8717,6 +8851,21 @@ def _v4_shadow_report_lines():
         active = len(_SHADOW_VIRTUAL_POSITIONS)
     if active > 0:
         lines.append(f"  ⏳ 추적 중: {active}건")
+    # 🔬 W/L 자동 분석 — 유의미한 필터 후보 추천
+    try:
+        analysis = _shadow_auto_analyze_indicators()
+        if analysis:
+            lines.append("🔍 필터 후보 자동 탐지:")
+            for akey, findings in analysis.items():
+                lines.append(f"  [{akey}]")
+                for f in findings[:3]:
+                    star = "★" if f["effect"] >= 1.5 else "☆"
+                    lines.append(
+                        f"    {star}{f['ind']}: W={f['w_avg']} L={f['l_avg']}"
+                        f" d={f['effect']} → {f['direction']}{f['threshold']} 추천"
+                    )
+    except Exception:
+        pass
     return lines
 
 
