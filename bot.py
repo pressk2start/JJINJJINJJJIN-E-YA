@@ -8461,6 +8461,18 @@ def _load_shadow_stats():
                         f.write("v14 blocked tracking reset done\n")
                 except Exception:
                     pass
+            # v15 1회성 리셋: 재시작 알림 연결 + 차단 PnL curve 수집 보강 → 전체 초기화
+            _v15_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v15_alerts_reset_done")
+            if not os.path.exists(_v15_marker):
+                print("[SHADOW_STATS] v15 초기화: 재시작 알림 연결 + 차단 PnL curve 보강 → 섀도우 + 차단 통계 전체 리셋")
+                _SHADOW_PERF_STATS = {}
+                try:
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v15_marker, "w") as f:
+                        f.write("v15 alerts + blocked pnl_curve reset done\n")
+                except Exception:
+                    pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8880,7 +8892,7 @@ def _shadow_evaluate_positions():
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
 
-        # --- 차단 건 가상 포지션 평가 (동일 청산 로직) ---
+        # --- 차단 건 가상 포지션 평가 (동일 청산 로직 + PnL curve) ---
         blocked_remaining = []
         for vp in _SHADOW_BLOCKED_POSITIONS:
             cur_price = price_map.get(vp["market"], 0)
@@ -8889,6 +8901,13 @@ def _shadow_evaluate_positions():
                 continue
             if cur_price < vp.get("worst_price", vp["entry_price"]):
                 vp["worst_price"] = cur_price
+            # v15: PnL 시간곡선 수집 (일반 포지션과 동일)
+            hold_sec_now = now - vp["entry_ts"]
+            for snap_s in _SHADOW_PNL_SNAP_SECS:
+                sk = str(snap_s)
+                if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
+                    vp.setdefault("pnl_curve", {})[sk] = round(
+                        (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
