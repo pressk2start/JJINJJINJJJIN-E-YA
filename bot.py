@@ -9146,17 +9146,15 @@ def _v4_shadow_report_lines():
     except Exception:
         pass
     # 🔍 차단 건 가상 추적 리포트 (counterfactual)
-    # v15: ⚠재검토 우선 정렬 + 상위 10개만 표시 (리포트 길이 제한)
+    # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
     with _SHADOW_PERF_LOCK:
         if _SHADOW_BLOCKED_STATS:
-            lines.append("🚫 차단 건 가상결과 (필터 없었다면?):")
+            lines.append("🚫 필터 효과 검증 (차단 안했으면?):")
             # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
                 _SHADOW_BLOCKED_STATS.items(),
                 key=lambda x: (-1 if x[1].get("wins", 0) / max(x[1].get("signals", 1), 1) >= 0.55 else 0,
                                -x[1].get("signals", 0)))
-            shown = 0
-            total_blocked = len([1 for _, bs in sorted_blocked if bs.get("signals", 0) >= 1])
             for bkey, bs in sorted_blocked:
                 bn = bs.get("signals", 0)
                 if bn < 1:
@@ -9167,32 +9165,33 @@ def _v4_shadow_report_lines():
                 bavg = bs.get("total_pnl", 0) / bn * 100
                 broute = bs.get("route", "?")
                 bfilter = bs.get("filter", bkey)
-                # 필터 효과 판정: 차단된 건의 승률이 낮으면(≤45%) 필터 유효
+                # 필터 효과 판정
                 if bwr <= 45:
                     verdict = "✅유효"
                 elif bwr >= 55:
-                    verdict = "⚠재검토"
+                    verdict = "⚠재검토!"
                 else:
                     verdict = "🔸관찰중"
-                # v15: MFE/MAE/평균보유 추가
+                # 1줄: 요약 (읽기 쉬운 판정)
+                lines.append(
+                    f"{verdict} {broute}:{bfilter} — {bn}건 중 {bw}승 ({bwr:.0f}%) {bavg:+.2f}%"
+                )
+                # 2줄: 상세 수치 (가로 구분)
                 mfe_list = bs.get("mfes", [])
                 avg_mfe = sum(mfe_list) / max(len(mfe_list), 1) * 100
                 hold_list = bs.get("hold_secs", [])
                 avg_hold = sum(hold_list) / max(len(hold_list), 1)
-                mae_str = ""
+                # 보유시간 읽기 쉽게
+                if avg_hold >= 60:
+                    hold_str = f"{avg_hold/60:.1f}m"
+                else:
+                    hold_str = f"{avg_hold:.0f}s"
+                mae_part = ""
                 if bs.get("mae_cnt", 0) > 0:
                     avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
-                    mae_str = f" MAE{avg_mae:+.2f}%"
-                shown += 1
-                if shown > 10:
-                    remain = total_blocked - 10
-                    if remain > 0:
-                        lines.append(f"  ... 외 {remain}건 (✅유효 다수 생략)")
-                    break
+                    mae_part = f" | 최대손실{avg_mae:+.2f}%"
                 lines.append(
-                    f"  {broute}:{bfilter} {bn}건 W{bw}/L{bl}"
-                    f" PnL{bavg:+.2f}% MFE{avg_mfe:+.2f}%{mae_str}"
-                    f" {avg_hold:.0f}s → {verdict}"
+                    f" └ 최고{avg_mfe:+.2f}%{mae_part} | 평균보유 {hold_str}"
                 )
     with _SHADOW_LOCK:
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
