@@ -7553,24 +7553,30 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
 # 조건: 15m 직전음봉 → 현재양봉 → 종가회복
 # (GATE가 15m_MACD골든+1h_EMA정배열 보장 → 복합필터 자동 적용)
 def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
+    _pipeline_inc("15m_pb_enter")
     if not c15 or len(c15) < 3:
+        _pipeline_inc("15m_pb_len_fail")
         return None
     prev_15 = c15[-2]
     cur_15 = c15[-1]
     # 직전봉 음봉
     if prev_15["trade_price"] >= prev_15["opening_price"]:
+        _pipeline_inc("15m_pb_prev_fail")
         return None
     # 현재봉 양봉
     if cur_15["trade_price"] <= cur_15["opening_price"]:
+        _pipeline_inc("15m_pb_cur_fail")
         return None
     # 종가 > 직전봉 시가 (회복)
     if cur_15["trade_price"] <= prev_15["opening_price"]:
+        _pipeline_inc("15m_pb_recovery_fail")
         return None
     # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
     prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
     recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
     # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
     if recovery < 1.5:
+        _pipeline_inc("15m_pb_ratio_fail")
         return None
     # 🔧 v11: W/L — vr5_15m W1.24/L9.24 (0.13x) → 15분 거래량 과열=반전 실패
     if len(c15) >= 6:
@@ -7578,7 +7584,9 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
         _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
         _av15 = sum(_pv15) / max(len(_pv15), 1)
         if _av15 > 0 and (_cv15 / _av15) >= 3.0:
+            _pipeline_inc("15m_pb_vr15_v11_fail")
             return None
+    _pipeline_inc("15m_pb_pass")
     return {
         "signal_tag": "15m_눌림반전",
         "entry_mode": "confirm",
@@ -8563,8 +8571,9 @@ def _save_blocked_stats():
 
 
 def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
-                                   exit_reason, hold_sec, blocked_by=""):
-    """차단 건 가상 추적 결과 기록 — 필터별 W/L, PnL 누적"""
+                                   exit_reason, hold_sec, blocked_by="",
+                                   mae=None):
+    """차단 건 가상 추적 결과 기록 — 필터별 W/L, PnL, MFE, MAE, 보유시간 누적"""
     global _SHADOW_BLOCKED_TRADE_COUNT
     key = blocked_by or f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -8574,9 +8583,20 @@ def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
                 "filter": blocked_by, "route": route, "strat": strat_name,
                 "signals": 0, "wins": 0, "losses": 0,
                 "total_pnl": 0.0, "pnls": [],
+                "mfes": [], "hold_secs": [],
+                "mae_sum": 0.0, "mae_cnt": 0,
                 "exit_reasons": {},
             }
         s = _SHADOW_BLOCKED_STATS[key]
+        # 마이그레이션: 기존 데이터에 누락 필드 보충
+        if "mfes" not in s:
+            s["mfes"] = []
+        if "hold_secs" not in s:
+            s["hold_secs"] = []
+        if "mae_sum" not in s:
+            s["mae_sum"] = 0.0
+        if "mae_cnt" not in s:
+            s["mae_cnt"] = 0
         s["signals"] += 1
         if is_win:
             s["wins"] += 1
@@ -8586,6 +8606,15 @@ def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
         s["pnls"].append(round(pnl_pct, 5))
         if len(s["pnls"]) > 200:
             s["pnls"] = s["pnls"][-200:]
+        s["mfes"].append(round(mfe_pct, 5))
+        if len(s["mfes"]) > 200:
+            s["mfes"] = s["mfes"][-200:]
+        s["hold_secs"].append(round(hold_sec, 1))
+        if len(s["hold_secs"]) > 200:
+            s["hold_secs"] = s["hold_secs"][-200:]
+        if mae is not None:
+            s["mae_sum"] = round(s["mae_sum"] + mae, 6)
+            s["mae_cnt"] += 1
         s["exit_reasons"][exit_reason] = s["exit_reasons"].get(exit_reason, 0) + 1
         _SHADOW_BLOCKED_TRADE_COUNT += 1
         _should_save = (_SHADOW_BLOCKED_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0)
@@ -8913,8 +8942,9 @@ def _shadow_evaluate_positions():
                 entry_price = vp["entry_price"]
                 pnl = (cur_price - entry_price) / entry_price
                 mfe = (vp["best_price"] - entry_price) / entry_price
+                mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
-                blocked_closed.append((vp, pnl, mfe, reason, hold))
+                blocked_closed.append((vp, pnl, mfe, mae, reason, hold))
             else:
                 blocked_remaining.append(vp)
         _SHADOW_BLOCKED_POSITIONS[:] = blocked_remaining
@@ -8926,11 +8956,12 @@ def _shadow_evaluate_positions():
                               mae=mae, pnl_curve=pnl_curve)
 
     # 차단 건 결과 기록
-    for vp, pnl, mfe, reason, hold in blocked_closed:
+    for vp, pnl, mfe, mae, reason, hold in blocked_closed:
         _shadow_record_blocked_result(
             vp["route"], vp["strat"], vp["market"],
             pnl, mfe, reason, hold,
-            blocked_by=vp.get("_blocked_by", ""))
+            blocked_by=vp.get("_blocked_by", ""),
+            mae=mae)
 
     # 중복 방지 캐시 정리
     with _SHADOW_LOCK:
