@@ -8218,111 +8218,313 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# 🔧 v8: 전략 레지스트리 초기화 (라이브 + 섀도우)
-# enabled=True: 실매매 가능 (A/B)
-# enabled=False: 섀도우 테스트만 (C~L)
+# ========================================================================
+# v0 초경량 시나리오 (v18 리셋)
+# 각 전략: 핵심 트리거 2개 + 옵션 타이밍
+# 튜닝 필터 0개 — 섀도우 데이터로 검증 후 하나씩 추가
+# ========================================================================
+
+_V0_EXIT_PARAMS = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.007,
+    "activation_pct": 0.003,
+    "trail_pct": 0.002,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "TRAIL_SL0.7/A0.3/T0.2",
+}
+
+
+def _v0_check_volume_burst(c1, c5, c15, c30, c60, gate_info=None):
+    """A 거래량폭발: VR5≥2.5 + 양봉"""
+    if not c1 or len(c1) < 7:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 2.5:
+        if _pipeline_inc("v0_A_vr5_fail", value=vr5, threshold=2.5, direction="gte"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_A_bull_fail"): return None
+    _pipeline_inc("v0_A_pass")
+    return {
+        "signal_tag": "거래량폭발",
+        "entry_mode": "confirm",
+        "logic_group": "A",
+        "filters_hit": [f"VR5={vr5:.1f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"vr5": round(vr5, 2)},
+    }
+
+
+def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
+    """B 가격돌파: 종가>20봉고점 + 양봉"""
+    if not c1 or len(c1) < 21:
+        return None
+    cur_close = c1[-1]["trade_price"]
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    if cur_close <= high_20:
+        gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+        if _pipeline_inc("v0_B_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_B_bull_fail"): return None
+    _pipeline_inc("v0_B_pass")
+    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+    return {
+        "signal_tag": "가격돌파",
+        "entry_mode": "confirm",
+        "logic_group": "B",
+        "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"gap_20bar": round(gap_pct, 2)},
+    }
+
+
+def _v0_check_pattern_reversal_15m(c1, c5, c15, c30, c60, gate_info=None):
+    """C 패턴반전(15m): 음→양 + 종가회복"""
+    if not c15 or len(c15) < 3:
+        return None
+    prev, cur = c15[-2], c15[-1]
+    if prev["trade_price"] >= prev["opening_price"]:
+        if _pipeline_inc("v0_C_prev_fail"): return None
+    if cur["trade_price"] <= cur["opening_price"]:
+        if _pipeline_inc("v0_C_cur_fail"): return None
+    if cur["trade_price"] <= prev["opening_price"]:
+        if _pipeline_inc("v0_C_recovery_fail"): return None
+    # (옵션) 1m 양봉 타이밍
+    if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_C_timing_fail"): return None
+    _pipeline_inc("v0_C_pass")
+    return {
+        "signal_tag": "패턴반전_15m",
+        "entry_mode": "confirm",
+        "logic_group": "C",
+        "filters_hit": ["15m음→양+회복"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {},
+    }
+
+
+def _v0_check_pattern_reversal_60m(c1, c5, c15, c30, c60, gate_info=None):
+    """H 패턴반전(60m): 음→양 + 종가회복"""
+    if not c60 or len(c60) < 3:
+        return None
+    prev, cur = c60[-2], c60[-1]
+    if prev["trade_price"] >= prev["opening_price"]:
+        if _pipeline_inc("v0_H_prev_fail"): return None
+    if cur["trade_price"] <= cur["opening_price"]:
+        if _pipeline_inc("v0_H_cur_fail"): return None
+    if cur["trade_price"] <= prev["opening_price"]:
+        if _pipeline_inc("v0_H_recovery_fail"): return None
+    if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_H_timing_fail"): return None
+    _pipeline_inc("v0_H_pass")
+    return {
+        "signal_tag": "패턴반전_60m",
+        "entry_mode": "confirm",
+        "logic_group": "H",
+        "filters_hit": ["60m음→양+회복"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {},
+    }
+
+
+def _v0_check_trend_align_15m(c1, c5, c15, c30, c60, gate_info=None):
+    """F 추세정배열(15m): EMA5>10>20 + 양봉"""
+    if not c15 or len(c15) < 20:
+        return None
+    ema5 = _v4_ema_from_candles(c15, 5)
+    ema10 = _v4_ema_from_candles(c15, 10)
+    ema20 = _v4_ema_from_candles(c15, 20)
+    if ema5 is None or ema10 is None or ema20 is None:
+        return None
+    if not (ema5 > ema10 > ema20):
+        if _pipeline_inc("v0_F_ema_fail"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_F_bull_fail"): return None
+    _pipeline_inc("v0_F_pass")
+    return {
+        "signal_tag": "추세정배열_15m",
+        "entry_mode": "confirm",
+        "logic_group": "F",
+        "filters_hit": [f"15mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"ema_spread_15": round((ema5 - ema20) / max(ema20, 1) * 100, 4)},
+    }
+
+
+def _v0_check_trend_align_60m(c1, c5, c15, c30, c60, gate_info=None):
+    """J 추세정배열(60m): EMA5>10>20 + 양봉"""
+    if not c60 or len(c60) < 20:
+        return None
+    ema5 = _v4_ema_from_candles(c60, 5)
+    ema10 = _v4_ema_from_candles(c60, 10)
+    ema20 = _v4_ema_from_candles(c60, 20)
+    if ema5 is None or ema10 is None or ema20 is None:
+        return None
+    if not (ema5 > ema10 > ema20):
+        if _pipeline_inc("v0_J_ema_fail"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_J_bull_fail"): return None
+    _pipeline_inc("v0_J_pass")
+    return {
+        "signal_tag": "추세정배열_60m",
+        "entry_mode": "confirm",
+        "logic_group": "J",
+        "filters_hit": [f"60mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"ema_spread_60": round((ema5 - ema20) / max(ema20, 1) * 100, 4)},
+    }
+
+
+def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
+    """G 모멘텀: 5m RSI≥65 + 양봉"""
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 65:
+        if _pipeline_inc("v0_G_rsi_fail", value=rsi_5m, threshold=65, direction="gte"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_G_bull_fail"): return None
+    _pipeline_inc("v0_G_pass")
+    return {
+        "signal_tag": "모멘텀",
+        "entry_mode": "confirm",
+        "logic_group": "G",
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"rsi_5m": round(rsi_5m, 1)},
+    }
+
+
+def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
+    """L 추세강도: 15m ADX≥30 + 양봉"""
+    if not c15 or len(c15) < 30:
+        return None
+    highs = [c["high_price"] for c in c15]
+    lows = [c["low_price"] for c in c15]
+    closes = [c["trade_price"] for c in c15]
+    adx_15 = _v4_adx(highs, lows, closes, 14)
+    if adx_15 is None or adx_15 < 30:
+        if _pipeline_inc("v0_L_adx_fail", value=adx_15, threshold=30, direction="gte"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_L_bull_fail"): return None
+    _pipeline_inc("v0_L_pass")
+    return {
+        "signal_tag": "추세강도",
+        "entry_mode": "confirm",
+        "logic_group": "L",
+        "filters_hit": [f"15mADX={adx_15:.1f}"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"adx_15": round(adx_15, 1)},
+    }
+
+
+def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
+    """K 역추세반등: 5m RSI≤35 + 음→양"""
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m > 35:
+        if _pipeline_inc("v0_K_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
+    # 5m 음→양 전환
+    if len(c5) < 2 or not (_v4_is_bullish(c5[-1]) and not _v4_is_bullish(c5[-2])):
+        if _pipeline_inc("v0_K_pattern_fail"): return None
+    # (옵션) 1m 양봉
+    if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("v0_K_timing_fail"): return None
+    _pipeline_inc("v0_K_pass")
+    return {
+        "signal_tag": "역추세반등",
+        "entry_mode": "confirm",
+        "logic_group": "K",
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"rsi_5m": round(rsi_5m, 1)},
+    }
+
+
+# --- v0 전략 레지스트리 (초경량 — 섀도우 전용) ---
+# 우선순위: B > A > C > H > F > J > G > L > K
 _STRATEGY_REGISTRY = {
-    # === 라이브 전략 (실매매) ===
-    "거래량3배": {
-        "check_fn": _v4_check_volume_3x,
-        "exit_params": _V4_EXIT_PARAMS["거래량3배"],
+    "가격돌파": {
+        "check_fn": _v0_check_price_breakout,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 1,
         "enabled": False,
-        "pipeline_key": "vol3x",
-        "route": "A",
-        "description": "VR5>2.5, ATR%>0.5%, 직전2봉양봉, 방향성 OR 필터",
+        "pipeline_key": "v0_B",
+        "route": "B",
+        "description": "종가>20봉고점 + 양봉",
     },
-    "20봉_고점돌파": {
-        "check_fn": _v4_check_20bar_breakout,
-        "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"],
+    "거래량폭발": {
+        "check_fn": _v0_check_volume_burst,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 2,
         "enabled": False,
-        "pipeline_key": "20bar",
-        "route": "B",
-        "description": "1m종가>20봉고점, 5mMACD+15mADX>20",
+        "pipeline_key": "v0_A",
+        "route": "A",
+        "description": "VR5≥2.5 + 양봉",
     },
-    # === 섀도우 전략 (기존 비활성 재검증) ===
-    "15m_눌림반전": {
-        "check_fn": _v4_check_15m_pullback_reversal,
-        "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"],
+    "패턴반전_15m": {
+        "check_fn": _v0_check_pattern_reversal_15m,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 3,
         "enabled": False,
-        "pipeline_key": "15m_pb",
+        "pipeline_key": "v0_C",
         "route": "C",
-        "description": "15m 음봉→양봉 반전, 종가회복",
+        "description": "15m 음→양 + 종가회복",
     },
-    "EMA정배열진입": {
-        "check_fn": _v4_check_ema_alignment,
-        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"],
+    "패턴반전_60m": {
+        "check_fn": _v0_check_pattern_reversal_60m,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 4,
         "enabled": False,
-        "pipeline_key": "ema_align",
-        "route": "F",
-        "description": "비활성화 (WF FAIL 양수폴드 43%)",
+        "pipeline_key": "v0_H",
+        "route": "H",
+        "description": "60m 음→양 + 종가회복",
     },
-    # === 섀도우 전략 (신규 계측용) ===
-    "거래량완화": {
-        "check_fn": _v4_shadow_check_volume_relaxed,
-        "exit_params": _V4_EXIT_PARAMS["거래량완화"],
+    "추세정배열_15m": {
+        "check_fn": _v0_check_trend_align_15m,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 5,
         "enabled": False,
-        "pipeline_key": "vol_relax",
-        "route": "D",
-        "description": "VR5 2.0~3.0 니어미스, ATR>0.5%",
+        "pipeline_key": "v0_F",
+        "route": "F",
+        "description": "15m EMA5>10>20 + 양봉",
     },
-    "모멘텀_스캘프": {
-        "check_fn": _v4_check_momentum_scalp,
-        "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"],
+    "추세정배열_60m": {
+        "check_fn": _v0_check_trend_align_60m,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 6,
         "enabled": False,
-        "pipeline_key": "mom_scalp",
-        "route": "G",
-        "description": "5mRSI≥65+60mRSI≥50, 다중TF 모멘텀",
+        "pipeline_key": "v0_J",
+        "route": "J",
+        "description": "60m EMA5>10>20 + 양봉",
     },
-    "60m_감싸기_돌파": {
-        "check_fn": _v4_check_60m_engulfing,
-        "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"],
+    "모멘텀": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 7,
         "enabled": False,
-        "pipeline_key": "60m_engulf",
-        "route": "H",
-        "description": "60m 음→양 감싸기 패턴",
+        "pipeline_key": "v0_G",
+        "route": "G",
+        "description": "5mRSI≥65 + 양봉",
     },
-    "15m_VR폭발": {
-        "check_fn": _v4_check_15m_vr_explosion,
-        "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"],
+    "추세강도": {
+        "check_fn": _v0_check_trend_strength,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 8,
         "enabled": False,
-        "pipeline_key": "15m_vr",
-        "route": "I",
-        "description": "15m VR5>3.0 + 양봉",
+        "pipeline_key": "v0_L",
+        "route": "L",
+        "description": "15mADX≥30 + 양봉",
     },
-    "상위TF_정배열": {
-        "check_fn": _v4_check_upper_tf_aligned,
-        "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"],
+    "역추세반등": {
+        "check_fn": _v0_check_oversold_bounce,
+        "exit_params": _V0_EXIT_PARAMS,
         "priority": 9,
         "enabled": False,
-        "pipeline_key": "upper_align",
-        "route": "J",
-        "description": "60m EMA정배열 + 15m MACD골든",
-    },
-    "과매도_반등": {
-        "check_fn": _v4_check_oversold_bounce,
-        "exit_params": _V4_EXIT_PARAMS["과매도_반등"],
-        "priority": 10,
-        "enabled": False,
-        "pipeline_key": "oversold",
+        "pipeline_key": "v0_K",
         "route": "K",
-        "description": "5m RSI≤35 + 음→양 반전",
-    },
-    "ADX_추세강화": {
-        "check_fn": _v4_check_adx_trend,
-        "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"],
-        "priority": 11,
-        "enabled": False,
-        "pipeline_key": "adx_trend",
-        "route": "L",
-        "description": "15mADX>30+60mADX>25+5mMACD골든",
+        "description": "5mRSI≤35 + 음→양",
     },
 }
 
@@ -8334,11 +8536,8 @@ _SHADOW_VIRTUAL_POSITIONS = []
 _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
 _SHADOW_PNL_SNAP_SECS = [30, 60, 90, 120, 150, 180]  # PnL 곡선 스냅샷 시점(초) — 중복 방지
 
-# 섀도우 전용 check_fn 매핑 (라이브에서 None 반환하는 전략의 실제 로직)
-_SHADOW_CHECK_OVERRIDES = {
-    "EMA정배열진입": _v4_shadow_check_ema_alignment,
-    "거래량완화": _v4_shadow_check_volume_relaxed,
-}
+# 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
+_SHADOW_CHECK_OVERRIDES = {}
 
 # 누적 성과 통계
 _SHADOW_PERF_STATS = {}
@@ -8453,6 +8652,20 @@ def _load_shadow_stats():
                         os.remove(SHADOW_BLOCKED_STATS_PATH)
                     with open(_v16_marker, "w") as f:
                         f.write("v16 threshold sweep reset done\n")
+                except Exception:
+                    pass
+            # v0 1회성 리셋: 전체 전략 초경량 리셋 → 기존 통계 전부 초기화
+            _v0_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v0_full_reset_done")
+            if not os.path.exists(_v0_marker):
+                print("[SHADOW_STATS] v0 전체 리셋: 초경량 시나리오 전환 → 모든 통계 초기화")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v0_marker, "w") as f:
+                        f.write("v0 full strategy reset done\n")
                 except Exception:
                     pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
@@ -9343,54 +9556,33 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
-    🔧 v9: 전략 레지스트리 기반 루프 (독립 모듈화)
-    [사전필터] 60m_m3 상위50% (🔧 v9: 33%→50% 완화, 시그널 부족 해소)
-    [SIGNAL] 레지스트리 우선순위 순서대로 평가 (먼저 매칭되면 반환)
+    v0 리셋: m3 게이트 제거, 전략별 핵심 트리거 2개만
+    [SHADOW] 9개 시나리오 전수 테스트 (게이트 없음)
+    [LIVE] 레지스트리 우선순위 순, enabled만 실행
     """
     _pipeline_inc("v4_called")
     if not c1:
         return None
 
-    # === 사전필터: 60m 3봉 모멘텀 상위50% ===
-    # 🔧 v9: 0.33→0.50 완화 (60 니어미스, 78% 탈락 → 시그널 부족 해소)
-    # 리포트 섹션4: 60m_m3_상위33% TEST EV +0.24% 유지하되 필터 강도 완화
-    m3_ok, m3_val, m3_thr = _v4_momentum_3bar_filter(c60, top_pct=0.50)
-    _pipeline_track_value("m3_pct", m3_val * 100 if m3_val else None, market, passed=m3_ok)
-    if m3_thr != 0:
-        with _PIPELINE_VALUE_TRACKER_LOCK:
-            _PIPELINE_VALUE_TRACKER["m3_pct"]["threshold"] = m3_thr * 100
-    m3_info = f"60m_m3={m3_val*100:.3f}%" if m3_val else "m3=N/A"
-    if m3_ok:
-        m3_info = f"60m_m3={m3_val*100:.3f}%≥{m3_thr*100:.3f}%"
-
-    # === 🔬 v8: 섀도우 테스트 — m3 무관하게 항상 실행 ===
-    # 계측 목적: m3 탈락 코인에서도 개별 전략 시그널 빈도를 측정
+    # === v0: 섀도우 테스트 — 게이트 없이 전 시나리오 실행 ===
     try:
-        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info)
+        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, None)
     except Exception as e:
-        print(f"[SHADOW] 섀도우 테스트 오류: {e}")  # 라이브에 영향 안 줌
+        print(f"[SHADOW] 섀도우 테스트 오류: {e}")
 
-    # m3 탈락 시 라이브 진입 차단 (섀도우는 이미 위에서 실행됨)
-    if not m3_ok:
-        _pipeline_inc("v4_m3_fail")
-        _shadow_log_write(now_kst_str(), market, "ALL", 0, "m3_fail",
-                          0, f"m3={m3_val*100:.3f}%<thr={m3_thr*100:.3f}%")
-        return None
-
-    # === 🔧 v8: 레지스트리 기반 전략 순회 (priority 순, enabled만) ===
+    # === 라이브 전략 순회 (priority 순, enabled만) ===
     sorted_strategies = sorted(_STRATEGY_REGISTRY.items(), key=lambda x: x[1]["priority"])
     for strat_name, strat in sorted_strategies:
         if not strat["enabled"]:
             continue
         check_fn = strat["check_fn"]
-        sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+        sig = check_fn(c1, c5, c15, c30, c60, gate_info=None)
         if sig:
             _pipeline_inc("v4_raw_hit")
             _pipeline_hourly_inc("raw_hit")
             _pipeline_strategy_pass(strat_name)
             _pipeline_record_signal_coin(market, strat_name)
-            sig["filters_hit"].append(m3_info)
-            _shadow_log_write(now_kst_str(), market, strat_name, 1, "", 1, m3_info)
+            _shadow_log_write(now_kst_str(), market, strat_name, 1, "", 1, "")
             return sig
         _pipeline_inc(f"v4_{strat['pipeline_key']}_fail")
 
