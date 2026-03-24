@@ -532,6 +532,10 @@ def _pipeline_report(force=False):
     with _PIPELINE_COUNTERS_LOCK:
         c = dict(_PIPELINE_COUNTERS)
     elapsed_min = (now - _PIPELINE_START_TS) / 60
+    # v15: 첫 리포트에 데이터가 전혀 없으면 "수집 중" 한 줄만 보내고 스킵
+    if c.get("scan_markets", 0) == 0 and c.get("detect_called", 0) == 0:
+        tg_send("📊 파이프라인 계측: 데이터 수집 중... (다음 리포트부터 표시)")
+        return
     delta_min = (now - _PIPELINE_PREV_SNAPSHOT_TS) / 60 if _PIPELINE_PREV_SNAPSHOT else elapsed_min
 
     # delta 계산 (이번 구간 변화량)
