@@ -511,10 +511,15 @@ _SHADOW_LOG_LOCK = threading.Lock()
 _SHADOW_LOG_INITIALIZED = False
 
 
+_BLOCKED_THREAD_LOCAL = threading.local()  # 차단 건 가상 추적용 thread-local
+
+
 def _pipeline_inc(key, n=1):
-    """파이프라인 카운터 증가"""
+    """파이프라인 카운터 증가 + 차단 필터명 thread-local 기록"""
     with _PIPELINE_COUNTERS_LOCK:
         _PIPELINE_COUNTERS[key] = _PIPELINE_COUNTERS.get(key, 0) + n
+    if key.endswith("_fail"):
+        _BLOCKED_THREAD_LOCAL.last_fail = key
 
 
 def _pipeline_report(force=False):
@@ -8369,6 +8374,13 @@ _SHADOW_PERF_STATS = {}
 _SHADOW_PERF_LOCK = threading.Lock()
 _SHADOW_TRADE_COUNT = 0
 
+# 차단 건 가상 추적 (counterfactual tracking)
+# 필터에 걸려 차단된 시그널도 가상 포지션으로 추적 → 필터 효과 검증
+_SHADOW_BLOCKED_POSITIONS = []
+_SHADOW_BLOCKED_DEDUP = {}  # { "route_market": last_entry_ts }
+_SHADOW_BLOCKED_STATS = {}
+_SHADOW_BLOCKED_TRADE_COUNT = 0
+
 
 def _load_shadow_stats():
     """봇 시작 시 저장된 섀도우 성과 통계 로드"""
@@ -8436,15 +8448,30 @@ def _load_shadow_stats():
                         f.write("v13 filters reset done\n")
                 except Exception:
                     pass
+            # v14 1회성 리셋: 차단 건 가상 추적(counterfactual) 도입 → 기존 데이터 전체 초기화
+            _v14_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v14_blocked_tracking_reset_done")
+            if not os.path.exists(_v14_marker):
+                print("[SHADOW_STATS] v14 초기화: 차단 건 가상 추적 도입 → 섀도우 + 차단 통계 전체 리셋")
+                _SHADOW_PERF_STATS = {}
+                try:
+                    # 차단 통계 파일도 초기화
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v14_marker, "w") as f:
+                        f.write("v14 blocked tracking reset done\n")
+                except Exception:
+                    pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
         print(f"[SHADOW_STATS] 로드 실패: {e}")
         _SHADOW_PERF_STATS = {}
+    # 차단 건 통계 로드
+    _load_blocked_stats()
 
 
 def _save_shadow_stats():
-    """섀도우 성과 통계 파일 저장"""
+    """섀도우 성과 통계 파일 저장 (일반 + 차단 건 동시 저장)"""
     with _SHADOW_PERF_LOCK:
         data = copy.deepcopy(_SHADOW_PERF_STATS)
     try:
@@ -8454,6 +8481,67 @@ def _save_shadow_stats():
         os.replace(tmp, SHADOW_STATS_PATH)
     except Exception as e:
         print(f"[SHADOW_STATS] 저장 실패: {e}")
+    _save_blocked_stats()
+
+
+def _load_blocked_stats():
+    """봇 시작 시 저장된 차단 건 가상 추적 통계 로드"""
+    global _SHADOW_BLOCKED_STATS, _SHADOW_BLOCKED_TRADE_COUNT
+    try:
+        if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+            with open(SHADOW_BLOCKED_STATS_PATH, "r", encoding="utf-8") as f:
+                _SHADOW_BLOCKED_STATS = json.load(f)
+            _SHADOW_BLOCKED_TRADE_COUNT = sum(
+                s.get("signals", 0) for s in _SHADOW_BLOCKED_STATS.values())
+            print(f"[BLOCKED_STATS] 로드 완료: {len(_SHADOW_BLOCKED_STATS)}개 필터, "
+                  f"총 {_SHADOW_BLOCKED_TRADE_COUNT}건")
+    except Exception as e:
+        print(f"[BLOCKED_STATS] 로드 실패: {e}")
+        _SHADOW_BLOCKED_STATS = {}
+
+
+def _save_blocked_stats():
+    """차단 건 통계 파일 저장 (atomic write)"""
+    with _SHADOW_PERF_LOCK:
+        data = copy.deepcopy(_SHADOW_BLOCKED_STATS)
+    try:
+        tmp = SHADOW_BLOCKED_STATS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SHADOW_BLOCKED_STATS_PATH)
+    except Exception as e:
+        print(f"[BLOCKED_STATS] 저장 실패: {e}")
+
+
+def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
+                                   exit_reason, hold_sec, blocked_by=""):
+    """차단 건 가상 추적 결과 기록 — 필터별 W/L, PnL 누적"""
+    global _SHADOW_BLOCKED_TRADE_COUNT
+    key = blocked_by or f"{route}:{strat_name}"
+    is_win = pnl_pct > 0
+    with _SHADOW_PERF_LOCK:
+        if key not in _SHADOW_BLOCKED_STATS:
+            _SHADOW_BLOCKED_STATS[key] = {
+                "filter": blocked_by, "route": route, "strat": strat_name,
+                "signals": 0, "wins": 0, "losses": 0,
+                "total_pnl": 0.0, "pnls": [],
+                "exit_reasons": {},
+            }
+        s = _SHADOW_BLOCKED_STATS[key]
+        s["signals"] += 1
+        if is_win:
+            s["wins"] += 1
+        else:
+            s["losses"] += 1
+        s["total_pnl"] = round(s["total_pnl"] + pnl_pct, 6)
+        s["pnls"].append(round(pnl_pct, 5))
+        if len(s["pnls"]) > 200:
+            s["pnls"] = s["pnls"][-200:]
+        s["exit_reasons"][exit_reason] = s["exit_reasons"].get(exit_reason, 0) + 1
+        _SHADOW_BLOCKED_TRADE_COUNT += 1
+        _should_save = (_SHADOW_BLOCKED_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0)
+    if _should_save:
+        _save_blocked_stats()
 
 
 def _calc_ind_avg(ind_list):
@@ -8702,12 +8790,14 @@ def _shadow_sim_exit(vp, cur_price):
 
 
 def _shadow_evaluate_positions():
-    """섀도우 가상포지션에 청산 로직 적용 — 메인 루프 매 사이클 호출"""
+    """섀도우 가상포지션에 청산 로직 적용 — 메인 루프 매 사이클 호출
+    일반 가상 포지션 + 차단 건 가상 추적 모두 처리"""
     now = time.time()
     with _SHADOW_LOCK:
-        if not _SHADOW_VIRTUAL_POSITIONS:
+        if not _SHADOW_VIRTUAL_POSITIONS and not _SHADOW_BLOCKED_POSITIONS:
             return
-        markets = list(set(vp["market"] for vp in _SHADOW_VIRTUAL_POSITIONS))
+        all_vps = _SHADOW_VIRTUAL_POSITIONS + _SHADOW_BLOCKED_POSITIONS
+        markets = list(set(vp["market"] for vp in all_vps))
 
     # 시세 일괄 조회 (API 호출 절약)
     price_map = {}
@@ -8723,14 +8813,15 @@ def _shadow_evaluate_positions():
             pass
 
     closed_results = []
+    blocked_closed = []
     with _SHADOW_LOCK:
+        # --- 일반 가상 포지션 평가 ---
         remaining = []
         for vp in _SHADOW_VIRTUAL_POSITIONS:
             cur_price = price_map.get(vp["market"], 0)
             if cur_price <= 0:
                 remaining.append(vp)
                 continue
-            # MAE + PnL 곡선 스냅샷 갱신
             if cur_price < vp.get("worst_price", vp["entry_price"]):
                 vp["worst_price"] = cur_price
             hold_sec_now = now - vp["entry_ts"]
@@ -8739,7 +8830,6 @@ def _shadow_evaluate_positions():
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
                     vp.setdefault("pnl_curve", {})[sk] = round(
                         (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
-
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
@@ -8747,24 +8837,53 @@ def _shadow_evaluate_positions():
                 mfe = (vp["best_price"] - entry_price) / entry_price
                 mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
-                # 🔧 FIX: max() 제거 — 실제 손실을 SL값으로 축소하면 통계 왜곡
                 closed_results.append((vp, pnl, mfe, mae, reason, hold,
                                        vp.get("indicators", {}), vp.get("pnl_curve", {})))
             else:
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
 
-    # 결과 기록
+        # --- 차단 건 가상 포지션 평가 (동일 청산 로직) ---
+        blocked_remaining = []
+        for vp in _SHADOW_BLOCKED_POSITIONS:
+            cur_price = price_map.get(vp["market"], 0)
+            if cur_price <= 0:
+                blocked_remaining.append(vp)
+                continue
+            if cur_price < vp.get("worst_price", vp["entry_price"]):
+                vp["worst_price"] = cur_price
+            closed, reason = _shadow_sim_exit(vp, cur_price)
+            if closed:
+                entry_price = vp["entry_price"]
+                pnl = (cur_price - entry_price) / entry_price
+                mfe = (vp["best_price"] - entry_price) / entry_price
+                hold = now - vp["entry_ts"]
+                blocked_closed.append((vp, pnl, mfe, reason, hold))
+            else:
+                blocked_remaining.append(vp)
+        _SHADOW_BLOCKED_POSITIONS[:] = blocked_remaining
+
+    # 일반 결과 기록
     for vp, pnl, mfe, mae, reason, hold, indicators, pnl_curve in closed_results:
         _shadow_record_result(vp["route"], vp["strat"], vp["market"],
                               pnl, mfe, reason, hold, indicators,
                               mae=mae, pnl_curve=pnl_curve)
+
+    # 차단 건 결과 기록
+    for vp, pnl, mfe, reason, hold in blocked_closed:
+        _shadow_record_blocked_result(
+            vp["route"], vp["strat"], vp["market"],
+            pnl, mfe, reason, hold,
+            blocked_by=vp.get("_blocked_by", ""))
 
     # 중복 방지 캐시 정리
     with _SHADOW_LOCK:
         stale = [k for k, v in _SHADOW_DEDUP.items() if now - v > SHADOW_DEDUP_CD_SEC * 2]
         for k in stale:
             _SHADOW_DEDUP.pop(k, None)
+        stale_b = [k for k, v in _SHADOW_BLOCKED_DEDUP.items() if now - v > SHADOW_DEDUP_CD_SEC * 2]
+        for k in stale_b:
+            _SHADOW_BLOCKED_DEDUP.pop(k, None)
 
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
@@ -8785,23 +8904,26 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
+        # 차단 플래그 초기화 후 전략 호출
+        _BLOCKED_THREAD_LOCAL.last_fail = None
         try:
             sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
         except Exception:
             sig = None
         hit = sig is not None
+        blocked_by = getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None) if not hit else None
         results[route] = hit
 
-        if hit and entry_price > 0:
+        if entry_price <= 0:
+            continue
+
+        if hit:
+            # 정상 시그널 → 기존 가상 포지션 등록
             dedup_key = f"{route}_{market}"
-            # 해당 전략의 청산 파라미터 가져오기
             ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
-            # 지표 병합: 공통 지표(15개) 기반 + 자기 고유 지표로 덮어쓰기
-            # → 전략별 핵심 지표뿐 아니라 전체 유니버설 지표를 W/L로 수집
-            #   (전략과 무관한 지표에서 유의미한 차이 발견 → 추가 필터 후보)
-            merged_ind = dict(universal_ind)  # 공통 지표 복사
+            merged_ind = dict(universal_ind)
             own_ind = sig.get("indicators", {})
-            merged_ind.update(own_ind)  # 자기 고유 지표가 우선
+            merged_ind.update(own_ind)
             with _SHADOW_LOCK:
                 last_entry = _SHADOW_DEDUP.get(dedup_key, 0)
                 if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
@@ -8810,19 +8932,34 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
                 _SHADOW_VIRTUAL_POSITIONS.append({
-                    "route": route,
-                    "strat": strat_name,
-                    "market": market,
-                    "entry_price": entry_price,
-                    "entry_ts": now_ts,
-                    "best_price": entry_price,
+                    "route": route, "strat": strat_name,
+                    "market": market, "entry_price": entry_price,
+                    "entry_ts": now_ts, "best_price": entry_price,
                     "worst_price": entry_price,
-                    "trail_armed": False,
-                    "trail_stop": 0.0,
-                    "exit_params": ep,
-                    "bars": 0,
-                    "indicators": merged_ind,
-                    "pnl_curve": {},
+                    "trail_armed": False, "trail_stop": 0.0,
+                    "exit_params": ep, "bars": 0,
+                    "indicators": merged_ind, "pnl_curve": {},
+                })
+        elif blocked_by:
+            # 필터 차단 건 → 가상 추적 (counterfactual)
+            dedup_key = f"{route}_{market}"
+            ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
+            with _SHADOW_LOCK:
+                last_entry = _SHADOW_BLOCKED_DEDUP.get(dedup_key, 0)
+                if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
+                    continue
+                if len(_SHADOW_BLOCKED_POSITIONS) >= SHADOW_MAX_BLOCKED_POS:
+                    continue
+                _SHADOW_BLOCKED_DEDUP[dedup_key] = now_ts
+                _SHADOW_BLOCKED_POSITIONS.append({
+                    "route": route, "strat": strat_name,
+                    "market": market, "entry_price": entry_price,
+                    "entry_ts": now_ts, "best_price": entry_price,
+                    "worst_price": entry_price,
+                    "trail_armed": False, "trail_stop": 0.0,
+                    "exit_params": ep, "bars": 0,
+                    "indicators": dict(universal_ind), "pnl_curve": {},
+                    "_blocked_by": blocked_by,
                 })
     return results
 
@@ -8915,6 +9052,38 @@ def _v4_shadow_report_lines():
                     )
     except Exception:
         pass
+    # 🔍 차단 건 가상 추적 리포트 (counterfactual)
+    with _SHADOW_PERF_LOCK:
+        if _SHADOW_BLOCKED_STATS:
+            lines.append("🚫 차단 건 가상결과 (필터 없었다면?):")
+            sorted_blocked = sorted(
+                _SHADOW_BLOCKED_STATS.items(),
+                key=lambda x: x[1].get("signals", 0), reverse=True)
+            for bkey, bs in sorted_blocked:
+                bn = bs.get("signals", 0)
+                if bn < 1:
+                    continue
+                bw = bs.get("wins", 0)
+                bl = bs.get("losses", 0)
+                bwr = bw / bn * 100
+                bavg = bs.get("total_pnl", 0) / bn * 100
+                broute = bs.get("route", "?")
+                bfilter = bs.get("filter", bkey)
+                # 필터 효과 판정: 차단된 건의 승률이 낮으면(≤45%) 필터 유효
+                if bwr <= 45:
+                    verdict = "✅유효"
+                elif bwr >= 55:
+                    verdict = "⚠재검토"
+                else:
+                    verdict = "🔸관찰중"
+                lines.append(
+                    f"  {broute}:{bfilter} {bn}건 W{bw}/L{bl}"
+                    f" PnL{bavg:+.2f}% → {verdict}"
+                )
+    with _SHADOW_LOCK:
+        active_b = len(_SHADOW_BLOCKED_POSITIONS)
+    if active_b > 0:
+        lines.append(f"  ⏳ 차단건 추적 중: {active_b}건")
     return lines
 
 
