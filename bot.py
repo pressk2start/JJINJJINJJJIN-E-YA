@@ -8530,7 +8530,7 @@ def _load_blocked_stats():
 def _check_blocked_filter_alerts_on_load():
     """봇 시작 시 로드된 차단 통계로 즉시 필터 유효성 알림 전송.
     재시작 후에도 누적 데이터 기반 '재검토 필요' 판정이 이어지도록 함."""
-    MIN_SAMPLES = 5  # 최소 샘플 수 — 너무 적으면 노이즈
+    MIN_SAMPLES = 20  # 최소 샘플 수 — 20건 미만은 통계적으로 무의미
     review_alerts = []  # ⚠ 재검토 필요 (승률 55%+ → 필터가 좋은 매매 막고 있음)
     valid_cnt = 0       # ✅ 유효 건수 (상세 안 보냄)
     with _SHADOW_PERF_LOCK:
@@ -9159,10 +9159,15 @@ def _v4_shadow_report_lines():
                 _SHADOW_BLOCKED_STATS.items(),
                 key=lambda x: (-1 if x[1].get("wins", 0) / max(x[1].get("signals", 1), 1) >= 0.55 else 0,
                                -x[1].get("signals", 0)))
+            _blocked_shown = 0
+            _blocked_pending = 0  # 샘플 부족 건수
             for bkey, bs in sorted_blocked:
                 bn = bs.get("signals", 0)
                 if bn < 1:
                     continue
+                if bn < 10:
+                    _blocked_pending += 1
+                    continue  # 10건 미만은 판정 보류
                 bw = bs.get("wins", 0)
                 bl = bs.get("losses", 0)
                 bwr = bw / bn * 100
@@ -9194,9 +9199,12 @@ def _v4_shadow_report_lines():
                 if bs.get("mae_cnt", 0) > 0:
                     avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
                     mae_part = f" | 최대손실{avg_mae:+.2f}%"
+                _blocked_shown += 1
                 lines.append(
                     f" └ 최고{avg_mfe:+.2f}%{mae_part} | 평균보유 {hold_str}"
                 )
+            if _blocked_pending > 0:
+                lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
     with _SHADOW_LOCK:
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
     if active_b > 0:
