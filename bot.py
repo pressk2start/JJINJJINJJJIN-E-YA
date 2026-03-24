@@ -7631,7 +7631,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
         if _pipeline_inc("20bar_macd_cross_fail", value=round(macd_diff, 6), threshold=0, direction="gt"): return None
     # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
     if not c15 or len(c15) < 30:
-        if _pipeline_inc("20bar_adx_fail"): return None
+        if _pipeline_inc("20bar_adx_data_fail"): return None
     highs_15 = [c["high_price"] for c in c15]
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
