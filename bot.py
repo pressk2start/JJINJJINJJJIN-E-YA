@@ -515,17 +515,20 @@ _BLOCKED_THREAD_LOCAL = threading.local()  # 차단 건 가상 추적용 thread-
 
 
 def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
-    """파이프라인 카운터 증가 + 차단 필터명/값/임계치 thread-local 기록
-    value: 차단 기준 지표의 실제 값
-    threshold: 현재 설정된 임계치
-    direction: 'gte'/'gt'/'lt'/'lte' — 통과 조건 방향 (예: 'gte'면 value>=threshold일 때 통과)"""
-    with _PIPELINE_COUNTERS_LOCK:
-        _PIPELINE_COUNTERS[key] = _PIPELINE_COUNTERS.get(key, 0) + n
+    """파이프라인 카운터 증가 + 차단 필터명/값/임계치 thread-local 기록.
+    Returns True(=caller should return None) in normal mode,
+    False(=caller should continue) in eval_all mode.
+    eval_all mode: 카운터 미증가, last_fail만 갱신 → 마지막 실패 필터 추적용"""
+    _eval_all = getattr(_BLOCKED_THREAD_LOCAL, '_eval_all_mode', False)
+    if not _eval_all:
+        with _PIPELINE_COUNTERS_LOCK:
+            _PIPELINE_COUNTERS[key] = _PIPELINE_COUNTERS.get(key, 0) + n
     if key.endswith("_fail"):
         _BLOCKED_THREAD_LOCAL.last_fail = key
         _BLOCKED_THREAD_LOCAL.last_fail_value = value
         _BLOCKED_THREAD_LOCAL.last_fail_threshold = threshold
         _BLOCKED_THREAD_LOCAL.last_fail_direction = direction
+    return not _eval_all
 
 
 def _pipeline_report(force=False):
@@ -7506,22 +7509,18 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
     vr5 = _v4_volume_ratio_5(c1)
     _pipeline_track_value("vr5", vr5, None, passed=(vr5 > 2.5))
     if vr5 <= 2.5:
-        _pipeline_inc("vol3x_vr5_fail", value=vr5, threshold=2.5, direction="gt")
-        return None
+        if _pipeline_inc("vol3x_vr5_fail", value=vr5, threshold=2.5, direction="gt"): return None
     # 🔧 v11: W/L — vr5 W12.20/L5.79 (2.1x) → 폭발적 거래량만 승률↑
     if vr5 < 8.0:
-        _pipeline_inc("vol3x_vr5_v11_fail", value=vr5, threshold=8.0, direction="gte")
-        return None
+        if _pipeline_inc("vol3x_vr5_v11_fail", value=vr5, threshold=8.0, direction="gte"): return None
     # 🔧 v9: ATR% 0.7→0.5 (리포트 니어미스 8건, 실시간 avg=0.24로 0.7 불가)
     atr_p = _v4_atr_pct(c1, 14)
     _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.5))
     if atr_p <= 0.5:
-        _pipeline_inc("vol3x_atr_fail", value=atr_p, threshold=0.5, direction="gt")
-        return None
+        if _pipeline_inc("vol3x_atr_fail", value=atr_p, threshold=0.5, direction="gt"): return None
     # 🔧 v9: 직전2봉 중 1봉 양봉 (주석대로 완화)
     if not (_v4_is_bullish(c1[-2]) or (len(c1) >= 3 and _v4_is_bullish(c1[-3]))):
-        _pipeline_inc("vol3x_bull_fail")
-        return None
+        if _pipeline_inc("vol3x_bull_fail"): return None
     # 방향성 필터: 5m_MACD골든 OR 15m_ADX>20
     macd_ok = False
     adx_ok = False
@@ -7541,8 +7540,7 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
         if adx_15 is not None and adx_15 > 20:
             adx_ok = True
     if not macd_ok and not adx_ok:
-        _pipeline_inc("vol3x_dir_fail")
-        return None
+        if _pipeline_inc("vol3x_dir_fail"): return None
     _pipeline_inc("vol3x_pass")
     _macd_str = f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}" if macd_ok else "5mMACD=X"
     _adx_str = f"15mADX={adx_15:.1f}" if adx_ok else "15mADX=X"
@@ -7565,29 +7563,24 @@ def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
 def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
     _pipeline_inc("15m_pb_enter")
     if not c15 or len(c15) < 3:
-        _pipeline_inc("15m_pb_len_fail")
-        return None
+        if _pipeline_inc("15m_pb_len_fail"): return None
     prev_15 = c15[-2]
     cur_15 = c15[-1]
     # 직전봉 음봉
     if prev_15["trade_price"] >= prev_15["opening_price"]:
-        _pipeline_inc("15m_pb_prev_fail")
-        return None
+        if _pipeline_inc("15m_pb_prev_fail"): return None
     # 현재봉 양봉
     if cur_15["trade_price"] <= cur_15["opening_price"]:
-        _pipeline_inc("15m_pb_cur_fail")
-        return None
+        if _pipeline_inc("15m_pb_cur_fail"): return None
     # 종가 > 직전봉 시가 (회복)
     if cur_15["trade_price"] <= prev_15["opening_price"]:
-        _pipeline_inc("15m_pb_recovery_fail")
-        return None
+        if _pipeline_inc("15m_pb_recovery_fail"): return None
     # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
     prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
     recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
     # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
     if recovery < 1.5:
-        _pipeline_inc("15m_pb_ratio_fail", value=recovery, threshold=1.5, direction="gte")
-        return None
+        if _pipeline_inc("15m_pb_ratio_fail", value=recovery, threshold=1.5, direction="gte"): return None
     # 🔧 v11: W/L — vr5_15m W1.24/L9.24 (0.13x) → 15분 거래량 과열=반전 실패
     if len(c15) >= 6:
         _cv15 = c15[-1].get("candle_acc_trade_price", 0)
@@ -7615,8 +7608,7 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
 def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     _pipeline_inc("20bar_enter")
     if not c1 or len(c1) < 21:
-        _pipeline_inc("20bar_len_fail")
-        return None
+        if _pipeline_inc("20bar_len_fail"): return None
     # 1m 현재 종가 > 직전 20봉 최고가
     cur_close = c1[-1]["trade_price"]
     high_20 = max(c["high_price"] for c in c1[-21:-1])
@@ -7628,28 +7620,23 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
         return None
     # 복합필터: 5m MACD 골든크로스
     if not c5 or len(c5) < 35:
-        _pipeline_inc("20bar_macd_fail")
-        return None
+        if _pipeline_inc("20bar_macd_fail"): return None
     closes_5m = [c["trade_price"] for c in c5]
     macd_5m, sig_5m, _ = _v4_macd(closes_5m)
     if macd_5m is None or sig_5m is None:
-        _pipeline_inc("20bar_macd_fail")
-        return None
+        if _pipeline_inc("20bar_macd_fail"): return None
     if macd_5m <= sig_5m:
-        _pipeline_inc("20bar_macd_fail")
-        return None
+        if _pipeline_inc("20bar_macd_fail"): return None
     # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
     if not c15 or len(c15) < 30:
-        _pipeline_inc("20bar_adx_fail")
-        return None
+        if _pipeline_inc("20bar_adx_fail"): return None
     highs_15 = [c["high_price"] for c in c15]
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
     _pipeline_track_value("adx_15_20bar", adx_15, None, passed=(adx_15 is not None and adx_15 > 20))
     if adx_15 is None or adx_15 <= 20:
-        _pipeline_inc("20bar_adx_fail", value=adx_15, threshold=20, direction="gt")
-        return None
+        if _pipeline_inc("20bar_adx_fail", value=adx_15, threshold=20, direction="gt"): return None
     # 🔧 v11: W/L — vr5_15m W2.02/L0.88 (2.3x) → 15분 거래량 동반 없는 돌파=허돌파
     if c15 and len(c15) >= 6:
         _cv15 = c15[-1].get("candle_acc_trade_price", 0)
@@ -7840,23 +7827,19 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
     # 5m RSI >= 68 (🔧 v10: 65→68, 더 강한 모멘텀만)
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     if rsi_5m is None or rsi_5m < 68:
-        _pipeline_inc("mom_scalp_rsi5_fail", value=rsi_5m, threshold=68, direction="gte")
-        return None
+        if _pipeline_inc("mom_scalp_rsi5_fail", value=rsi_5m, threshold=68, direction="gte"): return None
     # 60m RSI >= 55 (🔧 v10: 50→55, W67.37/L65.40 → 높을수록 좋음)
     rsi_60m = _v4_rsi_from_candles(c60, 14)
     if rsi_60m is None or rsi_60m < 55:
-        _pipeline_inc("mom_scalp_rsi60_fail", value=rsi_60m, threshold=55, direction="gte")
-        return None
+        if _pipeline_inc("mom_scalp_rsi60_fail", value=rsi_60m, threshold=55, direction="gte"): return None
     # 1m 현재봉 양봉
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("mom_scalp_bull_fail")
-        return None
+        if _pipeline_inc("mom_scalp_bull_fail"): return None
     # ATR 범위 (🔧 v10: W0.97/L1.01 → 낮을수록 약간 유리 → 상한 1.2 추가)
     atr_p = _v4_atr_pct(c1, 14)
     if atr_p < 0.5 or atr_p > 1.2:
-        _pipeline_inc("mom_scalp_atr_fail", value=atr_p, threshold=0.5 if atr_p < 0.5 else 1.2,
-                       direction="gte" if atr_p < 0.5 else "lte")
-        return None
+        if _pipeline_inc("mom_scalp_atr_fail", value=atr_p, threshold=0.5 if atr_p < 0.5 else 1.2,
+                       direction="gte" if atr_p < 0.5 else "lte"): return None
     # 🔧 v10: 15m ADX 추가 — 추세 존재 확인 (SL 40건 = 방향 없이 진입)
     if c15 and len(c15) >= 30:
         highs_15 = [c["high_price"] for c in c15]
@@ -7864,15 +7847,13 @@ def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
         closes_15 = [c["trade_price"] for c in c15]
         adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
         if adx_15 is None or adx_15 < 20:
-            _pipeline_inc("mom_scalp_adx_fail", value=adx_15, threshold=20, direction="gte")
-            return None
+            if _pipeline_inc("mom_scalp_adx_fail", value=adx_15, threshold=20, direction="gte"): return None
     else:
         return None
     # 🔧 v11: W/L — vr5 W2.64/L0.75 (3.5x) → 거래량 없는 RSI 과열은 가짜 모멘텀
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 1.5:
-        _pipeline_inc("mom_scalp_vr5_v11_fail", value=vr5, threshold=1.5, direction="gte")
-        return None
+        if _pipeline_inc("mom_scalp_vr5_v11_fail", value=vr5, threshold=1.5, direction="gte"): return None
     _pipeline_inc("mom_scalp_pass")
     return {
         "signal_tag": "모멘텀_스캘프",
@@ -7899,32 +7880,27 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
     cur_60 = c60[-1]
     # 직전 60m봉 음봉
     if prev_60["trade_price"] >= prev_60["opening_price"]:
-        _pipeline_inc("60m_engulf_prev_fail")
-        return None
+        if _pipeline_inc("60m_engulf_prev_fail"): return None
     # 현재 60m봉 양봉
     if cur_60["trade_price"] <= cur_60["opening_price"]:
-        _pipeline_inc("60m_engulf_cur_fail")
-        return None
+        if _pipeline_inc("60m_engulf_cur_fail"): return None
     # 감싸기: 현재봉 몸통이 직전봉 몸통을 감쌈
     cur_body_high = max(cur_60["trade_price"], cur_60["opening_price"])
     cur_body_low = min(cur_60["trade_price"], cur_60["opening_price"])
     prev_body_high = max(prev_60["trade_price"], prev_60["opening_price"])
     prev_body_low = min(prev_60["trade_price"], prev_60["opening_price"])
     if not (cur_body_high >= prev_body_high and cur_body_low <= prev_body_low):
-        _pipeline_inc("60m_engulf_wrap_fail")
-        return None
+        if _pipeline_inc("60m_engulf_wrap_fail"): return None
     # 1m 현재봉도 양봉 (진입 타이밍)
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("60m_engulf_1m_fail")
-        return None
+        if _pipeline_inc("60m_engulf_1m_fail"): return None
     # 감싸기 비율: 현재봉 몸통 / 직전봉 몸통
     prev_body = max(prev_body_high - prev_body_low, 1)
     cur_body = cur_body_high - cur_body_low
     engulf_ratio = round(cur_body / prev_body, 2) if prev_body > 0 else 0
     # 🔧 v10: W/L — engulf W2.04/L1.71 → 높을수록 승률↑ → 최소 1.8 요구
     if engulf_ratio < 1.8:
-        _pipeline_inc("60m_engulf_ratio_fail", value=engulf_ratio, threshold=1.8, direction="gte")
-        return None
+        if _pipeline_inc("60m_engulf_ratio_fail", value=engulf_ratio, threshold=1.8, direction="gte"): return None
     # 🔧 v10: 15m ADX 추가 — SL 38건 = 방향 없는 감싸기 제거
     if c15 and len(c15) >= 30:
         highs_15 = [c["high_price"] for c in c15]
@@ -7932,8 +7908,7 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         closes_15 = [c["trade_price"] for c in c15]
         adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
         if adx_15 is not None and adx_15 < 18:
-            _pipeline_inc("60m_engulf_adx_fail", value=adx_15, threshold=18, direction="gte")
-            return None
+            if _pipeline_inc("60m_engulf_adx_fail", value=adx_15, threshold=18, direction="gte"): return None
     # 🔧 v11: W/L — vr5_15m W1.04/L2.37 (0.44x) → 15분 거래량 펌프 동반=되돌림
     if c15 and len(c15) >= 6:
         _cv15 = c15[-1].get("candle_acc_trade_price", 0)
@@ -7995,15 +7970,13 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         return None
     # 1m 현재봉 양봉
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("15m_vr_1m_fail")
-        return None
+        if _pipeline_inc("15m_vr_1m_fail"): return None
     # 🔧 v10: 5m MACD 방향성 추가 — SL 27건/108건 = 25% → 방향 필터 필요
     if c5 and len(c5) >= 35:
         closes_5m = [c["trade_price"] for c in c5]
         macd_5m, sig_5m, _ = _v4_macd(closes_5m)
         if macd_5m is not None and sig_5m is not None and macd_5m <= sig_5m:
-            _pipeline_inc("15m_vr_macd_fail")
-            return None
+            if _pipeline_inc("15m_vr_macd_fail"): return None
     # 🔧 v11: W/L — gap_20bar W0.03/L-8.32 (극단) → 고점 대비 -3% 이하=데드캣바운스
     if c1 and len(c1) >= 21:
         _cur_cl = c1[-1]["trade_price"]
@@ -8066,23 +8039,19 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
     if ema5 is None or ema10 is None or ema20 is None:
         return None
     if not (ema5 > ema10 > ema20):
-        _pipeline_inc("upper_align_ema_fail")
-        return None
+        if _pipeline_inc("upper_align_ema_fail"): return None
     # 15m MACD 골든크로스
     closes_15 = [c["trade_price"] for c in c15]
     macd_15, sig_15, _ = _v4_macd(closes_15)
     if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
-        _pipeline_inc("upper_align_macd_fail")
-        return None
+        if _pipeline_inc("upper_align_macd_fail"): return None
     # 1m 양봉
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("upper_align_1m_fail")
-        return None
+        if _pipeline_inc("upper_align_1m_fail"): return None
     # ATR% >= 0.5 (최소 변동성)
     atr_p = _v4_atr_pct(c1, 14)
     if atr_p < 0.5:
-        _pipeline_inc("upper_align_atr_fail", value=atr_p, threshold=0.5, direction="gte")
-        return None
+        if _pipeline_inc("upper_align_atr_fail", value=atr_p, threshold=0.5, direction="gte"): return None
     # 🔧 v10: W/L — SL 60건/169건=35% 최다탈락 → 강한 추세 필터 필요
     # EMA 간격 최소 요구: (ema5-ema20)/ema20 > 0.1% → 의미있는 정배열만
     ema_gap_pct = (ema5 - ema20) / max(ema20, 1) * 100
@@ -8097,8 +8066,7 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
         closes_60 = [c["trade_price"] for c in c60]
         adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
         if adx_60 is not None and adx_60 < 20:
-            _pipeline_inc("upper_align_adx60_fail", value=adx_60, threshold=20, direction="gte")
-            return None
+            if _pipeline_inc("upper_align_adx60_fail", value=adx_60, threshold=20, direction="gte"): return None
     # 🔧 v11: W/L — macd_hist_5m_bps W16.46/L8.77 (1.88x) → 5분 MACD 가속 중만 유효
     if c5 and len(c5) >= 35:
         _cl5 = [c["trade_price"] for c in c5]
@@ -8150,8 +8118,7 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     # 5m RSI <= 35 (과매도 구간)
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     if rsi_5m is None or rsi_5m > 35:
-        _pipeline_inc("oversold_rsi_fail", value=rsi_5m, threshold=35, direction="lte")
-        return None
+        if _pipeline_inc("oversold_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
     # 🔧 v10: W/L — rsi W29.37/L29.87 → 거의 차이 없음 → RSI만으론 부족
     # RSI 하한 추가: 너무 깊은 과매도(RSI<20)는 폭락 중이라 반등 실패
     if rsi_5m < 20:
@@ -8167,8 +8134,7 @@ def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         return None
     # 1m 양봉 확인
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("oversold_1m_fail")
-        return None
+        if _pipeline_inc("oversold_1m_fail"): return None
     # 🔧 v10: 반등 강도 확인 — 현재 양봉이 직전 음봉의 50% 이상 회복
     cur_5m_body = c5[-1]["trade_price"] - c5[-1]["opening_price"]
     prev_5m_body = abs(c5[-2]["opening_price"] - c5[-2]["trade_price"])
@@ -8213,36 +8179,31 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
     closes_15 = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
     if adx_15 is None or adx_15 <= 30:
-        _pipeline_inc("adx_trend_15_fail", value=adx_15, threshold=30, direction="gt")
-        return None
+        if _pipeline_inc("adx_trend_15_fail", value=adx_15, threshold=30, direction="gt"): return None
     # 60m ADX > 25 (상위TF 추세 동기화)
     highs_60 = [c["high_price"] for c in c60]
     lows_60 = [c["low_price"] for c in c60]
     closes_60 = [c["trade_price"] for c in c60]
     adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
     if adx_60 is None or adx_60 <= 25:
-        _pipeline_inc("adx_trend_60_fail", value=adx_60, threshold=25, direction="gt")
-        return None
+        if _pipeline_inc("adx_trend_60_fail", value=adx_60, threshold=25, direction="gt"): return None
     # 5m MACD 골든 (방향성 확인)
     if not c5 or len(c5) < 35:
         return None
     closes_5m = [c["trade_price"] for c in c5]
     macd_5m, sig_5m, _ = _v4_macd(closes_5m)
     if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
-        _pipeline_inc("adx_trend_macd_fail")
-        return None
+        if _pipeline_inc("adx_trend_macd_fail"): return None
     # VR 최소 (🔧 v10: W/L — vr5 W8.00/L6.42 → 높을수록 승률↑ → 1.2→2.0 상향)
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 2.0:
-        _pipeline_inc("adx_trend_vr_fail", value=vr5, threshold=2.0, direction="gte")
-        return None
+        if _pipeline_inc("adx_trend_vr_fail", value=vr5, threshold=2.0, direction="gte"): return None
     # 🔧 v10: W/L — macd_5m W-956/L-1557 → 둘 다 음수이나 W가 덜 음수
     # MACD 히스토그램이 상승 전환 중인지 확인
     hist_5m = macd_5m - sig_5m if sig_5m is not None else 0
     # 🔧 v10: 1m 양봉 추가 — 타이밍 확인 (기존에 없었음)
     if not _v4_is_bullish(c1[-1]):
-        _pipeline_inc("adx_trend_1m_fail")
-        return None
+        if _pipeline_inc("adx_trend_1m_fail"): return None
     # 🔧 v11: W/L — vr5_15m W2.20/L0.67 (3.28x) → 15분 거래량 없으면 추세 지속 실패
     if c15 and len(c15) >= 6:
         _cv15 = c15[-1].get("candle_acc_trade_price", 0)
@@ -9046,8 +9007,22 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         except Exception:
             sig = None
         hit = sig is not None
-        blocked_by = getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None) if not hit else None
-        blocked_value = getattr(_BLOCKED_THREAD_LOCAL, "last_fail_value", None) if not hit else None
+        blocked_by = None
+        blocked_value = None
+        if not hit and getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None):
+            # eval_all 모드로 재실행 → 마지막 실패 필터 추적
+            _BLOCKED_THREAD_LOCAL.last_fail = None
+            _BLOCKED_THREAD_LOCAL.last_fail_value = None
+            _BLOCKED_THREAD_LOCAL.last_fail_threshold = None
+            _BLOCKED_THREAD_LOCAL.last_fail_direction = None
+            _BLOCKED_THREAD_LOCAL._eval_all_mode = True
+            try:
+                check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+            except Exception:
+                pass
+            _BLOCKED_THREAD_LOCAL._eval_all_mode = False
+            blocked_by = getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None)
+            blocked_value = getattr(_BLOCKED_THREAD_LOCAL, "last_fail_value", None)
         results[route] = hit
 
         if entry_price <= 0:
