@@ -9197,7 +9197,7 @@ def _v4_shadow_report_lines():
                     hold_str = f"{avg_hold:.0f}s"
                 mae_part = ""
                 if bs.get("mae_cnt", 0) > 0:
-                    avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
+                    avg_mae = bs.get("mae_sum", 0.0) / bs.get("mae_cnt", 1) * 100
                     mae_part = f" | 최대손실{avg_mae:+.2f}%"
                 _blocked_shown += 1
                 lines.append(
