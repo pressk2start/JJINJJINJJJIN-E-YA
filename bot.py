@@ -532,6 +532,10 @@ def _pipeline_report(force=False):
     with _PIPELINE_COUNTERS_LOCK:
         c = dict(_PIPELINE_COUNTERS)
     elapsed_min = (now - _PIPELINE_START_TS) / 60
+    # v15: 첫 리포트에 데이터가 전혀 없으면 "수집 중" 한 줄만 보내고 스킵
+    if c.get("scan_markets", 0) == 0 and c.get("detect_called", 0) == 0:
+        tg_send("📊 파이프라인 계측: 데이터 수집 중... (다음 리포트부터 표시)")
+        return
     delta_min = (now - _PIPELINE_PREV_SNAPSHOT_TS) / 60 if _PIPELINE_PREV_SNAPSHOT else elapsed_min
 
     # delta 계산 (이번 구간 변화량)
@@ -8527,7 +8531,8 @@ def _check_blocked_filter_alerts_on_load():
     """봇 시작 시 로드된 차단 통계로 즉시 필터 유효성 알림 전송.
     재시작 후에도 누적 데이터 기반 '재검토 필요' 판정이 이어지도록 함."""
     MIN_SAMPLES = 5  # 최소 샘플 수 — 너무 적으면 노이즈
-    alerts = []
+    review_alerts = []  # ⚠ 재검토 필요 (승률 55%+ → 필터가 좋은 매매 막고 있음)
+    valid_cnt = 0       # ✅ 유효 건수 (상세 안 보냄)
     with _SHADOW_PERF_LOCK:
         for bkey, bs in _SHADOW_BLOCKED_STATS.items():
             bn = bs.get("signals", 0)
@@ -8539,17 +8544,21 @@ def _check_blocked_filter_alerts_on_load():
             broute = bs.get("route", "?")
             bfilter = bs.get("filter", bkey)
             if bwr >= 55:
-                alerts.append(
+                review_alerts.append(
                     f"  ⚠{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
                     f" PnL{bavg:+.2f}% → 재검토 필요"
                 )
             elif bwr <= 45:
-                alerts.append(
-                    f"  ✅{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
-                    f" PnL{bavg:+.2f}% → 유효"
-                )
-    if alerts:
-        msg = "🔄 [재시작] 차단 필터 누적 판정:\n" + "\n".join(alerts)
+                valid_cnt += 1
+    if review_alerts or valid_cnt > 0:
+        parts = []
+        if review_alerts:
+            parts.extend(review_alerts[:15])  # 최대 15개
+            if len(review_alerts) > 15:
+                parts.append(f"  ... 외 {len(review_alerts)-15}건")
+        if valid_cnt > 0:
+            parts.append(f"  ✅ 유효 필터: {valid_cnt}개 (정상 작동 중)")
+        msg = "🔄 [재시작] 차단 필터 누적 판정:\n" + "\n".join(parts)
         try:
             tg_send(msg)
         except Exception as e:
@@ -8573,9 +8582,10 @@ def _save_blocked_stats():
 def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
                                    exit_reason, hold_sec, blocked_by="",
                                    mae=None):
-    """차단 건 가상 추적 결과 기록 — 필터별 W/L, PnL, MFE, MAE, 보유시간 누적"""
+    """차단 건 가상 추적 결과 기록 — 시나리오:필터별 W/L, PnL, MFE, MAE, 보유시간 누적"""
     global _SHADOW_BLOCKED_TRADE_COUNT
-    key = blocked_by or f"{route}:{strat_name}"
+    # v15: route 포함 → 시나리오별 분리 (같은 필터라도 시나리오마다 별도 통계)
+    key = f"{route}:{blocked_by}" if blocked_by else f"{route}:{strat_name}"
     is_win = pnl_pct > 0
     with _SHADOW_PERF_LOCK:
         if key not in _SHADOW_BLOCKED_STATS:
@@ -9140,12 +9150,15 @@ def _v4_shadow_report_lines():
     except Exception:
         pass
     # 🔍 차단 건 가상 추적 리포트 (counterfactual)
+    # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
     with _SHADOW_PERF_LOCK:
         if _SHADOW_BLOCKED_STATS:
-            lines.append("🚫 차단 건 가상결과 (필터 없었다면?):")
+            lines.append("🚫 필터 효과 검증 (차단 안했으면?):")
+            # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
                 _SHADOW_BLOCKED_STATS.items(),
-                key=lambda x: x[1].get("signals", 0), reverse=True)
+                key=lambda x: (-1 if x[1].get("wins", 0) / max(x[1].get("signals", 1), 1) >= 0.55 else 0,
+                               -x[1].get("signals", 0)))
             for bkey, bs in sorted_blocked:
                 bn = bs.get("signals", 0)
                 if bn < 1:
@@ -9156,16 +9169,33 @@ def _v4_shadow_report_lines():
                 bavg = bs.get("total_pnl", 0) / bn * 100
                 broute = bs.get("route", "?")
                 bfilter = bs.get("filter", bkey)
-                # 필터 효과 판정: 차단된 건의 승률이 낮으면(≤45%) 필터 유효
+                # 필터 효과 판정
                 if bwr <= 45:
                     verdict = "✅유효"
                 elif bwr >= 55:
-                    verdict = "⚠재검토"
+                    verdict = "⚠재검토!"
                 else:
                     verdict = "🔸관찰중"
+                # 1줄: 요약 (읽기 쉬운 판정)
                 lines.append(
-                    f"  {broute}:{bfilter} {bn}건 W{bw}/L{bl}"
-                    f" PnL{bavg:+.2f}% → {verdict}"
+                    f"{verdict} {broute}:{bfilter} — {bn}건 중 {bw}승 ({bwr:.0f}%) {bavg:+.2f}%"
+                )
+                # 2줄: 상세 수치 (가로 구분)
+                mfe_list = bs.get("mfes", [])
+                avg_mfe = sum(mfe_list) / max(len(mfe_list), 1) * 100
+                hold_list = bs.get("hold_secs", [])
+                avg_hold = sum(hold_list) / max(len(hold_list), 1)
+                # 보유시간 읽기 쉽게
+                if avg_hold >= 60:
+                    hold_str = f"{avg_hold/60:.1f}m"
+                else:
+                    hold_str = f"{avg_hold:.0f}s"
+                mae_part = ""
+                if bs.get("mae_cnt", 0) > 0:
+                    avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
+                    mae_part = f" | 최대손실{avg_mae:+.2f}%"
+                lines.append(
+                    f" └ 최고{avg_mfe:+.2f}%{mae_part} | 평균보유 {hold_str}"
                 )
     with _SHADOW_LOCK:
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
