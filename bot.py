@@ -8527,7 +8527,8 @@ def _check_blocked_filter_alerts_on_load():
     """봇 시작 시 로드된 차단 통계로 즉시 필터 유효성 알림 전송.
     재시작 후에도 누적 데이터 기반 '재검토 필요' 판정이 이어지도록 함."""
     MIN_SAMPLES = 5  # 최소 샘플 수 — 너무 적으면 노이즈
-    alerts = []
+    review_alerts = []  # ⚠ 재검토 필요 (승률 55%+ → 필터가 좋은 매매 막고 있음)
+    valid_cnt = 0       # ✅ 유효 건수 (상세 안 보냄)
     with _SHADOW_PERF_LOCK:
         for bkey, bs in _SHADOW_BLOCKED_STATS.items():
             bn = bs.get("signals", 0)
@@ -8539,17 +8540,21 @@ def _check_blocked_filter_alerts_on_load():
             broute = bs.get("route", "?")
             bfilter = bs.get("filter", bkey)
             if bwr >= 55:
-                alerts.append(
+                review_alerts.append(
                     f"  ⚠{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
                     f" PnL{bavg:+.2f}% → 재검토 필요"
                 )
             elif bwr <= 45:
-                alerts.append(
-                    f"  ✅{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
-                    f" PnL{bavg:+.2f}% → 유효"
-                )
-    if alerts:
-        msg = "🔄 [재시작] 차단 필터 누적 판정:\n" + "\n".join(alerts)
+                valid_cnt += 1
+    if review_alerts or valid_cnt > 0:
+        parts = []
+        if review_alerts:
+            parts.extend(review_alerts[:15])  # 최대 15개
+            if len(review_alerts) > 15:
+                parts.append(f"  ... 외 {len(review_alerts)-15}건")
+        if valid_cnt > 0:
+            parts.append(f"  ✅ 유효 필터: {valid_cnt}개 (정상 작동 중)")
+        msg = "🔄 [재시작] 차단 필터 누적 판정:\n" + "\n".join(parts)
         try:
             tg_send(msg)
         except Exception as e:
@@ -9141,12 +9146,17 @@ def _v4_shadow_report_lines():
     except Exception:
         pass
     # 🔍 차단 건 가상 추적 리포트 (counterfactual)
+    # v15: ⚠재검토 우선 정렬 + 상위 10개만 표시 (리포트 길이 제한)
     with _SHADOW_PERF_LOCK:
         if _SHADOW_BLOCKED_STATS:
             lines.append("🚫 차단 건 가상결과 (필터 없었다면?):")
+            # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
                 _SHADOW_BLOCKED_STATS.items(),
-                key=lambda x: x[1].get("signals", 0), reverse=True)
+                key=lambda x: (-1 if x[1].get("wins", 0) / max(x[1].get("signals", 1), 1) >= 0.55 else 0,
+                               -x[1].get("signals", 0)))
+            shown = 0
+            total_blocked = len([1 for _, bs in sorted_blocked if bs.get("signals", 0) >= 1])
             for bkey, bs in sorted_blocked:
                 bn = bs.get("signals", 0)
                 if bn < 1:
@@ -9173,6 +9183,12 @@ def _v4_shadow_report_lines():
                 if bs.get("mae_cnt", 0) > 0:
                     avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
                     mae_str = f" MAE{avg_mae:+.2f}%"
+                shown += 1
+                if shown > 10:
+                    remain = total_blocked - 10
+                    if remain > 0:
+                        lines.append(f"  ... 외 {remain}건 (✅유효 다수 생략)")
+                    break
                 lines.append(
                     f"  {broute}:{bfilter} {bn}건 W{bw}/L{bl}"
                     f" PnL{bavg:+.2f}% MFE{avg_mfe:+.2f}%{mae_str}"
