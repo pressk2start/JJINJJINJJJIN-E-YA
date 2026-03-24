@@ -385,3 +385,5 @@ SHADOW_STATS_PATH = os.path.join(os.getcwd(), "shadow_stats.json")
 SHADOW_STATS_SAVE_INTERVAL = 10   # N건마다 저장
 SHADOW_MAX_VIRTUAL_POS = 30       # 동시 추적 가상포지션 상한
 SHADOW_DEDUP_CD_SEC = 300         # 같은 루트+코인 중복 진입 방지 (5분)
+SHADOW_BLOCKED_STATS_PATH = os.path.join(os.getcwd(), "shadow_blocked_stats.json")
+SHADOW_MAX_BLOCKED_POS = 50       # 차단 건 가상 추적 동시 상한
