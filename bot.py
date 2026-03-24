@@ -7764,6 +7764,16 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
         # MACD 양수여도 ADX가 있으면 통과 허용
         if not adx_ok:
             return None
+    # 🔧 v13: W/L 87건 — vr5_15m W2.85/L0.82 (3.5x) → 높을수록 승률↑ → 최소 1.5
+    #   15m 거래량 뒷받침 없는 니어미스 = 가짜 거래량 스파이크
+    if c15 and len(c15) >= 6:
+        _cvol15d = c15[-1].get("candle_acc_trade_price", 0)
+        _pvols15d = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _avg15d = sum(_pvols15d) / max(len(_pvols15d), 1)
+        if _avg15d > 0:
+            _vr5_15m_d = _cvol15d / _avg15d
+            if _vr5_15m_d < 1.5:
+                return None
     return {
         "signal_tag": "거래량완화",
         "entry_mode": "confirm",
@@ -7988,6 +7998,18 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
             if _macd_bps_i < 15:
                 _pipeline_inc("15m_vr_macd15_v12_fail")
                 return None
+    # 🔧 v13: W/L 98건 — engulf_ratio_60 W4.21/L1.98 (2.1x) → 높을수록 승률↑ → 최소 3.0
+    #   60m 감싸기 비율 높으면 상위TF 모멘텀 확인 → VR폭발의 신뢰도↑
+    if c60 and len(c60) >= 2:
+        _prev60i = c60[-2]
+        _cur60i = c60[-1]
+        _pb60i = abs(_prev60i["opening_price"] - _prev60i["trade_price"])
+        _cb60i = abs(_cur60i["opening_price"] - _cur60i["trade_price"])
+        if _pb60i > 0:
+            _engulf_i = _cb60i / _pb60i
+            if _engulf_i < 3.0:
+                _pipeline_inc("15m_vr_engulf60_v13_fail")
+                return None
     _pipeline_inc("15m_vr_pass")
     return {
         "signal_tag": "15m_VR폭발",
@@ -8062,6 +8084,17 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
             _hist5_bps = _hist5 / _price5 * 10000
             if _hist5_bps < 12:
                 _pipeline_inc("upper_align_hist5_v11_fail")
+                return None
+    # 🔧 v13: W/L 146건 — vr5_15m W3.52/L5.24 (3.3x) → 낮을수록 승률↑ → 상한 6.0
+    #   VR 과열 = 이미 급등 끝자락, 정배열이어도 추격매수 실패
+    if c15 and len(c15) >= 6:
+        _cvol15 = c15[-1].get("candle_acc_trade_price", 0)
+        _pvols15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        _avg15 = sum(_pvols15) / max(len(_pvols15), 1)
+        if _avg15 > 0:
+            _vr5_15m_j = _cvol15 / _avg15
+            if _vr5_15m_j > 6.0:
+                _pipeline_inc("upper_align_vr15_v13_fail")
                 return None
     _pipeline_inc("upper_align_pass")
     return {
@@ -8385,6 +8418,21 @@ def _load_shadow_stats():
                 try:
                     with open(_v12_marker, "w") as f:
                         f.write("v12 filters reset done\n")
+                except Exception:
+                    pass
+            # v13 1회성 리셋: J/I/D에 W/L 임계치 필터 추가로 기존 데이터 무효
+            # J: vr5_15m<=6 (W3.52/L5.24, 146건), I: engulf_ratio_60>=3.0 (W4.21/L1.98, 98건), D: vr5_15m>=1.5 (W2.85/L0.82, 87건)
+            _v13_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v13_filters_reset_done")
+            if not os.path.exists(_v13_marker):
+                print("[SHADOW_STATS] v13 1회 초기화: J(vr5_15m≤6) I(engulf_ratio_60≥3.0) D(vr5_15m≥1.5) 필터 추가 → 전체 리셋")
+                print("[SHADOW_STATS] 근거:")
+                print("[SHADOW_STATS]   J:상위TF정배열 146건 — vr5_15m W3.52/L5.24 (3.3x) → 과열VR 제외")
+                print("[SHADOW_STATS]   I:15mVR폭발 98건 — engulf_ratio_60 W4.21/L1.98 (2.1x) → 60m감싸기 동반만")
+                print("[SHADOW_STATS]   D:거래량완화 87건 — vr5_15m W2.85/L0.82 (3.5x) → 15m거래량 뒷받침 필수")
+                _SHADOW_PERF_STATS = {}
+                try:
+                    with open(_v13_marker, "w") as f:
+                        f.write("v13 filters reset done\n")
                 except Exception:
                     pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
