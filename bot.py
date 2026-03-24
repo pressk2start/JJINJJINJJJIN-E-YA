@@ -528,6 +528,9 @@ def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
         _BLOCKED_THREAD_LOCAL.last_fail_value = value
         _BLOCKED_THREAD_LOCAL.last_fail_threshold = threshold
         _BLOCKED_THREAD_LOCAL.last_fail_direction = direction
+    # eval_all에서도 데이터검증(value=None)은 반드시 return해야 크래시 방지
+    if _eval_all and value is None:
+        return True
     return not _eval_all
 
 
@@ -7587,8 +7590,7 @@ def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
         _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
         _av15 = sum(_pv15) / max(len(_pv15), 1)
         if _av15 > 0 and (_cv15 / _av15) >= 3.0:
-            _pipeline_inc("15m_pb_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=3.0, direction="lt")
-            return None
+            if _pipeline_inc("15m_pb_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=3.0, direction="lt"): return None
     _pipeline_inc("15m_pb_pass")
     return {
         "signal_tag": "15m_눌림반전",
@@ -7616,20 +7618,20 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
     _20bar_gap = ((cur_close / max(high_20, 1)) - 1.0) * 100
     _pipeline_track_value("20bar_gap_pct", _20bar_gap, None, passed=(cur_close > high_20))
     if cur_close <= high_20:
-        _pipeline_inc("20bar_price_fail", value=round(_20bar_gap, 2), threshold=0, direction="gt")
-        return None
+        if _pipeline_inc("20bar_price_fail", value=round(_20bar_gap, 2), threshold=0, direction="gt"): return None
     # 복합필터: 5m MACD 골든크로스
     if not c5 or len(c5) < 35:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        if _pipeline_inc("20bar_macd_data_fail"): return None
     closes_5m = [c["trade_price"] for c in c5]
     macd_5m, sig_5m, _ = _v4_macd(closes_5m)
     if macd_5m is None or sig_5m is None:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        if _pipeline_inc("20bar_macd_null_fail"): return None
     if macd_5m <= sig_5m:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        macd_diff = macd_5m - sig_5m
+        if _pipeline_inc("20bar_macd_cross_fail", value=round(macd_diff, 6), threshold=0, direction="gt"): return None
     # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
     if not c15 or len(c15) < 30:
-        if _pipeline_inc("20bar_adx_fail"): return None
+        if _pipeline_inc("20bar_adx_data_fail"): return None
     highs_15 = [c["high_price"] for c in c15]
     lows_15 = [c["low_price"] for c in c15]
     closes_15 = [c["trade_price"] for c in c15]
@@ -7643,8 +7645,7 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
         _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
         _av15 = sum(_pv15) / max(len(_pv15), 1)
         if _av15 > 0 and (_cv15 / _av15) < 1.5:
-            _pipeline_inc("20bar_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte")
-            return None
+            if _pipeline_inc("20bar_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte"): return None
     _pipeline_inc("20bar_pass")
     return {
         "signal_tag": "20봉_고점돌파",
@@ -7783,8 +7784,7 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
         if _avg15d > 0:
             _vr5_15m_d = _cvol15d / _avg15d
             if _vr5_15m_d < 1.5:
-                _pipeline_inc("vol_relax_vr15_v13_fail", value=round(_vr5_15m_d, 2), threshold=1.5, direction="gte")
-                return None
+                if _pipeline_inc("vol_relax_vr15_v13_fail", value=round(_vr5_15m_d, 2), threshold=1.5, direction="gte"): return None
     return {
         "signal_tag": "거래량완화",
         "entry_mode": "confirm",
@@ -7915,8 +7915,7 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
         _av15 = sum(_pv15) / max(len(_pv15), 1)
         if _av15 > 0 and (_cv15 / _av15) >= 1.5:
-            _pipeline_inc("60m_engulf_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="lt")
-            return None
+            if _pipeline_inc("60m_engulf_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="lt"): return None
     # 🔧 v12: W/L 137건 — macd_15_bps W18.47(35) / L1.31(102) (14배)
     #   15m MACD bps 높을수록 모멘텀 확인된 감싸기 → 승률↑ → 최소 10 요구
     if c15 and len(c15) >= 35:
@@ -7926,8 +7925,7 @@ def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
         if _macd_15h is not None:
             _macd_bps = _macd_15h / _price_15h * 10000
             if _macd_bps < 10:
-                _pipeline_inc("60m_engulf_macd15_v12_fail", value=round(_macd_bps, 2), threshold=10, direction="gte")
-                return None
+                if _pipeline_inc("60m_engulf_macd15_v12_fail", value=round(_macd_bps, 2), threshold=10, direction="gte"): return None
     _pipeline_inc("60m_engulf_pass")
     return {
         "signal_tag": "60m_감싸기_돌파",
@@ -7983,8 +7981,7 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         _high20 = max(c["high_price"] for c in c1[-21:-1])
         _gap20 = ((_cur_cl / max(_high20, 1)) - 1.0) * 100
         if _gap20 < -3.0:
-            _pipeline_inc("15m_vr_gap20_v11_fail", value=round(_gap20, 2), threshold=-3.0, direction="gte")
-            return None
+            if _pipeline_inc("15m_vr_gap20_v11_fail", value=round(_gap20, 2), threshold=-3.0, direction="gte"): return None
     # 🔧 v12: W/L 125건 — macd_15_bps W23.29(34) / L6.84(91) (3.4배)
     #   15m MACD bps 높을수록 모멘텀 동반 VR폭발 → 승률↑ → 최소 15 요구
     if c15 and len(c15) >= 35:
@@ -7994,8 +7991,7 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         if _macd_15i is not None:
             _macd_bps_i = _macd_15i / _price_15i * 10000
             if _macd_bps_i < 15:
-                _pipeline_inc("15m_vr_macd15_v12_fail", value=round(_macd_bps_i, 2), threshold=15, direction="gte")
-                return None
+                if _pipeline_inc("15m_vr_macd15_v12_fail", value=round(_macd_bps_i, 2), threshold=15, direction="gte"): return None
     # 🔧 v13: W/L 98건 — engulf_ratio_60 W4.21/L1.98 (2.1x) → 높을수록 승률↑ → 최소 3.0
     #   60m 감싸기 비율 높으면 상위TF 모멘텀 확인 → VR폭발의 신뢰도↑
     if c60 and len(c60) >= 2:
@@ -8006,8 +8002,7 @@ def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
         if _pb60i > 0:
             _engulf_i = _cb60i / _pb60i
             if _engulf_i < 3.0:
-                _pipeline_inc("15m_vr_engulf60_v13_fail", value=round(_engulf_i, 2), threshold=3.0, direction="gte")
-                return None
+                if _pipeline_inc("15m_vr_engulf60_v13_fail", value=round(_engulf_i, 2), threshold=3.0, direction="gte"): return None
     _pipeline_inc("15m_vr_pass")
     return {
         "signal_tag": "15m_VR폭발",
@@ -8056,8 +8051,7 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
     # EMA 간격 최소 요구: (ema5-ema20)/ema20 > 0.1% → 의미있는 정배열만
     ema_gap_pct = (ema5 - ema20) / max(ema20, 1) * 100
     if ema_gap_pct < 0.1:
-        _pipeline_inc("upper_align_gap_fail", value=round(ema_gap_pct, 4), threshold=0.1, direction="gte")
-        return None
+        if _pipeline_inc("upper_align_gap_fail", value=round(ema_gap_pct, 4), threshold=0.1, direction="gte"): return None
     # 🔧 v10: 15m MACD 상한 — macd_15 W3.51/L2.85 → 차이 미미하지만 SL 줄이려면
     # 60m ADX 추가 — 추세 강도 확인
     if len(c60) >= 30:
@@ -8076,8 +8070,7 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
             _price5 = _cl5[-1] if _cl5[-1] > 0 else 1
             _hist5_bps = _hist5 / _price5 * 10000
             if _hist5_bps < 12:
-                _pipeline_inc("upper_align_hist5_v11_fail", value=round(_hist5_bps, 2), threshold=12, direction="gte")
-                return None
+                if _pipeline_inc("upper_align_hist5_v11_fail", value=round(_hist5_bps, 2), threshold=12, direction="gte"): return None
     # 🔧 v13: W/L 146건 — vr5_15m W3.52/L5.24 (3.3x) → 낮을수록 승률↑ → 상한 6.0
     #   VR 과열 = 이미 급등 끝자락, 정배열이어도 추격매수 실패
     if c15 and len(c15) >= 6:
@@ -8087,8 +8080,7 @@ def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
         if _avg15 > 0:
             _vr5_15m_j = _cvol15 / _avg15
             if _vr5_15m_j > 6.0:
-                _pipeline_inc("upper_align_vr15_v13_fail", value=round(_vr5_15m_j, 2), threshold=6.0, direction="lte")
-                return None
+                if _pipeline_inc("upper_align_vr15_v13_fail", value=round(_vr5_15m_j, 2), threshold=6.0, direction="lte"): return None
     _pipeline_inc("upper_align_pass")
     return {
         "signal_tag": "상위TF_정배열",
@@ -8210,8 +8202,7 @@ def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
         _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
         _av15 = sum(_pv15) / max(len(_pv15), 1)
         if _av15 > 0 and (_cv15 / _av15) < 1.5:
-            _pipeline_inc("adx_trend_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte")
-            return None
+            if _pipeline_inc("adx_trend_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte"): return None
     _pipeline_inc("adx_trend_pass")
     return {
         "signal_tag": "ADX_추세강화",
@@ -8236,7 +8227,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v4_check_volume_3x,
         "exit_params": _V4_EXIT_PARAMS["거래량3배"],
         "priority": 1,
-        "enabled": True,
+        "enabled": False,
         "pipeline_key": "vol3x",
         "route": "A",
         "description": "VR5>2.5, ATR%>0.5%, 직전2봉양봉, 방향성 OR 필터",
@@ -8245,7 +8236,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v4_check_20bar_breakout,
         "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"],
         "priority": 2,
-        "enabled": True,
+        "enabled": False,
         "pipeline_key": "20bar",
         "route": "B",
         "description": "1m종가>20봉고점, 5mMACD+15mADX>20",
@@ -9020,7 +9011,8 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
             except Exception:
                 pass
-            _BLOCKED_THREAD_LOCAL._eval_all_mode = False
+            finally:
+                _BLOCKED_THREAD_LOCAL._eval_all_mode = False
             blocked_by = getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None)
             blocked_value = getattr(_BLOCKED_THREAD_LOCAL, "last_fail_value", None)
         results[route] = hit
@@ -9118,6 +9110,46 @@ def _threshold_sweep(fail_values_list, current_threshold, direction):
                 best = {"new_th": round(c, 4), "n": len(passed),
                         "avg_pnl": round(avg_pnl * 100, 2), "wr": round(wr, 1)}
     return best
+
+
+def _threshold_sweep_table(fail_values_list, current_threshold, direction):
+    """v17: 현재 임계치 ±5% 시나리오별 W/L 테이블.
+    Returns: list of dicts [{th, n, wins, losses, wr, avg_pnl}, ...] or []"""
+    if not fail_values_list or len(fail_values_list) < 5 or current_threshold == 0:
+        return []
+    values = [fv["v"] for fv in fail_values_list if fv.get("v") is not None]
+    pnls = [fv["pnl"] for fv in fail_values_list if fv.get("v") is not None]
+    if len(values) < 5:
+        return []
+
+    steps = [
+        round(current_threshold * 0.95, 4),  # -5%
+        round(current_threshold, 4),           # 현재
+        round(current_threshold * 1.05, 4),  # +5%
+    ]
+    rows = []
+    for th in steps:
+        if direction in ("gte", "gt"):
+            passed = [(v, p) for v, p in zip(values, pnls)
+                      if (v >= th if direction == "gte" else v > th)]
+        elif direction in ("lt", "lte"):
+            passed = [(v, p) for v, p in zip(values, pnls)
+                      if (v < th if direction == "lt" else v <= th)]
+        else:
+            continue
+        n = len(passed)
+        if n == 0:
+            rows.append({"th": th, "n": 0, "wins": 0, "losses": 0,
+                         "wr": 0, "avg_pnl": 0, "is_current": (th == round(current_threshold, 4))})
+            continue
+        wins = sum(1 for _, p in passed if p > 0)
+        losses = n - wins
+        wr = wins / n * 100
+        avg_pnl = sum(p for _, p in passed) / n * 100
+        rows.append({"th": th, "n": n, "wins": wins, "losses": losses,
+                     "wr": round(wr, 1), "avg_pnl": round(avg_pnl, 2),
+                     "is_current": (th == round(current_threshold, 4))})
+    return rows
 
 
 def _v4_shadow_report_lines():
@@ -9273,6 +9305,18 @@ def _v4_shadow_report_lines():
                             f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
                             f" +{sweep['n']}건 승률{sweep['wr']:.0f}% PnL{sweep['avg_pnl']:+.2f}%"
                         )
+                    # v17: ±5% 시나리오 테이블
+                    table = _threshold_sweep_table(fv_list, f_th, f_dir)
+                    if table:
+                        for row in table:
+                            tag = "◀현재" if row["is_current"] else ""
+                            lines.append(
+                                f"   {row['th']:>8g} | {row['n']:>3}건"
+                                f" W{row['wins']}/L{row['losses']}"
+                                f" 승률{row['wr']:.0f}%"
+                                f" PnL{row['avg_pnl']:+.2f}%"
+                                f" {tag}"
+                            )
             if _blocked_pending > 0:
                 lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
     with _SHADOW_LOCK:
