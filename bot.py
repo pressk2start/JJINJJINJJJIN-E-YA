@@ -553,7 +553,7 @@ def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
     """파이프라인 카운터 증가 + 차단 필터명/값/임계치 thread-local 기록.
     Returns True(=caller should return None) in normal mode,
     False(=caller should continue) in eval_all mode.
-    eval_all mode: 카운터 미증가, last_fail만 갱신 → 마지막 실패 필터 추적용"""
+    eval_all mode: 카운터 미증가, all_fails 리스트에 누적 → 실패 필터 전수 추적"""
     _eval_all = getattr(_BLOCKED_THREAD_LOCAL, '_eval_all_mode', False)
     if not _eval_all:
         with _PIPELINE_COUNTERS_LOCK:
@@ -563,6 +563,14 @@ def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
         _BLOCKED_THREAD_LOCAL.last_fail_value = value
         _BLOCKED_THREAD_LOCAL.last_fail_threshold = threshold
         _BLOCKED_THREAD_LOCAL.last_fail_direction = direction
+        # v0: eval_all 시 모든 실패 필터를 리스트에 누적
+        if _eval_all:
+            if not hasattr(_BLOCKED_THREAD_LOCAL, 'all_fails'):
+                _BLOCKED_THREAD_LOCAL.all_fails = []
+            _BLOCKED_THREAD_LOCAL.all_fails.append({
+                "filter": key, "value": value,
+                "threshold": threshold, "direction": direction,
+            })
     # eval_all에서도 데이터검증(value=None)은 반드시 return해야 크래시 방지
     if _eval_all and value is None:
         return True
@@ -7436,91 +7444,8 @@ def _v4_gate_filter(c15, c60):
     return True, gate_info, None
 
 
-# --- 청산 파라미터 (v6 signal_v4 60일 백테스트 WF 데이터 기반) ---
-_V4_EXIT_PARAMS = {
-    # 거래량3배: TRAIL_SL0.7/A0.3/T0.2
-    # WF PASS: avgTE EV>0, 양수폴드 ≥60%
-    "거래량3배": {
-        "strategy": "TRAIL",
-        "sl_pct": 0.007,           # SL 0.7%
-        "activation_pct": 0.003,   # Activation 0.3%
-        "trail_pct": 0.002,        # Trail 0.2%
-        "hold_bars": 0,
-        "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    # 20봉_고점돌파: TRAIL_SL0.7/A0.3/T0.2
-    # WF PASS: avgTE EV>0, 양수폴드 ≥60%
-    # 최적 복합필터: 5m_MACD골든+15m_ADX>25 (GATE에서 15m MACD 이미 적용)
-    "20봉_고점돌파": {
-        "strategy": "TRAIL",
-        "sl_pct": 0.007,           # SL 0.7%
-        "activation_pct": 0.003,   # Activation 0.3%
-        "trail_pct": 0.002,        # Trail 0.2%
-        "hold_bars": 0,
-        "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    # 15m_눌림반전: TRAIL_SL0.7/A0.3/T0.2
-    # v6 변경: HOLD_12봉 → TRAIL (복합필터 15m_MACD골든+1h_EMA정배열 적용 시 TRAIL이 WF PASS)
-    # GATE 필터가 이미 복합필터 역할 수행
-    "15m_눌림반전": {
-        "strategy": "TRAIL",
-        "sl_pct": 0.007,           # SL 0.7%
-        "activation_pct": 0.003,   # Activation 0.3%
-        "trail_pct": 0.002,        # Trail 0.2%
-        "hold_bars": 0,
-        "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    # EMA정배열진입: 비활성화 (WF FAIL — 양수폴드 43% < 60%)
-    # 안전용으로 파라미터 유지 (신호 함수에서 None 반환)
-    "EMA정배열진입": {
-        "strategy": "TRAIL",
-        "sl_pct": 0.010,
-        "activation_pct": 0.005,
-        "trail_pct": 0.003,
-        "hold_bars": 0,
-        "max_bars": 60,
-        "description": "DISABLED_WF_FAIL",
-    },
-    # === v8 계측용 전략 청산 파라미터 (섀도우 모드 — 실매매 아님) ===
-    "모멘텀_스캘프": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    "60m_감싸기_돌파": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    "15m_VR폭발": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    "상위TF_정배열": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    "과매도_반등": {
-        "strategy": "TRAIL", "sl_pct": 0.010, "activation_pct": 0.005,
-        "trail_pct": 0.003, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL1.0/A0.5/T0.3",
-    },
-    "ADX_추세강화": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-    "거래량완화": {
-        "strategy": "TRAIL", "sl_pct": 0.007, "activation_pct": 0.003,
-        "trail_pct": 0.002, "hold_bars": 0, "max_bars": 60,
-        "description": "TRAIL_SL0.7/A0.3/T0.2",
-    },
-}
+# --- 청산 파라미터 (v0: _V4_EXIT_PARAMS 제거 — 레지스트리 exit_params 사용) ---
+_V4_EXIT_PARAMS = {}  # v0: 빈 dict — v4_get_exit_params fallback용
 
 _V4_DEFAULT_EXIT = {
     "strategy": "TRAIL",
@@ -7531,737 +7456,6 @@ _V4_DEFAULT_EXIT = {
     "max_bars": 60,
     "description": "DEFAULT_TRAIL_SL1.0/A0.5/T0.3",
 }
-
-
-# ============================================================
-# 🔧 v7: 독립 매수 전략 레지스트리
-# 각 전략이 자체 진입 조건 + 자체 청산 파라미터를 가진 독립 모듈
-# check_fn: 진입 판정 함수 (c1,c5,c15,c30,c60,gate_info) → dict|None
-# exit_params: 해당 전략 전용 청산 파라미터
-# priority: 평가 순서 (낮을수록 우선)
-# enabled: 활성화 여부
-# ============================================================
-# 주의: _STRATEGY_REGISTRY는 check_fn 정의 후 아래에서 초기화됨
-_STRATEGY_REGISTRY = {}  # 함수 정의 후 채워짐
-
-
-# --- 거래량3배 (1순위) ---
-# 데이터: ALL EV=+0.0656%, PF=1.16, Total=+23.69%
-# WF 단독 PASS (avgTE +0.0919%, 71% 양수폴드)
-# 조건: VR5>2.5 AND ATR%>0.5% AND 직전2봉중1봉양봉 AND (5m_MACD골든 OR 15m_ADX>20)
-def _v4_check_volume_3x(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("vol3x_enter")
-    if not c1 or len(c1) < 7:
-        return None
-    # 🔧 v9: VR5 3.0→2.5 (리포트 니어미스 46건, 주석과 코드 일치시킴)
-    vr5 = _v4_volume_ratio_5(c1)
-    _pipeline_track_value("vr5", vr5, None, passed=(vr5 > 2.5))
-    if vr5 <= 2.5:
-        if _pipeline_inc("vol3x_vr5_fail", value=vr5, threshold=2.5, direction="gt"): return None
-    # 🔧 v11: W/L — vr5 W12.20/L5.79 (2.1x) → 폭발적 거래량만 승률↑
-    if vr5 < 8.0:
-        if _pipeline_inc("vol3x_vr5_v11_fail", value=vr5, threshold=8.0, direction="gte"): return None
-    # 🔧 v9: ATR% 0.7→0.5 (리포트 니어미스 8건, 실시간 avg=0.24로 0.7 불가)
-    atr_p = _v4_atr_pct(c1, 14)
-    _pipeline_track_value("atr_pct", atr_p, None, passed=(atr_p > 0.5))
-    if atr_p <= 0.5:
-        if _pipeline_inc("vol3x_atr_fail", value=atr_p, threshold=0.5, direction="gt"): return None
-    # 🔧 v9: 직전2봉 중 1봉 양봉 (주석대로 완화)
-    if not (_v4_is_bullish(c1[-2]) or (len(c1) >= 3 and _v4_is_bullish(c1[-3]))):
-        if _pipeline_inc("vol3x_bull_fail"): return None
-    # 방향성 필터: 5m_MACD골든 OR 15m_ADX>20
-    macd_ok = False
-    adx_ok = False
-    macd_5m = sig_5m = None
-    adx_15 = None
-    if c5 and len(c5) >= 35:
-        closes_5m = [c["trade_price"] for c in c5]
-        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-        if macd_5m is not None and sig_5m is not None and macd_5m > sig_5m:
-            macd_ok = True
-    if c15 and len(c15) >= 30:
-        highs_15 = [c["high_price"] for c in c15]
-        lows_15 = [c["low_price"] for c in c15]
-        closes_15 = [c["trade_price"] for c in c15]
-        adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-        _pipeline_track_value("adx_15_vol3x", adx_15, None, passed=(adx_15 is not None and adx_15 > 20))
-        if adx_15 is not None and adx_15 > 20:
-            adx_ok = True
-    if not macd_ok and not adx_ok:
-        if _pipeline_inc("vol3x_dir_fail"): return None
-    _pipeline_inc("vol3x_pass")
-    _macd_str = f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}" if macd_ok else "5mMACD=X"
-    _adx_str = f"15mADX={adx_15:.1f}" if adx_ok else "15mADX=X"
-    return {
-        "signal_tag": "거래량3배",
-        "entry_mode": "confirm",
-        "logic_group": "A",
-        "filters_hit": [f"VR5={vr5:.1f}", f"ATR%={atr_p:.2f}", "직전봉양봉",
-                        _macd_str, _adx_str, f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["거래량3배"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (vr5,atr_pct,adx_15,macd_5m)
-    }
-
-
-# --- 15m_눌림반전 (3순위 — v6) ---
-# WF PASS: avgTE EV>0, 양수폴드 ≥60%
-# v6 변경: 청산 HOLD_12봉 → TRAIL SL0.7/A0.3/T0.2 (복합필터 적용 시 TRAIL WF PASS)
-# 조건: 15m 직전음봉 → 현재양봉 → 종가회복
-# (GATE가 15m_MACD골든+1h_EMA정배열 보장 → 복합필터 자동 적용)
-def _v4_check_15m_pullback_reversal(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("15m_pb_enter")
-    if not c15 or len(c15) < 3:
-        if _pipeline_inc("15m_pb_len_fail"): return None
-    prev_15 = c15[-2]
-    cur_15 = c15[-1]
-    # 직전봉 음봉
-    if prev_15["trade_price"] >= prev_15["opening_price"]:
-        if _pipeline_inc("15m_pb_prev_fail"): return None
-    # 현재봉 양봉
-    if cur_15["trade_price"] <= cur_15["opening_price"]:
-        if _pipeline_inc("15m_pb_cur_fail"): return None
-    # 종가 > 직전봉 시가 (회복)
-    if cur_15["trade_price"] <= prev_15["opening_price"]:
-        if _pipeline_inc("15m_pb_recovery_fail"): return None
-    # 회복비율: (현재종가 - 직전저가) / 직전봉 몸통 크기
-    prev_body = abs(prev_15["opening_price"] - prev_15["trade_price"])
-    recovery = (cur_15["trade_price"] - prev_15["trade_price"]) / max(prev_body, 1)
-    # 🔧 v10: W/L 기반 — recovery W1.72/L1.53 → 높을수록 승률↑ → 최소 1.5 요구
-    if recovery < 1.5:
-        if _pipeline_inc("15m_pb_ratio_fail", value=recovery, threshold=1.5, direction="gte"): return None
-    # 🔧 v11: W/L — vr5_15m W1.24/L9.24 (0.13x) → 15분 거래량 과열=반전 실패
-    if len(c15) >= 6:
-        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _av15 = sum(_pv15) / max(len(_pv15), 1)
-        if _av15 > 0 and (_cv15 / _av15) >= 3.0:
-            if _pipeline_inc("15m_pb_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=3.0, direction="lt"): return None
-    _pipeline_inc("15m_pb_pass")
-    return {
-        "signal_tag": "15m_눌림반전",
-        "entry_mode": "confirm",
-        "logic_group": "B",
-        "filters_hit": ["15m눌림+반전", f"회복={recovery:.2f}", f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["15m_눌림반전"].copy(),
-        "indicators": {"recovery_ratio": round(recovery, 2)},
-    }
-
-
-# --- 20봉_고점돌파 (2순위 — v6 신규) ---
-# WF PASS: avgTE=+0.0322%, 양수폴드=71% (5/7)
-# 조건: 1m 종가 > 직전 20봉 최고가
-# 복합필터: 5m_MACD골든 + 15m_ADX>20 (🔧 v9: 25→20 완화)
-# 검증: 5m_MACD골든+15m_ADX>25 → TR=+0.1962%, TE=+0.0715% BOTH EV>0
-def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("20bar_enter")
-    if not c1 or len(c1) < 21:
-        if _pipeline_inc("20bar_len_fail"): return None
-    # 1m 현재 종가 > 직전 20봉 최고가
-    cur_close = c1[-1]["trade_price"]
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    # 📈 20봉 gap% 기록 (종가-고점 괴리 → 양수=돌파, 음수=미달)
-    _20bar_gap = ((cur_close / max(high_20, 1)) - 1.0) * 100
-    _pipeline_track_value("20bar_gap_pct", _20bar_gap, None, passed=(cur_close > high_20))
-    if cur_close <= high_20:
-        if _pipeline_inc("20bar_price_fail", value=round(_20bar_gap, 2), threshold=0, direction="gt"): return None
-    # 복합필터: 5m MACD 골든크로스
-    if not c5 or len(c5) < 35:
-        if _pipeline_inc("20bar_macd_data_fail"): return None
-    closes_5m = [c["trade_price"] for c in c5]
-    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-    if macd_5m is None or sig_5m is None:
-        if _pipeline_inc("20bar_macd_null_fail"): return None
-    if macd_5m <= sig_5m:
-        macd_diff = macd_5m - sig_5m
-        if _pipeline_inc("20bar_macd_cross_fail", value=round(macd_diff, 6), threshold=0, direction="gt"): return None
-    # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
-    if not c15 or len(c15) < 30:
-        if _pipeline_inc("20bar_adx_data_fail"): return None
-    highs_15 = [c["high_price"] for c in c15]
-    lows_15 = [c["low_price"] for c in c15]
-    closes_15 = [c["trade_price"] for c in c15]
-    adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-    _pipeline_track_value("adx_15_20bar", adx_15, None, passed=(adx_15 is not None and adx_15 > 20))
-    if adx_15 is None or adx_15 <= 20:
-        if _pipeline_inc("20bar_adx_fail", value=adx_15, threshold=20, direction="gt"): return None
-    # 🔧 v11: W/L — vr5_15m W2.02/L0.88 (2.3x) → 15분 거래량 동반 없는 돌파=허돌파
-    if c15 and len(c15) >= 6:
-        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _av15 = sum(_pv15) / max(len(_pv15), 1)
-        if _av15 > 0 and (_cv15 / _av15) < 1.5:
-            if _pipeline_inc("20bar_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte"): return None
-    _pipeline_inc("20bar_pass")
-    return {
-        "signal_tag": "20봉_고점돌파",
-        "entry_mode": "confirm",
-        "logic_group": "B",
-        "filters_hit": [
-            f"20봉돌파={cur_close:.0f}>{high_20:.0f}",
-            f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}",
-            f"15mADX={adx_15:.1f}",
-            f"GATE={gate_info}",
-        ],
-        "exit_params": _V4_EXIT_PARAMS["20봉_고점돌파"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (gap_20bar,adx_15,macd_5m)
-    }
-
-
-# --- EMA정배열진입 (비활성화 — v6) ---
-# ❌ WF FAIL: 양수폴드 43% (3/7) < 60% 기준 미달
-# v5에서는 PASS였으나, 60일 WF 7폴드 재검증 결과 FAIL
-# Train→Test 일관성 없음 — 어떤 복합필터도 안정적 EV>0 불가
-def _v4_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
-    """비활성화 — WF FAIL (v6 signal_v4 60일 백테스트)"""
-    return None
-
-
-# --- [섀도우 전용] EMA정배열진입 실제 로직 (라이브에선 위의 None 반환) ---
-def _v4_shadow_check_ema_alignment(c1, c5, c15, c30, c60, gate_info=None):
-    """섀도우 계측용: EMA5>10>20 + MACD골든 + 양봉
-    🔧 v10: W/L — macd_15 W12.74/L182.55 → MACD 낮을수록 승률↑ → 상한 50 추가"""
-    if not c15 or len(c15) < 35:
-        return None
-    if not c60 or len(c60) < 20:
-        return None
-    if not c1 or len(c1) < 3:
-        return None
-    # 15m EMA 정배열 (5>10>20)
-    ema5_15 = _v4_ema_from_candles(c15, 5)
-    ema10_15 = _v4_ema_from_candles(c15, 10)
-    ema20_15 = _v4_ema_from_candles(c15, 20)
-    if not all(v is not None for v in [ema5_15, ema10_15, ema20_15]):
-        return None
-    if not (ema5_15 > ema10_15 > ema20_15):
-        return None
-    # 15m MACD 골든크로스
-    closes_15 = [c["trade_price"] for c in c15]
-    macd_15, sig_15, _ = _v4_macd(closes_15)
-    if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
-        return None
-    # 🔧 v10: MACD 상한 — W12.74 vs L182.55 → MACD 너무 높으면 이미 과열
-    if macd_15 > 50:
-        return None
-    # 1m 양봉
-    if not _v4_is_bullish(c1[-1]):
-        return None
-    # 🔧 v11: W/L — vr5_15m W2.10/L3.62 (0.58x) → 15분 거래량 과열 시 정배열 후 급락
-    if len(c15) >= 6:
-        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _av15 = sum(_pv15) / max(len(_pv15), 1)
-        if _av15 > 0 and (_cv15 / _av15) >= 2.5:
-            return None
-    # 🔧 v12: W/L 1887건 — ema_spread_60 W1.36(493) / L0.82(1394) (+66%)
-    #   60m EMA 스프레드 넓을수록 상위TF 추세 확실 → 승률↑ → 최소 1.0 요구
-    if c60 and len(c60) >= 20:
-        _ema5_60 = _v4_ema_from_candles(c60, 5)
-        _ema20_60 = _v4_ema_from_candles(c60, 20)
-        if _ema5_60 is not None and _ema20_60 is not None and _ema20_60 > 0:
-            _es60 = (_ema5_60 - _ema20_60) / _ema20_60 * 100
-            if _es60 < 1.0:
-                return None
-    return {
-        "signal_tag": "EMA정배열진입",
-        "entry_mode": "confirm",
-        "logic_group": "F",
-        "filters_hit": [f"15mEMA={ema5_15:.0f}>{ema10_15:.0f}>{ema20_15:.0f}",
-                        f"15mMACD={macd_15:.4f}>{sig_15:.4f}", f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["EMA정배열진입"].copy(),
-        "indicators": {},  # raw EMA가격 제거 (코인간 평균 무의미), 유니버설 ema_spread_15로 대체
-    }
-
-
-# --- [섀도우 전용] 거래량완화: VR5 2.0~3.0 니어미스 구간 ---
-# 기존 거래량3배(VR5>3.0)의 니어미스 — 이 구간에서도 수익 가능한지 측정
-def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
-    if not c1 or len(c1) < 7:
-        return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.5 or vr5 >= 2.5:  # 🔧 v9: 기존 2.0~3.0 → 1.5~2.5 (본체 2.5로 변경됨)
-        return None
-    atr_p = _v4_atr_pct(c1, 14)
-    if atr_p <= 0.3:  # 🔧 v9: 0.5 → 0.3 (본체 0.5로 변경됨)
-        return None
-    if not _v4_is_bullish(c1[-2]):
-        return None
-    # 방향성 필터 동일
-    macd_ok = False
-    adx_ok = False
-    if c5 and len(c5) >= 35:
-        closes_5m = [c["trade_price"] for c in c5]
-        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-        if macd_5m is not None and sig_5m is not None and macd_5m > sig_5m:
-            macd_ok = True
-    if c15 and len(c15) >= 30:
-        highs_15 = [c["high_price"] for c in c15]
-        lows_15 = [c["low_price"] for c in c15]
-        closes_15 = [c["trade_price"] for c in c15]
-        adx_15 = _v4_adx(highs_15, lows_15, closes_15, period=14)
-        if adx_15 is not None and adx_15 > 20:
-            adx_ok = True
-    if not macd_ok and not adx_ok:
-        return None
-    # 🔧 v10: W/L — atr W0.52/L0.58 → 낮을수록 승률↑ → ATR 상한 0.55 추가
-    if atr_p > 0.55:
-        return None
-    # 🔧 v11: W/L — macd_hist_15_bps W-1.06/L2.96 → 히스토 음수→양전환 직전이 최적
-    if c15 and len(c15) >= 35:
-        _cl15 = [c["trade_price"] for c in c15]
-        _m15, _s15, _ = _v4_macd(_cl15)
-        if _m15 is not None and _s15 is not None:
-            _hist15 = _m15 - _s15
-            _price15 = _cl15[-1] if _cl15[-1] > 0 else 1
-            _hist15_bps = _hist15 / _price15 * 10000
-            if _hist15_bps >= 1.0:
-                return None
-    # 🔧 v10: W/L — macd_5m W-1.15/L0.27 → 음수 MACD가 이김 → MACD 양수면 제외
-    if macd_ok and macd_5m is not None and macd_5m > 0:
-        # MACD 양수여도 ADX가 있으면 통과 허용
-        if not adx_ok:
-            return None
-    # 🔧 v13: W/L 87건 — vr5_15m W2.85/L0.82 (3.5x) → 높을수록 승률↑ → 최소 1.5
-    #   15m 거래량 뒷받침 없는 니어미스 = 가짜 거래량 스파이크
-    if c15 and len(c15) >= 6:
-        _cvol15d = c15[-1].get("candle_acc_trade_price", 0)
-        _pvols15d = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _avg15d = sum(_pvols15d) / max(len(_pvols15d), 1)
-        if _avg15d > 0:
-            _vr5_15m_d = _cvol15d / _avg15d
-            if _vr5_15m_d < 1.5:
-                if _pipeline_inc("vol_relax_vr15_v13_fail", value=round(_vr5_15m_d, 2), threshold=1.5, direction="gte"): return None
-    return {
-        "signal_tag": "거래량완화",
-        "entry_mode": "confirm",
-        "logic_group": "D",
-        "filters_hit": [f"VR5={vr5:.1f}(니어미스)", f"ATR%={atr_p:.2f}",
-                        f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["거래량완화"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (vr5,atr_pct,adx_15,macd_5m)
-    }
-
-
-# --- 15m_MACD골든+1h_EMA정배열 (GATE로 승격 → 개별 신호 비활성화) ---
-# 🔧 v5: 이 조합은 모든 신호의 공통 성공 필터로 확인됨
-# → _v4_gate_filter()로 승격하여 모든 신호에 필수 적용
-# → 개별 신호로는 더 이상 사용하지 않음 (중복 제거)
-def _v4_check_15m_macd_1h_ema(c1, c5, c15, c30, c60, gate_info=None):
-    """비활성화 — GATE로 승격됨"""
-    return None
-
-
-# ============================================================
-# 🔬 v8: 계측용 다양 진입 전략 (enabled=True, 데이터 수집 후 WF 판정)
-# 리포트 signal_v4 조건별 EV 양수 구간 기반
-# 모든 전략은 m3 사전필터(상위33%) 통과 후 평가됨
-# ============================================================
-
-
-# --- [계측5] 모멘텀_스캘프: 5m+60m RSI 동시 고점 구간 ---
-# 근거: 거래량3배 60m RSI70-100 EV=+0.3467%, 20봉돌파 60m RSI70-100 EV=+0.4947%
-# 5m RSI70-100 + 60m RSI50+ = 다중 TF 모멘텀 동기화
-def _v4_check_momentum_scalp(c1, c5, c15, c30, c60, gate_info=None):
-    """🔧 v10: W/L — SL 40건 최다탈락. rsi 차이 미미 → ATR 상한+60m RSI 상향+ADX 추가"""
-    _pipeline_inc("mom_scalp_enter")
-    if not c1 or len(c1) < 7:
-        return None
-    if not c5 or len(c5) < 15:
-        return None
-    if not c60 or len(c60) < 15:
-        return None
-    # 5m RSI >= 68 (🔧 v10: 65→68, 더 강한 모멘텀만)
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 68:
-        if _pipeline_inc("mom_scalp_rsi5_fail", value=rsi_5m, threshold=68, direction="gte"): return None
-    # 60m RSI >= 55 (🔧 v10: 50→55, W67.37/L65.40 → 높을수록 좋음)
-    rsi_60m = _v4_rsi_from_candles(c60, 14)
-    if rsi_60m is None or rsi_60m < 55:
-        if _pipeline_inc("mom_scalp_rsi60_fail", value=rsi_60m, threshold=55, direction="gte"): return None
-    # 1m 현재봉 양봉
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("mom_scalp_bull_fail"): return None
-    # ATR 범위 (🔧 v10: W0.97/L1.01 → 낮을수록 약간 유리 → 상한 1.2 추가)
-    atr_p = _v4_atr_pct(c1, 14)
-    if atr_p < 0.5 or atr_p > 1.2:
-        if _pipeline_inc("mom_scalp_atr_fail", value=atr_p, threshold=0.5 if atr_p < 0.5 else 1.2,
-                       direction="gte" if atr_p < 0.5 else "lte"): return None
-    # 🔧 v10: 15m ADX 추가 — 추세 존재 확인 (SL 40건 = 방향 없이 진입)
-    if c15 and len(c15) >= 30:
-        highs_15 = [c["high_price"] for c in c15]
-        lows_15 = [c["low_price"] for c in c15]
-        closes_15 = [c["trade_price"] for c in c15]
-        adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
-        if adx_15 is None or adx_15 < 20:
-            if _pipeline_inc("mom_scalp_adx_fail", value=adx_15, threshold=20, direction="gte"): return None
-    else:
-        return None
-    # 🔧 v11: W/L — vr5 W2.64/L0.75 (3.5x) → 거래량 없는 RSI 과열은 가짜 모멘텀
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.5:
-        if _pipeline_inc("mom_scalp_vr5_v11_fail", value=vr5, threshold=1.5, direction="gte"): return None
-    _pipeline_inc("mom_scalp_pass")
-    return {
-        "signal_tag": "모멘텀_스캘프",
-        "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"60mRSI={rsi_60m:.1f}",
-                        f"ATR%={atr_p:.2f}", f"ADX15={adx_15:.1f}", f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["모멘텀_스캘프"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (rsi_5m,rsi_60m,atr_pct,adx_15)
-    }
-
-
-# --- [계측6] 60m_감싸기_돌파: 60분봉 감싸기(Engulfing) 패턴 ---
-# 근거: 거래량3배 60m감싸기 EV=+0.8388%, 20봉돌파 60m감싸기 EV=+0.2124%
-#        5m양봉 60m감싸기 EV=+0.4222%, 쌍바닥 60m감싸기 EV=+0.1340%
-# 다수 신호에서 일관된 EV 양수 (강한 독립 피처)
-def _v4_check_60m_engulfing(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("60m_engulf_enter")
-    if not c60 or len(c60) < 3:
-        return None
-    if not c1 or len(c1) < 3:
-        return None
-    prev_60 = c60[-2]
-    cur_60 = c60[-1]
-    # 직전 60m봉 음봉
-    if prev_60["trade_price"] >= prev_60["opening_price"]:
-        if _pipeline_inc("60m_engulf_prev_fail"): return None
-    # 현재 60m봉 양봉
-    if cur_60["trade_price"] <= cur_60["opening_price"]:
-        if _pipeline_inc("60m_engulf_cur_fail"): return None
-    # 감싸기: 현재봉 몸통이 직전봉 몸통을 감쌈
-    cur_body_high = max(cur_60["trade_price"], cur_60["opening_price"])
-    cur_body_low = min(cur_60["trade_price"], cur_60["opening_price"])
-    prev_body_high = max(prev_60["trade_price"], prev_60["opening_price"])
-    prev_body_low = min(prev_60["trade_price"], prev_60["opening_price"])
-    if not (cur_body_high >= prev_body_high and cur_body_low <= prev_body_low):
-        if _pipeline_inc("60m_engulf_wrap_fail"): return None
-    # 1m 현재봉도 양봉 (진입 타이밍)
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("60m_engulf_1m_fail"): return None
-    # 감싸기 비율: 현재봉 몸통 / 직전봉 몸통
-    prev_body = max(prev_body_high - prev_body_low, 1)
-    cur_body = cur_body_high - cur_body_low
-    engulf_ratio = round(cur_body / prev_body, 2) if prev_body > 0 else 0
-    # 🔧 v10: W/L — engulf W2.04/L1.71 → 높을수록 승률↑ → 최소 1.8 요구
-    if engulf_ratio < 1.8:
-        if _pipeline_inc("60m_engulf_ratio_fail", value=engulf_ratio, threshold=1.8, direction="gte"): return None
-    # 🔧 v10: 15m ADX 추가 — SL 38건 = 방향 없는 감싸기 제거
-    if c15 and len(c15) >= 30:
-        highs_15 = [c["high_price"] for c in c15]
-        lows_15 = [c["low_price"] for c in c15]
-        closes_15 = [c["trade_price"] for c in c15]
-        adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
-        if adx_15 is not None and adx_15 < 18:
-            if _pipeline_inc("60m_engulf_adx_fail", value=adx_15, threshold=18, direction="gte"): return None
-    # 🔧 v11: W/L — vr5_15m W1.04/L2.37 (0.44x) → 15분 거래량 펌프 동반=되돌림
-    if c15 and len(c15) >= 6:
-        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _av15 = sum(_pv15) / max(len(_pv15), 1)
-        if _av15 > 0 and (_cv15 / _av15) >= 1.5:
-            if _pipeline_inc("60m_engulf_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="lt"): return None
-    # 🔧 v12: W/L 137건 — macd_15_bps W18.47(35) / L1.31(102) (14배)
-    #   15m MACD bps 높을수록 모멘텀 확인된 감싸기 → 승률↑ → 최소 10 요구
-    if c15 and len(c15) >= 35:
-        _closes_15h = [c["trade_price"] for c in c15]
-        _macd_15h, _sig_15h, _ = _v4_macd(_closes_15h)
-        _price_15h = _closes_15h[-1] if _closes_15h[-1] > 0 else 1
-        if _macd_15h is not None:
-            _macd_bps = _macd_15h / _price_15h * 10000
-            if _macd_bps < 10:
-                if _pipeline_inc("60m_engulf_macd15_v12_fail", value=round(_macd_bps, 2), threshold=10, direction="gte"): return None
-    _pipeline_inc("60m_engulf_pass")
-    return {
-        "signal_tag": "60m_감싸기_돌파",
-        "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": ["60m감싸기", f"비율={engulf_ratio:.1f}", f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["60m_감싸기_돌파"].copy(),
-        "indicators": {"engulf_ratio": engulf_ratio},  # 고유지표 (유니버설 engulf_ratio_60과 별도)
-    }
-
-
-# --- [계측7] 15m_VR폭발: 15분봉 거래량 급증 ---
-# 근거: 5m양봉 15mVR5>3 EV=+0.5030%, 거래량3배 15mVR5>3 EV=+0.5900%
-#        쌍바닥 15mVR5>3 EV=+0.5623%, 5m큰양봉 15mVR5>3 EV=+0.7179%
-# 일관된 강한 EV → 15분봉 거래량 급증 = 기관/세력 진입 신호
-def _v4_check_15m_vr_explosion(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("15m_vr_enter")
-    if not c15 or len(c15) < 7:
-        return None
-    if not c1 or len(c1) < 3:
-        return None
-    # 15m VR5 계산
-    cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
-    past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-    avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
-    if avg_vol_15 <= 0:
-        return None
-    vr5_15 = cur_vol_15 / avg_vol_15
-    if vr5_15 < 3.0:
-        _pipeline_inc("15m_vr_low")
-        return None
-    # 🔧 v10: W/L — vr5_15m W7.25/L9.99 → 낮을수록 승률↑ → 상한 8.0 추가
-    # VR 너무 높으면 이미 과열/펌프 끝자락
-    if vr5_15 > 8.0:
-        _pipeline_inc("15m_vr_overheat")
-        return None
-    # 15m 현재봉 양봉
-    if not _v4_is_bullish(c15[-1]):
-        _pipeline_inc("15m_vr_bear")
-        return None
-    # 1m 현재봉 양봉
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("15m_vr_1m_fail"): return None
-    # 🔧 v10: 5m MACD 방향성 추가 — SL 27건/108건 = 25% → 방향 필터 필요
-    if c5 and len(c5) >= 35:
-        closes_5m = [c["trade_price"] for c in c5]
-        macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-        if macd_5m is not None and sig_5m is not None and macd_5m <= sig_5m:
-            if _pipeline_inc("15m_vr_macd_fail"): return None
-    # 🔧 v11: W/L — gap_20bar W0.03/L-8.32 (극단) → 고점 대비 -3% 이하=데드캣바운스
-    if c1 and len(c1) >= 21:
-        _cur_cl = c1[-1]["trade_price"]
-        _high20 = max(c["high_price"] for c in c1[-21:-1])
-        _gap20 = ((_cur_cl / max(_high20, 1)) - 1.0) * 100
-        if _gap20 < -3.0:
-            if _pipeline_inc("15m_vr_gap20_v11_fail", value=round(_gap20, 2), threshold=-3.0, direction="gte"): return None
-    # 🔧 v12: W/L 125건 — macd_15_bps W23.29(34) / L6.84(91) (3.4배)
-    #   15m MACD bps 높을수록 모멘텀 동반 VR폭발 → 승률↑ → 최소 15 요구
-    if c15 and len(c15) >= 35:
-        _closes_15i = [c["trade_price"] for c in c15]
-        _macd_15i, _sig_15i, _ = _v4_macd(_closes_15i)
-        _price_15i = _closes_15i[-1] if _closes_15i[-1] > 0 else 1
-        if _macd_15i is not None:
-            _macd_bps_i = _macd_15i / _price_15i * 10000
-            if _macd_bps_i < 15:
-                if _pipeline_inc("15m_vr_macd15_v12_fail", value=round(_macd_bps_i, 2), threshold=15, direction="gte"): return None
-    # 🔧 v13: W/L 98건 — engulf_ratio_60 W4.21/L1.98 (2.1x) → 높을수록 승률↑ → 최소 3.0
-    #   60m 감싸기 비율 높으면 상위TF 모멘텀 확인 → VR폭발의 신뢰도↑
-    if c60 and len(c60) >= 2:
-        _prev60i = c60[-2]
-        _cur60i = c60[-1]
-        _pb60i = abs(_prev60i["opening_price"] - _prev60i["trade_price"])
-        _cb60i = abs(_cur60i["opening_price"] - _cur60i["trade_price"])
-        if _pb60i > 0:
-            _engulf_i = _cb60i / _pb60i
-            if _engulf_i < 3.0:
-                if _pipeline_inc("15m_vr_engulf60_v13_fail", value=round(_engulf_i, 2), threshold=3.0, direction="gte"): return None
-    _pipeline_inc("15m_vr_pass")
-    return {
-        "signal_tag": "15m_VR폭발",
-        "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": [f"15mVR5={vr5_15:.1f}", f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["15m_VR폭발"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (vr5_15m)
-    }
-
-
-# --- [계측8] 상위TF_정배열_돌파: 60m EMA 정배열 + 15m MACD 골든 ---
-# 근거: 거래량3배 60mEMA정배열3+ EV=+0.1335%, 20봉돌파 60mEMA정배열3+ EV=+0.3051%
-#        5m양봉 60mEMA정배열3+ EV=+0.1091%, MACD골든 60mEMA정배열3+ EV=+0.0771%
-#        5m큰양봉 60mEMA정배열3+ EV=+0.4469%, EMA정배열 60mEMA정배열3+ EV=+0.1274%
-# 기존 GATE와 다름: m3 필터 통과 + EMA정배열만 체크 (RSI/MACD 불필요)
-def _v4_check_upper_tf_aligned(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("upper_align_enter")
-    if not c60 or len(c60) < 20:
-        return None
-    if not c15 or len(c15) < 35:
-        return None
-    if not c1 or len(c1) < 3:
-        return None
-    # 60m EMA 정배열 (EMA5 > EMA10 > EMA20)
-    ema5 = _v4_ema_from_candles(c60, 5)
-    ema10 = _v4_ema_from_candles(c60, 10)
-    ema20 = _v4_ema_from_candles(c60, 20)
-    if ema5 is None or ema10 is None or ema20 is None:
-        return None
-    if not (ema5 > ema10 > ema20):
-        if _pipeline_inc("upper_align_ema_fail"): return None
-    # 15m MACD 골든크로스
-    closes_15 = [c["trade_price"] for c in c15]
-    macd_15, sig_15, _ = _v4_macd(closes_15)
-    if macd_15 is None or sig_15 is None or macd_15 <= sig_15:
-        if _pipeline_inc("upper_align_macd_fail"): return None
-    # 1m 양봉
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("upper_align_1m_fail"): return None
-    # ATR% >= 0.5 (최소 변동성)
-    atr_p = _v4_atr_pct(c1, 14)
-    if atr_p < 0.5:
-        if _pipeline_inc("upper_align_atr_fail", value=atr_p, threshold=0.5, direction="gte"): return None
-    # 🔧 v10: W/L — SL 60건/169건=35% 최다탈락 → 강한 추세 필터 필요
-    # EMA 간격 최소 요구: (ema5-ema20)/ema20 > 0.1% → 의미있는 정배열만
-    ema_gap_pct = (ema5 - ema20) / max(ema20, 1) * 100
-    if ema_gap_pct < 0.1:
-        if _pipeline_inc("upper_align_gap_fail", value=round(ema_gap_pct, 4), threshold=0.1, direction="gte"): return None
-    # 🔧 v10: 15m MACD 상한 — macd_15 W3.51/L2.85 → 차이 미미하지만 SL 줄이려면
-    # 60m ADX 추가 — 추세 강도 확인
-    if len(c60) >= 30:
-        highs_60 = [c["high_price"] for c in c60]
-        lows_60 = [c["low_price"] for c in c60]
-        closes_60 = [c["trade_price"] for c in c60]
-        adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
-        if adx_60 is not None and adx_60 < 20:
-            if _pipeline_inc("upper_align_adx60_fail", value=adx_60, threshold=20, direction="gte"): return None
-    # 🔧 v11: W/L — macd_hist_5m_bps W16.46/L8.77 (1.88x) → 5분 MACD 가속 중만 유효
-    if c5 and len(c5) >= 35:
-        _cl5 = [c["trade_price"] for c in c5]
-        _m5, _s5, _ = _v4_macd(_cl5)
-        if _m5 is not None and _s5 is not None:
-            _hist5 = _m5 - _s5
-            _price5 = _cl5[-1] if _cl5[-1] > 0 else 1
-            _hist5_bps = _hist5 / _price5 * 10000
-            if _hist5_bps < 12:
-                if _pipeline_inc("upper_align_hist5_v11_fail", value=round(_hist5_bps, 2), threshold=12, direction="gte"): return None
-    # 🔧 v13: W/L 146건 — vr5_15m W3.52/L5.24 (3.3x) → 낮을수록 승률↑ → 상한 6.0
-    #   VR 과열 = 이미 급등 끝자락, 정배열이어도 추격매수 실패
-    if c15 and len(c15) >= 6:
-        _cvol15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pvols15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _avg15 = sum(_pvols15) / max(len(_pvols15), 1)
-        if _avg15 > 0:
-            _vr5_15m_j = _cvol15 / _avg15
-            if _vr5_15m_j > 6.0:
-                if _pipeline_inc("upper_align_vr15_v13_fail", value=round(_vr5_15m_j, 2), threshold=6.0, direction="lte"): return None
-    _pipeline_inc("upper_align_pass")
-    return {
-        "signal_tag": "상위TF_정배열",
-        "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": [
-            f"60mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}",
-            f"15mMACD={macd_15:.4f}>{sig_15:.4f}",
-            f"ATR%={atr_p:.2f}", f"EMAgap={ema_gap_pct:.2f}%",
-            f"GATE={gate_info}",
-        ],
-        "exit_params": _V4_EXIT_PARAMS["상위TF_정배열"].copy(),
-        "indicators": {"ema_gap_pct": round(ema_gap_pct, 4)},  # 고유지표만 (raw EMA제거, 나머지 유니버설 통합)
-    }
-
-
-# --- [계측9] 과매도_반등: 5m RSI 과매도 + MFI 저점 ---
-# 근거: 5m양봉 5mRSI<30 EV=+0.0185%, 5m양봉 5mMFI<20 EV=+0.0668%
-#        BB하단반등 5mRSI<30 EV=+0.0058%, 쌍바닥 5mRSI<30 EV=+0.1268%
-# 역추세 반등 전략 — 과매도에서 반등 시작 감지
-def _v4_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("oversold_enter")
-    if not c5 or len(c5) < 15:
-        return None
-    if not c1 or len(c1) < 3:
-        return None
-    # 5m RSI <= 35 (과매도 구간)
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m > 35:
-        if _pipeline_inc("oversold_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
-    # 🔧 v10: W/L — rsi W29.37/L29.87 → 거의 차이 없음 → RSI만으론 부족
-    # RSI 하한 추가: 너무 깊은 과매도(RSI<20)는 폭락 중이라 반등 실패
-    if rsi_5m < 20:
-        _pipeline_inc("oversold_too_deep")
-        return None
-    # 5m 현재봉 양봉 (반등 시작)
-    if not _v4_is_bullish(c5[-1]):
-        _pipeline_inc("oversold_5m_bear")
-        return None
-    # 5m 직전봉 음봉 (하락 후 반등 패턴)
-    if _v4_is_bullish(c5[-2]):
-        _pipeline_inc("oversold_prev_bull")
-        return None
-    # 1m 양봉 확인
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("oversold_1m_fail"): return None
-    # 🔧 v10: 반등 강도 확인 — 현재 양봉이 직전 음봉의 50% 이상 회복
-    cur_5m_body = c5[-1]["trade_price"] - c5[-1]["opening_price"]
-    prev_5m_body = abs(c5[-2]["opening_price"] - c5[-2]["trade_price"])
-    bounce_ratio = cur_5m_body / max(prev_5m_body, 1)
-    # 🔧 v11: W/L — bounce_ratio W625.97/L0.98 (극단) → 강한 반등만 진짜 반전 (0.5→2.0)
-    if bounce_ratio < 2.0:
-        _pipeline_inc("oversold_bounce_weak")
-        return None
-    # 🔧 v10: 60m RSI > 35 추가 — 상위TF도 최소한 낙폭 과대가 아니어야 반등 가능
-    if c60 and len(c60) >= 15:
-        rsi_60m = _v4_rsi_from_candles(c60, 14)
-        if rsi_60m is not None and rsi_60m < 35:
-            _pipeline_inc("oversold_60m_too_low")
-            return None
-    _pipeline_inc("oversold_pass")
-    return {
-        "signal_tag": "과매도_반등",
-        "entry_mode": "confirm",
-        "logic_group": "D",
-        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"반등={bounce_ratio:.1f}",
-                        f"GATE={gate_info}"],
-        "exit_params": _V4_EXIT_PARAMS["과매도_반등"].copy(),
-        "indicators": {"bounce_ratio": round(bounce_ratio, 2)},  # rsi_5m은 유니버설로 통합
-    }
-
-
-# --- [계측10] ADX_추세강화: 다중 TF ADX 동시 강세 ---
-# 근거: 거래량3배 15mADX>25 EV=+0.1766%, 20봉돌파 15mADX>25 EV=+0.1359%
-#        5m큰양봉 15mADX>25 EV=+0.0522%, 60mADX>25 다수 양수
-# 추세 강도 필터 — 강한 추세 중 진입
-def _v4_check_adx_trend(c1, c5, c15, c30, c60, gate_info=None):
-    _pipeline_inc("adx_trend_enter")
-    if not c15 or len(c15) < 30:
-        return None
-    if not c60 or len(c60) < 30:
-        return None
-    if not c1 or len(c1) < 7:
-        return None
-    # 15m ADX > 30 (강한 추세)
-    highs_15 = [c["high_price"] for c in c15]
-    lows_15 = [c["low_price"] for c in c15]
-    closes_15 = [c["trade_price"] for c in c15]
-    adx_15 = _v4_adx(highs_15, lows_15, closes_15, 14)
-    if adx_15 is None or adx_15 <= 30:
-        if _pipeline_inc("adx_trend_15_fail", value=adx_15, threshold=30, direction="gt"): return None
-    # 60m ADX > 25 (상위TF 추세 동기화)
-    highs_60 = [c["high_price"] for c in c60]
-    lows_60 = [c["low_price"] for c in c60]
-    closes_60 = [c["trade_price"] for c in c60]
-    adx_60 = _v4_adx(highs_60, lows_60, closes_60, 14)
-    if adx_60 is None or adx_60 <= 25:
-        if _pipeline_inc("adx_trend_60_fail", value=adx_60, threshold=25, direction="gt"): return None
-    # 5m MACD 골든 (방향성 확인)
-    if not c5 or len(c5) < 35:
-        return None
-    closes_5m = [c["trade_price"] for c in c5]
-    macd_5m, sig_5m, _ = _v4_macd(closes_5m)
-    if macd_5m is None or sig_5m is None or macd_5m <= sig_5m:
-        if _pipeline_inc("adx_trend_macd_fail"): return None
-    # VR 최소 (🔧 v10: W/L — vr5 W8.00/L6.42 → 높을수록 승률↑ → 1.2→2.0 상향)
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 2.0:
-        if _pipeline_inc("adx_trend_vr_fail", value=vr5, threshold=2.0, direction="gte"): return None
-    # 🔧 v10: W/L — macd_5m W-956/L-1557 → 둘 다 음수이나 W가 덜 음수
-    # MACD 히스토그램이 상승 전환 중인지 확인
-    hist_5m = macd_5m - sig_5m if sig_5m is not None else 0
-    # 🔧 v10: 1m 양봉 추가 — 타이밍 확인 (기존에 없었음)
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("adx_trend_1m_fail"): return None
-    # 🔧 v11: W/L — vr5_15m W2.20/L0.67 (3.28x) → 15분 거래량 없으면 추세 지속 실패
-    if c15 and len(c15) >= 6:
-        _cv15 = c15[-1].get("candle_acc_trade_price", 0)
-        _pv15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        _av15 = sum(_pv15) / max(len(_pv15), 1)
-        if _av15 > 0 and (_cv15 / _av15) < 1.5:
-            if _pipeline_inc("adx_trend_vr15_v11_fail", value=round(_cv15/_av15, 2), threshold=1.5, direction="gte"): return None
-    _pipeline_inc("adx_trend_pass")
-    return {
-        "signal_tag": "ADX_추세강화",
-        "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": [
-            f"15mADX={adx_15:.1f}", f"60mADX={adx_60:.1f}",
-            f"5mMACD={macd_5m:.4f}>{sig_5m:.4f}",
-            f"VR5={vr5:.1f}", f"GATE={gate_info}",
-        ],
-        "exit_params": _V4_EXIT_PARAMS["ADX_추세강화"].copy(),
-        "indicators": {},  # 유니버설 지표로 통합 (adx_15,adx_60,macd_5m,vr5)
-    }
-
 
 # ========================================================================
 # v0 초경량 시나리오 (v18 리셋)
@@ -9274,14 +8468,14 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         except Exception:
             sig = None
         hit = sig is not None
-        blocked_by = None
-        blocked_value = None
+        all_fails = []
         if not hit and getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None):
-            # eval_all 모드로 재실행 → 마지막 실패 필터 추적
+            # eval_all 모드로 재실행 → 모든 실패 필터 수집
             _BLOCKED_THREAD_LOCAL.last_fail = None
             _BLOCKED_THREAD_LOCAL.last_fail_value = None
             _BLOCKED_THREAD_LOCAL.last_fail_threshold = None
             _BLOCKED_THREAD_LOCAL.last_fail_direction = None
+            _BLOCKED_THREAD_LOCAL.all_fails = []
             _BLOCKED_THREAD_LOCAL._eval_all_mode = True
             try:
                 check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
@@ -9289,8 +8483,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 pass
             finally:
                 _BLOCKED_THREAD_LOCAL._eval_all_mode = False
-            blocked_by = getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None)
-            blocked_value = getattr(_BLOCKED_THREAD_LOCAL, "last_fail_value", None)
+            all_fails = getattr(_BLOCKED_THREAD_LOCAL, "all_fails", [])
         results[route] = hit
 
         if entry_price <= 0:
@@ -9319,30 +8512,31 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "exit_params": ep, "bars": 0,
                     "indicators": merged_ind, "pnl_curve": {},
                 })
-        elif blocked_by:
-            # 필터 차단 건 → 가상 추적 (counterfactual)
+        elif all_fails:
+            # v0: 실패한 필터 각각에 대해 차단건 가상 추적
             dedup_key = f"{route}_{market}"
             ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
             with _SHADOW_LOCK:
                 last_entry = _SHADOW_BLOCKED_DEDUP.get(dedup_key, 0)
                 if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
                     continue
-                if len(_SHADOW_BLOCKED_POSITIONS) >= SHADOW_MAX_BLOCKED_POS:
-                    continue
                 _SHADOW_BLOCKED_DEDUP[dedup_key] = now_ts
-                _SHADOW_BLOCKED_POSITIONS.append({
-                    "route": route, "strat": strat_name,
-                    "market": market, "entry_price": entry_price,
-                    "entry_ts": now_ts, "best_price": entry_price,
-                    "worst_price": entry_price,
-                    "trail_armed": False, "trail_stop": 0.0,
-                    "exit_params": ep, "bars": 0,
-                    "indicators": dict(universal_ind), "pnl_curve": {},
-                    "_blocked_by": blocked_by,
-                    "_fail_value": blocked_value,
-                    "_fail_threshold": getattr(_BLOCKED_THREAD_LOCAL, "last_fail_threshold", None),
-                    "_fail_direction": getattr(_BLOCKED_THREAD_LOCAL, "last_fail_direction", None),
-                })
+                for fail_info in all_fails:
+                    if len(_SHADOW_BLOCKED_POSITIONS) >= SHADOW_MAX_BLOCKED_POS:
+                        break
+                    _SHADOW_BLOCKED_POSITIONS.append({
+                        "route": route, "strat": strat_name,
+                        "market": market, "entry_price": entry_price,
+                        "entry_ts": now_ts, "best_price": entry_price,
+                        "worst_price": entry_price,
+                        "trail_armed": False, "trail_stop": 0.0,
+                        "exit_params": ep.copy(), "bars": 0,
+                        "indicators": dict(universal_ind), "pnl_curve": {},
+                        "_blocked_by": fail_info["filter"],
+                        "_fail_value": fail_info["value"],
+                        "_fail_threshold": fail_info["threshold"],
+                        "_fail_direction": fail_info["direction"],
+                    })
     return results
 
 
