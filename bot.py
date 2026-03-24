@@ -249,25 +249,60 @@ _PIPELINE_COUNTERS = {
     "c1_ok": 0,                 # 1m 캔들 수집 성공 마켓
     "detect_called": 0,         # detect_leader_stock 호출 수
     "v4_called": 0,             # v4_evaluate_entry 호출 수
-    "v4_m3_fail": 0,            # 60m_m3 사전필터 탈락
-    "v4_vol3x_fail": 0,        # 거래량3배 조건 미충족
-    "v4_20bar_fail": 0,        # 20봉_고점돌파 조건 미충족
-    "v4_raw_hit": 0,           # v4 원시 신호 발생 수
-    "v4_time_block": 0,        # 시간대 필터 차단
-    # -- 거래량3배 세부 탈락 --
-    "vol3x_enter": 0,          # 거래량3배 진입(m3 통과 후)
-    "vol3x_vr5_fail": 0,       # VR5 <= 3.0
-    "vol3x_atr_fail": 0,       # ATR% <= 0.7
-    "vol3x_bull_fail": 0,      # 직전봉 양봉 아님
-    "vol3x_dir_fail": 0,       # 방향성(MACD/ADX) 모두 실패
-    "vol3x_pass": 0,           # 최종 통과
-    # -- 20봉 고점돌파 세부 탈락 --
-    "20bar_enter": 0,          # 20봉돌파 진입(m3+vol3x 실패 후)
-    "20bar_len_fail": 0,       # c1 < 21
-    "20bar_price_fail": 0,     # 종가 <= 20봉 고가
-    "20bar_macd_fail": 0,      # 5m MACD 미충족
-    "20bar_adx_fail": 0,       # 15m ADX <= 25
-    "20bar_pass": 0,           # 최종 통과
+    "v4_raw_hit": 0,            # v4 원시 신호 발생 수
+    "v4_time_block": 0,         # 시간대 필터 차단
+    # -- A 거래량폭발 --
+    "vol_burst_enter": 0,
+    "vol_burst_vr5_fail": 0,
+    "vol_burst_bull_fail": 0,
+    "vol_burst_pass": 0,
+    # -- B 가격돌파 --
+    "breakout_enter": 0,
+    "breakout_price_fail": 0,
+    "breakout_bull_fail": 0,
+    "breakout_pass": 0,
+    # -- C 패턴반전_15m --
+    "reversal_15m_enter": 0,
+    "reversal_15m_prev_fail": 0,
+    "reversal_15m_cur_fail": 0,
+    "reversal_15m_recovery_fail": 0,
+    "reversal_15m_1m_fail": 0,
+    "reversal_15m_pass": 0,
+    # -- H 패턴반전_60m --
+    "reversal_60m_enter": 0,
+    "reversal_60m_prev_fail": 0,
+    "reversal_60m_cur_fail": 0,
+    "reversal_60m_recovery_fail": 0,
+    "reversal_60m_1m_fail": 0,
+    "reversal_60m_pass": 0,
+    # -- F 추세정배열_15m --
+    "ema_align_15m_enter": 0,
+    "ema_align_15m_ema_fail": 0,
+    "ema_align_15m_1m_fail": 0,
+    "ema_align_15m_pass": 0,
+    # -- J 추세정배열_60m --
+    "ema_align_60m_enter": 0,
+    "ema_align_60m_ema_fail": 0,
+    "ema_align_60m_1m_fail": 0,
+    "ema_align_60m_pass": 0,
+    # -- G 모멘텀 --
+    "momentum_enter": 0,
+    "momentum_rsi5_fail": 0,
+    "momentum_1m_fail": 0,
+    "momentum_pass": 0,
+    # -- L 추세강도 --
+    "adx_trend_enter": 0,
+    "adx_trend_15_fail": 0,
+    "adx_trend_1m_fail": 0,
+    "adx_trend_pass": 0,
+    # -- K 역추세반등 --
+    "oversold_enter": 0,
+    "oversold_rsi_fail": 0,
+    "oversold_5m_bull_fail": 0,
+    "oversold_5m_prev_fail": 0,
+    "oversold_1m_fail": 0,
+    "oversold_pass": 0,
+    # -- gate 필터 --
     "gate_fail_stablecoin": 0, # 스테이블코인 제외
     "gate_fail_position": 0,   # 이미 보유
     "gate_fail_no_ticks": 0,   # 틱 없음
@@ -569,14 +604,27 @@ def _pipeline_report(force=False):
         f"━━━━━━━━━━━━━━━━",
         f"🔍 스캔: {c['scan_markets']}마켓 | c1성공: {c['c1_ok']}",
         f"🔬 detect: {_det}(Δ{d('detect_called')})",
-        f"📡 v4: {_v4}(Δ{d('v4_called')}) | m3X: {c['v4_m3_fail']}(Δ{d('v4_m3_fail')})",
-        f"  거래량3배X: {c['v4_vol3x_fail']} | 20봉돌파X: {c['v4_20bar_fail']}",
-        f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c['v4_time_block']}",
-        f"━ 전략 세부 ━",
-        f"  [거래량3배] 진입{c['vol3x_enter']} → VR5X:{c['vol3x_vr5_fail']} ATR%X:{c['vol3x_atr_fail']} "
-        f"양봉X:{c['vol3x_bull_fail']} 방향X:{c['vol3x_dir_fail']} ✅{c['vol3x_pass']}",
-        f"  [20봉돌파] 진입{c['20bar_enter']} → 길이X:{c['20bar_len_fail']} 가격X:{c['20bar_price_fail']} "
-        f"MACDX:{c['20bar_macd_fail']} ADXX:{c['20bar_adx_fail']} ✅{c['20bar_pass']}",
+        f"📡 v4: {_v4}(Δ{d('v4_called')})",
+        f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
+        f"━ v0 전략 세부 ━",
+        f"  [A거래량] 진입{c.get('vol_burst_enter',0)} → VR5X:{c.get('vol_burst_vr5_fail',0)} "
+        f"양봉X:{c.get('vol_burst_bull_fail',0)} ✅{c.get('vol_burst_pass',0)}",
+        f"  [B돌파] 진입{c.get('breakout_enter',0)} → 가격X:{c.get('breakout_price_fail',0)} "
+        f"양봉X:{c.get('breakout_bull_fail',0)} ✅{c.get('breakout_pass',0)}",
+        f"  [C반전15] 진입{c.get('reversal_15m_enter',0)} → 음X:{c.get('reversal_15m_prev_fail',0)} "
+        f"양X:{c.get('reversal_15m_cur_fail',0)} 회복X:{c.get('reversal_15m_recovery_fail',0)} ✅{c.get('reversal_15m_pass',0)}",
+        f"  [H반전60] 진입{c.get('reversal_60m_enter',0)} → 음X:{c.get('reversal_60m_prev_fail',0)} "
+        f"양X:{c.get('reversal_60m_cur_fail',0)} 회복X:{c.get('reversal_60m_recovery_fail',0)} ✅{c.get('reversal_60m_pass',0)}",
+        f"  [FEMA15] 진입{c.get('ema_align_15m_enter',0)} → EMAX:{c.get('ema_align_15m_ema_fail',0)} "
+        f"1mX:{c.get('ema_align_15m_1m_fail',0)} ✅{c.get('ema_align_15m_pass',0)}",
+        f"  [JEMA60] 진입{c.get('ema_align_60m_enter',0)} → EMAX:{c.get('ema_align_60m_ema_fail',0)} "
+        f"1mX:{c.get('ema_align_60m_1m_fail',0)} ✅{c.get('ema_align_60m_pass',0)}",
+        f"  [G모멘텀] 진입{c.get('momentum_enter',0)} → RSIX:{c.get('momentum_rsi5_fail',0)} "
+        f"1mX:{c.get('momentum_1m_fail',0)} ✅{c.get('momentum_pass',0)}",
+        f"  [LADX] 진입{c.get('adx_trend_enter',0)} → ADXX:{c.get('adx_trend_15_fail',0)} "
+        f"1mX:{c.get('adx_trend_1m_fail',0)} ✅{c.get('adx_trend_pass',0)}",
+        f"  [K역추세] 진입{c.get('oversold_enter',0)} → RSIX:{c.get('oversold_rsi_fail',0)} "
+        f"5mX:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)} ✅{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
@@ -747,15 +795,12 @@ def _pipeline_mini_report():
     if v4 == 0:
         return  # 스캔 없으면 skip
     lines = [
-        f"[V4_FUNNEL] {now_kst_str()} | v4호출={v4} m3탈락={c['v4_m3_fail']}",
-        f"  거래량3배: 진입{c['vol3x_enter']} VR5X={c['vol3x_vr5_fail']} "
-        f"ATRX={c['vol3x_atr_fail']} 양봉X={c['vol3x_bull_fail']} "
-        f"방향X={c['vol3x_dir_fail']} PASS={c['vol3x_pass']}",
-        f"  20봉돌파: 진입{c['20bar_enter']} 길이X={c['20bar_len_fail']} "
-        f"가격X={c['20bar_price_fail']} MACDX={c['20bar_macd_fail']} "
-        f"ADXX={c['20bar_adx_fail']} PASS={c['20bar_pass']}",
-        f"  raw_hit={c['v4_raw_hit']} 시간차단={c['v4_time_block']} "
-        f"gate통과={c['gate_pass']}",
+        f"[V0_FUNNEL] {now_kst_str()} | v4호출={v4}",
+        f"  A거래량={c.get('vol_burst_pass',0)} B돌파={c.get('breakout_pass',0)} "
+        f"C반전15={c.get('reversal_15m_pass',0)} H반전60={c.get('reversal_60m_pass',0)}",
+        f"  FEMA15={c.get('ema_align_15m_pass',0)} JEMA60={c.get('ema_align_60m_pass',0)} "
+        f"G모멘텀={c.get('momentum_pass',0)} LADX={c.get('adx_trend_pass',0)} K역추세={c.get('oversold_pass',0)}",
+        f"  raw_hit={c.get('v4_raw_hit',0)} gate통과={c.get('gate_pass',0)}",
     ]
     print("\n".join(lines))
 
@@ -9582,14 +9627,18 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
             _pipeline_record_signal_coin(market, strat_name)
             _shadow_log_write(now_kst_str(), market, strat_name, 1, "", 1, "")
             return sig
-        _pipeline_inc(f"v4_{strat['pipeline_key']}_fail")
+        _pipeline_inc(f"{strat['pipeline_key']}_fail")
 
     return None
 
 
 def v4_get_exit_params(signal_tag):
-    """시그널 태그별 청산 파라미터 반환 (🔧 v7: MFE 피드백 자동 적용)"""
-    base = _V4_EXIT_PARAMS.get(signal_tag, _V4_DEFAULT_EXIT).copy()
+    """시그널 태그별 청산 파라미터 반환 (v0: 레지스트리 우선 → _V4_EXIT_PARAMS fallback)"""
+    # v0: 레지스트리에서 exit_params 직접 참조
+    if signal_tag in _STRATEGY_REGISTRY:
+        base = _STRATEGY_REGISTRY[signal_tag]["exit_params"].copy()
+    else:
+        base = _V4_EXIT_PARAMS.get(signal_tag, _V4_DEFAULT_EXIT).copy()
     return mfe_feedback_exit_params(signal_tag, base)
 
 
