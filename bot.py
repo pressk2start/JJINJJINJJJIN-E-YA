@@ -7773,6 +7773,7 @@ def _v4_shadow_check_volume_relaxed(c1, c5, c15, c30, c60, gate_info=None):
         if _avg15d > 0:
             _vr5_15m_d = _cvol15d / _avg15d
             if _vr5_15m_d < 1.5:
+                _pipeline_inc("vol_relax_vr15_v13_fail")
                 return None
     return {
         "signal_tag": "거래량완화",
@@ -8688,13 +8689,13 @@ def _shadow_sim_exit(vp, cur_price):
         else:
             return True, "트레일본절"
 
-    # 3) 타임아웃 (max_bars × RECHECK_SEC)
-    if hold_sec >= max_bars * RECHECK_SEC:
-        return True, "타임아웃"
-
-    # 4) 본절 스톱 (체크포인트 도달 후 원가 이하 복귀)
+    # 3) 본절 스톱 (체크포인트 도달 후 원가 이하 복귀) — 실전과 동일 순서
     if mfe >= checkpoint and pnl <= 0:
         return True, "본절SL"
+
+    # 4) 타임아웃 (max_bars × RECHECK_SEC)
+    if hold_sec >= max_bars * RECHECK_SEC:
+        return True, "타임아웃"
 
     vp["bars"] += 1
     return False, ""
