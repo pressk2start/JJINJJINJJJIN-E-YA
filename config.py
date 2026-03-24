@@ -150,7 +150,7 @@ CIRCLE_IMB_HARD_FLOOR = 0.05
 # ============================================================
 # 8. 박스권 매매
 # ============================================================
-BOX_ENABLED = True
+BOX_ENABLED = False
 BOX_LOOKBACK = 30
 BOX_USE_5MIN = True
 BOX_MIN_RANGE_PCT = 0.020
