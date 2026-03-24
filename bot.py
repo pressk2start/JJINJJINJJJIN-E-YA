@@ -8573,9 +8573,10 @@ def _save_blocked_stats():
 def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
                                    exit_reason, hold_sec, blocked_by="",
                                    mae=None):
-    """차단 건 가상 추적 결과 기록 — 필터별 W/L, PnL, MFE, MAE, 보유시간 누적"""
+    """차단 건 가상 추적 결과 기록 — 시나리오:필터별 W/L, PnL, MFE, MAE, 보유시간 누적"""
     global _SHADOW_BLOCKED_TRADE_COUNT
-    key = blocked_by or f"{route}:{strat_name}"
+    # v15: route 포함 → 시나리오별 분리 (같은 필터라도 시나리오마다 별도 통계)
+    key = f"{route}:{blocked_by}" if blocked_by else f"{route}:{strat_name}"
     is_win = pnl_pct > 0
     with _SHADOW_PERF_LOCK:
         if key not in _SHADOW_BLOCKED_STATS:
@@ -9163,9 +9164,19 @@ def _v4_shadow_report_lines():
                     verdict = "⚠재검토"
                 else:
                     verdict = "🔸관찰중"
+                # v15: MFE/MAE/평균보유 추가
+                mfe_list = bs.get("mfes", [])
+                avg_mfe = sum(mfe_list) / max(len(mfe_list), 1) * 100
+                hold_list = bs.get("hold_secs", [])
+                avg_hold = sum(hold_list) / max(len(hold_list), 1)
+                mae_str = ""
+                if bs.get("mae_cnt", 0) > 0:
+                    avg_mae = bs["mae_sum"] / bs["mae_cnt"] * 100
+                    mae_str = f" MAE{avg_mae:+.2f}%"
                 lines.append(
                     f"  {broute}:{bfilter} {bn}건 W{bw}/L{bl}"
-                    f" PnL{bavg:+.2f}% → {verdict}"
+                    f" PnL{bavg:+.2f}% MFE{avg_mfe:+.2f}%{mae_str}"
+                    f" {avg_hold:.0f}s → {verdict}"
                 )
     with _SHADOW_LOCK:
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
