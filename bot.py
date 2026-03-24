@@ -8234,17 +8234,28 @@ _V0_EXIT_PARAMS = {
     "description": "TRAIL_SL0.7/A0.3/T0.2",
 }
 
+_V0_EXIT_PARAMS_REVERSAL = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.005,
+    "trail_pct": 0.003,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "TRAIL_SL1.0/A0.5/T0.3",
+}
+
 
 def _v0_check_volume_burst(c1, c5, c15, c30, c60, gate_info=None):
     """A 거래량폭발: VR5≥2.5 + 양봉"""
+    _pipeline_inc("vol_burst_enter")
     if not c1 or len(c1) < 7:
         return None
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 2.5:
-        if _pipeline_inc("v0_A_vr5_fail", value=vr5, threshold=2.5, direction="gte"): return None
+        if _pipeline_inc("vol_burst_vr5_fail", value=vr5, threshold=2.5, direction="gte"): return None
     if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_A_bull_fail"): return None
-    _pipeline_inc("v0_A_pass")
+        if _pipeline_inc("vol_burst_bull_fail"): return None
+    _pipeline_inc("vol_burst_pass")
     return {
         "signal_tag": "거래량폭발",
         "entry_mode": "confirm",
@@ -8257,16 +8268,17 @@ def _v0_check_volume_burst(c1, c5, c15, c30, c60, gate_info=None):
 
 def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
     """B 가격돌파: 종가>20봉고점 + 양봉"""
+    _pipeline_inc("breakout_enter")
     if not c1 or len(c1) < 21:
         return None
     cur_close = c1[-1]["trade_price"]
     high_20 = max(c["high_price"] for c in c1[-21:-1])
     if cur_close <= high_20:
         gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-        if _pipeline_inc("v0_B_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
+        if _pipeline_inc("breakout_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
     if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_B_bull_fail"): return None
-    _pipeline_inc("v0_B_pass")
+        if _pipeline_inc("breakout_bull_fail"): return None
+    _pipeline_inc("breakout_pass")
     gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
     return {
         "signal_tag": "가격돌파",
@@ -8278,113 +8290,95 @@ def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-def _v0_check_pattern_reversal_15m(c1, c5, c15, c30, c60, gate_info=None):
-    """C 패턴반전(15m): 음→양 + 종가회복"""
-    if not c15 or len(c15) < 3:
+def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
+    """C/H 패턴반전: {tf} 음→양 + 종가회복"""
+    tag = "패턴반전_15m" if tf == "15m" else "패턴반전_60m"
+    route = "C" if tf == "15m" else "H"
+    pkey = f"reversal_{tf}"
+    candles = c15 if tf == "15m" else c60
+    _pipeline_inc(f"{pkey}_enter")
+    if not candles or len(candles) < 3:
         return None
-    prev, cur = c15[-2], c15[-1]
+    prev, cur = candles[-2], candles[-1]
     if prev["trade_price"] >= prev["opening_price"]:
-        if _pipeline_inc("v0_C_prev_fail"): return None
+        if _pipeline_inc(f"{pkey}_prev_fail"): return None
     if cur["trade_price"] <= cur["opening_price"]:
-        if _pipeline_inc("v0_C_cur_fail"): return None
+        if _pipeline_inc(f"{pkey}_cur_fail"): return None
     if cur["trade_price"] <= prev["opening_price"]:
-        if _pipeline_inc("v0_C_recovery_fail"): return None
+        if _pipeline_inc(f"{pkey}_recovery_fail"): return None
     # (옵션) 1m 양봉 타이밍
     if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_C_timing_fail"): return None
-    _pipeline_inc("v0_C_pass")
+        if _pipeline_inc(f"{pkey}_1m_fail"): return None
+    _pipeline_inc(f"{pkey}_pass")
     return {
-        "signal_tag": "패턴반전_15m",
+        "signal_tag": tag,
         "entry_mode": "confirm",
-        "logic_group": "C",
-        "filters_hit": ["15m음→양+회복"],
+        "logic_group": route,
+        "filters_hit": [f"{tf}음→양", "종가회복"],
         "exit_params": _V0_EXIT_PARAMS.copy(),
         "indicators": {},
     }
 
 
-def _v0_check_pattern_reversal_60m(c1, c5, c15, c30, c60, gate_info=None):
-    """H 패턴반전(60m): 음→양 + 종가회복"""
-    if not c60 or len(c60) < 3:
-        return None
-    prev, cur = c60[-2], c60[-1]
-    if prev["trade_price"] >= prev["opening_price"]:
-        if _pipeline_inc("v0_H_prev_fail"): return None
-    if cur["trade_price"] <= cur["opening_price"]:
-        if _pipeline_inc("v0_H_cur_fail"): return None
-    if cur["trade_price"] <= prev["opening_price"]:
-        if _pipeline_inc("v0_H_recovery_fail"): return None
-    if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_H_timing_fail"): return None
-    _pipeline_inc("v0_H_pass")
-    return {
-        "signal_tag": "패턴반전_60m",
-        "entry_mode": "confirm",
-        "logic_group": "H",
-        "filters_hit": ["60m음→양+회복"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {},
-    }
+def _v0_check_reversal_15m(c1, c5, c15, c30, c60, gate_info=None):
+    return _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info, tf="15m")
 
 
-def _v0_check_trend_align_15m(c1, c5, c15, c30, c60, gate_info=None):
-    """F 추세정배열(15m): EMA5>10>20 + 양봉"""
-    if not c15 or len(c15) < 20:
+def _v0_check_reversal_60m(c1, c5, c15, c30, c60, gate_info=None):
+    return _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info, tf="60m")
+
+
+def _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
+    """F/J 추세정배열: {tf} EMA5>10>20 + 양봉"""
+    tag = "추세정배열_15m" if tf == "15m" else "추세정배열_60m"
+    route = "F" if tf == "15m" else "J"
+    pkey = f"ema_align_{tf}"
+    candles = c15 if tf == "15m" else c60
+    _pipeline_inc(f"{pkey}_enter")
+    if not candles or len(candles) < 20:
         return None
-    ema5 = _v4_ema_from_candles(c15, 5)
-    ema10 = _v4_ema_from_candles(c15, 10)
-    ema20 = _v4_ema_from_candles(c15, 20)
-    if ema5 is None or ema10 is None or ema20 is None:
+    if not c1 or len(c1) < 1:
+        return None
+    ema5 = _v4_ema_from_candles(candles, 5)
+    ema10 = _v4_ema_from_candles(candles, 10)
+    ema20 = _v4_ema_from_candles(candles, 20)
+    if not all(v is not None for v in [ema5, ema10, ema20]):
         return None
     if not (ema5 > ema10 > ema20):
-        if _pipeline_inc("v0_F_ema_fail"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_F_bull_fail"): return None
-    _pipeline_inc("v0_F_pass")
+        if _pipeline_inc(f"{pkey}_ema_fail"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc(f"{pkey}_1m_fail"): return None
+    _pipeline_inc(f"{pkey}_pass")
+    spread = round((ema5 - ema20) / max(ema20, 1) * 100, 4)
     return {
-        "signal_tag": "추세정배열_15m",
+        "signal_tag": tag,
         "entry_mode": "confirm",
-        "logic_group": "F",
-        "filters_hit": [f"15mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
+        "logic_group": route,
+        "filters_hit": [f"{tf}EMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
         "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {"ema_spread_15": round((ema5 - ema20) / max(ema20, 1) * 100, 4)},
+        "indicators": {f"ema_spread_{tf}": spread},
     }
 
 
-def _v0_check_trend_align_60m(c1, c5, c15, c30, c60, gate_info=None):
-    """J 추세정배열(60m): EMA5>10>20 + 양봉"""
-    if not c60 or len(c60) < 20:
-        return None
-    ema5 = _v4_ema_from_candles(c60, 5)
-    ema10 = _v4_ema_from_candles(c60, 10)
-    ema20 = _v4_ema_from_candles(c60, 20)
-    if ema5 is None or ema10 is None or ema20 is None:
-        return None
-    if not (ema5 > ema10 > ema20):
-        if _pipeline_inc("v0_J_ema_fail"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_J_bull_fail"): return None
-    _pipeline_inc("v0_J_pass")
-    return {
-        "signal_tag": "추세정배열_60m",
-        "entry_mode": "confirm",
-        "logic_group": "J",
-        "filters_hit": [f"60mEMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {"ema_spread_60": round((ema5 - ema20) / max(ema20, 1) * 100, 4)},
-    }
+def _v0_check_ema_15m(c1, c5, c15, c30, c60, gate_info=None):
+    return _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info, tf="15m")
+
+
+def _v0_check_ema_60m(c1, c5, c15, c30, c60, gate_info=None):
+    return _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info, tf="60m")
 
 
 def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
     """G 모멘텀: 5m RSI≥65 + 양봉"""
+    _pipeline_inc("momentum_enter")
     if not c5 or len(c5) < 15:
         return None
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     if rsi_5m is None or rsi_5m < 65:
-        if _pipeline_inc("v0_G_rsi_fail", value=rsi_5m, threshold=65, direction="gte"): return None
+        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=65, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_G_bull_fail"): return None
-    _pipeline_inc("v0_G_pass")
+        if _pipeline_inc("momentum_1m_fail"): return None
+    _pipeline_inc("momentum_pass")
     return {
         "signal_tag": "모멘텀",
         "entry_mode": "confirm",
@@ -8397,6 +8391,7 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
 
 def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
     """L 추세강도: 15m ADX≥30 + 양봉"""
+    _pipeline_inc("adx_trend_enter")
     if not c15 or len(c15) < 30:
         return None
     highs = [c["high_price"] for c in c15]
@@ -8404,10 +8399,10 @@ def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
     closes = [c["trade_price"] for c in c15]
     adx_15 = _v4_adx(highs, lows, closes, 14)
     if adx_15 is None or adx_15 < 30:
-        if _pipeline_inc("v0_L_adx_fail", value=adx_15, threshold=30, direction="gte"): return None
+        if _pipeline_inc("adx_trend_15_fail", value=adx_15, threshold=30, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_L_bull_fail"): return None
-    _pipeline_inc("v0_L_pass")
+        if _pipeline_inc("adx_trend_1m_fail"): return None
+    _pipeline_inc("adx_trend_pass")
     return {
         "signal_tag": "추세강도",
         "entry_mode": "confirm",
@@ -8420,24 +8415,27 @@ def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
 
 def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     """K 역추세반등: 5m RSI≤35 + 음→양"""
+    _pipeline_inc("oversold_enter")
     if not c5 or len(c5) < 15:
         return None
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     if rsi_5m is None or rsi_5m > 35:
-        if _pipeline_inc("v0_K_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
+        if _pipeline_inc("oversold_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
     # 5m 음→양 전환
-    if len(c5) < 2 or not (_v4_is_bullish(c5[-1]) and not _v4_is_bullish(c5[-2])):
-        if _pipeline_inc("v0_K_pattern_fail"): return None
+    if not _v4_is_bullish(c5[-1]):
+        if _pipeline_inc("oversold_5m_bull_fail"): return None
+    if len(c5) >= 2 and _v4_is_bullish(c5[-2]):
+        if _pipeline_inc("oversold_5m_prev_fail"): return None
     # (옵션) 1m 양봉
     if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("v0_K_timing_fail"): return None
-    _pipeline_inc("v0_K_pass")
+        if _pipeline_inc("oversold_1m_fail"): return None
+    _pipeline_inc("oversold_pass")
     return {
         "signal_tag": "역추세반등",
         "entry_mode": "confirm",
         "logic_group": "K",
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": _V0_EXIT_PARAMS_REVERSAL.copy(),
         "indicators": {"rsi_5m": round(rsi_5m, 1)},
     }
 
@@ -8450,7 +8448,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 1,
         "enabled": False,
-        "pipeline_key": "v0_B",
+        "pipeline_key": "breakout",
         "route": "B",
         "description": "종가>20봉고점 + 양봉",
     },
@@ -8459,43 +8457,43 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 2,
         "enabled": False,
-        "pipeline_key": "v0_A",
+        "pipeline_key": "vol_burst",
         "route": "A",
         "description": "VR5≥2.5 + 양봉",
     },
     "패턴반전_15m": {
-        "check_fn": _v0_check_pattern_reversal_15m,
+        "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 3,
         "enabled": False,
-        "pipeline_key": "v0_C",
+        "pipeline_key": "reversal_15m",
         "route": "C",
         "description": "15m 음→양 + 종가회복",
     },
     "패턴반전_60m": {
-        "check_fn": _v0_check_pattern_reversal_60m,
+        "check_fn": _v0_check_reversal_60m,
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 4,
         "enabled": False,
-        "pipeline_key": "v0_H",
+        "pipeline_key": "reversal_60m",
         "route": "H",
         "description": "60m 음→양 + 종가회복",
     },
     "추세정배열_15m": {
-        "check_fn": _v0_check_trend_align_15m,
+        "check_fn": _v0_check_ema_15m,
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 5,
         "enabled": False,
-        "pipeline_key": "v0_F",
+        "pipeline_key": "ema_align_15m",
         "route": "F",
         "description": "15m EMA5>10>20 + 양봉",
     },
     "추세정배열_60m": {
-        "check_fn": _v0_check_trend_align_60m,
+        "check_fn": _v0_check_ema_60m,
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 6,
         "enabled": False,
-        "pipeline_key": "v0_J",
+        "pipeline_key": "ema_align_60m",
         "route": "J",
         "description": "60m EMA5>10>20 + 양봉",
     },
@@ -8504,7 +8502,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 7,
         "enabled": False,
-        "pipeline_key": "v0_G",
+        "pipeline_key": "momentum",
         "route": "G",
         "description": "5mRSI≥65 + 양봉",
     },
@@ -8513,16 +8511,16 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS,
         "priority": 8,
         "enabled": False,
-        "pipeline_key": "v0_L",
+        "pipeline_key": "adx_trend",
         "route": "L",
         "description": "15mADX≥30 + 양봉",
     },
     "역추세반등": {
         "check_fn": _v0_check_oversold_bounce,
-        "exit_params": _V0_EXIT_PARAMS,
+        "exit_params": _V0_EXIT_PARAMS_REVERSAL,
         "priority": 9,
         "enabled": False,
-        "pipeline_key": "v0_K",
+        "pipeline_key": "oversold",
         "route": "K",
         "description": "5mRSI≤35 + 음→양",
     },
