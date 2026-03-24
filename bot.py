@@ -7621,13 +7621,14 @@ def _v4_check_20bar_breakout(c1, c5, c15, c30, c60, gate_info=None):
         if _pipeline_inc("20bar_price_fail", value=round(_20bar_gap, 2), threshold=0, direction="gt"): return None
     # 복합필터: 5m MACD 골든크로스
     if not c5 or len(c5) < 35:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        if _pipeline_inc("20bar_macd_data_fail"): return None
     closes_5m = [c["trade_price"] for c in c5]
     macd_5m, sig_5m, _ = _v4_macd(closes_5m)
     if macd_5m is None or sig_5m is None:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        if _pipeline_inc("20bar_macd_null_fail"): return None
     if macd_5m <= sig_5m:
-        if _pipeline_inc("20bar_macd_fail"): return None
+        macd_diff = macd_5m - sig_5m
+        if _pipeline_inc("20bar_macd_cross_fail", value=round(macd_diff, 6), threshold=0, direction="gt"): return None
     # 복합필터: 15m ADX > 20 (🔧 v9: 25→20 실적용, 리포트 ADX탈락 19건)
     if not c15 or len(c15) < 30:
         if _pipeline_inc("20bar_adx_fail"): return None
@@ -9111,6 +9112,46 @@ def _threshold_sweep(fail_values_list, current_threshold, direction):
     return best
 
 
+def _threshold_sweep_table(fail_values_list, current_threshold, direction):
+    """v17: 현재 임계치 ±5% 시나리오별 W/L 테이블.
+    Returns: list of dicts [{th, n, wins, losses, wr, avg_pnl}, ...] or []"""
+    if not fail_values_list or len(fail_values_list) < 5 or current_threshold == 0:
+        return []
+    values = [fv["v"] for fv in fail_values_list if fv.get("v") is not None]
+    pnls = [fv["pnl"] for fv in fail_values_list if fv.get("v") is not None]
+    if len(values) < 5:
+        return []
+
+    steps = [
+        round(current_threshold * 0.95, 4),  # -5%
+        round(current_threshold, 4),           # 현재
+        round(current_threshold * 1.05, 4),  # +5%
+    ]
+    rows = []
+    for th in steps:
+        if direction in ("gte", "gt"):
+            passed = [(v, p) for v, p in zip(values, pnls)
+                      if (v >= th if direction == "gte" else v > th)]
+        elif direction in ("lt", "lte"):
+            passed = [(v, p) for v, p in zip(values, pnls)
+                      if (v < th if direction == "lt" else v <= th)]
+        else:
+            continue
+        n = len(passed)
+        if n == 0:
+            rows.append({"th": th, "n": 0, "wins": 0, "losses": 0,
+                         "wr": 0, "avg_pnl": 0, "is_current": (th == round(current_threshold, 4))})
+            continue
+        wins = sum(1 for _, p in passed if p > 0)
+        losses = n - wins
+        wr = wins / n * 100
+        avg_pnl = sum(p for _, p in passed) / n * 100
+        rows.append({"th": th, "n": n, "wins": wins, "losses": losses,
+                     "wr": round(wr, 1), "avg_pnl": round(avg_pnl, 2),
+                     "is_current": (th == round(current_threshold, 4))})
+    return rows
+
+
 def _v4_shadow_report_lines():
     """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
     루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
@@ -9264,6 +9305,18 @@ def _v4_shadow_report_lines():
                             f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
                             f" +{sweep['n']}건 승률{sweep['wr']:.0f}% PnL{sweep['avg_pnl']:+.2f}%"
                         )
+                    # v17: ±5% 시나리오 테이블
+                    table = _threshold_sweep_table(fv_list, f_th, f_dir)
+                    if table:
+                        for row in table:
+                            tag = "◀현재" if row["is_current"] else ""
+                            lines.append(
+                                f"   {row['th']:>8g} | {row['n']:>3}건"
+                                f" W{row['wins']}/L{row['losses']}"
+                                f" 승률{row['wr']:.0f}%"
+                                f" PnL{row['avg_pnl']:+.2f}%"
+                                f" {tag}"
+                            )
             if _blocked_pending > 0:
                 lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
     with _SHADOW_LOCK:
