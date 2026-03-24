@@ -8498,6 +8498,43 @@ def _load_blocked_stats():
     except Exception as e:
         print(f"[BLOCKED_STATS] 로드 실패: {e}")
         _SHADOW_BLOCKED_STATS = {}
+    # 로드된 누적 통계로 즉시 필터 유효성 판정 알림
+    if _SHADOW_BLOCKED_STATS:
+        _check_blocked_filter_alerts_on_load()
+
+
+def _check_blocked_filter_alerts_on_load():
+    """봇 시작 시 로드된 차단 통계로 즉시 필터 유효성 알림 전송.
+    재시작 후에도 누적 데이터 기반 '재검토 필요' 판정이 이어지도록 함."""
+    MIN_SAMPLES = 5  # 최소 샘플 수 — 너무 적으면 노이즈
+    alerts = []
+    with _SHADOW_PERF_LOCK:
+        for bkey, bs in _SHADOW_BLOCKED_STATS.items():
+            bn = bs.get("signals", 0)
+            if bn < MIN_SAMPLES:
+                continue
+            bw = bs.get("wins", 0)
+            bwr = bw / bn * 100
+            bavg = bs.get("total_pnl", 0) / bn * 100
+            broute = bs.get("route", "?")
+            bfilter = bs.get("filter", bkey)
+            if bwr >= 55:
+                alerts.append(
+                    f"  ⚠{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
+                    f" PnL{bavg:+.2f}% → 재검토 필요"
+                )
+            elif bwr <= 45:
+                alerts.append(
+                    f"  ✅{broute}:{bfilter} {bn}건 승률{bwr:.0f}%"
+                    f" PnL{bavg:+.2f}% → 유효"
+                )
+    if alerts:
+        msg = "🔄 [재시작] 차단 필터 누적 판정:\n" + "\n".join(alerts)
+        try:
+            tg_send(msg)
+        except Exception as e:
+            print(f"[BLOCKED_ALERT] 전송 실패: {e}")
+        print(msg)
 
 
 def _save_blocked_stats():
