@@ -631,7 +631,7 @@ def _pipeline_report(force=False):
         f"  [A거래량] 진입{c.get('vol_burst_enter',0)}"
         f" → VR5(2.5미만):{c.get('vol_burst_vr5_fail',0)}"
         f" 음봉:{c.get('vol_burst_bull_fail',0)}"
-        f" 15mMACD(0미만):{c.get('vol_burst_macd_hist_fail',0)}"
+        f" 15mMACD음수:{c.get('vol_burst_macd_hist_fail',0)}"
         f" ✅통과:{c.get('vol_burst_pass',0)}",
         f"  [B돌파] 진입{c.get('breakout_enter',0)}"
         f" → 미돌파:{c.get('breakout_price_fail',0)}"
@@ -646,14 +646,14 @@ def _pipeline_report(force=False):
         f"  [C반전15] 진입{c.get('reversal_15m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_15m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
-        f" 미회복:{c.get('reversal_15m_recovery_fail',0)}"
+        f" 종가(전봉시가미달):{c.get('reversal_15m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
         f" 고점이격(1.5%초과):{c.get('reversal_15m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_15m_pass',0)}",
         f"  [H반전60] 진입{c.get('reversal_60m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_60m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_60m_cur_fail',0)}"
-        f" 미회복:{c.get('reversal_60m_recovery_fail',0)}"
+        f" 종가(전봉시가미달):{c.get('reversal_60m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" 고점이격(1.5%초과):{c.get('reversal_60m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
