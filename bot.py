@@ -8051,6 +8051,20 @@ def _load_shadow_stats():
                         f.write("v18 full reset: new filters + J removal + trade_records\n")
                 except Exception:
                     pass
+            # v18b 강제 리셋: 💡sweep 전체건 합산 반영
+            _v18b_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18b_sweep_reset_done")
+            if not os.path.exists(_v18b_marker):
+                print("[SHADOW_STATS] v18b 강제 리셋: sweep 전체건 합산 + 포맷 변경 반영")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18b_marker, "w") as f:
+                        f.write("v18b sweep reset done\n")
+                except Exception:
+                    pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
