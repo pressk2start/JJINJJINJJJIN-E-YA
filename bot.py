@@ -629,17 +629,17 @@ def _pipeline_report(force=False):
         f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
         f"━ v0 전략 세부 ━",
         f"  [A거래량] 진입{c.get('vol_burst_enter',0)}"
-        f" → VR5미만2.5:{c.get('vol_burst_vr5_fail',0)}"
+        f" → 거래량부족:{c.get('vol_burst_vr5_fail',0)}"
         f" 음봉:{c.get('vol_burst_bull_fail',0)}"
-        f" 15mMACD방향↓:{c.get('vol_burst_macd_hist_fail',0)}"
+        f" MACD하락:{c.get('vol_burst_macd_hist_fail',0)}"
         f" ✅통과:{c.get('vol_burst_pass',0)}",
         f"  [B돌파] 진입{c.get('breakout_enter',0)}"
-        f" → 종가미달20봉고점:{c.get('breakout_price_fail',0)}"
+        f" → 미돌파:{c.get('breakout_price_fail',0)}"
         f" 음봉:{c.get('breakout_bull_fail',0)}"
-        f" 15mVR미만1.5:{c.get('breakout_vr5_15m_fail',0)}"
+        f" 15m거래량부족:{c.get('breakout_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('breakout_pass',0)}",
         f"  [D근접] 진입{c.get('near_high_enter',0)}"
-        f" → 고점대비1%초과↓:{c.get('near_high_gap_fail',0)}"
+        f" → 고점먼곳:{c.get('near_high_gap_fail',0)}"
         f" 이미돌파:{c.get('near_high_over_fail',0)}"
         f" 음봉:{c.get('near_high_bull_fail',0)}"
         f" ✅통과:{c.get('near_high_pass',0)}",
@@ -648,34 +648,34 @@ def _pipeline_report(force=False):
         f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
         f" 미회복:{c.get('reversal_15m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
-        f" 고점대비1.5%초과↓:{c.get('reversal_15m_gap20_fail',0)}"
+        f" 고점먼곳:{c.get('reversal_15m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_15m_pass',0)}",
         f"  [H반전60] 진입{c.get('reversal_60m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_60m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_60m_cur_fail',0)}"
         f" 미회복:{c.get('reversal_60m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
-        f" 고점대비1.5%초과↓:{c.get('reversal_60m_gap20_fail',0)}"
+        f" 고점먼곳:{c.get('reversal_60m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] 진입{c.get('ema_align_15m_enter',0)}"
-        f" → EMA정배열아님:{c.get('ema_align_15m_ema_fail',0)}"
+        f" → 정배열아님:{c.get('ema_align_15m_ema_fail',0)}"
         f" 1m음봉:{c.get('ema_align_15m_1m_fail',0)}"
         f" ✅통과:{c.get('ema_align_15m_pass',0)}",
         f"  [G모멘텀] 진입{c.get('momentum_enter',0)}"
-        f" → RSI미만65:{c.get('momentum_rsi5_fail',0)}"
+        f" → RSI부족:{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
-        f" 15mVR미만2.0:{c.get('momentum_vr5_15m_fail',0)}"
+        f" 15m거래량부족:{c.get('momentum_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"  [LADX] 진입{c.get('adx_trend_enter',0)}"
-        f" → ADX미만30:{c.get('adx_trend_15_fail',0)}"
+        f" → 추세약함:{c.get('adx_trend_15_fail',0)}"
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
-        f" 15mVR미만0.8:{c.get('adx_trend_vr5_15m_fail',0)}"
+        f" 15m거래량부족:{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
         f"  [K역추세] 진입{c.get('oversold_enter',0)}"
-        f" → RSI초과35:{c.get('oversold_rsi_fail',0)}"
+        f" → RSI높음:{c.get('oversold_rsi_fail',0)}"
         f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
-        f" 감싸기미만2.0:{c.get('oversold_engulf_fail',0)}"
+        f" 감싸기부족:{c.get('oversold_engulf_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
