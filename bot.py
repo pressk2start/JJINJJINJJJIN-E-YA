@@ -631,7 +631,7 @@ def _pipeline_report(force=False):
         f"  [A거래량] 진입{c.get('vol_burst_enter',0)}"
         f" → VR5<2.5:{c.get('vol_burst_vr5_fail',0)}"
         f" 음봉:{c.get('vol_burst_bull_fail',0)}"
-        f" MACD히스트<0:{c.get('vol_burst_macd_hist_fail',0)}"
+        f" 15mMACD방향↓:{c.get('vol_burst_macd_hist_fail',0)}"
         f" ✅통과:{c.get('vol_burst_pass',0)}",
         f"  [B돌파] 진입{c.get('breakout_enter',0)}"
         f" → 종가≤20봉고점:{c.get('breakout_price_fail',0)}"
@@ -658,7 +658,7 @@ def _pipeline_report(force=False):
         f" Gap<-1.5%:{c.get('reversal_60m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] 진입{c.get('ema_align_15m_enter',0)}"
-        f" → EMA역배열:{c.get('ema_align_15m_ema_fail',0)}"
+        f" → EMA5≤10≤20:{c.get('ema_align_15m_ema_fail',0)}"
         f" 1m음봉:{c.get('ema_align_15m_1m_fail',0)}"
         f" ✅통과:{c.get('ema_align_15m_pass',0)}",
         f"  [G모멘텀] 진입{c.get('momentum_enter',0)}"
@@ -673,7 +673,7 @@ def _pipeline_report(force=False):
         f" ✅통과:{c.get('adx_trend_pass',0)}",
         f"  [K역추세] 진입{c.get('oversold_enter',0)}"
         f" → RSI>35:{c.get('oversold_rsi_fail',0)}"
-        f" 5m패턴X:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
+        f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
         f" 감싸기<2.0:{c.get('oversold_engulf_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
