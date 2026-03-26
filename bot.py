@@ -7564,7 +7564,7 @@ def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
         "logic_group": "B",
         "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
         "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {"gap_20bar": round(gap_pct, 2)},
+        "indicators": {"gap_20bar": round(gap_pct, 4)},
     }
 
 
