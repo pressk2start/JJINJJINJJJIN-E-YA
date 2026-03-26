@@ -263,6 +263,12 @@ _PIPELINE_COUNTERS = {
     "breakout_bull_fail": 0,
     "breakout_vr5_15m_fail": 0,
     "breakout_pass": 0,
+    # -- D 고점근접 --
+    "near_high_enter": 0,
+    "near_high_gap_fail": 0,
+    "near_high_over_fail": 0,
+    "near_high_bull_fail": 0,
+    "near_high_pass": 0,
     # -- C 패턴반전_15m --
     "reversal_15m_enter": 0,
     "reversal_15m_prev_fail": 0,
@@ -626,6 +632,8 @@ def _pipeline_report(force=False):
         f"양봉X:{c.get('vol_burst_bull_fail',0)} MACDX:{c.get('vol_burst_macd_hist_fail',0)} ✅{c.get('vol_burst_pass',0)}",
         f"  [B돌파] 진입{c.get('breakout_enter',0)} → 가격X:{c.get('breakout_price_fail',0)} "
         f"양봉X:{c.get('breakout_bull_fail',0)} VR15X:{c.get('breakout_vr5_15m_fail',0)} ✅{c.get('breakout_pass',0)}",
+        f"  [D근접] 진입{c.get('near_high_enter',0)} → GapX:{c.get('near_high_gap_fail',0)} "
+        f"초과X:{c.get('near_high_over_fail',0)} 양봉X:{c.get('near_high_bull_fail',0)} ✅{c.get('near_high_pass',0)}",
         f"  [C반전15] 진입{c.get('reversal_15m_enter',0)} → 음X:{c.get('reversal_15m_prev_fail',0)} "
         f"양X:{c.get('reversal_15m_cur_fail',0)} 회복X:{c.get('reversal_15m_recovery_fail',0)} "
         f"1mX:{c.get('reversal_15m_1m_fail',0)} Gap20X:{c.get('reversal_15m_gap20_fail',0)} ✅{c.get('reversal_15m_pass',0)}",
@@ -7764,8 +7772,37 @@ def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
+def _v0_check_near_high(c1, c5, c15, c30, c60, gate_info=None):
+    """D 고점근접: 20봉고점 대비 -1% 이내 + 양봉"""
+    _pipeline_inc("near_high_enter")
+    if not c1 or len(c1) < 21:
+        return None
+    cur_close = c1[-1]["trade_price"]
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+    # gap_20bar >= -1.0 (고점 대비 1% 이내)
+    if gap_pct < -1.0:
+        if _pipeline_inc("near_high_gap_fail", value=round(gap_pct, 4), threshold=-1.0, direction="gte"): return None
+    # 이미 돌파한 건 B가 담당 → 여기선 제외 (gap > 0)
+    if gap_pct > 0:
+        if _pipeline_inc("near_high_over_fail"): return None
+    # 양봉 체크
+    _body_pct_d = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("near_high_bull_fail", value=round(_body_pct_d, 2), threshold=0, direction="gt"): return None
+    _pipeline_inc("near_high_pass")
+    return {
+        "signal_tag": "고점근접",
+        "entry_mode": "confirm",
+        "logic_group": "D",
+        "filters_hit": [f"Gap20={gap_pct:+.2f}%"],
+        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "indicators": {"gap_20bar": round(gap_pct, 4)},
+    }
+
+
 # --- v0 전략 레지스트리 (초경량 — 섀도우 전용) ---
-# 우선순위: B > A > C > H > F > J > G > L > K
+# 우선순위: B > D > A > C > H > F > G > L > K
 _STRATEGY_REGISTRY = {
     "가격돌파": {
         "check_fn": _v0_check_price_breakout,
@@ -7775,6 +7812,15 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "breakout",
         "route": "B",
         "description": "종가>20봉고점 + 양봉",
+    },
+    "고점근접": {
+        "check_fn": _v0_check_near_high,
+        "exit_params": _V0_EXIT_PARAMS,
+        "priority": 2,
+        "enabled": False,
+        "pipeline_key": "near_high",
+        "route": "D",
+        "description": "20봉고점 -1%이내 + 양봉",
     },
     "거래량폭발": {
         "check_fn": _v0_check_volume_burst,
@@ -8685,6 +8731,7 @@ _SWEEP_FILTER_TO_IND = {
     "adx_trend_vr5_15m_fail": "vr5_15m",
     "reversal_15m_gap20_fail": "gap_20bar",
     "reversal_60m_gap20_fail": "gap_20bar",
+    "near_high_gap_fail": "gap_20bar",
 }
 
 
