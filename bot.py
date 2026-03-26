@@ -8721,7 +8721,7 @@ def _threshold_sweep(fail_values_list, current_threshold, direction):
 # v18: 필터명 → 인디케이터키 매핑 (임계치 sweep 전체건 비교용)
 _SWEEP_FILTER_TO_IND = {
     "vol_burst_vr5_fail": "vr5",
-    "vol_burst_macd_hist_fail": "macd_hist_15_bps",
+    # vol_burst_macd_hist_fail: threshold=0이라 sweep 불가 → 매핑 제외
     "breakout_vr5_15m_fail": "vr5_15m",
     "momentum_rsi5_fail": "rsi_5m",
     "momentum_vr5_15m_fail": "vr5_15m",
