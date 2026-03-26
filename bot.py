@@ -8676,45 +8676,67 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     return results
 
 
-def _threshold_sweep(fail_values_list, current_threshold, direction):
-    """v16: 차단 건의 (value, pnl) 쌍으로 최적 임계치 탐색.
+def _threshold_sweep(fail_values_list, current_threshold, direction,
+                     trade_records=None, ind_key=None):
+    """v18: 차단건 브루트포스 탐색 + 통과건 합산 전체 비교.
     direction: 'gte'/'gt' → 값이 threshold 이상이면 통과 (하한)
                'lt'/'lte' → 값이 threshold 미만이면 통과 (상한)
     Returns: dict with best alternative threshold or None"""
     if not fail_values_list or len(fail_values_list) < 5:
         return None
-    values = [fv["v"] for fv in fail_values_list if fv.get("v") is not None]
-    pnls = [fv["pnl"] for fv in fail_values_list if fv.get("v") is not None]
-    if len(values) < 5:
+    fail_data = [fv for fv in fail_values_list if fv.get("v") is not None]
+    if len(fail_data) < 5:
         return None
 
+    def _passes(v, th, d):
+        if d == "gte": return v >= th
+        if d == "gt": return v > th
+        if d == "lte": return v <= th
+        if d == "lt": return v < th
+        return False
+
+    # 통과건 데이터 준비
+    pass_data = []
+    if trade_records and ind_key:
+        for tr in trade_records:
+            v = tr.get("inds", {}).get(ind_key)
+            if v is not None:
+                pass_data.append({"v": v, "pnl": tr["pnl"]})
+
     best = None
-    if direction in ("gte", "gt"):
-        # 하한 필터: 임계치 낮추면 더 많은 건이 통과
-        candidates = sorted(set(values), reverse=True)
-        for c in candidates:
-            passed = [(v, p) for v, p in zip(values, pnls)
-                      if (v >= c if direction == "gte" else v > c)]
-            if len(passed) < 3:
-                continue
-            avg_pnl = sum(p for _, p in passed) / len(passed)
-            wr = sum(1 for _, p in passed if p > 0) / len(passed) * 100
-            if avg_pnl > 0 and (best is None or avg_pnl > best["avg_pnl"]):
-                best = {"new_th": round(c, 4), "n": len(passed),
-                        "avg_pnl": round(avg_pnl * 100, 2), "wr": round(wr, 1)}
-    elif direction in ("lt", "lte"):
-        # 상한 필터: 임계치 올리면 더 많은 건이 통과
-        candidates = sorted(set(values))
-        for c in candidates:
-            passed = [(v, p) for v, p in zip(values, pnls)
-                      if (v < c if direction == "lt" else v <= c)]
-            if len(passed) < 3:
-                continue
-            avg_pnl = sum(p for _, p in passed) / len(passed)
-            wr = sum(1 for _, p in passed if p > 0) / len(passed) * 100
-            if avg_pnl > 0 and (best is None or avg_pnl > best["avg_pnl"]):
-                best = {"new_th": round(c, 4), "n": len(passed),
-                        "avg_pnl": round(avg_pnl * 100, 2), "wr": round(wr, 1)}
+    candidates = sorted(set(fv["v"] for fv in fail_data),
+                        reverse=(direction in ("gte", "gt")))
+    for c in candidates:
+        # 차단건 중 새 임계치로 통과할 건
+        new_passed = [fv for fv in fail_data if _passes(fv["v"], c, direction)]
+        if len(new_passed) < 3:
+            continue
+        # 차단건만 기준
+        fail_n = len(new_passed)
+        fail_avg_pnl = sum(fv["pnl"] for fv in new_passed) / fail_n
+        fail_wr = sum(1 for fv in new_passed if fv["pnl"] > 0) / fail_n * 100
+        if fail_avg_pnl <= 0:
+            continue
+        # 전체건 합산 (통과건 + 새로 통과할 차단건)
+        total_n = len(pass_data) + fail_n
+        total_wins = (sum(1 for p in pass_data if p["pnl"] > 0)
+                      + sum(1 for fv in new_passed if fv["pnl"] > 0))
+        total_pnl = (sum(p["pnl"] for p in pass_data)
+                     + sum(fv["pnl"] for fv in new_passed))
+        total_wr = total_wins / total_n * 100 if total_n > 0 else 0
+        total_avg_pnl = total_pnl / total_n * 100 if total_n > 0 else 0
+        if best is None or fail_avg_pnl > best["fail_avg_pnl"]:
+            best = {
+                "new_th": round(c, 4),
+                # 차단건 기준
+                "fail_n": fail_n,
+                "fail_avg_pnl": round(fail_avg_pnl * 100, 2),
+                "fail_wr": round(fail_wr, 1),
+                # 전체건 기준
+                "total_n": total_n,
+                "total_wr": round(total_wr, 1),
+                "total_avg_pnl": round(total_avg_pnl, 2),
+            }
     return best
 
 
@@ -8952,35 +8974,48 @@ def _v4_shadow_report_lines():
                 lines.append(
                     f" └ 최고{avg_mfe:+.2f}%{mae_part} | 평균보유 {hold_str}"
                 )
-                # v16: threshold sweep — 임계치 최적화 제안
+                # v18: threshold sweep — 임계치 최적화 제안 + ±5% 전체건 비교
                 fv_list = bs.get("fail_values", [])
                 f_th = bs.get("fail_threshold")
                 f_dir = bs.get("fail_direction")
                 if fv_list and f_th is not None and f_dir:
-                    sweep = _threshold_sweep(fv_list, f_th, f_dir)
-                    if sweep:
-                        lines.append(
-                            f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
-                            f" +{sweep['n']}건 승률{sweep['wr']:.0f}% PnL{sweep['avg_pnl']:+.2f}%"
-                        )
-                    # v18: ±5% 전체건 비교 (통과+차단 합산)
                     bfilter_name = bs.get("filter", "")
                     ind_key = _SWEEP_FILTER_TO_IND.get(bfilter_name)
+                    # 해당 route의 perf stats에서 trade_records 가져오기
+                    tr_list = []
                     if ind_key:
-                        # 해당 route의 perf stats에서 trade_records 가져오기
-                        tr_list = []
                         for pk, ps in _SHADOW_PERF_STATS.items():
                             if ps.get("route") == broute:
                                 tr_list = ps.get("trade_records", [])
                                 break
+                    # 💡 최적 임계치 탐색 (차단건 + 전체건 합산)
+                    sweep = _threshold_sweep(fv_list, f_th, f_dir,
+                                             trade_records=tr_list, ind_key=ind_key)
+                    if sweep:
+                        lines.append(
+                            f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
+                            f" 차단건+{sweep['fail_n']}건 승률{sweep['fail_wr']:.0f}%"
+                            f" PnL{sweep['fail_avg_pnl']:+.02f}%"
+                            f" → 전체{sweep['total_n']}건"
+                            f" 승률{sweep['total_wr']:.0f}%"
+                            f" PnL{sweep['total_avg_pnl']:+.02f}%"
+                        )
+                    # ±5% 전체건 비교 테이블
+                    if ind_key:
                         table = _threshold_sweep_table(tr_list, fv_list, f_th, f_dir, ind_key)
                         if table:
+                            # 현재 기준값 추출 (변화량 표시용)
+                            cur_row = next((r for r in table if r["is_current"]), None)
                             for row in table:
+                                diff_n = row["n"] - cur_row["n"] if cur_row else 0
+                                diff_wr = row["wr"] - cur_row["wr"] if cur_row else 0
+                                diff_sign = "+" if diff_n >= 0 else ""
+                                wr_sign = "+" if diff_wr >= 0 else ""
                                 if row["is_current"]:
                                     lines.append(
                                         f"      ● {row['th']:>8g}(현재):"
                                         f" {row['n']}건 W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.02f}%"
                                     )
                                 elif row.get("is_loosen"):
                                     new_part = ""
@@ -8990,15 +9025,19 @@ def _v4_shadow_report_lines():
                                                     f" 승률{row['new_wr']:.0f}%")
                                     lines.append(
                                         f"      ▼ {row['th']:>8g}(풀림):"
-                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                        f" {row['n']}건({diff_sign}{diff_n})"
+                                        f" W{row['wins']}/L{row['losses']}"
+                                        f" 승률{row['wr']:.0f}%({wr_sign}{diff_wr:.0f}%p)"
+                                        f" PnL{row['avg_pnl']:+.02f}%"
                                         f"{new_part}"
                                     )
                                 else:
                                     lines.append(
                                         f"      ▲ {row['th']:>8g}(조임):"
-                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                        f" {row['n']}건({diff_sign}{diff_n})"
+                                        f" W{row['wins']}/L{row['losses']}"
+                                        f" 승률{row['wr']:.0f}%({wr_sign}{diff_wr:.0f}%p)"
+                                        f" PnL{row['avg_pnl']:+.02f}%"
                                     )
             if _blocked_pending > 0:
                 lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
