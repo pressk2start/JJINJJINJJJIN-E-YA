@@ -7925,6 +7925,23 @@ def _load_shadow_stats():
                         f.write("v0 full strategy reset done\n")
                 except Exception:
                     pass
+            # v18 1회성 리셋: recovery_gap 스테일 데이터 + trade_records 필드 추가
+            _v18_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18_trade_records_reset_done")
+            if not os.path.exists(_v18_marker):
+                print("[SHADOW_STATS] v18 리셋: trade_records 추가 + recovery_gap 스테일 데이터 정리")
+                try:
+                    # C/H recovery_gap 스테일 데이터 정리 → 해당 루트 통계 초기화
+                    keys_to_reset = [k for k, s in _SHADOW_PERF_STATS.items()
+                                     if s.get("route") in ("C", "H")]
+                    for k in keys_to_reset:
+                        del _SHADOW_PERF_STATS[k]
+                    # 전체 blocked stats도 리셋 (trade_records와 동기화)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18_marker, "w") as f:
+                        f.write("v18 trade_records + recovery_gap reset done\n")
+                except Exception:
+                    pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
             print(f"[SHADOW_STATS] 로드 완료: {len(_SHADOW_PERF_STATS)}개 루트, 총 {_SHADOW_TRADE_COUNT}건")
     except Exception as e:
@@ -8247,6 +8264,16 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s[avg_key] = avg
             s[cnt_key] = cnt
             s[m2_key] = m2
+        # v18: per-trade 기록 저장 → 임계치 sweep 전체건 비교용
+        if indicators:
+            if "trade_records" not in s:
+                s["trade_records"] = []
+            s["trade_records"].append({
+                "pnl": round(pnl_pct, 5),
+                "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
+            })
+            if len(s["trade_records"]) > 300:
+                s["trade_records"] = s["trade_records"][-300:]
         # MAE 누적
         if mae is not None:
             s["mae_sum"] = round(s.get("mae_sum", 0.0) + mae, 6)
@@ -8582,43 +8609,84 @@ def _threshold_sweep(fail_values_list, current_threshold, direction):
     return best
 
 
-def _threshold_sweep_table(fail_values_list, current_threshold, direction):
-    """v17: 현재 임계치 ±5% 시나리오별 W/L 테이블.
-    Returns: list of dicts [{th, n, wins, losses, wr, avg_pnl}, ...] or []"""
-    if not fail_values_list or len(fail_values_list) < 5 or current_threshold == 0:
+# v18: 필터명 → 인디케이터키 매핑 (임계치 sweep 전체건 비교용)
+_SWEEP_FILTER_TO_IND = {
+    "vol_burst_vr5_fail": "vr5",
+    "momentum_rsi5_fail": "rsi_5m",
+    "oversold_rsi_fail": "rsi_5m",
+    "adx_trend_15_fail": "adx_15",
+}
+
+
+def _threshold_sweep_table(trade_records, fail_values_list, current_threshold, direction, ind_key):
+    """v18: 통과건(trade_records) + 차단건(fail_values) 합산 ±5% 전체 비교.
+    - 조이기: 전체 W/L 승률 (통과건 중 더 조인 임계치 충족분만)
+    - 풀기: 전체 W/L + 신규 추가건 W/L (차단건 중 새로 통과할 분)
+    Returns: list of dicts or []"""
+    if current_threshold == 0:
         return []
-    values = [fv["v"] for fv in fail_values_list if fv.get("v") is not None]
-    pnls = [fv["pnl"] for fv in fail_values_list if fv.get("v") is not None]
-    if len(values) < 5:
+    # 통과건에서 해당 인디케이터 값 + PnL 추출
+    pass_trades = []
+    for tr in (trade_records or []):
+        v = tr.get("inds", {}).get(ind_key)
+        if v is not None:
+            pass_trades.append({"v": v, "pnl": tr["pnl"], "src": "pass"})
+    # 차단건에서 값 + PnL 추출
+    fail_trades = []
+    for fv in (fail_values_list or []):
+        if fv.get("v") is not None:
+            fail_trades.append({"v": fv["v"], "pnl": fv["pnl"], "src": "fail"})
+    all_trades = pass_trades + fail_trades
+    if len(all_trades) < 5:
         return []
 
-    steps = [
-        round(current_threshold * 0.95, 4),  # -5%
-        round(current_threshold, 4),           # 현재
-        round(current_threshold * 1.05, 4),  # +5%
-    ]
+    def _passes(v, th, d):
+        if d == "gte": return v >= th
+        if d == "gt": return v > th
+        if d == "lte": return v <= th
+        if d == "lt": return v < th
+        return False
+
+    # 풀기/조이기 방향 판별
+    if direction in ("gte", "gt"):
+        loosen_step = round(current_threshold * 0.95, 4)  # 낮추면 풀림
+        tighten_step = round(current_threshold * 1.05, 4)  # 높이면 조임
+    else:  # lt, lte
+        loosen_step = round(current_threshold * 1.05, 4)  # 높이면 풀림
+        tighten_step = round(current_threshold * 0.95, 4)  # 낮추면 조임
+
+    steps = [loosen_step, round(current_threshold, 4), tighten_step]
     rows = []
     for th in steps:
-        if direction in ("gte", "gt"):
-            passed = [(v, p) for v, p in zip(values, pnls)
-                      if (v >= th if direction == "gte" else v > th)]
-        elif direction in ("lt", "lte"):
-            passed = [(v, p) for v, p in zip(values, pnls)
-                      if (v < th if direction == "lt" else v <= th)]
-        else:
-            continue
-        n = len(passed)
+        is_current = (th == round(current_threshold, 4))
+        matched = [t for t in all_trades if _passes(t["v"], th, direction)]
+        n = len(matched)
         if n == 0:
             rows.append({"th": th, "n": 0, "wins": 0, "losses": 0,
-                         "wr": 0, "avg_pnl": 0, "is_current": (th == round(current_threshold, 4))})
+                         "wr": 0, "avg_pnl": 0, "is_current": is_current,
+                         "is_loosen": (th == loosen_step),
+                         "new_n": 0, "new_wins": 0, "new_losses": 0,
+                         "new_wr": 0, "new_avg_pnl": 0})
             continue
-        wins = sum(1 for _, p in passed if p > 0)
+        wins = sum(1 for t in matched if t["pnl"] > 0)
         losses = n - wins
         wr = wins / n * 100
-        avg_pnl = sum(p for _, p in passed) / n * 100
-        rows.append({"th": th, "n": n, "wins": wins, "losses": losses,
-                     "wr": round(wr, 1), "avg_pnl": round(avg_pnl, 2),
-                     "is_current": (th == round(current_threshold, 4))})
+        avg_pnl = sum(t["pnl"] for t in matched) / n * 100
+        # 신규 추가건 (차단→통과 전환분) — 풀기 방향에서만 의미
+        new_trades = [t for t in matched if t["src"] == "fail"]
+        new_n = len(new_trades)
+        new_wins = sum(1 for t in new_trades if t["pnl"] > 0)
+        new_losses = new_n - new_wins
+        new_wr = new_wins / new_n * 100 if new_n > 0 else 0
+        new_avg_pnl = sum(t["pnl"] for t in new_trades) / new_n * 100 if new_n > 0 else 0
+        rows.append({
+            "th": th, "n": n, "wins": wins, "losses": losses,
+            "wr": round(wr, 1), "avg_pnl": round(avg_pnl, 2),
+            "is_current": is_current,
+            "is_loosen": (th == loosen_step),
+            "new_n": new_n, "new_wins": new_wins, "new_losses": new_losses,
+            "new_wr": round(new_wr, 1), "new_avg_pnl": round(new_avg_pnl, 2),
+        })
     return rows
 
 
@@ -8775,18 +8843,43 @@ def _v4_shadow_report_lines():
                             f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
                             f" +{sweep['n']}건 승률{sweep['wr']:.0f}% PnL{sweep['avg_pnl']:+.2f}%"
                         )
-                    # v17: ±5% 시나리오 테이블
-                    table = _threshold_sweep_table(fv_list, f_th, f_dir)
-                    if table:
-                        for row in table:
-                            tag = "◀현재" if row["is_current"] else ""
-                            lines.append(
-                                f"   {row['th']:>8g} | {row['n']:>3}건"
-                                f" W{row['wins']}/L{row['losses']}"
-                                f" 승률{row['wr']:.0f}%"
-                                f" PnL{row['avg_pnl']:+.2f}%"
-                                f" {tag}"
-                            )
+                    # v18: ±5% 전체건 비교 (통과+차단 합산)
+                    bfilter_name = bs.get("filter", "")
+                    ind_key = _SWEEP_FILTER_TO_IND.get(bfilter_name)
+                    if ind_key:
+                        # 해당 route의 perf stats에서 trade_records 가져오기
+                        tr_list = []
+                        for pk, ps in _SHADOW_PERF_STATS.items():
+                            if ps.get("route") == broute:
+                                tr_list = ps.get("trade_records", [])
+                                break
+                        table = _threshold_sweep_table(tr_list, fv_list, f_th, f_dir, ind_key)
+                        if table:
+                            for row in table:
+                                if row["is_current"]:
+                                    lines.append(
+                                        f"      ● {row['th']:>8g}(현재):"
+                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
+                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                    )
+                                elif row.get("is_loosen"):
+                                    new_part = ""
+                                    if row["new_n"] > 0:
+                                        new_part = (f" | 신규+{row['new_n']}건"
+                                                    f" W{row['new_wins']}/L{row['new_losses']}"
+                                                    f" 승률{row['new_wr']:.0f}%")
+                                    lines.append(
+                                        f"      ▼ {row['th']:>8g}(풀림):"
+                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
+                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                        f"{new_part}"
+                                    )
+                                else:
+                                    lines.append(
+                                        f"      ▲ {row['th']:>8g}(조임):"
+                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
+                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.2f}%"
+                                    )
             if _blocked_pending > 0:
                 lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
     with _SHADOW_LOCK:
