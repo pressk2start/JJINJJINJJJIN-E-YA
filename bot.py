@@ -7955,7 +7955,7 @@ _STRATEGY_REGISTRY = {
         "enabled": False,
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥65 + 양봉",
+        "description": "5mRSI≥68 + 양봉 + VR5≤3.0",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -7964,7 +7964,7 @@ _STRATEGY_REGISTRY = {
         "enabled": False,
         "pipeline_key": "adx_trend",
         "route": "L",
-        "description": "15mADX≥30 + 양봉",
+        "description": "15mADX≥28.5 + 양봉",
     },
     "역추세반등": {
         "check_fn": _v0_check_oversold_bounce,
