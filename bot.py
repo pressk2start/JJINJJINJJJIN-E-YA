@@ -680,7 +680,7 @@ def _pipeline_report(force=False):
         f" → 5mRSI(35초과):{c.get('oversold_rsi_fail',0)}"
         f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
-        f" 감싸기(2.0미만):{c.get('oversold_engulf_fail',0)}"
+        f" 감싸기(2.1미만):{c.get('oversold_engulf_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
@@ -7757,7 +7757,7 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     # v18d: RSI 68→71로 조이기 (71.4에서 89건 29% +4%p)
     if rsi_5m is None or rsi_5m < 71:
-        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=68, direction="gte"): return None
+        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=71, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
         _bp_g = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
