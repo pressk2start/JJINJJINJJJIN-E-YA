@@ -275,7 +275,7 @@ _PIPELINE_COUNTERS = {
     "reversal_15m_cur_fail": 0,
     "reversal_15m_recovery_fail": 0,
     "reversal_15m_1m_fail": 0,
-    "reversal_15m_engulf_fail": 0,
+    "reversal_15m_vr5_15m_fail": 0,
     "reversal_15m_gap20_fail": 0,
     "reversal_15m_pass": 0,
     # -- H 패턴반전_60m --
@@ -641,16 +641,16 @@ def _pipeline_report(force=False):
         f" 음봉:{c.get('breakout_bull_fail',0)}"
         f" 15mVR(1.5미만):{c.get('breakout_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('breakout_pass',0)}",
-        f"  [C반전15] 15m음→양+종가회복+1m양봉+감싸기≧1.5+고점근접 [SL0.4/빠른익절]",
+        f"  [C반전15] 15m음→양+종가회복+1m양봉+15mVR≧1.0+고점근접 [SL0.4/빠른익절]",
         f"    진입{c.get('reversal_15m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_15m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
         f" 종가(전봉시가미달):{c.get('reversal_15m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
-        f" 감싸기(1.5미만):{c.get('reversal_15m_engulf_fail',0)}"
+        f" 15mVR(1.0미만):{c.get('reversal_15m_vr5_15m_fail',0)}"
         f" 고점이격(1.5%초과):{c.get('reversal_15m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_15m_pass',0)}",
-        f"  [H반전60] 60m음→양+종가회복+1m양봉",
+        f"  [H반전60] 60m음→양+종가회복+1m양봉 [90바]",
         f"    진입{c.get('reversal_60m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_60m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_60m_cur_fail',0)}"
@@ -662,9 +662,9 @@ def _pipeline_report(force=False):
         f" → EMA정배열아님:{c.get('ema_align_15m_ema_fail',0)}"
         f" 1m음봉:{c.get('ema_align_15m_1m_fail',0)}"
         f" ✅통과:{c.get('ema_align_15m_pass',0)}",
-        f"  [G모멘텀] 5mRSI≧68+1m양봉+VR5≦3.0+15mVR≧2.0 [SL1.5/120바]",
+        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.0+15mVR≧2.0 [SL0.7/90바]",
         f"    진입{c.get('momentum_enter',0)}"
-        f" → 5mRSI(68미만):{c.get('momentum_rsi5_fail',0)}"
+        f" → 5mRSI(71미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
         f" VR5과열(3.0초과):{c.get('momentum_vr5_over_fail',0)}"
         f" 15mVR(2.0미만):{c.get('momentum_vr5_15m_fail',0)}"
@@ -675,12 +675,12 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
         f" 15mVR(0.8미만):{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
-        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.0",
+        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1 [SL1.0/90바]",
         f"    진입{c.get('oversold_enter',0)}"
         f" → 5mRSI(35초과):{c.get('oversold_rsi_fail',0)}"
         f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
-        f" 감싸기(2.0미만):{c.get('oversold_engulf_fail',0)}"
+        f" 감싸기(2.1미만):{c.get('oversold_engulf_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
@@ -7543,14 +7543,14 @@ _V0_EXIT_PARAMS_C = {  # C: 30s부터 양수 → 빠르게 잠그기
     "description": "C_TRAIL_SL0.4/A0.2/T0.15",
 }
 
-_V0_EXIT_PARAMS_MOMENTUM = {  # G: MFE+0.48%, SL 33%사망 → 넓은 SL + 긴 홀딩
+_V0_EXIT_PARAMS_MOMENTUM = {  # v18d: G SL 원복 + 맥스바 90 절충 (SL1.5 재앙 확정)
     "strategy": "TRAIL",
-    "sl_pct": 0.015,
-    "activation_pct": 0.005,
-    "trail_pct": 0.004,
+    "sl_pct": 0.007,
+    "activation_pct": 0.003,
+    "trail_pct": 0.002,
     "hold_bars": 0,
-    "max_bars": 120,
-    "description": "G_TRAIL_SL1.5/A0.5/T0.4/120bar",
+    "max_bars": 90,
+    "description": "G_TRAIL_SL0.7/A0.3/T0.2/90bar",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -7561,6 +7561,16 @@ _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
     "hold_bars": 0,
     "max_bars": 90,
     "description": "SLOW_TRAIL_SL0.7/A0.3/T0.2/90bar",
+}
+
+_V0_EXIT_PARAMS_K = {  # v18d: K 150s +0.09% 활용, 맥스바 90
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.005,
+    "trail_pct": 0.003,
+    "hold_bars": 0,
+    "max_bars": 90,
+    "description": "K_TRAIL_SL1.0/A0.5/T0.3/90bar",
 }
 
 _V0_EXIT_PARAMS_BREAKOUT = {  # B: V자 패턴, 되돌림 버텨야
@@ -7628,7 +7638,7 @@ def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "B",
         "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
         "indicators": {"gap_20bar": round(gap_pct, 4)},
     }
 
@@ -7660,14 +7670,16 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         _bp_rev = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
         if not _v4_is_bullish(c1[-1]):
             if _pipeline_inc(f"{pkey}_1m_fail", value=round(_bp_rev, 2), threshold=0, direction="gt"): return None
-    # v18c: engulf_ratio_60 >= 1.5 — C만 적용 (W2.15 vs L1.43, 전 시나리오 최고 변별자)
-    if route == "C" and c60 and len(c60) >= 2:
-        _prev_body_rev = abs(c60[-2]["opening_price"] - c60[-2]["trade_price"])
-        _cur_body_rev = abs(c60[-1]["opening_price"] - c60[-1]["trade_price"])
-        if _prev_body_rev > 0:
-            _engulf_rev = round(_cur_body_rev / _prev_body_rev, 2)
-            if _engulf_rev < 1.5:
-                if _pipeline_inc(f"{pkey}_engulf_fail", value=_engulf_rev, threshold=1.5, direction="gte"): return None
+    # v18d: engulf 제거 (W3.35 vs L3.66 역전, 차단건 42% > 통과건 32% = 과적합)
+    # → vr5_15m >= 1.0 추가 (W4.83 vs L1.31, 3.7배 변별력)
+    if route == "C" and c15 and len(c15) >= 6:
+        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
+        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
+        if avg_vol_15 > 0:
+            _vr5_15m_c = round(cur_vol_15 / avg_vol_15, 2)
+            if _vr5_15m_c < 1.0:
+                if _pipeline_inc(f"{pkey}_vr5_15m_fail", value=_vr5_15m_c, threshold=1.0, direction="gte"): return None
     # v18c: gap20 필터 — C만 적용, H는 제거 (H 차단건 46%+0.07% > 통과건 28%, 역효과)
     _gap20_rev = None
     if route == "C" and c1 and len(c1) >= 21:
@@ -7682,7 +7694,7 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         "entry_mode": "confirm",
         "logic_group": route,
         "filters_hit": [f"{tf}음→양", f"회복{recovery_gap:+.2f}%", f"Gap20={_gap20_rev}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": (_V0_EXIT_PARAMS_C if route == "C" else _V0_EXIT_PARAMS_SLOW).copy(),
         "indicators": {"recovery_gap": round(recovery_gap, 2)},
     }
 
@@ -7738,14 +7750,14 @@ def _v0_check_ema_60m(c1, c5, c15, c30, c60, gate_info=None):
 
 
 def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
-    """G 모멘텀: 5m RSI 68~100 + 양봉 + 1mVR≤3.0"""
+    """G 모멘텀: 5m RSI 71~100 + 양봉 + 1mVR≤3.0"""
     _pipeline_inc("momentum_enter")
     if not c5 or len(c5) < 15:
         return None
     rsi_5m = _v4_rsi_from_candles(c5, 14)
-    # v18c: RSI 65→68로 조이기 (68.25에서 87건 29% +3%p)
-    if rsi_5m is None or rsi_5m < 68:
-        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=68, direction="gte"): return None
+    # v18d: RSI 68→71로 조이기 (71.4에서 89건 29% +4%p)
+    if rsi_5m is None or rsi_5m < 71:
+        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=71, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
         _bp_g = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
@@ -7805,7 +7817,7 @@ def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "L",
         "filters_hit": [f"15mADX={adx_15:.1f}", f"VR15={_vr5_15m_l}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": _V0_EXIT_PARAMS_SLOW.copy(),
         "indicators": {"adx_15": round(adx_15, 1)},
     }
 
@@ -7838,15 +7850,16 @@ def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         cur_body_k = abs(c60[-1]["opening_price"] - c60[-1]["trade_price"])
         if prev_body_k > 0:
             _engulf_k = round(cur_body_k / prev_body_k, 2)
-            if _engulf_k < 2.0:
-                if _pipeline_inc("oversold_engulf_fail", value=_engulf_k, threshold=2.0, direction="gte"): return None
+            # v18d: engulf 2.0→2.1 조이기 (62건 44% +3%p)
+            if _engulf_k < 2.1:
+                if _pipeline_inc("oversold_engulf_fail", value=_engulf_k, threshold=2.1, direction="gte"): return None
     _pipeline_inc("oversold_pass")
     return {
         "signal_tag": "역추세반등",
         "entry_mode": "confirm",
         "logic_group": "K",
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"Engulf={_engulf_k}"],
-        "exit_params": _V0_EXIT_PARAMS_REVERSAL.copy(),
+        "exit_params": _V0_EXIT_PARAMS_K.copy(),
         "indicators": {"rsi_5m": round(rsi_5m, 1)},
     }
 
@@ -7922,7 +7935,7 @@ _STRATEGY_REGISTRY = {
     },
     "패턴반전_60m": {
         "check_fn": _v0_check_reversal_60m,
-        "exit_params": _V0_EXIT_PARAMS,
+        "exit_params": _V0_EXIT_PARAMS_SLOW,
         "priority": 4,
         "enabled": False,
         "pipeline_key": "reversal_60m",
@@ -7955,7 +7968,7 @@ _STRATEGY_REGISTRY = {
         "enabled": False,
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥68 + 양봉 + VR5≤3.0",
+        "description": "5mRSI≥71 + 양봉 + VR5≤3.0",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -7968,7 +7981,7 @@ _STRATEGY_REGISTRY = {
     },
     "역추세반등": {
         "check_fn": _v0_check_oversold_bounce,
-        "exit_params": _V0_EXIT_PARAMS_REVERSAL,
+        "exit_params": _V0_EXIT_PARAMS_K,
         "priority": 9,
         "enabled": False,
         "pipeline_key": "oversold",
@@ -8157,6 +8170,20 @@ def _load_shadow_stats():
                         os.remove(SHADOW_BLOCKED_STATS_PATH)
                     with open(_v18c_marker, "w") as f:
                         f.write("v18c exit split + filter readjust reset done\n")
+                except Exception:
+                    pass
+            # v18d: C engulf→vr5_15m + G RSI71/SL원복 + K engulf2.1/90바 + H 90바
+            _v18d_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18d_filter_tune_reset_done")
+            if not os.path.exists(_v18d_marker):
+                print("[SHADOW_STATS] v18d 리셋: C vr5_15m + G RSI71/SL원복 + K engulf2.1 + H/K 90바")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18d_marker, "w") as f:
+                        f.write("v18d filter tune reset done\n")
                 except Exception:
                     pass
             _SHADOW_TRADE_COUNT = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
@@ -8421,6 +8448,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "win_ind_m2": {}, "loss_ind_m2": {},
                 "mae_sum": 0.0, "mae_cnt": 0,
                 "pnl_curve_sum": {}, "pnl_curve_cnt": {},
+                "sl_hit_secs": [],           # v18d: SL 히트 시점 (초)
+                "coin_wl": {},               # v18d: 코인별 {coin: [wins, losses]}
                 "_v11_filters_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
@@ -8430,7 +8459,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                                   ("loss_ind_avg", {}), ("loss_ind_cnt", {}),
                                   ("win_ind_m2", {}), ("loss_ind_m2", {}),
                                   ("mae_sum", 0.0), ("mae_cnt", 0),
-                                  ("pnl_curve_sum", {}), ("pnl_curve_cnt", {})):
+                                  ("pnl_curve_sum", {}), ("pnl_curve_cnt", {}),
+                                  ("sl_hit_secs", []), ("coin_wl", {})):
             if _field not in s:
                 s[_field] = _default
         s["signals"] += 1
@@ -8457,6 +8487,22 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
+        # v18d: SL 히트 시점 기록
+        if exit_reason == "손절SL":
+            sl_secs = s.get("sl_hit_secs", [])
+            sl_secs.append(round(hold_sec, 1))
+            if len(sl_secs) > 200:
+                sl_secs = sl_secs[-200:]
+            s["sl_hit_secs"] = sl_secs
+        # v18d: 코인별 W/L 기록
+        coin_wl = s.get("coin_wl", {})
+        if coin not in coin_wl:
+            coin_wl[coin] = [0, 0]
+        if is_win:
+            coin_wl[coin][0] += 1
+        else:
+            coin_wl[coin][1] += 1
+        s["coin_wl"] = coin_wl
         # 🔬 진입 지표값 승/패 점진적 평균 + Welford 분산 업데이트
         if indicators:
             if is_win:
@@ -8859,7 +8905,7 @@ _SWEEP_FILTER_TO_IND = {
     "oversold_engulf_fail": "engulf_ratio_60",
     "adx_trend_15_fail": "adx_15",
     "adx_trend_vr5_15m_fail": "vr5_15m",
-    "reversal_15m_engulf_fail": "engulf_ratio_60",  # v18c: C engulf
+    "reversal_15m_vr5_15m_fail": "vr5_15m",    # v18d: C engulf→vr5_15m 교체
     "reversal_15m_gap20_fail": "gap_20bar",
     # v18c: H gap20 제거, D 비활성화 → 매핑 불필요
 }
@@ -8997,6 +9043,49 @@ def _v4_shadow_report_lines():
                         curve_parts.append(f"{snap_s}s:{avg_snap:+.2f}%")
                 if curve_parts:
                     lines.append(f"    ⏱️ {' → '.join(curve_parts)}")
+            # v18d: SL 히트 시점 분포
+            sl_secs = s.get("sl_hit_secs", [])
+            if sl_secs and len(sl_secs) >= 3:
+                avg_sl = sum(sl_secs) / len(sl_secs)
+                # 구간별 분포: 0-30s, 30-60s, 60-120s, 120s+
+                b1 = sum(1 for x in sl_secs if x <= 30)
+                b2 = sum(1 for x in sl_secs if 30 < x <= 60)
+                b3 = sum(1 for x in sl_secs if 60 < x <= 120)
+                b4 = sum(1 for x in sl_secs if x > 120)
+                lines.append(
+                    f"    🛑 SL평균{avg_sl:.0f}초"
+                    f" (0-30s:{b1} 30-60s:{b2} 60-120s:{b3} 120s+:{b4})"
+                )
+            # v18d: 시간 기반 청산 PnL 비교 (트레일 vs 시간청산)
+            if cs and n >= 20:
+                # 현재 실제 PnL vs 각 시점 고정 청산 PnL
+                time_exit_parts = []
+                for snap_s in _SHADOW_PNL_SNAP_SECS:
+                    sk = str(snap_s)
+                    if sk in cs and cc.get(sk, 0) > 0:
+                        time_pnl = cs[sk] / cc[sk] * 100
+                        diff = time_pnl - avg_pnl
+                        if abs(diff) >= 0.01:
+                            sign = "+" if diff >= 0 else ""
+                            time_exit_parts.append(f"{snap_s}s→{sign}{diff:.2f}%p")
+                if time_exit_parts:
+                    lines.append(f"    📐 시간청산시 차이: {' '.join(time_exit_parts)}")
+            # v18d: 코인별 승률 (상위/하위 3개)
+            coin_wl = s.get("coin_wl", {})
+            if coin_wl and len(coin_wl) >= 5:
+                coin_stats = []
+                for c_name, (cw, cl) in coin_wl.items():
+                    ct = cw + cl
+                    if ct >= 3:  # 최소 3건
+                        coin_stats.append((c_name, cw, cl, ct, cw / ct * 100))
+                if len(coin_stats) >= 3:
+                    coin_stats.sort(key=lambda x: x[4], reverse=True)
+                    top3 = coin_stats[:3]
+                    bot3 = coin_stats[-3:]
+                    top_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in top3)
+                    bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
+                    lines.append(f"    🏆 상위: {top_str}")
+                    lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
             w_ind = s.get("win_ind_avg", {})
             w_cnt = s.get("win_ind_cnt", {})
