@@ -8448,6 +8448,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "win_ind_m2": {}, "loss_ind_m2": {},
                 "mae_sum": 0.0, "mae_cnt": 0,
                 "pnl_curve_sum": {}, "pnl_curve_cnt": {},
+                "sl_hit_secs": [],           # v18d: SL 히트 시점 (초)
+                "coin_wl": {},               # v18d: 코인별 {coin: [wins, losses]}
                 "_v11_filters_reset": True,
             }
         s = _SHADOW_PERF_STATS[key]
@@ -8457,7 +8459,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                                   ("loss_ind_avg", {}), ("loss_ind_cnt", {}),
                                   ("win_ind_m2", {}), ("loss_ind_m2", {}),
                                   ("mae_sum", 0.0), ("mae_cnt", 0),
-                                  ("pnl_curve_sum", {}), ("pnl_curve_cnt", {})):
+                                  ("pnl_curve_sum", {}), ("pnl_curve_cnt", {}),
+                                  ("sl_hit_secs", []), ("coin_wl", {})):
             if _field not in s:
                 s[_field] = _default
         s["signals"] += 1
@@ -8484,6 +8487,22 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["coins"].append(coin)
             if len(s["coins"]) > 50:
                 s["coins"] = s["coins"][-50:]
+        # v18d: SL 히트 시점 기록
+        if exit_reason == "손절SL":
+            sl_secs = s.get("sl_hit_secs", [])
+            sl_secs.append(round(hold_sec, 1))
+            if len(sl_secs) > 200:
+                sl_secs = sl_secs[-200:]
+            s["sl_hit_secs"] = sl_secs
+        # v18d: 코인별 W/L 기록
+        coin_wl = s.get("coin_wl", {})
+        if coin not in coin_wl:
+            coin_wl[coin] = [0, 0]
+        if is_win:
+            coin_wl[coin][0] += 1
+        else:
+            coin_wl[coin][1] += 1
+        s["coin_wl"] = coin_wl
         # 🔬 진입 지표값 승/패 점진적 평균 + Welford 분산 업데이트
         if indicators:
             if is_win:
@@ -9024,6 +9043,49 @@ def _v4_shadow_report_lines():
                         curve_parts.append(f"{snap_s}s:{avg_snap:+.2f}%")
                 if curve_parts:
                     lines.append(f"    ⏱️ {' → '.join(curve_parts)}")
+            # v18d: SL 히트 시점 분포
+            sl_secs = s.get("sl_hit_secs", [])
+            if sl_secs and len(sl_secs) >= 3:
+                avg_sl = sum(sl_secs) / len(sl_secs)
+                # 구간별 분포: 0-30s, 30-60s, 60-120s, 120s+
+                b1 = sum(1 for x in sl_secs if x <= 30)
+                b2 = sum(1 for x in sl_secs if 30 < x <= 60)
+                b3 = sum(1 for x in sl_secs if 60 < x <= 120)
+                b4 = sum(1 for x in sl_secs if x > 120)
+                lines.append(
+                    f"    🛑 SL평균{avg_sl:.0f}초"
+                    f" (0-30s:{b1} 30-60s:{b2} 60-120s:{b3} 120s+:{b4})"
+                )
+            # v18d: 시간 기반 청산 PnL 비교 (트레일 vs 시간청산)
+            if cs and n >= 20:
+                # 현재 실제 PnL vs 각 시점 고정 청산 PnL
+                time_exit_parts = []
+                for snap_s in _SHADOW_PNL_SNAP_SECS:
+                    sk = str(snap_s)
+                    if sk in cs and cc.get(sk, 0) > 0:
+                        time_pnl = cs[sk] / cc[sk] * 100
+                        diff = time_pnl - avg_pnl
+                        if abs(diff) >= 0.01:
+                            sign = "+" if diff >= 0 else ""
+                            time_exit_parts.append(f"{snap_s}s→{sign}{diff:.2f}%p")
+                if time_exit_parts:
+                    lines.append(f"    📐 시간청산시 차이: {' '.join(time_exit_parts)}")
+            # v18d: 코인별 승률 (상위/하위 3개)
+            coin_wl = s.get("coin_wl", {})
+            if coin_wl and len(coin_wl) >= 5:
+                coin_stats = []
+                for c_name, (cw, cl) in coin_wl.items():
+                    ct = cw + cl
+                    if ct >= 3:  # 최소 3건
+                        coin_stats.append((c_name, cw, cl, ct, cw / ct * 100))
+                if len(coin_stats) >= 3:
+                    coin_stats.sort(key=lambda x: x[4], reverse=True)
+                    top3 = coin_stats[:3]
+                    bot3 = coin_stats[-3:]
+                    top_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in top3)
+                    bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
+                    lines.append(f"    🏆 상위: {top_str}")
+                    lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
             w_ind = s.get("win_ind_avg", {})
             w_cnt = s.get("win_ind_cnt", {})
