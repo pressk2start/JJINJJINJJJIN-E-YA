@@ -7638,7 +7638,7 @@ def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "B",
         "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
         "indicators": {"gap_20bar": round(gap_pct, 4)},
     }
 
@@ -7694,7 +7694,7 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         "entry_mode": "confirm",
         "logic_group": route,
         "filters_hit": [f"{tf}음→양", f"회복{recovery_gap:+.2f}%", f"Gap20={_gap20_rev}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": (_V0_EXIT_PARAMS_C if route == "C" else _V0_EXIT_PARAMS_SLOW).copy(),
         "indicators": {"recovery_gap": round(recovery_gap, 2)},
     }
 
@@ -7817,7 +7817,7 @@ def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "L",
         "filters_hit": [f"15mADX={adx_15:.1f}", f"VR15={_vr5_15m_l}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
+        "exit_params": _V0_EXIT_PARAMS_SLOW.copy(),
         "indicators": {"adx_15": round(adx_15, 1)},
     }
 
@@ -7859,7 +7859,7 @@ def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
         "entry_mode": "confirm",
         "logic_group": "K",
         "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"Engulf={_engulf_k}"],
-        "exit_params": _V0_EXIT_PARAMS_REVERSAL.copy(),
+        "exit_params": _V0_EXIT_PARAMS_K.copy(),
         "indicators": {"rsi_5m": round(rsi_5m, 1)},
     }
 
