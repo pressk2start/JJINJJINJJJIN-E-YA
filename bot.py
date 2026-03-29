@@ -671,7 +671,7 @@ def _pipeline_report(force=False):
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"  [LADX] 15mADX≧28.5+1m양봉+15mVR≧0.8 [90바]",
         f"    진입{c.get('adx_trend_enter',0)}"
-        f" → 15mADX(30미만):{c.get('adx_trend_15_fail',0)}"
+        f" → 15mADX(28.5미만):{c.get('adx_trend_15_fail',0)}"
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
         f" 15mVR(0.8미만):{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
