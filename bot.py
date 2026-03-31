@@ -7960,7 +7960,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM,
         "priority": 7,
-        "enabled": False,
+        "enabled": True,  # v18e: 라이브 활성화 (v18d 53건 51% +0.24%)
         "pipeline_key": "momentum",
         "route": "G",
         "description": "5mRSI≥71 + 양봉 + VR5≤3.2",
@@ -7978,7 +7978,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_oversold_bounce,
         "exit_params": _V0_EXIT_PARAMS_K,
         "priority": 9,
-        "enabled": False,
+        "enabled": True,  # v18e: 라이브 활성화 (v18d 56건 64% +0.28%)
         "pipeline_key": "oversold",
         "route": "K",
         "description": "5mRSI≤35 + 음→양",
@@ -8167,16 +8167,19 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
-            # v18e-fix: G pullback 제거 → G 통계만 초기화 (v2: blocked 로드 전이라 perf만, blocked는 아래서)
+            # v18e-fix: G pullback 제거 → 전체 통계 초기화 (깔끔하게 재시작)
             _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
             _v18e_g_need_blocked_cleanup = False
             if not os.path.exists(_v18e_g_marker):
-                print("[SHADOW_STATS] v18e-fix: G pullback 제거 → G 통계 초기화")
+                print("[SHADOW_STATS] v18e-fix: G pullback 제거 → 전체 통계 초기화")
                 try:
-                    g_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("G:")]
-                    for k in g_keys:
-                        del _SHADOW_PERF_STATS[k]
-                    _v18e_g_need_blocked_cleanup = True
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18e_g_marker, "w") as f:
+                        f.write("v18e G pullback removed, full stats reset\n")
                 except Exception:
                     pass
             # v18e: ATR 동적 엑시트 + B/G pullback entry + 분포 겹침 경고
@@ -8214,19 +8217,6 @@ def _load_shadow_stats():
         _SHADOW_PERF_STATS = {}
     # 차단 건 통계 로드
     _load_blocked_stats()
-    # v18e-fix: G blocked 통계 정리 (blocked 로드 완료 후)
-    if _v18e_g_need_blocked_cleanup:
-        try:
-            g_bkeys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G:")]
-            for k in g_bkeys:
-                del _SHADOW_BLOCKED_STATS[k]
-            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
-            with open(_v18e_g_marker, "w") as f:
-                f.write("v18e G pullback removed, G stats reset\n")
-            _save_shadow_stats()
-            print("[SHADOW_STATS] v18e-fix: G perf+blocked 통계 초기화 완료")
-        except Exception:
-            pass
 
 
 def _save_shadow_stats():
@@ -8608,14 +8598,14 @@ def _shadow_sim_exit(vp, cur_price):
     trail_pct = ep.get("trail_pct", 0.002)
     max_bars = ep.get("max_bars", 60)
 
-    # v18e: ATR 동적 스케일링 — 기준 ATR 0.25% 대비 배율로 SL/activation/trail 조정
-    _REF_ATR = 0.25
-    atr_pct = vp.get("indicators", {}).get("atr_pct")
-    if atr_pct and atr_pct > 0:
-        atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
-        sl_pct = sl_pct * atr_scale
-        activation_pct = activation_pct * atr_scale
-        trail_pct = trail_pct * atr_scale
+    # v18e: ATR 동적 스케일링 — 비활성화 (v18d 고정값으로 복원, 근거 확보 후 재도입)
+    # _REF_ATR = 0.25
+    # atr_pct = vp.get("indicators", {}).get("atr_pct")
+    # if atr_pct and atr_pct > 0:
+    #     atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
+    #     sl_pct = sl_pct * atr_scale
+    #     activation_pct = activation_pct * atr_scale
+    #     trail_pct = trail_pct * atr_scale
 
     now = time.time()
     hold_sec = now - vp["entry_ts"]
