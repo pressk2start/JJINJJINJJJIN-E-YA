@@ -7960,7 +7960,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM,
         "priority": 7,
-        "enabled": False,
+        "enabled": True,  # v18e: 라이브 활성화 (v18d 53건 51% +0.24%)
         "pipeline_key": "momentum",
         "route": "G",
         "description": "5mRSI≥71 + 양봉 + VR5≤3.2",
@@ -7978,7 +7978,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_oversold_bounce,
         "exit_params": _V0_EXIT_PARAMS_K,
         "priority": 9,
-        "enabled": False,
+        "enabled": True,  # v18e: 라이브 활성화 (v18d 56건 64% +0.28%)
         "pipeline_key": "oversold",
         "route": "K",
         "description": "5mRSI≤35 + 음→양",
@@ -8598,14 +8598,14 @@ def _shadow_sim_exit(vp, cur_price):
     trail_pct = ep.get("trail_pct", 0.002)
     max_bars = ep.get("max_bars", 60)
 
-    # v18e: ATR 동적 스케일링 — 기준 ATR 0.25% 대비 배율로 SL/activation/trail 조정
-    _REF_ATR = 0.25
-    atr_pct = vp.get("indicators", {}).get("atr_pct")
-    if atr_pct and atr_pct > 0:
-        atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
-        sl_pct = sl_pct * atr_scale
-        activation_pct = activation_pct * atr_scale
-        trail_pct = trail_pct * atr_scale
+    # v18e: ATR 동적 스케일링 — 비활성화 (v18d 고정값으로 복원, 근거 확보 후 재도입)
+    # _REF_ATR = 0.25
+    # atr_pct = vp.get("indicators", {}).get("atr_pct")
+    # if atr_pct and atr_pct > 0:
+    #     atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
+    #     sl_pct = sl_pct * atr_scale
+    #     activation_pct = activation_pct * atr_scale
+    #     trail_pct = trail_pct * atr_scale
 
     now = time.time()
     hold_sec = now - vp["entry_ts"]
