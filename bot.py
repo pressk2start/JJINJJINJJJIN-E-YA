@@ -630,11 +630,7 @@ def _pipeline_report(force=False):
         f"📡 v4: {_v4}(Δ{d('v4_called')})",
         f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
         f"━ v0 전략 세부 ━",
-        f"  [A거래량] VR5≧2.5+양봉",
-        f"    진입{c.get('vol_burst_enter',0)}"
-        f" → VR5(2.5미만):{c.get('vol_burst_vr5_fail',0)}"
-        f" 음봉:{c.get('vol_burst_bull_fail',0)}"
-        f" ✅통과:{c.get('vol_burst_pass',0)}",
+        f"  [A거래량] ⛔비활성(v18e: 944건27%-0.05%)",
         f"  [B돌파] 종가돌파(20봉고점)+양봉+15mVR≧1.5 [SL1.0/90바]",
         f"    진입{c.get('breakout_enter',0)}"
         f" → 종가(20봉고점미달):{c.get('breakout_price_fail',0)}"
@@ -657,16 +653,12 @@ def _pipeline_report(force=False):
         f" 종가(전봉시가미달):{c.get('reversal_60m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
-        f"  [FEMA15] 15m EMA5정배열+1m양봉",
-        f"    진입{c.get('ema_align_15m_enter',0)}"
-        f" → EMA정배열아님:{c.get('ema_align_15m_ema_fail',0)}"
-        f" 1m음봉:{c.get('ema_align_15m_1m_fail',0)}"
-        f" ✅통과:{c.get('ema_align_15m_pass',0)}",
-        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.0+15mVR≧2.0 [SL0.7/90바]",
+        f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
+        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.2+15mVR≧2.0 [SL0.7/90바]",
         f"    진입{c.get('momentum_enter',0)}"
         f" → 5mRSI(71미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
-        f" VR5과열(3.0초과):{c.get('momentum_vr5_over_fail',0)}"
+        f" VR5과열(3.2초과):{c.get('momentum_vr5_over_fail',0)}"
         f" 15mVR(2.0미만):{c.get('momentum_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"  [LADX] 15mADX≧28.5+1m양봉+15mVR≧0.8 [90바]",
@@ -709,7 +701,7 @@ def _pipeline_report(force=False):
         val_lines.append(f"  m3%: max={_m3['max']:.3f} avg={_m3['avg']:.3f} thr={_m3['thr']:.3f} 🎯NM={_m3['near_miss']}")
     _vr5 = vs.get("vr5", {})
     if _vr5.get("n", 0) > 0:
-        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.0 🎯NM={_vr5['near_miss']}")
+        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.2 🎯NM={_vr5['near_miss']}")
     _atr = vs.get("atr_pct", {})
     if _atr.get("n", 0) > 0:
         val_lines.append(f"  ATR%: max={_atr['max']:.2f} avg={_atr['avg']:.2f} thr=0.7 🎯NM={_atr['near_miss']}")
@@ -7763,8 +7755,9 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
     # v18c: 1분봉 VR5 상한 (W1.31 vs L4.67 — L이 3.6배! 과열 추격 차단)
     _vr5_1m_g = _v4_volume_ratio_5(c1) if c1 and len(c1) >= 7 else None
-    if _vr5_1m_g is not None and _vr5_1m_g > 3.0:
-        if _pipeline_inc("momentum_vr5_over_fail", value=round(_vr5_1m_g, 2), threshold=3.0, direction="lte"): return None
+    # v18e: VR5 상한 3.0→3.2 (차단 3건=100% Win +1.51%, 리스크 최소)
+    if _vr5_1m_g is not None and _vr5_1m_g > 3.2:
+        if _pipeline_inc("momentum_vr5_over_fail", value=round(_vr5_1m_g, 2), threshold=3.2, direction="lte"): return None
     # v18: 15분봉 거래량 동반 체크 (W4.42 vs L1.51 → 2.9배 변별력)
     _vr5_15m_g = None
     if c15 and len(c15) >= 6:
@@ -7915,15 +7908,16 @@ _STRATEGY_REGISTRY = {
     #     "route": "D",
     #     "description": "20봉고점 -1%이내 + 양봉",
     # },
-    "거래량폭발": {
-        "check_fn": _v0_check_volume_burst,
-        "exit_params": _V0_EXIT_PARAMS,
-        "priority": 2,
-        "enabled": False,
-        "pipeline_key": "vol_burst",
-        "route": "A",
-        "description": "VR5≥2.5 + 양봉",
-    },
+    # v18e: A(거래량폭발) 비활성화 — 944건 27% PnL-0.05%, MFE+0.19%, W/L 분포 완전 겹침, 개선 불가
+    # "거래량폭발": {
+    #     "check_fn": _v0_check_volume_burst,
+    #     "exit_params": _V0_EXIT_PARAMS,
+    #     "priority": 2,
+    #     "enabled": False,
+    #     "pipeline_key": "vol_burst",
+    #     "route": "A",
+    #     "description": "VR5≥2.5 + 양봉",
+    # },
     "패턴반전_15m": {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
@@ -7942,15 +7936,16 @@ _STRATEGY_REGISTRY = {
         "route": "H",
         "description": "60m 음→양 + 종가회복",
     },
-    "추세정배열_15m": {
-        "check_fn": _v0_check_ema_15m,
-        "exit_params": _V0_EXIT_PARAMS,
-        "priority": 5,
-        "enabled": False,
-        "pipeline_key": "ema_align_15m",
-        "route": "F",
-        "description": "15m EMA5>10>20 + 양봉",
-    },
+    # v18e: F(추세정배열_15m) 비활성화 — 1905건 27% PnL-0.10%, MFE+0.12%, 전체 최악. 리소스 낭비
+    # "추세정배열_15m": {
+    #     "check_fn": _v0_check_ema_15m,
+    #     "exit_params": _V0_EXIT_PARAMS,
+    #     "priority": 5,
+    #     "enabled": False,
+    #     "pipeline_key": "ema_align_15m",
+    #     "route": "F",
+    #     "description": "15m EMA5>10>20 + 양봉",
+    # },
     # v18: J(추세정배열_60m) 제거 — 4432건 31% PnL-0.10% 최악, 환경필터 전환 검토
     # "추세정배열_60m": {
     #     "check_fn": _v0_check_ema_60m,
@@ -7968,7 +7963,7 @@ _STRATEGY_REGISTRY = {
         "enabled": False,
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥71 + 양봉 + VR5≤3.0",
+        "description": "5mRSI≥71 + 양봉 + VR5≤3.2",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8183,7 +8178,7 @@ def _load_shadow_stats():
                     if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
                         os.remove(SHADOW_BLOCKED_STATS_PATH)
                     with open(_v18e_marker, "w") as f:
-                        f.write("v18e atr dynamic exit + B/G pullback + overlap warning reset done\n")
+                        f.write("v18e atr dynamic exit + B/G pullback + overlap warning + A/F off + G vr5 3.2 reset done\n")
                 except Exception:
                     pass
             # v18d: C engulf→vr5_15m + G RSI71/SL원복 + K engulf2.1/90바 + H 90바
