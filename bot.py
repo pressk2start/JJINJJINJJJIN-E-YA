@@ -630,11 +630,7 @@ def _pipeline_report(force=False):
         f"📡 v4: {_v4}(Δ{d('v4_called')})",
         f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
         f"━ v0 전략 세부 ━",
-        f"  [A거래량] VR5≧2.5+양봉",
-        f"    진입{c.get('vol_burst_enter',0)}"
-        f" → VR5(2.5미만):{c.get('vol_burst_vr5_fail',0)}"
-        f" 음봉:{c.get('vol_burst_bull_fail',0)}"
-        f" ✅통과:{c.get('vol_burst_pass',0)}",
+        f"  [A거래량] ⛔비활성(v18e: 944건27%-0.05%)",
         f"  [B돌파] 종가돌파(20봉고점)+양봉+15mVR≧1.5 [SL1.0/90바]",
         f"    진입{c.get('breakout_enter',0)}"
         f" → 종가(20봉고점미달):{c.get('breakout_price_fail',0)}"
@@ -657,16 +653,12 @@ def _pipeline_report(force=False):
         f" 종가(전봉시가미달):{c.get('reversal_60m_recovery_fail',0)}"
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
-        f"  [FEMA15] 15m EMA5정배열+1m양봉",
-        f"    진입{c.get('ema_align_15m_enter',0)}"
-        f" → EMA정배열아님:{c.get('ema_align_15m_ema_fail',0)}"
-        f" 1m음봉:{c.get('ema_align_15m_1m_fail',0)}"
-        f" ✅통과:{c.get('ema_align_15m_pass',0)}",
-        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.0+15mVR≧2.0 [SL0.7/90바]",
+        f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
+        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.2+15mVR≧2.0 [SL0.7/90바]",
         f"    진입{c.get('momentum_enter',0)}"
         f" → 5mRSI(71미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
-        f" VR5과열(3.0초과):{c.get('momentum_vr5_over_fail',0)}"
+        f" VR5과열(3.2초과):{c.get('momentum_vr5_over_fail',0)}"
         f" 15mVR(2.0미만):{c.get('momentum_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"  [LADX] 15mADX≧28.5+1m양봉+15mVR≧0.8 [90바]",
@@ -709,7 +701,7 @@ def _pipeline_report(force=False):
         val_lines.append(f"  m3%: max={_m3['max']:.3f} avg={_m3['avg']:.3f} thr={_m3['thr']:.3f} 🎯NM={_m3['near_miss']}")
     _vr5 = vs.get("vr5", {})
     if _vr5.get("n", 0) > 0:
-        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.0 🎯NM={_vr5['near_miss']}")
+        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.2 🎯NM={_vr5['near_miss']}")
     _atr = vs.get("atr_pct", {})
     if _atr.get("n", 0) > 0:
         val_lines.append(f"  ATR%: max={_atr['max']:.2f} avg={_atr['avg']:.2f} thr=0.7 🎯NM={_atr['near_miss']}")
@@ -7763,8 +7755,9 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
     # v18c: 1분봉 VR5 상한 (W1.31 vs L4.67 — L이 3.6배! 과열 추격 차단)
     _vr5_1m_g = _v4_volume_ratio_5(c1) if c1 and len(c1) >= 7 else None
-    if _vr5_1m_g is not None and _vr5_1m_g > 3.0:
-        if _pipeline_inc("momentum_vr5_over_fail", value=round(_vr5_1m_g, 2), threshold=3.0, direction="lte"): return None
+    # v18e: VR5 상한 3.0→3.2 (차단 3건=100% Win +1.51%, 리스크 최소)
+    if _vr5_1m_g is not None and _vr5_1m_g > 3.2:
+        if _pipeline_inc("momentum_vr5_over_fail", value=round(_vr5_1m_g, 2), threshold=3.2, direction="lte"): return None
     # v18: 15분봉 거래량 동반 체크 (W4.42 vs L1.51 → 2.9배 변별력)
     _vr5_15m_g = None
     if c15 and len(c15) >= 6:
@@ -7915,15 +7908,16 @@ _STRATEGY_REGISTRY = {
     #     "route": "D",
     #     "description": "20봉고점 -1%이내 + 양봉",
     # },
-    "거래량폭발": {
-        "check_fn": _v0_check_volume_burst,
-        "exit_params": _V0_EXIT_PARAMS,
-        "priority": 2,
-        "enabled": False,
-        "pipeline_key": "vol_burst",
-        "route": "A",
-        "description": "VR5≥2.5 + 양봉",
-    },
+    # v18e: A(거래량폭발) 비활성화 — 944건 27% PnL-0.05%, MFE+0.19%, W/L 분포 완전 겹침, 개선 불가
+    # "거래량폭발": {
+    #     "check_fn": _v0_check_volume_burst,
+    #     "exit_params": _V0_EXIT_PARAMS,
+    #     "priority": 2,
+    #     "enabled": False,
+    #     "pipeline_key": "vol_burst",
+    #     "route": "A",
+    #     "description": "VR5≥2.5 + 양봉",
+    # },
     "패턴반전_15m": {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
@@ -7942,15 +7936,16 @@ _STRATEGY_REGISTRY = {
         "route": "H",
         "description": "60m 음→양 + 종가회복",
     },
-    "추세정배열_15m": {
-        "check_fn": _v0_check_ema_15m,
-        "exit_params": _V0_EXIT_PARAMS,
-        "priority": 5,
-        "enabled": False,
-        "pipeline_key": "ema_align_15m",
-        "route": "F",
-        "description": "15m EMA5>10>20 + 양봉",
-    },
+    # v18e: F(추세정배열_15m) 비활성화 — 1905건 27% PnL-0.10%, MFE+0.12%, 전체 최악. 리소스 낭비
+    # "추세정배열_15m": {
+    #     "check_fn": _v0_check_ema_15m,
+    #     "exit_params": _V0_EXIT_PARAMS,
+    #     "priority": 5,
+    #     "enabled": False,
+    #     "pipeline_key": "ema_align_15m",
+    #     "route": "F",
+    #     "description": "15m EMA5>10>20 + 양봉",
+    # },
     # v18: J(추세정배열_60m) 제거 — 4432건 31% PnL-0.10% 최악, 환경필터 전환 검토
     # "추세정배열_60m": {
     #     "check_fn": _v0_check_ema_60m,
@@ -7968,7 +7963,7 @@ _STRATEGY_REGISTRY = {
         "enabled": False,
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥71 + 양봉 + VR5≤3.0",
+        "description": "5mRSI≥71 + 양봉 + VR5≤3.2",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8170,6 +8165,20 @@ def _load_shadow_stats():
                         os.remove(SHADOW_BLOCKED_STATS_PATH)
                     with open(_v18c_marker, "w") as f:
                         f.write("v18c exit split + filter readjust reset done\n")
+                except Exception:
+                    pass
+            # v18e: ATR 동적 엑시트 + B/G pullback entry + 분포 겹침 경고
+            _v18e_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_atr_pullback_reset_done")
+            if not os.path.exists(_v18e_marker):
+                print("[SHADOW_STATS] v18e 리셋: ATR 동적 엑시트 + B/G pullback + 분포 겹침 경고")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18e_marker, "w") as f:
+                        f.write("v18e atr dynamic exit + B/G pullback + overlap warning + A/F off + G vr5 3.2 reset done\n")
                 except Exception:
                     pass
             # v18d: C engulf→vr5_15m + G RSI71/SL원복 + K engulf2.1/90바 + H 90바
@@ -8574,6 +8583,15 @@ def _shadow_sim_exit(vp, cur_price):
     trail_pct = ep.get("trail_pct", 0.002)
     max_bars = ep.get("max_bars", 60)
 
+    # v18e: ATR 동적 스케일링 — 기준 ATR 0.25% 대비 배율로 SL/activation/trail 조정
+    _REF_ATR = 0.25
+    atr_pct = vp.get("indicators", {}).get("atr_pct")
+    if atr_pct and atr_pct > 0:
+        atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
+        sl_pct = sl_pct * atr_scale
+        activation_pct = activation_pct * atr_scale
+        trail_pct = trail_pct * atr_scale
+
     now = time.time()
     hold_sec = now - vp["entry_ts"]
     pnl = (cur_price - entry_price) / entry_price
@@ -8657,6 +8675,20 @@ def _shadow_evaluate_positions():
             if cur_price < vp.get("worst_price", vp["entry_price"]):
                 vp["worst_price"] = cur_price
             hold_sec_now = now - vp["entry_ts"]
+            # v18e: pullback delay 처리 — 대기 중 최저가 추적, 완료 시 entry_price 갱신
+            _pb_delay = vp.get("_pullback_delay_sec", 0)
+            if _pb_delay > 0 and hold_sec_now < _pb_delay:
+                if cur_price < vp.get("_pullback_best_price", vp["entry_price"]):
+                    vp["_pullback_best_price"] = cur_price
+                remaining.append(vp)
+                continue
+            elif _pb_delay > 0 and not vp.get("_pullback_applied"):
+                vp["_pullback_applied"] = True
+                pb_price = vp.get("_pullback_best_price", vp["entry_price"])
+                vp["entry_price"] = pb_price
+                vp["best_price"] = max(pb_price, cur_price)
+                vp["worst_price"] = min(pb_price, cur_price)
+                vp["entry_ts"] = now  # 실질 진입시점 리셋
             for snap_s in _SHADOW_PNL_SNAP_SECS:
                 sk = str(snap_s)
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
@@ -8793,6 +8825,8 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 if len(_SHADOW_VIRTUAL_POSITIONS) >= SHADOW_MAX_VIRTUAL_POS:
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
+                # v18e: B/G pullback entry — 30초 대기 후 최저가로 진입
+                _pb_delay = 30 if route in ("B", "G") else 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
                     "market": market, "entry_price": entry_price,
@@ -8801,6 +8835,9 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "trail_armed": False, "trail_stop": 0.0,
                     "exit_params": ep, "bars": 0,
                     "indicators": merged_ind, "pnl_curve": {},
+                    "_pullback_delay_sec": _pb_delay,
+                    "_pullback_best_price": entry_price,
+                    "_pullback_orig_price": entry_price,
                 })
         elif all_fails:
             # v0: 실패한 필터 각각에 대해 차단건 가상 추적
@@ -9086,17 +9123,38 @@ def _v4_shadow_report_lines():
                     bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
-            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
+            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값) + v18e: ±1σ 겹침 경고
             w_ind = s.get("win_ind_avg", {})
             w_cnt = s.get("win_ind_cnt", {})
+            w_m2 = s.get("win_ind_m2", {})
             l_ind = s.get("loss_ind_avg", {})
             l_cnt = s.get("loss_ind_cnt", {})
+            l_m2 = s.get("loss_ind_m2", {})
             if w_ind or l_ind:
                 all_keys = set(w_ind.keys()) | set(l_ind.keys())
                 for ik in sorted(all_keys):
                     w_str = f"W{w_ind[ik]:.2f}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
                     l_str = f"L{l_ind[ik]:.2f}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
-                    lines.append(f"    📊{ik}: {w_str} / {l_str}")
+                    # v18e: ±1σ IoU 겹침 판정 (Welford M2 기반)
+                    overlap_tag = ""
+                    if ik in w_ind and ik in l_ind and w_cnt.get(ik, 0) >= 10 and l_cnt.get(ik, 0) >= 10:
+                        w_var = w_m2.get(ik, 0) / max(w_cnt[ik] - 1, 1)
+                        l_var = l_m2.get(ik, 0) / max(l_cnt[ik] - 1, 1)
+                        w_std = w_var ** 0.5
+                        l_std = l_var ** 0.5
+                        if w_std > 0 or l_std > 0:
+                            # ±1σ 구간: [mean-std, mean+std]
+                            w_lo, w_hi = w_ind[ik] - w_std, w_ind[ik] + w_std
+                            l_lo, l_hi = l_ind[ik] - l_std, l_ind[ik] + l_std
+                            # IoU = intersection / union
+                            inter = max(0, min(w_hi, l_hi) - max(w_lo, l_lo))
+                            union = max(w_hi, l_hi) - min(w_lo, l_lo)
+                            iou = inter / union if union > 0 else 1.0
+                            if iou >= 0.7:
+                                overlap_tag = " ⚠겹침"
+                            elif iou <= 0.3:
+                                overlap_tag = " ✅분리"
+                    lines.append(f"    📊{ik}: {w_str} / {l_str}{overlap_tag}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
