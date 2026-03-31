@@ -8167,16 +8167,19 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
-            # v18e-fix: G pullback 제거 → G 통계만 초기화 (v2: blocked 로드 전이라 perf만, blocked는 아래서)
+            # v18e-fix: G pullback 제거 → 전체 통계 초기화 (깔끔하게 재시작)
             _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
             _v18e_g_need_blocked_cleanup = False
             if not os.path.exists(_v18e_g_marker):
-                print("[SHADOW_STATS] v18e-fix: G pullback 제거 → G 통계 초기화")
+                print("[SHADOW_STATS] v18e-fix: G pullback 제거 → 전체 통계 초기화")
                 try:
-                    g_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("G:")]
-                    for k in g_keys:
-                        del _SHADOW_PERF_STATS[k]
-                    _v18e_g_need_blocked_cleanup = True
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18e_g_marker, "w") as f:
+                        f.write("v18e G pullback removed, full stats reset\n")
                 except Exception:
                     pass
             # v18e: ATR 동적 엑시트 + B/G pullback entry + 분포 겹침 경고
@@ -8214,19 +8217,6 @@ def _load_shadow_stats():
         _SHADOW_PERF_STATS = {}
     # 차단 건 통계 로드
     _load_blocked_stats()
-    # v18e-fix: G blocked 통계 정리 (blocked 로드 완료 후)
-    if _v18e_g_need_blocked_cleanup:
-        try:
-            g_bkeys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G:")]
-            for k in g_bkeys:
-                del _SHADOW_BLOCKED_STATS[k]
-            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
-            with open(_v18e_g_marker, "w") as f:
-                f.write("v18e G pullback removed, G stats reset\n")
-            _save_shadow_stats()
-            print("[SHADOW_STATS] v18e-fix: G perf+blocked 통계 초기화 완료")
-        except Exception:
-            pass
 
 
 def _save_shadow_stats():
