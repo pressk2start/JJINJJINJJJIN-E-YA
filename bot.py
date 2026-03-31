@@ -8167,6 +8167,20 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
+            # v18e-final: ATR동적 비활성 + K/G 라이브 + 고정값 복원 → 전체 초기화
+            _v18e_final_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_final_fixed_exit_reset_done")
+            if not os.path.exists(_v18e_final_marker):
+                print("[SHADOW_STATS] v18e-final: ATR동적 비활성 + K/G 라이브 → 전체 초기화")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18e_final_marker, "w") as f:
+                        f.write("v18e final: ATR off, K/G live, fixed exit params\n")
+                except Exception:
+                    pass
             # v18e-fix: G pullback 제거 → 전체 통계 초기화 (깔끔하게 재시작)
             _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
             _v18e_g_need_blocked_cleanup = False
