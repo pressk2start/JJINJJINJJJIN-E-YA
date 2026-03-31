@@ -8825,8 +8825,8 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 if len(_SHADOW_VIRTUAL_POSITIONS) >= SHADOW_MAX_VIRTUAL_POS:
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
-                # v18e: B/G pullback entry — 30초 대기 후 최저가로 진입
-                _pb_delay = 30 if route in ("B", "G") else 0
+                # v18e: B pullback entry — 30초 대기 후 최저가로 진입 (G는 30s부터 양수라 제외)
+                _pb_delay = 30 if route == "B" else 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
                     "market": market, "entry_price": entry_price,
