@@ -8167,6 +8167,23 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
+            # v18e-fix: G pullback 제거 → G 통계만 초기화
+            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_done")
+            if not os.path.exists(_v18e_g_marker):
+                print("[SHADOW_STATS] v18e-fix: G pullback 제거 → G 통계 초기화")
+                try:
+                    g_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("G:")]
+                    for k in g_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    # blocked에서도 G 제거
+                    g_bkeys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G:")]
+                    for k in g_bkeys:
+                        del _SHADOW_BLOCKED_STATS[k]
+                    with open(_v18e_g_marker, "w") as f:
+                        f.write("v18e G pullback removed, G stats reset\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
             # v18e: ATR 동적 엑시트 + B/G pullback entry + 분포 겹침 경고
             _v18e_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_atr_pullback_reset_done")
             if not os.path.exists(_v18e_marker):
