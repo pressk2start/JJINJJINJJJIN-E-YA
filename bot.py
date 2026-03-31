@@ -8172,6 +8172,20 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
+            # v18e: ATR 동적 엑시트 + B/G pullback entry + 분포 겹침 경고
+            _v18e_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_atr_pullback_reset_done")
+            if not os.path.exists(_v18e_marker):
+                print("[SHADOW_STATS] v18e 리셋: ATR 동적 엑시트 + B/G pullback + 분포 겹침 경고")
+                try:
+                    _SHADOW_PERF_STATS = {}
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        os.remove(SHADOW_STATS_PATH)
+                    if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                        os.remove(SHADOW_BLOCKED_STATS_PATH)
+                    with open(_v18e_marker, "w") as f:
+                        f.write("v18e atr dynamic exit + B/G pullback + overlap warning reset done\n")
+                except Exception:
+                    pass
             # v18d: C engulf→vr5_15m + G RSI71/SL원복 + K engulf2.1/90바 + H 90바
             _v18d_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18d_filter_tune_reset_done")
             if not os.path.exists(_v18d_marker):
@@ -8574,6 +8588,15 @@ def _shadow_sim_exit(vp, cur_price):
     trail_pct = ep.get("trail_pct", 0.002)
     max_bars = ep.get("max_bars", 60)
 
+    # v18e: ATR 동적 스케일링 — 기준 ATR 0.25% 대비 배율로 SL/activation/trail 조정
+    _REF_ATR = 0.25
+    atr_pct = vp.get("indicators", {}).get("atr_pct")
+    if atr_pct and atr_pct > 0:
+        atr_scale = max(0.5, min(2.5, atr_pct / _REF_ATR))
+        sl_pct = sl_pct * atr_scale
+        activation_pct = activation_pct * atr_scale
+        trail_pct = trail_pct * atr_scale
+
     now = time.time()
     hold_sec = now - vp["entry_ts"]
     pnl = (cur_price - entry_price) / entry_price
@@ -8657,6 +8680,20 @@ def _shadow_evaluate_positions():
             if cur_price < vp.get("worst_price", vp["entry_price"]):
                 vp["worst_price"] = cur_price
             hold_sec_now = now - vp["entry_ts"]
+            # v18e: pullback delay 처리 — 대기 중 최저가 추적, 완료 시 entry_price 갱신
+            _pb_delay = vp.get("_pullback_delay_sec", 0)
+            if _pb_delay > 0 and hold_sec_now < _pb_delay:
+                if cur_price < vp.get("_pullback_best_price", vp["entry_price"]):
+                    vp["_pullback_best_price"] = cur_price
+                remaining.append(vp)
+                continue
+            elif _pb_delay > 0 and not vp.get("_pullback_applied"):
+                vp["_pullback_applied"] = True
+                pb_price = vp.get("_pullback_best_price", vp["entry_price"])
+                vp["entry_price"] = pb_price
+                vp["best_price"] = max(pb_price, cur_price)
+                vp["worst_price"] = min(pb_price, cur_price)
+                vp["entry_ts"] = now  # 실질 진입시점 리셋
             for snap_s in _SHADOW_PNL_SNAP_SECS:
                 sk = str(snap_s)
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
@@ -8793,6 +8830,8 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 if len(_SHADOW_VIRTUAL_POSITIONS) >= SHADOW_MAX_VIRTUAL_POS:
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
+                # v18e: B/G pullback entry — 30초 대기 후 최저가로 진입
+                _pb_delay = 30 if route in ("B", "G") else 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
                     "market": market, "entry_price": entry_price,
@@ -8801,6 +8840,9 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "trail_armed": False, "trail_stop": 0.0,
                     "exit_params": ep, "bars": 0,
                     "indicators": merged_ind, "pnl_curve": {},
+                    "_pullback_delay_sec": _pb_delay,
+                    "_pullback_best_price": entry_price,
+                    "_pullback_orig_price": entry_price,
                 })
         elif all_fails:
             # v0: 실패한 필터 각각에 대해 차단건 가상 추적
@@ -9086,17 +9128,38 @@ def _v4_shadow_report_lines():
                     bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
-            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값)
+            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값) + v18e: ±1σ 겹침 경고
             w_ind = s.get("win_ind_avg", {})
             w_cnt = s.get("win_ind_cnt", {})
+            w_m2 = s.get("win_ind_m2", {})
             l_ind = s.get("loss_ind_avg", {})
             l_cnt = s.get("loss_ind_cnt", {})
+            l_m2 = s.get("loss_ind_m2", {})
             if w_ind or l_ind:
                 all_keys = set(w_ind.keys()) | set(l_ind.keys())
                 for ik in sorted(all_keys):
                     w_str = f"W{w_ind[ik]:.2f}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
                     l_str = f"L{l_ind[ik]:.2f}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
-                    lines.append(f"    📊{ik}: {w_str} / {l_str}")
+                    # v18e: ±1σ IoU 겹침 판정 (Welford M2 기반)
+                    overlap_tag = ""
+                    if ik in w_ind and ik in l_ind and w_cnt.get(ik, 0) >= 10 and l_cnt.get(ik, 0) >= 10:
+                        w_var = w_m2.get(ik, 0) / max(w_cnt[ik] - 1, 1)
+                        l_var = l_m2.get(ik, 0) / max(l_cnt[ik] - 1, 1)
+                        w_std = w_var ** 0.5
+                        l_std = l_var ** 0.5
+                        if w_std > 0 or l_std > 0:
+                            # ±1σ 구간: [mean-std, mean+std]
+                            w_lo, w_hi = w_ind[ik] - w_std, w_ind[ik] + w_std
+                            l_lo, l_hi = l_ind[ik] - l_std, l_ind[ik] + l_std
+                            # IoU = intersection / union
+                            inter = max(0, min(w_hi, l_hi) - max(w_lo, l_lo))
+                            union = max(w_hi, l_hi) - min(w_lo, l_lo)
+                            iou = inter / union if union > 0 else 1.0
+                            if iou >= 0.7:
+                                overlap_tag = " ⚠겹침"
+                            elif iou <= 0.3:
+                                overlap_tag = " ✅분리"
+                    lines.append(f"    📊{ik}: {w_str} / {l_str}{overlap_tag}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
