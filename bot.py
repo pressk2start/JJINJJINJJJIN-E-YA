@@ -8168,7 +8168,7 @@ def _load_shadow_stats():
                 except Exception:
                     pass
             # v18e-fix: G pullback 제거 → G 통계만 초기화 (v2: blocked 로드 전이라 perf만, blocked는 아래서)
-            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_done")
+            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
             _v18e_g_need_blocked_cleanup = False
             if not os.path.exists(_v18e_g_marker):
                 print("[SHADOW_STATS] v18e-fix: G pullback 제거 → G 통계 초기화")
@@ -8220,7 +8220,7 @@ def _load_shadow_stats():
             g_bkeys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G:")]
             for k in g_bkeys:
                 del _SHADOW_BLOCKED_STATS[k]
-            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_done")
+            _v18e_g_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_g_pullback_remove_v2_done")
             with open(_v18e_g_marker, "w") as f:
                 f.write("v18e G pullback removed, G stats reset\n")
             _save_shadow_stats()
