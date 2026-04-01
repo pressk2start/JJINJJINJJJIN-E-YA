@@ -7424,12 +7424,13 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
                 ui["tick_rate_60s"] = round(t60["rate"], 2)
                 # 가격 모멘텀: 최근 10초/30초 가격 변화율
                 newest_ts = max(tick_ts_ms(t) for t in _ticks)
-                _p_now = _ticks[-1].get("trade_price", 0)
+                # 최신가: newest_ts 기준 틱 (순서 무관하게 안전)
+                _p_now = max(_ticks, key=lambda t: tick_ts_ms(t)).get("trade_price", 0)
                 for _sec, _label in [(10, "10s"), (30, "30s"), (60, "60s")]:
                     _cutoff = newest_ts - _sec * 1000
                     _old_ticks = [t for t in _ticks if tick_ts_ms(t) <= _cutoff]
                     if _old_ticks and _p_now > 0:
-                        _p_old = _old_ticks[-1].get("trade_price", _p_now)
+                        _p_old = max(_old_ticks, key=lambda t: tick_ts_ms(t)).get("trade_price", _p_now)
                         if _p_old > 0:
                             ui[f"tick_mom_{_label}"] = round((_p_now / _p_old - 1) * 100, 4)
                 # 체결강도: 매수체결금액 / 매도체결금액 (30초)
