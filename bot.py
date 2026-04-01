@@ -8048,7 +8048,7 @@ _SHADOW_LOCK = threading.Lock()
 #               best_price, trail_armed, trail_stop, exit_params, bars, exit_reason }
 _SHADOW_VIRTUAL_POSITIONS = []
 _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
-_SHADOW_PNL_SNAP_SECS = [30, 60, 90, 120, 150, 180]  # PnL 곡선 스냅샷 시점(초) — 중복 방지
+_SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180]  # v18e: 초반 5초 단위 추가
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
 _SHADOW_CHECK_OVERRIDES = {}
