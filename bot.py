@@ -9222,8 +9222,10 @@ def _v4_shadow_report_lines():
             if w_ind or l_ind:
                 all_keys = set(w_ind.keys()) | set(l_ind.keys())
                 for ik in sorted(all_keys):
-                    w_str = f"W{w_ind[ik]:.2f}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
-                    l_str = f"L{l_ind[ik]:.2f}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
+                    # tick_ 지표는 소수점 3자리 (값이 작아서 2자리면 0.00으로 표시됨)
+                    _fmt = ".3f" if ik.startswith("tick_") else ".2f"
+                    w_str = f"W{w_ind[ik]:{_fmt}}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
+                    l_str = f"L{l_ind[ik]:{_fmt}}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
                     # v18e: ±1σ IoU 겹침 판정 (Welford M2 기반)
                     overlap_tag = ""
                     if ik in w_ind and ik in l_ind and w_cnt.get(ik, 0) >= 10 and l_cnt.get(ik, 0) >= 10:
