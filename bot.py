@@ -7406,7 +7406,9 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
     # --- v18e: 틱 기반 지표 (초봉 대용) ---
     if market:
         try:
-            _ticks = get_recent_ticks(market, 200, allow_network=False)
+            # TTL 무관하게 캐시된 틱 직접 참조 (detect_leader_stock에서 이미 fetch 완료)
+            _tick_hit = _TICKS_CACHE.get(market)
+            _ticks = _tick_hit["ticks"][:200] if _tick_hit and _tick_hit.get("ticks") else []
             if _ticks and len(_ticks) >= 5:
                 # 10초 테이프: 매수비, 체결속도, 거래대금/초
                 t10 = micro_tape_stats_from_ticks(_ticks, 10)
