@@ -7314,7 +7314,7 @@ def _v4_ema_from_candles(candles, period):
 
 
 # === 공통 지표 수집 (모든 전략 교차분석용) ===
-def _collect_universal_indicators(c1, c5, c15, c30, c60):
+def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
     """모든 전략 진입 시점에 호출 — 전체 지표를 한번에 수집.
     각 전략의 고유 indicators에 병합하여 W/L 교차분석 가능하게 함."""
     ui = {}
@@ -7403,6 +7403,63 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60):
         cur_close = c1[-1]["trade_price"]
         high_20 = max(c["high_price"] for c in c1[-21:-1])
         ui["gap_20bar"] = round(((cur_close / max(high_20, 1)) - 1.0) * 100, 4)
+    # --- v18e: 틱 기반 지표 (초봉 대용) ---
+    if market:
+        try:
+            _ticks = get_recent_ticks(market, 200, allow_network=False)
+            if _ticks and len(_ticks) >= 5:
+                # 10초 테이프: 매수비, 체결속도, 거래대금/초
+                t10 = micro_tape_stats_from_ticks(_ticks, 10)
+                ui["tick_buy_10s"] = round(t10["buy_ratio"], 3)
+                ui["tick_rate_10s"] = round(t10["rate"], 2)
+                ui["tick_krw_ps_10s"] = round(t10["krw_per_sec"] / 1_000_000, 2)  # 백만원/초
+                # 30초 테이프
+                t30 = micro_tape_stats_from_ticks(_ticks, 30)
+                ui["tick_buy_30s"] = round(t30["buy_ratio"], 3)
+                ui["tick_rate_30s"] = round(t30["rate"], 2)
+                ui["tick_krw_ps_30s"] = round(t30["krw_per_sec"] / 1_000_000, 2)
+                # 60초 테이프
+                t60 = micro_tape_stats_from_ticks(_ticks, 60)
+                ui["tick_buy_60s"] = round(t60["buy_ratio"], 3)
+                ui["tick_rate_60s"] = round(t60["rate"], 2)
+                # 가격 모멘텀: 최근 10초/30초 가격 변화율
+                newest_ts = max(tick_ts_ms(t) for t in _ticks)
+                _p_now = _ticks[-1].get("trade_price", 0)
+                for _sec, _label in [(10, "10s"), (30, "30s"), (60, "60s")]:
+                    _cutoff = newest_ts - _sec * 1000
+                    _old_ticks = [t for t in _ticks if tick_ts_ms(t) <= _cutoff]
+                    if _old_ticks and _p_now > 0:
+                        _p_old = _old_ticks[-1].get("trade_price", _p_now)
+                        if _p_old > 0:
+                            ui[f"tick_mom_{_label}"] = round((_p_now / _p_old - 1) * 100, 4)
+                # 체결강도: 매수체결금액 / 매도체결금액 (30초)
+                _buy_krw = 0
+                _sell_krw = 0
+                _cutoff_30 = newest_ts - 30_000
+                for t in _ticks:
+                    if tick_ts_ms(t) < _cutoff_30:
+                        continue
+                    _v = t.get("trade_price", 0) * t.get("trade_volume", 0)
+                    if t.get("ask_bid") == "BID":
+                        _buy_krw += _v
+                    else:
+                        _sell_krw += _v
+                if _sell_krw > 0:
+                    ui["tick_strength_30s"] = round(_buy_krw / _sell_krw, 2)
+                # 연속 매수 틱 수
+                _consec = 0
+                _max_consec = 0
+                for t in reversed(_ticks):
+                    if t.get("ask_bid") == "BID":
+                        _consec += 1
+                        _max_consec = max(_max_consec, _consec)
+                    else:
+                        _consec = 0
+                ui["tick_consec_buy"] = _max_consec
+                # 데이터 신선도 (초)
+                ui["tick_age"] = round(t10["age"], 1)
+        except Exception:
+            pass
     return ui
 
 
@@ -8801,7 +8858,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
 
     # 공통 지표 한 번만 계산 (모든 전략에 공유)
     try:
-        universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60)
+        universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60, market=market)
     except Exception as e:
         print(f"[SHADOW] universal_ind 수집 실패: {e}")
         universal_ind = {}
