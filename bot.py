@@ -7400,6 +7400,18 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
             cur_body = abs(cur_60["opening_price"] - cur_60["trade_price"])
             if prev_body > 0:
                 ui["engulf_ratio_60"] = round(cur_body / prev_body, 2)
+    # --- v18e: 진입 시점 스프레드/거래대금 ---
+    if c1 and len(c1) >= 2:
+        _cur = c1[-1]
+        # 스프레드 추정: (고가-저가)/종가 (%)
+        _hi = _cur.get("high_price", 0)
+        _lo = _cur.get("low_price", 0)
+        _cl = _cur.get("trade_price", 1)
+        if _cl > 0 and _hi > _lo:
+            ui["entry_spread_pct"] = round((_hi - _lo) / _cl * 100, 4)
+        # 거래대금 (백만원)
+        _vol_krw = _cur.get("candle_acc_trade_price", 0)
+        ui["entry_vol_krw_m"] = round(_vol_krw / 1_000_000, 2)
     # --- 1m 추가: 20봉 gap ---
     if c1 and len(c1) >= 21:
         cur_close = c1[-1]["trade_price"]
@@ -8722,9 +8734,10 @@ def _shadow_sim_exit(vp, cur_price):
     hold_sec = now - vp["entry_ts"]
     pnl = (cur_price - entry_price) / entry_price
 
-    # 최고가 갱신
+    # 최고가 갱신 + MFE 도달 시점 기록
     if cur_price > vp["best_price"]:
         vp["best_price"] = cur_price
+        vp["_mfe_sec"] = hold_sec  # MFE가 몇 초에 찍혔는지
 
     mfe = (vp["best_price"] - entry_price) / entry_price
 
@@ -8827,8 +8840,12 @@ def _shadow_evaluate_positions():
                 mfe = (vp["best_price"] - entry_price) / entry_price
                 mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
+                # v18e: 청산 시점 지표 추가 (MFE 도달 시점)
+                _close_ind = dict(vp.get("indicators", {}))
+                if "_mfe_sec" in vp:
+                    _close_ind["mfe_peak_sec"] = round(vp["_mfe_sec"], 0)
                 closed_results.append((vp, pnl, mfe, mae, reason, hold,
-                                       vp.get("indicators", {}), vp.get("pnl_curve", {})))
+                                       _close_ind, vp.get("pnl_curve", {})))
             else:
                 remaining.append(vp)
         _SHADOW_VIRTUAL_POSITIONS[:] = remaining
