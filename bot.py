@@ -316,6 +316,7 @@ _PIPELINE_COUNTERS = {
     "oversold_5m_prev_fail": 0,
     "oversold_1m_fail": 0,
     "oversold_engulf_fail": 0,
+    "oversold_gap20_fail": 0,
     "oversold_pass": 0,
     # -- gate 필터 --
     "gate_fail_stablecoin": 0, # 스테이블코인 제외
@@ -654,7 +655,7 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
-        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.2+15mVR≧2.0 [SL0.7/90바]",
+        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.2+15mVR≧2.0 [SL1.0/90바]",
         f"    진입{c.get('momentum_enter',0)}"
         f" → 5mRSI(71미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
@@ -667,12 +668,13 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
         f" 15mVR(0.8미만):{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
-        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1 [SL1.0/90바]",
+        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1+gap20≧-3% [SL1.0/90바]",
         f"    진입{c.get('oversold_enter',0)}"
         f" → 5mRSI(35초과):{c.get('oversold_rsi_fail',0)}"
         f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
         f" 감싸기(2.1미만):{c.get('oversold_engulf_fail',0)}"
+        f" gap20(-3%미만):{c.get('oversold_gap20_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
@@ -7448,7 +7450,7 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
                     else:
                         _sell_krw += _v
                 if _sell_krw > 0:
-                    ui["tick_strength_30s"] = round(_buy_krw / _sell_krw, 2)
+                    ui["tick_strength_30s"] = round(min(_buy_krw / _sell_krw, 50.0), 2)  # clamp: 매도0 근처 시 폭발 방지
                 # 연속 매수 틱 수
                 _consec = 0
                 _max_consec = 0
@@ -7595,14 +7597,14 @@ _V0_EXIT_PARAMS_C = {  # C: 30s부터 양수 → 빠르게 잠그기
     "description": "C_TRAIL_SL0.4/A0.2/T0.15",
 }
 
-_V0_EXIT_PARAMS_MOMENTUM = {  # v18d: G SL 원복 + 맥스바 90 절충 (SL1.5 재앙 확정)
+_V0_EXIT_PARAMS_MOMENTUM = {  # v18e: G SL 0.7→1.0% (MAE -0.72%와 SL 0.7% 근접, SL 47/115건 41% 히트)
     "strategy": "TRAIL",
-    "sl_pct": 0.007,
+    "sl_pct": 0.010,
     "activation_pct": 0.003,
     "trail_pct": 0.002,
     "hold_bars": 0,
     "max_bars": 90,
-    "description": "G_TRAIL_SL0.7/A0.3/T0.2/90bar",
+    "description": "G_TRAIL_SL1.0/A0.3/T0.2/90bar",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -7906,6 +7908,13 @@ def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
             # v18d: engulf 2.0→2.1 조이기 (62건 44% +3%p)
             if _engulf_k < 2.1:
                 if _pipeline_inc("oversold_engulf_fail", value=_engulf_k, threshold=2.1, direction="gte"): return None
+    # v18e: gap_20bar 필터 (W-1.77 / L-4.76 ✅분리, 101건. 깊은 폭락 반등 차단)
+    if c1 and len(c1) >= 21:
+        _cur_close_k = c1[-1]["trade_price"]
+        _high_20_k = max(c["high_price"] for c in c1[-21:-1])
+        _gap_20_k = round((_cur_close_k / max(_high_20_k, 1) - 1.0) * 100, 2)
+        if _gap_20_k < -3.0:
+            if _pipeline_inc("oversold_gap20_fail", value=_gap_20_k, threshold=-3.0, direction="gte"): return None
     _pipeline_inc("oversold_pass")
     return {
         "signal_tag": "역추세반등",
@@ -8227,6 +8236,20 @@ def _load_shadow_stats():
                         f.write("v18c exit split + filter readjust reset done\n")
                 except Exception:
                     pass
+            # v18e-tune: G SL1.0 + K gap20 + tick_strength clamp → G/K/L만 초기화
+            _v18e_tune_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_tune_gkl_reset_done")
+            if not os.path.exists(_v18e_tune_marker):
+                print("[SHADOW_STATS] v18e-tune: G SL1.0 + K gap20 필터 → G/K/L 통계 초기화")
+                try:
+                    for _prefix in ("G:", "K:", "L:"):
+                        _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith(_prefix)]
+                        for k in _del_keys:
+                            del _SHADOW_PERF_STATS[k]
+                    with open(_v18e_tune_marker, "w") as f:
+                        f.write("v18e tune: G SL1.0, K gap20>=3, tick_strength clamp50\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
             # v18e-final: ATR동적 비활성 + K/G 라이브 + 고정값 복원 → 전체 초기화
             _v18e_final_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_final_fixed_exit_reset_done")
             if not os.path.exists(_v18e_final_marker):
@@ -8291,6 +8314,20 @@ def _load_shadow_stats():
         _SHADOW_PERF_STATS = {}
     # 차단 건 통계 로드
     _load_blocked_stats()
+    # v18e-tune: blocked에서도 G/K/L 제거 (blocked 로드 후, 1회성)
+    _v18e_tune_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_tune_gkl_blocked_done")
+    if not os.path.exists(_v18e_tune_blocked_marker):
+        try:
+            for _prefix in ("G:", "K:", "L:"):
+                _del_keys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith(_prefix)]
+                for k in _del_keys:
+                    del _SHADOW_BLOCKED_STATS[k]
+            with open(_v18e_tune_blocked_marker, "w") as f:
+                f.write("v18e tune blocked G/K/L reset done\n")
+            _save_shadow_stats()
+            print("[SHADOW_STATS] v18e-tune: G/K/L blocked 통계 정리 완료")
+        except Exception:
+            pass
 
 
 def _save_shadow_stats():
