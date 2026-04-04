@@ -8678,10 +8678,14 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
         if indicators:
             if "trade_records" not in s:
                 s["trade_records"] = []
-            s["trade_records"].append({
+            _tr = {
                 "pnl": round(pnl_pct, 5),
                 "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
-            })
+            }
+            # v18e: 개별 건 pnl_curve 저장 → 조기 탈출 분석용
+            if pnl_curve:
+                _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
+            s["trade_records"].append(_tr)
             if len(s["trade_records"]) > 300:
                 s["trade_records"] = s["trade_records"][-300:]
         # MAE 누적
@@ -9300,6 +9304,30 @@ def _v4_shadow_report_lines():
                             elif iou <= 0.3:
                                 overlap_tag = " ✅분리"
                     lines.append(f"    📊{ik}: {w_str} / {l_str}{overlap_tag}")
+    # v18e: 조기 탈출 분석 — 시점별 PnL 임계치에 따른 최종 결과
+    with _SHADOW_PERF_LOCK:
+        _early_exit_lines = []
+        for key, s in sorted_stats:
+            tr_list = s.get("trade_records", [])
+            _trades_with_curve = [t for t in tr_list if t.get("curve")]
+            if len(_trades_with_curve) < 20:
+                continue
+            route = s.get("route", "?")
+            _ea_parts = []
+            for check_sec in [60, 90, 120]:
+                sk = str(check_sec)
+                # 해당 시점에서 -0.1% 이하인 건 vs 아닌 건
+                bad = [t for t in _trades_with_curve if t["curve"].get(sk) is not None and t["curve"][sk] < -0.001]
+                good = [t for t in _trades_with_curve if t["curve"].get(sk) is not None and t["curve"][sk] >= -0.001]
+                if len(bad) >= 5 and len(good) >= 5:
+                    bad_avg = sum(t["pnl"] for t in bad) / len(bad) * 100
+                    good_avg = sum(t["pnl"] for t in good) / len(good) * 100
+                    _ea_parts.append(f"{check_sec}s미만({len(bad)}건)→{bad_avg:+.2f}% vs 이상({len(good)}건)→{good_avg:+.2f}%")
+            if _ea_parts:
+                _early_exit_lines.append(f"  [{route}] " + " | ".join(_ea_parts))
+        if _early_exit_lines:
+            lines.append("🔪 조기탈출 분석 (시점별 PnL<-0.1% 건의 최종결과):")
+            lines.extend(_early_exit_lines)
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
