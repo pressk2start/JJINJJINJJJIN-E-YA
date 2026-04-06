@@ -655,9 +655,9 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
-        f"  [G모멘텀] 5mRSI≧71+1m양봉+VR5≦3.2+15mVR≧2.0 [SL1.0/90바]",
+        f"  [G모멘텀] 5mRSI≧74.55+1m양봉+VR5≦3.2+15mVR≧2.0 [SL1.0/90바+60s조기탈출]",
         f"    진입{c.get('momentum_enter',0)}"
-        f" → 5mRSI(71미만):{c.get('momentum_rsi5_fail',0)}"
+        f" → 5mRSI(74.55미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
         f" VR5과열(3.2초과):{c.get('momentum_vr5_over_fail',0)}"
         f" 15mVR(2.0미만):{c.get('momentum_vr5_15m_fail',0)}"
@@ -668,13 +668,12 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
         f" 15mVR(0.8미만):{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
-        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1+gap20≧-3% [SL1.0/90바]",
+        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1 [SL1.0/90바]",
         f"    진입{c.get('oversold_enter',0)}"
         f" → 5mRSI(35초과):{c.get('oversold_rsi_fail',0)}"
         f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
         f" 1m음봉:{c.get('oversold_1m_fail',0)}"
         f" 감싸기(2.1미만):{c.get('oversold_engulf_fail',0)}"
-        f" gap20(-3%미만):{c.get('oversold_gap20_fail',0)}"
         f" ✅통과:{c.get('oversold_pass',0)}",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
@@ -7822,8 +7821,9 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
         return None
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     # v18d: RSI 68→71로 조이기 (71.4에서 89건 29% +4%p)
-    if rsi_5m is None or rsi_5m < 71:
-        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=71, direction="gte"): return None
+    # v18e-tune: RSI 71→74.55 (136건 46% +0.11%, 234건 38% -0.05% 대비 +0.16%p)
+    if rsi_5m is None or rsi_5m < 74.55:
+        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=74.55, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
         _bp_g = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
@@ -7920,13 +7920,9 @@ def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
             # v18d: engulf 2.0→2.1 조이기 (62건 44% +3%p)
             if _engulf_k < 2.1:
                 if _pipeline_inc("oversold_engulf_fail", value=_engulf_k, threshold=2.1, direction="gte"): return None
-    # v18e: gap_20bar 필터 (W-1.77 / L-4.76 ✅분리, 101건. 깊은 폭락 반등 차단)
-    if c1 and len(c1) >= 21:
-        _cur_close_k = c1[-1]["trade_price"]
-        _high_20_k = max(c["high_price"] for c in c1[-21:-1])
-        _gap_20_k = round((_cur_close_k / max(_high_20_k, 1) - 1.0) * 100, 2)
-        if _gap_20_k < -3.0:
-            if _pipeline_inc("oversold_gap20_fail", value=_gap_20_k, threshold=-3.0, direction="gte"): return None
+    # v18e: gap_20bar 필터 제거 — 차단 39건 44% +0.12%, 역효과 확인
+    # if c1 and len(c1) >= 21:
+    #     ...if _gap_20_k < -3.0: return None
     _pipeline_inc("oversold_pass")
     return {
         "signal_tag": "역추세반등",
@@ -8044,7 +8040,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,  # v18e: 라이브 활성화 (v18d 53건 51% +0.24%)
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥71 + 양봉 + VR5≤3.2",
+        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 + 60s조기탈출",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8262,6 +8258,20 @@ def _load_shadow_stats():
                     _save_shadow_stats()
                 except Exception:
                     pass
+            # v18e-tune2: G RSI74.55 + G 조기탈출60s + K gap제거 → G/K만 초기화
+            _v18e_tune2_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_tune2_gk_reset_done")
+            if not os.path.exists(_v18e_tune2_marker):
+                print("[SHADOW_STATS] v18e-tune2: G RSI74.55+조기탈출 + K gap제거 → G/K 초기화")
+                try:
+                    for _prefix in ("G:", "K:"):
+                        _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith(_prefix)]
+                        for k in _del_keys:
+                            del _SHADOW_PERF_STATS[k]
+                    with open(_v18e_tune2_marker, "w") as f:
+                        f.write("v18e tune2: G RSI74.55+early_exit60s, K gap20 removed\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
             # v18e-final: ATR동적 비활성 + K/G 라이브 + 고정값 복원 → 전체 초기화
             _v18e_final_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_final_fixed_exit_reset_done")
             if not os.path.exists(_v18e_final_marker):
@@ -8338,6 +8348,20 @@ def _load_shadow_stats():
                 f.write("v18e tune blocked G/K/L reset done\n")
             _save_shadow_stats()
             print("[SHADOW_STATS] v18e-tune: G/K/L blocked 통계 정리 완료")
+        except Exception:
+            pass
+    # v18e-tune2: blocked에서도 G/K 제거
+    _v18e_tune2_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_tune2_gk_blocked_done")
+    if not os.path.exists(_v18e_tune2_blocked_marker):
+        try:
+            for _prefix in ("G:", "K:"):
+                _del_keys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith(_prefix)]
+                for k in _del_keys:
+                    del _SHADOW_BLOCKED_STATS[k]
+            with open(_v18e_tune2_blocked_marker, "w") as f:
+                f.write("v18e tune2 blocked G/K reset done\n")
+            _save_shadow_stats()
+            print("[SHADOW_STATS] v18e-tune2: G/K blocked 통계 정리 완료")
         except Exception:
             pass
 
@@ -8748,6 +8772,11 @@ def _shadow_sim_exit(vp, cur_price):
     # 1) 손절 (SL)
     if pnl <= -sl_pct:
         return True, "손절SL"
+
+    # 1.5) G 조기탈출: 60초 시점 PnL < -0.1%면 즉시 청산
+    # (53건 -1.04% → -0.1%로 절약, 234건 데이터 검증)
+    if vp.get("route") == "G" and hold_sec >= 60 and pnl < -0.001:
+        return True, "조기탈출60s"
 
     # 2) 체크포인트 도달 → 트레일링
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
