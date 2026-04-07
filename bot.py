@@ -656,7 +656,7 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
-        f"  [G모멘텀] 5mRSI≧74.55+1m양봉+VR5≦3.2+15mVR≧2.0 [SL1.0/90바+60s조기탈출]",
+        f"  [G모멘텀] 5mRSI≧74.55+1m양봉+VR5≦3.2+15mVR≧2.0 [G-v2:SL1.0/minH120s/max180s]",
         f"    진입{c.get('momentum_enter',0)}"
         f" → 5mRSI(74.55미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
@@ -669,13 +669,7 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('adx_trend_1m_fail',0)}"
         f" 15mVR(0.8미만):{c.get('adx_trend_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('adx_trend_pass',0)}",
-        f"  [K역추세] 5mRSI≦35+5m음→양+1m양봉+감싸기≧2.1 [SL1.0/90바]",
-        f"    진입{c.get('oversold_enter',0)}"
-        f" → 5mRSI(35초과):{c.get('oversold_rsi_fail',0)}"
-        f" 5m음→양아님:{c.get('oversold_5m_bull_fail',0)+c.get('oversold_5m_prev_fail',0)}"
-        f" 1m음봉:{c.get('oversold_1m_fail',0)}"
-        f" 감싸기(2.1미만):{c.get('oversold_engulf_fail',0)}"
-        f" ✅통과:{c.get('oversold_pass',0)}",
+        f"  [K역추세] ⛔비활성(전구간 마이너스, 시간축 무반응)",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
@@ -7609,14 +7603,14 @@ _V0_EXIT_PARAMS_C = {  # C: 30s부터 양수 → 빠르게 잠그기
     "description": "C_TRAIL_SL0.4/A0.2/T0.15",
 }
 
-_V0_EXIT_PARAMS_MOMENTUM = {  # v18e: G SL 0.7→1.0% (MAE -0.72%와 SL 0.7% 근접, SL 47/115건 41% 히트)
+_V0_EXIT_PARAMS_MOMENTUM = {  # G-v2: min_hold 120s + trail 지연 + max 180s
     "strategy": "TRAIL",
     "sl_pct": 0.010,
     "activation_pct": 0.003,
     "trail_pct": 0.002,
     "hold_bars": 0,
-    "max_bars": 90,
-    "description": "G_TRAIL_SL1.0/A0.3/T0.2/90bar",
+    "max_bars": 60,  # 60bars × 3s = 180s (기존 90bars=270s)
+    "description": "G-v2_SL1.0/minH120s/trail후120s/max180s",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -8041,7 +8035,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,  # v18e: 라이브 활성화 (v18d 53건 51% +0.24%)
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 + 60s조기탈출",
+        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s]",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8052,15 +8046,16 @@ _STRATEGY_REGISTRY = {
         "route": "L",
         "description": "15mADX≥28.5 + 양봉",
     },
-    "역추세반등": {
-        "check_fn": _v0_check_oversold_bounce,
-        "exit_params": _V0_EXIT_PARAMS_K,
-        "priority": 9,
-        "enabled": True,  # v18e: 라이브 활성화 (v18d 56건 64% +0.28%)
-        "pipeline_key": "oversold",
-        "route": "K",
-        "description": "5mRSI≤35 + 음→양",
-    },
+    # v18e: K(역추세반등) 비활성화 — 전구간 마이너스, 시간축으로도 안 살아남음
+    # "역추세반등": {
+    #     "check_fn": _v0_check_oversold_bounce,
+    #     "exit_params": _V0_EXIT_PARAMS_K,
+    #     "priority": 9,
+    #     "enabled": True,
+    #     "pipeline_key": "oversold",
+    #     "route": "K",
+    #     "description": "5mRSI≤35 + 음→양",
+    # },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -8273,6 +8268,19 @@ def _load_shadow_stats():
                     _save_shadow_stats()
                 except Exception:
                     pass
+            # G-v2: G exit 재설계 + K 비활성화 → G만 초기화 (K는 레지스트리에서 제거됨)
+            _gv2_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".gv2_exit_redesign_done")
+            if not os.path.exists(_gv2_marker):
+                print("[SHADOW_STATS] G-v2: exit 재설계(min_hold120s+max180s) + K 비활성화 → G 초기화")
+                try:
+                    _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("G:")]
+                    for k in _del_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    with open(_gv2_marker, "w") as f:
+                        f.write("G-v2: min_hold 120s, trail after 120s, max 180s, K disabled\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
             # v18e-final: ATR동적 비활성 + K/G 라이브 + 고정값 복원 → 전체 초기화
             _v18e_final_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_final_fixed_exit_reset_done")
             if not os.path.exists(_v18e_final_marker):
@@ -8363,6 +8371,19 @@ def _load_shadow_stats():
                 f.write("v18e tune2 blocked G/K reset done\n")
             _save_shadow_stats()
             print("[SHADOW_STATS] v18e-tune2: G/K blocked 통계 정리 완료")
+        except Exception:
+            pass
+    # G-v2: blocked에서도 G 정리
+    _gv2_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".gv2_blocked_done")
+    if not os.path.exists(_gv2_blocked_marker):
+        try:
+            _del_keys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G:")]
+            for k in _del_keys:
+                del _SHADOW_BLOCKED_STATS[k]
+            with open(_gv2_blocked_marker, "w") as f:
+                f.write("G-v2 blocked reset done\n")
+            _save_shadow_stats()
+            print("[SHADOW_STATS] G-v2: G blocked 통계 정리 완료")
         except Exception:
             pass
 
@@ -8770,19 +8791,20 @@ def _shadow_sim_exit(vp, cur_price):
 
     mfe = (vp["best_price"] - entry_price) / entry_price
 
-    # 1) 손절 (SL)
+    # 1) 손절 (SL) — 항상 작동
     if pnl <= -sl_pct:
         return True, "손절SL"
 
-    # 1.5) G 조기탈출: 60초 시점 PnL < -0.1%면 즉시 청산
-    # (53건 -1.04% → -0.1%로 절약, 234건 데이터 검증)
-    if vp.get("route") == "G" and hold_sec >= 60 and pnl < -0.001:
-        return True, "조기탈출60s"
+    # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
+    # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
+    _is_g = vp.get("route") == "G"
+    _g_min_hold = 120  # G만 최소보유시간 120초
 
-    # 2) 체크포인트 도달 → 트레일링
+    # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만)
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
     checkpoint = max(cost_floor, activation_pct)
-    if mfe >= checkpoint:
+    _trail_allowed = not _is_g or hold_sec >= _g_min_hold
+    if _trail_allowed and mfe >= checkpoint:
         if not vp["trail_armed"]:
             vp["trail_armed"] = True
             vp["trail_stop"] = vp["best_price"] * (1 - trail_pct)
@@ -8792,16 +8814,16 @@ def _shadow_sim_exit(vp, cur_price):
             if new_stop > vp["trail_stop"]:
                 vp["trail_stop"] = new_stop
 
-    # 트레일 스톱 히트
-    if vp["trail_armed"] and cur_price <= vp["trail_stop"]:
+    # 트레일 스톱 히트 (G는 120초 이후에만)
+    if _trail_allowed and vp["trail_armed"] and cur_price <= vp["trail_stop"]:
         trail_pnl = (vp["trail_stop"] - entry_price) / entry_price
         if trail_pnl > 0:
             return True, "트레일익절"
         else:
             return True, "트레일본절"
 
-    # 3) 본절 스톱 (체크포인트 도달 후 원가 이하 복귀) — 실전과 동일 순서
-    if mfe >= checkpoint and pnl <= 0:
+    # 3) 본절 스톱 (G는 120초 이후에만)
+    if _trail_allowed and mfe >= checkpoint and pnl <= 0:
         return True, "본절SL"
 
     # 4) 타임아웃 (max_bars × RECHECK_SEC)
