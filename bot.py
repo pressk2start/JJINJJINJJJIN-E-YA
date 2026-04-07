@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# v18e-tune2: G RSI74.55 + 60s조기탈출 + K gap제거 (2026-04-06)
 import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re, atexit, signal
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
