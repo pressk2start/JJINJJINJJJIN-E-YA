@@ -7603,14 +7603,24 @@ _V0_EXIT_PARAMS_C = {  # C: 30s부터 양수 → 빠르게 잠그기
     "description": "C_TRAIL_SL0.4/A0.2/T0.15",
 }
 
-_V0_EXIT_PARAMS_MOMENTUM = {  # G-v2: min_hold 120s + trail 지연 + max 180s
+_V0_EXIT_PARAMS_MOMENTUM = {  # G-v2-A: min_hold 120s + 기존 trail + max 180s
     "strategy": "TRAIL",
     "sl_pct": 0.010,
     "activation_pct": 0.003,
     "trail_pct": 0.002,
     "hold_bars": 0,
-    "max_bars": 60,  # 60bars × 3s = 180s (기존 90bars=270s)
-    "description": "G-v2_SL1.0/minH120s/trail후120s/max180s",
+    "max_bars": 60,  # 60bars × 3s = 180s
+    "description": "G-v2A_SL1.0/A0.3/T0.2/minH120s/max180s",
+}
+
+_V0_EXIT_PARAMS_MOMENTUM_B = {  # G-v2-B: min_hold 120s + 넓은 trail + max 180s
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.008,  # 0.8% (MFE 1.4% 대비 적절)
+    "trail_pct": 0.004,       # 0.4% (흔들림 허용)
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "G-v2B_SL1.0/A0.8/T0.4/minH120s/max180s",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -8036,6 +8046,15 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum",
         "route": "G",
         "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s]",
+    },
+    "모멘텀B": {  # G2: 같은 진입, 다른 exit (activation 0.8%, trail 0.4%)
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_B,
+        "priority": 7,
+        "enabled": False,  # shadow-only (라이브 비활성)
+        "pipeline_key": "momentum",  # 같은 pipeline 키 공유
+        "route": "G2",
+        "description": "5mRSI≥74.55 [G-v2B:A0.8/T0.4/minH120s]",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8797,8 +8816,8 @@ def _shadow_sim_exit(vp, cur_price):
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
-    _is_g = vp.get("route") == "G"
-    _g_min_hold = 120  # G만 최소보유시간 120초
+    _is_g = vp.get("route") in ("G", "G2")
+    _g_min_hold = 120  # G/G2 최소보유시간 120초
 
     # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만)
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
