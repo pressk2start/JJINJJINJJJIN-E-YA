@@ -7613,14 +7613,14 @@ _V0_EXIT_PARAMS_MOMENTUM = {  # G-v2-A: min_hold 120s + 기존 trail + max 180s
     "description": "G-v2A_SL1.0/A0.3/T0.2/minH120s/max180s",
 }
 
-_V0_EXIT_PARAMS_MOMENTUM_B = {  # G-v2-B: min_hold 120s + 넓은 trail + max 180s
+_V0_EXIT_PARAMS_MOMENTUM_B = {  # G-v2-B→G3: 중간값 trail (MFE +0.38%에서 0.8%는 과도, 0.5%로 조정)
     "strategy": "TRAIL",
     "sl_pct": 0.010,
-    "activation_pct": 0.008,  # 0.8% (MFE 1.4% 대비 적절)
-    "trail_pct": 0.004,       # 0.4% (흔들림 허용)
+    "activation_pct": 0.005,  # 0.5% (0.3%=너무 빠름, 0.8%=도달불가, 중간)
+    "trail_pct": 0.003,       # 0.3%
     "hold_bars": 0,
     "max_bars": 60,
-    "description": "G-v2B_SL1.0/A0.8/T0.4/minH120s/max180s",
+    "description": "G3_SL1.0/A0.5/T0.3/minH120s/max180s",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -8047,14 +8047,14 @@ _STRATEGY_REGISTRY = {
         "route": "G",
         "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s]",
     },
-    "모멘텀B": {  # G2: 같은 진입, 다른 exit (activation 0.8%, trail 0.4%)
+    "모멘텀B": {  # G2→G3: activation 0.5%, trail 0.3% (0.8%는 MFE 대비 과도 확인)
         "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_B,
         "priority": 7,
-        "enabled": False,  # shadow-only (라이브 비활성)
-        "pipeline_key": "momentum",  # 같은 pipeline 키 공유
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
         "route": "G2",
-        "description": "5mRSI≥74.55 [G-v2B:A0.8/T0.4/minH120s]",
+        "description": "5mRSI≥74.55 [G3:A0.5/T0.3/minH120s]",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8300,6 +8300,19 @@ def _load_shadow_stats():
                     _save_shadow_stats()
                 except Exception:
                     pass
+            # G3: G2 activation 0.8→0.5 교체 → G2 통계만 초기화
+            _g3_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".g3_activation_adjust_done")
+            if not os.path.exists(_g3_marker):
+                print("[SHADOW_STATS] G3: G2 activation 0.8→0.5 교체 → G2 초기화")
+                try:
+                    _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("G2:")]
+                    for k in _del_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    with open(_g3_marker, "w") as f:
+                        f.write("G3: activation 0.5, trail 0.3 (was 0.8/0.4)\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
             # v18e-final: ATR동적 비활성 + K/G 라이브 + 고정값 복원 → 전체 초기화
             _v18e_final_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18e_final_fixed_exit_reset_done")
             if not os.path.exists(_v18e_final_marker):
@@ -8403,6 +8416,19 @@ def _load_shadow_stats():
                 f.write("G-v2 blocked reset done\n")
             _save_shadow_stats()
             print("[SHADOW_STATS] G-v2: G blocked 통계 정리 완료")
+        except Exception:
+            pass
+    # G3: blocked에서 G2 정리
+    _g3_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".g3_blocked_done")
+    if not os.path.exists(_g3_blocked_marker):
+        try:
+            _del_keys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith("G2:")]
+            for k in _del_keys:
+                del _SHADOW_BLOCKED_STATS[k]
+            with open(_g3_blocked_marker, "w") as f:
+                f.write("G3 blocked G2 reset done\n")
+            _save_shadow_stats()
+            print("[SHADOW_STATS] G3: G2 blocked 통계 정리 완료")
         except Exception:
             pass
 
