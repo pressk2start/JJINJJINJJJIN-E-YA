@@ -7623,6 +7623,36 @@ _V0_EXIT_PARAMS_MOMENTUM_B = {  # G-v2-B→G3: 중간값 trail (MFE +0.38%에서
     "description": "G3_SL1.0/A0.5/T0.3/minH120s/max180s",
 }
 
+_V0_EXIT_PARAMS_MOMENTUM_G4 = {  # G4: activation 0.4%, trail 0.25%
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.004,  # 0.4%
+    "trail_pct": 0.0025,      # 0.25%
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "G4_SL1.0/A0.4/T0.25/minH120s/max180s",
+}
+
+_V0_EXIT_PARAMS_MOMENTUM_G6 = {  # G6: activation 0.6%, trail 0.35%
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.006,  # 0.6%
+    "trail_pct": 0.0035,      # 0.35%
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "G6_SL1.0/A0.6/T0.35/minH120s/max180s",
+}
+
+_V0_EXIT_PARAMS_MOMENTUM_G7 = {  # G7: activation 0.7%, trail 0.4%
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.007,  # 0.7%
+    "trail_pct": 0.004,       # 0.4%
+    "hold_bars": 0,
+    "max_bars": 60,
+    "description": "G7_SL1.0/A0.7/T0.4/minH120s/max180s",
+}
+
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -8055,6 +8085,33 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum",
         "route": "G2",
         "description": "5mRSI≥74.55 [G3:A0.5/T0.3/minH120s]",
+    },
+    "모멘텀G4": {  # G4: activation 0.4%, trail 0.25% (G~G2 중간)
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G4,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
+        "route": "G4",
+        "description": "5mRSI≥74.55 [G4:A0.4/T0.25/minH120s]",
+    },
+    "모멘텀G6": {  # G6: activation 0.6%, trail 0.35%
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G6,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
+        "route": "G6",
+        "description": "5mRSI≥74.55 [G6:A0.6/T0.35/minH120s]",
+    },
+    "모멘텀G7": {  # G7: activation 0.7%, trail 0.4%
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G7,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
+        "route": "G7",
+        "description": "5mRSI≥74.55 [G7:A0.7/T0.4/minH120s]",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
@@ -8842,8 +8899,8 @@ def _shadow_sim_exit(vp, cur_price):
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
-    _is_g = vp.get("route") in ("G", "G2")
-    _g_min_hold = 120  # G/G2 최소보유시간 120초
+    _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7 모두 포함
+    _g_min_hold = 120  # G-variants 최소보유시간 120초
 
     # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만)
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
