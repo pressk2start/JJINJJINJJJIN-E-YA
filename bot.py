@@ -369,6 +369,12 @@ _PIPELINE_HOURLY_LOCK = threading.Lock()
 _PIPELINE_SCAN_LATENCIES = deque(maxlen=200)  # 최근 200 사이클 (ms)
 _PIPELINE_SCAN_LAT_LOCK = threading.Lock()
 
+# 마켓별 스캔 간격 추적 — 한 코인이 얼마나 자주 재스캔되는지
+# (사이클 80s ÷ 마켓수가 아니라, 같은 코인이 재방문되는 실 간격)
+_MARKET_LAST_SCAN_TS = {}  # market -> last detect_called ts
+_MARKET_SCAN_INTERVALS = deque(maxlen=2000)  # 최근 2000건 (ms)
+_MARKET_SCAN_LOCK = threading.Lock()
+
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
 _PIPELINE_PASS_METRICS_LOCK = threading.Lock()
@@ -415,6 +421,19 @@ def _pipeline_record_scan_latency(elapsed_ms):
     """스캔 사이클 소요시간 기록 (ms)"""
     with _PIPELINE_SCAN_LAT_LOCK:
         _PIPELINE_SCAN_LATENCIES.append(elapsed_ms)
+
+
+def _pipeline_record_market_scan(market):
+    """마켓별 재스캔 간격 기록 (ms) — 같은 코인이 다음에 스캔되기까지 걸리는 시간"""
+    now = time.time()
+    with _MARKET_SCAN_LOCK:
+        prev = _MARKET_LAST_SCAN_TS.get(market)
+        _MARKET_LAST_SCAN_TS[market] = now
+        if prev is not None:
+            delta_ms = (now - prev) * 1000
+            # 10분 초과 갭은 무시 (재시작/일시정지 보정)
+            if 0 < delta_ms < 600000:
+                _MARKET_SCAN_INTERVALS.append(delta_ms)
 
 
 def _pipeline_record_pass_metrics(market, metrics_dict):
@@ -778,7 +797,19 @@ def _pipeline_report(force=False):
         lat_max = max(lat_list)
         lat_p95 = sorted(lat_list)[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] if len(lat_list) >= 5 else lat_max
         lines.append("━━━━━━━━━━━━━━━━")
-        lines.append(f"⏱️ 스캔 레이턴시: avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
+        lines.append(f"⏱️ 스캔 레이턴시(사이클): avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
+
+    # 🔁 마켓별 재스캔 간격 — 한 코인이 다음에 다시 스캔되는 실 간격
+    # (사이클 80s ÷ 마켓수 ≠ 코인별 재스캔 간격. 진짜 alpha decay 척도)
+    with _MARKET_SCAN_LOCK:
+        ms_list = list(_MARKET_SCAN_INTERVALS)
+    if ms_list and len(ms_list) >= 10:
+        ms_sorted = sorted(ms_list)
+        ms_avg = sum(ms_list) / len(ms_list)
+        ms_p50 = ms_sorted[len(ms_sorted) // 2]
+        ms_p95 = ms_sorted[min(int(len(ms_sorted) * 0.95), len(ms_sorted) - 1)]
+        ms_max = ms_sorted[-1]
+        lines.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
 
     # 🕐 시간대별 신호 (non-zero만)
     with _PIPELINE_HOURLY_LOCK:
@@ -7653,6 +7684,25 @@ _V0_EXIT_PARAMS_MOMENTUM_G7 = {  # G7: activation 0.7%, trail 0.4%
     "description": "G7_SL1.0/A0.7/T0.4/minH120s/max180s",
 }
 
+# GT 불변조건 (반드시 G와 동일):
+#   entry: _v0_check_momentum_rsi (RSI≥74.55, 동일 함수)
+#   sl_pct: 0.010 (G와 동일)
+#   max_bars: 60 (180s, G와 동일)
+#   min_hold: 120s (_is_g 분기로 G와 동일하게 적용)
+# 변수 (GT 유일한 차이):
+#   disable_trail: True → 트레일/본절 모두 우회, SL+타임아웃만 작동
+# 가설: trail이 alpha를 죽이고 있다 (180s 강제보유시 +0.31%p / +0.26%p 개선)
+_V0_EXIT_PARAMS_MOMENTUM_GT = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,           # G와 동일
+    "activation_pct": 0.003,   # 무관 (disable_trail로 비활성)
+    "trail_pct": 0.002,        # 무관 (disable_trail로 비활성)
+    "hold_bars": 0,
+    "max_bars": 60,            # 180s, G와 동일
+    "disable_trail": True,     # ⭐ GT 유일한 변수: trail/본절 완전 우회
+    "description": "GT_SL1.0/no-trail/minH120s/max180s",
+}
+
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -8113,6 +8163,15 @@ _STRATEGY_REGISTRY = {
         "route": "G7",
         "description": "5mRSI≥74.55 [G7:A0.7/T0.4/minH120s]",
     },
+    "모멘텀GT": {  # GT: trail 제거 — entry/SL/hold 모두 G와 동일, trail만 OFF
+        "check_fn": _v0_check_momentum_rsi,  # ⭐ G와 완전 동일한 entry
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
+        "route": "GT",
+        "description": "5mRSI≥74.55 [GT:no-trail/minH120s/max180s]",
+    },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
         "exit_params": _V0_EXIT_PARAMS_SLOW,
@@ -8367,6 +8426,19 @@ def _load_shadow_stats():
                         del _SHADOW_PERF_STATS[k]
                     with open(_g3_marker, "w") as f:
                         f.write("G3: activation 0.5, trail 0.3 (was 0.8/0.4)\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
+            # K-cleanup: 비활성 K 잔존 stats 제거 (registry에서 제거됐는데 stats에 잔존)
+            _k_cleanup_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".k_stats_cleanup_done")
+            if not os.path.exists(_k_cleanup_marker):
+                print("[SHADOW_STATS] K-cleanup: 비활성 K 잔존 stats 제거")
+                try:
+                    _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("K:")]
+                    for k in _del_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    with open(_k_cleanup_marker, "w") as f:
+                        f.write("K stats cleanup: removed stale K entries\n")
                     _save_shadow_stats()
                 except Exception:
                     pass
@@ -8899,13 +8971,14 @@ def _shadow_sim_exit(vp, cur_price):
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
-    _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7 모두 포함
+    _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7/GT 모두 포함
     _g_min_hold = 120  # G-variants 최소보유시간 120초
+    _disable_trail = ep.get("disable_trail", False)  # GT: trail/본절 완전 우회
 
-    # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만)
+    # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만, GT는 영구 비활성)
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
     checkpoint = max(cost_floor, activation_pct)
-    _trail_allowed = not _is_g or hold_sec >= _g_min_hold
+    _trail_allowed = (not _disable_trail) and (not _is_g or hold_sec >= _g_min_hold)
     if _trail_allowed and mfe >= checkpoint:
         if not vp["trail_armed"]:
             vp["trail_armed"] = True
@@ -14810,6 +14883,7 @@ def main():
                 if not c1: continue
 
                 _pipeline_inc("detect_called")
+                _pipeline_record_market_scan(m)
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
                 if not pre:
                     continue
