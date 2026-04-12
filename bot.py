@@ -7899,6 +7899,45 @@ def _v0_check_ema_60m(c1, c5, c15, c30, c60, gate_info=None):
     return _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info, tf="60m")
 
 
+def _v0_check_momentum_rsi_strict(c1, c5, c15, c30, c60, gate_info=None):
+    """GR 모멘텀(strict): G와 모든 조건 동일하나 5m RSI 임계치만 74.55 → 78
+    - 자동탐지 추천(78.28에서 G/G2 모두 +8%p) 반영
+    - exit는 _V0_EXIT_PARAMS_MOMENTUM (G와 동일) 고정
+    - 별도 pipeline_key("momentum_gr_*")로 카운터 분리
+    - shadow-only, route="GR" → stats 키 "GR:모멘텀GR"로 G/G2/GT와 완전 분리"""
+    _pipeline_inc("momentum_gr_enter")
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    # GR: RSI 임계치 74.55 → 78 (G의 유일한 차이점)
+    if rsi_5m is None or rsi_5m < 78.0:
+        if _pipeline_inc("momentum_gr_rsi5_fail", value=rsi_5m, threshold=78.0, direction="gte"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        _bp_gr = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
+        if _pipeline_inc("momentum_gr_1m_fail", value=round(_bp_gr, 2), threshold=0, direction="gt"): return None
+    _vr5_1m_gr = _v4_volume_ratio_5(c1) if c1 and len(c1) >= 7 else None
+    if _vr5_1m_gr is not None and _vr5_1m_gr > 3.2:
+        if _pipeline_inc("momentum_gr_vr5_over_fail", value=round(_vr5_1m_gr, 2), threshold=3.2, direction="lte"): return None
+    _vr5_15m_gr = None
+    if c15 and len(c15) >= 6:
+        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
+        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
+        if avg_vol_15 > 0:
+            _vr5_15m_gr = round(cur_vol_15 / avg_vol_15, 2)
+            if _vr5_15m_gr < 2.0:
+                if _pipeline_inc("momentum_gr_vr5_15m_fail", value=_vr5_15m_gr, threshold=2.0, direction="gte"): return None
+    _pipeline_inc("momentum_gr_pass")
+    return {
+        "signal_tag": "모멘텀GR",
+        "entry_mode": "confirm",
+        "logic_group": "GR",
+        "filters_hit": [f"5mRSI={rsi_5m:.1f}(strict)", f"VR5={_vr5_1m_gr}", f"VR15={_vr5_15m_gr}"],
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM.copy(),
+        "indicators": {"rsi_5m": round(rsi_5m, 1)},
+    }
+
+
 def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
     """G 모멘텀: 5m RSI 71~100 + 양봉 + 1mVR≤3.0"""
     _pipeline_inc("momentum_enter")
@@ -8171,6 +8210,15 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum",
         "route": "GT",
         "description": "5mRSI≥74.55 [GT:no-trail/minH120s/max180s]",
+    },
+    "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
+        "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM,    # ⭐ G와 동일 exit (변수는 entry만)
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum_gr",
+        "route": "GR",
+        "description": "5mRSI≥78 [GR:G와 동일 exit, entry만 강화]",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
