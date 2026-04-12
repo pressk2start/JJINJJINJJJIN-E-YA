@@ -7653,6 +7653,17 @@ _V0_EXIT_PARAMS_MOMENTUM_G7 = {  # G7: activation 0.7%, trail 0.4%
     "description": "G7_SL1.0/A0.7/T0.4/minH120s/max180s",
 }
 
+_V0_EXIT_PARAMS_MOMENTUM_GT = {  # GT: trail 제거, SL+시간청산만 (alpha 보존 가설 검증)
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 0.003,  # 무관 (disable_trail로 비활성)
+    "trail_pct": 0.002,       # 무관
+    "hold_bars": 0,
+    "max_bars": 60,
+    "disable_trail": True,    # 트레일/본절 모두 우회 → SL과 타임아웃만
+    "description": "GT_SL1.0/no-trail/minH120s/max180s",
+}
+
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -8113,6 +8124,15 @@ _STRATEGY_REGISTRY = {
         "route": "G7",
         "description": "5mRSI≥74.55 [G7:A0.7/T0.4/minH120s]",
     },
+    "모멘텀GT": {  # GT: trail 제거 — SL+시간청산만 (시간청산>trail 가설 검증)
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum",
+        "route": "GT",
+        "description": "5mRSI≥74.55 [GT:no-trail/minH120s/max180s]",
+    },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
         "exit_params": _V0_EXIT_PARAMS_SLOW,
@@ -8367,6 +8387,19 @@ def _load_shadow_stats():
                         del _SHADOW_PERF_STATS[k]
                     with open(_g3_marker, "w") as f:
                         f.write("G3: activation 0.5, trail 0.3 (was 0.8/0.4)\n")
+                    _save_shadow_stats()
+                except Exception:
+                    pass
+            # K-cleanup: 비활성 K 잔존 stats 제거 (registry에서 제거됐는데 stats에 잔존)
+            _k_cleanup_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".k_stats_cleanup_done")
+            if not os.path.exists(_k_cleanup_marker):
+                print("[SHADOW_STATS] K-cleanup: 비활성 K 잔존 stats 제거")
+                try:
+                    _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith("K:")]
+                    for k in _del_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    with open(_k_cleanup_marker, "w") as f:
+                        f.write("K stats cleanup: removed stale K entries\n")
                     _save_shadow_stats()
                 except Exception:
                     pass
@@ -8899,13 +8932,14 @@ def _shadow_sim_exit(vp, cur_price):
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
-    _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7 모두 포함
+    _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7/GT 모두 포함
     _g_min_hold = 120  # G-variants 최소보유시간 120초
+    _disable_trail = ep.get("disable_trail", False)  # GT: trail/본절 완전 우회
 
-    # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만)
+    # 2) 체크포인트 도달 → 트레일링 (G는 120초 이후에만, GT는 영구 비활성)
     cost_floor = FEE_RATE + 0.001 + PROFIT_CHECKPOINT_MIN_ALPHA
     checkpoint = max(cost_floor, activation_pct)
-    _trail_allowed = not _is_g or hold_sec >= _g_min_hold
+    _trail_allowed = (not _disable_trail) and (not _is_g or hold_sec >= _g_min_hold)
     if _trail_allowed and mfe >= checkpoint:
         if not vp["trail_armed"]:
             vp["trail_armed"] = True
