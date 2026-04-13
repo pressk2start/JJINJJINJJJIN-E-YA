@@ -377,13 +377,16 @@ _MARKET_SCAN_LOCK = threading.Lock()
 
 # 단계별 레이턴시 추적 — 사이클 내 각 단계의 elapsed 독립 측정
 # (전체 사이클 레이턴시가 이상치로 오염돼도 단계별로 어디가 병목인지 파악 가능)
+# scan은 fetch(네트워크 I/O)와 detect(CPU 루프)로 분리, report는 full/mini 분리
 _PIPELINE_STAGE_LATENCIES = {
     "health_check": deque(maxlen=200),
     "save_state":   deque(maxlen=200),
     "shadow_eval":  deque(maxlen=200),
     "tg_flush":     deque(maxlen=200),
-    "report":       deque(maxlen=200),
-    "scan_work":    deque(maxlen=200),  # fetch_orderbook + candles + detect loop
+    "report_full":  deque(maxlen=200),  # _pipeline_report (10분 텔레그램)
+    "report_mini":  deque(maxlen=200),  # _pipeline_mini_report (1분 콘솔)
+    "scan_fetch":   deque(maxlen=200),  # orderbook + candles 네트워크 fetch
+    "scan_detect":  deque(maxlen=200),  # detect_leader_stock 루프 + 진입 판정
 }
 _PIPELINE_STAGE_LOCK = threading.Lock()
 _PIPELINE_LATENCY_SANITY_CAP_MS = 600000  # 10분 초과는 이상치로 버림 (호스트 hibernation 등)
@@ -838,20 +841,29 @@ def _pipeline_report(force=False):
         lines.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
 
     # 🔍 단계별 레이턴시 — 사이클 내 각 단계 elapsed (병목 위치 파악)
+    # scan_fetch (네트워크 I/O) vs scan_detect (CPU 루프) 분리로 병목 특정
+    # sample count(n=) 포함 — 호출 빈도가 낮은 단계의 outlier 영향 파악
     with _PIPELINE_STAGE_LOCK:
         stage_snapshot = {k: list(v) for k, v in _PIPELINE_STAGE_LATENCIES.items()}
-    _stage_lines = []
-    for _stage_name in ("scan_work", "shadow_eval", "save_state", "report", "tg_flush", "health_check"):
+    _stage_order = (
+        "scan_fetch", "scan_detect", "shadow_eval",
+        "save_state", "report_full", "report_mini",
+        "tg_flush", "health_check",
+    )
+    _stage_rows = []
+    for _stage_name in _stage_order:
         _lst = stage_snapshot.get(_stage_name, [])
-        if len(_lst) < 5:
+        _n = len(_lst)
+        if _n < 5:
             continue
         _lst_sorted = sorted(_lst)
-        _s_avg = sum(_lst) / len(_lst)
-        _s_p95 = _lst_sorted[min(int(len(_lst_sorted) * 0.95), len(_lst_sorted) - 1)]
+        _s_avg = sum(_lst) / _n
+        _s_p95 = _lst_sorted[min(int(_n * 0.95), _n - 1)]
         _s_max = _lst_sorted[-1]
-        _stage_lines.append(f"{_stage_name}:avg={_s_avg:.0f}/p95={_s_p95:.0f}/max={_s_max:.0f}ms")
-    if _stage_lines:
-        lines.append("🔍 단계별 레이턴시: " + " | ".join(_stage_lines))
+        _stage_rows.append(f"   {_stage_name:12} n={_n:3} avg={_s_avg:6.1f}ms p95={_s_p95:7.1f}ms max={_s_max:8.1f}ms")
+    if _stage_rows:
+        lines.append("🔍 단계별 레이턴시 (p95/max에 튀는 단계 = 병목)")
+        lines.extend(_stage_rows)
 
     # 🕐 시간대별 신호 (non-zero만)
     with _PIPELINE_HOURLY_LOCK:
@@ -14446,8 +14458,10 @@ def main():
             # 📊 파이프라인 계측 리포트 (10분마다 텔레그램, 1분마다 콘솔)
             _t_stage = time.time()
             _pipeline_report()
+            _pipeline_record_stage("report_full", (time.time() - _t_stage) * 1000)
+            _t_stage = time.time()
             _pipeline_mini_report()
-            _pipeline_record_stage("report", (time.time() - _t_stage) * 1000)
+            _pipeline_record_stage("report_mini", (time.time() - _t_stage) * 1000)
 
             # 🔧 30분마다 텔레그램 헬스체크 알림
             if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
@@ -14951,7 +14965,7 @@ def main():
             shard = list(dict.fromkeys(shard))
 
             _scan_cycle_start = time.time()
-            _t_scan = _scan_cycle_start  # scan_work 단계 시작 시점
+            _t_fetch = _scan_cycle_start  # scan_fetch 단계 시작 (네트워크 I/O)
 
             obc = fetch_orderbook_cache(shard)
 
@@ -14971,6 +14985,10 @@ def main():
                     c1_cache[m] = []
 
             _pipeline_inc("c1_ok", sum(1 for v in c1_cache.values() if v))
+
+            # scan_fetch 단계 종료 (orderbook + candles 네트워크 fetch)
+            _pipeline_record_stage("scan_fetch", (time.time() - _t_fetch) * 1000)
+            _t_detect = time.time()  # scan_detect 단계 시작 (CPU 판정 루프)
 
             # 🔧 FIX: BTC 캔들 캐시 (shard 루프 밖에서 1회만 조회 → API 절약)
             _btc_c1_cache = None
@@ -15384,8 +15402,8 @@ def main():
             cut_summary()
             if found == 0:
                 req_summary()
-            # scan_work 단계 종료 측정 (fetch_orderbook → candles → detect loop 전체)
-            _pipeline_record_stage("scan_work", (time.time() - _t_scan) * 1000)
+            # scan_detect 단계 종료 (detect_leader_stock 루프 + 진입 판정 전체)
+            _pipeline_record_stage("scan_detect", (time.time() - _t_detect) * 1000)
             # 시간대별 동적 스캔 간격 적용
             aligned_sleep(get_scan_interval())
 
