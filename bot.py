@@ -390,8 +390,11 @@ _PIPELINE_STAGE_LATENCIES = {
     # detect 루프 내부 세분화 (마켓별 누적 → 사이클 단위로 합산되어 측정)
     "detect_leader": deque(maxlen=200),  # detect_leader_stock 한 사이클 누적 시간
     "universal_ind": deque(maxlen=200),  # _collect_universal_indicators 한 사이클 누적
-    # detect_leader 내부 세분화 (134ms/market 분해)
-    "detect_candles": deque(maxlen=200),  # 4개 get_minutes_candles(5/15/30/60) 누적
+    # detect_leader 내부 세분화 — timeframe별 분리 (호출 횟수도 함께 측정)
+    "fetch_c5":       deque(maxlen=200),  # get_minutes_candles(5,  m, 50) 사이클 누적
+    "fetch_c15":      deque(maxlen=200),  # get_minutes_candles(15, m, 50) 사이클 누적
+    "fetch_c30":      deque(maxlen=200),  # get_minutes_candles(30, m, 20) 사이클 누적
+    "fetch_c60":      deque(maxlen=200),  # get_minutes_candles(60, m, 30) 사이클 누적
     "detect_v4":      deque(maxlen=200),  # v4_evaluate_entry 누적 (universal_ind + check_fn 포함)
 }
 _PIPELINE_STAGE_LOCK = threading.Lock()
@@ -413,14 +416,23 @@ _CHECK_FN_EXEC_LOCK = threading.Lock()
 # 사이클 단위 detect 루프 내부 세분화 측정용 누적기
 # - detect_leader_stock 480회 호출 누적 → 사이클당 1회 record_stage
 # - _collect_universal_indicators 469회 호출 누적 → 사이클당 1회 record_stage
-# - detect_candles: 4개 get_minutes_candles(5/15/30/60) 블록 누적
+# - fetch_c5/c15/c30/c60: timeframe별 개별 get_minutes_candles 누적 (시간 + 호출 횟수)
 # - detect_v4: v4_evaluate_entry 호출 누적
 # (deque에 마켓별로 찍으면 사이클 단위 비교 어려워서 누적 후 사이클 단위로 flush)
 _CYCLE_DETECT_LEADER_MS = 0.0
 _CYCLE_UNIVERSAL_IND_MS = 0.0
-_CYCLE_DETECT_CANDLES_MS = 0.0
 _CYCLE_DETECT_V4_MS = 0.0
+_CYCLE_FETCH_MS = {"c5": 0.0, "c15": 0.0, "c30": 0.0, "c60": 0.0}
+_CYCLE_FETCH_CALLS = {"c5": 0, "c15": 0, "c30": 0, "c60": 0}
 _CYCLE_TIMING_LOCK = threading.Lock()
+
+# 최근 200 사이클의 fetch 호출 횟수 (stage deque와 평행하게 유지 → per-call avg 계산용)
+_FETCH_CALLS_HISTORY = {
+    "c5":  deque(maxlen=200),
+    "c15": deque(maxlen=200),
+    "c30": deque(maxlen=200),
+    "c60": deque(maxlen=200),
+}
 
 
 def _add_cycle_detect_leader_ms(ms):
@@ -437,11 +449,11 @@ def _add_cycle_universal_ind_ms(ms):
         _CYCLE_UNIVERSAL_IND_MS += ms
 
 
-def _add_cycle_detect_candles_ms(ms):
-    """4개 get_minutes_candles(5/15/30/60) 블록 누적"""
-    global _CYCLE_DETECT_CANDLES_MS
+def _add_cycle_fetch_ms(tf_key, ms):
+    """get_minutes_candles(tf, ...) 호출 시간 + 호출 횟수 누적 (tf_key: 'c5','c15','c30','c60')"""
     with _CYCLE_TIMING_LOCK:
-        _CYCLE_DETECT_CANDLES_MS += ms
+        _CYCLE_FETCH_MS[tf_key] += ms
+        _CYCLE_FETCH_CALLS[tf_key] += 1
 
 
 def _add_cycle_detect_v4_ms(ms):
@@ -453,25 +465,32 @@ def _add_cycle_detect_v4_ms(ms):
 
 def _flush_cycle_internal_timing():
     """사이클 끝에서 호출 — 누적값을 stage 측정으로 flush + 리셋"""
-    global _CYCLE_DETECT_LEADER_MS, _CYCLE_UNIVERSAL_IND_MS
-    global _CYCLE_DETECT_CANDLES_MS, _CYCLE_DETECT_V4_MS
+    global _CYCLE_DETECT_LEADER_MS, _CYCLE_UNIVERSAL_IND_MS, _CYCLE_DETECT_V4_MS
     with _CYCLE_TIMING_LOCK:
         _dl = _CYCLE_DETECT_LEADER_MS
         _ui = _CYCLE_UNIVERSAL_IND_MS
-        _dc = _CYCLE_DETECT_CANDLES_MS
         _dv = _CYCLE_DETECT_V4_MS
+        _fetch_ms_snap = dict(_CYCLE_FETCH_MS)
+        _fetch_calls_snap = dict(_CYCLE_FETCH_CALLS)
         _CYCLE_DETECT_LEADER_MS = 0.0
         _CYCLE_UNIVERSAL_IND_MS = 0.0
-        _CYCLE_DETECT_CANDLES_MS = 0.0
         _CYCLE_DETECT_V4_MS = 0.0
+        for _k in _CYCLE_FETCH_MS:
+            _CYCLE_FETCH_MS[_k] = 0.0
+            _CYCLE_FETCH_CALLS[_k] = 0
     if _dl > 0:
         _pipeline_record_stage("detect_leader", _dl)
     if _ui > 0:
         _pipeline_record_stage("universal_ind", _ui)
-    if _dc > 0:
-        _pipeline_record_stage("detect_candles", _dc)
     if _dv > 0:
         _pipeline_record_stage("detect_v4", _dv)
+    for _tf in ("c5", "c15", "c30", "c60"):
+        _ms = _fetch_ms_snap.get(_tf, 0.0)
+        _calls = _fetch_calls_snap.get(_tf, 0)
+        if _ms > 0:
+            _pipeline_record_stage(f"fetch_{_tf}", _ms)
+        if _calls > 0:
+            _FETCH_CALLS_HISTORY[_tf].append(_calls)
 
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
@@ -930,11 +949,20 @@ def _pipeline_report(force=False):
     _stage_order = (
         "scan_fetch", "scan_detect",
         "detect_leader",                                   # detect 루프 총합
-        "detect_candles", "detect_v4", "universal_ind",    # detect_leader 내부 세분화
+        # detect_leader 내부 세분화 (timeframe별 fetch + v4_eval + universal_ind)
+        "fetch_c5", "fetch_c15", "fetch_c30", "fetch_c60",
+        "detect_v4", "universal_ind",
         "shadow_eval",
         "save_state", "report_full", "report_mini",
         "tg_flush", "health_check",
     )
+    # fetch 단계는 per-call avg도 계산 (호출 횟수 history 사용)
+    _fetch_calls_snap = {
+        "fetch_c5":  list(_FETCH_CALLS_HISTORY["c5"]),
+        "fetch_c15": list(_FETCH_CALLS_HISTORY["c15"]),
+        "fetch_c30": list(_FETCH_CALLS_HISTORY["c30"]),
+        "fetch_c60": list(_FETCH_CALLS_HISTORY["c60"]),
+    }
     _stage_rows = []
     for _stage_name in _stage_order:
         _lst = stage_snapshot.get(_stage_name, [])
@@ -945,7 +973,21 @@ def _pipeline_report(force=False):
         _s_avg = sum(_lst) / _n
         _s_p95 = _lst_sorted[min(int(_n * 0.95), _n - 1)]
         _s_max = _lst_sorted[-1]
-        _stage_rows.append(f"   {_stage_name:12} n={_n:3} avg={_s_avg:6.1f}ms p95={_s_p95:7.1f}ms max={_s_max:8.1f}ms")
+        # fetch 단계면 호출 횟수 + per-call avg도 추가
+        if _stage_name in _fetch_calls_snap and _fetch_calls_snap[_stage_name]:
+            _calls_list = _fetch_calls_snap[_stage_name]
+            _total_calls = sum(_calls_list)
+            _total_ms = sum(_lst)
+            _per_call_avg = (_total_ms / _total_calls) if _total_calls > 0 else 0
+            _avg_calls = _total_calls / len(_calls_list) if _calls_list else 0
+            _stage_rows.append(
+                f"   {_stage_name:14} n={_n:3} avg={_s_avg:6.1f}ms p95={_s_p95:7.1f}ms max={_s_max:8.1f}ms "
+                f"| calls/cycle={_avg_calls:5.0f} per_call={_per_call_avg:5.2f}ms"
+            )
+        else:
+            _stage_rows.append(
+                f"   {_stage_name:14} n={_n:3} avg={_s_avg:6.1f}ms p95={_s_p95:7.1f}ms max={_s_max:8.1f}ms"
+            )
     if _stage_rows:
         lines.append("🔍 단계별 레이턴시 (p95/max에 튀는 단계 = 병목)")
         lines.extend(_stage_rows)
@@ -12081,13 +12123,20 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _v4_signal = None  # strategy_v4 반환값
 
     try:
-        # 멀티TF 캔들 데이터 페칭 (분기 5 가설 검증: fetch가 진짜 병목인가)
-        _t_dc = time.time()
+        # 멀티TF 캔들 데이터 페칭 — timeframe별 개별 timing (호출 횟수 + 시간)
+        # 분기 5 검증: c5/c15/c30/c60 중 어느 TF가 병목인지 특정
+        _t_tf = time.time()
         _c5 = get_minutes_candles(5, m, 50) or []
+        _add_cycle_fetch_ms("c5", (time.time() - _t_tf) * 1000)
+        _t_tf = time.time()
         _c15 = get_minutes_candles(15, m, 50) or []
+        _add_cycle_fetch_ms("c15", (time.time() - _t_tf) * 1000)
+        _t_tf = time.time()
         _c30 = get_minutes_candles(30, m, 20) or []
+        _add_cycle_fetch_ms("c30", (time.time() - _t_tf) * 1000)
+        _t_tf = time.time()
         _c60 = get_minutes_candles(60, m, 30) or []
-        _add_cycle_detect_candles_ms((time.time() - _t_dc) * 1000)
+        _add_cycle_fetch_ms("c60", (time.time() - _t_tf) * 1000)
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
