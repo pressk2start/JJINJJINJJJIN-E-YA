@@ -397,6 +397,13 @@ _CHECK_FN_CACHE_HITS = {}   # fn_name -> hit count
 _CHECK_FN_CACHE_MISSES = {}  # fn_name -> miss count
 _CHECK_FN_CACHE_LOCK = threading.Lock()
 
+# check_fn 실행 시간 직접 계측 — 진짜 병목 함수 특정용
+# 캐시 hit 시점은 측정 안 함 (조회 자체는 O(1)); miss 시점만 실제 실행 시간 측정
+# eval_all_mode 재실행 시간도 합산 (전체 실행 비용 = 1차 호출 + 재호출)
+_CHECK_FN_EXEC_TOTAL_MS = {}  # fn_name -> total accumulated ms
+_CHECK_FN_EXEC_CALLS = {}     # fn_name -> miss call count (실제 실행 횟수)
+_CHECK_FN_EXEC_LOCK = threading.Lock()
+
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
 _PIPELINE_PASS_METRICS_LOCK = threading.Lock()
@@ -896,6 +903,29 @@ def _pipeline_report(force=False):
             _fn_rows.append((_r, f"   {_short:28} hit={_h:6} miss={_m:6} hit_rate={_r:5.1f}%"))
         _fn_rows.sort(key=lambda x: -x[0])
         for _, _row in _fn_rows:
+            lines.append(_row)
+
+    # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
+    with _CHECK_FN_EXEC_LOCK:
+        _exec_total_snap = dict(_CHECK_FN_EXEC_TOTAL_MS)
+        _exec_calls_snap = dict(_CHECK_FN_EXEC_CALLS)
+    if _exec_calls_snap:
+        _total_all_ms = sum(_exec_total_snap.values())
+        _total_all_calls = sum(_exec_calls_snap.values())
+        lines.append(f"⏱️ check_fn 실행 시간 (cache miss만, 함수별 누적): 총 {_total_all_ms/1000:.1f}s / {_total_all_calls}회")
+        # 누적 시간 기준 내림차순 정렬 (가장 느린 게 위)
+        _exec_rows = []
+        for _fn in _exec_total_snap.keys():
+            _total_ms = _exec_total_snap.get(_fn, 0.0)
+            _n = _exec_calls_snap.get(_fn, 0)
+            if _n < 10:
+                continue
+            _avg_ms = _total_ms / _n if _n > 0 else 0
+            _share = (_total_ms / _total_all_ms * 100) if _total_all_ms > 0 else 0
+            _short = _fn.replace("_v0_check_", "")
+            _exec_rows.append((_total_ms, f"   {_short:28} n={_n:6} total={_total_ms/1000:7.2f}s avg={_avg_ms:5.2f}ms ({_share:4.1f}%)"))
+        _exec_rows.sort(key=lambda x: -x[0])
+        for _, _row in _exec_rows:
             lines.append(_row)
 
     # 🕐 시간대별 신호 (non-zero만)
@@ -9301,6 +9331,9 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     # hit/miss 로컬 집계 (함수 종료 시 글로벌로 flush → lock 한 번만)
     _local_hits = {}
     _local_misses = {}
+    # 실행 시간 로컬 집계 (cache miss 시 실제 실행 시간)
+    _local_exec_ms = {}
+    _local_exec_calls = {}
 
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
@@ -9314,6 +9347,8 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         else:
             _local_misses[_fn_name] = _local_misses.get(_fn_name, 0) + 1
             # 🔴 캐시 미스 — 실제 호출 (부작용: _pipeline_inc, _BLOCKED_THREAD_LOCAL)
+            # ⏱️ 실행 시간 측정 시작 (1차 호출 + eval_all 재호출 합산)
+            _t_check = time.time()
             # 차단 플래그 초기화 후 전략 호출
             _BLOCKED_THREAD_LOCAL.last_fail = None
             _BLOCKED_THREAD_LOCAL.last_fail_value = None
@@ -9339,6 +9374,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 finally:
                     _BLOCKED_THREAD_LOCAL._eval_all_mode = False
                 all_fails = list(getattr(_BLOCKED_THREAD_LOCAL, "all_fails", []))
+            # ⏱️ 실행 시간 측정 종료 — sanity cap (>10초는 outlier)
+            _check_elapsed_ms = (time.time() - _t_check) * 1000
+            if 0 <= _check_elapsed_ms < 10000:
+                _local_exec_ms[_fn_name] = _local_exec_ms.get(_fn_name, 0.0) + _check_elapsed_ms
+                _local_exec_calls[_fn_name] = _local_exec_calls.get(_fn_name, 0) + 1
             # 캐시 저장 — 이후 같은 check_fn 호출 시 재사용
             _check_fn_cache[check_fn] = (sig, all_fails)
 
@@ -9408,6 +9448,13 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 _CHECK_FN_CACHE_HITS[_k] = _CHECK_FN_CACHE_HITS.get(_k, 0) + _v
             for _k, _v in _local_misses.items():
                 _CHECK_FN_CACHE_MISSES[_k] = _CHECK_FN_CACHE_MISSES.get(_k, 0) + _v
+    # check_fn 실행 시간 로컬 집계 → 글로벌 flush (lock 한 번만)
+    if _local_exec_calls:
+        with _CHECK_FN_EXEC_LOCK:
+            for _k, _v in _local_exec_ms.items():
+                _CHECK_FN_EXEC_TOTAL_MS[_k] = _CHECK_FN_EXEC_TOTAL_MS.get(_k, 0.0) + _v
+            for _k, _v in _local_exec_calls.items():
+                _CHECK_FN_EXEC_CALLS[_k] = _CHECK_FN_EXEC_CALLS.get(_k, 0) + _v
     return results
 
 
