@@ -387,6 +387,9 @@ _PIPELINE_STAGE_LATENCIES = {
     "report_mini":  deque(maxlen=200),  # _pipeline_mini_report (1분 콘솔)
     "scan_fetch":   deque(maxlen=200),  # orderbook + candles 네트워크 fetch
     "scan_detect":  deque(maxlen=200),  # detect_leader_stock 루프 + 진입 판정
+    # detect 루프 내부 세분화 (마켓별 누적 → 사이클 단위로 합산되어 측정)
+    "detect_leader": deque(maxlen=200),  # detect_leader_stock 한 사이클 누적 시간
+    "universal_ind": deque(maxlen=200),  # _collect_universal_indicators 한 사이클 누적
 }
 _PIPELINE_STAGE_LOCK = threading.Lock()
 _PIPELINE_LATENCY_SANITY_CAP_MS = 600000  # 10분 초과는 이상치로 버림 (호스트 hibernation 등)
@@ -403,6 +406,42 @@ _CHECK_FN_CACHE_LOCK = threading.Lock()
 _CHECK_FN_EXEC_TOTAL_MS = {}  # fn_name -> total accumulated ms
 _CHECK_FN_EXEC_CALLS = {}     # fn_name -> miss call count (실제 실행 횟수)
 _CHECK_FN_EXEC_LOCK = threading.Lock()
+
+# 사이클 단위 detect 루프 내부 세분화 측정용 누적기
+# - detect_leader_stock 480회 호출 누적 → 사이클당 1회 record_stage
+# - _collect_universal_indicators 469회 호출 누적 → 사이클당 1회 record_stage
+# (deque에 마켓별로 찍으면 사이클 단위 비교 어려워서 누적 후 사이클 단위로 flush)
+_CYCLE_DETECT_LEADER_MS = 0.0
+_CYCLE_UNIVERSAL_IND_MS = 0.0
+_CYCLE_TIMING_LOCK = threading.Lock()
+
+
+def _add_cycle_detect_leader_ms(ms):
+    """detect_leader_stock 한 번 호출 시간 누적"""
+    global _CYCLE_DETECT_LEADER_MS
+    with _CYCLE_TIMING_LOCK:
+        _CYCLE_DETECT_LEADER_MS += ms
+
+
+def _add_cycle_universal_ind_ms(ms):
+    """_collect_universal_indicators 한 번 호출 시간 누적"""
+    global _CYCLE_UNIVERSAL_IND_MS
+    with _CYCLE_TIMING_LOCK:
+        _CYCLE_UNIVERSAL_IND_MS += ms
+
+
+def _flush_cycle_internal_timing():
+    """사이클 끝에서 호출 — 누적값을 stage 측정으로 flush + 리셋"""
+    global _CYCLE_DETECT_LEADER_MS, _CYCLE_UNIVERSAL_IND_MS
+    with _CYCLE_TIMING_LOCK:
+        _dl = _CYCLE_DETECT_LEADER_MS
+        _ui = _CYCLE_UNIVERSAL_IND_MS
+        _CYCLE_DETECT_LEADER_MS = 0.0
+        _CYCLE_UNIVERSAL_IND_MS = 0.0
+    if _dl > 0:
+        _pipeline_record_stage("detect_leader", _dl)
+    if _ui > 0:
+        _pipeline_record_stage("universal_ind", _ui)
 
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
@@ -859,7 +898,9 @@ def _pipeline_report(force=False):
     with _PIPELINE_STAGE_LOCK:
         stage_snapshot = {k: list(v) for k, v in _PIPELINE_STAGE_LATENCIES.items()}
     _stage_order = (
-        "scan_fetch", "scan_detect", "shadow_eval",
+        "scan_fetch", "scan_detect",
+        "detect_leader", "universal_ind",  # detect 루프 내부 세분화
+        "shadow_eval",
         "save_state", "report_full", "report_mini",
         "tg_flush", "health_check",
     )
@@ -9319,11 +9360,13 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     entry_price = c1[-1]["trade_price"] if c1 else 0
 
     # 공통 지표 한 번만 계산 (모든 전략에 공유)
+    _t_uni = time.time()
     try:
         universal_ind = _collect_universal_indicators(c1, c5, c15, c30, c60, market=market)
     except Exception as e:
         print(f"[SHADOW] universal_ind 수집 실패: {e}")
         universal_ind = {}
+    _add_cycle_universal_ind_ms((time.time() - _t_uni) * 1000)
 
     # ⭐ Per-call check_fn 캐시 — 같은 함수는 1회만 호출하고 재사용
     # 키: check_fn 객체 식별자 / 값: (sig, all_fails) 튜플
@@ -15118,7 +15161,9 @@ def main():
 
                 _pipeline_inc("detect_called")
                 _pipeline_record_market_scan(m)
+                _t_dl = time.time()
                 pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
+                _add_cycle_detect_leader_ms((time.time() - _t_dl) * 1000)
                 if not pre:
                     continue
 
@@ -15519,6 +15564,8 @@ def main():
                 req_summary()
             # scan_detect 단계 종료 (detect_leader_stock 루프 + 진입 판정 전체)
             _pipeline_record_stage("scan_detect", (time.time() - _t_detect) * 1000)
+            # 사이클 내부 누적 측정 flush (detect_leader, universal_ind 각각)
+            _flush_cycle_internal_timing()
             # 시간대별 동적 스캔 간격 적용
             aligned_sleep(get_scan_interval())
 
