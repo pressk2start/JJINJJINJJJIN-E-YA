@@ -390,6 +390,9 @@ _PIPELINE_STAGE_LATENCIES = {
     # detect 루프 내부 세분화 (마켓별 누적 → 사이클 단위로 합산되어 측정)
     "detect_leader": deque(maxlen=200),  # detect_leader_stock 한 사이클 누적 시간
     "universal_ind": deque(maxlen=200),  # _collect_universal_indicators 한 사이클 누적
+    # detect_leader 내부 세분화 (134ms/market 분해)
+    "detect_candles": deque(maxlen=200),  # 4개 get_minutes_candles(5/15/30/60) 누적
+    "detect_v4":      deque(maxlen=200),  # v4_evaluate_entry 누적 (universal_ind + check_fn 포함)
 }
 _PIPELINE_STAGE_LOCK = threading.Lock()
 _PIPELINE_LATENCY_SANITY_CAP_MS = 600000  # 10분 초과는 이상치로 버림 (호스트 hibernation 등)
@@ -410,9 +413,13 @@ _CHECK_FN_EXEC_LOCK = threading.Lock()
 # 사이클 단위 detect 루프 내부 세분화 측정용 누적기
 # - detect_leader_stock 480회 호출 누적 → 사이클당 1회 record_stage
 # - _collect_universal_indicators 469회 호출 누적 → 사이클당 1회 record_stage
+# - detect_candles: 4개 get_minutes_candles(5/15/30/60) 블록 누적
+# - detect_v4: v4_evaluate_entry 호출 누적
 # (deque에 마켓별로 찍으면 사이클 단위 비교 어려워서 누적 후 사이클 단위로 flush)
 _CYCLE_DETECT_LEADER_MS = 0.0
 _CYCLE_UNIVERSAL_IND_MS = 0.0
+_CYCLE_DETECT_CANDLES_MS = 0.0
+_CYCLE_DETECT_V4_MS = 0.0
 _CYCLE_TIMING_LOCK = threading.Lock()
 
 
@@ -430,18 +437,41 @@ def _add_cycle_universal_ind_ms(ms):
         _CYCLE_UNIVERSAL_IND_MS += ms
 
 
+def _add_cycle_detect_candles_ms(ms):
+    """4개 get_minutes_candles(5/15/30/60) 블록 누적"""
+    global _CYCLE_DETECT_CANDLES_MS
+    with _CYCLE_TIMING_LOCK:
+        _CYCLE_DETECT_CANDLES_MS += ms
+
+
+def _add_cycle_detect_v4_ms(ms):
+    """v4_evaluate_entry 호출 누적"""
+    global _CYCLE_DETECT_V4_MS
+    with _CYCLE_TIMING_LOCK:
+        _CYCLE_DETECT_V4_MS += ms
+
+
 def _flush_cycle_internal_timing():
     """사이클 끝에서 호출 — 누적값을 stage 측정으로 flush + 리셋"""
     global _CYCLE_DETECT_LEADER_MS, _CYCLE_UNIVERSAL_IND_MS
+    global _CYCLE_DETECT_CANDLES_MS, _CYCLE_DETECT_V4_MS
     with _CYCLE_TIMING_LOCK:
         _dl = _CYCLE_DETECT_LEADER_MS
         _ui = _CYCLE_UNIVERSAL_IND_MS
+        _dc = _CYCLE_DETECT_CANDLES_MS
+        _dv = _CYCLE_DETECT_V4_MS
         _CYCLE_DETECT_LEADER_MS = 0.0
         _CYCLE_UNIVERSAL_IND_MS = 0.0
+        _CYCLE_DETECT_CANDLES_MS = 0.0
+        _CYCLE_DETECT_V4_MS = 0.0
     if _dl > 0:
         _pipeline_record_stage("detect_leader", _dl)
     if _ui > 0:
         _pipeline_record_stage("universal_ind", _ui)
+    if _dc > 0:
+        _pipeline_record_stage("detect_candles", _dc)
+    if _dv > 0:
+        _pipeline_record_stage("detect_v4", _dv)
 
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
@@ -899,7 +929,8 @@ def _pipeline_report(force=False):
         stage_snapshot = {k: list(v) for k, v in _PIPELINE_STAGE_LATENCIES.items()}
     _stage_order = (
         "scan_fetch", "scan_detect",
-        "detect_leader", "universal_ind",  # detect 루프 내부 세분화
+        "detect_leader",                                   # detect 루프 총합
+        "detect_candles", "detect_v4", "universal_ind",    # detect_leader 내부 세분화
         "shadow_eval",
         "save_state", "report_full", "report_mini",
         "tg_flush", "health_check",
@@ -12050,11 +12081,13 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _v4_signal = None  # strategy_v4 반환값
 
     try:
-        # 멀티TF 캔들 데이터 페칭
+        # 멀티TF 캔들 데이터 페칭 (분기 5 가설 검증: fetch가 진짜 병목인가)
+        _t_dc = time.time()
         _c5 = get_minutes_candles(5, m, 50) or []
         _c15 = get_minutes_candles(15, m, 50) or []
         _c30 = get_minutes_candles(30, m, 20) or []
         _c60 = get_minutes_candles(60, m, 30) or []
+        _add_cycle_detect_candles_ms((time.time() - _t_dc) * 1000)
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
@@ -12075,7 +12108,9 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         _cur_hour = now_kst().hour
 
         # strategy_v4 통합 진입 판정 (c1 전달 — VR5/ATR% 계산용)
+        _t_dv = time.time()
         _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1)
+        _add_cycle_detect_v4_ms((time.time() - _t_dv) * 1000)
 
         if _v4_signal:
             # 시간대 필터 적용
