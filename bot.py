@@ -375,6 +375,19 @@ _MARKET_LAST_SCAN_TS = {}  # market -> last detect_called ts
 _MARKET_SCAN_INTERVALS = deque(maxlen=2000)  # 최근 2000건 (ms)
 _MARKET_SCAN_LOCK = threading.Lock()
 
+# 단계별 레이턴시 추적 — 사이클 내 각 단계의 elapsed 독립 측정
+# (전체 사이클 레이턴시가 이상치로 오염돼도 단계별로 어디가 병목인지 파악 가능)
+_PIPELINE_STAGE_LATENCIES = {
+    "health_check": deque(maxlen=200),
+    "save_state":   deque(maxlen=200),
+    "shadow_eval":  deque(maxlen=200),
+    "tg_flush":     deque(maxlen=200),
+    "report":       deque(maxlen=200),
+    "scan_work":    deque(maxlen=200),  # fetch_orderbook + candles + detect loop
+}
+_PIPELINE_STAGE_LOCK = threading.Lock()
+_PIPELINE_LATENCY_SANITY_CAP_MS = 600000  # 10분 초과는 이상치로 버림 (호스트 hibernation 등)
+
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
 _PIPELINE_PASS_METRICS_LOCK = threading.Lock()
@@ -418,9 +431,22 @@ def _pipeline_hourly_inc(stage):
 
 
 def _pipeline_record_scan_latency(elapsed_ms):
-    """스캔 사이클 소요시간 기록 (ms)"""
+    """스캔 사이클 소요시간 기록 (ms) — sanity cap 적용"""
+    # 이상치 방어: 10분 초과는 host hibernation/clock jump 가능성 → 버림
+    if elapsed_ms < 0 or elapsed_ms > _PIPELINE_LATENCY_SANITY_CAP_MS:
+        return
     with _PIPELINE_SCAN_LAT_LOCK:
         _PIPELINE_SCAN_LATENCIES.append(elapsed_ms)
+
+
+def _pipeline_record_stage(name, elapsed_ms):
+    """단계별 레이턴시 기록 — sanity cap 적용"""
+    if elapsed_ms < 0 or elapsed_ms > _PIPELINE_LATENCY_SANITY_CAP_MS:
+        return
+    with _PIPELINE_STAGE_LOCK:
+        d = _PIPELINE_STAGE_LATENCIES.get(name)
+        if d is not None:
+            d.append(elapsed_ms)
 
 
 def _pipeline_record_market_scan(market):
@@ -810,6 +836,22 @@ def _pipeline_report(force=False):
         ms_p95 = ms_sorted[min(int(len(ms_sorted) * 0.95), len(ms_sorted) - 1)]
         ms_max = ms_sorted[-1]
         lines.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
+
+    # 🔍 단계별 레이턴시 — 사이클 내 각 단계 elapsed (병목 위치 파악)
+    with _PIPELINE_STAGE_LOCK:
+        stage_snapshot = {k: list(v) for k, v in _PIPELINE_STAGE_LATENCIES.items()}
+    _stage_lines = []
+    for _stage_name in ("scan_work", "shadow_eval", "save_state", "report", "tg_flush", "health_check"):
+        _lst = stage_snapshot.get(_stage_name, [])
+        if len(_lst) < 5:
+            continue
+        _lst_sorted = sorted(_lst)
+        _s_avg = sum(_lst) / len(_lst)
+        _s_p95 = _lst_sorted[min(int(len(_lst_sorted) * 0.95), len(_lst_sorted) - 1)]
+        _s_max = _lst_sorted[-1]
+        _stage_lines.append(f"{_stage_name}:avg={_s_avg:.0f}/p95={_s_p95:.0f}/max={_s_max:.0f}ms")
+    if _stage_lines:
+        lines.append("🔍 단계별 레이턴시: " + " | ".join(_stage_lines))
 
     # 🕐 시간대별 신호 (non-zero만)
     with _PIPELINE_HOURLY_LOCK:
@@ -14374,28 +14416,38 @@ def main():
     while True:
         try:
             # 🔧 Health check - watchdog용 파일 업데이트
+            _t_stage = time.time()
             try:
                 with open(os.path.join(os.getcwd(), "health.log"), "w") as hf:  # 🔧 fix: 하드코딩→동적 경로
                     hf.write(f"{time.time()}\n")
             except Exception:
                 pass
+            _pipeline_record_stage("health_check", (time.time() - _t_stage) * 1000)
 
             # 💾 상태 영속화 (주기적 저장)
+            _t_stage = time.time()
             _save_bot_state()
+            _pipeline_record_stage("save_state", (time.time() - _t_stage) * 1000)
 
             # 📡 섀도우 가상포지션 평가 (만료된 것 → 승률/수익률 누적)
+            _t_stage = time.time()
             _shadow_evaluate_positions()
+            _pipeline_record_stage("shadow_eval", (time.time() - _t_stage) * 1000)
 
             # 🔧 실패 메시지 큐 재전송
+            _t_stage = time.time()
             tg_flush_failed()
+            _pipeline_record_stage("tg_flush", (time.time() - _t_stage) * 1000)
 
-            # 📊 스캔 사이클 레이턴시 기록
+            # 📊 스캔 사이클 레이턴시 기록 (sanity cap 적용: >10분 outlier 제외)
             _scan_cycle_elapsed = (time.time() - _scan_cycle_start) * 1000
             _pipeline_record_scan_latency(_scan_cycle_elapsed)
 
             # 📊 파이프라인 계측 리포트 (10분마다 텔레그램, 1분마다 콘솔)
+            _t_stage = time.time()
             _pipeline_report()
             _pipeline_mini_report()
+            _pipeline_record_stage("report", (time.time() - _t_stage) * 1000)
 
             # 🔧 30분마다 텔레그램 헬스체크 알림
             if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
@@ -14899,6 +14951,7 @@ def main():
             shard = list(dict.fromkeys(shard))
 
             _scan_cycle_start = time.time()
+            _t_scan = _scan_cycle_start  # scan_work 단계 시작 시점
 
             obc = fetch_orderbook_cache(shard)
 
@@ -15331,6 +15384,8 @@ def main():
             cut_summary()
             if found == 0:
                 req_summary()
+            # scan_work 단계 종료 측정 (fetch_orderbook → candles → detect loop 전체)
+            _pipeline_record_stage("scan_work", (time.time() - _t_scan) * 1000)
             # 시간대별 동적 스캔 간격 적용
             aligned_sleep(get_scan_interval())
 
