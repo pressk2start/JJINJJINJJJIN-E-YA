@@ -391,6 +391,12 @@ _PIPELINE_STAGE_LATENCIES = {
 _PIPELINE_STAGE_LOCK = threading.Lock()
 _PIPELINE_LATENCY_SANITY_CAP_MS = 600000  # 10분 초과는 이상치로 버림 (호스트 hibernation 등)
 
+# check_fn 캐시 hit/miss 직접 계측 — per-function 분리
+# 캐시가 실제로 작동하는지 간접 증거(momentum_enter 카운터 비율)와 별개로 직접 검증
+_CHECK_FN_CACHE_HITS = {}   # fn_name -> hit count
+_CHECK_FN_CACHE_MISSES = {}  # fn_name -> miss count
+_CHECK_FN_CACHE_LOCK = threading.Lock()
+
 # gate 통과 시 핵심 지표 스냅샷 (품질 분석용)
 _PIPELINE_PASS_METRICS = deque(maxlen=100)  # 최근 100개 통과 신호의 지표
 _PIPELINE_PASS_METRICS_LOCK = threading.Lock()
@@ -864,6 +870,33 @@ def _pipeline_report(force=False):
     if _stage_rows:
         lines.append("🔍 단계별 레이턴시 (p95/max에 튀는 단계 = 병목)")
         lines.extend(_stage_rows)
+
+    # 🧠 check_fn 캐시 hit/miss 직접 계측 — 캐시가 진짜 작동하는지 확인
+    with _CHECK_FN_CACHE_LOCK:
+        _cache_hits_snap = dict(_CHECK_FN_CACHE_HITS)
+        _cache_misses_snap = dict(_CHECK_FN_CACHE_MISSES)
+    if _cache_hits_snap or _cache_misses_snap:
+        _total_hits = sum(_cache_hits_snap.values())
+        _total_misses = sum(_cache_misses_snap.values())
+        _total_calls = _total_hits + _total_misses
+        _hit_rate = (_total_hits / _total_calls * 100) if _total_calls > 0 else 0
+        lines.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
+        # 함수별 상세 (hit_rate 기준 정렬)
+        _all_fns = set(_cache_hits_snap.keys()) | set(_cache_misses_snap.keys())
+        _fn_rows = []
+        for _fn in _all_fns:
+            _h = _cache_hits_snap.get(_fn, 0)
+            _m = _cache_misses_snap.get(_fn, 0)
+            _t = _h + _m
+            if _t < 10:
+                continue
+            _r = (_h / _t * 100) if _t > 0 else 0
+            # 함수명 단축 (_v0_check_momentum_rsi_strict → momentum_rsi_strict)
+            _short = _fn.replace("_v0_check_", "")
+            _fn_rows.append((_r, f"   {_short:28} hit={_h:6} miss={_m:6} hit_rate={_r:5.1f}%"))
+        _fn_rows.sort(key=lambda x: -x[0])
+        for _, _row in _fn_rows:
+            lines.append(_row)
 
     # 🕐 시간대별 신호 (non-zero만)
     with _PIPELINE_HOURLY_LOCK:
@@ -9265,15 +9298,21 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     # ⭐ Per-call check_fn 캐시 — 같은 함수는 1회만 호출하고 재사용
     # 키: check_fn 객체 식별자 / 값: (sig, all_fails) 튜플
     _check_fn_cache = {}
+    # hit/miss 로컬 집계 (함수 종료 시 글로벌로 flush → lock 한 번만)
+    _local_hits = {}
+    _local_misses = {}
 
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
+        _fn_name = getattr(check_fn, "__name__", str(check_fn))
 
         # 🟢 캐시 조회 — 같은 check_fn 이미 호출됐으면 결과 재사용 (부작용 없음)
         if check_fn in _check_fn_cache:
+            _local_hits[_fn_name] = _local_hits.get(_fn_name, 0) + 1
             sig, all_fails = _check_fn_cache[check_fn]
         else:
+            _local_misses[_fn_name] = _local_misses.get(_fn_name, 0) + 1
             # 🔴 캐시 미스 — 실제 호출 (부작용: _pipeline_inc, _BLOCKED_THREAD_LOCAL)
             # 차단 플래그 초기화 후 전략 호출
             _BLOCKED_THREAD_LOCAL.last_fail = None
@@ -9362,6 +9401,13 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                         "_fail_threshold": fail_info["threshold"],
                         "_fail_direction": fail_info["direction"],
                     })
+    # 캐시 hit/miss 로컬 집계 → 글로벌 flush (lock 한 번만)
+    if _local_hits or _local_misses:
+        with _CHECK_FN_CACHE_LOCK:
+            for _k, _v in _local_hits.items():
+                _CHECK_FN_CACHE_HITS[_k] = _CHECK_FN_CACHE_HITS.get(_k, 0) + _v
+            for _k, _v in _local_misses.items():
+                _CHECK_FN_CACHE_MISSES[_k] = _CHECK_FN_CACHE_MISSES.get(_k, 0) + _v
     return results
 
 
