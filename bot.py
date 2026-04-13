@@ -9241,7 +9241,16 @@ def _shadow_evaluate_positions():
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     """섀도우 테스트: 비활성 전략에 시그널 발생 시 가상 포지션 등록.
     실매매 안 함 — 가상 진입 → 실제 청산 로직 시뮬레이션 → 승률/수익률 누적.
-    v10: 공통 지표 수집 후 각 전략 고유 지표와 병합 (자기 지표 우선, 타 지표 추가)"""
+    v10: 공통 지표 수집 후 각 전략 고유 지표와 병합 (자기 지표 우선, 타 지표 추가)
+
+    ⭐ check_fn 캐시 최적화:
+    - G/G2/G4/G6/G7/GT 6개 variants가 동일한 _v0_check_momentum_rsi를 호출하므로
+      동일 (check_fn, candles) 입력에 대해 결과가 완전히 동일
+    - Pure function이므로 첫 호출만 실행하고 이후는 캐시된 (sig, all_fails) 재사용
+    - _pipeline_inc 부작용도 1회만 발생 → 카운터 정확도 개선 (이전 6× 부풀려짐)
+    - _BLOCKED_THREAD_LOCAL 상태도 첫 호출에서만 수집
+    - scan_detect 예상 감소: 65s → 20~30s
+    """
     results = {}
     now_ts = time.time()
     entry_price = c1[-1]["trade_price"] if c1 else 0
@@ -9253,35 +9262,48 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         print(f"[SHADOW] universal_ind 수집 실패: {e}")
         universal_ind = {}
 
+    # ⭐ Per-call check_fn 캐시 — 같은 함수는 1회만 호출하고 재사용
+    # 키: check_fn 객체 식별자 / 값: (sig, all_fails) 튜플
+    _check_fn_cache = {}
+
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
-        # 차단 플래그 초기화 후 전략 호출
-        _BLOCKED_THREAD_LOCAL.last_fail = None
-        _BLOCKED_THREAD_LOCAL.last_fail_value = None
-        _BLOCKED_THREAD_LOCAL.last_fail_threshold = None
-        _BLOCKED_THREAD_LOCAL.last_fail_direction = None
-        try:
-            sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
-        except Exception:
-            sig = None
-        hit = sig is not None
-        all_fails = []
-        if not hit and getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None):
-            # eval_all 모드로 재실행 → 모든 실패 필터 수집
+
+        # 🟢 캐시 조회 — 같은 check_fn 이미 호출됐으면 결과 재사용 (부작용 없음)
+        if check_fn in _check_fn_cache:
+            sig, all_fails = _check_fn_cache[check_fn]
+        else:
+            # 🔴 캐시 미스 — 실제 호출 (부작용: _pipeline_inc, _BLOCKED_THREAD_LOCAL)
+            # 차단 플래그 초기화 후 전략 호출
             _BLOCKED_THREAD_LOCAL.last_fail = None
             _BLOCKED_THREAD_LOCAL.last_fail_value = None
             _BLOCKED_THREAD_LOCAL.last_fail_threshold = None
             _BLOCKED_THREAD_LOCAL.last_fail_direction = None
-            _BLOCKED_THREAD_LOCAL.all_fails = []
-            _BLOCKED_THREAD_LOCAL._eval_all_mode = True
             try:
-                check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+                sig = check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
             except Exception:
-                pass
-            finally:
-                _BLOCKED_THREAD_LOCAL._eval_all_mode = False
-            all_fails = getattr(_BLOCKED_THREAD_LOCAL, "all_fails", [])
+                sig = None
+            all_fails = []
+            if sig is None and getattr(_BLOCKED_THREAD_LOCAL, "last_fail", None):
+                # eval_all 모드로 재실행 → 모든 실패 필터 수집
+                _BLOCKED_THREAD_LOCAL.last_fail = None
+                _BLOCKED_THREAD_LOCAL.last_fail_value = None
+                _BLOCKED_THREAD_LOCAL.last_fail_threshold = None
+                _BLOCKED_THREAD_LOCAL.last_fail_direction = None
+                _BLOCKED_THREAD_LOCAL.all_fails = []
+                _BLOCKED_THREAD_LOCAL._eval_all_mode = True
+                try:
+                    check_fn(c1, c5, c15, c30, c60, gate_info=m3_info)
+                except Exception:
+                    pass
+                finally:
+                    _BLOCKED_THREAD_LOCAL._eval_all_mode = False
+                all_fails = list(getattr(_BLOCKED_THREAD_LOCAL, "all_fails", []))
+            # 캐시 저장 — 이후 같은 check_fn 호출 시 재사용
+            _check_fn_cache[check_fn] = (sig, all_fails)
+
+        hit = sig is not None
         results[route] = hit
 
         if entry_price <= 0:
