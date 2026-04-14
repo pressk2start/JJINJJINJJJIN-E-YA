@@ -7947,16 +7947,19 @@ _V0_EXIT_PARAMS_MOMENTUM_G7 = {  # G7: activation 0.7%, trail 0.4%
 #   min_hold: 120s (_is_g 분기로 G와 동일하게 적용)
 # 변수 (GT 유일한 차이):
 #   disable_trail: True → 트레일/본절 모두 우회, SL+타임아웃만 작동
+#   activation_pct: 1.0 → 라이브 monitor의 dyn_checkpoint = max(_cost_floor, 1.0) = 1.0
+#                         → trail_armed가 100% 수익에서만 활성 = 사실상 영구 비활성
+#                         → 라이브 청산에서도 SL/max_bars만 작동 (shadow와 일치)
 # 가설: trail이 alpha를 죽이고 있다 (180s 강제보유시 +0.31%p / +0.26%p 개선)
 _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "strategy": "TRAIL",
     "sl_pct": 0.010,           # G와 동일
-    "activation_pct": 0.003,   # 무관 (disable_trail로 비활성)
-    "trail_pct": 0.002,        # 무관 (disable_trail로 비활성)
+    "activation_pct": 1.0,     # ⭐ 100% — 라이브 trail 영구 비활성 (shadow는 disable_trail 사용)
+    "trail_pct": 0.005,        # 무관 (trail_armed 안 됨)
     "hold_bars": 0,
     "max_bars": 60,            # 180s, G와 동일
-    "disable_trail": True,     # ⭐ GT 유일한 변수: trail/본절 완전 우회
-    "description": "GT_SL1.0/no-trail/minH120s/max180s",
+    "disable_trail": True,     # ⭐ shadow_sim_exit 분기용 (라이브는 activation 1.0으로 우회)
+    "description": "GT_SL1.0/no-trail/max180s",
 }
 
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
@@ -8417,10 +8420,10 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM,
         "priority": 7,
-        "enabled": True,  # v18e: 라이브 활성화 (v18d 53건 51% +0.24%)
+        "enabled": False,  # ⬇ shadow only — GT 메인 승격 (B-1)으로 인해 비활성화
         "pipeline_key": "momentum",
         "route": "G",
-        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s]",
+        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s] (shadow)",
     },
     "모멘텀B": {  # G2→G3: activation 0.5%, trail 0.3% (0.8%는 MFE 대비 과도 확인)
         "check_fn": _v0_check_momentum_rsi,
@@ -8462,10 +8465,10 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi,  # ⭐ G와 완전 동일한 entry
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 7,
-        "enabled": False,  # shadow-only
+        "enabled": True,  # ⬆ B-1 메인 승격 (GT 71건 +0.11% vs G4/G6/G7 +0.02~0.04%)
         "pipeline_key": "momentum",
         "route": "GT",
-        "description": "5mRSI≥74.55 [GT:no-trail/minH120s/max180s]",
+        "description": "5mRSI≥74.55 [GT:no-trail/max180s] (LIVE)",
     },
     "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
         "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
@@ -10100,6 +10103,12 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
         check_fn = strat["check_fn"]
         sig = check_fn(c1, c5, c15, c30, c60, gate_info=None)
         if sig:
+            # ⭐ strat 정보로 override (같은 check_fn을 공유하는 strategy 분리 보장)
+            #   예: G와 GT가 _v0_check_momentum_rsi 공유 → check_fn 반환값은 항상 G용
+            #       → strat_name/exit_params/route를 등록 키 기준으로 덮어써야 GT exit 적용됨
+            sig["signal_tag"] = strat_name  # 예: "모멘텀GT"
+            sig["exit_params"] = strat.get("exit_params", sig.get("exit_params", _V4_DEFAULT_EXIT)).copy()
+            sig["logic_group"] = strat.get("route", sig.get("logic_group", "?"))
             _pipeline_inc("v4_raw_hit")
             _pipeline_hourly_inc("raw_hit")
             _pipeline_strategy_pass(strat_name)
