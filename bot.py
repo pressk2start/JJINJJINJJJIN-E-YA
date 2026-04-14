@@ -6958,9 +6958,12 @@ def get_minutes_candles(u, m, c):
 
 # detect_leader_stock 내부 4개 TF fetch 병렬화용 전용 executor
 # - 모듈 레벨 (한 번만 생성)
-# - max_workers=4 (c5/c15/c30/c60 동시 처리)
-# - 기존 _candle_executor(scan_fetch c1용)와 분리되어 경쟁 없음
-_DETECT_TF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix='detect_tf')
+# - max_workers=2 (이전 4 → 2: rate limit 병목 완화 실험)
+#   이전 4 concurrent: per_call 220ms → 545ms (2.5x 악화, rate limit 도달)
+#   2 concurrent 실험: 4개 submit되지만 pool=2라 자동으로 2+2 wave로 분할
+#                      기대 per_call 300~400ms (rate limit 여유 있음)
+# - 기존 _candle_executor(scan_fetch c1용, 12 workers)와 분리되어 경쟁 없음
+_DETECT_TF_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix='detect_tf')
 
 
 def _fetch_candle_with_tag(tf, market, count, tag):
