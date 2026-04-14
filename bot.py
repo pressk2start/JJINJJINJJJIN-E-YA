@@ -6955,6 +6955,24 @@ def get_minutes_candles(u, m, c):
     _record_tagged_fetch(u, (time.time() - _t_gmc) * 1000)
     return list(reversed(js)) if js else []
 
+
+# detect_leader_stock 내부 4개 TF fetch 병렬화용 전용 executor
+# - 모듈 레벨 (한 번만 생성)
+# - max_workers=4 (c5/c15/c30/c60 동시 처리)
+# - 기존 _candle_executor(scan_fetch c1용)와 분리되어 경쟁 없음
+_DETECT_TF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix='detect_tf')
+
+
+def _fetch_candle_with_tag(tf, market, count, tag):
+    """ThreadPool worker에서 호출되는 tag-aware wrapper.
+    Worker thread는 main thread의 _FETCH_TAG_LOCAL을 공유 안 하므로
+    wrapper 내부에서 명시적으로 _fetch_tag() 설정해서 call-site 분류 유지."""
+    with _fetch_tag(tag):
+        try:
+            return get_minutes_candles(tf, market, count) or []
+        except Exception:
+            return []
+
 def tick_ts_ms(t):
     """틱 타임스탬프 추출 (ms 단위, timestamp/ts 키 통일 + 초→ms 방어)"""
     ts = t.get("timestamp")
@@ -12148,13 +12166,30 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     _v4_signal = None  # strategy_v4 반환값
 
     try:
-        # 멀티TF 캔들 데이터 페칭 — call-site tag 'detect_leader'로 분류
-        # (get_minutes_candles 함수 레벨에서 자동 timing + tag 기반 누적)
-        with _fetch_tag('detect_leader'):
-            _c5 = get_minutes_candles(5, m, 50) or []
-            _c15 = get_minutes_candles(15, m, 50) or []
-            _c30 = get_minutes_candles(30, m, 20) or []
-            _c60 = get_minutes_candles(60, m, 30) or []
+        # 멀티TF 캔들 데이터 페칭 — 4개 TF 병렬 submit (순차 880ms → 병렬 220ms 기대)
+        # 이전: sequential 4 × 220ms = 880ms/market × 58 = 51.4s/cycle
+        # 이후: parallel 1 × 220ms = 220ms/market × 58 = 12.8s/cycle (38s 절감)
+        # tag는 _fetch_candle_with_tag 내부에서 worker thread에 재설정 (call-site 분류 유지)
+        _f5  = _DETECT_TF_EXECUTOR.submit(_fetch_candle_with_tag, 5,  m, 50, 'detect_leader')
+        _f15 = _DETECT_TF_EXECUTOR.submit(_fetch_candle_with_tag, 15, m, 50, 'detect_leader')
+        _f30 = _DETECT_TF_EXECUTOR.submit(_fetch_candle_with_tag, 30, m, 20, 'detect_leader')
+        _f60 = _DETECT_TF_EXECUTOR.submit(_fetch_candle_with_tag, 60, m, 30, 'detect_leader')
+        try:
+            _c5  = _f5.result(timeout=10)
+        except Exception:
+            _c5 = []
+        try:
+            _c15 = _f15.result(timeout=10)
+        except Exception:
+            _c15 = []
+        try:
+            _c30 = _f30.result(timeout=10)
+        except Exception:
+            _c30 = []
+        try:
+            _c60 = _f60.result(timeout=10)
+        except Exception:
+            _c60 = []
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
