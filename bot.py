@@ -3583,15 +3583,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 🔧 FIX: vwap_gap=0 도 유효값 → falsy 체크 대신 None 체크
         _vwap_gap_str = f" VWAP{pre.get('vwap_gap', 0):+.1f}%" if pre.get('vwap_gap') is not None else ""
 
+        # 전략 설명 매핑
+        _buy_group = pre.get("v4_logic_group", "?")
+        _buy_filters_str = " ".join(pre.get("v4_filters_hit", []))
+        _buy_desc_map = {
+            "GT": "5분RSI≥73 과매수 + 1분양봉 + 거래량폭증 → 강모멘텀 추격 (180초 시간청산)",
+            "C": "15분 음→양 반전 + 종가회복0.1%↑ + 1분양봉 + 거래량동반 → 초입반전 포착 (빠른익절)",
+        }
+        _buy_strat_desc = _buy_desc_map.get(_buy_group, _buy_filters_str)
+
         # 🔧 FIX: 박스 진입은 박스 코드에서 별도 알람 발송 → 여기서 중복 발송 방지
         if not pre.get("is_box"):
             tg_send(
                 f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
-                f"• 신호: {signal_tag}{_vwap_gap_str}\n"
-                f"• 지표: 서지{surge_str} 매수{buy_r:.0%} 임밸{imb:.2f} 연속{cons}회\n"
+                f"• 전략: {signal_tag} [{_buy_group}]\n"
+                f"• 조건: {_buy_strat_desc}\n"
+                f"• 지표: {_buy_filters_str}\n"
                 f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
                 f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
-                f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%)\n"
+                f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%){_vwap_gap_str}\n"
                 f"{link_for(m)}"
             )
 
@@ -15476,12 +15486,21 @@ def main():
                 imb_str = f"임밸 {pre.get('imbalance', 0):.2f}"
                 pocket_mark = "🎯" if pre.get("is_precision_pocket") else ""
 
-                # 🔥 경로 표시: signal_tag 하나로 간소화
+                # 🔥 경로 표시: signal_tag + 핵심 조건 요약
                 filter_type = pre.get("filter_type", "stage1_gate")
+                _sig_tag = pre.get("signal_tag", "기본")
+                _v4_filters_str = " ".join(pre.get("v4_filters_hit", []))
+                _v4_group_str = pre.get("v4_logic_group", "?")
                 if filter_type == "prebreak":
                     path_str = "🚀선행진입"
                 else:
-                    path_str = pre.get("signal_tag", "기본")
+                    path_str = f"{_sig_tag} [{_v4_group_str}]"
+                # 전략별 한 줄 설명
+                _strat_desc_map = {
+                    "GT": "5분봉RSI 73이상 과매수 돌입 + 1분봉양봉 + 거래량 폭증 확인 → 강한 상승 모멘텀 추격 진입 (트레일링 없이 180초 시간청산)",
+                    "C": "15분봉이 음봉→양봉 전환 + 종가가 전봉시가 회복(0.1%이상) + 1분봉 양봉 + 15분거래량 증가 → 단기 반전 초입 포착 (빠른 익절 전략)",
+                }
+                _strat_desc = _strat_desc_map.get(_v4_group_str, _v4_filters_str)
 
                 # 🔥 새 지표 계산: 체결강도, 틱당금액, 가속도
                 ticks_for_metrics = pre.get("ticks", [])
@@ -15533,7 +15552,9 @@ def main():
                     f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
                     f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
-                    f"🔍 경로: {path_str}\n"
+                    f"🔍 전략: {path_str}\n"
+                    f"📋 {_strat_desc}\n"
+                    f"📌 {_v4_filters_str}\n"
                     f"{link_for(m)}")
 
                 sent = tg_send(txt, retry=2)
