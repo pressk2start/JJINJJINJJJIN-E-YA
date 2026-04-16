@@ -9944,8 +9944,8 @@ def _v4_shadow_report_lines():
         analysis = _shadow_auto_analyze_indicators()
         if analysis:
             lines.append("🔍 필터 후보 자동 탐지:")
-            # Phase2: GT/GR만 표시
-            _filter_routes = {"GT", "GR"}
+            # Phase2: GT만 표시
+            _filter_routes = {"GT"}
             for akey, findings in analysis.items():
                 _aroute = akey.split(":")[0] if ":" in akey else akey
                 if _aroute not in _filter_routes:
@@ -9987,6 +9987,9 @@ def _v4_shadow_report_lines():
                 bavg = bs.get("total_pnl", 0) / bn * 100
                 broute = bs.get("route", "?")
                 bfilter = bs.get("filter", bkey)
+                # Phase2: G-variant 중복 제거 — GT만 표시 (G/G2/G4/G6/G7/GR 스킵)
+                if broute in ("G", "G2", "G4", "G6", "G7", "GR"):
+                    continue
                 # 필터 효과 판정
                 if bwr <= 45:
                     verdict = "✅유효"
