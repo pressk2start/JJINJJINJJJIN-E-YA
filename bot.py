@@ -1025,22 +1025,7 @@ def _pipeline_report(force=False):
         _total_calls = _total_hits + _total_misses
         _hit_rate = (_total_hits / _total_calls * 100) if _total_calls > 0 else 0
         lines.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
-        # 함수별 상세 (hit_rate 기준 정렬)
-        _all_fns = set(_cache_hits_snap.keys()) | set(_cache_misses_snap.keys())
-        _fn_rows = []
-        for _fn in _all_fns:
-            _h = _cache_hits_snap.get(_fn, 0)
-            _m = _cache_misses_snap.get(_fn, 0)
-            _t = _h + _m
-            if _t < 10:
-                continue
-            _r = (_h / _t * 100) if _t > 0 else 0
-            # 함수명 단축 (_v0_check_momentum_rsi_strict → momentum_rsi_strict)
-            _short = _fn.replace("_v0_check_", "")
-            _fn_rows.append((_r, f"   {_short:28} hit={_h:6} miss={_m:6} hit_rate={_r:5.1f}%"))
-        _fn_rows.sort(key=lambda x: -x[0])
-        for _, _row in _fn_rows:
-            lines.append(_row)
+        # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
 
     # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
     with _CHECK_FN_EXEC_LOCK:
@@ -1050,9 +1035,12 @@ def _pipeline_report(force=False):
         _total_all_ms = sum(_exec_total_snap.values())
         _total_all_calls = sum(_exec_calls_snap.values())
         lines.append(f"⏱️ check_fn 실행 시간 (cache miss만, 함수별 누적): 총 {_total_all_ms/1000:.1f}s / {_total_all_calls}회")
-        # 누적 시간 기준 내림차순 정렬 (가장 느린 게 위)
+        # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
         _exec_rows = []
+        _SHOW_FN_DETAIL = False
         for _fn in _exec_total_snap.keys():
+            if not _SHOW_FN_DETAIL:
+                break
             _total_ms = _exec_total_snap.get(_fn, 0.0)
             _n = _exec_calls_snap.get(_fn, 0)
             if _n < 10:
@@ -9777,6 +9765,9 @@ def _v4_shadow_report_lines():
         lines.append("📡 전 시나리오 가상매매 지표 W/L:")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
+        # Phase2: GT만 상세, G/G2/G4/G6/G7/GR은 1줄 요약
+        _DETAIL_ROUTES = {"GT", "L", "H", "B", "C"}  # GT + 비G전략은 상세 유지
+        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR"}  # G-cluster는 1줄 요약
         for key, s in sorted_stats:
             n = s.get("signals", 0)
             if n < 1:
@@ -9805,6 +9796,9 @@ def _v4_shadow_report_lines():
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
                 f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
             )
+            # Phase2: G-cluster는 1줄 요약만, 상세 스킵
+            if route in _SUMMARY_ROUTES:
+                continue  # 1줄 요약(위)만 출력하고 상세(아래) 전부 스킵
             # 청산 사유 분포 (상위 3개)
             reasons = s.get("exit_reasons", {})
             if reasons:
@@ -9866,40 +9860,24 @@ def _v4_shadow_report_lines():
                     bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
-            # 🔬 진입지표 승/패 평균 비교 (각 시나리오 로직별 값) + v18e: ±1σ 겹침 경고
-            w_ind = s.get("win_ind_avg", {})
-            w_cnt = s.get("win_ind_cnt", {})
-            w_m2 = s.get("win_ind_m2", {})
-            l_ind = s.get("loss_ind_avg", {})
-            l_cnt = s.get("loss_ind_cnt", {})
-            l_m2 = s.get("loss_ind_m2", {})
-            if w_ind or l_ind:
-                all_keys = set(w_ind.keys()) | set(l_ind.keys())
-                for ik in sorted(all_keys):
-                    # tick_ 지표는 소수점 3자리 (값이 작아서 2자리면 0.00으로 표시됨)
-                    _fmt = ".3f" if ik.startswith("tick_") else ".2f"
-                    w_str = f"W{w_ind[ik]:{_fmt}}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
-                    l_str = f"L{l_ind[ik]:{_fmt}}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
-                    # v18e: ±1σ IoU 겹침 판정 (Welford M2 기반)
-                    overlap_tag = ""
-                    if ik in w_ind and ik in l_ind and w_cnt.get(ik, 0) >= 10 and l_cnt.get(ik, 0) >= 10:
-                        w_var = w_m2.get(ik, 0) / max(w_cnt[ik] - 1, 1)
-                        l_var = l_m2.get(ik, 0) / max(l_cnt[ik] - 1, 1)
-                        w_std = w_var ** 0.5
-                        l_std = l_var ** 0.5
-                        if w_std > 0 or l_std > 0:
-                            # ±1σ 구간: [mean-std, mean+std]
-                            w_lo, w_hi = w_ind[ik] - w_std, w_ind[ik] + w_std
-                            l_lo, l_hi = l_ind[ik] - l_std, l_ind[ik] + l_std
-                            # IoU = intersection / union
-                            inter = max(0, min(w_hi, l_hi) - max(w_lo, l_lo))
-                            union = max(w_hi, l_hi) - min(w_lo, l_lo)
-                            iou = inter / union if union > 0 else 1.0
-                            if iou >= 0.7:
-                                overlap_tag = " ⚠겹침"
-                            elif iou <= 0.3:
-                                overlap_tag = " ✅분리"
-                    lines.append(f"    📊{ik}: {w_str} / {l_str}{overlap_tag}")
+            # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
+            _show_indicators = route in ("GT", "GR")
+            if _show_indicators:
+                w_ind = s.get("win_ind_avg", {})
+                w_cnt = s.get("win_ind_cnt", {})
+                w_m2 = s.get("win_ind_m2", {})
+                l_ind = s.get("loss_ind_avg", {})
+                l_cnt = s.get("loss_ind_cnt", {})
+                l_m2 = s.get("loss_ind_m2", {})
+                if w_ind or l_ind:
+                    # mfe_peak_sec만 표시 (핵심 분리 지표)
+                    for ik in ["mfe_peak_sec", "tick_age"]:
+                        if ik not in w_ind and ik not in l_ind:
+                            continue
+                        _fmt = ".3f" if ik.startswith("tick_") else ".2f"
+                        w_str = f"W{w_ind[ik]:{_fmt}}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
+                        l_str = f"L{l_ind[ik]:{_fmt}}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
+                        lines.append(f"    📊{ik}: {w_str} / {l_str}")
     # v18e: 조기 탈출 분석 — 시점별 PnL 임계치에 따른 최종 결과
     with _SHADOW_PERF_LOCK:
         _early_exit_lines = []
@@ -9929,25 +9907,16 @@ def _v4_shadow_report_lines():
         active = len(_SHADOW_VIRTUAL_POSITIONS)
     if active > 0:
         lines.append(f"  ⏳ 추적 중: {active}건")
-    # 🔬 W/L 자동 분석 — 유의미한 필터 후보 추천
-    try:
-        analysis = _shadow_auto_analyze_indicators()
-        if analysis:
-            lines.append("🔍 필터 후보 자동 탐지:")
-            for akey, findings in analysis.items():
-                lines.append(f"  [{akey}]")
-                for f in findings[:3]:
-                    star = "★" if f["effect"] >= 1.5 else "☆"
-                    lines.append(
-                        f"    {star}{f['ind']}: W={f['w_avg']} L={f['l_avg']}"
-                        f" d={f['effect']} → {f['direction']}{f['threshold']} 추천"
-                    )
-    except Exception:
-        pass
-    # 🔍 차단 건 가상 추적 리포트 (counterfactual)
-    # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
+    # 🔬 W/L 자동 분석 — Phase2: 비활성 (Phase1 완료, 리포트 간소화)
+    # try:
+    #     analysis = _shadow_auto_analyze_indicators()
+    #     ...
+    # except Exception:
+    #     pass
+    # 🔍 차단 건 가상 추적 리포트 — Phase2: 비활성 (리포트 간소화)
+    _SHOW_BLOCKED_REPORT = False  # Phase1 완료, 필터 검증 불필요
     with _SHADOW_PERF_LOCK:
-        if _SHADOW_BLOCKED_STATS:
+        if _SHOW_BLOCKED_REPORT and _SHADOW_BLOCKED_STATS:
             lines.append("🚫 필터 효과 검증 (차단 안했으면?):")
             # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
