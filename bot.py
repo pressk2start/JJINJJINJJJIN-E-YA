@@ -3000,17 +3000,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # ★ 동적 가격 가드 (변동성 + 장세 반영)
         # ticks 전달로 동적 임계치 계산
-        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
+        # 🔧 Phase2: GT 모멘텀은 drift 임계 1.2%로 완화 (기본 0.5~1.0%)
+        # GT는 강모멘텀이라 시그널→주문 사이 0.5%+ drift가 정상 → 기존 임계에서 과도 차단
+        _gt_drift = 0.012 if "GT" in pre.get("signal_tag", "") else None
+        ok_guard, current_price, is_chase = final_price_guard(m, signal_price, max_drift=_gt_drift, ticks=pre.get("ticks"), is_circle=pre.get("is_circle", False))
 
         # 🔧 FIX: VWAP gap + drift 복합 체크 (가드 통과해도 총 괴리 과대 → 꼭대기 진입 차단)
         # 예: VWAP+1.7% 신호 + 0.95% drift = 2.65% → 실질 VWAP+2.65% 진입은 과도
         _vwap_gap_pct = pre.get("vwap_gap", 0)  # % 단위 (1.7 = 1.7%)
         _guard_drift_pct = (current_price / signal_price - 1.0) * 100 if signal_price > 0 else 0
         _total_gap = _vwap_gap_pct + max(0, _guard_drift_pct)
-        if _total_gap > 2.0 and not pre.get("is_circle"):
+        # 🔧 Phase2: GT 모멘텀 전용 VWAP+DRIFT 완화 (2.0% → 3.0%)
+        # GT는 RSI≥74.55 강모멘텀이라 시그널 시점에 이미 VWAP 대비 높은 위치
+        # → 기존 2.0% 임계에서 구조적으로 100% 차단됨 → GT만 3.0%로 완화
+        _is_gt = "GT" in pre.get("signal_tag", "")
+        _vwap_drift_limit = 3.0 if _is_gt else 2.0
+        if _total_gap > _vwap_drift_limit and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
-                  f"= 총 {_total_gap:.1f}% > 2.0% → 꼭대기 진입 차단")
+                  f"= 총 {_total_gap:.1f}% > {_vwap_drift_limit:.1f}% → 꼭대기 진입 차단")
 
         if not ok_guard:
             drift_pct = (current_price / signal_price - 1) * 100
