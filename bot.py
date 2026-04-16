@@ -3005,7 +3005,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # GT는 RSI≥74.55 강모멘텀이라 시그널 시점에 이미 VWAP 대비 높은 위치
         # → 기존 2.0% 임계에서 구조적으로 100% 차단됨 → GT만 3.0%로 완화
         _is_gt = "GT" in pre.get("signal_tag", "")
-        _vwap_drift_limit = 3.0 if _is_gt else 2.0
+        _vwap_drift_limit = 3.5 if _is_gt else 2.0
         if _total_gap > _vwap_drift_limit and not pre.get("is_circle"):
             ok_guard = False
             print(f"[VWAP+DRIFT] {m} VWAP gap {_vwap_gap_pct:.1f}% + drift {_guard_drift_pct:+.2f}% "
@@ -6826,11 +6826,7 @@ class LRUCache:
 
 
 _TICKS_CACHE = LRUCache(maxsize=100)
-# _TICKS_TTL — config.py에서 정의됨 (언더스코어라 import * 에서 제외 → 직접 정의)
-try:
-    _TICKS_TTL
-except NameError:
-    _TICKS_TTL = 2.0  # config.py 기본값과 동일
+# _TICKS_TTL — L10에서 명시 import 완료 (import * 가 언더스코어 제외하므로)
 _C5_CACHE = LRUCache(maxsize=300)
 
 
