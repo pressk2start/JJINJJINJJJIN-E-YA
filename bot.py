@@ -9765,9 +9765,9 @@ def _v4_shadow_report_lines():
         lines.append("📡 전 시나리오 가상매매 지표 W/L:")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
-        # Phase2: GT만 상세, G/G2/G4/G6/G7/GR은 1줄 요약
-        _DETAIL_ROUTES = {"GT", "L", "H", "B", "C"}  # GT + 비G전략은 상세 유지
-        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR"}  # G-cluster는 1줄 요약
+        # Phase2: GT만 상세, 나머지 전부 1줄 요약
+        _DETAIL_ROUTES = {"GT"}  # GT만 풀 상세
+        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "L", "H", "B", "C"}  # 전부 1줄
         _cluster_data = {}  # G-cluster 요약용 데이터 수집
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -9916,6 +9916,9 @@ def _v4_shadow_report_lines():
             if len(_trades_with_curve) < 20:
                 continue
             route = s.get("route", "?")
+            # Phase2: GT만 조기탈출 상세 표시
+            if route not in ("GT", "GR"):
+                continue
             _ea_parts = []
             for check_sec in [60, 90, 120]:
                 sk = str(check_sec)
@@ -9941,7 +9944,12 @@ def _v4_shadow_report_lines():
         analysis = _shadow_auto_analyze_indicators()
         if analysis:
             lines.append("🔍 필터 후보 자동 탐지:")
+            # Phase2: GT/GR만 표시
+            _filter_routes = {"GT", "GR"}
             for akey, findings in analysis.items():
+                _aroute = akey.split(":")[0] if ":" in akey else akey
+                if _aroute not in _filter_routes:
+                    continue
                 lines.append(f"  [{akey}]")
                 for f in findings[:3]:
                     star = "★" if f["effect"] >= 1.5 else "☆"
@@ -9963,7 +9971,10 @@ def _v4_shadow_report_lines():
                                -x[1].get("signals", 0)))
             _blocked_shown = 0
             _blocked_pending = 0  # 샘플 부족 건수
+            _BLOCKED_MAX_SHOW = 15  # Phase2: 상위 15개만 표시
             for bkey, bs in sorted_blocked:
+                if _blocked_shown >= _BLOCKED_MAX_SHOW:
+                    break
                 bn = bs.get("signals", 0)
                 if bn < 1:
                     continue
