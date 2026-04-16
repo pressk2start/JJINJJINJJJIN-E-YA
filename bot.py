@@ -1101,11 +1101,12 @@ def _pipeline_report(force=False):
 
 _PIPELINE_MINI_LAST_TS = 0
 _PIPELINE_MINI_INTERVAL = 60  # 1분
+_PIPELINE_MINI_PREV = {}  # delta 계산용 이전 스냅샷
 
 
 def _pipeline_mini_report():
     """1분마다 v4 전략 퍼널 미니 리포트 (콘솔만, 텔레그램 X)"""
-    global _PIPELINE_MINI_LAST_TS
+    global _PIPELINE_MINI_LAST_TS, _PIPELINE_MINI_PREV
     now = time.time()
     if (now - _PIPELINE_MINI_LAST_TS) < _PIPELINE_MINI_INTERVAL:
         return
@@ -1115,15 +1116,34 @@ def _pipeline_mini_report():
     v4 = c.get("v4_called", 0)
     if v4 == 0:
         return  # 스캔 없으면 skip
+    prev = _PIPELINE_MINI_PREV
+    def d(k):
+        return c.get(k, 0) - prev.get(k, 0)
+    _gt_enter = c.get('momentum_enter', 0)
+    _gt_rsi = c.get('momentum_rsi5_fail', 0)
+    _gt_1m = c.get('momentum_1m_fail', 0)
+    _gt_vr1 = c.get('momentum_vr5_over_fail', 0)
+    _gt_vr15 = c.get('momentum_vr5_15m_fail', 0)
+    _gt_pass = c.get('momentum_pass', 0)
+    # delta (이번 1분 구간)
+    _d_enter = d('momentum_enter')
+    _d_rsi = d('momentum_rsi5_fail')
+    _d_1m = d('momentum_1m_fail')
+    _d_vr1 = d('momentum_vr5_over_fail')
+    _d_vr15 = d('momentum_vr5_15m_fail')
+    _d_pass = d('momentum_pass')
     lines = [
-        f"[V0_FUNNEL] {now_kst_str()} | v4호출={v4}",
-        f"  A거래량={c.get('vol_burst_pass',0)} B돌파={c.get('breakout_pass',0)} "
-        f"C반전15={c.get('reversal_15m_pass',0)} H반전60={c.get('reversal_60m_pass',0)}",
-        f"  FEMA15={c.get('ema_align_15m_pass',0)} JEMA60={c.get('ema_align_60m_pass',0)} "
-        f"G모멘텀={c.get('momentum_pass',0)} LADX={c.get('adx_trend_pass',0)} K역추세={c.get('oversold_pass',0)}",
-        f"  raw_hit={c.get('v4_raw_hit',0)} gate통과={c.get('gate_pass',0)}",
+        f"[V0_FUNNEL] {now_kst_str()} | v4호출={v4}(Δ{d('v4_called')})",
+        f"  [GT] 호출={_gt_enter}(Δ{_d_enter}) RSI탈락={_gt_rsi}(Δ{_d_rsi}) "
+        f"1m음봉={_gt_1m}(Δ{_d_1m}) VR5과열={_gt_vr1}(Δ{_d_vr1}) "
+        f"15mVR부족={_gt_vr15}(Δ{_d_vr15}) ✅통과={_gt_pass}(Δ{_d_pass})",
+        f"  raw={c.get('v4_raw_hit',0)}(Δ{d('v4_raw_hit')}) "
+        f"gate={c.get('gate_pass',0)}(Δ{d('gate_pass')}) "
+        f"진입={c.get('send_attempt',0)}(Δ{d('send_attempt')}) "
+        f"성공={c.get('send_success',0)}(Δ{d('send_success')})",
     ]
     print("\n".join(lines))
+    _PIPELINE_MINI_PREV = c
 
 
 def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, final_alert,
