@@ -9768,6 +9768,7 @@ def _v4_shadow_report_lines():
         # Phase2: GT만 상세, G/G2/G4/G6/G7/GR은 1줄 요약
         _DETAIL_ROUTES = {"GT", "L", "H", "B", "C"}  # GT + 비G전략은 상세 유지
         _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR"}  # G-cluster는 1줄 요약
+        _cluster_data = {}  # G-cluster 요약용 데이터 수집
         for key, s in sorted_stats:
             n = s.get("signals", 0)
             if n < 1:
@@ -9796,7 +9797,9 @@ def _v4_shadow_report_lines():
                 f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
                 f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
             )
-            # Phase2: G-cluster는 1줄 요약만, 상세 스킵
+            # Phase2: G-cluster 데이터 수집 + 1줄 요약만
+            if route in {"GT", "G", "G2", "G4", "G6", "G7", "GR"}:
+                _cluster_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n}
             if route in _SUMMARY_ROUTES:
                 continue  # 1줄 요약(위)만 출력하고 상세(아래) 전부 스킵
             # 청산 사유 분포 (상위 3개)
@@ -9878,6 +9881,32 @@ def _v4_shadow_report_lines():
                         w_str = f"W{w_ind[ik]:{_fmt}}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
                         l_str = f"L{l_ind[ik]:{_fmt}}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
                         lines.append(f"    📊{ik}: {w_str} / {l_str}")
+    # 📌 Phase2: G-cluster 요약 + GT 판정 상태
+    if _cluster_data:
+        _gc_parts = []
+        for _r in ["GT", "G7", "G6", "G4"]:
+            if _r in _cluster_data:
+                _d = _cluster_data[_r]
+                _gc_parts.append(f"{_r}({_d['pnl']:+.2f}%)")
+        if _gc_parts:
+            lines.append(f"📌 G-cluster: {' ≈ '.join(_gc_parts)}")
+        # GT 판정 상태
+        if "GT" in _cluster_data:
+            _gt = _cluster_data["GT"]
+            # 180s PnL 가져오기
+            _gt_180s = ""
+            for _k, _s in sorted_stats:
+                if _s.get("route") == "GT":
+                    _cs = _s.get("pnl_curve_sum", {})
+                    _cc = _s.get("pnl_curve_cnt", {})
+                    if "180" in _cs and _cc.get("180", 0) > 0:
+                        _gt_180s = f" | 180s {_cs['180']/_cc['180']*100:+.2f}%"
+                    break
+            lines.append(f"🎯 GT 판정: PnL {_gt['pnl']:+.2f}% | 승률 {_gt['wr']:.0f}% | n={_gt['n']}{_gt_180s}")
+        # GR 상태 (있으면)
+        if "GR" in _cluster_data:
+            _gr = _cluster_data["GR"]
+            lines.append(f"🎯 GR 상태: PnL {_gr['pnl']:+.2f}% | 승률 {_gr['wr']:.0f}% | n={_gr['n']} (실전 부적합)")
     # v18e: 조기 탈출 분석 — 시점별 PnL 임계치에 따른 최종 결과
     with _SHADOW_PERF_LOCK:
         _early_exit_lines = []
@@ -9907,21 +9936,8 @@ def _v4_shadow_report_lines():
         active = len(_SHADOW_VIRTUAL_POSITIONS)
     if active > 0:
         lines.append(f"  ⏳ 추적 중: {active}건")
-    # 🔬 W/L 자동 분석 — 필터 후보 임계치 추천 (유지)
-    try:
-        analysis = _shadow_auto_analyze_indicators()
-        if analysis:
-            lines.append("🔍 필터 후보 자동 탐지:")
-            for akey, findings in analysis.items():
-                lines.append(f"  [{akey}]")
-                for f in findings[:3]:
-                    star = "★" if f["effect"] >= 1.5 else "☆"
-                    lines.append(
-                        f"    {star}{f['ind']}: W={f['w_avg']} L={f['l_avg']}"
-                        f" d={f['effect']} → {f['direction']}{f['threshold']} 추천"
-                    )
-    except Exception:
-        pass
+    # 🔬 W/L 자동 분석 — Phase2: 비활성 (필터 효과 검증 섹션으로 대체)
+    pass
     # 🔍 차단 건 가상 추적 리포트 (counterfactual)
     # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
     with _SHADOW_PERF_LOCK:
