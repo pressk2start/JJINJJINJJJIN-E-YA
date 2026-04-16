@@ -9907,12 +9907,21 @@ def _v4_shadow_report_lines():
         active = len(_SHADOW_VIRTUAL_POSITIONS)
     if active > 0:
         lines.append(f"  ⏳ 추적 중: {active}건")
-    # 🔬 W/L 자동 분석 — Phase2: 비활성 (Phase1 완료, 리포트 간소화)
-    # try:
-    #     analysis = _shadow_auto_analyze_indicators()
-    #     ...
-    # except Exception:
-    #     pass
+    # 🔬 W/L 자동 분석 — 필터 후보 임계치 추천 (유지)
+    try:
+        analysis = _shadow_auto_analyze_indicators()
+        if analysis:
+            lines.append("🔍 필터 후보 자동 탐지:")
+            for akey, findings in analysis.items():
+                lines.append(f"  [{akey}]")
+                for f in findings[:3]:
+                    star = "★" if f["effect"] >= 1.5 else "☆"
+                    lines.append(
+                        f"    {star}{f['ind']}: W={f['w_avg']} L={f['l_avg']}"
+                        f" d={f['effect']} → {f['direction']}{f['threshold']} 추천"
+                    )
+    except Exception:
+        pass
     # 🔍 차단 건 가상 추적 리포트 — Phase2: 비활성 (리포트 간소화)
     _SHOW_BLOCKED_REPORT = False  # Phase1 완료, 필터 검증 불필요
     with _SHADOW_PERF_LOCK:
