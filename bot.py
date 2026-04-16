@@ -823,9 +823,9 @@ def _pipeline_report(force=False):
         f" 1m음봉:{c.get('reversal_60m_1m_fail',0)}"
         f" ✅통과:{c.get('reversal_60m_pass',0)}",
         f"  [FEMA15] ⛔비활성(v18e: 1905건27%-0.10%)",
-        f"  [G모멘텀] 5mRSI≧74.55+1m양봉+VR5≦3.2+15mVR≧2.0 [G-v2:SL1.0/minH120s/max180s]",
+        f"  [G모멘텀] 5mRSI≧73.0+1m양봉+VR5≦3.2+15mVR≧2.0 [G-v2:SL1.0/minH120s/max180s]",
         f"    진입{c.get('momentum_enter',0)}"
-        f" → 5mRSI(74.55미만):{c.get('momentum_rsi5_fail',0)}"
+        f" → 5mRSI(73.0미만):{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
         f" VR5과열(3.2초과):{c.get('momentum_vr5_over_fail',0)}"
         f" 15mVR(2.0미만):{c.get('momentum_vr5_15m_fail',0)}"
@@ -1137,6 +1137,7 @@ def _pipeline_mini_report():
         f"  [GT] 호출={_gt_enter}(Δ{_d_enter}) RSI탈락={_gt_rsi}(Δ{_d_rsi}) "
         f"1m음봉={_gt_1m}(Δ{_d_1m}) VR5과열={_gt_vr1}(Δ{_d_vr1}) "
         f"15mVR부족={_gt_vr15}(Δ{_d_vr15}) ✅통과={_gt_pass}(Δ{_d_pass})",
+        f"  [C15] 통과={c.get('reversal_15m_pass',0)}(Δ{d('reversal_15m_pass')})",
         f"  raw={c.get('v4_raw_hit',0)}(Δ{d('v4_raw_hit')}) "
         f"gate={c.get('gate_pass',0)}(Δ{d('gate_pass')}) "
         f"→ 포지션={c.get('position_block',0)}(Δ{d('position_block')}) "
@@ -8229,8 +8230,9 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
     rsi_5m = _v4_rsi_from_candles(c5, 14)
     # v18d: RSI 68→71로 조이기 (71.4에서 89건 29% +4%p)
     # v18e-tune: RSI 71→74.55 (136건 46% +0.11%, 234건 38% -0.05% 대비 +0.16%p)
-    if rsi_5m is None or rsi_5m < 74.55:
-        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=74.55, direction="gte"): return None
+    # v18e-tune2: RSI 74.55→73.0 (100% 차단 해소 — 시스템 idle 방지)
+    if rsi_5m is None or rsi_5m < 73.0:
+        if _pipeline_inc("momentum_rsi5_fail", value=rsi_5m, threshold=73.0, direction="gte"): return None
     if not c1 or not _v4_is_bullish(c1[-1]):
         _bp_g = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
         if _pipeline_inc("momentum_1m_fail", value=round(_bp_g, 2), threshold=0, direction="gt"): return None
@@ -8406,7 +8408,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
         "priority": 3,
-        "enabled": False,
+        "enabled": True,  # ⬆ 보조 전략 활성화 (GT idle 보완, shadow -0.03% ≈ GT 수준)
         "pipeline_key": "reversal_15m",
         "route": "C",
         "description": "15m 음→양 + 종가회복",
@@ -8492,7 +8494,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,  # ⬆ B-1 메인 승격 (GT 71건 +0.11% vs G4/G6/G7 +0.02~0.04%)
         "pipeline_key": "momentum",
         "route": "GT",
-        "description": "5mRSI≥74.55 [GT:no-trail/max180s] (LIVE)",
+        "description": "5mRSI≥73.0 [GT:no-trail/max180s] (LIVE)",
     },
     "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
         "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
