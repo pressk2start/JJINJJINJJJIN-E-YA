@@ -811,6 +811,7 @@ def _pipeline_report(force=False):
         f" → 전봉양봉:{c.get('reversal_15m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
         f" 종가(전봉시가미달):{c.get('reversal_15m_recovery_fail',0)}"
+        f" 회복약({c.get('reversal_15m_recovery_weak_fail',0)})"
         f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
         f" 15mVR(1.0미만):{c.get('reversal_15m_vr5_15m_fail',0)}"
         f" 고점이격(1.5%초과):{c.get('reversal_15m_gap20_fail',0)}"
@@ -8111,6 +8112,10 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
     recovery_gap = ((cur["trade_price"] / max(prev["opening_price"], 1)) - 1.0) * 100
     if cur["trade_price"] <= prev["opening_price"]:
         if _pipeline_inc(f"{pkey}_recovery_fail", value=round(recovery_gap, 2), threshold=0, direction="gt"): return None
+    # v18e-tune2: C만 최소 회복 강도 요구 (한계 회복 제거)
+    #   recovery_gap > 0이면 통과했지만, 0.001%~0.09% 같은 미미한 회복은 노이즈
+    if route == "C" and recovery_gap < 0.1:
+        if _pipeline_inc(f"{pkey}_recovery_weak_fail", value=round(recovery_gap, 2), threshold=0.1, direction="gte"): return None
     # (옵션) 1m 양봉 타이밍
     if c1 and len(c1) >= 1:
         _bp_rev = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
