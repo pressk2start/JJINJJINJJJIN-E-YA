@@ -9922,10 +9922,10 @@ def _v4_shadow_report_lines():
                     )
     except Exception:
         pass
-    # 🔍 차단 건 가상 추적 리포트 — Phase2: 비활성 (리포트 간소화)
-    _SHOW_BLOCKED_REPORT = False  # Phase1 완료, 필터 검증 불필요
+    # 🔍 차단 건 가상 추적 리포트 (counterfactual)
+    # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
     with _SHADOW_PERF_LOCK:
-        if _SHOW_BLOCKED_REPORT and _SHADOW_BLOCKED_STATS:
+        if _SHADOW_BLOCKED_STATS:
             lines.append("🚫 필터 효과 검증 (차단 안했으면?):")
             # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
