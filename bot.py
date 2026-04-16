@@ -8088,9 +8088,21 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         return None
     prev, cur = candles[-2], candles[-1]
     # 직전봉 음봉 체크 — 몸통비율(%) 전달
+    # v18e-tune2: C만 전봉양봉 허용 (고점이격 1.2% 이내 시)
+    #   기존: 전봉양봉 → 무조건 탈락 (746/1044=71% 컷 → C 완전 비활성)
+    #   수정: 전봉양봉이어도 고점 근접(1.2%이내)이면 "초반 반전" 허용
     prev_body_pct = ((prev["trade_price"] - prev["opening_price"]) / max(prev["opening_price"], 1)) * 100
     if prev["trade_price"] >= prev["opening_price"]:
-        if _pipeline_inc(f"{pkey}_prev_fail", value=round(prev_body_pct, 2), threshold=0, direction="lt"): return None
+        if route == "C" and c1 and len(c1) >= 21:
+            _cur_close = c1[-1]["trade_price"]
+            _high_20 = max(c["high_price"] for c in c1[-21:-1])
+            _gap_from_high = ((_cur_close / max(_high_20, 1)) - 1.0) * 100
+            if _gap_from_high < -1.2:
+                # 고점 대비 1.2%+ 하락 → 약한 회복 → 전봉양봉 차단 유지
+                if _pipeline_inc(f"{pkey}_prev_fail", value=round(prev_body_pct, 2), threshold=0, direction="lt"): return None
+            # else: 고점 근접(-1.2%이내) → 전봉양봉이어도 허용 (상승 전환 초기)
+        else:
+            if _pipeline_inc(f"{pkey}_prev_fail", value=round(prev_body_pct, 2), threshold=0, direction="lt"): return None
     # 현재봉 양봉 체크 — 몸통비율(%) 전달
     cur_body_pct = ((cur["trade_price"] - cur["opening_price"]) / max(cur["opening_price"], 1)) * 100
     if cur["trade_price"] <= cur["opening_price"]:
