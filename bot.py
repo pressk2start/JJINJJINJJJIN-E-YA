@@ -1139,7 +1139,12 @@ def _pipeline_mini_report():
         f"15mVR부족={_gt_vr15}(Δ{_d_vr15}) ✅통과={_gt_pass}(Δ{_d_pass})",
         f"  raw={c.get('v4_raw_hit',0)}(Δ{d('v4_raw_hit')}) "
         f"gate={c.get('gate_pass',0)}(Δ{d('gate_pass')}) "
-        f"진입={c.get('send_attempt',0)}(Δ{d('send_attempt')}) "
+        f"→ 포지션={c.get('position_block',0)}(Δ{d('position_block')}) "
+        f"포스트={c.get('postcheck_block',0)}(Δ{d('postcheck_block')}) "
+        f"쿨다운={c.get('cooldown_block',0)}(Δ{d('cooldown_block')}) "
+        f"락={c.get('lock_block',0)}(Δ{d('lock_block')}) "
+        f"연패={c.get('suspend_block',0)}(Δ{d('suspend_block')})",
+        f"  → 진입={c.get('send_attempt',0)}(Δ{d('send_attempt')}) "
         f"성공={c.get('send_success',0)}(Δ{d('send_success')})",
     ]
     print("\n".join(lines))
