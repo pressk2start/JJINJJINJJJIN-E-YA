@@ -6823,7 +6823,11 @@ class LRUCache:
 
 
 _TICKS_CACHE = LRUCache(maxsize=100)
-# _TICKS_TTL — config.py에서 정의됨
+# _TICKS_TTL — config.py에서 정의됨 (언더스코어라 import * 에서 제외 → 직접 정의)
+try:
+    _TICKS_TTL
+except NameError:
+    _TICKS_TTL = 2.0  # config.py 기본값과 동일
 _C5_CACHE = LRUCache(maxsize=300)
 
 
