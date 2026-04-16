@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import *  # 전역 설정값 (config.py)
+# 🔧 FIX: _로 시작하는 config 변수는 import * 에서 제외됨 → 명시 import
+import config as _cfg
+_TICKS_TTL = getattr(_cfg, "_TICKS_TTL", 2.0)
 from urllib.parse import urlencode
 
 import uuid
