@@ -3596,8 +3596,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if not pre.get("is_box"):
             tg_send(
                 f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
-                f"• 전략: {signal_tag} [{_buy_group}]\n"
-                f"• 조건: {_buy_strat_desc}\n"
+                f"• 전략: {signal_tag} [{_buy_group}] — {_buy_strat_desc}\n"
                 f"• 지표: {_buy_filters_str}\n"
                 f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
                 f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
@@ -4281,12 +4280,22 @@ def close_auto_position(m, reason=""):
             # 피크→청산 드롭 (트레일이 얼마나 줬는지)
             _peak_drop = _mfe_val - (net_ret_pct if net_ret_pct else 0)
 
+            # 전략 정보 추출
+            _exit_sig_tag = _pos_data.get('signal_tag', '?')
+            _exit_group = "GT" if "GT" in _exit_sig_tag else ("C" if "반전_15m" in _exit_sig_tag else "?")
+            _exit_desc_map = {
+                "GT": "강모멘텀 추격 (5분RSI≥73, 180초 시간청산)",
+                "C": "초입반전 포착 (15분 음→양, 빠른익절)",
+            }
+            _exit_strat_desc = _exit_desc_map.get(_exit_group, "")
+
             tg_send(
                 f"====================================\n"
                 f"{result_emoji} <b>자동청산 완료</b> {m}\n"
                 f"====================================\n"
                 f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
                 f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
+                f"• 전략: {_exit_sig_tag} [{_exit_group}]{' — ' + _exit_strat_desc if _exit_strat_desc else ''}\n"
                 f"• 사유: {reason}\n"
                 f"• 매수평단: {fmt6(entry_price)}원\n"
                 f"• 실매도가: {fmt6(exit_price_used)}원\n"
@@ -4298,7 +4307,7 @@ def close_auto_position(m, reason=""):
                 f"• 보유: {_hold_sec:.0f}초 | MFE: +{_mfe_val:.2f}% ({_mfe_sec_val:.0f}초) | MAE: {_mae_val:.2f}%\n"
                 f"• 피크드롭: {_peak_drop:.2f}% | 트레일: {_trail_dist_val:.3f}% (잠금 {_trail_stop_val:+.3f}%)\n"
                 f"• 진입ATR: {_entry_atr_val:.3f}% | pstd: {_entry_pstd_val:.4f}% | SL: {_pos_data.get('sl_pct', 0)*100:.2f}%\n"
-                f"• 시그널: {_pos_data.get('signal_tag', '?')} ({_pos_data.get('signal_type', '?')}) | 모드: {_pos_data.get('entry_mode', '?')}\n"
+                f"• 모드: {_pos_data.get('entry_mode', '?')} | 타입: {_pos_data.get('signal_type', '?')}\n"
                 f"• MFE시계열: {' → '.join(f'{k}초:+{v*100:.2f}%' for k, v in sorted(_pos_data.get('mfe_snapshots', {}).items(), key=lambda x: int(x[0])))}\n"
                 f"====================================\n"
                 f"{link_for(m)}"
@@ -4617,12 +4626,27 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
 
         # 🔧 FIX: net 기준으로 판정 (수수료 반영)
         result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
+        # 전략 정보 추출
+        _partial_sig_tag = backup_pos_snapshot.get("signal_tag") if backup_pos_snapshot else None
+        if not _partial_sig_tag:
+            with _POSITION_LOCK:
+                _pos_ref = OPEN_POSITIONS.get(m)
+                if _pos_ref:
+                    _partial_sig_tag = _pos_ref.get("signal_tag", "?")
+        _partial_sig_tag = _partial_sig_tag or "?"
+        _partial_group = "GT" if "GT" in _partial_sig_tag else ("C" if "반전_15m" in _partial_sig_tag else "?")
+        _partial_desc_map = {
+            "GT": "강모멘텀 추격 (5분RSI≥73, 180초 시간청산)",
+            "C": "초입반전 포착 (15분 음→양, 빠른익절)",
+        }
+        _partial_strat_desc = _partial_desc_map.get(_partial_group, "")
         tg_send(
             f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
             f"====================================\n"
             f"💰 순손익: {pl_value - fee_total:+,.0f}원 (gross:{ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
             f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {pl_value - fee_total:+,.0f}원\n\n"
+            f"• 전략: {_partial_sig_tag} [{_partial_group}]{' — ' + _partial_strat_desc if _partial_strat_desc else ''}\n"
             f"• 사유: {reason or '부분청산'}\n"
             f"• 매수평단: {fmt6(entry_price)}원\n"
             f"• 실매도가: {fmt6(exit_price_used)}원\n"
@@ -15552,9 +15576,8 @@ def main():
                     f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
                     f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
-                    f"🔍 전략: {path_str}\n"
-                    f"📋 {_strat_desc}\n"
-                    f"📌 {_v4_filters_str}\n"
+                    f"🔍 {path_str} — {_strat_desc}\n"
+                    f"📌 지표: {_v4_filters_str}\n"
                     f"{link_for(m)}")
 
                 sent = tg_send(txt, retry=2)
