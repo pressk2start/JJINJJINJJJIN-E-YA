@@ -1449,6 +1449,40 @@ def _strat_group_from_signal(signal_type: str) -> str:
         return "C"
     return signal_type
 
+# 🔧 C 킬스위치: rolling PnL 기반 자동 비활성화
+_C_KILLSWITCH_UNTIL = 0.0  # C 자동 비활성 타임스탬프
+_C_KILLSWITCH_WINDOW = 30  # 최근 N건 기준
+_C_KILLSWITCH_THRESHOLD = -0.0010  # rolling PnL ≤ -0.10%면 킬
+_C_KILLSWITCH_COOLDOWN = 1800  # 30분 비활성
+
+# 🔧 C 진입 속도 제한
+_C_ENTRY_TIMESTAMPS = deque(maxlen=20)
+_C_MAX_ENTRIES_PER_10MIN = 2
+
+def _c_killswitch_check() -> bool:
+    """C 킬스위치: rolling PnL 기반 자동 비활성화. True면 C 차단"""
+    if time.time() < _C_KILLSWITCH_UNTIL:
+        return True
+    c_trades = [t for t in TRADE_HISTORY if "반전" in t.get("signal", "")]
+    if len(c_trades) < _C_KILLSWITCH_WINDOW:
+        return False
+    recent = c_trades[-_C_KILLSWITCH_WINDOW:]
+    avg_pnl = statistics.mean([t["pnl"] for t in recent])
+    if avg_pnl <= _C_KILLSWITCH_THRESHOLD:
+        global _C_KILLSWITCH_UNTIL
+        _C_KILLSWITCH_UNTIL = time.time() + _C_KILLSWITCH_COOLDOWN
+        print(f"[C_KILLSWITCH] C rolling PnL {avg_pnl*100:+.3f}% ≤ {_C_KILLSWITCH_THRESHOLD*100:.2f}% "
+              f"(최근 {_C_KILLSWITCH_WINDOW}건) → C 30분 비활성")
+        return True
+    return False
+
+def _c_rate_limit_ok() -> bool:
+    """C 진입 속도 제한: 10분당 최대 2건. True면 진입 OK"""
+    now = time.time()
+    cutoff = now - 600
+    recent = sum(1 for ts in _C_ENTRY_TIMESTAMPS if ts > cutoff)
+    return recent < _C_MAX_ENTRIES_PER_10MIN
+
 # 🔧 승률개선: 코인별 연패 추적 (같은 코인 반복 손절 방지)
 _COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
 _COIN_LOSS_LOCK = threading.Lock()
@@ -8301,8 +8335,9 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         if _pipeline_inc(f"{pkey}_recovery_fail", value=round(recovery_gap, 2), threshold=0, direction="gt"): return None
     # v18e-tune2: C만 최소 회복 강도 요구 (한계 회복 제거)
     #   recovery_gap > 0이면 통과했지만, 0.001%~0.09% 같은 미미한 회복은 노이즈
-    if route == "C" and recovery_gap < 0.1:
-        if _pipeline_inc(f"{pkey}_recovery_weak_fail", value=round(recovery_gap, 2), threshold=0.1, direction="gte"): return None
+    # v18e-tune2: 0.1% → 0.05% 완화 (0.1%는 C 신호 과도 차단)
+    if route == "C" and recovery_gap < 0.05:
+        if _pipeline_inc(f"{pkey}_recovery_weak_fail", value=round(recovery_gap, 2), threshold=0.05, direction="gte"): return None
     # (옵션) 1m 양봉 타이밍
     if c1 and len(c1) >= 1:
         _bp_rev = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
@@ -8651,7 +8686,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
         "priority": 3,
-        "enabled": False,  # ⬇ 라이브 비활성 (shadow -0.04%, 33% WR → edge 없음. GT 집중)
+        "enabled": True,  # ⬆ 재활성화 (recovery 0.05% + 킬스위치 + 진입제한 가드레일 적용)
         "pipeline_key": "reversal_15m",
         "route": "C",
         "description": "15m 음→양 + 종가회복",
@@ -15733,6 +15768,22 @@ def main():
                     pre["entry_mode"] = "half"
                     print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
+                # 🔧 C 가드레일: 킬스위치 + 진입속도 제한
+                _is_c_entry = "반전" in pre.get("signal_tag", "")
+                if _is_c_entry:
+                    if _c_killswitch_check():
+                        cut("C_KILLSWITCH", f"{m} C 킬스위치 활성 → 진입 차단")
+                        _pipeline_inc("suspend_block")
+                        with _POSITION_LOCK:
+                            recent_alerts.pop(m, None)
+                        continue
+                    if not _c_rate_limit_ok():
+                        cut("C_RATE_LIMIT", f"{m} C 10분당 2건 초과 → 진입 차단")
+                        _pipeline_inc("suspend_block")
+                        with _POSITION_LOCK:
+                            recent_alerts.pop(m, None)
+                        continue
+
                 # 🔧 전략별 연패 게이트 — 해당 전략만 차단 (C 연패가 GT 차단하지 않음)
                 _cur_strat_group = pre.get("v4_logic_group", "?")
                 _sg_key = _strat_group_from_signal(pre.get("signal_tag", ""))
@@ -15952,6 +16003,8 @@ def main():
                     # 🔧 FIX: 스캔 루프 락을 유지한 채 매수 진행 (gap 제거 → 중복진입 방지)
                     # open_auto_position이 reentrant=True로 재진입, 모니터 finally에서 최종 해제
                     _pipeline_inc("send_attempt")
+                    if "반전" in pre.get("signal_tag", ""):
+                        _C_ENTRY_TIMESTAMPS.append(time.time())
                     _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
                                       "", 1, f"ENTRY_ATTEMPT|mode={pre.get('entry_mode')}")
                     try:
