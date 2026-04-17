@@ -1461,6 +1461,7 @@ _C_MAX_ENTRIES_PER_10MIN = 2
 
 def _c_killswitch_check() -> bool:
     """C 킬스위치: rolling PnL 기반 자동 비활성화. True면 C 차단"""
+    global _C_KILLSWITCH_UNTIL
     if time.time() < _C_KILLSWITCH_UNTIL:
         return True
     c_trades = [t for t in TRADE_HISTORY if "반전" in t.get("signal", "")]
@@ -1469,7 +1470,6 @@ def _c_killswitch_check() -> bool:
     recent = c_trades[-_C_KILLSWITCH_WINDOW:]
     avg_pnl = statistics.mean([t["pnl"] for t in recent])
     if avg_pnl <= _C_KILLSWITCH_THRESHOLD:
-        global _C_KILLSWITCH_UNTIL
         _C_KILLSWITCH_UNTIL = time.time() + _C_KILLSWITCH_COOLDOWN
         print(f"[C_KILLSWITCH] C rolling PnL {avg_pnl*100:+.3f}% ≤ {_C_KILLSWITCH_THRESHOLD*100:.2f}% "
               f"(최근 {_C_KILLSWITCH_WINDOW}건) → C 30분 비활성")
