@@ -8493,7 +8493,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
         "priority": 3,
-        "enabled": True,  # ⬆ 보조 전략 활성화 (GT idle 보완, shadow -0.03% ≈ GT 수준)
+        "enabled": False,  # ⬇ 라이브 비활성 (shadow -0.04%, 33% WR → edge 없음. GT 집중)
         "pipeline_key": "reversal_15m",
         "route": "C",
         "description": "15m 음→양 + 종가회복",
