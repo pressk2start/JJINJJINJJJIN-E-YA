@@ -6923,6 +6923,28 @@ class LRUCache:
 _TICKS_CACHE = LRUCache(maxsize=100)
 # _TICKS_TTL — L10에서 명시 import 완료 (import * 가 언더스코어 제외하므로)
 _C5_CACHE = LRUCache(maxsize=300)
+# v18f: c60 전역 캐시 (scan wall-clock 최적화)
+# 60분봉은 3600s 주기 갱신 → TTL 300s도 실질 왜곡 거의 없음
+# 대상: detect_leader 경로의 get_minutes_candles(60, m, 30) — 58 calls/cycle × 221ms ≈ 12.9s/cycle 절감 예상
+_C60_CACHE = LRUCache(maxsize=300)
+_C60_CACHE_TTL_MS = 300_000  # 300s
+
+
+def _get_c60_cached(m, count=30):
+    """c60 캐시 조회 (TTL 300s). detect_leader 경로 전용.
+    miss 시 get_minutes_candles(60, m, count) 호출 후 캐시."""
+    hit = _C60_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C60_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c60_cache_hit")
+        cached = hit["c"]
+        # count가 더 많이 캐시된 경우 뒤쪽 count만 반환 (최신 캔들 포함)
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c60_cache_miss")
+    c60 = get_minutes_candles(60, m, count) or []
+    if c60:
+        _C60_CACHE.set(m, {"ts": _now_ms, "c": c60, "count": count})
+    return c60
 
 
 def five_min_context_ok(m):
@@ -12512,7 +12534,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         with _fetch_tag('detect_leader'):
             _c5  = get_minutes_candles(5,  m, 50) or []
             _c15 = get_minutes_candles(15, m, 50) or []
-            _c60 = get_minutes_candles(60, m, 30) or []
+            _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
@@ -15552,6 +15574,7 @@ def main():
                     last_reason.pop(_stale_k, None)
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
+            _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
