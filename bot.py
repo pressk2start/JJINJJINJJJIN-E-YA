@@ -3596,8 +3596,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if not pre.get("is_box"):
             tg_send(
                 f"{mode_emoji} <b>[{mode_label}] 자동매수</b> {m}\n"
-                f"• 전략: {signal_tag} [{_buy_group}] — {_buy_strat_desc}\n"
-                f"• 지표: {_buy_filters_str}\n"
+                f"• 전략: {signal_tag} [{_buy_group}] | {_buy_filters_str}\n"
                 f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
                 f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
                 f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%){_vwap_gap_str}\n"
@@ -15576,8 +15575,7 @@ def main():
                     f"🌡️ 과열 {overheat:.1f} | 틱나이 {fresh_age:.1f}초\n"
                     f"📈 CV {cv_val:.2f}{cv_emoji} | pstd {pstd_val*100:.3f}% | 호가 {best_ask_krw/1000:.0f}K\n"
                     f"🧯 손절가: {fmt6(dyn_stop)} (동적SL {eff_sl_pct*100:.2f}%)\n"
-                    f"🔍 {path_str} — {_strat_desc}\n"
-                    f"📌 지표: {_v4_filters_str}\n"
+                    f"🔍 {path_str} | {_v4_filters_str}\n"
                     f"{link_for(m)}")
 
                 sent = tg_send(txt, retry=2)
