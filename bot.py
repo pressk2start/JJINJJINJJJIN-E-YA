@@ -8056,6 +8056,17 @@ _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "description": "GT_SL1.0/no-trail/max180s",
 }
 
+_V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "disable_trail": True,
+    "description": "GT_SL07_SL0.7/no-trail/max180s",
+}
+
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL15 = {
     "strategy": "TRAIL",
     "sl_pct": 0.015,           # GT 1.0% → 1.5% (SL 히트 후 회복 여부 검증)
@@ -8710,6 +8721,15 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum_68",
         "route": "GT68",
         "description": "5mRSI≥68 [GT68:no-trail/max180s] (shadow — 진입 앞당김 실험)",
+    },
+    "모멘텀GT_SL07": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_SL07,
+        "priority": 7,
+        "enabled": False,  # shadow-only (SL 1.0→0.7 타이트화 실험)
+        "pipeline_key": "momentum",
+        "route": "GT_SL07",
+        "description": "5mRSI≥73.0 [GT_SL07:SL0.7/no-trail/max180s] (shadow — SL 타이트)",
     },
     "모멘텀GT_SL15": {
         "check_fn": _v0_check_momentum_rsi,
@@ -10039,7 +10059,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # Phase2: GT만 상세, 나머지 전부 1줄 요약
         _DETAIL_ROUTES = {"GT"}  # GT만 풀 상세
-        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "GT70", "GT68", "GT_SL15", "GT_300s", "HT", "B2", "L", "H", "B", "C"}  # 전부 1줄
+        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "GT70", "GT68", "GT_SL07", "GT_SL15", "GT_300s", "HT", "B2", "L", "H", "B", "C"}  # 전부 1줄
         _cluster_data = {}  # G-cluster 요약용 데이터 수집
         _shadow_cand_data = {}  # 🧪 Shadow후보(B2/HT/GT70/GT68) 요약용 수집
         for key, s in sorted_stats:
@@ -10073,8 +10093,8 @@ def _v4_shadow_report_lines():
             # Phase2: G-cluster 데이터 수집 + 1줄 요약만
             if route in {"GT", "G", "G2", "G4", "G6", "G7", "GR"}:
                 _cluster_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n}
-            # 🧪 Shadow후보 데이터 수집 (GT_SL15/GT_300s 우선, 그다음 B2/HT/GT70/GT68)
-            if route in {"GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"}:
+            # 🧪 Shadow후보 데이터 수집 (GT_SL07/SL15/300s 우선, 그다음 B2/HT/GT70/GT68)
+            if route in {"GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"}:
                 _cs_cand = s.get("pnl_curve_sum", {})
                 _cc_cand = s.get("pnl_curve_cnt", {})
                 _p180 = None
@@ -10191,10 +10211,10 @@ def _v4_shadow_report_lines():
         if "GR" in _cluster_data:
             _gr = _cluster_data["GR"]
             lines.append(f"🎯 GR 상태: PnL {_gr['pnl']:+.2f}% | 승률 {_gr['wr']:.0f}% | n={_gr['n']} (실전 부적합)")
-    # 🧪 Shadow후보 (GT_SL15/GT_300s 우선, B2/HT/GT70/GT68) 한줄 요약
+    # 🧪 Shadow후보 (GT_SL07/SL15/300s 우선, B2/HT/GT70/GT68) 한줄 요약
     if _shadow_cand_data:
         lines.append("🧪 Shadow후보:")
-        for _r in ["GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"]:
+        for _r in ["GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"]:
             if _r in _shadow_cand_data:
                 _d = _shadow_cand_data[_r]
                 _p180_str = f" | 180s {_d['p180']:+.2f}%" if _d["p180"] is not None else ""
