@@ -6947,6 +6947,28 @@ def _get_c60_cached(m, count=30):
     return c60
 
 
+# v18f: c15 전역 캐시 (scan wall-clock Phase B)
+# 15분봉은 900s 주기 갱신 → TTL 60s면 주기 대비 7% 창 (매우 안전)
+# 대상: detect_leader 경로의 get_minutes_candles(15, m, 50) — 59 calls/cycle × 224ms ≈ 13.0s/cycle 절감 예상
+_C15_CACHE = LRUCache(maxsize=300)
+_C15_CACHE_TTL_MS = 60_000  # 60s
+
+
+def _get_c15_cached(m, count=50):
+    """c15 캐시 조회 (TTL 60s). detect_leader 경로 전용."""
+    hit = _C15_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C15_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c15_cache_hit")
+        cached = hit["c"]
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c15_cache_miss")
+    c15 = get_minutes_candles(15, m, count) or []
+    if c15:
+        _C15_CACHE.set(m, {"ts": _now_ms, "c": c15, "count": count})
+    return c15
+
+
 def five_min_context_ok(m):
     if not USE_5M_CONTEXT:
         return True
@@ -12533,7 +12555,7 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # signature 호환성: _v4_shadow_test_all_routes(c30=...) 인자는 빈 list로 전달
         with _fetch_tag('detect_leader'):
             _c5  = get_minutes_candles(5,  m, 50) or []
-            _c15 = get_minutes_candles(15, m, 50) or []
+            _c15 = _get_c15_cached(m, count=50)  # v18f Phase B: 전역 캐시 (TTL 60s)
             _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
 
@@ -15575,6 +15597,7 @@ def main():
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
             _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
+            _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
