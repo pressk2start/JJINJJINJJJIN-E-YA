@@ -8347,6 +8347,45 @@ def _v0_check_momentum_rsi(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
+def _make_momentum_rsi_variant(rsi_min, pkey):
+    """GT shadow variant factory — RSI 임계값만 바꿔서 shadow 비교용"""
+    def _check(c1, c5, c15, c30, c60, gate_info=None):
+        _pipeline_inc(f"{pkey}_enter")
+        if not c5 or len(c5) < 15:
+            return None
+        rsi_5m = _v4_rsi_from_candles(c5, 14)
+        if rsi_5m is None or rsi_5m < rsi_min:
+            if _pipeline_inc(f"{pkey}_rsi5_fail", value=rsi_5m, threshold=rsi_min, direction="gte"): return None
+        if not c1 or not _v4_is_bullish(c1[-1]):
+            _bp = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
+            if _pipeline_inc(f"{pkey}_1m_fail", value=round(_bp, 2), threshold=0, direction="gt"): return None
+        _vr5 = _v4_volume_ratio_5(c1) if c1 and len(c1) >= 7 else None
+        if _vr5 is not None and _vr5 > 3.2:
+            if _pipeline_inc(f"{pkey}_vr5_over_fail", value=round(_vr5, 2), threshold=3.2, direction="lte"): return None
+        _vr15 = None
+        if c15 and len(c15) >= 6:
+            cur_vol = c15[-1].get("candle_acc_trade_price", 0)
+            past = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+            avg = sum(past) / max(len(past), 1)
+            if avg > 0:
+                _vr15 = round(cur_vol / avg, 2)
+                if _vr15 < 2.0:
+                    if _pipeline_inc(f"{pkey}_vr5_15m_fail", value=_vr15, threshold=2.0, direction="gte"): return None
+        _pipeline_inc(f"{pkey}_pass")
+        return {
+            "signal_tag": "모멘텀",
+            "entry_mode": "confirm",
+            "logic_group": "G",
+            "filters_hit": [f"5mRSI={rsi_5m:.1f}", f"VR5={_vr5}", f"VR15={_vr15}"],
+            "exit_params": _V0_EXIT_PARAMS_MOMENTUM.copy(),
+            "indicators": {"rsi_5m": round(rsi_5m, 1)},
+        }
+    return _check
+
+_v0_check_momentum_rsi_70 = _make_momentum_rsi_variant(70.0, "momentum_70")
+_v0_check_momentum_rsi_68 = _make_momentum_rsi_variant(68.0, "momentum_68")
+
+
 def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
     """L 추세강도: 15m ADX≥28.5 + 양봉"""
     _pipeline_inc("adx_trend_enter")
@@ -8589,6 +8628,24 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum_gr",
         "route": "GR",
         "description": "5mRSI≥78 [GR:G와 동일 exit, entry만 강화]",
+    },
+    "모멘텀GT70": {
+        "check_fn": _v0_check_momentum_rsi_70,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum_70",
+        "route": "GT70",
+        "description": "5mRSI≥70 [GT70:no-trail/max180s] (shadow — 진입 앞당김 실험)",
+    },
+    "모멘텀GT68": {
+        "check_fn": _v0_check_momentum_rsi_68,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7,
+        "enabled": False,  # shadow-only
+        "pipeline_key": "momentum_68",
+        "route": "GT68",
+        "description": "5mRSI≥68 [GT68:no-trail/max180s] (shadow — 진입 앞당김 실험)",
     },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
