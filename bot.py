@@ -6923,6 +6923,50 @@ class LRUCache:
 _TICKS_CACHE = LRUCache(maxsize=100)
 # _TICKS_TTL — L10에서 명시 import 완료 (import * 가 언더스코어 제외하므로)
 _C5_CACHE = LRUCache(maxsize=300)
+# v18f: c60 전역 캐시 (scan wall-clock 최적화)
+# 60분봉은 3600s 주기 갱신 → TTL 300s도 실질 왜곡 거의 없음
+# 대상: detect_leader 경로의 get_minutes_candles(60, m, 30) — 58 calls/cycle × 221ms ≈ 12.9s/cycle 절감 예상
+_C60_CACHE = LRUCache(maxsize=300)
+_C60_CACHE_TTL_MS = 300_000  # 300s
+
+
+def _get_c60_cached(m, count=30):
+    """c60 캐시 조회 (TTL 300s). detect_leader 경로 전용.
+    miss 시 get_minutes_candles(60, m, count) 호출 후 캐시."""
+    hit = _C60_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C60_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c60_cache_hit")
+        cached = hit["c"]
+        # count가 더 많이 캐시된 경우 뒤쪽 count만 반환 (최신 캔들 포함)
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c60_cache_miss")
+    c60 = get_minutes_candles(60, m, count) or []
+    if c60:
+        _C60_CACHE.set(m, {"ts": _now_ms, "c": c60, "count": count})
+    return c60
+
+
+# v18f: c15 전역 캐시 (scan wall-clock Phase B)
+# 15분봉은 900s 주기 갱신 → TTL 60s면 주기 대비 7% 창 (매우 안전)
+# 대상: detect_leader 경로의 get_minutes_candles(15, m, 50) — 59 calls/cycle × 224ms ≈ 13.0s/cycle 절감 예상
+_C15_CACHE = LRUCache(maxsize=300)
+_C15_CACHE_TTL_MS = 60_000  # 60s
+
+
+def _get_c15_cached(m, count=50):
+    """c15 캐시 조회 (TTL 60s). detect_leader 경로 전용."""
+    hit = _C15_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C15_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c15_cache_hit")
+        cached = hit["c"]
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c15_cache_miss")
+    c15 = get_minutes_candles(15, m, count) or []
+    if c15:
+        _C15_CACHE.set(m, {"ts": _now_ms, "c": c15, "count": count})
+    return c15
 
 
 def five_min_context_ok(m):
@@ -8056,6 +8100,50 @@ _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "description": "GT_SL1.0/no-trail/max180s",
 }
 
+_V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "disable_trail": True,
+    "description": "GT_SL07_SL0.7/no-trail/max180s",
+}
+
+_V0_EXIT_PARAMS_MOMENTUM_GT_SL15 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.015,           # GT 1.0% → 1.5% (SL 히트 후 회복 여부 검증)
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "disable_trail": True,
+    "description": "GT_SL15_SL1.5/no-trail/max180s",
+}
+
+_V0_EXIT_PARAMS_MOMENTUM_GT_300s = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,           # GT 60 (180s) → 100 (300s) — 180s 이후 alpha 지속 여부
+    "disable_trail": True,
+    "description": "GT_300s_SL1.0/no-trail/max300s",
+}
+
+_V0_EXIT_PARAMS_H_T180 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.010,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 60,
+    "disable_trail": True,
+    "description": "HT180_SL1.0/no-trail/max180s",
+}
+
 _V0_EXIT_PARAMS_SLOW = {  # L/B: 후반 양전 → 시간만 더
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -8140,6 +8228,37 @@ def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
         "signal_tag": "가격돌파",
         "entry_mode": "confirm",
         "logic_group": "B",
+        "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
+        "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
+        "indicators": {"gap_20bar": round(gap_pct, 4)},
+    }
+
+
+def _v0_check_price_breakout_bullpass(c1, c5, c15, c30, c60, gate_info=None):
+    """B2 가격돌파 (양봉 필터 제거): 종가>20봉고점 + 15mVR≥1.5"""
+    _pipeline_inc("breakout_bp_enter")
+    if not c1 or len(c1) < 21:
+        return None
+    cur_close = c1[-1]["trade_price"]
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    if cur_close <= high_20:
+        gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+        if _pipeline_inc("breakout_bp_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
+    _vr5_15m_b = None
+    if c15 and len(c15) >= 6:
+        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
+        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
+        if avg_vol_15 > 0:
+            _vr5_15m_b = round(cur_vol_15 / avg_vol_15, 2)
+            if _vr5_15m_b < 1.5:
+                if _pipeline_inc("breakout_bp_vr5_15m_fail", value=_vr5_15m_b, threshold=1.5, direction="gte"): return None
+    _pipeline_inc("breakout_bp_pass")
+    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+    return {
+        "signal_tag": "가격돌파BP",
+        "entry_mode": "confirm",
+        "logic_group": "B2",
         "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
         "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
         "indicators": {"gap_20bar": round(gap_pct, 4)},
@@ -8647,6 +8766,51 @@ _STRATEGY_REGISTRY = {
         "route": "GT68",
         "description": "5mRSI≥68 [GT68:no-trail/max180s] (shadow — 진입 앞당김 실험)",
     },
+    "모멘텀GT_SL07": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_SL07,
+        "priority": 7,
+        "enabled": False,  # shadow-only (SL 1.0→0.7 타이트화 실험)
+        "pipeline_key": "momentum",
+        "route": "GT_SL07",
+        "description": "5mRSI≥73.0 [GT_SL07:SL0.7/no-trail/max180s] (shadow — SL 타이트)",
+    },
+    "모멘텀GT_SL15": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_SL15,
+        "priority": 7,
+        "enabled": False,  # shadow-only (SL 1.0→1.5 완화 실험)
+        "pipeline_key": "momentum",
+        "route": "GT_SL15",
+        "description": "5mRSI≥73.0 [GT_SL15:SL1.5/no-trail/max180s] (shadow — SL 완화)",
+    },
+    "모멘텀GT_300s": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_300s,
+        "priority": 7,
+        "enabled": False,  # shadow-only (max 180→300s 연장 실험)
+        "pipeline_key": "momentum",
+        "route": "GT_300s",
+        "description": "5mRSI≥73.0 [GT_300s:SL1.0/no-trail/max300s] (shadow — 시간 연장)",
+    },
+    "돌파B2": {
+        "check_fn": _v0_check_price_breakout_bullpass,
+        "exit_params": _V0_EXIT_PARAMS_BREAKOUT,
+        "priority": 1,
+        "enabled": False,  # shadow-only (양봉 필터 제거 실험)
+        "pipeline_key": "breakout_bp",
+        "route": "B2",
+        "description": "종가>20봉고점 + 15mVR≥1.5 (양봉 필터 제거, shadow)",
+    },
+    "반전60m_T180": {
+        "check_fn": _v0_check_reversal_60m,
+        "exit_params": _V0_EXIT_PARAMS_H_T180,
+        "priority": 4,
+        "enabled": False,  # shadow-only (GT식 exit 적용 실험)
+        "pipeline_key": "reversal_60m",
+        "route": "HT",
+        "description": "60m 음→양 + 종가회복 [HT:GT식 no-trail/max180s] (shadow)",
+    },
     "추세강도": {
         "check_fn": _v0_check_trend_strength,
         "exit_params": _V0_EXIT_PARAMS_SLOW,
@@ -8674,7 +8838,7 @@ _SHADOW_LOCK = threading.Lock()
 #               best_price, trail_armed, trail_stop, exit_params, bars, exit_reason }
 _SHADOW_VIRTUAL_POSITIONS = []
 _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
-_SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180]  # v18e: 초반 5초 단위 추가
+_SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
 _SHADOW_CHECK_OVERRIDES = {}
@@ -9715,7 +9879,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
                 # v18e: B pullback entry — 30초 대기 후 최저가로 진입 (G는 30s부터 양수라 제외)
-                _pb_delay = 30 if route == "B" else 0
+                _pb_delay = 30 if route in ("B", "B2") else 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
                     "market": market, "entry_price": entry_price,
@@ -9939,8 +10103,9 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # Phase2: GT만 상세, 나머지 전부 1줄 요약
         _DETAIL_ROUTES = {"GT"}  # GT만 풀 상세
-        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "L", "H", "B", "C"}  # 전부 1줄
+        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "GT70", "GT68", "GT_SL07", "GT_SL15", "GT_300s", "HT", "B2", "L", "H", "B", "C"}  # 전부 1줄
         _cluster_data = {}  # G-cluster 요약용 데이터 수집
+        _shadow_cand_data = {}  # 🧪 Shadow후보(B2/HT/GT70/GT68) 요약용 수집
         for key, s in sorted_stats:
             n = s.get("signals", 0)
             if n < 1:
@@ -9972,6 +10137,17 @@ def _v4_shadow_report_lines():
             # Phase2: G-cluster 데이터 수집 + 1줄 요약만
             if route in {"GT", "G", "G2", "G4", "G6", "G7", "GR"}:
                 _cluster_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n}
+            # 🧪 Shadow후보 데이터 수집 (GT_SL07/SL15/300s 우선, 그다음 B2/HT/GT70/GT68)
+            if route in {"GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"}:
+                _cs_cand = s.get("pnl_curve_sum", {})
+                _cc_cand = s.get("pnl_curve_cnt", {})
+                _p180 = None
+                if "180" in _cs_cand and _cc_cand.get("180", 0) > 0:
+                    _p180 = _cs_cand["180"] / _cc_cand["180"] * 100
+                _p300 = None
+                if "300" in _cs_cand and _cc_cand.get("300", 0) > 0:
+                    _p300 = _cs_cand["300"] / _cc_cand["300"] * 100
+                _shadow_cand_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n, "p180": _p180, "p300": _p300}
             if route in _SUMMARY_ROUTES:
                 continue  # 1줄 요약(위)만 출력하고 상세(아래) 전부 스킵
             # 청산 사유 분포 (상위 3개)
@@ -10079,6 +10255,15 @@ def _v4_shadow_report_lines():
         if "GR" in _cluster_data:
             _gr = _cluster_data["GR"]
             lines.append(f"🎯 GR 상태: PnL {_gr['pnl']:+.2f}% | 승률 {_gr['wr']:.0f}% | n={_gr['n']} (실전 부적합)")
+    # 🧪 Shadow후보 (GT_SL07/SL15/300s 우선, B2/HT/GT70/GT68) 한줄 요약
+    if _shadow_cand_data:
+        lines.append("🧪 Shadow후보:")
+        for _r in ["GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"]:
+            if _r in _shadow_cand_data:
+                _d = _shadow_cand_data[_r]
+                _p180_str = f" | 180s {_d['p180']:+.2f}%" if _d["p180"] is not None else ""
+                _p300_str = f" | 300s {_d['p300']:+.2f}%" if _d["p300"] is not None else ""
+                lines.append(f"  [{_r}] n={_d['n']} 승률{_d['wr']:.0f}% PnL{_d['pnl']:+.2f}%{_p180_str}{_p300_str}")
     # v18e: 조기 탈출 분석 — 시점별 PnL 임계치에 따른 최종 결과
     with _SHADOW_PERF_LOCK:
         _early_exit_lines = []
@@ -12370,8 +12555,8 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
         # signature 호환성: _v4_shadow_test_all_routes(c30=...) 인자는 빈 list로 전달
         with _fetch_tag('detect_leader'):
             _c5  = get_minutes_candles(5,  m, 50) or []
-            _c15 = get_minutes_candles(15, m, 50) or []
-            _c60 = get_minutes_candles(60, m, 30) or []
+            _c15 = _get_c15_cached(m, count=50)  # v18f Phase B: 전역 캐시 (TTL 60s)
+            _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
@@ -15411,6 +15596,8 @@ def main():
                     last_reason.pop(_stale_k, None)
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
+            _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
+            _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
