@@ -1149,6 +1149,10 @@ def _pipeline_mini_report():
         f"  → 진입={c.get('send_attempt',0)}(Δ{d('send_attempt')}) "
         f"성공={c.get('send_success',0)}(Δ{d('send_success')})",
     ]
+    with _STREAK_LOCK:
+        _strat_streak_str = " ".join(f"{k}:{v}패" for k, v in _STRAT_LOSE_STREAK.items() if v > 0)
+    if _strat_streak_str:
+        lines.append(f"  [연패] {_strat_streak_str}")
     print("\n".join(lines))
     _PIPELINE_MINI_PREV = c
 
@@ -1429,9 +1433,21 @@ _RECENT_BUY_LOCK = threading.Lock()  # 🔧 FIX: _RECENT_BUY_TS 스레드 안전
 TRADE_HISTORY = deque(maxlen=30)  # 최근 30개 거래 기록
 
 # 🔧 크리티컬 핫픽스: streak 전역변수 상단 선언 (NameError 방지)
-_lose_streak = 0              # 연속 패배 수
+_lose_streak = 0              # 연속 패배 수 (글로벌 — 로그/표시용)
 _win_streak = 0               # 연속 승리 수
 _STREAK_LOCK = threading.Lock()  # 🔧 FIX H1: streak 카운터 스레드 안전 보장
+
+# 🔧 전략별 연패 분리 — C 손실이 GT를 차단하지 않도록
+_STRAT_LOSE_STREAK = {}       # {"GT": 0, "C": 0, ...}
+_STRAT_SUSPEND_UNTIL = {}     # {"GT": 0.0, "C": 0.0, ...}
+_STRAT_MAX_MODE = {}          # {"GT": None, "C": None, ...}
+
+def _strat_group_from_signal(signal_type: str) -> str:
+    if "GT" in signal_type or "모멘텀" in signal_type:
+        return "GT"
+    elif "반전" in signal_type or signal_type == "C":
+        return "C"
+    return signal_type
 
 # 🔧 승률개선: 코인별 연패 추적 (같은 코인 반복 손절 방지)
 _COIN_LOSS_HISTORY = {}  # { "KRW-XXX": [loss_ts1, loss_ts2, ...] }
@@ -1496,28 +1512,37 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본"):
                 if now_ts - ts < COIN_LOSS_COOLDOWN
             ]
 
-    # 🔧 FIX H1: streak 카운터를 락으로 보호 (2개 스레드 동시 record_trade → 연패 카운터 오작동 방지)
+    # 🔧 전략별 연패 분리 — signal_type으로 그룹 결정
+    _sg = _strat_group_from_signal(signal_type)
+
     with _STREAK_LOCK:
+        # 글로벌 streak (로그/표시용)
         if is_win:
             _lose_streak = 0
             _win_streak += 1
-            # 🔧 FIX: 연승 시 진입 제한 해제
             _ENTRY_MAX_MODE = None
         else:
             _lose_streak += 1
             _win_streak = 0
-            # 🔧 FIX: 연패 단계별 진입 제한 (드로우다운 방어)
-            if _lose_streak >= 5:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 1800  # 🔧 수익개선: 10분→30분 (5연패=시장 부적합, 충분히 쉬기)
-                _ENTRY_MAX_MODE = "half"
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 30분 전체 진입 금지")
-            elif _lose_streak >= 4:
-                _ENTRY_SUSPEND_UNTIL = time.time() + 600  # 🔧 수익개선: 3분→10분 (4연패도 시장 악화 신호)
-                _ENTRY_MAX_MODE = "half"
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → 10분 전체 진입 금지")
-            elif _lose_streak >= 3:
-                _ENTRY_MAX_MODE = "half"  # 🔧 특단조치: probe 폐지 → half만 허용
-                print(f"[LOSE_GATE] 연속 {_lose_streak}패 → half만 허용 (probe 폐지)")
+
+        # 전략별 streak (실제 차단용)
+        if is_win:
+            _STRAT_LOSE_STREAK[_sg] = 0
+            _STRAT_MAX_MODE[_sg] = None
+        else:
+            _STRAT_LOSE_STREAK[_sg] = _STRAT_LOSE_STREAK.get(_sg, 0) + 1
+            _sl = _STRAT_LOSE_STREAK[_sg]
+            if _sl >= 5:
+                _STRAT_SUSPEND_UNTIL[_sg] = time.time() + 1800
+                _STRAT_MAX_MODE[_sg] = "half"
+                print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → 30분 {_sg} 진입 금지")
+            elif _sl >= 4:
+                _STRAT_SUSPEND_UNTIL[_sg] = time.time() + 600
+                _STRAT_MAX_MODE[_sg] = "half"
+                print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → 10분 {_sg} 진입 금지")
+            elif _sl >= 3:
+                _STRAT_MAX_MODE[_sg] = "half"
+                print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → {_sg} half만 허용")
 
     # 💾 거래 발생 시 즉시 상태 저장 (재시작 시 손실 방지)
     global _LAST_STATE_PERSIST_TS
@@ -1771,7 +1796,9 @@ def _save_bot_state(force=False):
         # streak 수집
         with _STREAK_LOCK:
             streaks = {"lose": _lose_streak, "win": _win_streak,
-                       "suspend_until": _ENTRY_SUSPEND_UNTIL}
+                       "suspend_until": _ENTRY_SUSPEND_UNTIL,
+                       "strat_lose": dict(_STRAT_LOSE_STREAK),
+                       "strat_suspend": dict(_STRAT_SUSPEND_UNTIL)}
 
         # OPEN_POSITIONS 수집 (재시작 시 유령포지션 복구용)
         with _POSITION_LOCK:
@@ -1872,11 +1899,19 @@ def _load_bot_state():
                 _lose_streak = streaks.get("lose", 0)
                 _win_streak = streaks.get("win", 0)
                 sus = streaks.get("suspend_until", 0)
-                # 재시작 시점에도 아직 유효한 진입 금지만 복원
                 if sus > time.time():
                     _ENTRY_SUSPEND_UNTIL = sus
                     print(f"[STATE_PERSIST] 진입 금지 복원: {(sus - time.time()):.0f}초 남음")
-            print(f"[STATE_PERSIST] streak 복원: 연패={_lose_streak} 연승={_win_streak}")
+                # 전략별 streak 복원
+                _strat_lose = streaks.get("strat_lose", {})
+                _strat_sus = streaks.get("strat_suspend", {})
+                for k, v in _strat_lose.items():
+                    _STRAT_LOSE_STREAK[k] = v
+                for k, v in _strat_sus.items():
+                    if v > time.time():
+                        _STRAT_SUSPEND_UNTIL[k] = v
+            _strat_info = " ".join(f"{k}={v}" for k, v in _STRAT_LOSE_STREAK.items())
+            print(f"[STATE_PERSIST] streak 복원: 연패={_lose_streak} 연승={_win_streak} 전략별=[{_strat_info}]")
 
         # OPEN_POSITIONS 복원 (참고 정보 — 실제 잔고는 orphan_sync가 처리)
         positions = state.get("open_positions", {})
@@ -15454,19 +15489,20 @@ def main():
                     pre["entry_mode"] = "half"
                     print(f"[NIGHT] {m} 야간({_night_h}시) → half 강제 (유동성 부족 완화)")
 
-                # 🔧 FIX: 연패 게이트 — 전체 진입 중지/모드 제한
-                # 🔧 FIX: _STREAK_LOCK 안에서 읽기 (record_trade 스레드와 TOCTOU 방지)
+                # 🔧 전략별 연패 게이트 — 해당 전략만 차단 (C 연패가 GT 차단하지 않음)
+                _cur_strat_group = pre.get("v4_logic_group", "?")
+                _sg_key = _strat_group_from_signal(pre.get("signal_tag", ""))
                 with _STREAK_LOCK:
-                    _suspend_ts = _ENTRY_SUSPEND_UNTIL
-                    _max_mode = _ENTRY_MAX_MODE
+                    _suspend_ts = _STRAT_SUSPEND_UNTIL.get(_sg_key, 0)
+                    _max_mode = _STRAT_MAX_MODE.get(_sg_key)
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
-                    cut("LOSE_SUSPEND", f"{m} 연패 진입중지 (잔여 {_remain}초)")
+                    cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패 진입중지 (잔여 {_remain}초)")
                     _pipeline_inc("suspend_block")
                     continue
-                # 🔧 특단조치: probe 폐지 → half 강제
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
+                    print(f"[LOSE_GATE] {m} [{_sg_key}] 연패 모드제한 → half 강제")
                     print(f"[LOSE_GATE] {m} 연패 모드제한 → half 강제 (probe 폐지)")
 
                 reason = "ign" if pre.get("ign_ok") else (
