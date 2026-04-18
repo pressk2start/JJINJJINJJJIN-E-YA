@@ -2643,7 +2643,7 @@ def sync_orphan_positions():
                         continue
 
                 # 🔧 FIX: API/계산을 락 밖에서 수행 (데드락 방지 — 락 안 네트워크 호출 금지)
-                _orphan_c1 = get_minutes_candles(1, market, 20)
+                _orphan_c1 = _get_c1_cached(market, 20)
                 _orphan_stop, _orphan_sl_pct_val, _ = dynamic_stop_loss(avg_buy_price, _orphan_c1, market=market)
                 _orphan_atr = atr14_from_candles(_orphan_c1, 14) if _orphan_c1 else None
                 _orphan_atr_pct = (_orphan_atr / avg_buy_price * 100) if (_orphan_atr and avg_buy_price > 0) else 0.0
@@ -2738,7 +2738,7 @@ def sync_orphan_positions():
                     # 3) 박스 정보 없으면 실시간 박스 감지 시도 (BOX_LAST_EXIT 이력만 있는 경우 포함)
                     if not _box_orphan_info:
                         try:
-                            _orphan_c1_box = get_minutes_candles(1, market, 60)
+                            _orphan_c1_box = _get_c1_cached(market, 60)
                             if _orphan_c1_box:
                                 _box_is, _box_det = detect_box_range(_orphan_c1_box)
                                 if _box_is and _box_det:
@@ -3558,7 +3558,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _entry_ticks = pre.get("ticks", [])
         _entry_pstd = price_band_std(_entry_ticks, sec=10) if _entry_ticks else 0.0
         _entry_pstd = _entry_pstd if _entry_pstd is not None else 0.0
-        _entry_c1 = get_minutes_candles(1, m, 20)
+        _entry_c1 = _get_c1_cached(m, 20)
         _entry_atr = atr14_from_candles(_entry_c1, 14) if _entry_c1 else None
         _entry_atr_pct = (_entry_atr / avg_price * 100) if (_entry_atr and avg_price > 0) else 0.0
 
@@ -3936,7 +3936,7 @@ def add_auto_position(m, cur_price, reason=""):
         return False, None
 
     # 🔧 FIX: 네트워크 I/O를 락 바깥에서 수행 (_POSITION_LOCK 장기 점유 방지)
-    c1_for_sl = get_minutes_candles(1, m, 20)
+    c1_for_sl = _get_c1_cached(m, 20)
 
     # 평균단가 갱신
     with _POSITION_LOCK:
@@ -7579,7 +7579,7 @@ def btc_volatility_regime():
             return _BTC_REGIME_CACHE["regime"], _BTC_REGIME_CACHE["atr_pct"]
 
     try:
-        c1_btc = get_minutes_candles(1, "KRW-BTC", 20)
+        c1_btc = _get_c1_cached("KRW-BTC", 20)
         if not c1_btc or len(c1_btc) < 15:
             return "normal", 0.0
 
@@ -11311,7 +11311,7 @@ def circle_check_entry(m):
 
     # 현재 1분봉 조회 (봉 수 카운트 + 현재가)
     try:
-        c1 = get_minutes_candles(1, m, 10)
+        c1 = _get_c1_cached(m, 10)
         if not c1 or len(c1) < 2:
             return None
     except Exception:
@@ -11505,7 +11505,7 @@ def circle_check_entry(m):
         # 동그라미 rebreak 시 "폭발"이면 품질점수 무시하고 즉시 진입
         _is_surge_circle = False
         try:
-            _sc_c1 = get_minutes_candles(1, m, 5)
+            _sc_c1 = _get_c1_cached(m, 5)
             if _sc_c1 and len(_sc_c1) >= 3:
                 _sc_cur_vol = _sc_c1[-1].get("candle_acc_trade_price", 0)
                 _sc_prev_avg = sum(c.get("candle_acc_trade_price", 0) for c in _sc_c1[:-1]) / max(len(_sc_c1)-1, 1)
@@ -11586,7 +11586,7 @@ def circle_check_entry(m):
         # 재돌파 = 추세연장인데 VWAP/EMA5 밑이면 되돌림 페이크
         _circle_vwap_ok = True
         try:
-            _c1_circle = get_minutes_candles(1, m, 30)
+            _c1_circle = _get_c1_cached(m, 30)
             if _c1_circle and len(_c1_circle) >= 10:
                 _vwap_circle = calc_vwap_from_candles(_c1_circle, 20)
                 # EMA5 계산 (종가 기반)
@@ -11617,7 +11617,7 @@ def circle_check_entry(m):
         # 🔧 NEW: 노이즈 방어 — ATR 바닥 + 임밸런스 하드플로어
         _circle_noise_ok = True
         try:
-            _c1_atr = get_minutes_candles(1, m, 20) or []
+            _c1_atr = _get_c1_cached(m, 20) or []
             if _c1_atr and len(_c1_atr) >= 15:
                 _atr_raw = atr14_from_candles(_c1_atr, 14)
                 if _atr_raw and cur_price > 0:
@@ -11932,7 +11932,7 @@ def box_check_entry(m):
 
     # 현재가 조회
     try:
-        c1 = get_minutes_candles(1, m, 5)
+        c1 = _get_c1_cached(m, 5)
         if not c1 or len(c1) < 2:
             return None
     except Exception:
@@ -12148,7 +12148,7 @@ def box_monitor_position(m, entry_price, volume, box_info):
         time.sleep(1.5)
 
         try:
-            c1 = get_minutes_candles(1, m, 3)
+            c1 = _get_c1_cached(m, 3)
             if not c1:
                 continue
             cur_price = c1[-1]["trade_price"]
@@ -13602,7 +13602,7 @@ def monitor_position(m,
         eff_sl_pct = pre.get("box_sl_pct", DYN_SL_MIN)
         atr_info = "box_fixed"
     else:
-        c1 = get_minutes_candles(1, m, 20)
+        c1 = _get_c1_cached(m, 20)
         # 🔧 FIX: 초기 SL에도 signal_type 전달 (래칫 max()로 인해 초기값이 영구 지배 → ign/circle 완화 무효화 방지)
         base_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1, signal_type=pre.get("signal_type", "normal"), market=m)
 
@@ -13717,7 +13717,7 @@ def monitor_position(m,
         nonlocal _c1_cache, _c1_cache_ts
         now = time.time()
         if _c1_cache is None or (now - _c1_cache_ts) >= 5:  # 🔧 손익분기개선: 10→5초 (stale 데이터로 판단 방지)
-            _c1_cache = get_minutes_candles(1, m, 20)
+            _c1_cache = _get_c1_cached(m, 20)
             _c1_cache_ts = now
         return _c1_cache
 
@@ -15305,7 +15305,7 @@ def main():
                             # 리테스트 조건 충족 → 진입 (half 강제)
                             retest_pre["entry_mode"] = "half"  # 🔧 이중 보장: 리테스트 = half 강제
                             print(f"[RETEST] {wm} 🎯 리테스트 진입 시작! (half 강제)")
-                            c1 = get_minutes_candles(1, wm, 20)
+                            c1 = _get_c1_cached(wm, 20)
                             dyn_stop, eff_sl_pct, _ = dynamic_stop_loss(retest_pre["price"], c1, signal_type=retest_pre.get("signal_type", "normal"), market=wm)  # 🔧 FIX: signal_type 전달
                             tg_send(f"🎯 <b>리테스트 진입</b> {wm} ⚡HALF\n"
                                     f"• 첫 급등 후 되돌림 → 재돌파 확인\n"
@@ -15441,7 +15441,7 @@ def main():
 
                         # 🔧 FIX: setdefault — circle_check_entry에서 이미 설정된 경우 덮어쓰지 않음
                         circle_pre.setdefault("entry_mode", CIRCLE_ENTRY_MODE)
-                        c1_circle = get_minutes_candles(1, cm, 20)
+                        c1_circle = _get_c1_cached(cm, 20)
                         # 🔧 FIX: 동그라미 signal_type 전달 (circle SL 완화 적용)
                         dyn_stop_c, eff_sl_pct_c, _ = dynamic_stop_loss(circle_pre["price"], c1_circle, signal_type=circle_pre.get("signal_type"), market=cm)
 
@@ -16013,7 +16013,7 @@ def main():
 
                         # 🔧 FIX: BTC 캔들은 shard 루프당 1회만 조회 (lazy 캐시)
                         if _btc_c1_cache is None:
-                            _btc_c1_cache = get_minutes_candles(1, "KRW-BTC", 2) or []
+                            _btc_c1_cache = _get_c1_cached("KRW-BTC", 2) or []
                         if _btc_c5_cache is None:
                             _btc_c5_cache = get_minutes_candles(5, "KRW-BTC", 2) or []
                         cbtc1 = _btc_c1_cache
