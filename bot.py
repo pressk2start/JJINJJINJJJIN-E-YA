@@ -12910,13 +12910,6 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_MID, SPREAD_CAP_MID)
     else:
         eff_spread_max = min(GATE_SPREAD_MAX * SPREAD_SCALE_HIGH, SPREAD_CAP_HIGH)
-
-    # v18i: GT 전용 spread 완화 (0.40 → 0.70)
-    # GT는 모멘텀 전략 — 추세 초입엔 호가창 흔들려 spread 넓음. 유효 시그널 손실 방지.
-    # 다른 전략(B/C/H/L)은 그대로 유지.
-    if _15m_signal == "모멘텀GT":
-        eff_spread_max = max(eff_spread_max, 0.70)
-
     if spread > eff_spread_max:
         cut("SPREAD", f"{m} 스프레드과다 {spread:.2f}%>{eff_spread_max:.2f}% | {_metrics}", near_miss=False)
         _pipeline_inc("gate_fail_spread")
