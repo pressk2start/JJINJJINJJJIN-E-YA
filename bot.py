@@ -12498,6 +12498,9 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     c1을 fetch (없을 때). 대부분 심볼이 여기서 걸러져 불필요한 1분봉
     호출 60/cycle → 10~20 수준으로 감소 기대.
     """
+    # === v18g 단계별 계측 시작 ===
+    _dl_t0 = time.time()
+
     # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
     _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
     if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
@@ -12564,6 +12567,10 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
             _pipeline_inc("pre_cut_coin_loss")
             return None
 
+    # === v18g 계측: precheck 종료 시점 기록 ===
+    _dl_t_pre = time.time()
+    _pipeline_record_stage("dl_precheck", (_dl_t_pre - _dl_t0) * 1000)
+
     # === v18g lazy c1 fetch: 위 사전차단 통과한 심볼만 c1 호출 ===
     if c1 is None:
         c1 = _get_c1_cached(m, 30)
@@ -12571,6 +12578,10 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         return None
     if ob.get("depth_krw", 0) <= 0:
         return None
+
+    # === v18g 계측: c1 fetch 종료 ===
+    _dl_t_c1 = time.time()
+    _pipeline_record_stage("dl_c1_fetch", (_dl_t_c1 - _dl_t_pre) * 1000)
 
     # 🔧 WF데이터: mega breakout 비활성화 (데이터에 없는 로직 — 거래대금 최소조건 바이패스 제거)
     mega = False  # is_mega_breakout(c1)
@@ -12727,11 +12738,13 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         #   - _collect_universal_indicators body에서 c30 사용 0회
         #   - 100% dead fetch 확정 → 12.8s/cycle 절감
         # signature 호환성: _v4_shadow_test_all_routes(c30=...) 인자는 빈 list로 전달
+        _dl_t_mf0 = time.time()
         with _fetch_tag('detect_leader'):
             _c5  = get_minutes_candles(5,  m, 50) or []
             _c15 = _get_c15_cached(m, count=50)  # v18f Phase B: 전역 캐시 (TTL 60s)
             _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
+        _pipeline_record_stage("dl_multitf_fetch", (time.time() - _dl_t_mf0) * 1000)
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
@@ -12753,7 +12766,9 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
 
         # strategy_v4 통합 진입 판정 (c1 전달 — VR5/ATR% 계산용)
         _t_dv = time.time()
+        _dl_t_v4 = time.time()
         _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1)
+        _pipeline_record_stage("dl_v4_eval", (time.time() - _dl_t_v4) * 1000)
         _add_cycle_detect_v4_ms((time.time() - _t_dv) * 1000)
 
         if _v4_signal:
