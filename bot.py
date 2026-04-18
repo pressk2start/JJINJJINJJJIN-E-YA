@@ -7003,6 +7003,29 @@ def _get_c15_cached(m, count=50):
     return c15
 
 
+# v18g: c1 전역 캐시 (scan_fetch wall-clock 최적화)
+# 1분봉은 60s 주기 갱신. TTL 4s = 주기 대비 6.7% 창
+# 60 markets 동시 fetch가 upbit rate-limit 유발 (per_call 220→2400ms 폭증)
+# 캐시로 사이클 단축 시 동시 호출 수 감소 → 호출당 레이턴시도 정상화
+_C1_CACHE = LRUCache(maxsize=300)
+_C1_CACHE_TTL_MS = 4_000  # 4s
+
+
+def _get_c1_cached(m, count=30):
+    """c1 캐시 조회 (TTL 4s). main scan loop ThreadPool 경로 전용."""
+    hit = _C1_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C1_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c1_cache_hit")
+        cached = hit["c"]
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c1_cache_miss")
+    c1 = get_minutes_candles(1, m, count) or []
+    if c1:
+        _C1_CACHE.set(m, {"ts": _now_ms, "c": c1, "count": count})
+    return c1
+
+
 def five_min_context_ok(m):
     if not USE_5M_CONTEXT:
         return True
@@ -8129,9 +8152,9 @@ _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "activation_pct": 1.0,     # ⭐ 100% — 라이브 trail 영구 비활성 (shadow는 disable_trail 사용)
     "trail_pct": 0.005,        # 무관 (trail_armed 안 됨)
     "hold_bars": 0,
-    "max_bars": 60,            # 180s, G와 동일
+    "max_bars": 80,            # ⬆ 60(180s) → 80(240s) — 240s +0.62% > 180s +0.45%, 시간형 알파 연장
     "disable_trail": True,     # ⭐ shadow_sim_exit 분기용 (라이브는 activation 1.0으로 우회)
-    "description": "GT_SL1.0/no-trail/max180s",
+    "description": "GT_SL1.0/no-trail/max240s",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -8686,10 +8709,10 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_C,
         "priority": 3,
-        "enabled": True,  # ⬆ 재활성화 (recovery 0.05% + 킬스위치 + 진입제한 가드레일 적용)
+        "enabled": False,  # ⬇ 라이브 OFF — 2422건 승률32% PnL-0.06% 구조적 음수, shadow만 유지
         "pipeline_key": "reversal_15m",
         "route": "C",
-        "description": "15m 음→양 + 종가회복",
+        "description": "15m 음→양 + 종가회복 (shadow only)",
     },
     "패턴반전_60m": {
         "check_fn": _v0_check_reversal_60m,
@@ -8772,7 +8795,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,  # ⬆ B-1 메인 승격 (GT 71건 +0.11% vs G4/G6/G7 +0.02~0.04%)
         "pipeline_key": "momentum",
         "route": "GT",
-        "description": "5mRSI≥74.55 [GT:no-trail/max180s] (LIVE)",
+        "description": "5mRSI≥74.55 [GT:no-trail/max240s] (LIVE)",
     },
     "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
         "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
@@ -15633,6 +15656,7 @@ def main():
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
             _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
             _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
+            _C1_CACHE.purge_older_than(max_age_sec=4)     # v18g: TTL과 동일
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
@@ -15673,8 +15697,9 @@ def main():
 
             c1_cache = {}
             # 🔧 FIX: 20→30 캔들 (BOX_LOOKBACK=30 요구 충족 — 돌파 감지는 20개만 슬라이싱해서 사용)
+            # v18g: _get_c1_cached로 변경 — TTL 4s, 사이클 단축 시 동시 호출 폭주 완화
             futures = {
-                _candle_executor.submit(get_minutes_candles, 1, m, 30): m
+                _candle_executor.submit(_get_c1_cached, m, 30): m
                 for m in shard
             }
             for f in as_completed(futures):
