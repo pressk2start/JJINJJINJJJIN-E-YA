@@ -9100,6 +9100,31 @@ def _load_shadow_stats():
                     _save_shadow_stats()
                 except Exception:
                     pass
+            # v18g: GT max_hold 180s→240s 변경 → G-cluster 전체 초기화 (백업 후)
+            # 근거: 180s 청산 데이터와 240s 청산 데이터가 같은 키에 섞이면 PnL/승률/SL 통계 왜곡
+            _v18g_gt_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18g_gt_240s_reset_done")
+            _GT_CLUSTER_PREFIXES = ("GT:", "GR:", "GT70:", "GT68:", "GT_SL07:", "GT_SL15:", "GT_300s:",
+                                    "G:", "G2:", "G4:", "G6:", "G7:")
+            if not os.path.exists(_v18g_gt_marker):
+                print("[SHADOW_STATS] v18g: GT max_hold 180s→240s → G-cluster 통계 초기화 (백업 보존)")
+                try:
+                    # 1) 백업 — shadow_stats.json → shadow_stats_pre_v18g.json
+                    if os.path.exists(SHADOW_STATS_PATH):
+                        _bak_path = os.path.join(os.path.dirname(SHADOW_STATS_PATH),
+                                                 "shadow_stats_pre_v18g.json")
+                        with open(SHADOW_STATS_PATH, "rb") as _src, open(_bak_path, "wb") as _dst:
+                            _dst.write(_src.read())
+                        print(f"[SHADOW_STATS] 백업: {_bak_path}")
+                    # 2) G-cluster prefix 키 삭제
+                    _del_keys = [k for k in _SHADOW_PERF_STATS if k.startswith(_GT_CLUSTER_PREFIXES)]
+                    for k in _del_keys:
+                        del _SHADOW_PERF_STATS[k]
+                    print(f"[SHADOW_STATS] v18g: {len(_del_keys)}개 G-cluster 키 삭제")
+                    with open(_v18g_gt_marker, "w") as f:
+                        f.write("v18g: GT max_hold 180s->240s, G-cluster reset, backup at shadow_stats_pre_v18g.json\n")
+                    _save_shadow_stats()
+                except Exception as _e:
+                    print(f"[SHADOW_STATS] v18g 초기화 실패: {_e}")
             # G-v2: G exit 재설계 + K 비활성화 → G만 초기화 (K는 레지스트리에서 제거됨)
             _gv2_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".gv2_exit_redesign_done")
             if not os.path.exists(_gv2_marker):
@@ -9231,6 +9256,28 @@ def _load_shadow_stats():
             print("[SHADOW_STATS] v18e-tune2: G/K blocked 통계 정리 완료")
         except Exception:
             pass
+    # v18g: blocked에서도 G-cluster 제거 (백업 후)
+    _v18g_gt_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".v18g_gt_240s_blocked_done")
+    if not os.path.exists(_v18g_gt_blocked_marker):
+        try:
+            # 백업
+            if os.path.exists(SHADOW_BLOCKED_STATS_PATH):
+                _bak_path = os.path.join(os.path.dirname(SHADOW_BLOCKED_STATS_PATH),
+                                         "shadow_blocked_stats_pre_v18g.json")
+                with open(SHADOW_BLOCKED_STATS_PATH, "rb") as _src, open(_bak_path, "wb") as _dst:
+                    _dst.write(_src.read())
+                print(f"[SHADOW_STATS] blocked 백업: {_bak_path}")
+            _GT_CLUSTER_PREFIXES_BLK = ("GT:", "GR:", "GT70:", "GT68:", "GT_SL07:", "GT_SL15:", "GT_300s:",
+                                        "G:", "G2:", "G4:", "G6:", "G7:")
+            _del_keys = [k for k in _SHADOW_BLOCKED_STATS if k.startswith(_GT_CLUSTER_PREFIXES_BLK)]
+            for k in _del_keys:
+                del _SHADOW_BLOCKED_STATS[k]
+            with open(_v18g_gt_blocked_marker, "w") as f:
+                f.write("v18g blocked G-cluster reset (GT 240s)\n")
+            _save_shadow_stats()
+            print(f"[SHADOW_STATS] v18g: {len(_del_keys)}개 G-cluster blocked 키 삭제")
+        except Exception as _e:
+            print(f"[SHADOW_STATS] v18g blocked 초기화 실패: {_e}")
     # G-v2: blocked에서도 G 정리
     _gv2_blocked_marker = os.path.join(os.path.dirname(SHADOW_STATS_PATH), ".gv2_blocked_done")
     if not os.path.exists(_gv2_blocked_marker):
