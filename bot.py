@@ -1038,9 +1038,9 @@ def _pipeline_report(force=False):
         lines.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
         # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
 
-    # 🗂️ candle 캐시 hit/miss — c1/c15/c60 캐시 실효성 확인 (v18g-tune)
+    # 🗂️ candle 캐시 hit/miss — c1/c5/c15/c60 캐시 실효성 확인 (v18h: c5 추가)
     _candle_cache_rows = []
-    for _tf_key in ("c1", "c15", "c60"):
+    for _tf_key in ("c1", "c5", "c15", "c60"):
         _h = c.get(f"{_tf_key}_cache_hit", 0)
         _mi = c.get(f"{_tf_key}_cache_miss", 0)
         _total = _h + _mi
@@ -1057,6 +1057,7 @@ def _pipeline_report(force=False):
         ("pre_cut_depth", "depth"),
         ("pre_cut_sell_dominant", "sell우세"),
         ("pre_cut_coin_loss", "cooldown"),
+        ("pre_cut_dead_market", "dead시장"),
     ]:
         _v = c.get(_key, 0)
         if _v > 0:
@@ -7059,6 +7060,39 @@ def _get_c1_cached(m, count=30):
     return c1
 
 
+# v18h: c5 전역 캐시 (detect_leader 경로 전용, count=50)
+# 5분봉은 300s 주기 갱신. TTL 45s = 주기 대비 15% 창
+# 사이클 ~40s보다 길어 cross-cycle reuse 가능 (scan loop에서 같은 심볼 재조회 시 hit)
+# 기존 _C5_CACHE는 five_min_context_ok 전용(count=6, TTL 3s) — 분리 유지
+_C5_DETECT_CACHE = LRUCache(maxsize=300)
+_C5_DETECT_CACHE_TTL_MS = 45_000  # 45s
+
+
+def _get_c5_cached(m, count=50):
+    """c5 캐시 조회 (TTL 45s, count-aware). detect_leader 경로 전용."""
+    hit = _C5_DETECT_CACHE.get(m)
+    _now_ms = int(time.time() * 1000)
+    if hit and (_now_ms - hit.get("ts", 0) <= _C5_DETECT_CACHE_TTL_MS) and hit.get("count", 0) >= count:
+        _pipeline_inc("c5_cache_hit")
+        cached = hit["c"]
+        return cached[-count:] if len(cached) > count else cached
+    _pipeline_inc("c5_cache_miss")
+    c5 = get_minutes_candles(5, m, count) or []
+    if c5:
+        _C5_DETECT_CACHE.set(m, {"ts": _now_ms, "c": c5, "count": count})
+    return c5
+
+
+def _quick_multitf_skip(c1):
+    """c1 기반 보수적 필터 — 명백히 신호 불가능한 종목만 제거.
+    조건: 최근 5분 거래대금 < 5M KRW (분당 1M 미만 = 사실상 죽은 시장)
+    리턴 True = skip, False = 통과."""
+    if not c1 or len(c1) < 5:
+        return False
+    recent_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-5:])
+    return recent_vol < 5_000_000
+
+
 def five_min_context_ok(m):
     if not USE_5M_CONTEXT:
         return True
@@ -12590,6 +12624,12 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     _dl_t_c1 = time.time()
     _pipeline_record_stage("dl_c1_fetch", (_dl_t_c1 - _dl_t_pre) * 1000)
 
+    # === v18h: c1 기반 빠른 컷 (multi-TF fetch 전 마지막 보수적 필터) ===
+    # 최근 5분 거래대금 < 5M KRW = 사실상 죽은 시장 → multi-TF 불필요
+    if _quick_multitf_skip(c1):
+        _pipeline_inc("pre_cut_dead_market")
+        return None
+
     # 🔧 WF데이터: mega breakout 비활성화 (데이터에 없는 로직 — 거래대금 최소조건 바이패스 제거)
     mega = False  # is_mega_breakout(c1)
     cur, prev = c1[-1], c1[-2]
@@ -12747,7 +12787,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         # signature 호환성: _v4_shadow_test_all_routes(c30=...) 인자는 빈 list로 전달
         _dl_t_mf0 = time.time()
         with _fetch_tag('detect_leader'):
-            _c5  = get_minutes_candles(5,  m, 50) or []
+            _c5  = _get_c5_cached(m, count=50)  # v18h: 전역 캐시 (TTL 45s)
             _c15 = _get_c15_cached(m, count=50)  # v18f Phase B: 전역 캐시 (TTL 60s)
             _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
@@ -15795,6 +15835,7 @@ def main():
             _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
             _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
             _C1_CACHE.purge_older_than(max_age_sec=15)    # v18g-tune: TTL과 동일 (4s→15s)
+            _C5_DETECT_CACHE.purge_older_than(max_age_sec=45)  # v18h: c5 detect 캐시
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
