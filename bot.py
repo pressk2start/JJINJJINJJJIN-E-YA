@@ -12474,15 +12474,16 @@ def regime_filter(m, c1, cur_price):
 
 
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
-def detect_leader_stock(m, obc, c1, tight_mode=False):
+def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     """
     하이브리드 진입 탐지 엔진:
       - Probe(소액): 완화된 early 흐름 감지 → 초기 염탐 진입
       - Confirm(추세): 강한 점화/매집/돌파 → 확정 진입
-    """
-    if len(c1) < 3:
-        return None
 
+    v18g lazy c1: 스테이블코인/포지션/오더북 사전차단이 통과된 경우에만
+    c1을 fetch (없을 때). 대부분 심볼이 여기서 걸러져 불필요한 1분봉
+    호출 60/cycle → 10~20 수준으로 감소 기대.
+    """
     # === 🔧 스테이블코인 차단 (USDT, USDC 등 가격변동 없는 코인) ===
     _coin_ticker = m.upper().split("-")[-1] if "-" in m else m.upper()
     if _coin_ticker in {"USDT", "USDC", "DAI", "TUSD", "BUSD"}:  # 🔧 FIX: 정확매치 (부분문자열 오탐 방지)
@@ -12511,6 +12512,12 @@ def detect_leader_stock(m, obc, c1, tight_mode=False):
     if not ob or not isinstance(ob.get("raw"), dict):
         return None
     if not ob.get("raw", {}).get("orderbook_units"):
+        return None
+
+    # === v18g lazy c1 fetch: 위 사전차단 통과한 심볼만 c1 호출 ===
+    if c1 is None:
+        c1 = _get_c1_cached(m, 30)
+    if not c1 or len(c1) < 3:
         return None
     if ob.get("depth_krw", 0) <= 0:
         return None
@@ -15754,23 +15761,12 @@ def main():
 
             _pipeline_inc("scan_markets", len(shard))
 
-            c1_cache = {}
-            # 🔧 FIX: 20→30 캔들 (BOX_LOOKBACK=30 요구 충족 — 돌파 감지는 20개만 슬라이싱해서 사용)
-            # v18g: _get_c1_cached로 변경 — TTL 4s, 사이클 단축 시 동시 호출 폭주 완화
-            futures = {
-                _candle_executor.submit(_get_c1_cached, m, 30): m
-                for m in shard
-            }
-            for f in as_completed(futures):
-                m = futures[f]
-                try:
-                    c1_cache[m] = f.result() or []
-                except Exception:
-                    c1_cache[m] = []
+            # v18g lazy c1: ThreadPool 대량 prefetch 제거.
+            # 스테이블코인/포지션/오더북 사전차단 통과한 심볼만 detect_leader 내부에서
+            # _get_c1_cached로 fetch. 60 calls/cycle → 10~20 수준 감소 기대.
+            c1_cache = {}  # legacy 변수 유지 (하위 코드 참조 호환)
 
-            _pipeline_inc("c1_ok", sum(1 for v in c1_cache.values() if v))
-
-            # scan_fetch 단계 종료 (orderbook + candles 네트워크 fetch)
+            # scan_fetch 단계 종료 (orderbook fetch만 포함)
             _pipeline_record_stage("scan_fetch", (time.time() - _t_fetch) * 1000)
             _t_detect = time.time()  # scan_detect 단계 시작 (CPU 판정 루프)
 
@@ -15782,15 +15778,19 @@ def main():
             for m in shard:
               _lock_held = False  # 🔧 FIX: 락 획득 여부 추적 (미획득 상태에서 해제 방지)
               try:  # 🔧 심볼별 예외 격리 (한 심볼 에러가 전체 스캔 중단 방지)
-                c1 = c1_cache.get(m, [])
-                if not c1: continue
-
+                # v18g lazy c1: detect_leader 내부에서 사전차단 통과 시에만 c1 fetch
                 _pipeline_inc("detect_called")
                 _pipeline_record_market_scan(m)
                 _t_dl = time.time()
-                pre = detect_leader_stock(m, obc, c1, tight_mode=tight_mode)
+                pre = detect_leader_stock(m, obc, c1=None, tight_mode=tight_mode)
                 _add_cycle_detect_leader_ms((time.time() - _t_dl) * 1000)
                 if not pre:
+                    continue
+
+                # 후보 심볼 — downstream에서 c1 필요. 위 detect_leader에서 캐시됐으므로
+                # 여기 호출은 캐시 hit (TTL 15s 이내).
+                c1 = _get_c1_cached(m, 30)
+                if not c1:
                     continue
 
                 # ⭕ 동그라미 워치리스트 등록 (점화 감지 시)
