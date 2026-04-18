@@ -13,7 +13,7 @@ import os
 TOP_N = 60
 SCAN_INTERVAL = 6
 COOLDOWN = 240
-PARALLEL_WORKERS = 12
+PARALLEL_WORKERS = 4  # v18g-tune: 12→4 (60 markets 동시 fetch가 upbit rate-limit 유발해 per_call 220→2420ms 폭증. 4로 축소 시 동시 호출 5 req/s < 30 제한, per_call 정상화 기대)
 
 # ============================================================
 # 2. 청산 제어 (anti-whipsaw)
