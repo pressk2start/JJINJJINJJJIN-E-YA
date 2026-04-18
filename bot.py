@@ -7019,7 +7019,7 @@ def _get_c60_cached(m, count=30):
 # 15분봉은 900s 주기 갱신 → TTL 60s면 주기 대비 7% 창 (매우 안전)
 # 대상: detect_leader 경로의 get_minutes_candles(15, m, 50) — 59 calls/cycle × 224ms ≈ 13.0s/cycle 절감 예상
 _C15_CACHE = LRUCache(maxsize=300)
-_C15_CACHE_TTL_MS = 60_000  # 60s
+_C15_CACHE_TTL_MS = 90_000  # 90s (v18h-tune2: 60s→90s, hit 45%→60%+ 기대)
 
 
 def _get_c15_cached(m, count=50):
@@ -7065,7 +7065,7 @@ def _get_c1_cached(m, count=30):
 # 사이클 ~40s보다 길어 cross-cycle reuse 가능 (scan loop에서 같은 심볼 재조회 시 hit)
 # 기존 _C5_CACHE는 five_min_context_ok 전용(count=6, TTL 3s) — 분리 유지
 _C5_DETECT_CACHE = LRUCache(maxsize=300)
-_C5_DETECT_CACHE_TTL_MS = 45_000  # 45s
+_C5_DETECT_CACHE_TTL_MS = 60_000  # 60s (v18h-tune2: 45s→60s, hit 40%→60%+ 기대)
 
 
 def _get_c5_cached(m, count=50):
@@ -7085,12 +7085,13 @@ def _get_c5_cached(m, count=50):
 
 def _quick_multitf_skip(c1):
     """c1 기반 보수적 필터 — 명백히 신호 불가능한 종목만 제거.
-    조건: 최근 5분 거래대금 < 5M KRW (분당 1M 미만 = 사실상 죽은 시장)
+    조건: 최근 5분 거래대금 < 10M KRW (분당 2M 미만)
+    v18h-tune2: 5M→10M (gate 통과 cand 거래대금 평균 대비 여전히 여유 큼)
     리턴 True = skip, False = 통과."""
     if not c1 or len(c1) < 5:
         return False
     recent_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-5:])
-    return recent_vol < 5_000_000
+    return recent_vol < 10_000_000
 
 
 def five_min_context_ok(m):
@@ -15838,9 +15839,9 @@ def main():
             _TICKS_CACHE.purge_older_than(max_age_sec=2.5)
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
             _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
-            _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
+            _C15_CACHE.purge_older_than(max_age_sec=90)   # v18h-tune2: 60s→90s
             _C1_CACHE.purge_older_than(max_age_sec=15)    # v18g-tune: TTL과 동일 (4s→15s)
-            _C5_DETECT_CACHE.purge_older_than(max_age_sec=45)  # v18h: c5 detect 캐시
+            _C5_DETECT_CACHE.purge_older_than(max_age_sec=60)  # v18h-tune2: 45s→60s
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
