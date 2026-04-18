@@ -1031,6 +1031,18 @@ def _pipeline_report(force=False):
         lines.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
         # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
 
+    # 🗂️ candle 캐시 hit/miss — c1/c15/c60 캐시 실효성 확인 (v18g-tune)
+    _candle_cache_rows = []
+    for _tf_key in ("c1", "c15", "c60"):
+        _h = c.get(f"{_tf_key}_cache_hit", 0)
+        _mi = c.get(f"{_tf_key}_cache_miss", 0)
+        _total = _h + _mi
+        if _total > 0:
+            _rate = (_h / _total * 100) if _total > 0 else 0
+            _candle_cache_rows.append(f"{_tf_key}:hit={_h}/miss={_mi}({_rate:.0f}%)")
+    if _candle_cache_rows:
+        lines.append("🗂️ candle 캐시: " + " | ".join(_candle_cache_rows))
+
     # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
     with _CHECK_FN_EXEC_LOCK:
         _exec_total_snap = dict(_CHECK_FN_EXEC_TOTAL_MS)
@@ -7004,15 +7016,15 @@ def _get_c15_cached(m, count=50):
 
 
 # v18g: c1 전역 캐시 (scan_fetch wall-clock 최적화)
-# 1분봉은 60s 주기 갱신. TTL 4s = 주기 대비 6.7% 창
+# 1분봉은 60s 주기 갱신. TTL 15s = 주기 대비 25% 창 (현재 사이클 48s 대비 캐시 유효성 확보)
 # 60 markets 동시 fetch가 upbit rate-limit 유발 (per_call 220→2400ms 폭증)
 # 캐시로 사이클 단축 시 동시 호출 수 감소 → 호출당 레이턴시도 정상화
 _C1_CACHE = LRUCache(maxsize=300)
-_C1_CACHE_TTL_MS = 4_000  # 4s
+_C1_CACHE_TTL_MS = 15_000  # 15s (v18g-tune: 4s→15s, 사이클 48s 기준 캐시 재사용 확보)
 
 
 def _get_c1_cached(m, count=30):
-    """c1 캐시 조회 (TTL 4s). main scan loop ThreadPool 경로 전용."""
+    """c1 캐시 조회 (TTL 15s). main scan loop ThreadPool 경로 전용."""
     hit = _C1_CACHE.get(m)
     _now_ms = int(time.time() * 1000)
     if hit and (_now_ms - hit.get("ts", 0) <= _C1_CACHE_TTL_MS) and hit.get("count", 0) >= count:
@@ -15703,7 +15715,7 @@ def main():
             _C5_CACHE.purge_older_than(max_age_sec=2.5)
             _C60_CACHE.purge_older_than(max_age_sec=300)  # v18f: TTL과 동일
             _C15_CACHE.purge_older_than(max_age_sec=60)   # v18f Phase B: TTL과 동일
-            _C1_CACHE.purge_older_than(max_age_sec=4)     # v18g: TTL과 동일
+            _C1_CACHE.purge_older_than(max_age_sec=15)    # v18g-tune: TTL과 동일 (4s→15s)
 
             mkts_all = get_top_krw_by_24h(TOP_N)
             if not mkts_all:
