@@ -8216,13 +8216,21 @@ _V0_EXIT_PARAMS_MOMENTUM_G7 = {  # G7: activation 0.7%, trail 0.4%
 # 가설: trail이 alpha를 죽이고 있다 (180s 강제보유시 +0.31%p / +0.26%p 개선)
 _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "strategy": "TRAIL",
-    "sl_pct": 0.010,           # G와 동일
+    "sl_pct": 0.020,           # v18i: 0.010 → 0.020 (초반 120s 노이즈 완충)
     "activation_pct": 1.0,     # ⭐ 100% — 라이브 trail 영구 비활성 (shadow는 disable_trail 사용)
     "trail_pct": 0.005,        # 무관 (trail_armed 안 됨)
     "hold_bars": 0,
     "max_bars": 80,            # ⬆ 60(180s) → 80(240s) — 240s +0.62% > 180s +0.45%, 시간형 알파 연장
     "disable_trail": True,     # ⭐ shadow_sim_exit 분기용 (라이브는 activation 1.0으로 우회)
-    "description": "GT_SL1.0/no-trail/max240s",
+    # v18i: GT 전용 tiered SL (shadow만 적용 — live는 flat 0.020)
+    # 근거 (n=23 실전): 60s 미만 -1.05%, 60s+ +0.66%. 120s+ +0.68%
+    # 시간청산 차이: 60s→+0.80%p, 120s→+1.14%p, 240s→+1.81%p (모두 SL보다 좋음)
+    "sl_tiers": [
+        (60,   0.025),  # 0~60s: 2.5% (완전 완충)
+        (120,  0.015),  # 60~120s: 1.5% (중간 완충)
+        (9999, 0.010),  # 120s+: 1.0% (원복, 추세형 수익 보호)
+    ],
+    "description": "GT_SL_tiered(2.5/1.5/1.0)/no-trail/max240s",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -9777,8 +9785,21 @@ def _shadow_sim_exit(vp, cur_price):
 
     mfe = (vp["best_price"] - entry_price) / entry_price
 
+    # v18i: tiered SL — 시간대별 SL 동적 조정 (GT 전용, sl_tiers 있을 때만)
+    # 0~60s: 2.5%, 60~120s: 1.5%, 120s+: 1.0%
+    # 근거: 60s 미만 탈출 -1.05% vs 60s 이상 +0.66% (조기탈출이 알파 파괴)
+    _sl_tiers = ep.get("sl_tiers")
+    if _sl_tiers:
+        _eff_sl = sl_pct  # 기본값 폴백
+        for _tier_sec, _tier_pct in _sl_tiers:
+            if hold_sec < _tier_sec:
+                _eff_sl = _tier_pct
+                break
+    else:
+        _eff_sl = sl_pct
+
     # 1) 손절 (SL) — 항상 작동
-    if pnl <= -sl_pct:
+    if pnl <= -_eff_sl:
         return True, "손절SL"
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
