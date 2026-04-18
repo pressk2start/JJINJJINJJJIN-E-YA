@@ -12575,25 +12575,30 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # === v18g pre-check 강화 (c1 fetch 전 저비용 필터) ===
     # 목적: detect_leader 본 로직이 돌기 전에 명백히 거를 수 있는 종목을 제거.
     # orderbook 만으로 계산 가능한 4개 필터 → c1 fetch + 하위 연산 모두 스킵.
-    # 임계는 보수적으로 시작 (과차단보다 통과율 우선).
+    # v18h-tune: 실측 통계 기반 임계 조임 (gate 통과 실측치 대비 여유 확보)
+    #   - spread max 0.46% → 0.6% 컷 (여유 0.14%)
+    #   - depth avg 127M → 15M 컷 (여유 112M)
+    #   - 매수비 min 64% → sell 0.70 컷 (여유 6%p)
 
-    # 1) 스프레드 컷 (0.8% 초과 시 skip) — gate 한도(0.4%)보다 넉넉
-    if ob.get("spread", 0) > 0.8:
+    # 1) 스프레드 컷 (0.6% 초과 시 skip) — v18h-tune: 0.8% → 0.6%
+    if ob.get("spread", 0) > 0.6:
         _pipeline_inc("pre_cut_spread")
         return None
 
-    # 2) 오더북 깊이 컷 (top-3 총액 5M KRW 미만 = 유동성 부족)
-    if ob.get("depth_krw", 0) < 5_000_000:
+    # 2) 오더북 깊이 컷 (top-3 총액 15M KRW 미만 = 유동성 부족)
+    # v18h-tune: 5M → 15M (기존 5M은 0건 컷으로 유명무실)
+    if ob.get("depth_krw", 0) < 15_000_000:
         _pipeline_inc("pre_cut_depth")
         return None
 
-    # 3) 매도 우세 컷 (top-3 호가창 ask/total > 0.75)
+    # 3) 매도 우세 컷 (top-3 호가창 ask/total > 0.70)
+    # v18h-tune: 0.75 → 0.70
     _pre_units = ob.get("raw", {}).get("orderbook_units", [])[:3]
     if _pre_units:
         _pre_askv = sum(u["ask_price"] * u["ask_size"] for u in _pre_units)
         _pre_bidv = sum(u["bid_price"] * u["bid_size"] for u in _pre_units)
         _pre_total = _pre_askv + _pre_bidv
-        if _pre_total > 0 and (_pre_askv / _pre_total) > 0.75:
+        if _pre_total > 0 and (_pre_askv / _pre_total) > 0.70:
             _pipeline_inc("pre_cut_sell_dominant")
             return None
 
