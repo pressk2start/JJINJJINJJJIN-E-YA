@@ -1043,6 +1043,20 @@ def _pipeline_report(force=False):
     if _candle_cache_rows:
         lines.append("🗂️ candle 캐시: " + " | ".join(_candle_cache_rows))
 
+    # 🚧 pre-check 컷 현황 (v18g: c1 fetch 전 저비용 필터로 걸러낸 종목)
+    _pre_rows = []
+    for _key, _label in [
+        ("pre_cut_spread", "spread"),
+        ("pre_cut_depth", "depth"),
+        ("pre_cut_sell_dominant", "sell우세"),
+        ("pre_cut_coin_loss", "cooldown"),
+    ]:
+        _v = c.get(_key, 0)
+        if _v > 0:
+            _pre_rows.append(f"{_label}:{_v}")
+    if _pre_rows:
+        lines.append("🚧 pre-cut: " + " | ".join(_pre_rows))
+
     # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
     with _CHECK_FN_EXEC_LOCK:
         _exec_total_snap = dict(_CHECK_FN_EXEC_TOTAL_MS)
@@ -12513,6 +12527,42 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         return None
     if not ob.get("raw", {}).get("orderbook_units"):
         return None
+
+    # === v18g pre-check 강화 (c1 fetch 전 저비용 필터) ===
+    # 목적: detect_leader 본 로직이 돌기 전에 명백히 거를 수 있는 종목을 제거.
+    # orderbook 만으로 계산 가능한 4개 필터 → c1 fetch + 하위 연산 모두 스킵.
+    # 임계는 보수적으로 시작 (과차단보다 통과율 우선).
+
+    # 1) 스프레드 컷 (0.8% 초과 시 skip) — gate 한도(0.4%)보다 넉넉
+    if ob.get("spread", 0) > 0.8:
+        _pipeline_inc("pre_cut_spread")
+        return None
+
+    # 2) 오더북 깊이 컷 (top-3 총액 5M KRW 미만 = 유동성 부족)
+    if ob.get("depth_krw", 0) < 5_000_000:
+        _pipeline_inc("pre_cut_depth")
+        return None
+
+    # 3) 매도 우세 컷 (top-3 호가창 ask/total > 0.75)
+    _pre_units = ob.get("raw", {}).get("orderbook_units", [])[:3]
+    if _pre_units:
+        _pre_askv = sum(u["ask_price"] * u["ask_size"] for u in _pre_units)
+        _pre_bidv = sum(u["bid_price"] * u["bid_size"] for u in _pre_units)
+        _pre_total = _pre_askv + _pre_bidv
+        if _pre_total > 0 and (_pre_askv / _pre_total) > 0.75:
+            _pipeline_inc("pre_cut_sell_dominant")
+            return None
+
+    # 4) COIN_LOSS 쿨다운 컷 (COIN_LOSS_MAX 이상 누적 손실 시 skip)
+    _pre_now = time.time()
+    with _COIN_LOSS_LOCK:
+        _pre_recent_losses = [
+            ts for ts in _COIN_LOSS_HISTORY.get(m, [])
+            if _pre_now - ts < COIN_LOSS_COOLDOWN
+        ]
+        if len(_pre_recent_losses) >= COIN_LOSS_MAX:
+            _pipeline_inc("pre_cut_coin_loss")
+            return None
 
     # === v18g lazy c1 fetch: 위 사전차단 통과한 심볼만 c1 호출 ===
     if c1 is None:
