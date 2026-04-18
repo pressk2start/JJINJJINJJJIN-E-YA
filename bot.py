@@ -394,6 +394,11 @@ _PIPELINE_STAGE_LATENCIES = {
     "detect_leader": deque(maxlen=200),  # detect_leader_stock 한 사이클 누적 시간
     "universal_ind": deque(maxlen=200),  # _collect_universal_indicators 한 사이클 누적
     "detect_v4":     deque(maxlen=200),  # v4_evaluate_entry 누적 (universal_ind + check_fn 포함)
+    # v18g: detect_leader 내부 stage 분해 (병목 구간 특정)
+    "dl_precheck":       deque(maxlen=200),  # 함수 진입 ~ pre-check 통과
+    "dl_c1_fetch":       deque(maxlen=200),  # c1 lazy fetch (캐시 hit 시 거의 0)
+    "dl_multitf_fetch":  deque(maxlen=200),  # c5/c15/c60 fetch
+    "dl_v4_eval":        deque(maxlen=200),  # v4_evaluate_entry (v0 strategies 13개)
     # 참고: timeframe별 fetch는 _TAGGED_FETCH_HISTORY(call-site tag 기반)로 측정
     # → get_minutes_candles 함수 레벨 wrap + thread-local tag → 모든 호출 경로 추적
 }
@@ -968,6 +973,8 @@ def _pipeline_report(force=False):
     _stage_order = (
         "scan_fetch", "scan_detect",
         "detect_leader",                   # detect 루프 총합
+        "dl_precheck", "dl_c1_fetch",      # v18g: detect_leader 내부 분해
+        "dl_multitf_fetch", "dl_v4_eval",  # v18g: detect_leader 내부 분해
         "detect_v4", "universal_ind",      # detect_leader 내부 (fetch는 tag 기반 별도 섹션)
         "shadow_eval",
         "save_state", "report_full", "report_mini",
