@@ -8939,10 +8939,10 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi_68,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 7,
-        "enabled": True,  # ⬆ v18j: shadow → LIVE 승격 (n=112 승률39% PnL+0.01% — 손익분기 도달)
+        "enabled": False,  # shadow-only
         "pipeline_key": "momentum_68",
         "route": "GT68",
-        "description": "5mRSI≥68 [GT68:no-trail/max240s/SL2%flat] (LIVE)",
+        "description": "5mRSI≥68 [GT68:no-trail/max180s] (shadow — 진입 앞당김 실험)",
     },
     "모멘텀GT_VR5LOW": {
         "check_fn": _v0_check_momentum_vr5low,
