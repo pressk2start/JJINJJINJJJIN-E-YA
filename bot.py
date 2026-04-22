@@ -3608,6 +3608,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_mode": entry_mode,  # 🔧 FIX: IMPACT_CAP 전환 반영 (pre 대신 로컬 변수)
                 "entry_ts": time.time(),  # 🧠 진입 시각 (학습용)
                 "signal_tag": pre.get("signal_tag", "기본"),  # 🔧 MFE 익절 경로용
+                "logic_group": pre.get("v4_logic_group", "?"),
                 "signal_type": _derived_signal_type,  # 🔧 FIX: SL 신호별 완화용
                 "trade_type": pre.get("trade_type", "scalp"),  # 🔧 특단조치: 스캘프/러너 진입 시 결정
                 # 🔧 데이터수집: 손절폭/트레일 간격 튜닝용 메트릭
@@ -3695,11 +3696,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         # 전략 설명 매핑
         _buy_group = pre.get("v4_logic_group", "?")
         _buy_filters_str = " ".join(pre.get("v4_filters_hit", []))
-        _buy_desc_map = {
-            "GT": "5분RSI≥73 과매수 + 1분양봉 + 거래량폭증 → 강모멘텀 추격 (180초 시간청산)",
-            "C": "15분 음→양 반전 + 종가회복0.1%↑ + 1분양봉 + 거래량동반 → 초입반전 포착 (빠른익절)",
-        }
-        _buy_strat_desc = _buy_desc_map.get(_buy_group, _buy_filters_str)
+        _buy_strat_desc = _STRAT_DESC_MAP.get(_buy_group, _buy_filters_str)
 
         # 🔧 FIX: 박스 진입은 박스 코드에서 별도 알람 발송 → 여기서 중복 발송 방지
         if not pre.get("is_box"):
@@ -4390,12 +4387,10 @@ def close_auto_position(m, reason=""):
 
             # 전략 정보 추출
             _exit_sig_tag = _pos_data.get('signal_tag', '?')
-            _exit_group = "GT" if "GT" in _exit_sig_tag else ("C" if "반전_15m" in _exit_sig_tag else "?")
-            _exit_desc_map = {
-                "GT": "강모멘텀 추격 (5분RSI≥73, 180초 시간청산)",
-                "C": "초입반전 포착 (15분 음→양, 빠른익절)",
-            }
-            _exit_strat_desc = _exit_desc_map.get(_exit_group, "")
+            _exit_group = _pos_data.get('logic_group', '?')
+            if _exit_group == '?':
+                _exit_group = "GT" if "GT" in _exit_sig_tag else ("C" if "반전_15m" in _exit_sig_tag else "?")
+            _exit_strat_desc = _STRAT_DESC_MAP.get(_exit_group, "")
 
             tg_send(
                 f"====================================\n"
@@ -4742,12 +4737,15 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 if _pos_ref:
                     _partial_sig_tag = _pos_ref.get("signal_tag", "?")
         _partial_sig_tag = _partial_sig_tag or "?"
-        _partial_group = "GT" if "GT" in _partial_sig_tag else ("C" if "반전_15m" in _partial_sig_tag else "?")
-        _partial_desc_map = {
-            "GT": "강모멘텀 추격 (5분RSI≥73, 180초 시간청산)",
-            "C": "초입반전 포착 (15분 음→양, 빠른익절)",
-        }
-        _partial_strat_desc = _partial_desc_map.get(_partial_group, "")
+        _partial_group = (backup_pos_snapshot or {}).get('logic_group', '?')
+        if _partial_group == '?':
+            with _POSITION_LOCK:
+                _pos_ref2 = OPEN_POSITIONS.get(m)
+                if _pos_ref2:
+                    _partial_group = _pos_ref2.get('logic_group', '?')
+        if _partial_group == '?':
+            _partial_group = "GT" if "GT" in _partial_sig_tag else ("C" if "반전_15m" in _partial_sig_tag else "?")
+        _partial_strat_desc = _STRAT_DESC_MAP.get(_partial_group, "")
         tg_send(
             f"====================================\n"
             f"{result_emoji} <b>부분 청산</b> {m}\n"
@@ -8148,6 +8146,33 @@ _V4_DEFAULT_EXIT = {
 # 각 전략: 핵심 트리거 2개 + 옵션 타이밍
 # 튜닝 필터 0개 — 섀도우 데이터로 검증 후 하나씩 추가
 # ========================================================================
+
+_STRAT_DESC_MAP = {
+    "GT": "5분RSI≥74.55 + VR5≤3.2 → 강모멘텀 추격 (no-trail, 시간청산)",
+    "G": "5분RSI≥74.55 + 양봉 + VR5≤3.2 → 모멘텀 (trail)",
+    "GR": "5분RSI≥78 + 양봉 → 모멘텀 strict",
+    "G2": "5분RSI≥74.55 → 모멘텀 (A0.5/T0.3)",
+    "G4": "5분RSI≥74.55 → 모멘텀 (A0.4/T0.25)",
+    "G6": "5분RSI≥74.55 → 모멘텀 (A0.6/T0.35)",
+    "G7": "5분RSI≥74.55 → 모멘텀 (A0.7/T0.4)",
+    "GT70": "5분RSI≥70 → 모멘텀 (RSI 완화 실험)",
+    "GT68": "5분RSI≥68 → 모멘텀 (RSI 완화 실험)",
+    "GT_VR5LOW": "5분RSI≥74.55 + VR5≤0.707 → 초입 진입 실험",
+    "GT_SL07": "5분RSI≥73 → 모멘텀 (SL 0.7% 타이트)",
+    "GT_SL15": "5분RSI≥73 → 모멘텀 (SL 1.5% 완화)",
+    "GT_300s": "5분RSI≥73 → 모멘텀 (300초 시간청산)",
+    "C": "15분 음→양 반전 + 종가회복 → 초입반전 포착 (빠른익절)",
+    "H": "60분 음→양 반전 + 종가회복 → 장기반전",
+    "HT": "60분 음→양 + GT식 exit → 반전 실험",
+    "B": "종가>20봉고점 + 양봉 + 15mVR≥1.5 → 가격돌파",
+    "B2": "종가>20봉고점 + 15mVR≥1.5 → 가격돌파 (양봉 무관)",
+    "A": "VR5≥2.5 + 양봉 → 거래량 폭발",
+    "D": "20봉고점 -1%이내 + 양봉 → 고점근접",
+    "F": "15분 EMA5>10>20 + 양봉 → 추세정배열",
+    "J": "60분 EMA5>10>20 + 양봉 → 추세정배열",
+    "K": "5분RSI≤35 + 음→양 → 역추세반등",
+    "L": "15분 ADX≥28.5 + 양봉 → 추세강도",
+}
 
 _V0_EXIT_PARAMS = {
     "strategy": "TRAIL",
