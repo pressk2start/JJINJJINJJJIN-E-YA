@@ -5405,6 +5405,27 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         _sig_tag = _pos_data.get("signal_tag", "기본")
         _entry_mode = _pos_data.get("entry_mode", "confirm")
         _mfe_snaps = _pos_data.get("mfe_snapshots", {})
+
+        # 🔧 FIX: mfe_snapshots 누락 시 fallback (부분청산 등 빠른청산 경로 — 98% 케이스)
+        # monitor_position의 첫 mfe 스냅샷(5초) 전에 부분청산 권고가 발생하면
+        # backup_pos_snapshot에 mfe_snapshots가 빈 dict로 들어와 통계가 0으로 누락됨
+        # → entry_price와 best_price로 즉석 계산하여 통계 누락 방지
+        if not _mfe_snaps:
+            _entry_p = _pos_data.get("entry_price", 0) or 0
+            _best_p = _pos_data.get("best_price") or _entry_p
+            if _entry_p > 0 and hold_sec > 0:
+                _mfe_fallback = max((_best_p / _entry_p - 1.0), 0.0)
+                for _snap_t in MFE_SNAPSHOT_TIMES:
+                    if _snap_t <= hold_sec:
+                        _mfe_snaps[_snap_t] = _mfe_fallback
+
+        # 🔧 FIX: mfe_pct가 0인데 best_price 정보 있으면 재계산 (% 단위)
+        if mfe_pct == 0:
+            _entry_p = _pos_data.get("entry_price", 0) or 0
+            _best_p = _pos_data.get("best_price") or _entry_p
+            if _entry_p > 0 and _best_p > _entry_p:
+                mfe_pct = (_best_p / _entry_p - 1.0) * 100
+
         # mfe_pct/mae_pct를 소수 단위로 변환 (% → 소수: 0.5% → 0.005)
         _mfe_dec = mfe_pct / 100.0 if abs(mfe_pct) > 0.1 else mfe_pct
         _mae_dec = mae_pct / 100.0 if abs(mae_pct) > 0.1 else mae_pct
@@ -14037,6 +14058,7 @@ def monitor_position(m,
                 if pos_now:
                     pos_now["mfe_pct"] = mfe_pct
                     pos_now["mae_pct"] = mae_pct
+                    pos_now["best_price"] = best  # 🔧 FIX: 부분청산 등 빠른청산 경로의 mfe fallback용
                     if _mfe_sec is not None:
                         pos_now["mfe_sec"] = round(_mfe_sec, 1)  # 최고점 도달까지 걸린 시간
                     # 🔧 FIX: trail_dist/trail_stop_pct를 항상 저장 (trail 미무장 시에도 기본값 기록 → 청산 알람 0값 방지)
