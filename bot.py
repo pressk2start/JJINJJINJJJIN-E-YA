@@ -682,6 +682,12 @@ def _pipeline_report(force=False):
         for i in range(0, len(_hourly_parts), 6):
             lines.append("  " + " | ".join(_hourly_parts[i:i+6]))
 
+    # 📊 실전 전략별 성과 (shadow와 나란히 비교하기 위해 먼저 출력)
+    _live_sig_report = get_all_signal_stats_report()
+    if _live_sig_report:
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append(_live_sig_report)
+
     # 📡 섀도우 루트 계측 (v8)
     shadow_lines = _v4_shadow_report_lines()
     if shadow_lines:
