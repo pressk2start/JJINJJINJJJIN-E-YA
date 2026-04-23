@@ -4184,7 +4184,8 @@ def close_auto_position(m, reason=""):
                             update_trade_result(m, exit_price_used, net_ret_delayed/100.0 if entry_price else 0, hold_sec,
                                                 added=pos.get('added', False), exit_reason=reason,
                                                 mfe_pct=mfe, mae_pct=mae,
-                                                entry_ts=pos.get("entry_ts"))
+                                                entry_ts=pos.get("entry_ts"),
+                                                pos_snapshot=dict(pos))
                         except Exception as _e:
                             print("[DELAYED_CLOSE_LOG_ERR]", _e)
                         return
@@ -4230,7 +4231,8 @@ def close_auto_position(m, reason=""):
                                                         added=pos.get('added', False),
                                                         exit_reason=reason or "후속확인_청산",
                                                         mfe_pct=_mfe, mae_pct=_mae,
-                                                        entry_ts=pos.get("entry_ts"))
+                                                        entry_ts=pos.get("entry_ts"),
+                                                        pos_snapshot=dict(pos))
                                 except Exception as _e:
                                     print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
                                 return
@@ -4771,10 +4773,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
                 record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"))
                 # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                _ps_mfe = backup_pos_snapshot.get("mfe_pct", 0.0) if backup_pos_snapshot else 0.0
+                _ps_mae = backup_pos_snapshot.get("mae_pct", 0.0) if backup_pos_snapshot else 0.0
                 update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
                                         added=backup_added, exit_reason=reason or "부분청산",
+                                        mfe_pct=_ps_mfe, mae_pct=_ps_mae,
                                         entry_ts=backup_entry_ts,
-                                        pos_snapshot=backup_pos_snapshot)  # 🔧 FIX: 튜닝 메트릭 전달
+                                        pos_snapshot=backup_pos_snapshot)
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
@@ -5413,9 +5418,18 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             if _entry_p > 0 and _best_p > _entry_p:
                 mfe_pct = (_best_p / _entry_p - 1.0) * 100
 
-        # mfe_pct/mae_pct를 소수 단위로 변환 (% → 소수: 0.5% → 0.005)
-        _mfe_dec = mfe_pct / 100.0 if abs(mfe_pct) > 0.1 else mfe_pct
-        _mae_dec = mae_pct / 100.0 if abs(mae_pct) > 0.1 else mae_pct
+        if mae_pct == 0 and pnl_pct < 0:
+            _entry_p = _pos_data.get("entry_price", 0) or 0
+            if _entry_p > 0:
+                _worst_p = _pos_data.get("worst_price") or _entry_p
+                if _worst_p < _entry_p:
+                    mae_pct = (_worst_p / _entry_p - 1.0) * 100
+                elif exit_price > 0 and exit_price < _entry_p:
+                    mae_pct = (exit_price / _entry_p - 1.0) * 100
+
+        # mfe_pct/mae_pct: 항상 % 단위 (monitor_position 출처) → 소수로 변환
+        _mfe_dec = mfe_pct / 100.0
+        _mae_dec = mae_pct / 100.0
         update_signal_stats(
             signal_tag=_sig_tag,
             pnl_pct=pnl_pct,
@@ -13954,10 +13968,10 @@ def monitor_position(m,
     # 🔧 FIX: SL 주기적 갱신용 타임스탬프 (수익 중 손절 완화 반영)
     _last_sl_refresh_ts = 0.0
 
-    def _get_c1_cached():
+    def _get_c1_local():
         nonlocal _c1_cache, _c1_cache_ts
         now = time.time()
-        if _c1_cache is None or (now - _c1_cache_ts) >= 5:  # 🔧 손익분기개선: 10→5초 (stale 데이터로 판단 방지)
+        if _c1_cache is None or (now - _c1_cache_ts) >= 5:
             _c1_cache = _get_c1_cached(m, 20)
             _c1_cache_ts = now
         return _c1_cache
@@ -14073,6 +14087,7 @@ def monitor_position(m,
                     pos_now["mfe_pct"] = mfe_pct
                     pos_now["mae_pct"] = mae_pct
                     pos_now["best_price"] = best
+                    pos_now["worst_price"] = worst
                     if _mfe_sec is not None:
                         pos_now["mfe_sec"] = round(_mfe_sec, 1)  # 최고점 도달까지 걸린 시간
                     # 🔧 FIX: trail_dist/trail_stop_pct를 항상 저장 (trail 미무장 시에도 기본값 기록 → 청산 알람 0값 방지)
@@ -14091,7 +14106,7 @@ def monitor_position(m,
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
             # - 박스 포지션은 고정 SL 유지 (refresh 스킵)
             if not pre.get("is_box") and time.time() - _last_sl_refresh_ts >= 5:
-                _c1_for_sl_refresh = _get_c1_cached()
+                _c1_for_sl_refresh = _get_c1_local()
                 _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
                     entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type, market=m
                 )
@@ -14429,7 +14444,7 @@ def monitor_position(m,
                             trail_db_first_ts = 0.0
                             trail_db_hits = 0
                             _c1_cache = None; _c1_cache_ts = 0.0
-                            c1_for_sl = _get_c1_cached()
+                            c1_for_sl = _get_c1_local()
                             _new_stop, eff_sl_pct, atr_info = dynamic_stop_loss(entry_price, c1_for_sl, signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type, market=m)  # 🔧 FIX: signal_type/current_price/trade_type 전달
                             base_stop = max(base_stop, _new_stop)  # 🔧 FIX: 래칫 보호 (추매 후 SL 하향 방지)
                             # trail은 유지 (이미 무장된 상태면 새 평단 기준으로 계속)
@@ -14439,7 +14454,7 @@ def monitor_position(m,
             # 러너(max_gain >= 2*CP): 약세에도 트레일 넓게 유지 (추세 중간 눌림 허용)
             # 비러너: 기존 강세→넓게, 약세→좁게
             if trail_armed and new_high:
-                atr = atr14_from_candles(_get_c1_cached(), 14)
+                atr = atr14_from_candles(_get_c1_local(), 14)
                 if atr and atr > 0:
                     base_trail = max(trail_dist_min,
                                      (atr / max(curp, 1)) * TRAIL_ATR_MULT)
@@ -14576,7 +14591,7 @@ def monitor_position(m,
                     tg_send_mid(f"⏳ {m} +{cur_gain*100:.2f}% HOLD_{_v4_hold_bars}봉 대기중 ({_elapsed_bars_1m}/{_v4_hold_bars}분)")
                 else:
                     trail_armed = True
-                    atr = atr14_from_candles(_get_c1_cached(), 14)
+                    atr = atr14_from_candles(_get_c1_local(), 14)
                     if atr and atr > 0:
                         trail_dist = max(trail_dist_min, (atr / max(curp, 1)) * TRAIL_ATR_MULT)
                     else:
@@ -14625,7 +14640,7 @@ def monitor_position(m,
                 _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0)  # fallback 2.0 (테이블 미매칭 시 보수적)
                 mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.0=4.0%
                 try:
-                    c1_mfe = _get_c1_cached()
+                    c1_mfe = _get_c1_local()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
                     if atr_raw and curp > 0:
                         atr_pct = atr_raw / curp
@@ -14691,7 +14706,7 @@ def monitor_position(m,
                 _rr_mult = MFE_RR_MULTIPLIERS.get(signal_tag, 2.0) + 0.3  # fallback 2.3 (러너 +0.3 보너스)
                 mfe_base = max(eff_sl_pct * _rr_mult, MFE_PARTIAL_TARGETS.get(signal_tag, 0.020))  # SL 2.0%×2.3=4.6%
                 try:
-                    c1_mfe = _get_c1_cached()
+                    c1_mfe = _get_c1_local()
                     atr_raw = atr14_from_candles(c1_mfe) if c1_mfe and len(c1_mfe) >= 15 else None
                     if atr_raw and curp > 0:
                         atr_pct = atr_raw / curp
@@ -14788,7 +14803,7 @@ def monitor_position(m,
                     # - 수정: 신고점 판정 → trail 갱신 → best 갱신
                     if curp > best:
                         # 🔧 FIX: ATR 기반 trail_dist 사용 (trail_dist_min 고정 → 본루프와 동일 ATR 반영)
-                        _ext_atr = atr14_from_candles(_get_c1_cached(), 14)
+                        _ext_atr = atr14_from_candles(_get_c1_local(), 14)
                         if _ext_atr and _ext_atr > 0:
                             _ext_trail_dist = max(trail_dist_min, (_ext_atr / max(curp, 1)) * TRAIL_ATR_MULT)
                         else:
@@ -14816,7 +14831,7 @@ def monitor_position(m,
                         verdict = "연장_RATCHET_STOP"
                         break
                     # 🔧 FIX: ATR 동적 손절 체크 (연장루프에서도 가격 폭락 방어)
-                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_cached(), signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type, market=m)  # 🔧 FIX: trade_type 전달 (scalp/runner SL 분리)
+                    _ext_sl_price, _ext_sl_pct, _ = dynamic_stop_loss(entry_price, _get_c1_local(), signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type, market=m)  # 🔧 FIX: trade_type 전달 (scalp/runner SL 분리)
                     if _ext_sl_price > 0 and curp <= _ext_sl_price:
                         _ext_gain = (curp / entry_price - 1.0) if entry_price > 0 else 0
                         close_auto_position(m, f"연장ATR손절 {_ext_gain*100:.2f}% (SL {_ext_sl_pct*100:.2f}%)")
@@ -14869,7 +14884,7 @@ def monitor_position(m,
         # 2) 끝알람 문구 생성
         # ================================
         # 🔧 FIX: 루프 종료 후 c1 갱신 (stale 데이터로 끝알람/ctx 판단 왜곡 방지)
-        c1 = _get_c1_cached() or c1
+        c1 = _get_c1_local() or c1
         # 🔧 BUG FIX: _end_reco 예외 시 finally 블록 중단 → remonitor 미호출 방지
         try:
             action, rationale = _end_reco(m,
