@@ -13921,6 +13921,14 @@ def monitor_position(m,
     _mfe_snap_done = set()       # 이미 기록 완료된 시점 (중복 방지)
     _mfe_snap_cur_prices = {}    # {10: 현재가, 30: 현재가, ...} 각 시점의 현재가 (MFE뿐 아니라 실시간 수익률도)
 
+    if reentry:
+        with _POSITION_LOCK:
+            _existing = OPEN_POSITIONS.get(m, {})
+        best = max(entry_price, _existing.get("best_price", entry_price))
+        worst = min(entry_price, _existing.get("worst_price", entry_price))
+        _mfe_snapshots = dict(_existing.get("mfe_snapshots", {}))
+        _mfe_snap_done = set(int(k) for k in _mfe_snapshots.keys())
+
     # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
@@ -14425,13 +14433,13 @@ def monitor_position(m,
 
                 if add_cond_price and add_cond_flow and add_cond_pullback and add_cond_rebreak and add_cond_mfe and add_cond_btc:
                     with _POSITION_LOCK:
-                        pos = OPEN_POSITIONS.get(m)
-                        already_added = pos.get("added") if pos else True
-                        last_add_ts = pos.get("last_add_ts", 0.0) if pos else 0.0
+                        _pyr_pos = OPEN_POSITIONS.get(m)
+                        already_added = _pyr_pos.get("added") if _pyr_pos else True
+                        last_add_ts = _pyr_pos.get("last_add_ts", 0.0) if _pyr_pos else 0.0
 
                     cooldown_ok = (time.time() - last_add_ts) >= (PYRAMID_ADD_COOLDOWN_SEC * 0.6)
 
-                    if pos and (not already_added) and cooldown_ok:
+                    if _pyr_pos and (not already_added) and cooldown_ok:
                         add_reason = f"눌림재돌파 (수익+{gain_from_entry*100:.1f}% 눌림{_pyr_peak_drop*100:.1f}%→재탈환 매수비{t15_now['buy_ratio']:.0%})"
                         ok_add, new_entry = add_auto_position(m, curp, add_reason)
                         if ok_add and new_entry:
@@ -14820,6 +14828,16 @@ def monitor_position(m,
                         trail_stop = max(trail_stop, curp * (1.0 - _ext_trail_dist))
                     best = max(best, curp)
                     worst = min(worst, curp)  # 🔧 FIX: 연장루프에서도 MAE 추적 (maxdd 정확도)
+
+                    _ext_mfe = (best / entry_price - 1.0) * 100 if entry_price > 0 else 0
+                    _ext_mae = (worst / entry_price - 1.0) * 100 if entry_price > 0 else 0
+                    with _POSITION_LOCK:
+                        _ext_pos = OPEN_POSITIONS.get(m)
+                        if _ext_pos:
+                            _ext_pos["mfe_pct"] = _ext_mfe
+                            _ext_pos["mae_pct"] = _ext_mae
+                            _ext_pos["best_price"] = best
+                            _ext_pos["worst_price"] = worst
 
                     # 트레일 체크 (🔧 FIX: 2회 디바운스 — 메인루프와 동일 패턴)
                     if curp < trail_stop:
