@@ -14070,6 +14070,8 @@ def monitor_position(m,
             best = max(best, curp)
             worst = min(worst, curp)
 
+            alive_sec = time.time() - start_ts
+
             # 📊 MFE 시계열 스냅샷: 각 시점까지의 최고 수익률 기록
             for snap_sec in MFE_SNAPSHOT_TIMES:
                 if snap_sec not in _mfe_snap_done and alive_sec >= snap_sec:
