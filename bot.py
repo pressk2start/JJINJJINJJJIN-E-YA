@@ -13921,6 +13921,14 @@ def monitor_position(m,
     _mfe_snap_done = set()       # 이미 기록 완료된 시점 (중복 방지)
     _mfe_snap_cur_prices = {}    # {10: 현재가, 30: 현재가, ...} 각 시점의 현재가 (MFE뿐 아니라 실시간 수익률도)
 
+    if reentry:
+        with _POSITION_LOCK:
+            _existing = OPEN_POSITIONS.get(m, {})
+        best = max(entry_price, _existing.get("best_price", entry_price))
+        worst = min(entry_price, _existing.get("worst_price", entry_price))
+        _mfe_snapshots = dict(_existing.get("mfe_snapshots", {}))
+        _mfe_snap_done = set(int(k) for k in _mfe_snapshots.keys())
+
     # === 포지션 모드 (half / confirm) + 트레이드 유형 (scalp / runner) ===
     with _POSITION_LOCK:
         pos = OPEN_POSITIONS.get(m, {})
