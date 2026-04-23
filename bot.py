@@ -1651,6 +1651,13 @@ def _load_signal_stats():
         if os.path.exists(SIGNAL_STATS_PATH):
             with open(SIGNAL_STATS_PATH, "r", encoding="utf-8") as f:
                 _SIGNAL_STATS = json.load(f)
+            _purged = []
+            for _tag, _s in list(_SIGNAL_STATS.items()):
+                if _s.get("trades", 0) > 0 and _s.get("avg_mfe", 0) == 0 and _s.get("avg_mae", 0) == 0:
+                    _purged.append(f"{_tag}({_s['trades']}건)")
+                    del _SIGNAL_STATS[_tag]
+            if _purged:
+                print(f"[SIGNAL_STATS] MFE/MAE=0 오염 데이터 제거: {', '.join(_purged)}")
             print(f"[SIGNAL_STATS] 로드 완료: {len(_SIGNAL_STATS)}개 시그널 타입")
     except Exception as e:
         print(f"[SIGNAL_STATS] 로드 실패: {e}")
