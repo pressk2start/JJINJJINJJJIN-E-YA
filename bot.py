@@ -10531,14 +10531,25 @@ def _v4_shadow_report_lines():
                 l_cnt = s.get("loss_ind_cnt", {})
                 l_m2 = s.get("loss_ind_m2", {})
                 if w_ind or l_ind:
-                    # mfe_peak_sec만 표시 (핵심 분리 지표)
-                    for ik in ["mfe_peak_sec", "tick_age"]:
-                        if ik not in w_ind and ik not in l_ind:
-                            continue
-                        _fmt = ".3f" if ik.startswith("tick_") else ".2f"
-                        w_str = f"W{w_ind[ik]:{_fmt}}({w_cnt.get(ik,0)})" if ik in w_ind else "W:-"
-                        l_str = f"L{l_ind[ik]:{_fmt}}({l_cnt.get(ik,0)})" if ik in l_ind else "L:-"
-                        lines.append(f"    📊{ik}: {w_str} / {l_str}")
+                    _all_keys = sorted(set(list(w_ind.keys()) + list(l_ind.keys())))
+                    _scored = []
+                    for ik in _all_keys:
+                        wv = w_ind.get(ik)
+                        lv = l_ind.get(ik)
+                        wn = w_cnt.get(ik, 0)
+                        ln = l_cnt.get(ik, 0)
+                        if wv is not None and lv is not None and wn >= 10 and ln >= 10:
+                            wm2 = w_m2.get(ik, 0)
+                            lm2 = l_m2.get(ik, 0)
+                            w_var = wm2 / wn if wn > 1 else 0.001
+                            l_var = lm2 / ln if ln > 1 else 0.001
+                            pooled = (w_var + l_var) / 2
+                            d = abs(wv - lv) / max(pooled ** 0.5, 0.0001)
+                            _scored.append((d, ik, wv, wn, lv, ln))
+                    _scored.sort(reverse=True)
+                    for _d, ik, wv, wn, lv, ln in _scored[:8]:
+                        _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
+                        lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
     # 📌 Phase2: G-cluster 요약 + GT 판정 상태
     if _cluster_data:
         _gc_parts = []
