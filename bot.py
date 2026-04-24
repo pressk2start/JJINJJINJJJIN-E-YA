@@ -329,6 +329,7 @@ _PIPELINE_COUNTERS = {
     "gate_fail_fake_flow": 0,  # 스푸핑
     "gate_fail_no_v4": 0,      # v4 신호 없음 (총)
     "gate_fail_coin_cd": 0,    # 코인별 연패 쿨다운
+    "gate_fail_tick_age": 0,   # GT tick_age 부족
     "gate_fail_fresh": 0,      # 틱 신선도 부족
     "gate_fail_spread": 0,     # 스프레드 과다
     "gate_fail_vol_min": 0,    # 거래대금 부족
@@ -846,7 +847,7 @@ def _pipeline_report(force=False):
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
-        f"  신선도: {c['gate_fail_fresh']} | 스프레드: {c['gate_fail_spread']}",
+        f"  tick_age: {c.get('gate_fail_tick_age', 0)} | 신선도: {c['gate_fail_fresh']} | 스프레드: {c['gate_fail_spread']}",
         f"  거래대금: {c['gate_fail_vol_min']} | 매수비: {c['gate_fail_buy_ratio']}",
         f"  가속: {c['gate_fail_accel']} | 거래속도: {c['gate_fail_early_flow']}",
         f"✅ gate통과: {_gp}(Δ{d('gate_pass')})",
