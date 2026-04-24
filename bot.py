@@ -8314,6 +8314,25 @@ _V0_EXIT_PARAMS_GT_SURV60 = {
     "description": "GT_tiered/no-trail/max240s/surv60(pnl>=0)",
 }
 
+_V0_EXIT_PARAMS_GT_SURV60_SOFT = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 80,
+    "disable_trail": True,
+    "sl_tiers": [
+        (60,   0.025),
+        (120,  0.015),
+        (9999, 0.010),
+    ],
+    "survival_gate_sec": 60,
+    "survival_min_pnl": -0.003,
+    "survival_max_mfe": 0.002,
+    "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%)",
+}
+
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
@@ -9155,6 +9174,25 @@ _STRATEGY_REGISTRY = {
         "route": "CG_S60",
         "description": "CG+60초생존게이트(pnl>=0) (shadow)",
     },
+    # === soft 생존 게이트: pnl<-0.3% AND mfe<0.2% 둘 다 미달 시만 탈락 ===
+    "모멘텀GT_S60S": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GT_SURV60_SOFT,
+        "priority": 7,
+        "enabled": False,
+        "pipeline_key": "momentum",
+        "route": "GT_S6S",
+        "description": "GT+60초soft생존(pnl<-0.3%+mfe<0.2%) (shadow)",
+    },
+    "패턴반전_15m_GT240_S60S": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _V0_EXIT_PARAMS_GT_SURV60_SOFT,
+        "priority": 3,
+        "enabled": False,
+        "pipeline_key": "reversal_15m",
+        "route": "CG_S6S",
+        "description": "CG+60초soft생존(pnl<-0.3%+mfe<0.2%) (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -9993,11 +10031,15 @@ def _shadow_sim_exit(vp, cur_price):
     if pnl <= -_eff_sl:
         return True, "손절SL"
 
-    # 1.5) 생존 게이트: 지정 시점 도달 시 PnL 미달이면 조기 청산
+    # 1.5) 생존 게이트: 지정 시점 도달 시 조건 미달이면 조�� 청산
     _surv_sec = ep.get("survival_gate_sec")
     if _surv_sec and not vp.get("_survival_passed"):
         if hold_sec >= _surv_sec:
-            if pnl < ep.get("survival_min_pnl", 0.0):
+            _surv_fail = pnl < ep.get("survival_min_pnl", 0.0)
+            _surv_max_mfe = ep.get("survival_max_mfe")
+            if _surv_max_mfe is not None:
+                _surv_fail = _surv_fail and mfe < _surv_max_mfe
+            if _surv_fail:
                 return True, "생존탈락"
             vp["_survival_passed"] = True
 
@@ -10622,7 +10664,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
