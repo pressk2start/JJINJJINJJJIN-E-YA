@@ -8330,7 +8330,8 @@ _V0_EXIT_PARAMS_GT_SURV60_SOFT = {
     "survival_gate_sec": 60,
     "survival_min_pnl": -0.003,
     "survival_max_mfe": 0.002,
-    "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%)",
+    "survival_min_mae": -0.006,
+    "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%+mae<-0.6%)",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -10031,7 +10032,7 @@ def _shadow_sim_exit(vp, cur_price):
     if pnl <= -_eff_sl:
         return True, "손절SL"
 
-    # 1.5) 생존 게이트: 지정 시점 도달 시 조건 미달이면 조�� 청산
+    # 1.5) 생존 게이트: 지정 시점 도달 시 조건 미달이면 조기 청산
     _surv_sec = ep.get("survival_gate_sec")
     if _surv_sec and not vp.get("_survival_passed"):
         if hold_sec >= _surv_sec:
@@ -10039,6 +10040,10 @@ def _shadow_sim_exit(vp, cur_price):
             _surv_max_mfe = ep.get("survival_max_mfe")
             if _surv_max_mfe is not None:
                 _surv_fail = _surv_fail and mfe < _surv_max_mfe
+            _surv_min_mae = ep.get("survival_min_mae")
+            if _surv_min_mae is not None:
+                mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
+                _surv_fail = _surv_fail and mae < _surv_min_mae
             if _surv_fail:
                 return True, "생존탈락"
             vp["_survival_passed"] = True
