@@ -352,7 +352,7 @@ MKTS_CACHE_TTL = 90
 # 🔧 v7: 첫 2분 내 5초 간격 세분화 (초기 MFE 피크 정밀 추적)
 MFE_SNAPSHOT_TIMES = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600]
 # 시그널별 성과 통계 최소 샘플 수 (이 이상 모여야 리포트/적응형 청산에 활용)
-SIGNAL_STATS_MIN_TRADES = 5
+SIGNAL_STATS_MIN_TRADES = 2
 # 시그널별 통계 파일 경로
 SIGNAL_STATS_PATH = "signal_stats.json"
 
