@@ -9080,6 +9080,34 @@ _STRATEGY_REGISTRY = {
     #     "route": "K",
     #     "description": "5mRSI≤35 + 음→양",
     # },
+    # === GT exit 재사용 실험: 다른 진입 + GT 시간청산(240s/no-trail/tiered SL) ===
+    "돌파B2_GT240": {
+        "check_fn": _v0_check_price_breakout_bullpass,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 1,
+        "enabled": False,
+        "pipeline_key": "breakout_bp",
+        "route": "B2G",
+        "description": "종가>20봉고점 [B2+GT exit:no-trail/max240s] (shadow)",
+    },
+    "반전60m_GT240": {
+        "check_fn": _v0_check_reversal_60m,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 4,
+        "enabled": False,
+        "pipeline_key": "reversal_60m",
+        "route": "HG",
+        "description": "60m 음→양 [H+GT exit:no-trail/max240s] (shadow)",
+    },
+    "패턴반전_15m_GT240": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 3,
+        "enabled": False,
+        "pipeline_key": "reversal_15m",
+        "route": "CG",
+        "description": "15m 음→양 [C+GT exit:no-trail/max240s] (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -10522,7 +10550,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
