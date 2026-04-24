@@ -12993,6 +12993,15 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_inc("gate_fail_coin_cd")
         return None
 
+    # 🔧 GT tick_age 필터 (shadow n=246: W5.2 vs L3.4 — 늦은 진입이 승률 높음)
+    if _v4_signal.get("logic_group") == "GT":
+        _t10_gate = micro_tape_stats_from_ticks(ticks, 10)
+        _entry_tick_age = _t10_gate["age"]
+        if _entry_tick_age < 5.0:
+            cut("TICK_AGE", f"{m} tick_age부족 {_entry_tick_age:.1f}s<5.0s | {_15m_signal}", near_miss=True)
+            _pipeline_inc("gate_fail_tick_age")
+            return None
+
     # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
 
     # === 매수비 계산 (스푸핑 방지: 비점화는 가중평균) ===
