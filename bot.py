@@ -8296,6 +8296,24 @@ _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "description": "GT_SL_tiered(2.5/1.5/1.0)/no-trail/max240s",
 }
 
+_V0_EXIT_PARAMS_GT_SURV60 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 80,
+    "disable_trail": True,
+    "sl_tiers": [
+        (60,   0.025),
+        (120,  0.015),
+        (9999, 0.010),
+    ],
+    "survival_gate_sec": 60,
+    "survival_min_pnl": 0.0,
+    "description": "GT_tiered/no-trail/max240s/surv60(pnl>=0)",
+}
+
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
@@ -9117,6 +9135,25 @@ _STRATEGY_REGISTRY = {
         "route": "CG_TA",
         "description": "15m 음→양 [CG+tick_age≤15] (shadow)",
         "ind_filters": [("tick_age", "<=", 15.0)],
+    },
+    # === 60초 생존 게이트 실험: 진입→60s관찰→생존시유지→240s ===
+    "모멘텀GT_S60": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GT_SURV60,
+        "priority": 7,
+        "enabled": False,
+        "pipeline_key": "momentum",
+        "route": "GT_S60",
+        "description": "GT+60초생존게이트(pnl>=0) (shadow)",
+    },
+    "패턴반전_15m_GT240_S60": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _V0_EXIT_PARAMS_GT_SURV60,
+        "priority": 3,
+        "enabled": False,
+        "pipeline_key": "reversal_15m",
+        "route": "CG_S60",
+        "description": "CG+60초생존게이트(pnl>=0) (shadow)",
     },
 }
 
@@ -9956,6 +9993,14 @@ def _shadow_sim_exit(vp, cur_price):
     if pnl <= -_eff_sl:
         return True, "손절SL"
 
+    # 1.5) 생존 게이트: 지정 시점 도달 시 PnL 미달이면 조기 청산
+    _surv_sec = ep.get("survival_gate_sec")
+    if _surv_sec and not vp.get("_survival_passed"):
+        if hold_sec >= _surv_sec:
+            if pnl < ep.get("survival_min_pnl", 0.0):
+                return True, "생존탈락"
+            vp["_survival_passed"] = True
+
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
     _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7/GT 모두 포함
@@ -10051,6 +10096,13 @@ def _shadow_evaluate_positions():
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
                     vp.setdefault("pnl_curve", {})[sk] = round(
                         (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
+            # t=30s/60s 상태 스냅샷 (MFE, 고점대비 하락폭)
+            _ep = vp["entry_price"]
+            for _ss in (30, 60):
+                _mk = f"mfe_{_ss}s"
+                if _mk not in vp and hold_sec_now >= _ss and _ep > 0:
+                    vp[_mk] = round((vp["best_price"] - _ep) / _ep, 6)
+                    vp[f"dd_peak_{_ss}s"] = round((vp["best_price"] - cur_price) / _ep, 6)
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
@@ -10058,10 +10110,12 @@ def _shadow_evaluate_positions():
                 mfe = (vp["best_price"] - entry_price) / entry_price
                 mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
                 hold = now - vp["entry_ts"]
-                # v18e: 청산 시점 지표 추가 (MFE 도달 시점)
                 _close_ind = dict(vp.get("indicators", {}))
                 if "_mfe_sec" in vp:
                     _close_ind["mfe_peak_sec"] = round(vp["_mfe_sec"], 0)
+                for _sk in ("mfe_30s", "dd_peak_30s", "mfe_60s", "dd_peak_60s"):
+                    if _sk in vp:
+                        _close_ind[_sk] = vp[_sk]
                 closed_results.append((vp, pnl, mfe, mae, reason, hold,
                                        _close_ind, vp.get("pnl_curve", {})))
             else:
@@ -10568,7 +10622,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
