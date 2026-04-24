@@ -9108,6 +9108,16 @@ _STRATEGY_REGISTRY = {
         "route": "CG",
         "description": "15m 음→양 [C+GT exit:no-trail/max240s] (shadow)",
     },
+    "패턴반전_15m_GT240_TA15": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 3,
+        "enabled": False,
+        "pipeline_key": "reversal_15m",
+        "route": "CG_TA",
+        "description": "15m 음→양 [CG+tick_age≤15] (shadow)",
+        "ind_filters": [("tick_age", "<=", 15.0)],
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -10197,6 +10207,14 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             _check_fn_cache[check_fn] = (sig, all_fails)
 
         hit = sig is not None
+        # ind_filters: shadow variant별 indicator 기반 추가 필터 (예: tick_age ≤ 15)
+        _ind_filters = strat.get("ind_filters")
+        if hit and _ind_filters:
+            for _fk, _fop, _fth in _ind_filters:
+                _fv = universal_ind.get(_fk)
+                if _fv is None or (_fop == "<=" and _fv > _fth) or (_fop == ">=" and _fv < _fth):
+                    hit = False
+                    break
         results[route] = hit
 
         if entry_price <= 0:
@@ -10550,7 +10568,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
