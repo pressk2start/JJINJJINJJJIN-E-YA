@@ -8334,16 +8334,16 @@ _V0_EXIT_PARAMS_GT_SURV60_SOFT = {
     "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%+mae<-0.6%)",
 }
 
-# dd_peak 기반 생존 게이트 — 60초 시점 고점 대비 낙폭으로 판정
-def _make_exit_params_dd_peak(threshold):
+# dd_peak 기반 생존 게이트 — 고점 대비 낙폭으로 판정
+def _make_exit_params_dd_peak(threshold, gate_sec=60):
     return {
         "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
         "trail_pct": 0.005, "hold_bars": 0, "max_bars": 80,
         "disable_trail": True,
         "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
-        "survival_gate_sec": 60,
+        "survival_gate_sec": gate_sec,
         "survival_max_dd_peak": threshold,
-        "description": f"GT_tiered/no-trail/max240s/dd60<{threshold}",
+        "description": f"GT_tiered/no-trail/max240s/dd{gate_sec}<{threshold}",
     }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -9234,6 +9234,35 @@ _STRATEGY_REGISTRY = {
         "priority": 3, "enabled": False,
         "pipeline_key": "reversal_15m", "route": "CG_D5",
         "description": "CG+dd_peak60<0.5% (shadow)",
+    },
+    # === 30초 게이트: dd_peak_30s d=0.64 — 60초 기다릴 이유 없는지 검증 ===
+    "CG_30D1": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.001, gate_sec=30),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "C3D1",
+        "description": "CG+dd_peak30<0.1% (shadow)",
+    },
+    "CG_30D2": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.002, gate_sec=30),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "C3D2",
+        "description": "CG+dd_peak30<0.2% (shadow)",
+    },
+    "CG_30D3": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.003, gate_sec=30),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "C3D3",
+        "description": "CG+dd_peak30<0.3% (shadow)",
+    },
+    "CG_30D5": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.005, gate_sec=30),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "C3D5",
+        "description": "CG+dd_peak30<0.5% (shadow)",
     },
 }
 
@@ -10720,7 +10749,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
