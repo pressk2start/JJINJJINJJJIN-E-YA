@@ -11072,7 +11072,7 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
                 c_var = sum((x - c_mean) ** 2 for x in c_vals) / len(c_vals)
                 pooled_std = max(((a_var + c_var) / 2) ** 0.5, 0.0001)
                 d = abs(a_mean - c_mean) / pooled_std
-                direction = "<=" if a_mean < c_mean else ">="
+                direction = "≤" if a_mean < c_mean else "≥"
                 d_scores.append({
                     "feat": feat, "d": round(d, 3),
                     "a_mean": round(a_mean, 4), "c_mean": round(c_mean, 4),
@@ -11096,7 +11096,7 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
                         v = inds.get(feat)
                         if v is None:
                             continue
-                        if (op == "<=" and v <= th) or (op == ">=" and v >= th):
+                        if (op == "≤" and v <= th) or (op == "≥" and v >= th):
                             score += 1
                     if score >= 2:
                         hi_trades.append(t)
@@ -11162,19 +11162,19 @@ def _survival_analysis_lines():
             elif _a_n >= 10 and _c_n >= 10:
                 _fails = []
                 if not _a_pos:
-                    _fails.append("A_pnl<=0")
+                    _fails.append("A_pnl≤0")
                 _a_60s = a_g["curve"].get("60")
                 if _a_60s is not None and _a_60s <= 0:
                     _fails.append(f"A_60s={_a_60s:+.2f}%")
                 if ac_lift < 0.3:
-                    _fails.append(f"lift={ac_lift:+.2f}<0.3")
+                    _fails.append(f"lift={ac_lift:+.2f}⟨0.3")
                 if _fails:
                     _early_warn = f" ⚠조기붕괴({','.join(_fails)})"
         if not lines:
             lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
-        lines.append(f"  [{route}] A(<0.3%):{a_g['n']}건"
+        lines.append(f"  [{route}] A(≤0.3%):{a_g['n']}건"
                      f" B(0.3~0.5%):{grps['B']['n']}건"
-                     f" C(>0.5%):{c_g['n']}건"
+                     f" C(≥0.5%):{c_g['n']}건"
                      f" → {action}{_early_warn}")
         for g_name in ("A", "B", "C"):
             g = grps[g_name]
