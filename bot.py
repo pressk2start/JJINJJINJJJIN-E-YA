@@ -11155,12 +11155,21 @@ def _survival_analysis_lines():
             action = "SHADOW"
         else:
             action = "BLOCK"
+        _early_warn = ""
+        if total_n >= 30 and _a_n >= 10 and _c_n >= 10 and action == "BLOCK":
+            _fails = []
+            if not _a_pos:
+                _fails.append("A_pnl<=0")
+            if ac_lift < 0.3:
+                _fails.append(f"lift={ac_lift:+.2f}<0.3")
+            if _fails:
+                _early_warn = f" ⚠조기붕괴({','.join(_fails)})"
         if not lines:
             lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
         lines.append(f"  [{route}] A(<0.3%):{a_g['n']}건"
                      f" B(0.3~0.5%):{grps['B']['n']}건"
                      f" C(>0.5%):{c_g['n']}건"
-                     f" → {action}")
+                     f" → {action}{_early_warn}")
         for g_name in ("A", "B", "C"):
             g = grps[g_name]
             if g["n"] == 0:
