@@ -11121,7 +11121,11 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
 
 def _survival_analysis_lines():
     """파이프라인 리포트용 survival analysis 텍스트.
-    출력 조건: A,C 모두 n>=3 이고 |A-C lift| >= 0.3%p"""
+    출력 조건: A,C 모두 n>=3, A-C lift >= 0.3%p
+    Action level: ENABLE / SHADOW / BLOCK
+    - ENABLE: n>=100, ac_lift>0.5%, hl_lift>0.3% → 실전 gate 승격 가능
+    - SHADOW: n>=50, ac_lift>0.3%, hl_lift>0.2% → shadow 유지, 관찰
+    - BLOCK: 나머지 → 무시 (출력은 하되 action 없음)"""
     analysis = _survival_analysis()
     if not analysis:
         return []
@@ -11132,21 +11136,27 @@ def _survival_analysis_lines():
         if a_g["n"] < 3 or c_g["n"] < 3:
             continue
         ac_lift = a_g["avg_pnl"] - c_g["avg_pnl"]
-        if abs(ac_lift) < 0.3:
+        if ac_lift < 0.3:
             continue
         total_n = a_g["n"] + grps["B"]["n"] + c_g["n"]
-        if total_n >= 100 and ac_lift > 0.5:
-            conf = "Strong"
-        elif total_n >= 50 and ac_lift > 0.3:
-            conf = "Medium"
+        sc = data.get("scoring", {})
+        hl_lift = 0.0
+        if sc and sc.get("rules"):
+            hi, lo = sc["hi"], sc["lo"]
+            if hi["n"] > 0 and lo["n"] > 0:
+                hl_lift = hi["pnl"] - lo["pnl"]
+        if total_n >= 100 and ac_lift > 0.5 and hl_lift > 0.3:
+            action = "ENABLE"
+        elif total_n >= 50 and ac_lift > 0.3 and hl_lift > 0.2:
+            action = "SHADOW"
         else:
-            conf = "Weak"
+            action = "BLOCK"
         if not lines:
             lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
         lines.append(f"  [{route}] A(<0.3%):{a_g['n']}건"
                      f" B(0.3~0.5%):{grps['B']['n']}건"
                      f" C(>0.5%):{c_g['n']}건"
-                     f" [{conf}]")
+                     f" → {action}")
         for g_name in ("A", "B", "C"):
             g = grps[g_name]
             if g["n"] == 0:
@@ -11161,24 +11171,21 @@ def _survival_analysis_lines():
         lines.append(f"    → A-C lift: {ac_lift:+.2f}%p")
         ds = data["d_scores"][:5]
         if ds:
-            lines.append(f"    📊 Entry���Survival d-score TOP5:")
+            lines.append(f"    📊 Entry→Survival d-score TOP5:")
             for item in ds:
                 lines.append(
                     f"      {item['feat']}: A={item['a_mean']:.3f}"
                     f" C={item['c_mean']:.3f} d={item['d']:.2f}"
                     f" ({item['direction']})")
-        sc = data.get("scoring", {})
         if sc and sc.get("rules"):
-            hi = sc["hi"]
-            lo = sc["lo"]
+            hi, lo = sc["hi"], sc["lo"]
             rule_str = " & ".join(f"{f}{op}{th}" for f, op, th in sc["rules"])
             lines.append(f"    🎯 Scoring (score≥2): {rule_str}")
             lines.append(f"      HI: {hi['n']}건 승률{hi['wr']:.0f}%"
                          f" PnL{hi['pnl']:+.2f}%"
                          f" | LO: {lo['n']}건 승률{lo['wr']:.0f}%"
                          f" PnL{lo['pnl']:+.2f}%")
-            if hi["n"] > 0 and lo["n"] > 0:
-                hl_lift = hi["pnl"] - lo["pnl"]
+            if hl_lift != 0:
                 lines.append(f"      → HI-LO lift: {hl_lift:+.2f}%p")
     return lines
 
