@@ -11163,6 +11163,9 @@ def _survival_analysis_lines():
                 _fails = []
                 if not _a_pos:
                     _fails.append("A_pnl<=0")
+                _a_60s = a_g["curve"].get("60")
+                if _a_60s is not None and _a_60s <= 0:
+                    _fails.append(f"A_60s={_a_60s:+.2f}%")
                 if ac_lift < 0.3:
                     _fails.append(f"lift={ac_lift:+.2f}<0.3")
                 if _fails:
