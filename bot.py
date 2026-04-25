@@ -1120,6 +1120,15 @@ def _pipeline_report(force=False):
         lines.append("━━━━━━━━━━━━━━━━")
         lines.extend(shadow_lines)
 
+    # 🧬 Survival Analysis
+    try:
+        surv_lines = _survival_analysis_lines()
+        if surv_lines:
+            lines.append("━━━━━━━━━━━━━━━━")
+            lines.extend(surv_lines)
+    except Exception:
+        pass
+
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
     _PIPELINE_PREV_SNAPSHOT_TS = now
@@ -10995,6 +11004,167 @@ def _v4_shadow_report_lines():
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
     if active_b > 0:
         lines.append(f"  ⏳ 차단건 추적 중: {active_b}건")
+    return lines
+
+
+def _survival_analysis(routes=("CG", "GT"), min_n=10):
+    """dd_peak_60s 기반 survival quality 분석.
+    A(dd<0.3%), B(0.3~0.5%), C(>0.5%) 그룹 분리 → PnL/feature d-score 산출.
+    Returns dict: {route: {groups, d_scores, scoring_rules}} or empty."""
+    _ENTRY_FEATURES = [
+        "tick_age", "vr5", "rsi_15m", "adx_15", "adx_60",
+        "entry_spread_pct", "entry_vol_krw_m", "gap_20bar",
+        "tick_rate_10s", "tick_rate_30s", "tick_buy_30s",
+        "tick_strength_30s", "tick_consec_buy", "tick_mom_10s",
+        "tick_mom_30s", "rsi_5m", "rsi_60m", "atr_pct",
+        "ema_spread_15", "ema_spread_60", "vr5_15m",
+        "macd_hist_5m_bps", "macd_hist_15_bps", "m3_60m",
+    ]
+    results = {}
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            route = s.get("route", "?")
+            if route not in routes:
+                continue
+            tr_list = s.get("trade_records", [])
+            trades_with_dd = [t for t in tr_list
+                              if t.get("inds", {}).get("dd_peak_60s") is not None]
+            if len(trades_with_dd) < min_n:
+                continue
+            grp_a, grp_b, grp_c = [], [], []
+            for t in trades_with_dd:
+                dd = t["inds"]["dd_peak_60s"]
+                if dd < 0.003:
+                    grp_a.append(t)
+                elif dd < 0.005:
+                    grp_b.append(t)
+                else:
+                    grp_c.append(t)
+            def _grp_stats(grp):
+                if not grp:
+                    return {"n": 0, "wr": 0, "avg_pnl": 0, "curve": {}}
+                n = len(grp)
+                wins = sum(1 for t in grp if t["pnl"] > 0)
+                avg = sum(t["pnl"] for t in grp) / n * 100
+                curve = {}
+                for sk in ("60", "120", "180", "240"):
+                    vals = [t["curve"][sk] for t in grp
+                            if t.get("curve", {}).get(sk) is not None]
+                    if vals:
+                        curve[sk] = round(sum(vals) / len(vals) * 100, 3)
+                return {"n": n, "wr": round(wins / n * 100, 1),
+                        "avg_pnl": round(avg, 3), "curve": curve}
+
+            groups = {"A": _grp_stats(grp_a), "B": _grp_stats(grp_b),
+                      "C": _grp_stats(grp_c)}
+
+            d_scores = []
+            for feat in _ENTRY_FEATURES:
+                a_vals = [t["inds"][feat] for t in grp_a
+                          if feat in t.get("inds", {})]
+                c_vals = [t["inds"][feat] for t in grp_c
+                          if feat in t.get("inds", {})]
+                if len(a_vals) < 5 or len(c_vals) < 5:
+                    continue
+                a_mean = sum(a_vals) / len(a_vals)
+                c_mean = sum(c_vals) / len(c_vals)
+                a_var = sum((x - a_mean) ** 2 for x in a_vals) / len(a_vals)
+                c_var = sum((x - c_mean) ** 2 for x in c_vals) / len(c_vals)
+                pooled_std = max(((a_var + c_var) / 2) ** 0.5, 0.0001)
+                d = abs(a_mean - c_mean) / pooled_std
+                direction = "<=" if a_mean < c_mean else ">="
+                d_scores.append({
+                    "feat": feat, "d": round(d, 3),
+                    "a_mean": round(a_mean, 4), "c_mean": round(c_mean, 4),
+                    "a_n": len(a_vals), "c_n": len(c_vals),
+                    "direction": direction,
+                })
+            d_scores.sort(key=lambda x: x["d"], reverse=True)
+
+            scoring = {}
+            top3 = [ds for ds in d_scores if ds["d"] >= 0.3][:3]
+            if len(top3) >= 2 and len(trades_with_dd) >= 20:
+                rules = []
+                for ds in top3:
+                    mid = (ds["a_mean"] + ds["c_mean"]) / 2
+                    rules.append((ds["feat"], ds["direction"], round(mid, 4)))
+                hi_trades, lo_trades = [], []
+                for t in trades_with_dd:
+                    score = 0
+                    inds = t.get("inds", {})
+                    for feat, op, th in rules:
+                        v = inds.get(feat)
+                        if v is None:
+                            continue
+                        if (op == "<=" and v <= th) or (op == ">=" and v >= th):
+                            score += 1
+                    if score >= 2:
+                        hi_trades.append(t)
+                    else:
+                        lo_trades.append(t)
+                def _quick(grp):
+                    if not grp:
+                        return {"n": 0, "wr": 0, "pnl": 0}
+                    n = len(grp)
+                    w = sum(1 for t in grp if t["pnl"] > 0)
+                    return {"n": n, "wr": round(w / n * 100, 1),
+                            "pnl": round(sum(t["pnl"] for t in grp) / n * 100, 3)}
+                scoring = {
+                    "rules": rules,
+                    "hi": _quick(hi_trades),
+                    "lo": _quick(lo_trades),
+                }
+            results[route] = {"groups": groups, "d_scores": d_scores,
+                              "scoring": scoring}
+    return results
+
+
+def _survival_analysis_lines():
+    """파이프라인 리포트용 survival analysis 텍스트."""
+    analysis = _survival_analysis()
+    if not analysis:
+        return []
+    lines = ["🧬 Survival Analysis (dd_peak_60s 기준):"]
+    for route, data in sorted(analysis.items()):
+        grps = data["groups"]
+        lines.append(f"  [{route}] A(<0.3%):{grps['A']['n']}건"
+                     f" B(0.3~0.5%):{grps['B']['n']}건"
+                     f" C(>0.5%):{grps['C']['n']}건")
+        for g_name in ("A", "B", "C"):
+            g = grps[g_name]
+            if g["n"] == 0:
+                continue
+            curve_str = ""
+            if g["curve"]:
+                curve_str = " | " + " → ".join(
+                    f"{k}s:{v:+.2f}%" for k, v in sorted(g["curve"].items(),
+                                                           key=lambda x: int(x[0])))
+            lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
+                         f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
+        if grps["A"]["n"] > 0 and grps["C"]["n"] > 0:
+            lift = grps["A"]["avg_pnl"] - grps["C"]["avg_pnl"]
+            lines.append(f"    → A-C lift: {lift:+.2f}%p")
+        ds = data["d_scores"][:5]
+        if ds:
+            lines.append(f"    📊 Entry→Survival d-score TOP5:")
+            for item in ds:
+                lines.append(
+                    f"      {item['feat']}: A={item['a_mean']:.3f}"
+                    f" C={item['c_mean']:.3f} d={item['d']:.2f}"
+                    f" ({item['direction']})")
+        sc = data.get("scoring", {})
+        if sc and sc.get("rules"):
+            hi = sc["hi"]
+            lo = sc["lo"]
+            rule_str = " & ".join(f"{f}{op}{th}" for f, op, th in sc["rules"])
+            lines.append(f"    🎯 Scoring (score≥2): {rule_str}")
+            lines.append(f"      HI: {hi['n']}건 승률{hi['wr']:.0f}%"
+                         f" PnL{hi['pnl']:+.2f}%"
+                         f" | LO: {lo['n']}건 승률{lo['wr']:.0f}%"
+                         f" PnL{lo['pnl']:+.2f}%")
+            if hi["n"] > 0 and lo["n"] > 0:
+                lift = hi["pnl"] - lo["pnl"]
+                lines.append(f"      → HI-LO lift: {lift:+.2f}%p")
     return lines
 
 
