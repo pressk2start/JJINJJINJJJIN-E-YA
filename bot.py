@@ -8334,6 +8334,18 @@ _V0_EXIT_PARAMS_GT_SURV60_SOFT = {
     "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%+mae<-0.6%)",
 }
 
+# dd_peak 기반 생존 게이트 — 60초 시점 고점 대비 낙폭으로 판정
+def _make_exit_params_dd_peak(threshold):
+    return {
+        "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+        "trail_pct": 0.005, "hold_bars": 0, "max_bars": 80,
+        "disable_trail": True,
+        "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
+        "survival_gate_sec": 60,
+        "survival_max_dd_peak": threshold,
+        "description": f"GT_tiered/no-trail/max240s/dd60<{threshold}",
+    }
+
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
@@ -9194,6 +9206,35 @@ _STRATEGY_REGISTRY = {
         "route": "CG_S6S",
         "description": "CG+60초soft생존(pnl<-0.3%+mfe<0.2%) (shadow)",
     },
+    # === dd_peak 기반 생존 게이트: 60초 시점 고점대비 낙폭으로 판정 ===
+    "CG_DD1": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.001),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "CG_D1",
+        "description": "CG+dd_peak60<0.1% (shadow)",
+    },
+    "CG_DD2": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.002),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "CG_D2",
+        "description": "CG+dd_peak60<0.2% (shadow)",
+    },
+    "CG_DD3": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.003),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "CG_D3",
+        "description": "CG+dd_peak60<0.3% (shadow)",
+    },
+    "CG_DD5": {
+        "check_fn": _v0_check_reversal_15m,
+        "exit_params": _make_exit_params_dd_peak(0.005),
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "CG_D5",
+        "description": "CG+dd_peak60<0.5% (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -10036,14 +10077,24 @@ def _shadow_sim_exit(vp, cur_price):
     _surv_sec = ep.get("survival_gate_sec")
     if _surv_sec and not vp.get("_survival_passed"):
         if hold_sec >= _surv_sec:
-            _surv_fail = pnl < ep.get("survival_min_pnl", 0.0)
-            _surv_max_mfe = ep.get("survival_max_mfe")
-            if _surv_max_mfe is not None:
-                _surv_fail = _surv_fail and mfe < _surv_max_mfe
-            _surv_min_mae = ep.get("survival_min_mae")
-            if _surv_min_mae is not None:
-                mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
-                _surv_fail = _surv_fail and mae < _surv_min_mae
+            _surv_fail = False
+            # PnL 기반 게이트 (survival_min_pnl 명시 시만 작동)
+            if "survival_min_pnl" in ep:
+                _pnl_fail = pnl < ep["survival_min_pnl"]
+                _surv_max_mfe = ep.get("survival_max_mfe")
+                if _surv_max_mfe is not None:
+                    _pnl_fail = _pnl_fail and mfe < _surv_max_mfe
+                _surv_min_mae = ep.get("survival_min_mae")
+                if _surv_min_mae is not None:
+                    _mae = (vp.get("worst_price", entry_price) - entry_price) / entry_price
+                    _pnl_fail = _pnl_fail and _mae < _surv_min_mae
+                _surv_fail = _pnl_fail
+            # dd_peak 기반 게이트 (독립 — 고점 대비 낙폭 초과 시 탈락)
+            _surv_max_dd = ep.get("survival_max_dd_peak")
+            if _surv_max_dd is not None:
+                _dd = (vp["best_price"] - cur_price) / entry_price
+                if _dd > _surv_max_dd:
+                    _surv_fail = True
             if _surv_fail:
                 return True, "생존탈락"
             vp["_survival_passed"] = True
@@ -10669,7 +10720,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
