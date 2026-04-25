@@ -11156,14 +11156,17 @@ def _survival_analysis_lines():
         else:
             action = "BLOCK"
         _early_warn = ""
-        if total_n >= 30 and _a_n >= 10 and _c_n >= 10 and action == "BLOCK":
-            _fails = []
-            if not _a_pos:
-                _fails.append("A_pnl<=0")
-            if ac_lift < 0.3:
-                _fails.append(f"lift={ac_lift:+.2f}<0.3")
-            if _fails:
-                _early_warn = f" ⚠조기붕괴({','.join(_fails)})"
+        if total_n >= 30 and action == "BLOCK":
+            if _a_n < 5 or _c_n < 5:
+                _early_warn = f" ⏳skew(A={_a_n}/C={_c_n})"
+            elif _a_n >= 10 and _c_n >= 10:
+                _fails = []
+                if not _a_pos:
+                    _fails.append("A_pnl<=0")
+                if ac_lift < 0.3:
+                    _fails.append(f"lift={ac_lift:+.2f}<0.3")
+                if _fails:
+                    _early_warn = f" ⚠조기붕괴({','.join(_fails)})"
         if not lines:
             lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
         lines.append(f"  [{route}] A(<0.3%):{a_g['n']}건"
