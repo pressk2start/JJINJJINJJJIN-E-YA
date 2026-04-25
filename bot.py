@@ -11120,16 +11120,33 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
 
 
 def _survival_analysis_lines():
-    """파이프라인 리포트용 survival analysis 텍스트."""
+    """파이프라인 리포트용 survival analysis 텍스트.
+    출력 조건: A,C 모두 n>=3 이고 |A-C lift| >= 0.3%p"""
     analysis = _survival_analysis()
     if not analysis:
         return []
-    lines = ["🧬 Survival Analysis (dd_peak_60s 기준):"]
+    lines = []
     for route, data in sorted(analysis.items()):
         grps = data["groups"]
-        lines.append(f"  [{route}] A(<0.3%):{grps['A']['n']}건"
+        a_g, c_g = grps["A"], grps["C"]
+        if a_g["n"] < 3 or c_g["n"] < 3:
+            continue
+        ac_lift = a_g["avg_pnl"] - c_g["avg_pnl"]
+        if abs(ac_lift) < 0.3:
+            continue
+        total_n = a_g["n"] + grps["B"]["n"] + c_g["n"]
+        if total_n >= 100 and ac_lift > 0.5:
+            conf = "Strong"
+        elif total_n >= 50 and ac_lift > 0.3:
+            conf = "Medium"
+        else:
+            conf = "Weak"
+        if not lines:
+            lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
+        lines.append(f"  [{route}] A(<0.3%):{a_g['n']}건"
                      f" B(0.3~0.5%):{grps['B']['n']}건"
-                     f" C(>0.5%):{grps['C']['n']}건")
+                     f" C(>0.5%):{c_g['n']}건"
+                     f" [{conf}]")
         for g_name in ("A", "B", "C"):
             g = grps[g_name]
             if g["n"] == 0:
@@ -11141,12 +11158,10 @@ def _survival_analysis_lines():
                                                            key=lambda x: int(x[0])))
             lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
                          f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
-        if grps["A"]["n"] > 0 and grps["C"]["n"] > 0:
-            lift = grps["A"]["avg_pnl"] - grps["C"]["avg_pnl"]
-            lines.append(f"    → A-C lift: {lift:+.2f}%p")
+        lines.append(f"    → A-C lift: {ac_lift:+.2f}%p")
         ds = data["d_scores"][:5]
         if ds:
-            lines.append(f"    📊 Entry→Survival d-score TOP5:")
+            lines.append(f"    📊 Entry���Survival d-score TOP5:")
             for item in ds:
                 lines.append(
                     f"      {item['feat']}: A={item['a_mean']:.3f}"
@@ -11163,8 +11178,8 @@ def _survival_analysis_lines():
                          f" | LO: {lo['n']}건 승률{lo['wr']:.0f}%"
                          f" PnL{lo['pnl']:+.2f}%")
             if hi["n"] > 0 and lo["n"] > 0:
-                lift = hi["pnl"] - lo["pnl"]
-                lines.append(f"      → HI-LO lift: {lift:+.2f}%p")
+                hl_lift = hi["pnl"] - lo["pnl"]
+                lines.append(f"      → HI-LO lift: {hl_lift:+.2f}%p")
     return lines
 
 
