@@ -11007,7 +11007,7 @@ def _v4_shadow_report_lines():
     return lines
 
 
-def _survival_analysis(routes=("CG", "GT"), min_n=10):
+def _survival_analysis(routes=("CG", "GT"), min_n=30):
     """dd_peak_60s 기반 survival quality 분석.
     A(dd<0.3%), B(0.3~0.5%), C(>0.5%) 그룹 분리 → PnL/feature d-score 산출.
     Returns dict: {route: {groups, d_scores, scoring_rules}} or empty."""
@@ -11120,51 +11120,33 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
 
 
 def _survival_analysis_lines():
-    """파이프라인 리포트용 survival analysis 텍스트."""
+    """파이프라인 리포트용 survival analysis 압축 텍스트 (최대 ~8줄)."""
     analysis = _survival_analysis()
     if not analysis:
         return []
-    lines = ["🧬 Survival Analysis (dd_peak_60s 기준):"]
+    lines = ["🧬 Survival (dd_peak_60s):"]
     for route, data in sorted(analysis.items()):
         grps = data["groups"]
-        lines.append(f"  [{route}] A(<0.3%):{grps['A']['n']}건"
-                     f" B(0.3~0.5%):{grps['B']['n']}건"
-                     f" C(>0.5%):{grps['C']['n']}건")
-        for g_name in ("A", "B", "C"):
-            g = grps[g_name]
-            if g["n"] == 0:
-                continue
-            curve_str = ""
-            if g["curve"]:
-                curve_str = " | " + " → ".join(
-                    f"{k}s:{v:+.2f}%" for k, v in sorted(g["curve"].items(),
-                                                           key=lambda x: int(x[0])))
-            lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
-                         f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
-        if grps["A"]["n"] > 0 and grps["C"]["n"] > 0:
-            lift = grps["A"]["avg_pnl"] - grps["C"]["avg_pnl"]
-            lines.append(f"    → A-C lift: {lift:+.2f}%p")
-        ds = data["d_scores"][:5]
+        a, b, c = grps["A"], grps["B"], grps["C"]
+        lines.append(
+            f"  [{route}] A{a['n']}건({a['wr']:.0f}%/{a['avg_pnl']:+.2f}%)"
+            f" B{b['n']}건({b['wr']:.0f}%/{b['avg_pnl']:+.2f}%)"
+            f" C{c['n']}건({c['wr']:.0f}%/{c['avg_pnl']:+.2f}%)")
+        if a["n"] > 0 and c["n"] > 0:
+            lines[-1] += f" lift{a['avg_pnl'] - c['avg_pnl']:+.2f}%p"
+        ds = data["d_scores"][:3]
         if ds:
-            lines.append(f"    📊 Entry→Survival d-score TOP5:")
-            for item in ds:
-                lines.append(
-                    f"      {item['feat']}: A={item['a_mean']:.3f}"
-                    f" C={item['c_mean']:.3f} d={item['d']:.2f}"
-                    f" ({item['direction']})")
+            top_str = " | ".join(
+                f"{it['feat']} d={it['d']:.2f}" for it in ds)
+            lines.append(f"    📊 {top_str}")
         sc = data.get("scoring", {})
         if sc and sc.get("rules"):
-            hi = sc["hi"]
-            lo = sc["lo"]
+            hi, lo = sc["hi"], sc["lo"]
             rule_str = " & ".join(f"{f}{op}{th}" for f, op, th in sc["rules"])
-            lines.append(f"    🎯 Scoring (score≥2): {rule_str}")
-            lines.append(f"      HI: {hi['n']}건 승률{hi['wr']:.0f}%"
-                         f" PnL{hi['pnl']:+.2f}%"
-                         f" | LO: {lo['n']}건 승률{lo['wr']:.0f}%"
-                         f" PnL{lo['pnl']:+.2f}%")
-            if hi["n"] > 0 and lo["n"] > 0:
-                lift = hi["pnl"] - lo["pnl"]
-                lines.append(f"      → HI-LO lift: {lift:+.2f}%p")
+            lines.append(
+                f"    🎯 {rule_str}"
+                f" → HI:{hi['n']}건{hi['pnl']:+.2f}%"
+                f" LO:{lo['n']}건{lo['pnl']:+.2f}%")
     return lines
 
 
