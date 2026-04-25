@@ -11123,9 +11123,9 @@ def _survival_analysis_lines():
     """파이프라인 리포트용 survival analysis 텍스트.
     출력 조건: A,C 모두 n>=3, A-C lift >= 0.3%p
     Action level: ENABLE / SHADOW / BLOCK
-    - ENABLE: n>=100, ac_lift>0.5%, hl_lift>0.3% → 실전 gate 승격 가능
-    - SHADOW: n>=50, ac_lift>0.3%, hl_lift>0.2% → shadow 유지, 관찰
-    - BLOCK: 나머지 → 무시 (출력은 하되 action 없음)"""
+    - ENABLE: n>=100, A>=30, C>=30, ac_lift>0.5%, hl_lift>0.3%, A_pnl>0
+    - SHADOW: n>=50, A>=15, C>=15, ac_lift>0.3%, hl_lift>0.2%
+    - BLOCK: 나머지"""
     analysis = _survival_analysis()
     if not analysis:
         return []
@@ -11145,9 +11145,13 @@ def _survival_analysis_lines():
             hi, lo = sc["hi"], sc["lo"]
             if hi["n"] > 0 and lo["n"] > 0:
                 hl_lift = hi["pnl"] - lo["pnl"]
-        if total_n >= 100 and ac_lift > 0.5 and hl_lift > 0.3:
+        _a_n, _c_n = a_g["n"], c_g["n"]
+        _a_pos = a_g["avg_pnl"] > 0
+        if (total_n >= 100 and _a_n >= 30 and _c_n >= 30
+                and ac_lift > 0.5 and hl_lift > 0.3 and _a_pos):
             action = "ENABLE"
-        elif total_n >= 50 and ac_lift > 0.3 and hl_lift > 0.2:
+        elif (total_n >= 50 and _a_n >= 15 and _c_n >= 15
+              and ac_lift > 0.3 and hl_lift > 0.2):
             action = "SHADOW"
         else:
             action = "BLOCK"
