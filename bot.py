@@ -11258,8 +11258,8 @@ def _survival_analysis_lines():
             }
             _dd_ok = True
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _dd_ok = mae_dist["A"]["within_05_pct"] >= 80
-                _checks["A_mae80%<0.5"] = _dd_ok
+                _dd_ok = mae_dist["A"]["within_03_pct"] >= 80
+                _checks["A_mae80%<0.3"] = _dd_ok
             _pass = sum(1 for v in _checks.values() if v)
             _total = len(_checks)
             _marks = " ".join(
