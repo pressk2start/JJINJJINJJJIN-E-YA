@@ -1127,7 +1127,7 @@ def _pipeline_report(force=False):
             lines.append("━━━━━━━━━━━━━━━━")
             lines.extend(surv_lines)
     except Exception:
-        pass
+        print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
