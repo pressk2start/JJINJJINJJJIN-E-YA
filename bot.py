@@ -10239,6 +10239,11 @@ def _shadow_evaluate_positions():
                 if _mk not in vp and hold_sec_now >= _ss and _ep > 0:
                     vp[_mk] = round((vp["best_price"] - _ep) / _ep, 6)
                     vp[f"dd_peak_{_ss}s"] = round((vp["best_price"] - cur_price) / _ep, 6)
+            # mae_60s: 진입 후 60초 내 최저 PnL (early_sl 검증용)
+            if hold_sec_now <= 60 and _ep > 0:
+                _cur_pnl_raw = (cur_price - _ep) / _ep
+                if _cur_pnl_raw < vp.get("mae_60s", 0.0):
+                    vp["mae_60s"] = round(_cur_pnl_raw, 6)
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
@@ -10249,7 +10254,7 @@ def _shadow_evaluate_positions():
                 _close_ind = dict(vp.get("indicators", {}))
                 if "_mfe_sec" in vp:
                     _close_ind["mfe_peak_sec"] = round(vp["_mfe_sec"], 0)
-                for _sk in ("mfe_30s", "dd_peak_30s", "mfe_60s", "dd_peak_60s"):
+                for _sk in ("mfe_30s", "dd_peak_30s", "mfe_60s", "dd_peak_60s", "mae_60s"):
                     if _sk in vp:
                         _close_ind[_sk] = vp[_sk]
                 closed_results.append((vp, pnl, mfe, mae, reason, hold,
@@ -10269,11 +10274,17 @@ def _shadow_evaluate_positions():
                 vp["worst_price"] = cur_price
             # v15: PnL 시간곡선 수집 (일반 포지션과 동일)
             hold_sec_now = now - vp["entry_ts"]
+            _ep_b = vp["entry_price"]
             for snap_s in _SHADOW_PNL_SNAP_SECS:
                 sk = str(snap_s)
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
                     vp.setdefault("pnl_curve", {})[sk] = round(
-                        (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
+                        (cur_price - _ep_b) / _ep_b, 6)
+            # mae_60s: 진입 후 60초 내 최저 PnL (early_sl 검증용)
+            if hold_sec_now <= 60 and _ep_b > 0:
+                _cur_pnl_b = (cur_price - _ep_b) / _ep_b
+                if _cur_pnl_b < vp.get("mae_60s", 0.0):
+                    vp["mae_60s"] = round(_cur_pnl_b, 6)
             closed, reason = _shadow_sim_exit(vp, cur_price)
             if closed:
                 entry_price = vp["entry_price"]
@@ -11114,8 +11125,26 @@ def _survival_analysis(routes=("CG", "GT"), min_n=10):
                     "hi": _quick(hi_trades),
                     "lo": _quick(lo_trades),
                 }
+            # mae_60s 분포 (early_sl 파라미터 검증용)
+            mae_dist = {}
+            for grp_name, grp_list in [("A", grp_a), ("C", grp_c)]:
+                mae_vals = [t["inds"].get("mae_60s") for t in grp_list
+                            if t.get("inds", {}).get("mae_60s") is not None]
+                if len(mae_vals) >= 3:
+                    mae_sorted = sorted(mae_vals)
+                    n_m = len(mae_sorted)
+                    within_03 = sum(1 for v in mae_sorted if v >= -0.003)
+                    within_05 = sum(1 for v in mae_sorted if v >= -0.005)
+                    mae_dist[grp_name] = {
+                        "n": n_m,
+                        "within_03_pct": round(within_03 / n_m * 100, 1),
+                        "within_05_pct": round(within_05 / n_m * 100, 1),
+                        "p50": round(mae_sorted[n_m // 2] * 100, 3),
+                        "p80": round(mae_sorted[int(n_m * 0.8)] * 100, 3),
+                        "worst": round(mae_sorted[0] * 100, 3),
+                    }
             results[route] = {"groups": groups, "d_scores": d_scores,
-                              "scoring": scoring}
+                              "scoring": scoring, "mae_dist": mae_dist}
     return results
 
 
@@ -11206,6 +11235,38 @@ def _survival_analysis_lines():
                          f" PnL{lo['pnl']:+.2f}%")
             if hl_lift != 0:
                 lines.append(f"      → HI-LO lift: {hl_lift:+.2f}%p")
+        # mae_60s 분포 (early_sl 검증용)
+        mae_dist = data.get("mae_dist", {})
+        if "A" in mae_dist:
+            md = mae_dist["A"]
+            lines.append(
+                f"    📉 A mae_60s: n={md['n']}"
+                f" p50={md['p50']:+.3f}%"
+                f" p80={md['p80']:+.3f}%"
+                f" worst={md['worst']:+.3f}%"
+                f" (0.3%내 {md['within_03_pct']:.0f}%"
+                f" 0.5%내 {md['within_05_pct']:.0f}%)")
+        # ENABLE 자동 validation (n>=80부터 표시)
+        if total_n >= 80:
+            _checks = {
+                "n>=100": total_n >= 100,
+                "A>=30": _a_n >= 30,
+                "C>=30": _c_n >= 30,
+                "ac>0.5": ac_lift > 0.5,
+                "hl>0.3": hl_lift > 0.3,
+                "A_pnl>0": _a_pos,
+            }
+            _dd_ok = True
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                _dd_ok = mae_dist["A"]["within_05_pct"] >= 80
+                _checks["A_mae80%<0.5"] = _dd_ok
+            _pass = sum(1 for v in _checks.values() if v)
+            _total = len(_checks)
+            _marks = " ".join(
+                f"{'✅' if v else '❌'}{k}" for k, v in _checks.items())
+            lines.append(f"    🔑 ENABLE: {_pass}/{_total} {_marks}")
+            if all(_checks.values()):
+                print(f"[ENABLE_READY] {route}: ALL conditions met! {_checks}")
     return lines
 
 
