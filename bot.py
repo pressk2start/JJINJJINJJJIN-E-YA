@@ -11249,17 +11249,17 @@ def _survival_analysis_lines():
         # ENABLE 자동 validation (n>=80부터 표시)
         if total_n >= 80:
             _checks = {
-                "n>=100": total_n >= 100,
-                "A>=30": _a_n >= 30,
-                "C>=30": _c_n >= 30,
-                "ac>0.5": ac_lift > 0.5,
-                "hl>0.3": hl_lift > 0.3,
-                "A_pnl>0": _a_pos,
+                "n↑100": total_n >= 100,
+                "A↑30": _a_n >= 30,
+                "C↑30": _c_n >= 30,
+                "ac↑0.5": ac_lift > 0.5,
+                "hl↑0.3": hl_lift > 0.3,
+                "A_pnl↑0": _a_pos,
             }
             _dd_ok = True
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _dd_ok = mae_dist["A"]["within_05_pct"] >= 80
-                _checks["A_mae80%<0.5"] = _dd_ok
+                _dd_ok = mae_dist["A"]["within_03_pct"] >= 80
+                _checks["A_mae80%↓0.3"] = _dd_ok
             _pass = sum(1 for v in _checks.values() if v)
             _total = len(_checks)
             _marks = " ".join(
