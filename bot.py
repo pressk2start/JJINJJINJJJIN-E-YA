@@ -8410,8 +8410,9 @@ _V0_EXIT_PARAMS_GTSV_E3 = {
         "hold_until_sec": 120,
         "peak_zones": [(150, 0.40), (180, 0.30)],
         "min_peak_pct": 0.005,
+        "min_peak_hold_sec": 10,
     },
-    "description": "GTSV+adaptive(120hold/0.8%safety/peak40-30/180max)",
+    "description": "GTSV+adaptive(120hold/0.8%safety/peak40-30/180max/10shold)",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -10246,12 +10247,16 @@ def _shadow_sim_exit(vp, cur_price):
     if _ape and hold_sec >= _ape["hold_until_sec"]:
         _peak_pnl = mfe
         if _peak_pnl >= _ape["min_peak_pct"]:
-            _dd_from_peak = (vp["best_price"] - cur_price) / entry_price
-            for _zone_end, _dd_ratio in _ape["peak_zones"]:
-                if hold_sec < _zone_end:
-                    if _dd_from_peak > _peak_pnl * _dd_ratio:
-                        return True, "peak_dd"
-                    break
+            if "_peak_above_ts" not in vp:
+                vp["_peak_above_ts"] = now
+            _peak_age = now - vp["_peak_above_ts"]
+            if _peak_age >= _ape.get("min_peak_hold_sec", 10):
+                _dd_from_peak = (vp["best_price"] - cur_price) / entry_price
+                for _zone_end, _dd_ratio in _ape["peak_zones"]:
+                    if hold_sec < _zone_end:
+                        if _dd_from_peak > _peak_pnl * _dd_ratio:
+                            return True, "peak_dd"
+                        break
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
