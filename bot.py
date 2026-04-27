@@ -9298,8 +9298,8 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 7, "enabled": False,
         "pipeline_key": "momentum", "route": "GTGA",
-        "ind_filters": [("entry_spread_pct", "<=", 1.0), ("tick_age", ">=", 5.0)],
-        "description": "GT+gate(spread<=1.0,tick_age>=5) 역선택 검증 (shadow)",
+        "ind_filters": [("tick_age", ">=", 5.0)],
+        "description": "GT+gate(tick_age>=5) 역선택 검증 (shadow)",
     },
     "모멘텀GT_SURV": {
         "check_fn": _v0_check_momentum_rsi,
