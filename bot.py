@@ -8343,6 +8343,22 @@ _V0_EXIT_PARAMS_GT_SURV60_SOFT = {
     "description": "GT_tiered/no-trail/max240s/surv60soft(pnl<-0.3%+mfe<0.2%+mae<-0.6%)",
 }
 
+# GT_MH120: 120초까지 SL 사실상 비활성 (hold thesis 검증)
+_V0_EXIT_PARAMS_GT_MH120 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 80,
+    "disable_trail": True,
+    "sl_tiers": [
+        (120,  0.050),  # 0~120s: 5.0% (사실상 SL 없음)
+        (9999, 0.010),  # 120s+: 1.0% (정상 SL)
+    ],
+    "description": "GT_MH120_noSL120s/then1.0/no-trail/max240s",
+}
+
 # dd_peak 기반 생존 게이트 — 고점 대비 낙폭으로 판정
 def _make_exit_params_dd_peak(threshold, gate_sec=60):
     return {
@@ -8354,6 +8370,9 @@ def _make_exit_params_dd_peak(threshold, gate_sec=60):
         "survival_max_dd_peak": threshold,
         "description": f"GT_tiered/no-trail/max240s/dd{gate_sec}<{threshold}",
     }
+
+# GT_SURV: 60초 시점 dd_peak > 0.3%면 청산 (survival A구간만 보유)
+_V0_EXIT_PARAMS_GT_SURV = _make_exit_params_dd_peak(0.003, gate_sec=60)
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
     "strategy": "TRAIL",
@@ -9272,6 +9291,29 @@ _STRATEGY_REGISTRY = {
         "priority": 3, "enabled": False,
         "pipeline_key": "reversal_15m", "route": "C3D5",
         "description": "CG+dd_peak30<0.5% (shadow)",
+    },
+    # === GT 신규 shadow: gate/exit/hold 3축 독립 검증 ===
+    "모멘텀GT_GATED": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "GTGA",
+        "ind_filters": [("entry_spread_pct", "<=", 1.0), ("tick_age", ">=", 5.0)],
+        "description": "GT+gate(spread<=1.0,tick_age>=5) 역선택 검증 (shadow)",
+    },
+    "모멘텀GT_SURV": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GT_SURV,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "GTSV",
+        "description": "GT+dd_peak60>0.3%청산 survival gate (shadow)",
+    },
+    "모멘텀GT_MH120": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GT_MH120,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "GTM1",
+        "description": "GT+120초SL비활성 hold thesis 검증 (shadow)",
     },
 }
 
@@ -10769,7 +10811,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5", "GTGA", "GTSV", "GTM1")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
