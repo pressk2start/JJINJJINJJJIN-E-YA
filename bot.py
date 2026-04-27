@@ -8374,6 +8374,46 @@ def _make_exit_params_dd_peak(threshold, gate_sec=60):
 # GT_SURV: 60초 시점 dd_peak > 0.3%면 청산 (survival A구간만 보유)
 _V0_EXIT_PARAMS_GT_SURV = _make_exit_params_dd_peak(0.003, gate_sec=60)
 
+# === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
+# GTSV_E1: survival gate + 120s 강제종료 (보수형 fallback)
+_V0_EXIT_PARAMS_GTSV_E1 = {
+    "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+    "trail_pct": 0.005, "hold_bars": 0, "max_bars": 40,
+    "disable_trail": True,
+    "sl_tiers": [(60, 0.025), (120, 0.015)],
+    "survival_gate_sec": 60, "survival_max_dd_peak": 0.003,
+    "description": "GTSV+120s_force_exit",
+}
+
+# GTSV_E2: survival gate + 150s 강제종료 (peak 구간 포착)
+_V0_EXIT_PARAMS_GTSV_E2 = {
+    "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+    "trail_pct": 0.005, "hold_bars": 0, "max_bars": 50,
+    "disable_trail": True,
+    "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
+    "survival_gate_sec": 60, "survival_max_dd_peak": 0.003,
+    "description": "GTSV+150s_force_exit",
+}
+
+# GTSV_E3: survival gate + adaptive peak exit
+# [0~120s] hold, SL 0.8% (구조 붕괴 방지)
+# [120~150s] peak 대비 40% DD → exit
+# [150~180s] peak 대비 30% DD → exit
+# peak < 0.5% → 180s 강제종료 (adaptive 무의미)
+_V0_EXIT_PARAMS_GTSV_E3 = {
+    "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+    "trail_pct": 0.005, "hold_bars": 0, "max_bars": 60,
+    "disable_trail": True,
+    "sl_tiers": [(120, 0.008), (9999, 0.010)],
+    "survival_gate_sec": 60, "survival_max_dd_peak": 0.003,
+    "adaptive_peak_exit": {
+        "hold_until_sec": 120,
+        "peak_zones": [(150, 0.40), (180, 0.30)],
+        "min_peak_pct": 0.005,
+    },
+    "description": "GTSV+adaptive(120hold/0.8%safety/peak40-30/180max)",
+}
+
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,           # GT 1.0% → 0.7% (MAE -0.68% 기반, 빠른 손절이 나은지)
@@ -9315,6 +9355,28 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "momentum", "route": "GTM1",
         "description": "GT+120초SL비활성 hold thesis 검증 (shadow)",
     },
+    # === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
+    "모멘텀GTSV_E1": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE1",
+        "description": "GTSV+120s강제종료 exit검증 (shadow)",
+    },
+    "모멘텀GTSV_E2": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E2,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE2",
+        "description": "GTSV+150s강제종료 exit검증 (shadow)",
+    },
+    "모멘텀GTSV_E3": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E3,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE3",
+        "description": "GTSV+adaptive(120hold/peak/180max) exit검증 (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -10179,6 +10241,18 @@ def _shadow_sim_exit(vp, cur_price):
                 return True, "생존탈락"
             vp["_survival_passed"] = True
 
+    # 1.7) Adaptive peak exit — 구간별 peak DD 추적 (GTSV_E3)
+    _ape = ep.get("adaptive_peak_exit")
+    if _ape and hold_sec >= _ape["hold_until_sec"]:
+        _peak_pnl = mfe
+        if _peak_pnl >= _ape["min_peak_pct"]:
+            _dd_from_peak = (vp["best_price"] - cur_price) / entry_price
+            for _zone_end, _dd_ratio in _ape["peak_zones"]:
+                if hold_sec < _zone_end:
+                    if _dd_from_peak > _peak_pnl * _dd_ratio:
+                        return True, "peak_dd"
+                    break
+
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
     _is_g = vp.get("route", "").startswith("G")  # G/G2/G4/G6/G7/GT 모두 포함
@@ -10811,7 +10885,7 @@ def _v4_shadow_report_lines():
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
             # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5", "GTGA", "GTSV", "GTM1")
+            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5", "GTGA", "GTSV", "GTM1", "SVE1", "SVE2", "SVE3")
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
