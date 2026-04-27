@@ -10243,14 +10243,13 @@ def _shadow_sim_exit(vp, cur_price):
             vp["_survival_passed"] = True
 
     # 1.7) Adaptive peak exit — 구간별 peak DD 추적 (GTSV_E3)
+    # _mfe_sec: best_price 마지막 갱신 시점 (peak 안정 여부 판단에 재활용)
     _ape = ep.get("adaptive_peak_exit")
     if _ape and hold_sec >= _ape["hold_until_sec"]:
         _peak_pnl = mfe
         if _peak_pnl >= _ape["min_peak_pct"]:
-            if "_peak_above_ts" not in vp:
-                vp["_peak_above_ts"] = now
-            _peak_age = now - vp["_peak_above_ts"]
-            if _peak_age >= _ape.get("min_peak_hold_sec", 10):
+            _peak_stable = hold_sec - vp.get("_mfe_sec", hold_sec)
+            if _peak_stable >= _ape.get("min_peak_hold_sec", 10):
                 _dd_from_peak = (vp["best_price"] - cur_price) / entry_price
                 for _zone_end, _dd_ratio in _ape["peak_zones"]:
                     if hold_sec < _zone_end:
