@@ -1541,6 +1541,27 @@ _COIN_LOSS_LOCK = threading.Lock()
 _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
 
+# SVE1 일일 리스크 가드
+SVE1_DAILY_MAX_TRADES = 10      # 하루 최대 거래 횟수
+SVE1_DAILY_MAX_LOSS_PCT = -0.02 # 하루 누적 PnL 하한 (-2%)
+
+def _sve1_daily_trade_count():
+    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    return sum(1 for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
+
+def _sve1_daily_pnl():
+    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    return sum(t.get("pnl", 0) for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
+
+def sve1_daily_guard_ok():
+    cnt = _sve1_daily_trade_count()
+    if cnt >= SVE1_DAILY_MAX_TRADES:
+        return False, f"일일 거래 {cnt}/{SVE1_DAILY_MAX_TRADES}건 도달"
+    pnl = _sve1_daily_pnl()
+    if pnl <= SVE1_DAILY_MAX_LOSS_PCT:
+        return False, f"일일 PnL {pnl*100:.2f}% ≤ {SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%"
+    return True, ""
+
 
 def record_trade(market: str, pnl_pct: float, signal_type: str = "기본"):
     """
@@ -9090,14 +9111,14 @@ _STRATEGY_REGISTRY = {
         "route": "G7",
         "description": "5mRSI≥74.55 [G7:A0.7/T0.4/minH120s]",
     },
-    "모멘텀GT": {  # GT: trail 제거 — entry/SL/hold 모두 G와 동일, trail만 OFF
-        "check_fn": _v0_check_momentum_rsi,  # ⭐ G와 완전 동일한 entry
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+    "모멘텀GT": {  # SVE1: survival gate(60s dd_peak>0.3%→탈락) + 120s 강제종료
+        "check_fn": _v0_check_momentum_rsi,  # ⭐ entry 변경 없음
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
         "priority": 7,
-        "enabled": True,  # ⬆ B-1 메인 승격 (GT 71건 +0.11% vs G4/G6/G7 +0.02~0.04%)
+        "enabled": True,
         "pipeline_key": "momentum",
-        "route": "GT",
-        "description": "5mRSI≥74.55 [GT:no-trail/max240s] (LIVE)",
+        "route": "SVE1",
+        "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
     "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
         "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
@@ -14601,6 +14622,11 @@ def monitor_position(m,
         eff_sl_pct = _v4_ep["sl_pct"]
         base_stop = entry_price * (1 - eff_sl_pct)
 
+    # === SVE1 exit mode: survival gate + 시간 강제종료 ===
+    _is_sve1 = bool(_v4_ep.get("survival_gate_sec")) and _v4_ep.get("disable_trail", False)
+    _sve1_survival_passed = False
+    _sve1_force_sec = (_v4_ep.get("max_bars", 40) * RECHECK_SEC) if _is_sve1 else 0
+
     # === 🔥 Plateau 감지용 상태 ===
     last_peak_ts = time.time()   # 마지막 고점 갱신 시간
     plateau_partial_done = False # Plateau 부분익절 완료 여부
@@ -14762,7 +14788,7 @@ def monitor_position(m,
 
             # 🔧 FIX: SL 주기적 갱신 — 수익 중 손절 완화(current_price) 반영
             # - 박스 포지션은 고정 SL 유지 (refresh 스킵)
-            if not pre.get("is_box") and time.time() - _last_sl_refresh_ts >= 5:
+            if not pre.get("is_box") and not _is_sve1 and time.time() - _last_sl_refresh_ts >= 5:
                 _c1_for_sl_refresh = _get_c1_local()
                 _new_stop, _new_sl_pct, _new_atr_info = dynamic_stop_loss(
                     entry_price, _c1_for_sl_refresh, signal_type=signal_type_for_sl, current_price=curp, trade_type=trade_type, market=m
@@ -14776,6 +14802,52 @@ def monitor_position(m,
             # === 1) ATR 기반 동적 손절 (웜업 제거, 체결 직후부터 적용) ===
             alive_sec = time.time() - start_ts
             cur_gain = (curp / entry_price - 1.0)
+
+            # === SVE1 전용 exit 로직 (survival gate + 시간 강제종료) ===
+            if _is_sve1:
+                # 1) 120s 강제 종료 (profit/loss 무관)
+                if alive_sec >= _sve1_force_sec:
+                    _sve1_reason = f"TIME_{_sve1_force_sec:.0f}s | {'+' if cur_gain >= 0 else ''}{cur_gain*100:.2f}%"
+                    close_auto_position(m, f"SVE1 {_sve1_reason}")
+                    _already_closed = True
+                    verdict = f"SVE1_TIME_{_sve1_force_sec:.0f}"
+                    tg_send_mid(f"⏱ {m} SVE1 {_sve1_reason}")
+                    break
+
+                # 2) 생존 게이트: 60s 도달 시 dd_peak > 0.3% → 탈락
+                _surv_sec = _v4_ep.get("survival_gate_sec", 60)
+                _surv_dd_max = _v4_ep.get("survival_max_dd_peak", 0.003)
+                if not _sve1_survival_passed and alive_sec >= _surv_sec:
+                    _dd_peak = (best - curp) / entry_price if entry_price > 0 else 0
+                    if _dd_peak > _surv_dd_max:
+                        _surv_reason = f"생존탈락 | dd_peak {_dd_peak*100:.2f}% > {_surv_dd_max*100:.1f}% | {alive_sec:.0f}s | {cur_gain*100:.2f}%"
+                        close_auto_position(m, f"SVE1 {_surv_reason}")
+                        _already_closed = True
+                        verdict = "SVE1_생존탈락"
+                        tg_send_mid(f"🚫 {m} SVE1 {_surv_reason}")
+                        break
+                    _sve1_survival_passed = True
+
+                # 3) PANIC_SL: <30s에서 -1.5% 이상 급락 → 즉시 컷
+                if alive_sec < 30 and cur_gain <= -0.015:
+                    _panic_reason = f"PANIC_SL | {cur_gain*100:.2f}% | {alive_sec:.0f}s"
+                    close_auto_position(m, f"SVE1 {_panic_reason}")
+                    _already_closed = True
+                    verdict = "SVE1_PANIC_SL"
+                    tg_send_mid(f"🛑 {m} SVE1 {_panic_reason}")
+                    break
+
+                # 4) SL_60_120: 60~120s에서 -1.0% 이상 손실
+                if _surv_sec <= alive_sec < _sve1_force_sec and cur_gain <= -0.010:
+                    _sl_reason = f"SL_60_120 | {cur_gain*100:.2f}% | {alive_sec:.0f}s"
+                    close_auto_position(m, f"SVE1 {_sl_reason}")
+                    _already_closed = True
+                    verdict = "SVE1_SL_60_120"
+                    tg_send_mid(f"🛑 {m} SVE1 {_sl_reason}")
+                    break
+
+                # SVE1: 기존 SL/트레일/체크포인트/타임아웃 로직 건너뛰기
+                continue
 
             # 🔧 before1 복원: 손절 = eff_sl_pct 직접 비교 (fee margin 없음)
             # + base_stop 가격 기반 SL (부분익절 후 본절 상향 반영)
@@ -16785,6 +16857,13 @@ def main():
                         with _POSITION_LOCK:
                             recent_alerts.pop(m, None)
                         continue
+
+                # SVE1 일일 리스크 가드 (일일 거래 횟수 + 일일 PnL 하한)
+                _daily_ok, _daily_reason = sve1_daily_guard_ok()
+                if not _daily_ok:
+                    cut("DAILY_GUARD", f"{m} {_daily_reason}")
+                    _pipeline_inc("suspend_block")
+                    continue
 
                 # 🔧 전략별 연패 게이트 — 해당 전략만 차단 (C 연패가 GT 차단하지 않음)
                 _cur_strat_group = pre.get("v4_logic_group", "?")
