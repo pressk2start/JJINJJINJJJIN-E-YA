@@ -3634,6 +3634,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _ctx_buy_ratio = pre.get("buy_ratio", 0)
         _ctx_spread = pre.get("spread", 0)
         _ctx_accel = pre.get("flow_accel", 0)
+        _entry_c1_hit = _C1_CACHE.get(m)
+        _entry_c1_cache_age = ((int(time.time() * 1000) - _entry_c1_hit.get("ts", 0)) / 1000.0) if _entry_c1_hit else 0.0
 
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
@@ -3674,6 +3676,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "mfe_sec": 0,
                 "trail_dist": 0.0,
                 "trail_stop_pct": 0.0,
+                "c1_cache_age": round(_entry_c1_cache_age, 1),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -3744,6 +3747,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
                 f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
                 f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%){_vwap_gap_str}\n"
+                f"• c1캐시: {_entry_c1_cache_age:.1f}s\n"
                 f"{link_for(m)}"
             )
 
@@ -3781,6 +3785,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 last_tick_ts = max(tick_ts_ms(t) for t in ticks)
                 if last_tick_ts == 0: last_tick_ts = now_ms
                 fresh_age = (now_ms - last_tick_ts) / 1000.0
+            # c1 캐시 나이 (TTL 45s 변경 후 영향 모니터링용)
+            _c1_cache_age_sec = 0.0
+            _c1_hit = _C1_CACHE.get(m)
+            if _c1_hit:
+                _c1_cache_age_sec = (int(time.time() * 1000) - _c1_hit.get("ts", 0)) / 1000.0
             # 베스트호가 깊이
             try:
                 u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
@@ -3826,6 +3835,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_vr5": round(_ctx_vr5, 2),
                 "entry_buy_ratio": round(_ctx_buy_ratio, 4),
                 "entry_accel": round(_ctx_accel, 3),
+                "c1_cache_age": round(_c1_cache_age_sec, 1),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
@@ -7108,7 +7118,7 @@ def _get_c15_cached(m, count=50):
 # 60 markets 동시 fetch가 upbit rate-limit 유발 (per_call 220→2400ms 폭증)
 # 캐시로 사이클 단축 시 동시 호출 수 감소 → 호출당 레이턴시도 정상화
 _C1_CACHE = LRUCache(maxsize=300)
-_C1_CACHE_TTL_MS = 15_000  # 15s (v18g-tune: 4s→15s, 사이클 48s 기준 캐시 재사용 확보)
+_C1_CACHE_TTL_MS = 45_000  # 45s (v18g-tune2: 15s→45s, c1 hit 0%→개선 목표. 1분봉=60s 갱신주기 대비 75% 창)
 
 
 def _get_c1_cached(m, count=30):
