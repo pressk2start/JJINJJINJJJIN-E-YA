@@ -3636,6 +3636,21 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _ctx_accel = pre.get("flow_accel", 0)
         _entry_c1_hit = _C1_CACHE.get(m)
         _entry_c1_cache_age = ((int(time.time() * 1000) - _entry_c1_hit.get("ts", 0)) / 1000.0) if _entry_c1_hit else 0.0
+        _entry_ticks_for_age = pre.get("ticks", [])
+        _entry_tick_age_sec = 0.0
+        if _entry_ticks_for_age:
+            _now_ms_ta = int(time.time() * 1000)
+            _last_tick_ms = max(tick_ts_ms(t) for t in _entry_ticks_for_age[:3])
+            _entry_tick_age_sec = (_now_ms_ta - _last_tick_ms) / 1000.0 if _last_tick_ms > 0 else 999.0
+        _entry_c1_candle_age_sec = 0.0
+        if _entry_c1 and len(_entry_c1) >= 1:
+            _last_c1_ts = _entry_c1[-1].get("candle_date_time_kst", "")
+            if _last_c1_ts:
+                try:
+                    _c1_dt = datetime.strptime(_last_c1_ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone(timedelta(hours=9)))
+                    _entry_c1_candle_age_sec = time.time() - _c1_dt.timestamp()
+                except Exception:
+                    pass
 
         with _POSITION_LOCK:
             OPEN_POSITIONS[m] = {
@@ -3677,6 +3692,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "trail_dist": 0.0,
                 "trail_stop_pct": 0.0,
                 "c1_cache_age": round(_entry_c1_cache_age, 1),
+                "tick_age": round(_entry_tick_age_sec, 1),
+                "c1_candle_age": round(_entry_c1_candle_age_sec, 1),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -3747,7 +3764,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 f"• 신호가: {fmt6(signal_price)}원 → 체결가: {fmt6(avg_price)}원 ({slip_pct*100:+.2f}%)\n"
                 f"• 주문: {krw_to_use:,.0f}원 ({actual_pct:.1f}%) | 수량: {volume_filled:.6f}\n"
                 f"• 손절: {safe_stop_str}원 (SL {eff_sl_pct*100:.2f}%){_vwap_gap_str}\n"
-                f"• c1캐시: {_entry_c1_cache_age:.1f}s\n"
+                f"• 신선도: tick {_entry_tick_age_sec:.1f}s | c1봉 {_entry_c1_candle_age_sec:.0f}s | 캐시 {_entry_c1_cache_age:.1f}s\n"
                 f"{link_for(m)}"
             )
 
@@ -3836,6 +3853,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "entry_buy_ratio": round(_ctx_buy_ratio, 4),
                 "entry_accel": round(_ctx_accel, 3),
                 "c1_cache_age": round(_c1_cache_age_sec, 1),
+                "tick_age_sec": round(_entry_tick_age_sec, 1),
+                "c1_candle_age_sec": round(_entry_c1_candle_age_sec, 1),
             })
         except Exception as e:
             print(f"[FEATURE_LOG_ERR] {e}")
