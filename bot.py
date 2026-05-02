@@ -883,10 +883,10 @@ def _pipeline_report(force=False):
         f"━ check_fn 필터 세부 (12 시나리오) ━",
         f"  [G모멘텀] 5mRSI≧74.55 + 1m양봉 + 1mVR5≦3.2 + 15mVR≧2.0",
         f"    진입{c.get('momentum_enter',0)}"
-        f" → 5mRSI<74.55:{c.get('momentum_rsi5_fail',0)}"
+        f" → 5mRSI&lt;74.55:{c.get('momentum_rsi5_fail',0)}"
         f" 1m음봉:{c.get('momentum_1m_fail',0)}"
-        f" 1mVR5>3.2:{c.get('momentum_vr5_over_fail',0)}"
-        f" 15mVR<2.0:{c.get('momentum_vr5_15m_fail',0)}"
+        f" 1mVR5&gt;3.2:{c.get('momentum_vr5_over_fail',0)}"
+        f" 15mVR&lt;2.0:{c.get('momentum_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"    ├ SVE1(LIVE): gate60s/dd≦0.3%/120s강제",
         f"    ├ GT(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
@@ -896,18 +896,18 @@ def _pipeline_report(force=False):
         f"    진입{c.get('breakout_enter',0)}"
         f" → 종가≦20봉고점:{c.get('breakout_price_fail',0)}"
         f" 음봉:{c.get('breakout_bull_fail',0)}"
-        f" 15mVR<1.5:{c.get('breakout_vr5_15m_fail',0)}"
+        f" 15mVR&lt;1.5:{c.get('breakout_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('breakout_pass',0)}",
         f"    └ B(shadow): trail SL1.0%/act0.4%/trail0.3%/max270s",
         f"  [CG반전15] 15m전봉음봉→현봉양봉 + 종가>전봉시가(≧0.05%) + 1m양봉 + 15mVR≧1.0 + 고점이격≦1.5%",
         f"    진입{c.get('reversal_15m_enter',0)}"
         f" → 전봉양봉:{c.get('reversal_15m_prev_fail',0)}"
         f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
-        f" 종가<전봉시가:{c.get('reversal_15m_recovery_fail',0)}"
-        f" 회복<0.05%:{c.get('reversal_15m_recovery_weak_fail',0)}"
+        f" 종가&lt;전봉시가:{c.get('reversal_15m_recovery_fail',0)}"
+        f" 회복&lt;0.05%:{c.get('reversal_15m_recovery_weak_fail',0)}"
         f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
-        f" 15mVR<1.0:{c.get('reversal_15m_vr5_15m_fail',0)}"
-        f" 고점이격>1.5%:{c.get('reversal_15m_gap20_fail',0)}"
+        f" 15mVR&lt;1.0:{c.get('reversal_15m_vr5_15m_fail',0)}"
+        f" 고점이격&gt;1.5%:{c.get('reversal_15m_gap20_fail',0)}"
         f" ✅통과:{c.get('reversal_15m_pass',0)}",
         f"    └ CG(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
         f"  [MIC마이크로] 1m양봉 + tick_rate_30s≧0.5 + tick_buy_30s≧0.60",
@@ -915,44 +915,44 @@ def _pipeline_report(force=False):
         f" → 음봉:{c.get('broad_bull_fail',0)}"
         f" ✅통과:{c.get('broad_pass',0)}",
         f"    └ MIC(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
-        f"  [VOL압축] ATR_ratio<0.85(현재14봉/과거14봉) + VR5≧1.5 + 양봉",
+        f"  [VOL압축] ATR_ratio&lt;0.85(현재14봉/과거14봉) + VR5≧1.5 + 양봉",
         f"    진입{c.get('vol_squeeze_enter',0)}"
         f" → ATR_ratio≧0.85:{c.get('vol_compression_fail',0)}"
-        f" VR5<1.5:{c.get('vol_vr5_fail',0)}"
+        f" VR5&lt;1.5:{c.get('vol_vr5_fail',0)}"
         f" 음봉:{c.get('vol_bull_fail',0)}"
         f" ✅통과:{c.get('vol_squeeze_pass',0)}",
         f"    └ VOL(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
         f"  [TME시간대] KST(9,10,13,14,21,22시) + 5mRSI≧60 + 양봉",
         f"    진입{c.get('time_mom_enter',0)}"
         f" → 시간외:{c.get('time_hour_fail',0)}"
-        f" 5mRSI<60:{c.get('time_rsi_fail',0)}"
+        f" 5mRSI&lt;60:{c.get('time_rsi_fail',0)}"
         f" 음봉:{c.get('time_bull_fail',0)}"
         f" ✅통과:{c.get('time_mom_pass',0)}",
         f"    └ TME(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
         f"  [RET눌림] 5m급등≧1.0% + pullback0.3~2.0% + EMA20gap-0.5~+0.8% + 양봉",
         f"    진입{c.get('retest_enter',0)}"
-        f" → surge<1.0%:{c.get('retest_surge_fail',0)}"
-        f" pullback<0.3%:{c.get('retest_pullback_shallow',0)}"
-        f" pullback>2.0%:{c.get('retest_pullback_deep',0)}"
-        f" EMA20<-0.5%:{c.get('retest_ema_below',0)}"
-        f" EMA20>+0.8%:{c.get('retest_ema_above',0)}"
+        f" → surge&lt;1.0%:{c.get('retest_surge_fail',0)}"
+        f" pullback&lt;0.3%:{c.get('retest_pullback_shallow',0)}"
+        f" pullback&gt;2.0%:{c.get('retest_pullback_deep',0)}"
+        f" EMA20&lt;-0.5%:{c.get('retest_ema_below',0)}"
+        f" EMA20&gt;+0.8%:{c.get('retest_ema_above',0)}"
         f" 음봉:{c.get('retest_bull_fail',0)}"
         f" ✅통과:{c.get('retest_pass',0)}",
         f"    └ RET(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
         f"  [ABS흡수] 20봉고점이격-1.5~+0.5% + 직전3봉음봉≧1 + 하락≦1.5% + 양봉",
         f"    진입{c.get('abs_enter',0)}"
-        f" → 이격<-1.5%:{c.get('abs_gap_low',0)}"
-        f" 이격>+0.5%:{c.get('abs_gap_high',0)}"
+        f" → 이격&lt;-1.5%:{c.get('abs_gap_low',0)}"
+        f" 이격&gt;+0.5%:{c.get('abs_gap_high',0)}"
         f" 매도압없음:{c.get('abs_pressure_fail',0)}"
-        f" 하락>1.5%:{c.get('abs_hold_fail',0)}"
+        f" 하락&gt;1.5%:{c.get('abs_hold_fail',0)}"
         f" 음봉:{c.get('abs_bull_fail',0)}"
         f" ✅통과:{c.get('abs_pass',0)}",
         f"    └ ABS(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
         f"  [CLM과열] body≧0.3% + wick_ratio≧0.3 + VR5≧2.0",
         f"    진입{c.get('climax_enter',0)}"
-        f" → body<0.3%:{c.get('climax_body_fail',0)}"
-        f" wick<0.3:{c.get('climax_wick_fail',0)}"
-        f" VR5<2.0:{c.get('climax_vr_fail',0)}"
+        f" → body&lt;0.3%:{c.get('climax_body_fail',0)}"
+        f" wick&lt;0.3:{c.get('climax_wick_fail',0)}"
+        f" VR5&lt;2.0:{c.get('climax_vr_fail',0)}"
         f" ✅통과:{c.get('climax_pass',0)}",
         f"    └ CLM(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
         f"━━━━━━━━━━━━━━━━",
@@ -3576,7 +3576,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 krw_to_use = min_order_krw
             else:
                 signal_skip(f"주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
-                tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 < {min_order_krw:,}원)")
+                tg_send_mid(f"⚠️ {m} 매수 스킵: 주문금액 부족 ({krw_to_use:,.0f}원 &lt; {min_order_krw:,}원)")
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
@@ -6214,7 +6214,7 @@ def send_batch_trade_report():
         lines.append(f"  평균MFE: +{avg_mfe:.2f}% | 평균MAE: {avg_mae:.2f}%")
         lines.append(f"  MFE활용도: {mfe_util:.0f}% (고점 대비 수익 실현율)")
         if mae_reversal > 0 or ("mae_pct" in df.columns):
-            lines.append(f"  MAE역전률: {mae_reversal:.0f}% (MAE<-0.3% 후 이긴 비율)")
+            lines.append(f"  MAE역전률: {mae_reversal:.0f}% (MAE&lt;-0.3% 후 이긴 비율)")
 
         # ─── 3. 보유시간 ───
         lines.append(f"  보유시간: 평균{avg_hold:.0f}초 / 중앙값{med_hold:.0f}초")
@@ -16040,7 +16040,7 @@ def validate_config():
     warnings = []
     if TOP_N > 200: errors.append(f"TOP_N={TOP_N} 너무 큼 (≤200 권장)")
     if STOP_LOSS_PCT >= 0.05:
-        warnings.append(f"STOP_LOSS_PCT={STOP_LOSS_PCT*100:.1f}% 큼 (<5%)")
+        warnings.append(f"STOP_LOSS_PCT={STOP_LOSS_PCT*100:.1f}% 큼 (&lt;5%)")
     if PARALLEL_WORKERS > 30:
         warnings.append(f"PARALLEL_WORKERS={PARALLEL_WORKERS} 과다")
     if MIN_TURNOVER <= 0 or MIN_TURNOVER >= 1:
