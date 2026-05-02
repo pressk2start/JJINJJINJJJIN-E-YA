@@ -10713,18 +10713,31 @@ def _v4_shadow_report_lines():
                     for _d, ik, wv, wn, lv, ln in _scored[:8]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
-    # v19: Research Top-3 출력 (PnL 기준 상위 3개만 텔레그램에 표시)
+    # v19: Research Top-3 출력 (quality score 기준, n<10 제외)
+    # score = PnL × min(log2(n), 5) — 샘플 많을수록 신뢰도 가중, n<10 노이즈 제거
+    import math
     if _research_pnl:
-        _research_pnl.sort(key=lambda x: x[4], reverse=True)
-        lines.append("🧪 Research Top-3:")
-        for _r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae_str, _r_tag, _r_key, _r_s in _research_pnl[:3]:
-            lines.append(
-                f"  {_r_tag}{_r_route}:{_r_strat} {_r_n}건 승률{_r_wr:.0f}%"
-                f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}%{_r_mae_str}"
-            )
-        if len(_research_pnl) > 3:
-            _rest = len(_research_pnl) - 3
-            lines.append(f"  ({_rest}개 추가 시나리오는 파일 로그에서 확인)")
+        _qualified = []
+        _pending = []
+        for item in _research_pnl:
+            _r_n = item[2]
+            _r_pnl = item[4]
+            _r_mae_raw = item[9].get("mae_sum", 0) / max(item[9].get("mae_cnt", 1), 1) if item[9].get("mae_cnt", 0) > 0 else 0
+            if _r_n < 10:
+                _pending.append(item)
+                continue
+            _score = _r_pnl * min(math.log2(max(_r_n, 2)), 5)
+            _qualified.append((_score, item))
+        _qualified.sort(key=lambda x: x[0], reverse=True)
+        if _qualified:
+            lines.append("🧪 Research Top-3:")
+            for _score, (_r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae_str, _r_tag, _r_key, _r_s) in _qualified[:3]:
+                lines.append(
+                    f"  {_r_tag}{_r_route}:{_r_strat} {_r_n}건 승률{_r_wr:.0f}%"
+                    f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}%{_r_mae_str}"
+                )
+        if _pending:
+            lines.append(f"  ⏳ 수집중: {', '.join(p[0] for p in _pending)} (n<10)")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
