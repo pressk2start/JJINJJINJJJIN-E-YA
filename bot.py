@@ -8233,6 +8233,9 @@ _STRAT_DESC_MAP = {
     "MIC": "양봉 + tick_rate_30s급증 + 매수비율60%↑ → 마이크로스트럭처",
     "VOL": "ATR 압축 → VR5 급증 + 양봉 → 변동성 폭발",
     "TME": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 → 시간대 엣지",
+    "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
+    "ABS": "고점근처 매도흡수 + 재양봉 → 흡수 돌파",
+    "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
 }
 
 _V0_EXIT_PARAMS = {
@@ -9113,8 +9116,112 @@ def _v0_check_time_momentum(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# --- v0 전략 레��스트리 (v19: 대폭 정리 — Production + Research 2트랙) ---
-# 기존 47개 → 9개로 축소. 결론 난 시나리오 전부 제거.
+def _v0_check_retest_entry(c1, c5, c15, c30, c60, gate_info=None):
+    """RET 눌림재진입: 급등 후 EMA20 근처 눌림 + 저점방어 + 재양봉"""
+    _pipeline_inc("retest_enter")
+    if not c5 or len(c5) < 15:
+        return None
+    if not c1 or len(c1) < 21:
+        return None
+    closes_5m = [c["trade_price"] for c in c5]
+    recent_high = max(closes_5m[-5:])
+    pre_surge = closes_5m[-10] if len(closes_5m) >= 10 else closes_5m[0]
+    surge_pct = (recent_high - pre_surge) / max(pre_surge, 1) * 100
+    if surge_pct < 1.0:
+        if _pipeline_inc("retest_surge_fail", value=round(surge_pct, 2), threshold=1.0, direction="gte"): return None
+    cur_price = c1[-1]["trade_price"]
+    pullback_pct = (recent_high - cur_price) / max(recent_high, 1) * 100
+    if pullback_pct < 0.3:
+        if _pipeline_inc("retest_pullback_shallow", value=round(pullback_pct, 2), threshold=0.3, direction="gte"): return None
+    if pullback_pct > 2.0:
+        if _pipeline_inc("retest_pullback_deep", value=round(pullback_pct, 2), threshold=2.0, direction="lte"): return None
+    ema20 = _v4_ema_from_candles(c1, 20)
+    if ema20 is None:
+        return None
+    ema_gap = (cur_price - ema20) / max(ema20, 1) * 100
+    if ema_gap < -0.5:
+        if _pipeline_inc("retest_ema_below", value=round(ema_gap, 2), threshold=-0.5, direction="gte"): return None
+    if ema_gap > 0.8:
+        if _pipeline_inc("retest_ema_above", value=round(ema_gap, 2), threshold=0.8, direction="lte"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("retest_bull_fail"): return None
+    _pipeline_inc("retest_pass")
+    return {
+        "signal_tag": "눌림재진입",
+        "entry_mode": "confirm",
+        "logic_group": "R",
+        "filters_hit": [f"surge={surge_pct:.1f}%", f"pullback={pullback_pct:.1f}%", f"EMA_gap={ema_gap:.2f}%"],
+        "exit_params": {},
+        "indicators": {"surge_pct": round(surge_pct, 2), "pullback_pct": round(pullback_pct, 2)},
+    }
+
+
+def _v0_check_absorption(c1, c5, c15, c30, c60, gate_info=None):
+    """ABS 흡수돌파: 고점근처 매도압력 흡수(음봉 후 반등) + 재양봉"""
+    _pipeline_inc("abs_enter")
+    if not c1 or len(c1) < 21:
+        return None
+    cur_close = c1[-1]["trade_price"]
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
+    if gap_pct < -1.5:
+        if _pipeline_inc("abs_gap_low", value=round(gap_pct, 2), threshold=-1.5, direction="gte"): return None
+    if gap_pct > 0.5:
+        if _pipeline_inc("abs_gap_high", value=round(gap_pct, 2), threshold=0.5, direction="lte"): return None
+    recent_3 = c1[-4:-1]
+    red_count = sum(1 for c in recent_3 if not _v4_is_bullish(c))
+    if red_count < 1:
+        if _pipeline_inc("abs_pressure_fail"): return None
+    recent_low = min(c["low_price"] for c in c1[-4:])
+    drop_pct = (high_20 - recent_low) / max(high_20, 1) * 100
+    if drop_pct > 1.5:
+        if _pipeline_inc("abs_hold_fail", value=round(drop_pct, 2), threshold=1.5, direction="lte"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("abs_bull_fail"): return None
+    _pipeline_inc("abs_pass")
+    return {
+        "signal_tag": "흡수돌파",
+        "entry_mode": "confirm",
+        "logic_group": "A2",
+        "filters_hit": [f"gap20={gap_pct:+.1f}%", f"red_bars={red_count}", f"drop={drop_pct:.1f}%"],
+        "exit_params": {},
+        "indicators": {"gap_20bar": round(gap_pct, 4)},
+    }
+
+
+def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
+    """CLM 과열감지: 장대양봉 + 윗꼬리 + VR과열 → 진입금지 구간 추적"""
+    _pipeline_inc("climax_enter")
+    if not c1 or len(c1) < 7:
+        return None
+    last = c1[-1]
+    body = last["trade_price"] - last["opening_price"]
+    total_range = last["high_price"] - last["low_price"]
+    if total_range <= 0:
+        return None
+    body_pct = body / max(last["opening_price"], 1) * 100
+    if body_pct < 0.3:
+        if _pipeline_inc("climax_body_fail", value=round(body_pct, 2), threshold=0.3, direction="gte"): return None
+    upper_wick = last["high_price"] - last["trade_price"]
+    wick_ratio = upper_wick / total_range
+    if wick_ratio < 0.3:
+        if _pipeline_inc("climax_wick_fail", value=round(wick_ratio, 2), threshold=0.3, direction="gte"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 2.0:
+        if _pipeline_inc("climax_vr_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
+    _pipeline_inc("climax_pass")
+    return {
+        "signal_tag": "과열감지",
+        "entry_mode": "confirm",
+        "logic_group": "Z",
+        "filters_hit": [f"body={body_pct:.2f}%", f"wick={wick_ratio:.2f}", f"VR5={vr5:.1f}"],
+        "exit_params": {},
+        "indicators": {"body_pct": round(body_pct, 2), "wick_ratio": round(wick_ratio, 2)},
+    }
+
+
+# --- v0 전략 레지스트리 (v19: 대폭 정리 — Production + Research 2트랙) ---
+# 기존 47개 → 12개. Production 1 + Research 11 (baseline 3 + 생존 2 + 신규 6)
 _STRATEGY_REGISTRY = {
     # ━━━ Track A: PRODUCTION (절대 변경 금지) ━━━
     "모멘텀GT": {
@@ -9185,6 +9292,27 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "time_momentum", "route": "TME",
         "description": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 [SVE1 exit] (shadow)",
+    },
+    "눌림재진입": {
+        "check_fn": _v0_check_retest_entry,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "retest", "route": "RET",
+        "description": "급등후 EMA20눌림 + 저점방어 + 재양봉 [GT exit] (shadow)",
+    },
+    "흡수돌파": {
+        "check_fn": _v0_check_absorption,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "absorption", "route": "ABS",
+        "description": "고점근처 매도흡수 + 재양봉 [SVE1 exit] (shadow)",
+    },
+    "과열감지": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM",
+        "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
     },
 }
 
@@ -10588,7 +10716,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"GT", "B", "CG", "SV4", "SV5", "MIC", "VOL", "TME"}
+        _ACTIVE_RESEARCH = {"GT", "B", "CG", "SV4", "SV5", "MIC", "VOL", "TME", "RET", "ABS", "CLM"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -10726,7 +10854,9 @@ def _v4_shadow_report_lines():
             if _r_n < 10:
                 _pending.append(item)
                 continue
-            _score = _r_pnl * min(math.log2(max(_r_n, 2)), 5)
+            _r_mae_abs = abs(_r_mae_raw) * 100
+            _mae_factor = max(1.0 - _r_mae_abs, 0.1)
+            _score = _r_pnl * _mae_factor * min(math.log2(max(_r_n, 2)), 5)
             _qualified.append((_score, item))
         _qualified.sort(key=lambda x: x[0], reverse=True)
         if _qualified:
