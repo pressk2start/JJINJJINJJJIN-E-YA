@@ -219,6 +219,81 @@ _RETEST_LOCK = threading.Lock()
 # (DCB 데드캣바운스 전략 제거됨 — 비활성 상태였으며 코드 정리)
 
 # =========================
+# 🎯 SVE2 Soft Gate — entry-time indicator scoring (ex-ante A/C prediction)
+# =========================
+# 4축: tick_rate_30s / macd_hist_5m_bps / atr_pct / entry_spread_pct (모두 ↓ = 안전)
+# rolling percentile threshold (P45, window 200) → score 0~4 → FULL/REDUCED/SKIP
+_SVE2_FEATURES = ("tick_rate_30s", "macd_hist_5m_bps", "atr_pct", "entry_spread_pct")
+_SVE2_PERCENTILE = 0.45
+_SVE2_WARMUP = 30
+_SVE2_WINDOW = 200
+_SVE2_REDUCED_FRACTION = 0.5
+
+class _RollingPercentile:
+    __slots__ = ("buf", "_warmup")
+    def __init__(self, maxlen=200, warmup=30):
+        self.buf = deque(maxlen=maxlen)
+        self._warmup = warmup
+    def update(self, x):
+        if x is not None and isinstance(x, (int, float)):
+            self.buf.append(float(x))
+    def q(self, p):
+        if len(self.buf) < self._warmup:
+            return None
+        arr = sorted(self.buf)
+        idx = p * (len(arr) - 1)
+        lo = int(idx)
+        hi = min(lo + 1, len(arr) - 1)
+        frac = idx - lo
+        return arr[lo] * (1 - frac) + arr[hi] * frac
+    def __len__(self):
+        return len(self.buf)
+
+_SVE2_ROLLING = {k: _RollingPercentile(_SVE2_WINDOW, _SVE2_WARMUP) for k in _SVE2_FEATURES}
+_SVE2_SCORE_LOG = deque(maxlen=300)
+_SVE2_LOCK = threading.Lock()
+
+def _sve2_compute_score(indicators):
+    """SVE2 soft gate: 4축 entry-time indicator → score(0~4) + decision.
+    Returns (score, decision, thresholds, features)"""
+    features = {k: indicators.get(k) for k in _SVE2_FEATURES}
+    thresholds = {}
+    for k, rp in _SVE2_ROLLING.items():
+        thresholds[k] = rp.q(_SVE2_PERCENTILE)
+    if any(v is None for v in thresholds.values()):
+        return 4, "FULL", thresholds, features
+    score = 0
+    for k in _SVE2_FEATURES:
+        val = features.get(k)
+        thr = thresholds.get(k)
+        if val is not None and thr is not None and val <= thr:
+            score += 1
+    if score >= 2:
+        decision = "FULL"
+    elif score == 1:
+        decision = "REDUCED"
+    else:
+        decision = "SKIP"
+    return score, decision, thresholds, features
+
+def _sve2_update_rolling(indicators):
+    """SVE1 shadow trade 완료 시 rolling buffer 업데이트"""
+    for k in _SVE2_FEATURES:
+        val = indicators.get(k)
+        if val is not None:
+            _SVE2_ROLLING[k].update(val)
+
+def _sve2_warmup_from_trade_records():
+    """기존 SVE1 trade_records에서 rolling buffer 초기화 (cold start 방지)"""
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            if not key.startswith("SVE1:"):
+                continue
+            for tr in s.get("trade_records", []):
+                inds = tr.get("inds", {})
+                _sve2_update_rolling(inds)
+
+# =========================
 # ⭕ 동그라미 엔트리 V1 (Circle Entry - 눌림 재돌파 전용 엔진)
 # =========================
 # 패턴: Ignition → 1~6봉 첫 눌림 → 리클레임 → 재돌파
@@ -890,6 +965,8 @@ def _pipeline_report(force=False):
         f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
         f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
         f"⛔ 연패중지: {c['suspend_block']}",
+        f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
+        f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
         f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
         f"━━━━━━━━━━━━━━━━",
         f"📈 <b>퍼널 전환율</b>",
@@ -3240,6 +3317,43 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             entry_mode = "half"
             entry_fraction = 0.50
             mode_emoji = "⚡"
+
+        # 🎯 SVE2 soft gate — entry-time indicator scoring
+        _sve2_ind = {}
+        _sve2_ticks = pre.get("ticks", [])
+        if _sve2_ticks and len(_sve2_ticks) >= 5:
+            _sve2_t30 = micro_tape_stats_from_ticks(_sve2_ticks, 30)
+            _sve2_ind["tick_rate_30s"] = _sve2_t30.get("rate")
+        _sve2_c1 = _get_c1_cached(m, 20)
+        if _sve2_c1 and len(_sve2_c1) >= 7:
+            _sve2_ind["atr_pct"] = round(_v4_atr_pct(_sve2_c1, 14), 4)
+            _hi = _sve2_c1[-1].get("high_price", 0)
+            _lo = _sve2_c1[-1].get("low_price", 0)
+            _cl = _sve2_c1[-1].get("trade_price", 1)
+            if _cl > 0 and _hi > _lo:
+                _sve2_ind["entry_spread_pct"] = round((_hi - _lo) / _cl * 100, 4)
+        _sve2_c5 = _get_c5_cached(m, 50)
+        if _sve2_c5 and len(_sve2_c5) >= 35:
+            _sve2_closes5 = [c["trade_price"] for c in _sve2_c5]
+            _, _, _sve2_hist = _v4_macd(_sve2_closes5)
+            if _sve2_hist is not None and _sve2_closes5[-1] > 0:
+                _sve2_ind["macd_hist_5m_bps"] = round(_sve2_hist / _sve2_closes5[-1] * 10000, 2)
+        _s2_score, _s2_decision, _s2_thr, _s2_feat = _sve2_compute_score(_sve2_ind)
+        if _s2_decision == "SKIP":
+            print(f"[SVE2] {m} score={_s2_score} → SKIP (진입 차단)")
+            _pipeline_inc("sve2_skip")
+            signal_skip(f"SVE2 score={_s2_score} SKIP")
+            with _POSITION_LOCK:
+                OPEN_POSITIONS.pop(m, None)
+            return
+        elif _s2_decision == "REDUCED":
+            _prev_frac = entry_fraction
+            entry_fraction *= _SVE2_REDUCED_FRACTION
+            print(f"[SVE2] {m} score={_s2_score} → REDUCED ({_prev_frac:.0%}→{entry_fraction:.0%})")
+            _pipeline_inc("sve2_reduced")
+        else:
+            print(f"[SVE2] {m} score={_s2_score} → FULL")
+            _pipeline_inc("sve2_full")
 
         # ============================================================
         # ★★★ 구조 변경 1: 풀백 진입 (Pullback Entry)
@@ -10130,6 +10244,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
         _SHADOW_TRADE_COUNT += 1
         _should_save = (_SHADOW_TRADE_COUNT % SHADOW_STATS_SAVE_INTERVAL == 0)  # 🔧 FIX: 락 안에서 체크
 
+    if route == "SVE1" and indicators:
+        _sve2_update_rolling(indicators)
+
     if _should_save:
         _save_shadow_stats()
 
@@ -10519,6 +10636,17 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             merged_ind = dict(universal_ind)
             own_ind = sig.get("indicators", {})
             merged_ind.update(own_ind)
+            if route == "SVE1":
+                _s2_score, _s2_dec, _s2_thr, _s2_feat = _sve2_compute_score(merged_ind)
+                merged_ind["sve2_score"] = _s2_score
+                merged_ind["sve2_decision"] = _s2_dec
+                with _SVE2_LOCK:
+                    _SVE2_SCORE_LOG.append({
+                        "ts": now_ts, "market": market,
+                        "score": _s2_score, "decision": _s2_dec,
+                        "features": {k: round(v, 4) if v is not None else None for k, v in _s2_feat.items()},
+                        "thresholds": {k: round(v, 4) if v is not None else None for k, v in _s2_thr.items()},
+                    })
             with _SHADOW_LOCK:
                 last_entry = _SHADOW_DEDUP.get(dedup_key, 0)
                 if now_ts - last_entry < SHADOW_DEDUP_CD_SEC:
@@ -10876,6 +11004,35 @@ def _v4_shadow_report_lines():
                     for _d, ik, wv, wn, lv, ln in _scored[:8]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
+    # SVE2 score별 PnL (SVE1 trade_records에서 계산)
+    with _SHADOW_PERF_LOCK:
+        for _s2key, _s2s in _SHADOW_PERF_STATS.items():
+            if not _s2key.startswith("SVE1:"):
+                continue
+            _s2_trs = _s2s.get("trade_records", [])
+            if len(_s2_trs) >= 10:
+                _s2_by_score = {}
+                for _tr in _s2_trs:
+                    _sc = _tr.get("inds", {}).get("sve2_score")
+                    if _sc is not None:
+                        _sc = int(_sc)
+                        _s2_by_score.setdefault(_sc, []).append(_tr["pnl"])
+                if _s2_by_score:
+                    _s2_parts = []
+                    for _sc in sorted(_s2_by_score.keys(), reverse=True):
+                        _pnls = _s2_by_score[_sc]
+                        _avg = sum(_pnls) / len(_pnls) * 100
+                        _wr = sum(1 for p in _pnls if p > 0) / len(_pnls) * 100
+                        _s2_parts.append(f"s{_sc}:{len(_pnls)}건 {_wr:.0f}% {_avg:+.2f}%")
+                    _s2_thr_strs = []
+                    for _fk in _SVE2_FEATURES:
+                        _tval = _SVE2_ROLLING[_fk].q(_SVE2_PERCENTILE)
+                        if _tval is not None:
+                            _s2_thr_strs.append(f"{_fk}≤{_tval:.2f}")
+                    lines.append(f"    🎯 SVE2 score분포: {' | '.join(_s2_parts)}")
+                    if _s2_thr_strs:
+                        lines.append(f"    📐 SVE2 thr(P{int(_SVE2_PERCENTILE*100)}): {' '.join(_s2_thr_strs)}")
+            break
     # v19: Research Top-3 출력 (quality score 기준, n<10 제외)
     # score = PnL × min(log2(n), 5) — 샘플 많을수록 신뢰도 가중, n<10 노이즈 제거
     import math
@@ -16082,6 +16239,9 @@ def main():
 
     # 📡 섀도우 가상매매 누적 통계 로드
     _load_shadow_stats()
+    _sve2_warmup_from_trade_records()
+    _s2_lens = {k: len(rp) for k, rp in _SVE2_ROLLING.items()}
+    print(f"[SVE2] warmup 완료: {_s2_lens}")
 
     tg_send(
         f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
