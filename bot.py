@@ -222,16 +222,16 @@ _RETEST_LOCK = threading.Lock()
 # 🎯 SVE2 Soft Gate — entry-time indicator scoring (ex-ante A/C prediction)
 # =========================
 # 4축: tick_rate_30s / macd_hist_5m_bps / atr_pct / entry_spread_pct (모두 ↓ = 안전)
-# rolling percentile threshold (P45, window 200) → score 0~4 → FULL/REDUCED/SKIP
+# rolling percentile threshold (P45, window 300) → score 0~4 → size scaling
 _SVE2_FEATURES = ("tick_rate_30s", "macd_hist_5m_bps", "atr_pct", "entry_spread_pct")
 _SVE2_PERCENTILE = 0.45
 _SVE2_WARMUP = 30
-_SVE2_WINDOW = 200
-_SVE2_REDUCED_FRACTION = 0.5
+_SVE2_WINDOW = 300
+_SVE2_SIZE_MAP = {0: 0.0, 1: 0.3, 2: 0.6, 3: 1.0, 4: 1.0}
 
 class _RollingPercentile:
     __slots__ = ("buf", "_warmup")
-    def __init__(self, maxlen=200, warmup=30):
+    def __init__(self, maxlen=300, warmup=30):
         self.buf = deque(maxlen=maxlen)
         self._warmup = warmup
     def update(self, x):
@@ -268,12 +268,13 @@ def _sve2_compute_score(indicators):
         thr = thresholds.get(k)
         if val is not None and thr is not None and val <= thr:
             score += 1
-    if score >= 2:
-        decision = "FULL"
-    elif score == 1:
+    size_mult = _SVE2_SIZE_MAP.get(score, 1.0)
+    if size_mult <= 0:
+        decision = "SKIP"
+    elif size_mult < 1.0:
         decision = "REDUCED"
     else:
-        decision = "SKIP"
+        decision = "FULL"
     return score, decision, thresholds, features
 
 def _sve2_update_rolling(indicators):
@@ -3339,6 +3340,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             if _sve2_hist is not None and _sve2_closes5[-1] > 0:
                 _sve2_ind["macd_hist_5m_bps"] = round(_sve2_hist / _sve2_closes5[-1] * 10000, 2)
         _s2_score, _s2_decision, _s2_thr, _s2_feat = _sve2_compute_score(_sve2_ind)
+        _s2_size = _SVE2_SIZE_MAP.get(_s2_score, 1.0)
         if _s2_decision == "SKIP":
             print(f"[SVE2] {m} score={_s2_score} → SKIP (진입 차단)")
             _pipeline_inc("sve2_skip")
@@ -3348,8 +3350,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             return
         elif _s2_decision == "REDUCED":
             _prev_frac = entry_fraction
-            entry_fraction *= _SVE2_REDUCED_FRACTION
-            print(f"[SVE2] {m} score={_s2_score} → REDUCED ({_prev_frac:.0%}→{entry_fraction:.0%})")
+            entry_fraction *= _s2_size
+            print(f"[SVE2] {m} score={_s2_score} → {_s2_size:.0%} size ({_prev_frac:.0%}→{entry_fraction:.0%})")
             _pipeline_inc("sve2_reduced")
         else:
             print(f"[SVE2] {m} score={_s2_score} → FULL")
