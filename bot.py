@@ -965,7 +965,7 @@ def _pipeline_report(force=False):
         f"━━━━━━━━━━━━━━━━",
         f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
         f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
-        f"⛔ 연패중지: {c['suspend_block']}",
+        f"⛔ 연패중지: {c['suspend_block']} | SVE2우회: {c.get('suspend_sve2_bypass',0)}",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
         f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
@@ -3341,6 +3341,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 _sve2_ind["macd_hist_5m_bps"] = round(_sve2_hist / _sve2_closes5[-1] * 10000, 2)
         _s2_score, _s2_decision, _s2_thr, _s2_feat = _sve2_compute_score(_sve2_ind)
         _s2_size = _SVE2_SIZE_MAP.get(_s2_score, 1.0)
+        _suspend_penalty = pre.get("_suspend_sve2_penalty")
         if _s2_decision == "SKIP":
             print(f"[SVE2] {m} score={_s2_score} → SKIP (진입 차단)")
             _pipeline_inc("sve2_skip")
@@ -3351,10 +3352,18 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         elif _s2_decision == "REDUCED":
             _prev_frac = entry_fraction
             entry_fraction *= _s2_size
-            print(f"[SVE2] {m} score={_s2_score} → {_s2_size:.0%} size ({_prev_frac:.0%}→{entry_fraction:.0%})")
+            if _suspend_penalty:
+                entry_fraction *= _suspend_penalty
+            print(f"[SVE2] {m} score={_s2_score} → {_s2_size:.0%} size ({_prev_frac:.0%}→{entry_fraction:.0%})"
+                  f"{' [연패우회]' if _suspend_penalty else ''}")
             _pipeline_inc("sve2_reduced")
         else:
-            print(f"[SVE2] {m} score={_s2_score} → FULL")
+            _prev_frac = entry_fraction
+            if _suspend_penalty:
+                entry_fraction *= _suspend_penalty
+                print(f"[SVE2] {m} score={_s2_score} → FULL but 연패우회 {_suspend_penalty:.0%} ({_prev_frac:.0%}→{entry_fraction:.0%})")
+            else:
+                print(f"[SVE2] {m} score={_s2_score} → FULL")
             _pipeline_inc("sve2_full")
 
         # ============================================================
@@ -16940,9 +16949,39 @@ def main():
                     _max_mode = _STRAT_MAX_MODE.get(_sg_key)
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
-                    cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패 진입중지 (잔여 {_remain}초)")
-                    _pipeline_inc("suspend_block")
-                    continue
+                    # SVE2 조건부 우회: score >= 2이면 축소 진입 허용
+                    _bp_ind = {}
+                    _bp_ticks = pre.get("ticks", [])
+                    if _bp_ticks and len(_bp_ticks) >= 5:
+                        _bp_t30 = micro_tape_stats_from_ticks(_bp_ticks, 30)
+                        _bp_ind["tick_rate_30s"] = _bp_t30.get("rate")
+                    _bp_c1 = _get_c1_cached(m, 20)
+                    if _bp_c1 and len(_bp_c1) >= 7:
+                        _bp_ind["atr_pct"] = round(_v4_atr_pct(_bp_c1, 14), 4)
+                        _bhi = _bp_c1[-1].get("high_price", 0)
+                        _blo = _bp_c1[-1].get("low_price", 0)
+                        _bcl = _bp_c1[-1].get("trade_price", 1)
+                        if _bcl > 0 and _bhi > _blo:
+                            _bp_ind["entry_spread_pct"] = round((_bhi - _blo) / _bcl * 100, 4)
+                    _bp_c5 = _get_c5_cached(m, 50)
+                    if _bp_c5 and len(_bp_c5) >= 35:
+                        _bp_cls5 = [c["trade_price"] for c in _bp_c5]
+                        _, _, _bp_hist = _v4_macd(_bp_cls5)
+                        if _bp_hist is not None and _bp_cls5[-1] > 0:
+                            _bp_ind["macd_hist_5m_bps"] = round(_bp_hist / _bp_cls5[-1] * 10000, 2)
+                    _bp_score, _bp_dec, _, _ = _sve2_compute_score(_bp_ind)
+                    if _bp_score >= 3:
+                        pre["_suspend_sve2_penalty"] = 0.5
+                        print(f"[SUSPEND_BYPASS] {m} [{_sg_key}] SVE2 score={_bp_score} → 연패중지 우회 (50%)")
+                        _pipeline_inc("suspend_sve2_bypass")
+                    elif _bp_score == 2:
+                        pre["_suspend_sve2_penalty"] = 0.3
+                        print(f"[SUSPEND_BYPASS] {m} [{_sg_key}] SVE2 score={_bp_score} → 연패중지 우회 (30%)")
+                        _pipeline_inc("suspend_sve2_bypass")
+                    else:
+                        cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패 진입중지 (잔여 {_remain}초) SVE2={_bp_score}")
+                        _pipeline_inc("suspend_block")
+                        continue
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[LOSE_GATE] {m} [{_sg_key}] 연패 모드제한 → half 강제")
