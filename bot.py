@@ -8056,6 +8056,8 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
         cur_close = c1[-1]["trade_price"]
         high_20 = max(c["high_price"] for c in c1[-21:-1])
         ui["gap_20bar"] = round(((cur_close / max(high_20, 1)) - 1.0) * 100, 4)
+    # --- KST hour (시간대 edge 탐색용) ---
+    ui["kst_hour"] = now_kst().hour
     # --- v18e: 틱 기반 지표 (초봉 대용) ---
     if market:
         try:
@@ -8218,30 +8220,19 @@ _V4_DEFAULT_EXIT = {
 # ========================================================================
 
 _STRAT_DESC_MAP = {
+    # Production
+    "SVE1": "5분RSI≥74.55 + 생존게이트60s + 120s강제종료 (LIVE)",
+    # Research - baseline
     "GT": "5분RSI≥74.55 + VR5≤3.2 → 강모멘텀 추격 (no-trail, 시간청산)",
-    "G": "5분RSI≥74.55 + 양봉 + VR5≤3.2 → 모멘텀 (trail)",
-    "GR": "5분RSI≥78 + 양봉 → 모멘텀 strict",
-    "G2": "5분RSI≥74.55 → 모멘텀 (A0.5/T0.3)",
-    "G4": "5분RSI≥74.55 → 모멘텀 (A0.4/T0.25)",
-    "G6": "5분RSI≥74.55 → 모멘텀 (A0.6/T0.35)",
-    "G7": "5분RSI≥74.55 → 모멘텀 (A0.7/T0.4)",
-    "GT70": "5분RSI≥70 → 모멘텀 (RSI 완화 실험)",
-    "GT68": "5분RSI≥68 → 모멘텀 (RSI 완화 실험)",
-    "GT_VR5LOW": "5분RSI≥74.55 + VR5≤0.707 → 초입 진입 실험",
-    "GT_SL07": "5분RSI≥73 → 모멘텀 (SL 0.7% 타이트)",
-    "GT_SL15": "5분RSI≥73 → 모멘텀 (SL 1.5% 완화)",
-    "GT_300s": "5분RSI≥73 → 모멘텀 (300초 시간청산)",
-    "C": "15분 음→양 반전 + 종가회복 → 초입반전 포착 (빠른익절)",
-    "H": "60분 음→양 반전 + 종가회복 → 장기반전",
-    "HT": "60분 음→양 + GT식 exit → 반전 실험",
     "B": "종가>20봉고점 + 양봉 + 15mVR≥1.5 → 가격돌파",
-    "B2": "종가>20봉고점 + 15mVR≥1.5 → 가격돌파 (양봉 무관)",
-    "A": "VR5≥2.5 + 양봉 → 거래량 폭발",
-    "D": "20봉고점 -1%이내 + 양봉 → 고점근접",
-    "F": "15분 EMA5>10>20 + 양봉 → 추세정배열",
-    "J": "60분 EMA5>10>20 + 양봉 → 추세정배열",
-    "K": "5분RSI≤35 + 음→양 → 역추세반등",
-    "L": "15분 ADX≥28.5 + 양봉 → 추세강도",
+    "CG": "15분 반전 + GT식 exit → 반전+시간청산",
+    # Research - survival variants
+    "SV4": "SVE1 + 45s 빠른판정 게이트",
+    "SV5": "SVE1 + dd_peak 0.2% 엄격 필터",
+    # Research - new entry structures
+    "MIC": "양봉 + tick_rate_30s급증 + 매수비율60%↑ → 마이크로스트럭처",
+    "VOL": "ATR 압축 → VR5 급증 + 양봉 → 변동성 폭발",
+    "TME": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 → 시간대 엣지",
 }
 
 _V0_EXIT_PARAMS = {
@@ -8463,6 +8454,26 @@ _V0_EXIT_PARAMS_GTSV_E3 = {
         "min_peak_hold_sec": 10,
     },
     "description": "GTSV+adaptive(120hold/0.8%safety/peak40-30/180max/10shold)",
+}
+
+# === SV4: 45s gate (빠른 판정) + 120s forced ===
+_V0_EXIT_PARAMS_SV4 = {
+    "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+    "trail_pct": 0.005, "hold_bars": 0, "max_bars": 40,
+    "disable_trail": True,
+    "sl_tiers": [(45, 0.025), (120, 0.015)],
+    "survival_gate_sec": 45, "survival_max_dd_peak": 0.003,
+    "description": "SV4:gate45s+dd0.3%+120s_force",
+}
+
+# === SV5: 60s gate + tighter dd_peak 0.2% + 120s forced ===
+_V0_EXIT_PARAMS_SV5 = {
+    "strategy": "TRAIL", "sl_pct": 0.020, "activation_pct": 1.0,
+    "trail_pct": 0.005, "hold_bars": 0, "max_bars": 40,
+    "disable_trail": True,
+    "sl_tiers": [(60, 0.025), (120, 0.015)],
+    "survival_gate_sec": 60, "survival_max_dd_peak": 0.002,
+    "description": "SV5:gate60s+dd0.2%+120s_force",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -9025,123 +9036,89 @@ def _v0_check_near_high(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# --- v0 전략 레지스트리 (초경량 — 섀도우 전용) ---
-# 우선순위: B > D > A > C > H > F > G > L > K
+# === NEW 시나리오 진입 함수 ===
+
+def _v0_check_broad_bullish(c1, c5, c15, c30, c60, gate_info=None):
+    """X 기본양봉: ind_filters 기반 새 시나리오의 base check (1m 양봉 + 최소 데이터)"""
+    _pipeline_inc("broad_enter")
+    if not c1 or len(c1) < 7:
+        return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("broad_bull_fail"): return None
+    _pipeline_inc("broad_pass")
+    return {
+        "signal_tag": "기본양봉",
+        "entry_mode": "confirm",
+        "logic_group": "X",
+        "filters_hit": ["1m_bullish"],
+        "exit_params": {},
+        "indicators": {},
+    }
+
+
+def _v0_check_vol_squeeze(c1, c5, c15, c30, c60, gate_info=None):
+    """VOL 변동성압축→폭발: ATR 압축 상태에서 거래량 급증 + 양봉"""
+    _pipeline_inc("vol_squeeze_enter")
+    if not c1 or len(c1) < 21:
+        return None
+    cur_atr = _v4_atr_pct(c1, 14)
+    if cur_atr is None or cur_atr <= 0:
+        return None
+    old_candles = c1[:-7]
+    if len(old_candles) < 14:
+        return None
+    old_atr = _v4_atr_pct(old_candles, 14)
+    if old_atr is None or old_atr <= 0:
+        return None
+    atr_ratio = cur_atr / old_atr
+    if atr_ratio >= 0.85:
+        if _pipeline_inc("vol_compression_fail", value=round(atr_ratio, 2), threshold=0.85, direction="lt"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.5:
+        if _pipeline_inc("vol_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
+    if not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("vol_bull_fail"): return None
+    _pipeline_inc("vol_squeeze_pass")
+    return {
+        "signal_tag": "변동성압축",
+        "entry_mode": "confirm",
+        "logic_group": "V",
+        "filters_hit": [f"ATR_ratio={atr_ratio:.2f}", f"VR5={vr5:.2f}"],
+        "exit_params": {},
+        "indicators": {"atr_pct": round(cur_atr, 4), "atr_ratio": round(atr_ratio, 2)},
+    }
+
+
+def _v0_check_time_momentum(c1, c5, c15, c30, c60, gate_info=None):
+    """TME 시간대엣지: 특정 KST 시간대 + 기본 모멘텀 (RSI>60 + 양봉)"""
+    _pipeline_inc("time_mom_enter")
+    h = now_kst().hour
+    if h not in (9, 10, 13, 14, 21, 22):
+        if _pipeline_inc("time_hour_fail"): return None
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 60:
+        if _pipeline_inc("time_rsi_fail", value=rsi_5m, threshold=60, direction="gte"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("time_bull_fail"): return None
+    _pipeline_inc("time_mom_pass")
+    return {
+        "signal_tag": "시간대모멘텀",
+        "entry_mode": "confirm",
+        "logic_group": "T",
+        "filters_hit": [f"KST_h={h}", f"RSI5={rsi_5m:.1f}"],
+        "exit_params": {},
+        "indicators": {"rsi_5m": round(rsi_5m, 1), "kst_hour": h},
+    }
+
+
+# --- v0 전략 레��스트리 (v19: 대폭 정리 — Production + Research 2트랙) ---
+# 기존 47개 → 9개로 축소. 결론 난 시나리오 전부 제거.
 _STRATEGY_REGISTRY = {
-    "가격돌파": {
-        "check_fn": _v0_check_price_breakout,
-        "exit_params": _V0_EXIT_PARAMS_BREAKOUT,
-        "priority": 1,
-        "enabled": False,
-        "pipeline_key": "breakout",
-        "route": "B",
-        "description": "종가>20봉고점 + 양봉",
-    },
-    # v18c: D(고점근접) 비활성화 — 5782건 24%, W/L 변별력 전무, MFE 0.09%
-    # "고점근접": {
-    #     "check_fn": _v0_check_near_high,
-    #     "exit_params": _V0_EXIT_PARAMS,
-    #     "priority": 2,
-    #     "enabled": False,
-    #     "pipeline_key": "near_high",
-    #     "route": "D",
-    #     "description": "20봉고점 -1%이내 + 양봉",
-    # },
-    # v18e: A(거래량폭발) 비활성화 — 944건 27% PnL-0.05%, MFE+0.19%, W/L 분포 완전 겹침, 개선 불가
-    # "거래량폭발": {
-    #     "check_fn": _v0_check_volume_burst,
-    #     "exit_params": _V0_EXIT_PARAMS,
-    #     "priority": 2,
-    #     "enabled": False,
-    #     "pipeline_key": "vol_burst",
-    #     "route": "A",
-    #     "description": "VR5≥2.5 + 양봉",
-    # },
-    "패턴반전_15m": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _V0_EXIT_PARAMS_C,
-        "priority": 3,
-        "enabled": False,  # ⬇ 라이브 OFF — 2422건 승률32% PnL-0.06% 구조적 음수, shadow만 유지
-        "pipeline_key": "reversal_15m",
-        "route": "C",
-        "description": "15m 음→양 + 종가회복 (shadow only)",
-    },
-    "패턴반전_60m": {
-        "check_fn": _v0_check_reversal_60m,
-        "exit_params": _V0_EXIT_PARAMS_SLOW,
-        "priority": 4,
-        "enabled": False,
-        "pipeline_key": "reversal_60m",
-        "route": "H",
-        "description": "60m 음→양 + 종가회복",
-    },
-    # v18e: F(추세정배열_15m) 비활성화 — 1905건 27% PnL-0.10%, MFE+0.12%, 전체 최악. 리소스 낭비
-    # "추세정배열_15m": {
-    #     "check_fn": _v0_check_ema_15m,
-    #     "exit_params": _V0_EXIT_PARAMS,
-    #     "priority": 5,
-    #     "enabled": False,
-    #     "pipeline_key": "ema_align_15m",
-    #     "route": "F",
-    #     "description": "15m EMA5>10>20 + 양봉",
-    # },
-    # v18: J(추세정배열_60m) 제거 — 4432건 31% PnL-0.10% 최악, 환경필터 전환 검토
-    # "추세정배열_60m": {
-    #     "check_fn": _v0_check_ema_60m,
-    #     "exit_params": _V0_EXIT_PARAMS,
-    #     "priority": 6,
-    #     "enabled": False,
-    #     "pipeline_key": "ema_align_60m",
-    #     "route": "J",
-    #     "description": "60m EMA5>10>20 + 양봉",
-    # },
-    "모멘텀": {
+    # ━━━ Track A: PRODUCTION (절대 변경 금지) ━━━
+    "모멘텀GT": {
         "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM,
-        "priority": 7,
-        "enabled": False,  # ⬇ shadow only — GT 메인 승격 (B-1)으로 인해 비활성화
-        "pipeline_key": "momentum",
-        "route": "G",
-        "description": "5mRSI≥74.55 + 양봉 + VR5≤3.2 [G-v2:minH120s] (shadow)",
-    },
-    "모멘텀B": {  # G2→G3: activation 0.5%, trail 0.3% (0.8%는 MFE 대비 과도 확인)
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_B,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum",
-        "route": "G2",
-        "description": "5mRSI≥74.55 [G3:A0.5/T0.3/minH120s]",
-    },
-    "모멘텀G4": {  # G4: activation 0.4%, trail 0.25% (G~G2 중간)
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G4,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum",
-        "route": "G4",
-        "description": "5mRSI≥74.55 [G4:A0.4/T0.25/minH120s]",
-    },
-    "모멘텀G6": {  # G6: activation 0.6%, trail 0.35%
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G6,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum",
-        "route": "G6",
-        "description": "5mRSI≥74.55 [G6:A0.6/T0.35/minH120s]",
-    },
-    "모멘텀G7": {  # G7: activation 0.7%, trail 0.4%
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_G7,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum",
-        "route": "G7",
-        "description": "5mRSI≥74.55 [G7:A0.7/T0.4/minH120s]",
-    },
-    "모멘텀GT": {  # SVE1: survival gate(60s dd_peak>0.3%→탈락) + 120s 강제종료
-        "check_fn": _v0_check_momentum_rsi,  # ⭐ entry 변경 없음
         "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
         "priority": 7,
         "enabled": True,
@@ -9149,284 +9126,65 @@ _STRATEGY_REGISTRY = {
         "route": "SVE1",
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
-    "모멘텀GR": {  # GR: entry 강화 — RSI 74.55 → 78, exit는 G와 동일 고정
-        "check_fn": _v0_check_momentum_rsi_strict,  # ⭐ rsi 78 별도 함수 (G 영향 없음)
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM,    # ⭐ G와 동일 exit (변수는 entry만)
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum_gr",
-        "route": "GR",
-        "description": "5mRSI≥78 [GR:G와 동일 exit, entry만 강화]",
-    },
-    "모멘텀GT70": {
-        "check_fn": _v0_check_momentum_rsi_70,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum_70",
-        "route": "GT70",
-        "description": "5mRSI≥70 [GT70:no-trail/max180s] (shadow — 진입 앞당김 실험)",
-    },
-    "모멘텀GT68": {
-        "check_fn": _v0_check_momentum_rsi_68,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 7,
-        "enabled": False,  # shadow-only
-        "pipeline_key": "momentum_68",
-        "route": "GT68",
-        "description": "5mRSI≥68 [GT68:no-trail/max180s] (shadow — 진입 앞당김 실험)",
-    },
-    "모멘텀GT_VR5LOW": {
-        "check_fn": _v0_check_momentum_vr5low,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 7,
-        "enabled": False,  # shadow-only — vr5 상한 0.707 실험
-        "pipeline_key": "momentum_vr5low",
-        "route": "GT_VR5LOW",
-        "description": "5mRSI≥74.55 + vr5≤0.707 [GT 초입 진입 필터 실험] (shadow)",
-    },
-    "모멘텀GT_SL07": {
+    # ━━━ Track B: RESEARCH — baseline 비교 대상 ━━━
+    "모멘텀GT_BASE": {
         "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_SL07,
-        "priority": 7,
-        "enabled": False,  # shadow-only (SL 1.0→0.7 타이트화 실험)
-        "pipeline_key": "momentum",
-        "route": "GT_SL07",
-        "description": "5mRSI≥73.0 [GT_SL07:SL0.7/no-trail/max180s] (shadow — SL 타이트)",
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 7, "enabled": False,
+        "pipeline_key": "momentum", "route": "GT",
+        "description": "5mRSI≥74.55 [GT baseline:no-trail/max240s] (shadow)",
     },
-    "모멘텀GT_SL15": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_SL15,
-        "priority": 7,
-        "enabled": False,  # shadow-only (SL 1.0→1.5 완화 실험)
-        "pipeline_key": "momentum",
-        "route": "GT_SL15",
-        "description": "5mRSI≥73.0 [GT_SL15:SL1.5/no-trail/max180s] (shadow — SL 완화)",
-    },
-    "모멘텀GT_300s": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT_300s,
-        "priority": 7,
-        "enabled": False,  # shadow-only (max 180→300s 연장 실험)
-        "pipeline_key": "momentum",
-        "route": "GT_300s",
-        "description": "5mRSI≥73.0 [GT_300s:SL1.0/no-trail/max300s] (shadow — 시간 연장)",
-    },
-    "돌파B2": {
-        "check_fn": _v0_check_price_breakout_bullpass,
+    "가격돌파": {
+        "check_fn": _v0_check_price_breakout,
         "exit_params": _V0_EXIT_PARAMS_BREAKOUT,
-        "priority": 1,
-        "enabled": False,  # shadow-only (양봉 필터 제거 실험)
-        "pipeline_key": "breakout_bp",
-        "route": "B2",
-        "description": "종가>20봉고점 + 15mVR≥1.5 (양봉 필터 제거, shadow)",
-    },
-    "반전60m_T180": {
-        "check_fn": _v0_check_reversal_60m,
-        "exit_params": _V0_EXIT_PARAMS_H_T180,
-        "priority": 4,
-        "enabled": False,  # shadow-only (GT식 exit 적용 실험)
-        "pipeline_key": "reversal_60m",
-        "route": "HT",
-        "description": "60m 음→양 + 종가회복 [HT:GT식 no-trail/max180s] (shadow)",
-    },
-    "추세강도": {
-        "check_fn": _v0_check_trend_strength,
-        "exit_params": _V0_EXIT_PARAMS_SLOW,
-        "priority": 8,
-        "enabled": False,
-        "pipeline_key": "adx_trend",
-        "route": "L",
-        "description": "15mADX≥28.5 + 양봉",
-    },
-    # v18e: K(역추세반등) 비활성화 — 전구간 마이너스, 시간축으로도 안 살아남음
-    # "역추세반등": {
-    #     "check_fn": _v0_check_oversold_bounce,
-    #     "exit_params": _V0_EXIT_PARAMS_K,
-    #     "priority": 9,
-    #     "enabled": True,
-    #     "pipeline_key": "oversold",
-    #     "route": "K",
-    #     "description": "5mRSI≤35 + 음→양",
-    # },
-    # === GT exit 재사용 실험: 다른 진입 + GT 시간청산(240s/no-trail/tiered SL) ===
-    "돌파B2_GT240": {
-        "check_fn": _v0_check_price_breakout_bullpass,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 1,
-        "enabled": False,
-        "pipeline_key": "breakout_bp",
-        "route": "B2G",
-        "description": "종가>20봉고점 [B2+GT exit:no-trail/max240s] (shadow)",
-    },
-    "반전60m_GT240": {
-        "check_fn": _v0_check_reversal_60m,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 4,
-        "enabled": False,
-        "pipeline_key": "reversal_60m",
-        "route": "HG",
-        "description": "60m 음→양 [H+GT exit:no-trail/max240s] (shadow)",
+        "priority": 1, "enabled": False,
+        "pipeline_key": "breakout", "route": "B",
+        "description": "종가>20봉고점 + 양봉 (shadow)",
     },
     "패턴반전_15m_GT240": {
         "check_fn": _v0_check_reversal_15m,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 3,
-        "enabled": False,
-        "pipeline_key": "reversal_15m",
-        "route": "CG",
-        "description": "15m 음→양 [C+GT exit:no-trail/max240s] (shadow)",
+        "priority": 3, "enabled": False,
+        "pipeline_key": "reversal_15m", "route": "CG",
+        "description": "15m 음→양 [C+GT exit] (shadow)",
     },
-    "패턴반전_15m_GT240_TA15": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 3,
-        "enabled": False,
-        "pipeline_key": "reversal_15m",
-        "route": "CG_TA",
-        "description": "15m 음→양 [CG+tick_age≤15] (shadow)",
-        "ind_filters": [("tick_age", "<=", 15.0)],
-    },
-    # === 60초 생존 게이트 실험: 진입→60s관찰→생존시유지→240s ===
-    "모멘텀GT_S60": {
+    # ━━━ Track B: RESEARCH — SVE1 생존필터 변종 (2개만) ━━━
+    "SVE1_SV4": {
         "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GT_SURV60,
-        "priority": 7,
-        "enabled": False,
-        "pipeline_key": "momentum",
-        "route": "GT_S60",
-        "description": "GT+60초생존게이트(pnl>=0) (shadow)",
-    },
-    "패턴반전_15m_GT240_S60": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _V0_EXIT_PARAMS_GT_SURV60,
-        "priority": 3,
-        "enabled": False,
-        "pipeline_key": "reversal_15m",
-        "route": "CG_S60",
-        "description": "CG+60초생존게이트(pnl>=0) (shadow)",
-    },
-    # === soft 생존 게이트: pnl<-0.3% AND mfe<0.2% 둘 다 미달 시만 탈락 ===
-    "모멘텀GT_S60S": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GT_SURV60_SOFT,
-        "priority": 7,
-        "enabled": False,
-        "pipeline_key": "momentum",
-        "route": "GT_S6S",
-        "description": "GT+60초soft생존(pnl<-0.3%+mfe<0.2%) (shadow)",
-    },
-    "패턴반전_15m_GT240_S60S": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _V0_EXIT_PARAMS_GT_SURV60_SOFT,
-        "priority": 3,
-        "enabled": False,
-        "pipeline_key": "reversal_15m",
-        "route": "CG_S6S",
-        "description": "CG+60초soft생존(pnl<-0.3%+mfe<0.2%) (shadow)",
-    },
-    # === dd_peak 기반 생존 게이트: 60초 시점 고점대비 낙폭으로 판정 ===
-    "CG_DD1": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.001),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "CG_D1",
-        "description": "CG+dd_peak60<0.1% (shadow)",
-    },
-    "CG_DD2": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.002),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "CG_D2",
-        "description": "CG+dd_peak60<0.2% (shadow)",
-    },
-    "CG_DD3": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.003),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "CG_D3",
-        "description": "CG+dd_peak60<0.3% (shadow)",
-    },
-    "CG_DD5": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.005),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "CG_D5",
-        "description": "CG+dd_peak60<0.5% (shadow)",
-    },
-    # === 30초 게이트: dd_peak_30s d=0.64 — 60초 기다릴 이유 없는지 검증 ===
-    "CG_30D1": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.001, gate_sec=30),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "C3D1",
-        "description": "CG+dd_peak30<0.1% (shadow)",
-    },
-    "CG_30D2": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.002, gate_sec=30),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "C3D2",
-        "description": "CG+dd_peak30<0.2% (shadow)",
-    },
-    "CG_30D3": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.003, gate_sec=30),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "C3D3",
-        "description": "CG+dd_peak30<0.3% (shadow)",
-    },
-    "CG_30D5": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _make_exit_params_dd_peak(0.005, gate_sec=30),
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "C3D5",
-        "description": "CG+dd_peak30<0.5% (shadow)",
-    },
-    # === GT 신규 shadow: gate/exit/hold 3축 독립 검증 ===
-    "모멘텀GT_GATED": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_SV4,
         "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "GTGA",
-        "ind_filters": [("tick_age", ">=", 5.0)],
-        "description": "GT+gate(tick_age>=5) 역선택 검증 (shadow)",
+        "pipeline_key": "momentum", "route": "SV4",
+        "description": "SVE1+gate45s (빠른판정) (shadow)",
     },
-    "모멘텀GT_SURV": {
+    "SVE1_SV5": {
         "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GT_SURV,
+        "exit_params": _V0_EXIT_PARAMS_SV5,
         "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "GTSV",
-        "description": "GT+dd_peak60>0.3%청산 survival gate (shadow)",
+        "pipeline_key": "momentum", "route": "SV5",
+        "description": "SVE1+dd0.2% (엄격필터) (shadow)",
     },
-    "모멘텀GT_MH120": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GT_MH120,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "GTM1",
-        "description": "GT+120초SL비활성 hold thesis 검증 (shadow)",
-    },
-    # === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
-    "모멘텀GTSV_E1": {
-        "check_fn": _v0_check_momentum_rsi,
+    # ━━━ Track B: RESEARCH — 완전히 새로운 진입 구조 ━━━
+    "마이크로플로우": {
+        "check_fn": _v0_check_broad_bullish,
         "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE1",
-        "description": "GTSV+120s강제종료 exit검증 (shadow)",
+        "priority": 10, "enabled": False,
+        "pipeline_key": "micro_flow", "route": "MIC",
+        "ind_filters": [("tick_rate_30s", ">=", 0.5), ("tick_buy_30s", ">=", 0.60)],
+        "description": "양봉+tick급증+매수압도 [SVE1 exit] (shadow)",
     },
-    "모멘텀GTSV_E2": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E2,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE2",
-        "description": "GTSV+150s강제종료 exit검증 (shadow)",
+    "변동성압축": {
+        "check_fn": _v0_check_vol_squeeze,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "vol_squeeze", "route": "VOL",
+        "description": "ATR압축→VR급증+양봉 [GT exit] (shadow)",
     },
-    "모멘텀GTSV_E3": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E3,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE3",
-        "description": "GTSV+adaptive(120hold/peak/180max) exit검증 (shadow)",
+    "시간대모멘텀": {
+        "check_fn": _v0_check_time_momentum,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "time_momentum", "route": "TME",
+        "description": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 [SVE1 exit] (shadow)",
     },
 }
 
@@ -10825,14 +10583,13 @@ def _v4_shadow_report_lines():
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 전 시나리오 가상매매 지표 W/L:")
+        lines.append("📡 시나리오 성과 (Production + Research Top-3):")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
-        # Phase2: GT만 상세, 나머지 전부 1줄 요약
-        _DETAIL_ROUTES = {"GT"}  # GT만 풀 상세
-        _SUMMARY_ROUTES = {"G", "G2", "G4", "G6", "G7", "GR", "GT70", "GT68", "GT_SL07", "GT_SL15", "GT_300s", "HT", "B2", "L", "H", "B", "C"}  # 전부 1줄
-        _cluster_data = {}  # G-cluster 요약용 데이터 수집
-        _shadow_cand_data = {}  # 🧪 Shadow후보(B2/HT/GT70/GT68) 요약용 수집
+        # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
+        _PRODUCTION_ROUTES = {"SVE1"}
+        _ACTIVE_RESEARCH = {"GT", "B", "CG", "SV4", "SV5", "MIC", "VOL", "TME"}
+        _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
             if n < 1:
@@ -10841,7 +10598,6 @@ def _v4_shadow_report_lines():
             wr = wins / n * 100
             avg_pnl = s.get("total_pnl", 0) / n * 100
             coins = len(s.get("coins", []))
-            # 승률 기반 이모지
             if wr >= 55:
                 tag = "🟢"
             elif wr >= 45:
@@ -10850,33 +10606,23 @@ def _v4_shadow_report_lines():
                 tag = "🔴"
             route = s.get("route", "?")
             strat = s.get("strat", "?")
-            # MFE / MAE 평균
             avg_mfe = sum(s.get("mfes", [])) / max(len(s.get("mfes", [])), 1) * 100
             mae_cnt = s.get("mae_cnt", 0)
             avg_mae_str = ""
             if mae_cnt > 0:
                 avg_mae = s.get("mae_sum", 0) / mae_cnt * 100
                 avg_mae_str = f" MAE{avg_mae:+.2f}%"
-            lines.append(
-                f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
-                f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
-            )
-            # Phase2: G-cluster 데이터 수집 + 1줄 요약만
-            if route in {"GT", "G", "G2", "G4", "G6", "G7", "GR"}:
-                _cluster_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n}
-            # 🧪 Shadow후보 데이터 수집 (GT_SL07/SL15/300s 우선, 그다음 B2/HT/GT70/GT68)
-            if route in {"GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"}:
-                _cs_cand = s.get("pnl_curve_sum", {})
-                _cc_cand = s.get("pnl_curve_cnt", {})
-                _p180 = None
-                if "180" in _cs_cand and _cc_cand.get("180", 0) > 0:
-                    _p180 = _cs_cand["180"] / _cc_cand["180"] * 100
-                _p300 = None
-                if "300" in _cs_cand and _cc_cand.get("300", 0) > 0:
-                    _p300 = _cs_cand["300"] / _cc_cand["300"] * 100
-                _shadow_cand_data[route] = {"pnl": avg_pnl, "wr": wr, "n": n, "p180": _p180, "p300": _p300}
-            if route in _SUMMARY_ROUTES:
-                continue  # 1줄 요약(위)만 출력하고 상세(아래) 전부 스킵
+            # v19: 3-level routing
+            if route in _PRODUCTION_ROUTES:
+                lines.append(
+                    f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
+                    f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
+                )
+            elif route in _ACTIVE_RESEARCH:
+                _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae_str, tag, key, s))
+                continue  # top-3 선별 후 출력
+            else:
+                continue  # 비활성 old route — 텔레그램 출력 안 함
             # 청산 사유 분포 (상위 3개)
             reasons = s.get("exit_reasons", {})
             if reasons:
@@ -10938,8 +10684,8 @@ def _v4_shadow_report_lines():
                     bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
                     lines.append(f"    🏆 상위: {top_str}")
                     lines.append(f"    💀 하위: {bot_str}")
-            # 🔬 진입지표 승/패 비교 — Phase2: GT/GR만 mfe_peak_sec 표시 (나머지 생략)
-            _show_indicators = route in ("GT", "GR", "B2G", "HG", "CG", "CG_TA", "GT_S60", "CG_S60", "GT_S6S", "CG_S6S", "CG_D1", "CG_D2", "CG_D3", "CG_D5", "C3D1", "C3D2", "C3D3", "C3D5", "GTGA", "GTSV", "GTM1", "SVE1", "SVE2", "SVE3")
+            # v19: SVE1만 지표 W/L 표시
+            _show_indicators = route in _PRODUCTION_ROUTES
             if _show_indicators:
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
@@ -10967,84 +10713,36 @@ def _v4_shadow_report_lines():
                     for _d, ik, wv, wn, lv, ln in _scored[:8]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
-    # 📌 Phase2: G-cluster 요약 + GT 판정 상태
-    if _cluster_data:
-        _gc_parts = []
-        for _r in ["GT", "G7", "G6", "G4"]:
-            if _r in _cluster_data:
-                _d = _cluster_data[_r]
-                _gc_parts.append(f"{_r}({_d['pnl']:+.2f}%)")
-        if _gc_parts:
-            lines.append(f"📌 G-cluster: {' ≈ '.join(_gc_parts)}")
-        # GT 판정 상태
-        if "GT" in _cluster_data:
-            _gt = _cluster_data["GT"]
-            # 180s PnL 가져오기
-            _gt_180s = ""
-            for _k, _s in sorted_stats:
-                if _s.get("route") == "GT":
-                    _cs = _s.get("pnl_curve_sum", {})
-                    _cc = _s.get("pnl_curve_cnt", {})
-                    if "180" in _cs and _cc.get("180", 0) > 0:
-                        _gt_180s = f" | 180s {_cs['180']/_cc['180']*100:+.2f}%"
-                    break
-            lines.append(f"🎯 GT 판정: PnL {_gt['pnl']:+.2f}% | 승률 {_gt['wr']:.0f}% | n={_gt['n']}{_gt_180s}")
-        # GR 상태 (있으면)
-        if "GR" in _cluster_data:
-            _gr = _cluster_data["GR"]
-            lines.append(f"🎯 GR 상태: PnL {_gr['pnl']:+.2f}% | 승률 {_gr['wr']:.0f}% | n={_gr['n']} (실전 부적합)")
-    # 🧪 Shadow후보 (GT_SL07/SL15/300s 우선, B2/HT/GT70/GT68) 한줄 요약
-    if _shadow_cand_data:
-        lines.append("🧪 Shadow후보:")
-        for _r in ["GT_SL07", "GT_SL15", "GT_300s", "B2", "HT", "GT70", "GT68"]:
-            if _r in _shadow_cand_data:
-                _d = _shadow_cand_data[_r]
-                _p180_str = f" | 180s {_d['p180']:+.2f}%" if _d["p180"] is not None else ""
-                _p300_str = f" | 300s {_d['p300']:+.2f}%" if _d["p300"] is not None else ""
-                lines.append(f"  [{_r}] n={_d['n']} 승률{_d['wr']:.0f}% PnL{_d['pnl']:+.2f}%{_p180_str}{_p300_str}")
-    # v18e: 조기 탈출 분석 — 시점별 PnL 임계치에 따른 최종 결과
-    with _SHADOW_PERF_LOCK:
-        _early_exit_lines = []
-        for key, s in sorted_stats:
-            tr_list = s.get("trade_records", [])
-            _trades_with_curve = [t for t in tr_list if t.get("curve")]
-            if len(_trades_with_curve) < 20:
-                continue
-            route = s.get("route", "?")
-            # Phase2: GT만 조기탈출 상세 표시
-            if route not in ("GT", "GR"):
-                continue
-            _ea_parts = []
-            for check_sec in [60, 90, 120]:
-                sk = str(check_sec)
-                # 해당 시점에서 -0.1% 이하인 건 vs 아닌 건
-                bad = [t for t in _trades_with_curve if t["curve"].get(sk) is not None and t["curve"][sk] < -0.001]
-                good = [t for t in _trades_with_curve if t["curve"].get(sk) is not None and t["curve"][sk] >= -0.001]
-                if len(bad) >= 5 and len(good) >= 5:
-                    bad_avg = sum(t["pnl"] for t in bad) / len(bad) * 100
-                    good_avg = sum(t["pnl"] for t in good) / len(good) * 100
-                    _ea_parts.append(f"{check_sec}s미만({len(bad)}건)→{bad_avg:+.2f}% vs 이상({len(good)}건)→{good_avg:+.2f}%")
-            if _ea_parts:
-                _early_exit_lines.append(f"  [{route}] " + " | ".join(_ea_parts))
-        if _early_exit_lines:
-            lines.append("🔪 조기탈출 분석 (시점별 PnL<-0.1% 건의 최종결과):")
-            lines.extend(_early_exit_lines)
+    # v19: Research Top-3 출력 (PnL 기준 상위 3개만 텔레그램에 표시)
+    if _research_pnl:
+        _research_pnl.sort(key=lambda x: x[4], reverse=True)
+        lines.append("🧪 Research Top-3:")
+        for _r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae_str, _r_tag, _r_key, _r_s in _research_pnl[:3]:
+            lines.append(
+                f"  {_r_tag}{_r_route}:{_r_strat} {_r_n}건 승률{_r_wr:.0f}%"
+                f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}%{_r_mae_str}"
+            )
+        if len(_research_pnl) > 3:
+            _rest = len(_research_pnl) - 3
+            lines.append(f"  ({_rest}개 추가 시나리오는 파일 로그에서 확인)")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
     if active > 0:
         lines.append(f"  ⏳ 추적 중: {active}건")
-    # 🔬 W/L 자동 분석 — 필터 후보 임계치 추천
+    # v19: 필터 자동 분석 — SVE1만
     try:
         analysis = _shadow_auto_analyze_indicators()
         if analysis:
-            lines.append("🔍 필터 후보 자동 탐지:")
-            # Phase2: GT만 표시
-            _filter_routes = {"GT"}
+            _filter_routes = _PRODUCTION_ROUTES
+            _shown = False
             for akey, findings in analysis.items():
                 _aroute = akey.split(":")[0] if ":" in akey else akey
                 if _aroute not in _filter_routes:
                     continue
+                if not _shown:
+                    lines.append("🔍 필터 후보 자동 탐지:")
+                    _shown = True
                 lines.append(f"  [{akey}]")
                 for f in findings[:3]:
                     star = "★" if f["effect"] >= 1.5 else "☆"
@@ -11082,8 +10780,8 @@ def _v4_shadow_report_lines():
                 bavg = bs.get("total_pnl", 0) / bn * 100
                 broute = bs.get("route", "?")
                 bfilter = bs.get("filter", bkey)
-                # Phase2: G-variant 중복 제거 — GT만 표시 (G/G2/G4/G6/G7/GR 스킵)
-                if broute in ("G", "G2", "G4", "G6", "G7", "GR"):
+                # v19: 비활성 old route 스킵 — 현재 active 경로만 표시
+                if broute not in _PRODUCTION_ROUTES and broute not in _ACTIVE_RESEARCH:
                     continue
                 # 필터 효과 판정
                 if bwr <= 45:
@@ -11188,7 +10886,7 @@ def _v4_shadow_report_lines():
     return lines
 
 
-def _survival_analysis(routes=("CG", "GT"), min_n=10):
+def _survival_analysis(routes=("SVE1", "GT", "CG"), min_n=10):
     """dd_peak_60s 기반 survival quality 분석.
     A(dd<0.3%), B(0.3~0.5%), C(>0.5%) 그룹 분리 → PnL/feature d-score 산출.
     Returns dict: {route: {groups, d_scores, scoring_rules}} or empty."""
