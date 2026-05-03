@@ -1328,6 +1328,28 @@ def _pipeline_report(force=False):
     except Exception:
         pass
 
+    # 🧪 A군우회 상세 로그 (최근 10건)
+    if _ab_stats["total"] > 0:
+        try:
+            with open(_A_BYPASS_LOG, "r", encoding="utf-8") as _abf2:
+                _ab_all = list(csv.DictReader(_abf2))
+            _ab_recent = _ab_all[-10:]
+            lines.append("━━━━━━━━━━━━━━━━")
+            lines.append("🧪 <b>A군우회 로그 (최근)</b>")
+            for _abr in _ab_recent:
+                _pass_mark = "✅" if _abr.get("a_bypass_pass") == "1" else "❌"
+                _pnl_str = f" pnl={float(_abr['final_pnl'])*100:+.2f}%" if _abr.get("final_pnl") else ""
+                lines.append(
+                    f"  {_pass_mark} {_abr.get('market','?')[:8]} "
+                    f"A={_abr.get('a_score','?')}/3 "
+                    f"tr30={_abr.get('tick_rate_30s','-')} "
+                    f"atr={_abr.get('atr_pct','-')} "
+                    f"macd={_abr.get('macd_hist_5m_bps','-')}"
+                    f"{_pnl_str}"
+                )
+        except Exception:
+            pass
+
     msg = "\n".join(lines)
     print(msg)
     tg_send(msg)
