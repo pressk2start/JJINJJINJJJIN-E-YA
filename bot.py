@@ -929,14 +929,16 @@ def _pipeline_report(force=False):
     _succ = c["send_success"]
     _det = c["detect_called"]
 
-    # 🧪 A군우회 CSV 통계
-    _ab_stats = {"total": 0, "pass": 0, "entered": 0, "pnl": "N/A", "wr": "N/A"}
+    # 🧪 A군우회 CSV 통계 (비교 분석용)
+    _ab_stats = {"total": 0, "pass": 0, "entered": 0, "pnl": "N/A", "wr": "N/A",
+                 "fail_avg": {}, "pass_avg": {}}
     try:
         if os.path.exists(_A_BYPASS_LOG):
             with open(_A_BYPASS_LOG, "r", encoding="utf-8") as _abf:
                 _ab_rows = list(csv.DictReader(_abf))
             _ab_stats["total"] = len(_ab_rows)
             _ab_pass_rows = [r for r in _ab_rows if r.get("a_bypass_pass") == "1"]
+            _ab_fail_rows = [r for r in _ab_rows if r.get("a_bypass_pass") == "0"]
             _ab_stats["pass"] = len(_ab_pass_rows)
             _ab_done = [r for r in _ab_pass_rows if r.get("final_pnl")]
             _ab_stats["entered"] = len(_ab_done)
@@ -944,6 +946,12 @@ def _pipeline_report(force=False):
                 _ab_pnls = [float(r["final_pnl"]) for r in _ab_done]
                 _ab_stats["pnl"] = f"{sum(_ab_pnls)/len(_ab_pnls)*100:+.2f}%"
                 _ab_stats["wr"] = f"{sum(1 for p in _ab_pnls if p>0)/len(_ab_pnls)*100:.0f}%"
+            for _grp, _key in [(_ab_pass_rows, "pass_avg"), (_ab_fail_rows, "fail_avg")]:
+                if _grp:
+                    for _feat in ("tick_rate_30s", "atr_pct", "macd_hist_5m_bps"):
+                        _vals = [float(r[_feat]) for r in _grp if r.get(_feat)]
+                        if _vals:
+                            _ab_stats[_key][_feat] = sum(_vals) / len(_vals)
     except Exception:
         pass
 
@@ -1042,8 +1050,11 @@ def _pipeline_report(force=False):
         f"⛔ 연패중지: {c['suspend_block']} | A군우회: {c.get('suspend_a_bypass',0)}",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
-        f"🧪 A군로그: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
-        f" | 우회PnL:{_ab_stats['pnl']} 승률:{_ab_stats['wr']}",
+        f"🧪 A군우회: 후보{_ab_stats['total']} | 통과{_ab_stats['pass']} | 진입{_ab_stats['entered']}",
+        f"  우회PnL:{_ab_stats['pnl']} 승률:{_ab_stats['wr']}"
+        f" | 차이: tr30 {_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
+        f" atr {_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
+        f" macd {_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}",
         f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
         f"━━━━━━━━━━━━━━━━",
         f"📈 <b>퍼널 전환율</b>",
@@ -1327,28 +1338,6 @@ def _pipeline_report(force=False):
         _pipeline_gauge_csv_write()
     except Exception:
         pass
-
-    # 🧪 A군우회 상세 로그 (최근 10건)
-    if _ab_stats["total"] > 0:
-        try:
-            with open(_A_BYPASS_LOG, "r", encoding="utf-8") as _abf2:
-                _ab_all = list(csv.DictReader(_abf2))
-            _ab_recent = _ab_all[-10:]
-            lines.append("━━━━━━━━━━━━━━━━")
-            lines.append("🧪 <b>A군우회 로그 (최근)</b>")
-            for _abr in _ab_recent:
-                _pass_mark = "✅" if _abr.get("a_bypass_pass") == "1" else "❌"
-                _pnl_str = f" pnl={float(_abr['final_pnl'])*100:+.2f}%" if _abr.get("final_pnl") else ""
-                lines.append(
-                    f"  {_pass_mark} {_abr.get('market','?')[:8]} "
-                    f"A={_abr.get('a_score','?')}/3 "
-                    f"tr30={_abr.get('tick_rate_30s','-')} "
-                    f"atr={_abr.get('atr_pct','-')} "
-                    f"macd={_abr.get('macd_hist_5m_bps','-')}"
-                    f"{_pnl_str}"
-                )
-        except Exception:
-            pass
 
     msg = "\n".join(lines)
     print(msg)
