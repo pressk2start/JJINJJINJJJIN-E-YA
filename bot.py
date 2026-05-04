@@ -295,6 +295,62 @@ def _sve2_warmup_from_trade_records():
                 _sve2_update_rolling(inds)
 
 # =========================
+# 🧪 A군우회 전용 로그 (treatment vs control 비교용)
+# =========================
+_A_BYPASS_LOG = "/home/ubuntu/bot/logs/a_bypass_samples.csv"
+_A_BYPASS_FIELDS = [
+    "ts", "market", "signal_type",
+    "is_losing_stop", "a_bypass_pass", "a_score", "bypass_reason", "position_size_pct",
+    "tick_rate_10s", "tick_rate_30s", "tick_rate_60s",
+    "tick_buy_30s", "tick_krw_ps_10s", "tick_krw_ps_30s",
+    "atr_pct", "macd_hist_5m_bps", "entry_spread_pct",
+    "entry_vol_krw_m", "rsi_5m", "vr5_1m", "vr_15m",
+    "dd_peak_30s", "dd_peak_60s",
+    "mfe_30s", "mfe_60s", "mfe_peak_sec", "mae_60s",
+    "final_pnl", "exit_reason",
+]
+_A_BYPASS_PENDING = {}  # market → row (결과 대기 중)
+_A_BYPASS_LOCK = threading.Lock()
+
+def _eval_a_bypass(features):
+    checks = {
+        "tick_rate_30s": features.get("tick_rate_30s", 999) <= 2.39,
+        "atr_pct": features.get("atr_pct", 999) <= 0.96,
+        "macd_hist_5m_bps": features.get("macd_hist_5m_bps", 999) <= 54.1,
+    }
+    score = sum(checks.values())
+    if score == 3:
+        return {"pass": True, "score": score, "size_pct": 0.50, "reason": "A_BYPASS_3OF3", "checks": checks}
+    return {"pass": False, "score": score, "size_pct": 0.0, "reason": f"A_BYPASS_FAIL_{score}OF3", "checks": checks}
+
+def _append_a_bypass_sample(row):
+    os.makedirs(os.path.dirname(_A_BYPASS_LOG), exist_ok=True)
+    exists = os.path.exists(_A_BYPASS_LOG)
+    with open(_A_BYPASS_LOG, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_A_BYPASS_FIELDS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in _A_BYPASS_FIELDS})
+
+def _a_bypass_update_result(market, final_pnl, exit_reason,
+                            dd_peak_30s=None, dd_peak_60s=None,
+                            mfe_30s=None, mfe_60s=None, mfe_peak_sec=None, mae_60s=None):
+    with _A_BYPASS_LOCK:
+        row = _A_BYPASS_PENDING.pop(market, None)
+    if not row:
+        return
+    row["final_pnl"] = round(final_pnl, 6) if final_pnl is not None else ""
+    row["exit_reason"] = exit_reason or ""
+    row["dd_peak_30s"] = round(dd_peak_30s, 6) if dd_peak_30s is not None else ""
+    row["dd_peak_60s"] = round(dd_peak_60s, 6) if dd_peak_60s is not None else ""
+    row["mfe_30s"] = round(mfe_30s, 6) if mfe_30s is not None else ""
+    row["mfe_60s"] = round(mfe_60s, 6) if mfe_60s is not None else ""
+    row["mfe_peak_sec"] = int(mfe_peak_sec) if mfe_peak_sec is not None else ""
+    row["mae_60s"] = round(mae_60s, 6) if mae_60s is not None else ""
+    _append_a_bypass_sample(row)
+    print(f"[A_LOG] {market} 결과기록: pnl={row['final_pnl']} reason={exit_reason}")
+
+# =========================
 # ⭕ 동그라미 엔트리 V1 (Circle Entry - 눌림 재돌파 전용 엔진)
 # =========================
 # 패턴: Ignition → 1~6봉 첫 눌림 → 리클레임 → 재돌파
@@ -873,6 +929,32 @@ def _pipeline_report(force=False):
     _succ = c["send_success"]
     _det = c["detect_called"]
 
+    # 🧪 A군우회 CSV 통계 (비교 분석용)
+    _ab_stats = {"total": 0, "pass": 0, "entered": 0, "pnl": "N/A", "wr": "N/A",
+                 "fail_avg": {}, "pass_avg": {}}
+    try:
+        if os.path.exists(_A_BYPASS_LOG):
+            with open(_A_BYPASS_LOG, "r", encoding="utf-8") as _abf:
+                _ab_rows = list(csv.DictReader(_abf))
+            _ab_stats["total"] = len(_ab_rows)
+            _ab_pass_rows = [r for r in _ab_rows if r.get("a_bypass_pass") == "1"]
+            _ab_fail_rows = [r for r in _ab_rows if r.get("a_bypass_pass") == "0"]
+            _ab_stats["pass"] = len(_ab_pass_rows)
+            _ab_done = [r for r in _ab_pass_rows if r.get("final_pnl")]
+            _ab_stats["entered"] = len(_ab_done)
+            if _ab_done:
+                _ab_pnls = [float(r["final_pnl"]) for r in _ab_done]
+                _ab_stats["pnl"] = f"{sum(_ab_pnls)/len(_ab_pnls)*100:+.2f}%"
+                _ab_stats["wr"] = f"{sum(1 for p in _ab_pnls if p>0)/len(_ab_pnls)*100:.0f}%"
+            for _grp, _key in [(_ab_pass_rows, "pass_avg"), (_ab_fail_rows, "fail_avg")]:
+                if _grp:
+                    for _feat in ("tick_rate_30s", "atr_pct", "macd_hist_5m_bps"):
+                        _vals = [float(r[_feat]) for r in _grp if r.get(_feat)]
+                        if _vals:
+                            _ab_stats[_key][_feat] = sum(_vals) / len(_vals)
+    except Exception:
+        pass
+
     lines = [
         f"📊 <b>파이프라인 계측 (누적 {elapsed_min:.0f}분 | Δ{delta_min:.0f}분)</b>",
         f"━━━━━━━━━━━━━━━━",
@@ -968,6 +1050,11 @@ def _pipeline_report(force=False):
         f"⛔ 연패중지: {c['suspend_block']} | A군우회: {c.get('suspend_a_bypass',0)}",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
+        f"🧪 A군우회: 후보{_ab_stats['total']} | 통과{_ab_stats['pass']} | 진입{_ab_stats['entered']}",
+        f"  우회PnL:{_ab_stats['pnl']} 승률:{_ab_stats['wr']}"
+        f" | 차이: tr30 {_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
+        f" atr {_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
+        f" macd {_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}",
         f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
         f"━━━━━━━━━━━━━━━━",
         f"📈 <b>퍼널 전환율</b>",
@@ -3837,6 +3924,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "c1_cache_age": round(_entry_c1_cache_age, 1),
                 "tick_age": round(_entry_tick_age_sec, 1),
                 "c1_candle_age": round(_entry_c1_candle_age_sec, 1),
+                "a_bypass": pre.get("_suspend_a_penalty"),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -5652,6 +5740,23 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
         )
     except Exception as _ss_err:
         print(f"[SIGNAL_STATS_ERR] {market}: {_ss_err}")
+
+    # 🧪 A군우회 로그 결과 업데이트
+    try:
+        _pos_data_ab = pos_snapshot or {}
+        if _pos_data_ab.get("a_bypass"):
+            _mfe_snaps_ab = _pos_data_ab.get("mfe_snapshots", {})
+            _a_bypass_update_result(
+                market, pnl_pct, exit_reason,
+                dd_peak_30s=_pos_data_ab.get("dd_peak_30s"),
+                dd_peak_60s=_pos_data_ab.get("dd_peak_60s"),
+                mfe_30s=_mfe_snaps_ab.get(30),
+                mfe_60s=_mfe_snaps_ab.get(60),
+                mfe_peak_sec=_pos_data_ab.get("mfe_sec"),
+                mae_60s=_pos_data_ab.get("mae_60s"),
+            )
+    except Exception as _ab_err:
+        print(f"[A_BYPASS_RESULT_ERR] {market}: {_ab_err}")
 
     # 🔧 건수 기반 학습 트리거 (매수만 학습)
     if AUTO_LEARN_ENABLED:
@@ -16932,42 +17037,65 @@ def main():
                     _max_mode = _STRAT_MAX_MODE.get(_sg_key)
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
-                    # SVE1 A군 조건부 우회: 고정 임계값 기반 (Survival Analysis d-score TOP3)
-                    _bp_a_score = 0
+                    # SVE1 A군 조건부 우회 + 전수 로깅 (treatment vs control)
                     _bp_ticks = pre.get("ticks", [])
-                    _bp_tr30 = None
+                    _bp_features = {}
                     if _bp_ticks and len(_bp_ticks) >= 5:
+                        _bp_t10 = micro_tape_stats_from_ticks(_bp_ticks, 10)
                         _bp_t30 = micro_tape_stats_from_ticks(_bp_ticks, 30)
-                        _bp_tr30 = _bp_t30.get("rate")
-                        if _bp_tr30 is not None and _bp_tr30 <= 2.43:
-                            _bp_a_score += 1
-                    _bp_atr = None
+                        _bp_t60 = micro_tape_stats_from_ticks(_bp_ticks, 60)
+                        _bp_features["tick_rate_10s"] = round(_bp_t10.get("rate", 0), 2)
+                        _bp_features["tick_rate_30s"] = round(_bp_t30.get("rate", 0), 2)
+                        _bp_features["tick_rate_60s"] = round(_bp_t60.get("rate", 0), 2)
+                        _bp_features["tick_buy_30s"] = round(_bp_t30.get("buy_ratio", 0), 3)
+                        _bp_features["tick_krw_ps_10s"] = round(_bp_t10.get("krw_per_sec", 0) / 1_000_000, 2)
+                        _bp_features["tick_krw_ps_30s"] = round(_bp_t30.get("krw_per_sec", 0) / 1_000_000, 2)
                     _bp_c1 = _get_c1_cached(m, 20)
                     if _bp_c1 and len(_bp_c1) >= 7:
-                        _bp_atr = round(_v4_atr_pct(_bp_c1, 14), 4)
-                        if _bp_atr <= 0.98:
-                            _bp_a_score += 1
-                    _bp_macd = None
+                        _bp_features["atr_pct"] = round(_v4_atr_pct(_bp_c1, 14), 4)
+                        _bp_cur = _bp_c1[-1]
+                        _bp_hi = _bp_cur.get("high_price", 0)
+                        _bp_lo = _bp_cur.get("low_price", 0)
+                        _bp_cl = _bp_cur.get("trade_price", 1)
+                        if _bp_cl > 0 and _bp_hi > _bp_lo:
+                            _bp_features["entry_spread_pct"] = round((_bp_hi - _bp_lo) / _bp_cl * 100, 4)
+                        _bp_vol_krw = _bp_cur.get("candle_acc_trade_price", 0)
+                        _bp_features["entry_vol_krw_m"] = round(_bp_vol_krw / 1_000_000, 2)
+                        _bp_features["vr5_1m"] = round(_v4_volume_ratio_5(_bp_c1), 2) if len(_bp_c1) >= 6 else None
                     _bp_c5 = _get_c5_cached(m, 50)
                     if _bp_c5 and len(_bp_c5) >= 35:
                         _bp_cls5 = [c["trade_price"] for c in _bp_c5]
                         _, _, _bp_hist = _v4_macd(_bp_cls5)
                         if _bp_hist is not None and _bp_cls5[-1] > 0:
-                            _bp_macd = round(_bp_hist / _bp_cls5[-1] * 10000, 2)
-                            if _bp_macd <= 54.7:
-                                _bp_a_score += 1
-                    if _bp_a_score >= 3:
-                        pre["_suspend_a_penalty"] = 0.5
-                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 3/3 → 연패중지 우회 (50%) "
-                              f"tr30={_bp_tr30:.1f} atr={_bp_atr:.3f} macd={_bp_macd:.1f}")
+                            _bp_features["macd_hist_5m_bps"] = round(_bp_hist / _bp_cls5[-1] * 10000, 2)
+                        _bp_rsi5 = _v4_rsi_from_candles(_bp_c5, 14)
+                        if _bp_rsi5 is not None:
+                            _bp_features["rsi_5m"] = round(_bp_rsi5, 2)
+                    _bp_c15 = _get_c15_cached(m, 30)
+                    if _bp_c15 and len(_bp_c15) >= 6:
+                        _bp_features["vr_15m"] = round(_v4_volume_ratio_5(_bp_c15), 2)
+                    _bp_eval = _eval_a_bypass(_bp_features)
+                    _bp_row = {
+                        "ts": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+                        "market": m,
+                        "signal_type": pre.get("signal_tag", ""),
+                        "is_losing_stop": 1,
+                        "a_bypass_pass": int(_bp_eval["pass"]),
+                        "a_score": _bp_eval["score"],
+                        "bypass_reason": _bp_eval["reason"],
+                        "position_size_pct": _bp_eval["size_pct"],
+                        **_bp_features,
+                    }
+                    if _bp_eval["pass"]:
+                        pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
+                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 {_bp_eval['score']}/3 → 연패중지 우회 ({_bp_eval['size_pct']:.0%}) "
+                              f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
                         _pipeline_inc("suspend_a_bypass")
-                    elif _bp_a_score == 2:
-                        pre["_suspend_a_penalty"] = 0.3
-                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 2/3 → 연패중지 우회 (30%) "
-                              f"tr30={_bp_tr30} atr={_bp_atr} macd={_bp_macd}")
-                        _pipeline_inc("suspend_a_bypass")
+                        with _A_BYPASS_LOCK:
+                            _A_BYPASS_PENDING[m] = _bp_row
                     else:
-                        cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_a_score}/3")
+                        _append_a_bypass_sample(_bp_row)
+                        cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/3")
                         _pipeline_inc("suspend_block")
                         continue
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
