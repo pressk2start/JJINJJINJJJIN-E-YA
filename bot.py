@@ -299,7 +299,7 @@ def _sve2_warmup_from_trade_records():
 # =========================
 _A_BYPASS_LOG = "/home/ubuntu/bot/logs/a_bypass_samples.csv"
 _A_BYPASS_FIELDS = [
-    "ts", "market", "signal_type",
+    "ts", "market", "signal_type", "entry_type",
     "is_losing_stop", "a_bypass_pass", "a_score", "bypass_reason", "position_size_pct",
     "tick_rate_10s", "tick_rate_30s", "tick_rate_60s",
     "tick_buy_30s", "tick_krw_ps_10s", "tick_krw_ps_30s",
@@ -971,7 +971,25 @@ def _pipeline_report(force=False):
     _succ = c["send_success"]
     _det = c["detect_called"]
 
-    # 🧪 A군우회 CSV 통계 (비교 분석용)
+    # 🧪 A군 vs 일반 성과 비교 (TRADE_HISTORY 기반)
+    _today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    _today_trades = [t for t in TRADE_HISTORY if t.get("time", 0) >= _today_start]
+    _normal_trades = [t for t in _today_trades if t.get("entry_type", "NORMAL") == "NORMAL"]
+    _bypass_trades = [t for t in _today_trades if t.get("entry_type", "").startswith("BYPASS_")]
+    def _grp_stats(trades):
+        if not trades:
+            return {"n": 0, "wr": "–", "pnl": "–"}
+        n = len(trades)
+        wins = sum(1 for t in trades if t.get("win"))
+        avg_pnl = sum(t.get("pnl", 0) for t in trades) / n
+        return {"n": n, "wr": f"{wins/n*100:.0f}%", "pnl": f"{avg_pnl*100:+.2f}%"}
+    _st_normal = _grp_stats(_normal_trades)
+    _st_bypass = _grp_stats(_bypass_trades)
+    # A군 전용 guard 현황
+    _a_cnt = _a_daily_trade_count()
+    _a_pnl = _a_daily_pnl()
+
+    # CSV 통계 (후보/통과/차이 분석)
     _ab_stats = {"total": 0, "pass": 0, "entered": 0, "pnl": "N/A", "wr": "N/A",
                  "fail_avg": {}, "pass_avg": {}}
     try:
@@ -1093,14 +1111,16 @@ def _pipeline_report(force=False):
         f" c_kill:{c.get('block_c_killswitch',0)} c_rate:{c.get('block_c_rate',0)}"
         f" 연패:{c.get('block_loss_streak',0)} | A군우회:{c.get('suspend_a_bypass',0)}",
         f"📊 일일가드: 거래{_sve1_daily_trade_count()}/{SVE1_DAILY_MAX_TRADES}"
-        f" PnL:{_sve1_daily_pnl()*100:.2f}%/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%",
+        f" PnL:{_sve1_daily_pnl()*100:.2f}%/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%"
+        f" | A군:{_a_cnt}/{A_DAILY_MAX_TRADES} PnL:{_a_pnl*100:.2f}%/{A_DAILY_MAX_LOSS_PCT*100:.1f}%",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
-        f"🧪 A군우회: 후보{_ab_stats['total']} | 통과{_ab_stats['pass']} | 진입{_ab_stats['entered']}",
-        f"  우회PnL:{_ab_stats['pnl']} 승률:{_ab_stats['wr']}"
+        f"🧪 A군: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
         f" | 차이: tr30 {_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
         f" atr {_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
         f" macd {_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}",
+        f"📈 성과비교(오늘): 일반 n={_st_normal['n']} wr={_st_normal['wr']} pnl={_st_normal['pnl']}"
+        f" | A군 n={_st_bypass['n']} wr={_st_bypass['wr']} pnl={_st_bypass['pnl']}",
         f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
         f"━━━━━━━━━━━━━━━━",
         f"📈 <b>퍼널 전환율</b>",
@@ -1791,6 +1811,10 @@ _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음
 SVE1_DAILY_MAX_TRADES = 15      # 하루 최대 거래 횟수 (10→15: 초반 잠김 완화, 전면 해제는 위험)
 SVE1_DAILY_MAX_LOSS_PCT = -0.02 # 하루 누적 PnL 하한 (-2% 유지)
 
+# A군 전용 일일 가드 — 백도어 방지
+A_DAILY_MAX_TRADES = 5          # A군 하루 최대 5건
+A_DAILY_MAX_LOSS_PCT = -0.01    # A군 하루 누적 PnL 하한 (-1%)
+
 def _sve1_daily_trade_count():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
     return sum(1 for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
@@ -1798,6 +1822,25 @@ def _sve1_daily_trade_count():
 def _sve1_daily_pnl():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
     return sum(t.get("pnl", 0) for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
+
+def _a_daily_trade_count():
+    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    return sum(1 for t in TRADE_HISTORY
+               if t.get("time", 0) >= today_start and t.get("entry_type", "").startswith("BYPASS_"))
+
+def _a_daily_pnl():
+    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    return sum(t.get("pnl", 0) for t in TRADE_HISTORY
+               if t.get("time", 0) >= today_start and t.get("entry_type", "").startswith("BYPASS_"))
+
+def _a_daily_guard_ok():
+    cnt = _a_daily_trade_count()
+    if cnt >= A_DAILY_MAX_TRADES:
+        return False, f"A군 일일 {cnt}/{A_DAILY_MAX_TRADES}건 도달"
+    pnl = _a_daily_pnl()
+    if pnl <= A_DAILY_MAX_LOSS_PCT:
+        return False, f"A군 일일 PnL {pnl*100:.2f}% ≤ {A_DAILY_MAX_LOSS_PCT*100:.1f}%"
+    return True, ""
 
 def sve1_daily_guard_ok():
     cnt = _sve1_daily_trade_count()
@@ -1809,15 +1852,8 @@ def sve1_daily_guard_ok():
     return True, ""
 
 
-def record_trade(market: str, pnl_pct: float, signal_type: str = "기본"):
-    """
-    거래 결과 기록
-    🔧 FIX: 소수 단위로 통일 (예: +0.023 = +2.3%)
-    - pnl_pct: 소수 단위 수익률 (예: +0.023, -0.015)
-    - signal_type: 진입 신호 타입 (점화/강돌파/EMA↑/고점↑/거래량↑/기본/리테스트/동그라미/박스)
-    - update_trade_result()와 동일한 단위 사용
-    🔧 FIX: streak도 여기서 일원화 (update_trade_result 누락/중복 스킵 영향 제거)
-    """
+def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry_type: str = "NORMAL"):
+    """거래 결과 기록. entry_type: NORMAL / BYPASS_DAILY_A / BYPASS_LOSS_A"""
     global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL, _ENTRY_MAX_MODE
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
     # 소수점 비율(0.02 = 2%)이 정상 범위, 10 이상이면 확실히 % 단위
@@ -1835,7 +1871,8 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본"):
         "pnl": pnl_pct,
         "win": is_win,
         "time": time.time(),
-        "signal": signal_type,  # 🔧 수익개선: 전략별 승률 추적용
+        "signal": signal_type,
+        "entry_type": entry_type,
     })
 
     # 🔧 수익개선: 전략별 승률 로깅 (어떤 전략이 돈을 까먹는지 파악)
@@ -3971,6 +4008,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "tick_age": round(_entry_tick_age_sec, 1),
                 "c1_candle_age": round(_entry_c1_candle_age_sec, 1),
                 "a_bypass": pre.get("_suspend_a_penalty"),
+                "is_losing_stop": pre.get("_is_losing_stop", False),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -4680,7 +4718,9 @@ def close_auto_position(m, reason=""):
             # 🔧 FIX: net_ret_pct 사용 — gross/net 혼용 제거 (지연청산/DCB와 통일)
             # (방어코드가 record_trade 내부에도 있지만, 호출부에서도 정확히 넣기)
             try:
-                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"))
+                _et = "BYPASS_DAILY_A" if pos.get("a_bypass") and not pos.get("is_losing_stop") else (
+                    "BYPASS_LOSS_A" if pos.get("a_bypass") else "NORMAL")
+                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
@@ -5115,8 +5155,9 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 else:
                     hold_sec = 0
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
-                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"))
-                # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+                _et2 = "BYPASS_DAILY_A" if backup_pos_snapshot.get("a_bypass") and not backup_pos_snapshot.get("is_losing_stop") else (
+                    "BYPASS_LOSS_A" if backup_pos_snapshot.get("a_bypass") else "NORMAL")
+                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"), entry_type=_et2)
                 _ps_mfe = backup_pos_snapshot.get("mfe_pct", 0.0) if backup_pos_snapshot else 0.0
                 _ps_mae = backup_pos_snapshot.get("mae_pct", 0.0) if backup_pos_snapshot else 0.0
                 update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
@@ -17084,10 +17125,12 @@ def main():
                     _remain = int(_suspend_ts - time.time())
                     _bp_features = _collect_a_bypass_features(pre, m)
                     _bp_eval = _eval_a_bypass(_bp_features)
+                    _bp_entry_type = "BYPASS_LOSS_A" if _bp_eval["pass"] else "BLOCKED_LOSS"
                     _bp_row = {
                         "ts": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
                         "market": m,
                         "signal_type": pre.get("signal_tag", ""),
+                        "entry_type": _bp_entry_type,
                         "is_losing_stop": 1,
                         "a_bypass_pass": int(_bp_eval["pass"]),
                         "a_score": _bp_eval["score"],
@@ -17096,7 +17139,18 @@ def main():
                         **_bp_features,
                     }
                     if _bp_eval["pass"]:
+                        _a_dg_ok, _a_dg_reason = _a_daily_guard_ok()
+                        if not _a_dg_ok:
+                            _bp_row["entry_type"] = "BLOCKED_A_CAP"
+                            _bp_row["bypass_reason"] = f"A_CAP_HIT({_a_dg_reason})"
+                            _bp_row["a_bypass_pass"] = 0
+                            _append_a_bypass_sample(_bp_row)
+                            cut("A_DAY_CAP", f"{m} A군 통과했으나 {_a_dg_reason}")
+                            _pipeline_inc("suspend_block")
+                            _pipeline_inc("block_daily_guard")
+                            continue
                         pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
+                        pre["_is_losing_stop"] = True
                         _dg_note = " +daily우회" if _daily_blocked else ""
                         print(f"[A_BYPASS] {m} [{_sg_key}] A군 {_bp_eval['score']}/3 → 연패우회 ({_bp_eval['size_pct']:.0%}){_dg_note} "
                               f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
@@ -17121,6 +17175,7 @@ def main():
                         "ts": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
                         "market": m,
                         "signal_type": pre.get("signal_tag", ""),
+                        "entry_type": "BYPASS_DAILY_A" if _bp_eval["pass"] else "BLOCKED_DAILY",
                         "is_losing_stop": 0,
                         "a_bypass_pass": int(_bp_eval["pass"]),
                         "a_score": _bp_eval["score"],
@@ -17129,7 +17184,18 @@ def main():
                         **_bp_features,
                     }
                     if _bp_eval["pass"]:
+                        _a_dg_ok, _a_dg_reason = _a_daily_guard_ok()
+                        if not _a_dg_ok:
+                            _bp_row["entry_type"] = "BLOCKED_A_CAP"
+                            _bp_row["bypass_reason"] = f"A_CAP_HIT({_a_dg_reason})"
+                            _bp_row["a_bypass_pass"] = 0
+                            _append_a_bypass_sample(_bp_row)
+                            cut("A_DAY_CAP", f"{m} A군 통과했으나 {_a_dg_reason}")
+                            _pipeline_inc("suspend_block")
+                            _pipeline_inc("block_daily_guard")
+                            continue
                         pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
+                        pre["_is_losing_stop"] = False
                         print(f"[A_BYPASS_DG] {m} A군 {_bp_eval['score']}/3 → daily_guard 우회 ({_bp_eval['size_pct']:.0%}) "
                               f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
                         _pipeline_inc("suspend_a_bypass")
