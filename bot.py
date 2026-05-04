@@ -1750,8 +1750,8 @@ _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
 
 # SVE1 일일 리스크 가드
-SVE1_DAILY_MAX_TRADES = 10      # 하루 최대 거래 횟수
-SVE1_DAILY_MAX_LOSS_PCT = -0.02 # 하루 누적 PnL 하한 (-2%)
+SVE1_DAILY_MAX_TRADES = 25      # 하루 최대 거래 횟수 (10→25: 정상 운영 가능하게)
+SVE1_DAILY_MAX_LOSS_PCT = -0.03 # 하루 누적 PnL 하한 (-2%→-3%: 10건 미만에서 잠기는 현상 완화)
 
 def _sve1_daily_trade_count():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
