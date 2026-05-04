@@ -473,7 +473,11 @@ _PIPELINE_COUNTERS = {
     "position_block": 0,       # 포지션/recent_alerts 탈락
     "postcheck_block": 0,      # postcheck 탈락
     "lock_block": 0,           # 락 획득 실패
-    "suspend_block": 0,        # 연패 중지
+    "suspend_block": 0,        # 연패 중지 (합계)
+    "block_daily_guard": 0,    # 일일 리스크 가드
+    "block_c_killswitch": 0,   # C 킬스위치
+    "block_c_rate": 0,         # C 속도제한
+    "block_loss_streak": 0,    # 실제 연패중지
     "send_attempt": 0,         # 최종 진입 시도 수
     "send_success": 0,         # 진입 성공 수
 }
@@ -1047,7 +1051,9 @@ def _pipeline_report(force=False):
         f"━━━━━━━━━━━━━━━━",
         f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
         f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
-        f"⛔ 연패중지: {c['suspend_block']} | A군우회: {c.get('suspend_a_bypass',0)}",
+        f"⛔ 차단{c['suspend_block']}: daily:{c.get('block_daily_guard',0)}"
+        f" c_kill:{c.get('block_c_killswitch',0)} c_rate:{c.get('block_c_rate',0)}"
+        f" 연패:{c.get('block_loss_streak',0)} | A군우회:{c.get('suspend_a_bypass',0)}",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
         f"🧪 A군우회: 후보{_ab_stats['total']} | 통과{_ab_stats['pass']} | 진입{_ab_stats['entered']}",
@@ -17012,12 +17018,14 @@ def main():
                     if _c_killswitch_check():
                         cut("C_KILLSWITCH", f"{m} C 킬스위치 활성 → 진입 차단")
                         _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_c_killswitch")
                         with _POSITION_LOCK:
                             recent_alerts.pop(m, None)
                         continue
                     if not _c_rate_limit_ok():
                         cut("C_RATE_LIMIT", f"{m} C 10분당 2건 초과 → 진입 차단")
                         _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_c_rate")
                         with _POSITION_LOCK:
                             recent_alerts.pop(m, None)
                         continue
@@ -17027,6 +17035,7 @@ def main():
                 if not _daily_ok:
                     cut("DAILY_GUARD", f"{m} {_daily_reason}")
                     _pipeline_inc("suspend_block")
+                    _pipeline_inc("block_daily_guard")
                     continue
 
                 # 🔧 전략별 연패 게이트 — 해당 전략만 차단 (C 연패가 GT 차단하지 않음)
@@ -17097,6 +17106,7 @@ def main():
                         _append_a_bypass_sample(_bp_row)
                         cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/3")
                         _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_loss_streak")
                         continue
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
