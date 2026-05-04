@@ -1054,6 +1054,8 @@ def _pipeline_report(force=False):
         f"⛔ 차단{c['suspend_block']}: daily:{c.get('block_daily_guard',0)}"
         f" c_kill:{c.get('block_c_killswitch',0)} c_rate:{c.get('block_c_rate',0)}"
         f" 연패:{c.get('block_loss_streak',0)} | A군우회:{c.get('suspend_a_bypass',0)}",
+        f"📊 일일가드: 거래{_sve1_daily_trade_count()}/{SVE1_DAILY_MAX_TRADES}"
+        f" PnL:{_sve1_daily_pnl()*100:.2f}%/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%",
         f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
         f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
         f"🧪 A군우회: 후보{_ab_stats['total']} | 통과{_ab_stats['pass']} | 진입{_ab_stats['entered']}",
@@ -17031,12 +17033,9 @@ def main():
                         continue
 
                 # SVE1 일일 리스크 가드 (일일 거래 횟수 + 일일 PnL 하한)
+                # A-bypass가 우회할 수 있으므로 즉시 차단하지 않고 플래그 설정
                 _daily_ok, _daily_reason = sve1_daily_guard_ok()
-                if not _daily_ok:
-                    cut("DAILY_GUARD", f"{m} {_daily_reason}")
-                    _pipeline_inc("suspend_block")
-                    _pipeline_inc("block_daily_guard")
-                    continue
+                _daily_blocked = not _daily_ok
 
                 # 🔧 전략별 연패 게이트 — 해당 전략만 차단 (C 연패가 GT 차단하지 않음)
                 _cur_strat_group = pre.get("v4_logic_group", "?")
@@ -17097,17 +17096,28 @@ def main():
                     }
                     if _bp_eval["pass"]:
                         pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
-                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 {_bp_eval['score']}/3 → 연패중지 우회 ({_bp_eval['size_pct']:.0%}) "
+                        _dg_note = " +daily_guard우회" if _daily_blocked else ""
+                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 {_bp_eval['score']}/3 → 연패중지 우회 ({_bp_eval['size_pct']:.0%}){_dg_note} "
                               f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
                         _pipeline_inc("suspend_a_bypass")
                         with _A_BYPASS_LOCK:
                             _A_BYPASS_PENDING[m] = _bp_row
                     else:
                         _append_a_bypass_sample(_bp_row)
-                        cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/3")
-                        _pipeline_inc("suspend_block")
-                        _pipeline_inc("block_loss_streak")
+                        if _daily_blocked:
+                            cut("DAILY_GUARD", f"{m} {_daily_reason} (연패중+A불통과)")
+                            _pipeline_inc("suspend_block")
+                            _pipeline_inc("block_daily_guard")
+                        else:
+                            cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/3")
+                            _pipeline_inc("suspend_block")
+                            _pipeline_inc("block_loss_streak")
                         continue
+                elif _daily_blocked:
+                    cut("DAILY_GUARD", f"{m} {_daily_reason}")
+                    _pipeline_inc("suspend_block")
+                    _pipeline_inc("block_daily_guard")
+                    continue
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[LOSE_GATE] {m} [{_sg_key}] 연패 모드제한 → half 강제")
