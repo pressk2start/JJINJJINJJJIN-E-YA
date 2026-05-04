@@ -314,14 +314,52 @@ _A_BYPASS_LOCK = threading.Lock()
 
 def _eval_a_bypass(features):
     checks = {
-        "tick_rate_30s": features.get("tick_rate_30s", 999) <= 2.39,
-        "atr_pct": features.get("atr_pct", 999) <= 0.96,
-        "macd_hist_5m_bps": features.get("macd_hist_5m_bps", 999) <= 54.1,
+        "tick_rate_30s": features.get("tick_rate_30s", 999) <= 2.43,
+        "atr_pct": features.get("atr_pct", 999) <= 0.98,
+        "macd_hist_5m_bps": features.get("macd_hist_5m_bps", 999) <= 54.7,
     }
     score = sum(checks.values())
     if score == 3:
         return {"pass": True, "score": score, "size_pct": 0.50, "reason": "A_BYPASS_3OF3", "checks": checks}
     return {"pass": False, "score": score, "size_pct": 0.0, "reason": f"A_BYPASS_FAIL_{score}OF3", "checks": checks}
+
+def _collect_a_bypass_features(pre, m):
+    features = {}
+    ticks = pre.get("ticks", [])
+    if ticks and len(ticks) >= 5:
+        t10 = micro_tape_stats_from_ticks(ticks, 10)
+        t30 = micro_tape_stats_from_ticks(ticks, 30)
+        t60 = micro_tape_stats_from_ticks(ticks, 60)
+        features["tick_rate_10s"] = round(t10.get("rate", 0), 2)
+        features["tick_rate_30s"] = round(t30.get("rate", 0), 2)
+        features["tick_rate_60s"] = round(t60.get("rate", 0), 2)
+        features["tick_buy_30s"] = round(t30.get("buy_ratio", 0), 3)
+        features["tick_krw_ps_10s"] = round(t10.get("krw_per_sec", 0) / 1_000_000, 2)
+        features["tick_krw_ps_30s"] = round(t30.get("krw_per_sec", 0) / 1_000_000, 2)
+    c1 = _get_c1_cached(m, 20)
+    if c1 and len(c1) >= 7:
+        features["atr_pct"] = round(_v4_atr_pct(c1, 14), 4)
+        cur = c1[-1]
+        hi = cur.get("high_price", 0)
+        lo = cur.get("low_price", 0)
+        cl = cur.get("trade_price", 1)
+        if cl > 0 and hi > lo:
+            features["entry_spread_pct"] = round((hi - lo) / cl * 100, 4)
+        features["entry_vol_krw_m"] = round(cur.get("candle_acc_trade_price", 0) / 1_000_000, 2)
+        features["vr5_1m"] = round(_v4_volume_ratio_5(c1), 2) if len(c1) >= 6 else None
+    c5 = _get_c5_cached(m, 50)
+    if c5 and len(c5) >= 35:
+        cls5 = [c["trade_price"] for c in c5]
+        _, _, hist = _v4_macd(cls5)
+        if hist is not None and cls5[-1] > 0:
+            features["macd_hist_5m_bps"] = round(hist / cls5[-1] * 10000, 2)
+        rsi5 = _v4_rsi_from_candles(c5, 14)
+        if rsi5 is not None:
+            features["rsi_5m"] = round(rsi5, 2)
+    c15 = _get_c15_cached(m, 30)
+    if c15 and len(c15) >= 6:
+        features["vr_15m"] = round(_v4_volume_ratio_5(c15), 2)
+    return features
 
 def _append_a_bypass_sample(row):
     os.makedirs(os.path.dirname(_A_BYPASS_LOG), exist_ok=True)
@@ -1750,8 +1788,8 @@ _ENTRY_SUSPEND_UNTIL = 0.0     # 연패 시 전체 진입 중지 타임스탬프
 _ENTRY_MAX_MODE = None         # 연패 시 entry_mode 상한 (None=제한없음, "half"=half만 허용)
 
 # SVE1 일일 리스크 가드
-SVE1_DAILY_MAX_TRADES = 25      # 하루 최대 거래 횟수 (10→25: 정상 운영 가능하게)
-SVE1_DAILY_MAX_LOSS_PCT = -0.03 # 하루 누적 PnL 하한 (-2%→-3%: 10건 미만에서 잠기는 현상 완화)
+SVE1_DAILY_MAX_TRADES = 15      # 하루 최대 거래 횟수 (10→15: 초반 잠김 완화, 전면 해제는 위험)
+SVE1_DAILY_MAX_LOSS_PCT = -0.02 # 하루 누적 PnL 하한 (-2% 유지)
 
 def _sve1_daily_trade_count():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
@@ -17032,8 +17070,7 @@ def main():
                             recent_alerts.pop(m, None)
                         continue
 
-                # SVE1 일일 리스크 가드 (일일 거래 횟수 + 일일 PnL 하한)
-                # A-bypass가 우회할 수 있으므로 즉시 차단하지 않고 플래그 설정
+                # SVE1 일일 리스크 가드 — A군은 우회 허용
                 _daily_ok, _daily_reason = sve1_daily_guard_ok()
                 _daily_blocked = not _daily_ok
 
@@ -17045,43 +17082,7 @@ def main():
                     _max_mode = _STRAT_MAX_MODE.get(_sg_key)
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
-                    # SVE1 A군 조건부 우회 + 전수 로깅 (treatment vs control)
-                    _bp_ticks = pre.get("ticks", [])
-                    _bp_features = {}
-                    if _bp_ticks and len(_bp_ticks) >= 5:
-                        _bp_t10 = micro_tape_stats_from_ticks(_bp_ticks, 10)
-                        _bp_t30 = micro_tape_stats_from_ticks(_bp_ticks, 30)
-                        _bp_t60 = micro_tape_stats_from_ticks(_bp_ticks, 60)
-                        _bp_features["tick_rate_10s"] = round(_bp_t10.get("rate", 0), 2)
-                        _bp_features["tick_rate_30s"] = round(_bp_t30.get("rate", 0), 2)
-                        _bp_features["tick_rate_60s"] = round(_bp_t60.get("rate", 0), 2)
-                        _bp_features["tick_buy_30s"] = round(_bp_t30.get("buy_ratio", 0), 3)
-                        _bp_features["tick_krw_ps_10s"] = round(_bp_t10.get("krw_per_sec", 0) / 1_000_000, 2)
-                        _bp_features["tick_krw_ps_30s"] = round(_bp_t30.get("krw_per_sec", 0) / 1_000_000, 2)
-                    _bp_c1 = _get_c1_cached(m, 20)
-                    if _bp_c1 and len(_bp_c1) >= 7:
-                        _bp_features["atr_pct"] = round(_v4_atr_pct(_bp_c1, 14), 4)
-                        _bp_cur = _bp_c1[-1]
-                        _bp_hi = _bp_cur.get("high_price", 0)
-                        _bp_lo = _bp_cur.get("low_price", 0)
-                        _bp_cl = _bp_cur.get("trade_price", 1)
-                        if _bp_cl > 0 and _bp_hi > _bp_lo:
-                            _bp_features["entry_spread_pct"] = round((_bp_hi - _bp_lo) / _bp_cl * 100, 4)
-                        _bp_vol_krw = _bp_cur.get("candle_acc_trade_price", 0)
-                        _bp_features["entry_vol_krw_m"] = round(_bp_vol_krw / 1_000_000, 2)
-                        _bp_features["vr5_1m"] = round(_v4_volume_ratio_5(_bp_c1), 2) if len(_bp_c1) >= 6 else None
-                    _bp_c5 = _get_c5_cached(m, 50)
-                    if _bp_c5 and len(_bp_c5) >= 35:
-                        _bp_cls5 = [c["trade_price"] for c in _bp_c5]
-                        _, _, _bp_hist = _v4_macd(_bp_cls5)
-                        if _bp_hist is not None and _bp_cls5[-1] > 0:
-                            _bp_features["macd_hist_5m_bps"] = round(_bp_hist / _bp_cls5[-1] * 10000, 2)
-                        _bp_rsi5 = _v4_rsi_from_candles(_bp_c5, 14)
-                        if _bp_rsi5 is not None:
-                            _bp_features["rsi_5m"] = round(_bp_rsi5, 2)
-                    _bp_c15 = _get_c15_cached(m, 30)
-                    if _bp_c15 and len(_bp_c15) >= 6:
-                        _bp_features["vr_15m"] = round(_v4_volume_ratio_5(_bp_c15), 2)
+                    _bp_features = _collect_a_bypass_features(pre, m)
                     _bp_eval = _eval_a_bypass(_bp_features)
                     _bp_row = {
                         "ts": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
@@ -17096,8 +17097,8 @@ def main():
                     }
                     if _bp_eval["pass"]:
                         pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
-                        _dg_note = " +daily_guard우회" if _daily_blocked else ""
-                        print(f"[A_BYPASS] {m} [{_sg_key}] A군조건 {_bp_eval['score']}/3 → 연패중지 우회 ({_bp_eval['size_pct']:.0%}){_dg_note} "
+                        _dg_note = " +daily우회" if _daily_blocked else ""
+                        print(f"[A_BYPASS] {m} [{_sg_key}] A군 {_bp_eval['score']}/3 → 연패우회 ({_bp_eval['size_pct']:.0%}){_dg_note} "
                               f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
                         _pipeline_inc("suspend_a_bypass")
                         with _A_BYPASS_LOCK:
@@ -17114,10 +17115,32 @@ def main():
                             _pipeline_inc("block_loss_streak")
                         continue
                 elif _daily_blocked:
-                    cut("DAILY_GUARD", f"{m} {_daily_reason}")
-                    _pipeline_inc("suspend_block")
-                    _pipeline_inc("block_daily_guard")
-                    continue
+                    _bp_features = _collect_a_bypass_features(pre, m)
+                    _bp_eval = _eval_a_bypass(_bp_features)
+                    _bp_row = {
+                        "ts": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+                        "market": m,
+                        "signal_type": pre.get("signal_tag", ""),
+                        "is_losing_stop": 0,
+                        "a_bypass_pass": int(_bp_eval["pass"]),
+                        "a_score": _bp_eval["score"],
+                        "bypass_reason": _bp_eval["reason"],
+                        "position_size_pct": _bp_eval["size_pct"],
+                        **_bp_features,
+                    }
+                    if _bp_eval["pass"]:
+                        pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
+                        print(f"[A_BYPASS_DG] {m} A군 {_bp_eval['score']}/3 → daily_guard 우회 ({_bp_eval['size_pct']:.0%}) "
+                              f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')}")
+                        _pipeline_inc("suspend_a_bypass")
+                        with _A_BYPASS_LOCK:
+                            _A_BYPASS_PENDING[m] = _bp_row
+                    else:
+                        _append_a_bypass_sample(_bp_row)
+                        cut("DAILY_GUARD", f"{m} {_daily_reason} (A불통과 {_bp_eval['score']}/3)")
+                        _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_daily_guard")
+                        continue
                 if _max_mode == "half" and pre.get("entry_mode") == "confirm":
                     pre["entry_mode"] = "half"
                     print(f"[LOSE_GATE] {m} [{_sg_key}] 연패 모드제한 → half 강제")
