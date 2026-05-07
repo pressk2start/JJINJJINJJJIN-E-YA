@@ -8576,20 +8576,23 @@ _V4_DEFAULT_EXIT = {
 _STRAT_DESC_MAP = {
     # Production
     "SVE1": "5분RSI≥74.55 + 생존게이트60s + 120s강제종료 (LIVE)",
-    # Research - baseline
-    "GT": "5분RSI≥74.55 + VR5≤3.2 → 강모멘텀 추격 (no-trail, 시간청산)",
-    "B": "종가>20봉고점 + 양봉 + 15mVR≥1.5 → 가격돌파",
-    "CG": "15분 반전 + GT식 exit → 반전+시간청산",
-    # Research - survival variants
-    "SV4": "SVE1 + 45s 빠른판정 게이트",
-    "SV5": "SVE1 + dd_peak 0.2% 엄격 필터",
-    # Research - new entry structures
-    "MIC": "양봉 + tick_rate_30s급증 + 매수비율60%↑ → 마이크로스트럭처",
+    # Research - entry structures
     "VOL": "ATR 압축 → VR5 급증 + 양봉 → 변동성 폭발",
-    "TME": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 → 시간대 엣지",
     "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
-    "ABS": "고점근처 매도흡수 + 재양봉 → 흡수 돌파",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
+    # Research - v20 scenarios
+    "QA": "RSI60-74 + 양봉 + VR1.5 + tick안정 → 조용한 가속",
+    "SHK": "큰아래꼬리 + 강한마감 + VR1.5 → 급락후 회복",
+    "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
+    "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
+    "TAC": "양봉 + RSI50 + tick매수축적 → 틱 축적",
+    # Research - v21 scenarios
+    "QC": "낮은tick_rate + 낮은spread + 낮은ATR + 양봉 → 조용한 continuation",
+    "SHR": "급락-0.3~0.6% 후 EMA20회복 → shakeout reclaim",
+    "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
+    "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
+    "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
+    "CPRS": "코인별 승패편향 반영 → coin personality",
 }
 
 _V0_EXIT_PARAMS = {
@@ -9743,8 +9746,229 @@ def _v0_check_tick_accum(c1, c5=None, c15=None, c30=None, c60=None, gate_info=No
     }
 
 
-# --- v0 전략 레지스트리 (v20: 정리 + 신규 5개 — Production 1 + Research 12) ---
-# v19: 47→12, v20: 불필요 5 제거 + 신규 5 추가 = 12
+# === v21 신규 시나리오 진입 함수 (6개) ===
+
+_COIN_BIAS = {}  # {market: (wins, losses)} — SVE1 coin_wl에서 주기적 갱신
+
+def _update_coin_bias():
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            if not key.startswith("SVE1:"):
+                continue
+            cw = s.get("coin_wl", {})
+            for coin, (w, l) in cw.items():
+                _COIN_BIAS[coin] = (w, l)
+            break
+
+
+def _v0_check_quiet_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """QC 조용한continuation: 낮은ATR + 양봉 + 저VR — A군 미시구조 본질"""
+    _pipeline_inc("quiet_cont_enter")
+    if not c1 or len(c1) < 15 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("quiet_cont_bull_fail"): return None
+    atr = _v4_atr_pct(c1, 14)
+    if atr <= 0 or atr > 0.98:
+        if _pipeline_inc("quiet_cont_atr_fail", value=round(atr, 3), threshold=0.98, direction="lte"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.0 or vr5 > 2.5:
+        if _pipeline_inc("quiet_cont_vr5_fail", value=round(vr5, 2), threshold=2.5, direction="lte"): return None
+    body = abs(c1[-1]["trade_price"] - c1[-1]["opening_price"])
+    price = max(c1[-1]["trade_price"], 1)
+    body_pct = body / price * 100
+    if body_pct > 1.0:
+        if _pipeline_inc("quiet_cont_body_fail", value=round(body_pct, 2), threshold=1.0, direction="lte"): return None
+    _pipeline_inc("quiet_cont_pass")
+    return {
+        "signal_tag": "조용한continuation",
+        "entry_mode": "confirm",
+        "logic_group": "QC",
+        "filters_hit": [f"ATR={atr:.3f}", f"VR5={vr5:.1f}", f"body={body_pct:.2f}%"],
+        "exit_params": {},
+        "indicators": {"atr_pct": round(atr, 4), "vr5": round(vr5, 2), "body_pct": round(body_pct, 3)},
+    }
+
+
+def _v0_check_shakeout_reclaim(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """SHR shakeout reclaim: 최근 -0.3~-0.6% 급락 후 EMA20 위 복귀 + 양봉"""
+    _pipeline_inc("shakeout_reclaim_enter")
+    if not c1 or len(c1) < 21 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("shakeout_reclaim_bull_fail"): return None
+    closes = [c["trade_price"] for c in c1]
+    ema20 = _v4_ema(closes, 20)
+    if ema20 is None or closes[-1] <= ema20:
+        if _pipeline_inc("shakeout_reclaim_ema_fail"): return None
+    recent_high = max(c["high_price"] for c in c1[-8:-1])
+    recent_low = min(c["low_price"] for c in c1[-5:-1])
+    dip_pct = (recent_low - recent_high) / max(recent_high, 1) * 100
+    if dip_pct > -0.3 or dip_pct < -0.8:
+        if _pipeline_inc("shakeout_reclaim_dip_fail", value=round(dip_pct, 2), threshold=-0.3, direction="lte"): return None
+    recovery_pct = (closes[-1] - recent_low) / max(recent_low, 1) * 100
+    if recovery_pct < 0.2:
+        if _pipeline_inc("shakeout_reclaim_recovery_fail"): return None
+    _pipeline_inc("shakeout_reclaim_pass")
+    return {
+        "signal_tag": "shakeout복귀",
+        "entry_mode": "confirm",
+        "logic_group": "SHR",
+        "filters_hit": [f"dip={dip_pct:.2f}%", f"recv={recovery_pct:.2f}%", f"EMA20={ema20:.0f}"],
+        "exit_params": {},
+        "indicators": {"dip_pct": round(dip_pct, 3), "recovery_pct": round(recovery_pct, 3)},
+    }
+
+
+def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """CLMP CLM pullback: 최근 5-10봉 내 과열봉 발생 후 눌림 + 재양봉"""
+    _pipeline_inc("clm_pullback_enter")
+    if not c1 or len(c1) < 12 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("clm_pullback_bull_fail"): return None
+    climax_found = False
+    climax_idx = -1
+    for i in range(-10, -2):
+        if abs(i) > len(c1):
+            continue
+        candle = c1[i]
+        body = abs(candle["trade_price"] - candle["opening_price"])
+        rng = candle["high_price"] - candle["low_price"]
+        if rng <= 0:
+            continue
+        body_ratio = body / rng
+        upper_wick = candle["high_price"] - max(candle["trade_price"], candle["opening_price"])
+        wick_ratio = upper_wick / rng
+        if body_ratio >= 0.50 and wick_ratio >= 0.20 and _v4_is_bullish(candle):
+            climax_found = True
+            climax_idx = i
+            break
+    if not climax_found:
+        if _pipeline_inc("clm_pullback_no_climax"): return None
+    pullback_candles = c1[climax_idx + 1:-1]
+    if len(pullback_candles) < 2:
+        if _pipeline_inc("clm_pullback_too_short"): return None
+    climax_high = c1[climax_idx]["high_price"]
+    pullback_low = min(c["low_price"] for c in pullback_candles)
+    pullback_pct = (pullback_low - climax_high) / max(climax_high, 1) * 100
+    if pullback_pct > -0.1 or pullback_pct < -0.8:
+        if _pipeline_inc("clm_pullback_depth_fail", value=round(pullback_pct, 2)): return None
+    if c1[-1]["trade_price"] <= pullback_low:
+        if _pipeline_inc("clm_pullback_reclaim_fail"): return None
+    _pipeline_inc("clm_pullback_pass")
+    return {
+        "signal_tag": "CLM눌림",
+        "entry_mode": "confirm",
+        "logic_group": "CLMP",
+        "filters_hit": [f"pb={pullback_pct:.2f}%", f"gap={climax_idx}봉전"],
+        "exit_params": {},
+        "indicators": {"pullback_pct": round(pullback_pct, 3), "climax_gap": abs(climax_idx)},
+    }
+
+
+def _v0_check_range_expand(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """RX range expansion: ATR 압축 + 거래대금 증가 + 박스 상단 접근"""
+    _pipeline_inc("range_expand_enter")
+    if not c1 or len(c1) < 21 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("range_expand_bull_fail"): return None
+    cur_atr = _v4_atr_pct(c1, 14)
+    if cur_atr is None or cur_atr <= 0:
+        return None
+    old_candles = c1[:-7]
+    if len(old_candles) < 14:
+        return None
+    old_atr = _v4_atr_pct(old_candles, 14)
+    if old_atr is None or old_atr <= 0:
+        return None
+    atr_ratio = cur_atr / old_atr
+    if atr_ratio >= 0.85:
+        if _pipeline_inc("range_expand_atr_fail", value=round(atr_ratio, 2), threshold=0.85, direction="lt"): return None
+    cur_vol = c1[-1].get("candle_acc_trade_price", 0)
+    prev5_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5
+    if prev5_vol <= 0 or cur_vol / prev5_vol < 1.3:
+        if _pipeline_inc("range_expand_vol_fail"): return None
+    high_20 = max(c["high_price"] for c in c1[-21:-1])
+    cur_close = c1[-1]["trade_price"]
+    gap_pct = (cur_close - high_20) / max(high_20, 1) * 100
+    if gap_pct < -0.5:
+        if _pipeline_inc("range_expand_gap_fail", value=round(gap_pct, 2), threshold=-0.5, direction="gte"): return None
+    _pipeline_inc("range_expand_pass")
+    return {
+        "signal_tag": "범위확장",
+        "entry_mode": "confirm",
+        "logic_group": "RX",
+        "filters_hit": [f"ATR_r={atr_ratio:.2f}", f"VR={cur_vol/prev5_vol:.1f}", f"gap20={gap_pct:+.2f}%"],
+        "exit_params": {},
+        "indicators": {"atr_ratio": round(atr_ratio, 3), "gap_20bar": round(gap_pct, 3)},
+    }
+
+
+def _v0_check_liquidity_trap(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """LTRP 유동성함정: tick_rate급증 + spread확대 + 과열 → 진입금지 구간 탐지"""
+    _pipeline_inc("liq_trap_enter")
+    if not c1 or len(c1) < 7:
+        return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 3.0:
+        if _pipeline_inc("liq_trap_vr5_fail", value=round(vr5, 2), threshold=3.0, direction="gte"): return None
+    hi, lo = c1[-1]["high_price"], c1[-1]["low_price"]
+    price = max(c1[-1]["trade_price"], 1)
+    spread_pct = (hi - lo) / price * 100
+    if spread_pct < 1.5:
+        if _pipeline_inc("liq_trap_spread_fail", value=round(spread_pct, 2), threshold=1.5, direction="gte"): return None
+    upper_wick = hi - max(c1[-1]["trade_price"], c1[-1]["opening_price"])
+    rng = hi - lo
+    if rng > 0 and upper_wick / rng < 0.25:
+        if _pipeline_inc("liq_trap_wick_fail"): return None
+    _pipeline_inc("liq_trap_pass")
+    return {
+        "signal_tag": "유동성함정",
+        "entry_mode": "confirm",
+        "logic_group": "LTRP",
+        "filters_hit": [f"VR5={vr5:.1f}", f"spread={spread_pct:.2f}%", f"wick={upper_wick/rng:.2f}" if rng > 0 else ""],
+        "exit_params": {},
+        "indicators": {"vr5": round(vr5, 2), "spread_pct": round(spread_pct, 3)},
+    }
+
+
+def _v0_check_coin_personality(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """CPRS 코인성격: 양봉 + SVE1 기반 코인 승률 편향 활용"""
+    _pipeline_inc("coin_pers_enter")
+    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("coin_pers_bull_fail"): return None
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 55:
+        if _pipeline_inc("coin_pers_rsi_fail", value=rsi_5m, threshold=55, direction="gte"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.2:
+        if _pipeline_inc("coin_pers_vr5_fail", value=round(vr5, 2), threshold=1.2, direction="gte"): return None
+    market = None
+    if gate_info and isinstance(gate_info, dict):
+        market = gate_info.get("market")
+    coin_tag = "unknown"
+    coin_wr = 50.0
+    if market and market in _COIN_BIAS:
+        w, l = _COIN_BIAS[market]
+        total = w + l
+        if total >= 5:
+            coin_wr = w / total * 100
+            coin_tag = f"{market}({w}W{l}L)"
+            if coin_wr < 55:
+                if _pipeline_inc("coin_pers_bias_fail", value=round(coin_wr, 1), threshold=55, direction="gte"): return None
+        else:
+            if _pipeline_inc("coin_pers_data_fail"): return None
+    else:
+        if _pipeline_inc("coin_pers_no_data"): return None
+    _pipeline_inc("coin_pers_pass")
+    return {
+        "signal_tag": "코인성격",
+        "entry_mode": "confirm",
+        "logic_group": "CPRS",
+        "filters_hit": [f"coin={coin_tag}", f"WR={coin_wr:.0f}%", f"RSI5={rsi_5m:.1f}"],
+        "exit_params": {},
+        "indicators": {"coin_wr": round(coin_wr, 1), "rsi_5m": round(rsi_5m, 1), "vr5": round(vr5, 2)},
+    }
+
+
+# --- v0 전략 레지스트리 (v21: MIC/B/GT_BASE 제거 + 신규 6개 — Production 1 + Research 14) ---
+# v20: 12, v21: 3 제거(GT_BASE/B/MIC) + 6 추가(QC/SHR/CLMP/RX/LTRP/CPRS) = 15
 _STRATEGY_REGISTRY = {
     # ━━━ Track A: PRODUCTION (절대 변경 금지) ━━━
     "모멘텀GT": {
@@ -9756,30 +9980,7 @@ _STRATEGY_REGISTRY = {
         "route": "SVE1",
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
-    # ━━━ Track B: RESEARCH — baseline 비교 대상 ━━━
-    "모멘텀GT_BASE": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "GT",
-        "description": "5mRSI≥74.55 [GT baseline:no-trail/max240s] (shadow)",
-    },
-    "가격돌파": {
-        "check_fn": _v0_check_price_breakout,
-        "exit_params": _V0_EXIT_PARAMS_BREAKOUT,
-        "priority": 1, "enabled": False,
-        "pipeline_key": "breakout", "route": "B",
-        "description": "종가>20봉고점 + 양봉 (shadow)",
-    },
     # ━━━ Track B: RESEARCH — 진입 구조 ━━━
-    "마이크로플로우": {
-        "check_fn": _v0_check_broad_bullish,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "micro_flow", "route": "MIC",
-        "ind_filters": [("tick_rate_30s", ">=", 0.5), ("tick_buy_30s", ">=", 0.60)],
-        "description": "양봉+tick급증+매수압도 [SVE1 exit] (shadow)",
-    },
     "변동성압축": {
         "check_fn": _v0_check_vol_squeeze,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -9838,6 +10039,50 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "tick_accum", "route": "TAC",
         "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
         "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
+    },
+    # ━━━ Track D: v21 신규 시나리오 (6개) ━━━
+    "조용한continuation": {
+        "check_fn": _v0_check_quiet_cont,
+        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "quiet_cont", "route": "QC",
+        "ind_filters": [("tick_rate_30s", "<=", 2.0), ("entry_spread_pct", "<=", 0.89)],
+        "description": "낮은ATR+양봉+저VR — A군 미시구조 [A_BYPASS exit:240s] (shadow)",
+    },
+    "shakeout복귀": {
+        "check_fn": _v0_check_shakeout_reclaim,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "shakeout_reclaim", "route": "SHR",
+        "description": "급락-0.3~0.6%후 EMA20회복+양봉 [GT exit:240s] (shadow)",
+    },
+    "CLM눌림": {
+        "check_fn": _v0_check_clm_pullback,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "clm_pullback", "route": "CLMP",
+        "description": "과열봉후 눌림+재양봉 [GT exit:240s] (shadow)",
+    },
+    "범위확장": {
+        "check_fn": _v0_check_range_expand,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "range_expand", "route": "RX",
+        "description": "ATR압축+거래대금증가+박스상단접근 [GT exit:240s] (shadow)",
+    },
+    "유동성함정": {
+        "check_fn": _v0_check_liquidity_trap,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "liq_trap", "route": "LTRP",
+        "description": "VR과열+spread확대+윗꼬리 → 진입금지추적 [GT exit] (shadow)",
+    },
+    "코인성격": {
+        "check_fn": _v0_check_coin_personality,
+        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "coin_pers", "route": "CPRS",
+        "description": "SVE1코인승률편향+양봉+RSI55 [A_BYPASS exit:240s] (shadow)",
     },
 }
 
@@ -11031,7 +11276,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
                 # v18e: B pullback entry — 30초 대기 후 최저가로 진입 (G는 30s부터 양수라 제외)
-                _pb_delay = 30 if route in ("B", "B2") else 0
+                _pb_delay = 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
                     "market": market, "entry_price": entry_price,
@@ -11246,6 +11491,7 @@ def _v4_shadow_report_lines():
     """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
     루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
     v11: 라이브(A,B) + 섀도우(C~L) 전체 11개 시나리오 지표 수집"""
+    _update_coin_bias()
     lines = []
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
@@ -11255,7 +11501,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"GT", "B", "CG", "SV4", "SV5", "MIC", "VOL", "TME", "RET", "ABS", "CLM"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "QA", "SHK", "DRY", "MZC", "TAC", "QC", "SHR", "CLMP", "RX", "LTRP", "CPRS"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11436,6 +11682,59 @@ def _v4_shadow_report_lines():
                 )
         if _pending:
             lines.append(f"  ⏳ 수집중: {', '.join(p[0] for p in _pending)} (n<10)")
+    # v21: 시나리오별 MFE/MAE/Hold/Continuation 상세 리포트 (n≥10인 전체 시나리오)
+    with _SHADOW_PERF_LOCK:
+        _all_scenario_stats = []
+        for key, s in _SHADOW_PERF_STATS.items():
+            n = s.get("signals", 0)
+            if n < 10:
+                continue
+            route = s.get("route", "?")
+            strat = s.get("strat", "?")
+            wins = s.get("wins", 0)
+            wr = wins / n * 100
+            avg_pnl = s.get("total_pnl", 0) / n * 100
+            mfes = s.get("mfes", [])
+            avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
+            mae_cnt = s.get("mae_cnt", 0)
+            avg_mae = s.get("mae_sum", 0) / max(mae_cnt, 1) * 100 if mae_cnt > 0 else 0
+            cs = s.get("pnl_curve_sum", {})
+            cc = s.get("pnl_curve_cnt", {})
+            curve = {}
+            for snap_s in (60, 120, 180, 240):
+                sk = str(snap_s)
+                if sk in cs and cc.get(sk, 0) > 0:
+                    curve[snap_s] = cs[sk] / cc[sk] * 100
+            cont_flag = ""
+            if 120 in curve and 240 in curve:
+                if curve[240] > curve[120] + 0.02:
+                    cont_flag = "↗cont"
+                elif curve[240] < curve[120] - 0.05:
+                    cont_flag = "↘decay"
+            sl_secs = s.get("sl_hit_secs", [])
+            avg_hold = sum(sl_secs) / len(sl_secs) if sl_secs else 0
+            capture = 0
+            if avg_mfe > 0:
+                capture = avg_pnl / avg_mfe * 100
+            _all_scenario_stats.append({
+                "route": route, "strat": strat, "n": n, "wr": wr,
+                "pnl": avg_pnl, "mfe": avg_mfe, "mae": avg_mae,
+                "curve": curve, "cont": cont_flag,
+                "hold": avg_hold, "capture": capture,
+            })
+        if _all_scenario_stats:
+            _all_scenario_stats.sort(key=lambda x: x["pnl"], reverse=True)
+            lines.append("📊 시나리오별 MFE/MAE 상세:")
+            for sc in _all_scenario_stats:
+                curve_str = " ".join(f"{k}s:{v:+.2f}%" for k, v in sorted(sc["curve"].items()))
+                cont_str = f" {sc['cont']}" if sc['cont'] else ""
+                lines.append(
+                    f"  {sc['route']}:{sc['strat']} n={sc['n']}"
+                    f" PnL{sc['pnl']:+.2f}% MFE{sc['mfe']:+.2f}% MAE{sc['mae']:+.2f}%"
+                    f" cap={sc['capture']:.0f}%{cont_str}"
+                )
+                if curve_str:
+                    lines.append(f"    ⏱ {curve_str}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
@@ -11876,7 +12175,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
 
     # === v0: 섀도우 테스트 — 게이트 없이 전 시나리오 실행 ===
     try:
-        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, None)
+        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, {"market": market})
     except Exception as e:
         print(f"[SHADOW] 섀도우 테스트 오류: {e}")
 
