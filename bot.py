@@ -1032,9 +1032,7 @@ def _pipeline_report(force=False):
         f" 15mVR&lt;2.0:{c.get('momentum_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('momentum_pass',0)}",
         f"    ├ SVE1(LIVE): gate60s/dd≦0.3%/120s강제",
-        f"    ├ GT(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
-        f"    ├ SV4(shadow): gate45s/dd≦0.3%/120s강제",
-        f"    └ SV5(shadow): gate60s/dd≦0.2%/120s강제",
+        f"    └ GT(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
         f"  [B돌파] 종가>20봉고점 + 양봉 + 15mVR≧1.5",
         f"    진입{c.get('breakout_enter',0)}"
         f" → 종가≦20봉고점:{c.get('breakout_price_fail',0)}"
@@ -1042,17 +1040,6 @@ def _pipeline_report(force=False):
         f" 15mVR&lt;1.5:{c.get('breakout_vr5_15m_fail',0)}"
         f" ✅통과:{c.get('breakout_pass',0)}",
         f"    └ B(shadow): trail SL1.0%/act0.4%/trail0.3%/max270s",
-        f"  [CG반전15] 15m전봉음봉→현봉양봉 + 종가>전봉시가(≧0.05%) + 1m양봉 + 15mVR≧1.0 + 고점이격≦1.5%",
-        f"    진입{c.get('reversal_15m_enter',0)}"
-        f" → 전봉양봉:{c.get('reversal_15m_prev_fail',0)}"
-        f" 현봉음봉:{c.get('reversal_15m_cur_fail',0)}"
-        f" 종가&lt;전봉시가:{c.get('reversal_15m_recovery_fail',0)}"
-        f" 회복&lt;0.05%:{c.get('reversal_15m_recovery_weak_fail',0)}"
-        f" 1m음봉:{c.get('reversal_15m_1m_fail',0)}"
-        f" 15mVR&lt;1.0:{c.get('reversal_15m_vr5_15m_fail',0)}"
-        f" 고점이격&gt;1.5%:{c.get('reversal_15m_gap20_fail',0)}"
-        f" ✅통과:{c.get('reversal_15m_pass',0)}",
-        f"    └ CG(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
         f"  [MIC마이크로] 1m양봉 + tick_rate_30s≧0.5 + tick_buy_30s≧0.60",
         f"    진입{c.get('broad_enter',0)}"
         f" → 음봉:{c.get('broad_bull_fail',0)}"
@@ -1065,13 +1052,6 @@ def _pipeline_report(force=False):
         f" 음봉:{c.get('vol_bull_fail',0)}"
         f" ✅통과:{c.get('vol_squeeze_pass',0)}",
         f"    └ VOL(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [TME시간대] KST(9,10,13,14,21,22시) + 5mRSI≧60 + 양봉",
-        f"    진입{c.get('time_mom_enter',0)}"
-        f" → 시간외:{c.get('time_hour_fail',0)}"
-        f" 5mRSI&lt;60:{c.get('time_rsi_fail',0)}"
-        f" 음봉:{c.get('time_bull_fail',0)}"
-        f" ✅통과:{c.get('time_mom_pass',0)}",
-        f"    └ TME(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
         f"  [RET눌림] 5m급등≧1.0% + pullback0.3~2.0% + EMA20gap-0.5~+0.8% + 양봉",
         f"    진입{c.get('retest_enter',0)}"
         f" → surge&lt;1.0%:{c.get('retest_surge_fail',0)}"
@@ -1082,15 +1062,6 @@ def _pipeline_report(force=False):
         f" 음봉:{c.get('retest_bull_fail',0)}"
         f" ✅통과:{c.get('retest_pass',0)}",
         f"    └ RET(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [ABS흡수] 20봉고점이격-1.5~+0.5% + 직전3봉음봉≧1 + 하락≦1.5% + 양봉",
-        f"    진입{c.get('abs_enter',0)}"
-        f" → 이격&lt;-1.5%:{c.get('abs_gap_low',0)}"
-        f" 이격&gt;+0.5%:{c.get('abs_gap_high',0)}"
-        f" 매도압없음:{c.get('abs_pressure_fail',0)}"
-        f" 하락&gt;1.5%:{c.get('abs_hold_fail',0)}"
-        f" 음봉:{c.get('abs_bull_fail',0)}"
-        f" ✅통과:{c.get('abs_pass',0)}",
-        f"    └ ABS(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
         f"  [CLM과열] body≧0.3% + wick_ratio≧0.3 + VR5≧2.0",
         f"    진입{c.get('climax_enter',0)}"
         f" → body&lt;0.3%:{c.get('climax_body_fail',0)}"
@@ -1098,6 +1069,44 @@ def _pipeline_report(force=False):
         f" VR5&lt;2.0:{c.get('climax_vr_fail',0)}"
         f" ✅통과:{c.get('climax_pass',0)}",
         f"    └ CLM(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
+        f"  [QA조용한가속] RSI60~74 + 양봉 + VR≧1.5 + tick_rate≦2.0",
+        f"    진입{c.get('quiet_accel_enter',0)}"
+        f" → RSI&lt;60:{c.get('quiet_accel_rsi_low',0)}"
+        f" RSI≧74:{c.get('quiet_accel_rsi_high',0)}"
+        f" 음봉:{c.get('quiet_accel_bull_fail',0)}"
+        f" VR&lt;1.5:{c.get('quiet_accel_vr5_fail',0)}"
+        f" ✅통과:{c.get('quiet_accel_pass',0)}",
+        f"    └ QA(shadow): max240s/dd0.5%gate [A_BYPASS exit]",
+        f"  [SHK급락후회복] 아래꼬리≧40% + 양봉 + 강한마감 + VR≧1.5",
+        f"    진입{c.get('shakeout_enter',0)}"
+        f" → 음봉:{c.get('shakeout_bull_fail',0)}"
+        f" 꼬리부족:{c.get('shakeout_wick_fail',0)}"
+        f" 약한마감:{c.get('shakeout_close_fail',0)}"
+        f" VR&lt;1.5:{c.get('shakeout_vr5_fail',0)}"
+        f" ✅통과:{c.get('shakeout_pass',0)}",
+        f"    └ SHK(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
+        f"  [DRY거래량건조] 3봉저거래량→VR≧2.0폭발 + 양봉 + 5봉돌파",
+        f"    진입{c.get('dry_enter',0)}"
+        f" → 음봉:{c.get('dry_bull_fail',0)}"
+        f" 건조아님:{c.get('dry_volume_fail',0)}"
+        f" VR&lt;2.0:{c.get('dry_vr5_fail',0)}"
+        f" 돌파실패:{c.get('dry_breakout_fail',0)}"
+        f" ✅통과:{c.get('dry_pass',0)}",
+        f"    └ DRY(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
+        f"  [MZC MACD반등] 5m hist 음→양 + 양봉 + 15mVR≧1.0",
+        f"    진입{c.get('macd_cross_enter',0)}"
+        f" → 크로스실패:{c.get('macd_cross_signal_fail',0)}"
+        f" 음봉:{c.get('macd_cross_bull_fail',0)}"
+        f" 15mVR&lt;1.0:{c.get('macd_cross_vr15_fail',0)}"
+        f" ✅통과:{c.get('macd_cross_pass',0)}",
+        f"    └ MZC(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
+        f"  [TAC틱축적] 양봉 + RSI≧50 + VR≧1.2 + tick_buy≧0.65 + tick_rate≦2.0",
+        f"    진입{c.get('tick_accum_enter',0)}"
+        f" → 음봉:{c.get('tick_accum_bull_fail',0)}"
+        f" RSI&lt;50:{c.get('tick_accum_rsi_fail',0)}"
+        f" VR&lt;1.2:{c.get('tick_accum_vr5_fail',0)}"
+        f" ✅통과:{c.get('tick_accum_pass',0)}",
+        f"    └ TAC(shadow): max240s/dd0.5%gate [A_BYPASS exit]",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
@@ -9580,8 +9589,162 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-# --- v0 전략 레지스트리 (v19: 대폭 정리 — Production + Research 2트랙) ---
-# 기존 47개 → 12개. Production 1 + Research 11 (baseline 3 + 생존 2 + 신규 6)
+# === v20 신규 시나리오 check_fn (5개) ===
+
+def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
+    """QA 조용한가속: RSI 60-74 + 양봉 + VR≥1.5 — '약한 초기 가속이 좋다' 패턴"""
+    _pipeline_inc("quiet_accel_enter")
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 60:
+        if _pipeline_inc("quiet_accel_rsi_low", value=rsi_5m, threshold=60, direction="gte"): return None
+    if rsi_5m >= 74:
+        if _pipeline_inc("quiet_accel_rsi_high", value=round(rsi_5m, 1), threshold=74, direction="lt"): return None
+    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("quiet_accel_bull_fail"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.5:
+        if _pipeline_inc("quiet_accel_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
+    _pipeline_inc("quiet_accel_pass")
+    return {
+        "signal_tag": "조용한가속",
+        "entry_mode": "confirm",
+        "logic_group": "QA",
+        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"VR5={vr5:.1f}"],
+        "exit_params": {},
+        "indicators": {"rsi_5m": round(rsi_5m, 1), "vr5": round(vr5, 2)},
+    }
+
+
+def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """SHK 급락후회복: 큰 아래꼬리 + 강한 마감 — 약한 손 제거 후 continuation"""
+    _pipeline_inc("shakeout_enter")
+    if not c1 or len(c1) < 7:
+        return None
+    last = c1[-1]
+    hi, lo = last["high_price"], last["low_price"]
+    op, cl = last["opening_price"], last["trade_price"]
+    rng = hi - lo
+    if rng <= 0:
+        return None
+    if cl <= op:
+        if _pipeline_inc("shakeout_bull_fail"): return None
+    lower_wick = min(op, cl) - lo
+    if lower_wick / rng < 0.40:
+        if _pipeline_inc("shakeout_wick_fail", value=round(lower_wick / rng, 2), threshold=0.40, direction="gte"): return None
+    if (cl - lo) / rng < 0.60:
+        if _pipeline_inc("shakeout_close_fail", value=round((cl - lo) / rng, 2), threshold=0.60, direction="gte"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.5:
+        if _pipeline_inc("shakeout_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
+    _pipeline_inc("shakeout_pass")
+    return {
+        "signal_tag": "급락후회복",
+        "entry_mode": "confirm",
+        "logic_group": "SHK",
+        "filters_hit": [f"wick={lower_wick/rng:.2f}", f"close_pos={((cl-lo)/rng):.2f}", f"VR5={vr5:.1f}"],
+        "exit_params": {},
+        "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "vr5": round(vr5, 2)},
+    }
+
+
+def _v0_check_dry_breakout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """DRY 거래량건조: 3봉 저거래량 → 현재 VR폭발 + 양봉 + 5봉고점 돌파"""
+    _pipeline_inc("dry_enter")
+    if not c1 or len(c1) < 10:
+        return None
+    last = c1[-1]
+    if not _v4_is_bullish(last):
+        if _pipeline_inc("dry_bull_fail"): return None
+    cur_vol = last.get("candle_acc_trade_price", 0)
+    prev3_vols = [c.get("candle_acc_trade_price", 0) for c in c1[-4:-1]]
+    avg5_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5 if len(c1) >= 6 else 0
+    if avg5_vol <= 0:
+        return None
+    all_dry = all(v < avg5_vol for v in prev3_vols)
+    if not all_dry:
+        if _pipeline_inc("dry_volume_fail"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 2.0:
+        if _pipeline_inc("dry_vr5_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
+    prev5_high = max(c["high_price"] for c in c1[-6:-1])
+    if last["trade_price"] <= prev5_high:
+        if _pipeline_inc("dry_breakout_fail"): return None
+    _pipeline_inc("dry_pass")
+    return {
+        "signal_tag": "거래량건조",
+        "entry_mode": "confirm",
+        "logic_group": "DRY",
+        "filters_hit": [f"VR5={vr5:.1f}", f"dry3={all_dry}"],
+        "exit_params": {},
+        "indicators": {"vr5": round(vr5, 2)},
+    }
+
+
+def _v0_check_macd_cross(c1, c5, c15, c30, c60, gate_info=None):
+    """MZC MACD제로크로스: 5m MACD hist 음→양 전환 + 양봉 + 15mVR≥1.0"""
+    _pipeline_inc("macd_cross_enter")
+    if not c5 or len(c5) < 35:
+        return None
+    cls5 = [c["trade_price"] for c in c5]
+    _, _, hist = _v4_macd(cls5)
+    if hist is None:
+        return None
+    prev_cls5 = [c["trade_price"] for c in c5[:-1]]
+    _, _, prev_hist = _v4_macd(prev_cls5)
+    if prev_hist is None:
+        return None
+    if not (prev_hist < 0 and hist >= 0):
+        if _pipeline_inc("macd_cross_signal_fail"): return None
+    if not c1 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("macd_cross_bull_fail"): return None
+    vr_15m = None
+    if c15 and len(c15) >= 6:
+        cur_v15 = c15[-1].get("candle_acc_trade_price", 0)
+        past_v15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
+        avg_v15 = sum(past_v15) / max(len(past_v15), 1)
+        if avg_v15 > 0:
+            vr_15m = round(cur_v15 / avg_v15, 2)
+    if vr_15m is not None and vr_15m < 1.0:
+        if _pipeline_inc("macd_cross_vr15_fail", value=vr_15m, threshold=1.0, direction="gte"): return None
+    _pipeline_inc("macd_cross_pass")
+    return {
+        "signal_tag": "MACD반등",
+        "entry_mode": "confirm",
+        "logic_group": "MZC",
+        "filters_hit": [f"hist={hist:.2f}", f"prev={prev_hist:.2f}", f"VR15={vr_15m}"],
+        "exit_params": {},
+        "indicators": {"macd_hist": round(hist, 4), "macd_prev_hist": round(prev_hist, 4)},
+    }
+
+
+def _v0_check_tick_accum(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    """TAC 틱축적: 양봉 + RSI≥50 — ind_filters로 tick_buy≥0.65 + tick_rate≤2.0 적용"""
+    _pipeline_inc("tick_accum_enter")
+    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
+        if _pipeline_inc("tick_accum_bull_fail"): return None
+    if not c5 or len(c5) < 15:
+        return None
+    rsi_5m = _v4_rsi_from_candles(c5, 14)
+    if rsi_5m is None or rsi_5m < 50:
+        if _pipeline_inc("tick_accum_rsi_fail", value=rsi_5m, threshold=50, direction="gte"): return None
+    vr5 = _v4_volume_ratio_5(c1)
+    if vr5 < 1.2:
+        if _pipeline_inc("tick_accum_vr5_fail", value=round(vr5, 2), threshold=1.2, direction="gte"): return None
+    _pipeline_inc("tick_accum_pass")
+    return {
+        "signal_tag": "틱축적",
+        "entry_mode": "confirm",
+        "logic_group": "TAC",
+        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"VR5={vr5:.1f}"],
+        "exit_params": {},
+        "indicators": {"rsi_5m": round(rsi_5m, 1), "vr5": round(vr5, 2)},
+    }
+
+
+# --- v0 전략 레지스트리 (v20: 정리 + 신규 5개 — Production 1 + Research 12) ---
+# v19: 47→12, v20: 불필요 5 제거 + 신규 5 추가 = 12
 _STRATEGY_REGISTRY = {
     # ━━━ Track A: PRODUCTION (절대 변경 금지) ━━━
     "모멘텀GT": {
@@ -9608,29 +9771,7 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "breakout", "route": "B",
         "description": "종가>20봉고점 + 양봉 (shadow)",
     },
-    "패턴반전_15m_GT240": {
-        "check_fn": _v0_check_reversal_15m,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 3, "enabled": False,
-        "pipeline_key": "reversal_15m", "route": "CG",
-        "description": "15m 음→양 [C+GT exit] (shadow)",
-    },
-    # ━━━ Track B: RESEARCH — SVE1 생존필터 변종 (2개만) ━━━
-    "SVE1_SV4": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_SV4,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "SV4",
-        "description": "SVE1+gate45s (빠른판정) (shadow)",
-    },
-    "SVE1_SV5": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_SV5,
-        "priority": 7, "enabled": False,
-        "pipeline_key": "momentum", "route": "SV5",
-        "description": "SVE1+dd0.2% (엄격필터) (shadow)",
-    },
-    # ━━━ Track B: RESEARCH — 완전히 새로운 진입 구조 ━━━
+    # ━━━ Track B: RESEARCH — 진입 구조 ━━━
     "마이크로플로우": {
         "check_fn": _v0_check_broad_bullish,
         "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
@@ -9646,13 +9787,6 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "vol_squeeze", "route": "VOL",
         "description": "ATR압축→VR급증+양봉 [GT exit] (shadow)",
     },
-    "시간대모멘텀": {
-        "check_fn": _v0_check_time_momentum,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "time_momentum", "route": "TME",
-        "description": "KST 9-10/13-14/21-22시 + RSI>60 + 양봉 [SVE1 exit] (shadow)",
-    },
     "눌림재진입": {
         "check_fn": _v0_check_retest_entry,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -9660,19 +9794,50 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "retest", "route": "RET",
         "description": "급등후 EMA20눌림 + 저점방어 + 재양봉 [GT exit] (shadow)",
     },
-    "흡수돌파": {
-        "check_fn": _v0_check_absorption,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "absorption", "route": "ABS",
-        "description": "고점근처 매도흡수 + 재양봉 [SVE1 exit] (shadow)",
-    },
     "과열감지": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM",
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
+    },
+    # ━━━ Track C: v20 신규 시나리오 (5개) ━━━
+    "조용한가속": {
+        "check_fn": _v0_check_quiet_accel,
+        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "quiet_accel", "route": "QA",
+        "ind_filters": [("tick_rate_30s", "<=", 2.0)],
+        "description": "RSI60-74+양봉+VR1.5+tick안정 [A_BYPASS exit:240s] (shadow)",
+    },
+    "급락후회복": {
+        "check_fn": _v0_check_shakeout,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "shakeout", "route": "SHK",
+        "description": "큰아래꼬리40%+강한마감+VR1.5 [GT exit] (shadow)",
+    },
+    "거래량건조": {
+        "check_fn": _v0_check_dry_breakout,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "dry", "route": "DRY",
+        "description": "3봉저거래량→VR폭발+5봉돌파 [GT exit] (shadow)",
+    },
+    "MACD반등": {
+        "check_fn": _v0_check_macd_cross,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "macd_cross", "route": "MZC",
+        "description": "5m MACD hist 음→양+양봉+15mVR1.0 [GT exit] (shadow)",
+    },
+    "틱축적": {
+        "check_fn": _v0_check_tick_accum,
+        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "tick_accum", "route": "TAC",
+        "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
+        "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
     },
 }
 
