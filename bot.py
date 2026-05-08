@@ -9788,18 +9788,24 @@ def _update_coin_bias():
 
 
 def _v0_check_quiet_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """QC 조용한continuation: RSI58-72 + 낮은ATR/spread + MACD양수비과열 + 15mVR + 20봉근접"""
+    """QC 조용한continuation: RSI55-72 + 낮은ATR + MACD양수비과열 + 15mVR1.5 + 20봉근접 + 최소에너지 [v22에너지하한]"""
     _pipeline_inc("quiet_cont_enter")
     if not c1 or len(c1) < 21 or not _v4_is_bullish(c1[-1]):
         if _pipeline_inc("quiet_cont_bull_fail"): return None
     if not c5 or len(c5) < 35:
         return None
     rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 58 or rsi_5m > 72:
-        if _pipeline_inc("quiet_cont_rsi_fail", value=rsi_5m, threshold=58): return None
+    if rsi_5m is None or rsi_5m < 55 or rsi_5m > 72:
+        if _pipeline_inc("quiet_cont_rsi_fail", value=rsi_5m, threshold=55): return None
     atr = _v4_atr_pct(c1, 14)
     if atr <= 0 or atr > 0.9:
         if _pipeline_inc("quiet_cont_atr_fail", value=round(atr, 3), threshold=0.9, direction="lte"): return None
+    body_cur = abs(c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["trade_price"], 1) * 100
+    if body_cur < 0.1:
+        if _pipeline_inc("quiet_cont_energy_body_fail", value=round(body_cur, 3), threshold=0.1, direction="gte"): return None
+    vr5_cur = _v4_volume_ratio_5(c1)
+    if vr5_cur < 1.3:
+        if _pipeline_inc("quiet_cont_energy_vr5_fail", value=round(vr5_cur, 2), threshold=1.3, direction="gte"): return None
     closes_5m = [c["trade_price"] for c in c5]
     _, _, hist_5m = _v4_macd(closes_5m)
     if hist_5m is None or hist_5m <= 0:
@@ -9815,8 +9821,8 @@ def _v0_check_quiet_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info=No
         avg_v15 = sum(past_v15) / max(len(past_v15), 1)
         if avg_v15 > 0:
             vr_15m = round(cur_v15 / avg_v15, 2)
-    if vr_15m is None or vr_15m < 1.2:
-        if _pipeline_inc("quiet_cont_vr15_fail", value=vr_15m, threshold=1.2, direction="gte"): return None
+    if vr_15m is None or vr_15m < 1.5:
+        if _pipeline_inc("quiet_cont_vr15_fail", value=vr_15m, threshold=1.5, direction="gte"): return None
     high_20 = max(c["high_price"] for c in c1[-21:-1])
     cur_close = c1[-1]["trade_price"]
     gap_pct = abs((cur_close - high_20) / max(high_20, 1) * 100)
@@ -9867,32 +9873,32 @@ def _v0_check_shakeout_reclaim(c1, c5=None, c15=None, c30=None, c60=None, gate_i
 
 
 def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """CLMP CLM pullback: 과열봉(body≥0.4%+VR2+윗꼬리25%) 후 눌림0.2-0.8% + 재양봉"""
+    """CLMP CLM pullback: 과열봉(body≥0.3%+VR1.5+윗꼬리20%) 후 눌림0.15-1.0% + 재양봉 [v22완화]"""
     _pipeline_inc("clm_pullback_enter")
     if not c1 or len(c1) < 8 or not _v4_is_bullish(c1[-1]):
         if _pipeline_inc("clm_pullback_bull_fail"): return None
     climax_found = False
     climax_idx = -1
-    for i in range(-4, -1):
+    for i in range(-6, -1):
         if abs(i) > len(c1):
             continue
         candle = c1[i]
         body = abs(candle["trade_price"] - candle["opening_price"])
         price = max(candle["trade_price"], 1)
         body_pct = body / price * 100
-        if body_pct < 0.4:
+        if body_pct < 0.3:
             continue
         rng = candle["high_price"] - candle["low_price"]
         if rng <= 0:
             continue
         upper_wick = candle["high_price"] - max(candle["trade_price"], candle["opening_price"])
         wick_ratio = upper_wick / rng
-        if wick_ratio < 0.25:
+        if wick_ratio < 0.20:
             continue
         idx_vols = [c.get("candle_acc_trade_price", 0) for c in c1[max(0, len(c1)+i-5):len(c1)+i]]
         avg_v = sum(idx_vols) / max(len(idx_vols), 1) if idx_vols else 0
         cur_v = candle.get("candle_acc_trade_price", 0)
-        if avg_v > 0 and cur_v / avg_v >= 2.0:
+        if avg_v > 0 and cur_v / avg_v >= 1.5:
             climax_found = True
             climax_idx = i
             break
@@ -9905,7 +9911,7 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
     climax_high = c1[climax_idx]["high_price"]
     pullback_low = min(c["low_price"] for c in pullback_candles)
     pullback_pct = (pullback_low - climax_high) / max(climax_high, 1) * 100
-    if pullback_pct > -0.2 or pullback_pct < -0.8:
+    if pullback_pct > -0.15 or pullback_pct < -1.0:
         if _pipeline_inc("clm_pullback_depth_fail", value=round(pullback_pct, 2)): return None
     midpoint = (climax_close + pullback_low) / 2
     if c1[-1]["trade_price"] < midpoint:
@@ -10021,7 +10027,7 @@ def _v0_check_liquidity_trap(c1, c5=None, c15=None, c30=None, c60=None, gate_inf
 
 
 def _v0_check_coin_personality(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """CPRS 코인성격: WR≥60% n≥3 + 양봉 — 하위코인 자동 차단"""
+    """CPRS 코인성격: WR≥52% n≥3 + 양봉 — 하위코인 자동 차단 [v22완화]"""
     _pipeline_inc("coin_pers_enter")
     if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
         if _pipeline_inc("coin_pers_bull_fail"): return None
@@ -10035,13 +10041,13 @@ def _v0_check_coin_personality(c1, c5=None, c15=None, c30=None, c60=None, gate_i
     if total < 3:
         if _pipeline_inc("coin_pers_data_fail", value=total, threshold=3, direction="gte"): return None
     coin_wr = w / total * 100
-    if coin_wr < 60:
-        if _pipeline_inc("coin_pers_wr_fail", value=round(coin_wr, 1), threshold=60, direction="gte"): return None
-    if avg_pnl < 0:
-        if _pipeline_inc("coin_pers_pnl_fail", value=round(avg_pnl * 100, 2), threshold=0, direction="gte"): return None
+    if coin_wr < 52:
+        if _pipeline_inc("coin_pers_wr_fail", value=round(coin_wr, 1), threshold=52, direction="gte"): return None
+    if avg_pnl < -0.0005:
+        if _pipeline_inc("coin_pers_pnl_fail", value=round(avg_pnl * 100, 2), threshold=-0.05, direction="gte"): return None
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.2:
-        if _pipeline_inc("coin_pers_vr5_fail", value=round(vr5, 2), threshold=1.2, direction="gte"): return None
+    if vr5 < 0.8:
+        if _pipeline_inc("coin_pers_vr5_fail", value=round(vr5, 2), threshold=0.8, direction="gte"): return None
     coin_tag = f"{market}({w}W{l}L)"
     _pipeline_inc("coin_pers_pass")
     return {
