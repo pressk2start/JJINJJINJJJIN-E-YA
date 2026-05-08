@@ -8587,6 +8587,7 @@ _STRAT_DESC_MAP = {
     "FBR": "1차돌파실패 → 밀림 → 저점상승 → 재돌파 → failed breakout 2nd entry",
     "LATE_CONT": "FBR/CLMP전용: 초반DD허용 + 300s연장 (늦은continuation 포착)",
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
+    "MZC_F": "MZC + d-score필터(sprd≤0.35/ATR≤0.45/tickR≤1.7) → 정제된 MACD반등",
 }
 
 _V0_EXIT_PARAMS = {
@@ -10253,6 +10254,15 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("tick_rate_30s", "<=", 2.0), ("tick_buy_30s", ">=", 0.60), ("entry_spread_pct", "<=", 0.8)],
         "description": "안뜨거운데계속사는놈:RSI58-72+ATR≤0.9+2/3양봉+저tick [A_BYPASS] (shadow)",
     },
+    # ━━━ Track F: v24 W/L d-score 기반 필터 실험 ━━━
+    "MACD반등_F": {
+        "check_fn": _v0_check_macd_cross,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "macd_cross", "route": "MZC_F",
+        "ind_filters": [("entry_spread_pct", "<=", 0.35), ("atr_pct", "<=", 0.45), ("tick_rate_30s", "<=", 1.7)],
+        "description": "MZC+d-score필터(sprd≤0.35/ATR≤0.45/tickR≤1.7) [GT exit] (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11670,7 +11680,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
