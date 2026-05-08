@@ -11918,12 +11918,44 @@ def _v4_shadow_report_lines():
                         _dir = "↑" if wv > lv else "↓"
                         _d_pairs.append((_dd, ik, wv, wn, lv, ln, _dir))
                 _d_pairs.sort(reverse=True)
+            _bucket_rows = []
+            if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
+                _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
+                               "dd_peak_120s", "mae_120s", "mfe_120s"}
+                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
+                _trs = s.get("trade_records", [])
+                if len(_trs) >= 12:
+                    _bk_keys = []
+                    for _dd, ik, *_ in _d_pairs:
+                        if ik not in _POST_ENTRY and _dd >= 0.4 and ik not in _bk_keys:
+                            _bk_keys.append(ik)
+                            if len(_bk_keys) >= 1:
+                                break
+                    for wk in _BUCKET_WATCH.get(route, []):
+                        if wk not in _bk_keys:
+                            _bk_keys.append(wk)
+                    for bk_key in _bk_keys[:2]:
+                        bk_vals = [(tr["inds"][bk_key], tr["pnl"]) for tr in _trs
+                                   if bk_key in tr.get("inds", {})]
+                        if len(bk_vals) < 9:
+                            continue
+                        bk_vals.sort(key=lambda x: x[0])
+                        bsz = len(bk_vals) // 3
+                        for i, bk in enumerate([bk_vals[:bsz], bk_vals[bsz:2*bsz], bk_vals[2*bsz:]]):
+                            bv = [x[0] for x in bk]
+                            bp = [x[1] for x in bk]
+                            _bucket_rows.append((
+                                bk_key, min(bv), max(bv), len(bk),
+                                sum(1 for p in bp if p > 0) / len(bp) * 100,
+                                sum(bp) / len(bp) * 100,
+                            ))
             _all_scenario_stats.append({
                 "route": route, "strat": strat, "n": n, "wr": wr,
                 "pnl": avg_pnl, "mfe": avg_mfe, "mae": avg_mae,
                 "curve": curve, "cont": cont_flag,
                 "hold": avg_hold, "capture": capture,
                 "d_pairs": _d_pairs[:5],
+                "buckets": _bucket_rows,
             })
         if _all_scenario_stats:
             _all_scenario_stats.sort(key=lambda x: x["pnl"], reverse=True)
@@ -11942,6 +11974,14 @@ def _v4_shadow_report_lines():
                     for _dd, ik, wv, wn, lv, ln, _dir in sc["d_pairs"]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_dd:.2f} ({_dir})")
+                if sc.get("buckets"):
+                    _prev_bk = None
+                    for bk_key, lo, hi, bn, bwr, bpnl in sc["buckets"]:
+                        if bk_key != _prev_bk:
+                            lines.append(f"    🎯{bk_key} bucket:")
+                            _prev_bk = bk_key
+                        _f = ".2f" if abs(lo) < 10 else ".1f"
+                        lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
