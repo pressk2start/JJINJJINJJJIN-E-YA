@@ -11885,11 +11885,35 @@ def _v4_shadow_report_lines():
             capture = 0
             if avg_mfe > 0:
                 capture = avg_pnl / avg_mfe * 100
+            _d_pairs = []
+            if n >= 20:
+                _w_ind = s.get("win_ind_avg", {})
+                _w_cnt = s.get("win_ind_cnt", {})
+                _w_m2 = s.get("win_ind_m2", {})
+                _l_ind = s.get("loss_ind_avg", {})
+                _l_cnt = s.get("loss_ind_cnt", {})
+                _l_m2 = s.get("loss_ind_m2", {})
+                for ik in sorted(set(list(_w_ind.keys()) + list(_l_ind.keys()))):
+                    wv = _w_ind.get(ik)
+                    lv = _l_ind.get(ik)
+                    wn = _w_cnt.get(ik, 0)
+                    ln = _l_cnt.get(ik, 0)
+                    if wv is not None and lv is not None and wn >= 5 and ln >= 5:
+                        wm2 = _w_m2.get(ik, 0)
+                        lm2 = _l_m2.get(ik, 0)
+                        w_var = wm2 / wn if wn > 1 else 0.001
+                        l_var = lm2 / ln if ln > 1 else 0.001
+                        pooled = (w_var + l_var) / 2
+                        _dd = abs(wv - lv) / max(pooled ** 0.5, 0.0001)
+                        _dir = "↑" if wv > lv else "↓"
+                        _d_pairs.append((_dd, ik, wv, wn, lv, ln, _dir))
+                _d_pairs.sort(reverse=True)
             _all_scenario_stats.append({
                 "route": route, "strat": strat, "n": n, "wr": wr,
                 "pnl": avg_pnl, "mfe": avg_mfe, "mae": avg_mae,
                 "curve": curve, "cont": cont_flag,
                 "hold": avg_hold, "capture": capture,
+                "d_pairs": _d_pairs[:5],
             })
         if _all_scenario_stats:
             _all_scenario_stats.sort(key=lambda x: x["pnl"], reverse=True)
@@ -11904,6 +11928,10 @@ def _v4_shadow_report_lines():
                 )
                 if curve_str:
                     lines.append(f"    ⏱ {curve_str}")
+                if sc.get("d_pairs") and sc["route"] in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
+                    for _dd, ik, wv, wn, lv, ln, _dir in sc["d_pairs"]:
+                        _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
+                        lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_dd:.2f} ({_dir})")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
