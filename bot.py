@@ -1069,14 +1069,6 @@ def _pipeline_report(force=False):
         f" VR5&lt;2.0:{c.get('climax_vr_fail',0)}"
         f" ✅통과:{c.get('climax_pass',0)}",
         f"    └ CLM(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [QA조용한가속] RSI60~74 + 양봉 + VR≧1.5 + tick_rate≦2.0",
-        f"    진입{c.get('quiet_accel_enter',0)}"
-        f" → RSI&lt;60:{c.get('quiet_accel_rsi_low',0)}"
-        f" RSI≧74:{c.get('quiet_accel_rsi_high',0)}"
-        f" 음봉:{c.get('quiet_accel_bull_fail',0)}"
-        f" VR&lt;1.5:{c.get('quiet_accel_vr5_fail',0)}"
-        f" ✅통과:{c.get('quiet_accel_pass',0)}",
-        f"    └ QA(shadow): max240s/dd0.5%gate [A_BYPASS exit]",
         f"  [SHK급락후회복] 아래꼬리≧40% + 양봉 + 강한마감 + VR≧1.5",
         f"    진입{c.get('shakeout_enter',0)}"
         f" → 음봉:{c.get('shakeout_bull_fail',0)}"
@@ -8587,14 +8579,13 @@ _STRAT_DESC_MAP = {
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
     "TAC": "양봉 + RSI50 + tick매수축적 → 틱 축적",
     # Research - v21 scenarios
-    "QC": "낮은tick_rate + 낮은spread + 낮은ATR + 양봉 → 조용한 continuation",
     "SHR": "급락-0.3~0.6% 후 EMA20회복 → shakeout reclaim",
     "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     "CPRS": "코인별 승패편향 반영 → coin personality",
     "FBR": "1차돌파실패 → 밀림 → 저점상승 → 재돌파 → failed breakout 2nd entry",
-    "TAC180": "틱축적 + 180s exit (TAC peak 가설 검증)",
+    "LATE_CONT": "FBR/CLMP전용: 초반DD허용 + 300s연장 (늦은continuation 포착)",
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
 }
 
@@ -8854,18 +8845,21 @@ _V0_EXIT_PARAMS_A_BYPASS = {
     "description": "A_BYPASS:max240s/dd0.5%gate/tiered_SL",
 }
 
-_V0_EXIT_PARAMS_TAC_E180 = {
+_V0_EXIT_PARAMS_LATE_CONT = {
     "strategy": "TRAIL",
     "sl_pct": 0.020,
     "activation_pct": 1.0,
     "trail_pct": 0.005,
     "hold_bars": 0,
-    "max_bars": 60,            # 180s (60 × 3s) — TAC 시간곡선 180s peak 가설
+    "max_bars": 100,            # 300s (100 × 3s) — FBR/CLMP 늦은 continuation 포착
     "disable_trail": True,
-    "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
-    "survival_gate_sec": 60,
-    "survival_max_dd_peak": 0.005,
-    "description": "TAC_E180:max180s/dd0.5%gate/tiered_SL",
+    "sl_tiers": [
+        (60,   0.035),  # 0~60s: 3.5% (초반 DD 완전 허용 — CLMP 60s:-0.29%)
+        (120,  0.025),  # 60~120s: 2.5% (중간 DD 허용)
+        (180,  0.015),  # 120~180s: 1.5% (반전 구간 진입)
+        (9999, 0.010),  # 180s+: 1.0% (확정 continuation 보호)
+    ],
+    "description": "LATE_CONT:max300s/wideSL(3.5/2.5/1.5/1.0)/no-trail",
 }
 
 _V0_EXIT_PARAMS_MOMENTUM_GT_SL07 = {
@@ -10139,8 +10133,8 @@ def _v0_check_low_heat_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info
     }
 
 
-# --- v0 전략 레지스트리 (v21c: TAC_E180 + LHC 추가 — Production 1 + Research 18) ---
-# v21b: 16, v21c: +TAC_E180(exit실험) + LHC(저열continuation) = 18
+# --- v0 전략 레지스트리 (v23: QA/QC/TAC180 정리, FBR/CLMP→LATE_CONT exit — Production 1 + Research 14) ---
+# v22→v23: -QA(에너지부족) -QC(MFE약) -TAC180(실험실패) / FBR+CLMP→LATE_CONT(300s/wideSL)
 _STRATEGY_REGISTRY = {
     # ━━━ Track A: PRODUCTION (절대 변경 금지) ━━━
     "모멘텀GT": {
@@ -10174,15 +10168,7 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM",
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
     },
-    # ━━━ Track C: v20 신규 시나리오 (5개) ━━━
-    "조용한가속": {
-        "check_fn": _v0_check_quiet_accel,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "quiet_accel", "route": "QA",
-        "ind_filters": [("tick_rate_30s", "<=", 2.0)],
-        "description": "RSI60-74+양봉+VR1.5+tick안정 [A_BYPASS exit:240s] (shadow)",
-    },
+    # ━━━ Track C: v20 신규 시나리오 ━━━
     "급락후회복": {
         "check_fn": _v0_check_shakeout,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10212,15 +10198,7 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
         "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
     },
-    # ━━━ Track D: v21b 신규 시나리오 (7개 — 조건식 정밀화) ━━━
-    "조용한continuation": {
-        "check_fn": _v0_check_quiet_cont,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "quiet_cont", "route": "QC",
-        "ind_filters": [("tick_rate_30s", "<=", 2.2), ("entry_spread_pct", "<=", 0.8)],
-        "description": "RSI58-72+ATR≤0.9+MACD양수비과열+15mVR1.2+20봉근접 [A_BYPASS] (shadow)",
-    },
+    # ━━━ Track D: v21b 신규 시나리오 (조건식 정밀화) ━━━
     "shakeout복귀": {
         "check_fn": _v0_check_shakeout_reclaim,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10231,11 +10209,11 @@ _STRATEGY_REGISTRY = {
     },
     "CLM눌림": {
         "check_fn": _v0_check_clm_pullback,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
         "priority": 10, "enabled": False,
         "pipeline_key": "clm_pullback", "route": "CLMP",
         "ind_filters": [("entry_spread_pct", "<=", 0.9)],
-        "description": "과열봉(body0.4%+VR2+윗꼬리25%)→눌림0.2-0.8%+재양봉 [GT] (shadow)",
+        "description": "과열봉후눌림+재양봉 [LATE_CONT:300s/wideSL] (shadow)",
     },
     "범위확장": {
         "check_fn": _v0_check_range_expand,
@@ -10261,20 +10239,12 @@ _STRATEGY_REGISTRY = {
     },
     "실패돌파2차": {
         "check_fn": _v0_check_failed_breakout,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
         "priority": 10, "enabled": False,
         "pipeline_key": "failed_breakout", "route": "FBR",
-        "description": "1차돌파실패→밀림→저점상승→재돌파+spread감소 [GT] (shadow)",
+        "description": "1차돌파실패→재돌파+spread감소 [LATE_CONT:300s/wideSL] (shadow)",
     },
-    # ━━━ Track E: v21c exit 실험 + 신규 ━━━
-    "틱축적_180s": {
-        "check_fn": _v0_check_tick_accum,
-        "exit_params": _V0_EXIT_PARAMS_TAC_E180,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "tick_accum", "route": "TAC180",
-        "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
-        "description": "TAC + 180s exit (peak 가설: 180s>240s) [shadow]",
-    },
+    # ━━━ Track E: v21c ━━━
     "저열continuation": {
         "check_fn": _v0_check_low_heat_cont,
         "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
@@ -11700,7 +11670,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "QA", "SHK", "DRY", "MZC", "TAC", "QC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "TAC180", "LHC"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
