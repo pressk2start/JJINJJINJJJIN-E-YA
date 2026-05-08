@@ -10121,7 +10121,7 @@ def _v0_check_low_heat_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info
     if bullish_count < 2:
         if _pipeline_inc("lhc_trend_fail", value=bullish_count, threshold=2, direction="gte"): return None
     vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.0 or vr5 > 2.5:
+    if vr5 < 1.0 or vr5 > 3.5:
         if _pipeline_inc("lhc_vr5_fail", value=round(vr5, 2)): return None
     _pipeline_inc("lhc_pass")
     return {
