@@ -8587,7 +8587,8 @@ _STRAT_DESC_MAP = {
     "FBR": "1차돌파실패 → 밀림 → 저점상승 → 재돌파 → failed breakout 2nd entry",
     "LATE_CONT": "FBR/CLMP전용: 초반DD허용 + 300s연장 (늦은continuation 포착)",
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
-    "MZC_F": "MZC + d-score필터(tick_buy≥0.65/krw_ps≥0.7) → 정제된 MACD반등",
+    "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
+    "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
 }
 
 _V0_EXIT_PARAMS = {
@@ -8769,6 +8770,9 @@ def _make_exit_params_dd_peak(threshold, gate_sec=60):
 
 # GT_SURV: 60초 시점 dd_peak > 0.3%면 청산 (survival A구간만 보유)
 _V0_EXIT_PARAMS_GT_SURV = _make_exit_params_dd_peak(0.003, gate_sec=60)
+
+# CLM_S30: 30초 dd_peak > 0.2%면 청산 (CLM bucket: 하 WR52%+0.39 vs 상 WR23%-0.41)
+_V0_EXIT_PARAMS_CLM_S30 = _make_exit_params_dd_peak(0.002, gate_sec=30)
 
 # === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
 # GTSV_E1: survival gate + 120s 강제종료 (보수형 fallback)
@@ -10254,14 +10258,21 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("tick_rate_30s", "<=", 2.0), ("tick_buy_30s", ">=", 0.60), ("entry_spread_pct", "<=", 0.8)],
         "description": "안뜨거운데계속사는놈:RSI58-72+ATR≤0.9+2/3양봉+저tick [A_BYPASS] (shadow)",
     },
-    # ━━━ Track F: v24 W/L d-score 기반 필터 실험 ━━━
+    # ━━━ Track F: v24 W/L d-score 기반 필터/exit 실험 ━━━
+    "과열감지_S30": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_S30,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_S30",
+        "description": "CLM+30초survival(dd_peak≤0.2%) [bucket: 하WR52%+0.39 vs 상WR23%-0.41] (shadow)",
+    },
     "MACD반등_F": {
         "check_fn": _v0_check_macd_cross,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
         "pipeline_key": "macd_cross", "route": "MZC_F",
-        "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_krw_ps_30s", ">=", 0.7)],
-        "description": "MZC+d-score필터(tick_buy≥0.65/krw_ps≥0.7) [GT exit] (shadow)",
+        "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
+        "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
     },
 }
 
@@ -11680,7 +11691,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11922,7 +11933,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
+                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
