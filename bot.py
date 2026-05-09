@@ -8589,6 +8589,8 @@ _STRAT_DESC_MAP = {
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
     "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
     "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
+    "CLMP_W": "CLMP depth완화(-0.10~-1.5%) → 수익차단 필터 검증",
+    "SHK_W": "SHK close완화(0.50) → 수익차단 필터 검증",
 }
 
 _V0_EXIT_PARAMS = {
@@ -9636,7 +9638,7 @@ def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _close_thr=0.60):
     """SHK 급락후회복: 큰 아래꼬리 + 강한 마감 — 약한 손 제거 후 continuation"""
     _pipeline_inc("shakeout_enter")
     if not c1 or len(c1) < 7:
@@ -9652,8 +9654,8 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
     lower_wick = min(op, cl) - lo
     if lower_wick / rng < 0.40:
         if _pipeline_inc("shakeout_wick_fail", value=round(lower_wick / rng, 2), threshold=0.40, direction="gte"): return None
-    if (cl - lo) / rng < 0.60:
-        if _pipeline_inc("shakeout_close_fail", value=round((cl - lo) / rng, 2), threshold=0.60, direction="gte"): return None
+    if (cl - lo) / rng < _close_thr:
+        if _pipeline_inc("shakeout_close_fail", value=round((cl - lo) / rng, 2), threshold=_close_thr, direction="gte"): return None
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 1.5:
         if _pipeline_inc("shakeout_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
@@ -9666,6 +9668,10 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
         "exit_params": {},
         "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "vr5": round(vr5, 2)},
     }
+
+
+def _v0_check_shakeout_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    return _v0_check_shakeout(c1, c5, c15, c30, c60, gate_info, _close_thr=0.50)
 
 
 def _v0_check_dry_breakout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
@@ -9871,7 +9877,7 @@ def _v0_check_shakeout_reclaim(c1, c5=None, c15=None, c30=None, c60=None, gate_i
     }
 
 
-def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _depth_hi=-0.15, _depth_lo=-1.0):
     """CLMP CLM pullback: 과열봉(body≥0.3%+VR1.5+윗꼬리20%) 후 눌림0.15-1.0% + 재양봉 [v22완화]"""
     _pipeline_inc("clm_pullback_enter")
     if not c1 or len(c1) < 8 or not _v4_is_bullish(c1[-1]):
@@ -9910,7 +9916,7 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
     climax_high = c1[climax_idx]["high_price"]
     pullback_low = min(c["low_price"] for c in pullback_candles)
     pullback_pct = (pullback_low - climax_high) / max(climax_high, 1) * 100
-    if pullback_pct > -0.15 or pullback_pct < -1.0:
+    if pullback_pct > _depth_hi or pullback_pct < _depth_lo:
         if _pipeline_inc("clm_pullback_depth_fail", value=round(pullback_pct, 2)): return None
     midpoint = (climax_close + pullback_low) / 2
     if c1[-1]["trade_price"] < midpoint:
@@ -9924,6 +9930,10 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
         "exit_params": {},
         "indicators": {"pullback_pct": round(pullback_pct, 3), "climax_gap": abs(climax_idx)},
     }
+
+
+def _v0_check_clm_pullback_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    return _v0_check_clm_pullback(c1, c5, c15, c30, c60, gate_info, _depth_hi=-0.10, _depth_lo=-1.5)
 
 
 def _v0_check_range_expand(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
@@ -10273,6 +10283,22 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "macd_cross", "route": "MZC_F",
         "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
         "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
+    },
+    # ━━━ Track G: 필터 완화 shadow (수익차단 필터 검증) ━━━
+    "CLM눌림_W": {
+        "check_fn": _v0_check_clm_pullback_wide,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "clm_pullback", "route": "CLMP_W",
+        "ind_filters": [("entry_spread_pct", "<=", 0.9)],
+        "description": "CLMP depth완화(-0.10~-1.5%) [재검토:10건WR60%+0.28%차단] (shadow)",
+    },
+    "급락후회복_W": {
+        "check_fn": _v0_check_shakeout_wide,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "shakeout", "route": "SHK_W",
+        "description": "SHK close완화(0.50) [재검토:39건WR56%+0.14%차단] (shadow)",
     },
 }
 
@@ -11691,7 +11717,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLMP_W", "SHK_W"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11933,7 +11959,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"]}
+                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["lower_wick_ratio"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
