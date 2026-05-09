@@ -9666,7 +9666,7 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
         "logic_group": "SHK",
         "filters_hit": [f"wick={lower_wick/rng:.2f}", f"close_pos={((cl-lo)/rng):.2f}", f"VR5={vr5:.1f}"],
         "exit_params": {},
-        "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "vr5": round(vr5, 2)},
+        "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "close_pos": round((cl - lo) / rng, 2), "vr5": round(vr5, 2)},
     }
 
 
@@ -11959,7 +11959,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["lower_wick_ratio"]}
+                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
