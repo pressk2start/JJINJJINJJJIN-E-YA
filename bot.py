@@ -8569,7 +8569,6 @@ _STRAT_DESC_MAP = {
     # Production
     "SVE1": "5분RSI≥74.55 + 생존게이트60s + 120s강제종료 (LIVE)",
     # Research - entry structures
-    "VOL": "ATR 압축 → VR5 급증 + 양봉 → 변동성 폭발",
     "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
     # Research - v20 scenarios
@@ -8579,7 +8578,6 @@ _STRAT_DESC_MAP = {
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
     "TAC": "양봉 + RSI50 + tick매수축적 → 틱 축적",
     # Research - v21 scenarios
-    "SHR": "급락-0.3~0.6% 후 EMA20회복 → shakeout reclaim",
     "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
@@ -9608,13 +9606,24 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     if vr5 < 2.0:
         if _pipeline_inc("climax_vr_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
     _pipeline_inc("climax_pass")
+    lo = last["low_price"]
+    cl = last["trade_price"]
+    hi = last["high_price"]
+    lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
+    close_strength = (cl - lo) / total_range
+    wick_asym = (upper_wick - lower_wick) / total_range
+    body_range = abs(body) / total_range
     return {
         "signal_tag": "과열감지",
         "entry_mode": "confirm",
         "logic_group": "Z",
         "filters_hit": [f"body={body_pct:.2f}%", f"wick={wick_ratio:.2f}", f"VR5={vr5:.1f}"],
         "exit_params": {},
-        "indicators": {"body_pct": round(body_pct, 2), "wick_ratio": round(wick_ratio, 2)},
+        "indicators": {
+            "body_pct": round(body_pct, 2), "wick_ratio": round(wick_ratio, 2),
+            "vr5": round(vr5, 2), "close_strength": round(close_strength, 3),
+            "wick_asym": round(wick_asym, 3), "body_range": round(body_range, 3),
+        },
     }
 
 
@@ -10170,13 +10179,7 @@ _STRATEGY_REGISTRY = {
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
     # ━━━ Track B: RESEARCH — 진입 구조 ━━━
-    "변동성압축": {
-        "check_fn": _v0_check_vol_squeeze,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "vol_squeeze", "route": "VOL",
-        "description": "ATR압축→VR급증+양봉 [GT exit] (shadow)",
-    },
+    # (VOL 제거: n>1000 cap=-26% PnL음수 지속, 회복추세 없음)
     "눌림재진입": {
         "check_fn": _v0_check_retest_entry,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10222,14 +10225,7 @@ _STRATEGY_REGISTRY = {
         "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
     },
     # ━━━ Track D: v21b 신규 시나리오 (조건식 정밀화) ━━━
-    "shakeout복귀": {
-        "check_fn": _v0_check_shakeout_reclaim,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "shakeout_reclaim", "route": "SHR",
-        "ind_filters": [("tick_buy_30s", ">=", 0.58), ("entry_spread_pct", "<=", 0.9)],
-        "description": "급락-0.3~0.8%→EMA20복귀+RSI50-68+tick_buy [GT exit:240s] (shadow)",
-    },
+    # (SHR 제거: n>1000 cap=-38% PnL음수 지속, 회복추세 없음)
     "CLM눌림": {
         "check_fn": _v0_check_clm_pullback,
         "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
@@ -11739,7 +11735,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "SHK", "DRY", "MZC", "TAC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11928,6 +11924,8 @@ def _v4_shadow_report_lines():
             if n < 10:
                 continue
             route = s.get("route", "?")
+            if route not in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
+                continue
             strat = s.get("strat", "?")
             wins = s.get("wins", 0)
             wr = wins / n * 100
@@ -11981,7 +11979,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
