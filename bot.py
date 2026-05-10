@@ -8575,7 +8575,6 @@ _STRAT_DESC_MAP = {
     "SHK": "큰아래꼬리 + 강한마감 + VR1.5 → 급락후 회복",
     "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
-    "TAC": "양봉 + RSI50 + tick매수축적 → 틱 축적",
     # Research - v21 scenarios
     "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
@@ -10215,14 +10214,8 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "macd_cross", "route": "MZC",
         "description": "5m MACD hist 음→양+양봉+15mVR1.0 [GT exit] (shadow)",
     },
-    "틱축적": {
-        "check_fn": _v0_check_tick_accum,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "tick_accum", "route": "TAC",
-        "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
-        "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
-    },
+    # (TAC 제거: cap 음수 지속, 분리력 없음)
+
     # ━━━ Track D: v21b 신규 시나리오 (조건식 정밀화) ━━━
     # (SHR 제거: n>1000 cap=-38% PnL음수 지속, 회복추세 없음)
     "CLM눌림": {
@@ -11734,7 +11727,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "SHK", "DRY", "MZC", "TAC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "SHK", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
