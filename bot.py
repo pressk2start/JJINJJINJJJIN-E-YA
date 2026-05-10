@@ -1023,7 +1023,7 @@ def _pipeline_report(force=False):
         f"🔬 detect: {_det}(Δ{d('detect_called')})",
         f"📡 v4: {_v4}(Δ{d('v4_called')})",
         f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
-        f"━ check_fn 필터 세부 (12 시나리오) ━",
+        f"━ check_fn 필터 세부 (8 시나리오) ━",
         f"  [G모멘텀] 5mRSI≧74.55 + 1m양봉 + 1mVR5≦3.2 + 15mVR≧2.0",
         f"    진입{c.get('momentum_enter',0)}"
         f" → 5mRSI&lt;74.55:{c.get('momentum_rsi5_fail',0)}"
@@ -1045,13 +1045,6 @@ def _pipeline_report(force=False):
         f" → 음봉:{c.get('broad_bull_fail',0)}"
         f" ✅통과:{c.get('broad_pass',0)}",
         f"    └ MIC(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
-        f"  [VOL압축] ATR_ratio&lt;0.85(현재14봉/과거14봉) + VR5≧1.5 + 양봉",
-        f"    진입{c.get('vol_squeeze_enter',0)}"
-        f" → ATR_ratio≧0.85:{c.get('vol_compression_fail',0)}"
-        f" VR5&lt;1.5:{c.get('vol_vr5_fail',0)}"
-        f" 음봉:{c.get('vol_bull_fail',0)}"
-        f" ✅통과:{c.get('vol_squeeze_pass',0)}",
-        f"    └ VOL(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
         f"  [RET눌림] 5m급등≧1.0% + pullback0.3~2.0% + EMA20gap-0.5~+0.8% + 양봉",
         f"    진입{c.get('retest_enter',0)}"
         f" → surge&lt;1.0%:{c.get('retest_surge_fail',0)}"
@@ -1069,14 +1062,6 @@ def _pipeline_report(force=False):
         f" VR5&lt;2.0:{c.get('climax_vr_fail',0)}"
         f" ✅통과:{c.get('climax_pass',0)}",
         f"    └ CLM(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [SHK급락후회복] 아래꼬리≧40% + 양봉 + 강한마감 + VR≧1.5",
-        f"    진입{c.get('shakeout_enter',0)}"
-        f" → 음봉:{c.get('shakeout_bull_fail',0)}"
-        f" 꼬리부족:{c.get('shakeout_wick_fail',0)}"
-        f" 약한마감:{c.get('shakeout_close_fail',0)}"
-        f" VR&lt;1.5:{c.get('shakeout_vr5_fail',0)}"
-        f" ✅통과:{c.get('shakeout_pass',0)}",
-        f"    └ SHK(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
         f"  [DRY거래량건조] 3봉저거래량→VR≧2.0폭발 + 양봉 + 5봉돌파",
         f"    진입{c.get('dry_enter',0)}"
         f" → 음봉:{c.get('dry_bull_fail',0)}"
@@ -1092,13 +1077,6 @@ def _pipeline_report(force=False):
         f" 15mVR&lt;1.0:{c.get('macd_cross_vr15_fail',0)}"
         f" ✅통과:{c.get('macd_cross_pass',0)}",
         f"    └ MZC(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [TAC틱축적] 양봉 + RSI≧50 + VR≧1.2 + tick_buy≧0.65 + tick_rate≦2.0",
-        f"    진입{c.get('tick_accum_enter',0)}"
-        f" → 음봉:{c.get('tick_accum_bull_fail',0)}"
-        f" RSI&lt;50:{c.get('tick_accum_rsi_fail',0)}"
-        f" VR&lt;1.2:{c.get('tick_accum_vr5_fail',0)}"
-        f" ✅통과:{c.get('tick_accum_pass',0)}",
-        f"    └ TAC(shadow): max240s/dd0.5%gate [A_BYPASS exit]",
         f"━━━━━━━━━━━━━━━━",
         f"🚫 gate탈락:",
         f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
@@ -8572,7 +8550,6 @@ _STRAT_DESC_MAP = {
     "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
     # Research - v20 scenarios
-    "SHK": "큰아래꼬리 + 강한마감 + VR1.5 → 급락후 회복",
     "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
     # Research - v21 scenarios
@@ -8586,8 +8563,6 @@ _STRAT_DESC_MAP = {
     "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
     "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
     "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
-    "CLMP_W": "CLMP depth완화(-0.10~-1.5%) → 수익차단 필터 검증",
-    "SHK_W": "SHK close완화(0.50) → 수익차단 필터 검증",
 }
 
 _V0_EXIT_PARAMS = {
@@ -10193,13 +10168,7 @@ _STRATEGY_REGISTRY = {
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
     },
     # ━━━ Track C: v20 신규 시나리오 ━━━
-    "급락후회복": {
-        "check_fn": _v0_check_shakeout,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "shakeout", "route": "SHK",
-        "description": "큰아래꼬리40%+강한마감+VR1.5 [GT exit] (shadow)",
-    },
+    # (SHK 제거: n=806 cap=-44% PnL -0.08%, 회복추세 없음)
     "거래량건조": {
         "check_fn": _v0_check_dry_breakout,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10287,22 +10256,7 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_S30A",
         "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
     },
-    # ━━━ Track G: 필터 완화 shadow (수익차단 필터 검증) ━━━
-    "CLM눌림_W": {
-        "check_fn": _v0_check_clm_pullback_wide,
-        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "clm_pullback", "route": "CLMP_W",
-        "ind_filters": [("entry_spread_pct", "<=", 0.9)],
-        "description": "CLMP depth완화(-0.10~-1.5%) [재검토:10건WR60%+0.28%차단] (shadow)",
-    },
-    "급락후회복_W": {
-        "check_fn": _v0_check_shakeout_wide,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "shakeout", "route": "SHK_W",
-        "description": "SHK close완화(0.50) [재검토:39건WR56%+0.14%차단] (shadow)",
-    },
+    # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11727,7 +11681,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "SHK", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11971,7 +11925,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
