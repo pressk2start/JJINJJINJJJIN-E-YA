@@ -8569,17 +8569,13 @@ _STRAT_DESC_MAP = {
     # Production
     "SVE1": "5분RSI≥74.55 + 생존게이트60s + 120s강제종료 (LIVE)",
     # Research - entry structures
-    "VOL": "ATR 압축 → VR5 급증 + 양봉 → 변동성 폭발",
     "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
     # Research - v20 scenarios
-    "QA": "RSI60-74 + 양봉 + VR1.5 + tick안정 → 조용한 가속",
     "SHK": "큰아래꼬리 + 강한마감 + VR1.5 → 급락후 회복",
     "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
-    "TAC": "양봉 + RSI50 + tick매수축적 → 틱 축적",
     # Research - v21 scenarios
-    "SHR": "급락-0.3~0.6% 후 EMA20회복 → shakeout reclaim",
     "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
@@ -8589,6 +8585,9 @@ _STRAT_DESC_MAP = {
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
     "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
     "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
+    "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
+    "CLMP_W": "CLMP depth완화(-0.10~-1.5%) → 수익차단 필터 검증",
+    "SHK_W": "SHK close완화(0.50) → 수익차단 필터 검증",
 }
 
 _V0_EXIT_PARAMS = {
@@ -8773,6 +8772,13 @@ _V0_EXIT_PARAMS_GT_SURV = _make_exit_params_dd_peak(0.003, gate_sec=60)
 
 # CLM_S30: 30초 dd_peak > 0.2%면 청산 (CLM bucket: 하 WR52%+0.39 vs 상 WR23%-0.41)
 _V0_EXIT_PARAMS_CLM_S30 = _make_exit_params_dd_peak(0.002, gate_sec=30)
+
+# CLM_S30_ATR: ATR적응형 gate (저ATR 0.2%, 중ATR 0.3%, 고ATR 0.45%)
+_V0_EXIT_PARAMS_CLM_S30_ATR = _make_exit_params_dd_peak(0.003, gate_sec=30)
+_V0_EXIT_PARAMS_CLM_S30_ATR["survival_dd_adaptive"] = {
+    "ind_key": "atr_pct",
+    "tiers": [(0.45, 0.002), (0.70, 0.003), (999, 0.0045)],
+}
 
 # === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
 # GTSV_E1: survival gate + 120s 강제종료 (보수형 fallback)
@@ -9598,13 +9604,24 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     if vr5 < 2.0:
         if _pipeline_inc("climax_vr_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
     _pipeline_inc("climax_pass")
+    lo = last["low_price"]
+    cl = last["trade_price"]
+    hi = last["high_price"]
+    lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
+    close_strength = (cl - lo) / total_range
+    wick_asym = (upper_wick - lower_wick) / total_range
+    body_range = abs(body) / total_range
     return {
         "signal_tag": "과열감지",
         "entry_mode": "confirm",
         "logic_group": "Z",
         "filters_hit": [f"body={body_pct:.2f}%", f"wick={wick_ratio:.2f}", f"VR5={vr5:.1f}"],
         "exit_params": {},
-        "indicators": {"body_pct": round(body_pct, 2), "wick_ratio": round(wick_ratio, 2)},
+        "indicators": {
+            "body_pct": round(body_pct, 2), "wick_ratio": round(wick_ratio, 2),
+            "vr5": round(vr5, 2), "close_strength": round(close_strength, 3),
+            "wick_asym": round(wick_asym, 3), "body_range": round(body_range, 3),
+        },
     }
 
 
@@ -9636,7 +9653,7 @@ def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
-def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _close_thr=0.60):
     """SHK 급락후회복: 큰 아래꼬리 + 강한 마감 — 약한 손 제거 후 continuation"""
     _pipeline_inc("shakeout_enter")
     if not c1 or len(c1) < 7:
@@ -9652,8 +9669,8 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
     lower_wick = min(op, cl) - lo
     if lower_wick / rng < 0.40:
         if _pipeline_inc("shakeout_wick_fail", value=round(lower_wick / rng, 2), threshold=0.40, direction="gte"): return None
-    if (cl - lo) / rng < 0.60:
-        if _pipeline_inc("shakeout_close_fail", value=round((cl - lo) / rng, 2), threshold=0.60, direction="gte"): return None
+    if (cl - lo) / rng < _close_thr:
+        if _pipeline_inc("shakeout_close_fail", value=round((cl - lo) / rng, 2), threshold=_close_thr, direction="gte"): return None
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 1.5:
         if _pipeline_inc("shakeout_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
@@ -9664,8 +9681,12 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
         "logic_group": "SHK",
         "filters_hit": [f"wick={lower_wick/rng:.2f}", f"close_pos={((cl-lo)/rng):.2f}", f"VR5={vr5:.1f}"],
         "exit_params": {},
-        "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "vr5": round(vr5, 2)},
+        "indicators": {"lower_wick_ratio": round(lower_wick / rng, 2), "close_pos": round((cl - lo) / rng, 2), "vr5": round(vr5, 2)},
     }
+
+
+def _v0_check_shakeout_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    return _v0_check_shakeout(c1, c5, c15, c30, c60, gate_info, _close_thr=0.50)
 
 
 def _v0_check_dry_breakout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
@@ -9871,7 +9892,7 @@ def _v0_check_shakeout_reclaim(c1, c5=None, c15=None, c30=None, c60=None, gate_i
     }
 
 
-def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _depth_hi=-0.15, _depth_lo=-1.0):
     """CLMP CLM pullback: 과열봉(body≥0.3%+VR1.5+윗꼬리20%) 후 눌림0.15-1.0% + 재양봉 [v22완화]"""
     _pipeline_inc("clm_pullback_enter")
     if not c1 or len(c1) < 8 or not _v4_is_bullish(c1[-1]):
@@ -9910,7 +9931,7 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
     climax_high = c1[climax_idx]["high_price"]
     pullback_low = min(c["low_price"] for c in pullback_candles)
     pullback_pct = (pullback_low - climax_high) / max(climax_high, 1) * 100
-    if pullback_pct > -0.15 or pullback_pct < -1.0:
+    if pullback_pct > _depth_hi or pullback_pct < _depth_lo:
         if _pipeline_inc("clm_pullback_depth_fail", value=round(pullback_pct, 2)): return None
     midpoint = (climax_close + pullback_low) / 2
     if c1[-1]["trade_price"] < midpoint:
@@ -9924,6 +9945,10 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
         "exit_params": {},
         "indicators": {"pullback_pct": round(pullback_pct, 3), "climax_gap": abs(climax_idx)},
     }
+
+
+def _v0_check_clm_pullback_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
+    return _v0_check_clm_pullback(c1, c5, c15, c30, c60, gate_info, _depth_hi=-0.10, _depth_lo=-1.5)
 
 
 def _v0_check_range_expand(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
@@ -10152,13 +10177,7 @@ _STRATEGY_REGISTRY = {
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
     # ━━━ Track B: RESEARCH — 진입 구조 ━━━
-    "변동성압축": {
-        "check_fn": _v0_check_vol_squeeze,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "vol_squeeze", "route": "VOL",
-        "description": "ATR압축→VR급증+양봉 [GT exit] (shadow)",
-    },
+    # (VOL 제거: n>1000 cap=-26% PnL음수 지속, 회복추세 없음)
     "눌림재진입": {
         "check_fn": _v0_check_retest_entry,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10195,23 +10214,10 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "macd_cross", "route": "MZC",
         "description": "5m MACD hist 음→양+양봉+15mVR1.0 [GT exit] (shadow)",
     },
-    "틱축적": {
-        "check_fn": _v0_check_tick_accum,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "tick_accum", "route": "TAC",
-        "ind_filters": [("tick_buy_30s", ">=", 0.65), ("tick_rate_30s", "<=", 2.0)],
-        "description": "양봉+RSI50+매수축적+체결안정 [A_BYPASS exit:240s] (shadow)",
-    },
+    # (TAC 제거: cap 음수 지속, 분리력 없음)
+
     # ━━━ Track D: v21b 신규 시나리오 (조건식 정밀화) ━━━
-    "shakeout복귀": {
-        "check_fn": _v0_check_shakeout_reclaim,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "shakeout_reclaim", "route": "SHR",
-        "ind_filters": [("tick_buy_30s", ">=", 0.58), ("entry_spread_pct", "<=", 0.9)],
-        "description": "급락-0.3~0.8%→EMA20복귀+RSI50-68+tick_buy [GT exit:240s] (shadow)",
-    },
+    # (SHR 제거: n>1000 cap=-38% PnL음수 지속, 회복추세 없음)
     "CLM눌림": {
         "check_fn": _v0_check_clm_pullback,
         "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
@@ -10273,6 +10279,29 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "macd_cross", "route": "MZC_F",
         "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
         "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
+    },
+    "과열감지_S30_ATR": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_S30_ATR,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_S30A",
+        "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
+    },
+    # ━━━ Track G: 필터 완화 shadow (수익차단 필터 검증) ━━━
+    "CLM눌림_W": {
+        "check_fn": _v0_check_clm_pullback_wide,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "clm_pullback", "route": "CLMP_W",
+        "ind_filters": [("entry_spread_pct", "<=", 0.9)],
+        "description": "CLMP depth완화(-0.10~-1.5%) [재검토:10건WR60%+0.28%차단] (shadow)",
+    },
+    "급락후회복_W": {
+        "check_fn": _v0_check_shakeout_wide,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "shakeout", "route": "SHK_W",
+        "description": "SHK close완화(0.50) [재검토:39건WR56%+0.14%차단] (shadow)",
     },
 }
 
@@ -11133,6 +11162,13 @@ def _shadow_sim_exit(vp, cur_price):
                 _surv_fail = _pnl_fail
             # dd_peak 기반 게이트 (독립 — 고점 대비 낙폭 초과 시 탈락)
             _surv_max_dd = ep.get("survival_max_dd_peak")
+            _sda = ep.get("survival_dd_adaptive")
+            if _sda:
+                _ind_val = vp.get("indicators", {}).get(_sda["ind_key"], 0)
+                for _tier_max, _tier_dd in _sda["tiers"]:
+                    if _ind_val < _tier_max:
+                        _surv_max_dd = _tier_dd
+                        break
             if _surv_max_dd is not None:
                 _dd = (vp["best_price"] - cur_price) / entry_price
                 if _dd > _surv_max_dd:
@@ -11691,7 +11727,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "SHK", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11880,6 +11916,8 @@ def _v4_shadow_report_lines():
             if n < 10:
                 continue
             route = s.get("route", "?")
+            if route not in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
+                continue
             strat = s.get("strat", "?")
             wins = s.get("wins", 0)
             wr = wins / n * 100
@@ -11933,7 +11971,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
