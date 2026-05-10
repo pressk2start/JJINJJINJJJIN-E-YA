@@ -8572,7 +8572,6 @@ _STRAT_DESC_MAP = {
     "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
     # Research - v20 scenarios
-    "QA": "RSI60-74 + 양봉 + VR1.5 + tick안정 → 조용한 가속",
     "SHK": "큰아래꼬리 + 강한마감 + VR1.5 → 급락후 회복",
     "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
     "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
