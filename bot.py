@@ -8589,6 +8589,7 @@ _STRAT_DESC_MAP = {
     "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
     "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
     "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
+    "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
     "CLMP_W": "CLMP depth완화(-0.10~-1.5%) → 수익차단 필터 검증",
     "SHK_W": "SHK close완화(0.50) → 수익차단 필터 검증",
 }
@@ -8775,6 +8776,13 @@ _V0_EXIT_PARAMS_GT_SURV = _make_exit_params_dd_peak(0.003, gate_sec=60)
 
 # CLM_S30: 30초 dd_peak > 0.2%면 청산 (CLM bucket: 하 WR52%+0.39 vs 상 WR23%-0.41)
 _V0_EXIT_PARAMS_CLM_S30 = _make_exit_params_dd_peak(0.002, gate_sec=30)
+
+# CLM_S30_ATR: ATR적응형 gate (저ATR 0.2%, 중ATR 0.3%, 고ATR 0.45%)
+_V0_EXIT_PARAMS_CLM_S30_ATR = _make_exit_params_dd_peak(0.003, gate_sec=30)
+_V0_EXIT_PARAMS_CLM_S30_ATR["survival_dd_adaptive"] = {
+    "ind_key": "atr_pct",
+    "tiers": [(0.45, 0.002), (0.70, 0.003), (999, 0.0045)],
+}
 
 # === GTSV exit 구조 검증: 120s/150s/adaptive 3축 비교 ===
 # GTSV_E1: survival gate + 120s 강제종료 (보수형 fallback)
@@ -10284,6 +10292,13 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
         "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
     },
+    "과열감지_S30_ATR": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_S30_ATR,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_S30A",
+        "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
+    },
     # ━━━ Track G: 필터 완화 shadow (수익차단 필터 검증) ━━━
     "CLM눌림_W": {
         "check_fn": _v0_check_clm_pullback_wide,
@@ -11159,6 +11174,13 @@ def _shadow_sim_exit(vp, cur_price):
                 _surv_fail = _pnl_fail
             # dd_peak 기반 게이트 (독립 — 고점 대비 낙폭 초과 시 탈락)
             _surv_max_dd = ep.get("survival_max_dd_peak")
+            _sda = ep.get("survival_dd_adaptive")
+            if _sda:
+                _ind_val = vp.get("indicators", {}).get(_sda["ind_key"], 0)
+                for _tier_max, _tier_dd in _sda["tiers"]:
+                    if _ind_val < _tier_max:
+                        _surv_max_dd = _tier_dd
+                        break
             if _surv_max_dd is not None:
                 _dd = (vp["best_price"] - cur_price) / entry_price
                 if _dd > _surv_max_dd:
@@ -11717,7 +11739,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLMP_W", "SHK_W"}
+        _ACTIVE_RESEARCH = {"VOL", "RET", "CLM", "SHK", "DRY", "MZC", "TAC", "SHR", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLMP_W", "SHK_W"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11959,7 +11981,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
+                _BUCKET_WATCH = {"LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"], "CLMP_W": ["pullback_pct"], "SHK_W": ["close_pos", "lower_wick_ratio"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
