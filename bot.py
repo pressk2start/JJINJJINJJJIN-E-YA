@@ -514,6 +514,7 @@ _PIPELINE_COUNTERS = {
     "lock_block": 0,           # 락 획득 실패
     "suspend_block": 0,        # 연패 중지 (합계)
     "block_daily_guard": 0,    # 일일 리스크 가드
+    "block_latency_kill": 0,   # 레이턴시 킬스위치
     "block_c_killswitch": 0,   # C 킬스위치
     "block_c_rate": 0,         # C 속도제한
     "block_loss_streak": 0,    # 실제 연패중지
@@ -750,6 +751,22 @@ def _pipeline_record_stage(name, elapsed_ms):
         d = _PIPELINE_STAGE_LATENCIES.get(name)
         if d is not None:
             d.append(elapsed_ms)
+
+
+def _latency_killswitch_check():
+    """scan_detect p95 기반 진입 차단 판정. (True=통과, False=차단)"""
+    if not LATENCY_KILLSWITCH_ENABLED:
+        return True, ""
+    with _PIPELINE_STAGE_LOCK:
+        samples = list(_PIPELINE_STAGE_LATENCIES.get("scan_detect", []))
+    if len(samples) < LATENCY_KILLSWITCH_MIN_SAMPLES:
+        return True, ""
+    samples.sort()
+    idx = int(len(samples) * 0.95)
+    p95 = samples[min(idx, len(samples) - 1)]
+    if p95 > LATENCY_KILLSWITCH_P95_MS:
+        return False, f"scan_detect p95={p95/1000:.1f}s > {LATENCY_KILLSWITCH_P95_MS/1000:.0f}s (n={len(samples)})"
+    return True, ""
 
 
 def _pipeline_record_market_scan(market):
@@ -1088,6 +1105,7 @@ def _pipeline_report(force=False):
         f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
         f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
         f"⛔ 차단{c['suspend_block']}: daily:{c.get('block_daily_guard',0)}"
+        f" lat_kill:{c.get('block_latency_kill',0)}"
         f" c_kill:{c.get('block_c_killswitch',0)} c_rate:{c.get('block_c_rate',0)}"
         f" 연패:{c.get('block_loss_streak',0)} | A군우회:{c.get('suspend_a_bypass',0)}",
         f"📊 일일가드: 거래{_sve1_daily_trade_count()}/{SVE1_DAILY_MAX_TRADES}"
@@ -1795,6 +1813,12 @@ SVE1_DAILY_MAX_LOSS_PCT = -0.02 # 하루 누적 PnL 하한 (-2% 유지)
 # A군 전용 일일 가드 — 백도어 방지
 A_DAILY_MAX_TRADES = 3          # A군 하루 최대 3건 (5→3: 제한 배치)
 A_DAILY_MAX_LOSS_PCT = -0.007   # A군 하루 누적 PnL 하한 (-0.7%)
+A_BYPASS_AFTER_DAILY_GUARD = False  # daily guard 발동 후 A군 우회 허용 여부 (False=차단)
+
+# 레이턴시 kill-switch — scan_detect p95가 임계치 초과 시 신규 진입 차단
+LATENCY_KILLSWITCH_ENABLED = True
+LATENCY_KILLSWITCH_P95_MS = 60000   # scan_detect p95 임계치 (60초)
+LATENCY_KILLSWITCH_MIN_SAMPLES = 10  # 최소 샘플 수 (미달 시 kill-switch 비활성)
 
 def _sve1_daily_trade_count():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
@@ -17273,6 +17297,15 @@ def main():
                     try:
                         retest_pre = check_retest_entry(wm)
                         if retest_pre:
+                            # daily guard + latency kill-switch (하드락)
+                            _rt_dg_ok, _rt_dg_reason = sve1_daily_guard_ok()
+                            if not _rt_dg_ok:
+                                print(f"[RETEST] {wm} daily guard 차단: {_rt_dg_reason}")
+                                continue
+                            _rt_lat_ok, _rt_lat_reason = _latency_killswitch_check()
+                            if not _rt_lat_ok:
+                                print(f"[RETEST] {wm} latency kill: {_rt_lat_reason}")
+                                continue
                             # 🔐 락 획득 (메인/DCB 경로와 동일 패턴)
                             if not _try_acquire_entry_lock(wm):
                                 print(f"[RETEST] {wm} already locked → skip")
@@ -17382,6 +17415,16 @@ def main():
                     try:
                         circle_pre = circle_check_entry(cm)
                         if not circle_pre:
+                            continue
+
+                        # daily guard + latency kill-switch (하드락)
+                        _ci_dg_ok, _ci_dg_reason = sve1_daily_guard_ok()
+                        if not _ci_dg_ok:
+                            print(f"[CIRCLE] {cm} daily guard 차단: {_ci_dg_reason}")
+                            continue
+                        _ci_lat_ok, _ci_lat_reason = _latency_killswitch_check()
+                        if not _ci_lat_ok:
+                            print(f"[CIRCLE] {cm} latency kill: {_ci_lat_reason}")
                             continue
 
                         # ⚠️ OPEN_POSITIONS 차단 시 watchlist 유지 (다음 사이클 재시도)
@@ -17547,6 +17590,16 @@ def main():
                         try:
                             box_pre = box_check_entry(bm)
                             if not box_pre:
+                                continue
+
+                            # daily guard + latency kill-switch (하드락)
+                            _bx_dg_ok, _bx_dg_reason = sve1_daily_guard_ok()
+                            if not _bx_dg_ok:
+                                print(f"[BOX] {bm} daily guard 차단: {_bx_dg_reason}")
+                                continue
+                            _bx_lat_ok, _bx_lat_reason = _latency_killswitch_check()
+                            if not _bx_lat_ok:
+                                print(f"[BOX] {bm} latency kill: {_bx_lat_reason}")
                                 continue
 
                             with _POSITION_LOCK:
@@ -17850,6 +17903,16 @@ def main():
                             recent_alerts.pop(m, None)
                         continue
 
+                # 레이턴시 kill-switch — scan_detect p95 초과 시 전면 차단
+                _lat_ok, _lat_reason = _latency_killswitch_check()
+                if not _lat_ok:
+                    cut("LAT_KILL", f"{m} {_lat_reason}")
+                    _pipeline_inc("suspend_block")
+                    _pipeline_inc("block_latency_kill")
+                    with _POSITION_LOCK:
+                        recent_alerts.pop(m, None)
+                    continue
+
                 # SVE1 일일 리스크 가드 — A군은 우회 허용
                 _daily_ok, _daily_reason = sve1_daily_guard_ok()
                 _daily_blocked = not _daily_ok
@@ -17862,6 +17925,11 @@ def main():
                     _max_mode = _STRAT_MAX_MODE.get(_sg_key)
                 if _suspend_ts > time.time():
                     _remain = int(_suspend_ts - time.time())
+                    if _daily_blocked and not A_BYPASS_AFTER_DAILY_GUARD:
+                        cut("DAILY_GUARD", f"{m} {_daily_reason} (연패중, A우회 비활성)")
+                        _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_daily_guard")
+                        continue
                     _bp_features = _collect_a_bypass_features(pre, m)
                     _bp_eval = _eval_a_bypass(_bp_features)
                     _bp_entry_type = "BYPASS_LOSS_A" if _bp_eval["pass"] else "BLOCKED_LOSS"
@@ -17891,24 +17959,23 @@ def main():
                         pre["_suspend_a_penalty"] = _bp_eval["size_pct"]
                         pre["_is_losing_stop"] = True
                         pre["v4_exit_params"] = _V0_EXIT_PARAMS_A_BYPASS.copy()
-                        _dg_note = " +daily우회" if _daily_blocked else ""
-                        print(f"[A_BYPASS] {m} [{_sg_key}] A군 {_bp_eval['score']}/4 → 연패우회 ({_bp_eval['size_pct']:.0%}){_dg_note} "
+                        print(f"[A_BYPASS] {m} [{_sg_key}] A군 {_bp_eval['score']}/4 → 연패우회 ({_bp_eval['size_pct']:.0%}) "
                               f"tr30={_bp_features.get('tick_rate_30s')} atr={_bp_features.get('atr_pct')} macd={_bp_features.get('macd_hist_5m_bps')} sprd={_bp_features.get('entry_spread_pct')} [GT_EXIT:240s]")
                         _pipeline_inc("suspend_a_bypass")
                         with _A_BYPASS_LOCK:
                             _A_BYPASS_PENDING[m] = _bp_row
                     else:
                         _append_a_bypass_sample(_bp_row)
-                        if _daily_blocked:
-                            cut("DAILY_GUARD", f"{m} {_daily_reason} (연패중+A불통과)")
-                            _pipeline_inc("suspend_block")
-                            _pipeline_inc("block_daily_guard")
-                        else:
-                            cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/4")
-                            _pipeline_inc("suspend_block")
-                            _pipeline_inc("block_loss_streak")
+                        cut("LOSE_SUSPEND", f"{m} [{_sg_key}] 연패중지 (잔여{_remain}초) A={_bp_eval['score']}/4")
+                        _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_loss_streak")
                         continue
                 elif _daily_blocked:
+                    if not A_BYPASS_AFTER_DAILY_GUARD:
+                        cut("DAILY_GUARD", f"{m} {_daily_reason} (A우회 비활성)")
+                        _pipeline_inc("suspend_block")
+                        _pipeline_inc("block_daily_guard")
+                        continue
                     _bp_features = _collect_a_bypass_features(pre, m)
                     _bp_eval = _eval_a_bypass(_bp_features)
                     _bp_row = {
