@@ -1815,6 +1815,26 @@ A_DAILY_MAX_TRADES = 3          # A군 하루 최대 3건 (5→3: 제한 배치)
 A_DAILY_MAX_LOSS_PCT = -0.007   # A군 하루 누적 PnL 하한 (-0.7%)
 A_BYPASS_AFTER_DAILY_GUARD = False  # daily guard 발동 후 A군 우회 허용 여부 (False=차단)
 
+# 청산-기록 레이스 윈도우 방지: mark_position_closed → record_trade 사이 PnL 선반영
+_PENDING_CLOSE_PNL_LOCK = threading.Lock()
+_PENDING_CLOSE_PNL = []  # [{"pnl": float, "time": float, "market": str}]
+
+def _register_pending_pnl(market, pnl_decimal):
+    with _PENDING_CLOSE_PNL_LOCK:
+        _PENDING_CLOSE_PNL.append({"pnl": pnl_decimal, "time": time.time(), "market": market})
+
+def _clear_pending_pnl(market):
+    with _PENDING_CLOSE_PNL_LOCK:
+        for i, p in enumerate(_PENDING_CLOSE_PNL):
+            if p["market"] == market:
+                _PENDING_CLOSE_PNL.pop(i)
+                break
+
+def _pending_daily_pnl():
+    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    with _PENDING_CLOSE_PNL_LOCK:
+        return sum(p["pnl"] for p in _PENDING_CLOSE_PNL if p["time"] >= today_start)
+
 # 레이턴시 kill-switch — scan_detect p95가 임계치 초과 시 신규 진입 차단
 LATENCY_KILLSWITCH_ENABLED = True
 LATENCY_KILLSWITCH_P95_MS = 60000   # scan_detect p95 임계치 (60초)
@@ -1826,7 +1846,8 @@ def _sve1_daily_trade_count():
 
 def _sve1_daily_pnl():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
-    return sum(t.get("pnl", 0) for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
+    realized = sum(t.get("pnl", 0) for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
+    return realized + _pending_daily_pnl()
 
 def _a_daily_trade_count():
     today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
@@ -4689,6 +4710,11 @@ def close_auto_position(m, reason=""):
                 # 🔧 FIX: mark_position_closed로 state 마킹 후 정리
                 mark_position_closed(m, f"full_close:{reason}")
 
+                # 🔧 FIX: 청산 PnL 선반영 — record_trade 전 레이스 윈도우 차단
+                if entry_price > 0:
+                    _pre_net_pnl = (exit_price_used / entry_price - 1.0) - FEE_RATE_ROUNDTRIP
+                    _register_pending_pnl(m, _pre_net_pnl)
+
                 # 🔧 찌꺼기 청소: 전량 매도 후에도 소수점 잔량이 남을 수 있음
                 try:
                     time.sleep(0.5)
@@ -4734,6 +4760,7 @@ def close_auto_position(m, reason=""):
                 _et = "BYPASS_DAILY_A" if pos.get("a_bypass") and not pos.get("is_losing_stop") else (
                     "BYPASS_LOSS_A" if pos.get("a_bypass") else "NORMAL")
                 record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et)
+                _clear_pending_pnl(m)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
 
