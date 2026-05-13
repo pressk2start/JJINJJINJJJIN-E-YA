@@ -8426,6 +8426,28 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
         # 거래대금 (백만원)
         _vol_krw = _cur.get("candle_acc_trade_price", 0)
         ui["entry_vol_krw_m"] = round(_vol_krw / 1_000_000, 2)
+    # --- Death Filter indicators: SZD (spread_z) + PER (per_5) ---
+    if c1 and len(c1) >= 21:
+        _spreads = []
+        for _c in c1[-21:-1]:
+            _s_hi = _c.get("high_price", 0)
+            _s_lo = _c.get("low_price", 0)
+            _s_cl = _c.get("trade_price", 1)
+            if _s_cl > 0 and _s_hi >= _s_lo:
+                _spreads.append((_s_hi - _s_lo) / _s_cl * 100)
+        if len(_spreads) >= 10:
+            _sp_mean = sum(_spreads) / len(_spreads)
+            _sp_var = sum((_s - _sp_mean) ** 2 for _s in _spreads) / len(_spreads)
+            _sp_sd = _sp_var ** 0.5
+            if _sp_sd > 1e-6:
+                _cur_sp = ui.get("entry_spread_pct", 0)
+                ui["spread_z"] = round((_cur_sp - _sp_mean) / _sp_sd, 3)
+    if c1 and len(c1) >= 6:
+        _per_closes = [_c["trade_price"] for _c in c1[-6:]]
+        _per_net = abs(_per_closes[-1] - _per_closes[0])
+        _per_gross = sum(abs(_per_closes[i] - _per_closes[i - 1]) for i in range(1, len(_per_closes)))
+        if _per_gross > 0:
+            ui["per_5"] = round(_per_net / _per_gross, 3)
     # --- 1m 추가: 20봉 gap ---
     if c1 and len(c1) >= 21:
         cur_close = c1[-1]["trade_price"]
@@ -8493,6 +8515,11 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
                 ui["tick_age"] = round(t10["age"], 1)
         except Exception:
             pass
+    # --- TFX: Toxic Flow flag (매수편향 극단 + 낮은 가격효율 = 독성 주문흐름) ---
+    _tb30 = ui.get("tick_buy_30s")
+    _per = ui.get("per_5")
+    if _tb30 is not None and _per is not None:
+        ui["tfx_flag"] = 1.0 if (_tb30 > 0.75 and _per < 0.25) else 0.0
     return ui
 
 
@@ -10308,6 +10335,39 @@ _STRATEGY_REGISTRY = {
         "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
     },
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
+    # ━━━ Track H: Death Filter shadow (SZD+PER — dd_peak 선행 필터 검증) ━━━
+    "모멘텀GT_DF": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "momentum", "route": "GT_DF",
+        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
+        "description": "GT+DeathFilter(spread_z≤1.3+PER≥0.20) [SVE1 exit] (shadow)",
+    },
+    "과열감지_DF": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_DF",
+        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
+        "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
+    },
+    "CLM눌림_DF": {
+        "check_fn": _v0_check_clm_pullback,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "clm_pullback", "route": "CLMP_DF",
+        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20), ("entry_spread_pct", "<=", 0.9)],
+        "description": "CLMP+DeathFilter(spread_z≤1.3+PER≥0.20+spread≤0.9) [LATE_CONT exit] (shadow)",
+    },
+    "실패돌파2차_DF": {
+        "check_fn": _v0_check_failed_breakout,
+        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "failed_breakout", "route": "FBR_DF",
+        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
+        "description": "FBR+DeathFilter(spread_z≤1.3+PER≥0.20) [LATE_CONT exit] (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
