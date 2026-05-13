@@ -8448,6 +8448,25 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
         _per_gross = sum(abs(_per_closes[i] - _per_closes[i - 1]) for i in range(1, len(_per_closes)))
         if _per_gross > 0:
             ui["per_5"] = round(_per_net / _per_gross, 3)
+    if c1 and len(c1) >= 4:
+        _per3_closes = [_c["trade_price"] for _c in c1[-4:]]
+        _per3_net = abs(_per3_closes[-1] - _per3_closes[0])
+        _per3_gross = sum(abs(_per3_closes[i] - _per3_closes[i - 1]) for i in range(1, len(_per3_closes)))
+        if _per3_gross > 0:
+            ui["per_3"] = round(_per3_net / _per3_gross, 3)
+    # vol_price_eff + pseudo_absorption: 거래량 대비 가격효율 (흡수 감지)
+    if c1 and len(c1) >= 14:
+        _vpe_vol_cur = c1[-1].get("candle_acc_trade_price", 0)
+        _vpe_vol_avg = sum(c.get("candle_acc_trade_price", 0) for c in c1[-11:-1]) / 10.0
+        _vpe_vr = _vpe_vol_cur / max(_vpe_vol_avg, 1)
+        _vpe_ret = abs(c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1) * 100
+        if _vpe_vr > 0.01:
+            ui["vol_price_eff"] = round(_vpe_ret / _vpe_vr, 4)
+        _atr_1m = ui.get("atr_pct", 0)
+        if _vpe_vr > 2.0 and _atr_1m > 0 and _vpe_ret < _atr_1m * 0.3:
+            ui["pseudo_absorption"] = 1.0
+        else:
+            ui["pseudo_absorption"] = 0.0
     # --- 1m 추가: 20봉 gap ---
     if c1 and len(c1) >= 21:
         cur_close = c1[-1]["trade_price"]
