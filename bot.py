@@ -10387,6 +10387,15 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
         "description": "FBR+DeathFilter(spread_z≤1.3+PER≥0.20) [LATE_CONT exit] (shadow)",
     },
+    # ━━━ Track I: PER death filter — SVE1 dual-track (per_3≥0.65 단독) ━━━
+    "모멘텀GT_PER": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE1_PER",
+        "ind_filters": [("per_3", ">=", 0.65)],
+        "description": "SVE1+PER3≥0.65 death filter [SVE1 exit] (shadow — dual-track vs unfiltered SVE1)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
