@@ -11820,7 +11820,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "GT_DF", "CLM_DF", "CLMP_DF", "FBR_DF", "SVE1_PER"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
