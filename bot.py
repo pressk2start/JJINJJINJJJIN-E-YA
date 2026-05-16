@@ -10354,15 +10354,8 @@ _STRATEGY_REGISTRY = {
         "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
     },
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
-    # ━━━ Track H: Death Filter shadow (SZD+PER — dd_peak 선행 필터 검증) ━━━
-    "모멘텀GT_DF": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "momentum", "route": "GT_DF",
-        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
-        "description": "GT+DeathFilter(spread_z≤1.3+PER≥0.20) [SVE1 exit] (shadow)",
-    },
+    # ━━━ Track H: Death Filter shadow (SZD+PER — CLM_DF만 생존) ━━━
+    # GT_DF 폐기: n=37, cap=-27%, death filter 단독으론 GT에서 edge 생성 실패
     "과열감지_DF": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10371,15 +10364,7 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
         "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
     },
-    # ━━━ Track I: PER death filter — SVE1 dual-track (per_3≥0.65 단독) ━━━
-    "모멘텀GT_PER": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE1_PER",
-        "ind_filters": [("per_3", ">=", 0.65)],
-        "description": "SVE1+PER3≥0.65 death filter [SVE1 exit] (shadow — dual-track vs unfiltered SVE1)",
-    },
+    # Track I 폐기: SVE1_PER n=12, cap=-199%, per_3≥0.65가 SVE1에서 역효과
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11804,7 +11789,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "GT_DF", "CLM_DF", "SVE1_PER"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
