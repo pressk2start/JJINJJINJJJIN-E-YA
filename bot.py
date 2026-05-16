@@ -10365,6 +10365,31 @@ _STRATEGY_REGISTRY = {
         "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
     },
     # Track I 폐기: SVE1_PER n=12, cap=-199%, per_3≥0.65가 SVE1에서 역효과
+    # ━━━ Track J: CALM GATE — 고요한 환경 필터 (entry_spread+ATR 저조건) ━━━
+    "과열감지_CALM": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_CALM",
+        "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
+        "description": "CLM+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
+    },
+    "유동성함정_CALM": {
+        "check_fn": _v0_check_liquidity_trap,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "liq_trap", "route": "LTRP_CALM",
+        "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
+        "description": "LTRP+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
+    },
+    "눌림재진입_CALM": {
+        "check_fn": _v0_check_retest_entry,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "retest", "route": "RET_CALM",
+        "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
+        "description": "RET+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11789,7 +11814,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "RET_CALM"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
