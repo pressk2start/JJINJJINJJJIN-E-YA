@@ -10371,22 +10371,6 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
         "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
     },
-    "CLM눌림_DF": {
-        "check_fn": _v0_check_clm_pullback,
-        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "clm_pullback", "route": "CLMP_DF",
-        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20), ("entry_spread_pct", "<=", 0.9)],
-        "description": "CLMP+DeathFilter(spread_z≤1.3+PER≥0.20+spread≤0.9) [LATE_CONT exit] (shadow)",
-    },
-    "실패돌파2차_DF": {
-        "check_fn": _v0_check_failed_breakout,
-        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "failed_breakout", "route": "FBR_DF",
-        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
-        "description": "FBR+DeathFilter(spread_z≤1.3+PER≥0.20) [LATE_CONT exit] (shadow)",
-    },
     # ━━━ Track I: PER death filter — SVE1 dual-track (per_3≥0.65 단독) ━━━
     "모멘텀GT_PER": {
         "check_fn": _v0_check_momentum_rsi,
