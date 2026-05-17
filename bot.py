@@ -11362,6 +11362,10 @@ def _shadow_evaluate_positions():
     with _SHADOW_LOCK:
         pending_remaining = []
         for ps in _SHADOW_PENDING_SIGNALS:
+            elapsed = now - ps["signal_ts"]
+            # 안전장치: gate_delay의 3배 초과 시 무조건 폐기 (가격 조회 실패 등 방지)
+            if elapsed > ps["gate_delay_sec"] * 3:
+                continue
             cur_price = price_map.get(ps["market"], 0)
             if cur_price <= 0:
                 pending_remaining.append(ps)
@@ -11370,7 +11374,6 @@ def _shadow_evaluate_positions():
                 ps["best_price"] = cur_price
             if cur_price < ps["worst_price"]:
                 ps["worst_price"] = cur_price
-            elapsed = now - ps["signal_ts"]
             gate_sec = ps["gate_delay_sec"]
             if elapsed < gate_sec:
                 pending_remaining.append(ps)
