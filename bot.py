@@ -10382,6 +10382,17 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
         "description": "LTRP+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
     },
+    # ━━━ Track K: GATE30 — 시그널 후 30초 관찰 → 생존 확인 → 진입 ━━━
+    # LTRP A-zone (dd_peak_30s≤0): WR=55%, PnL=+0.64% (가장 높은 기대값)
+    "유동성함정_GATE30": {
+        "check_fn": _v0_check_liquidity_trap,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "liq_trap", "route": "LTRP_GATE30",
+        "gate_delay_sec": 30,
+        "gate_dd_peak_max": 0.0,
+        "description": "LTRP+Gate30(30s관찰→dd_peak≤0→진입) [GT exit] (shadow)",
+    },
     "눌림재진입_CALM": {
         "check_fn": _v0_check_retest_entry,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10398,6 +10409,10 @@ _SHADOW_LOCK = threading.Lock()
 #               best_price, trail_armed, trail_stop, exit_params, bars, exit_reason }
 _SHADOW_VIRTUAL_POSITIONS = []
 _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
+# ━━━ Pending Queue: pre-entry gate observation (GATE30 등) ━━━
+# 시그널 발생 → 대기열 등록 → gate_delay_sec 후 dd_peak 체크 → 통과 시 VP 생성
+_SHADOW_PENDING_SIGNALS = []
+_SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
@@ -11321,13 +11336,14 @@ def _shadow_sim_exit(vp, cur_price):
 
 def _shadow_evaluate_positions():
     """섀도우 가상포지션에 청산 로직 적용 — 메인 루프 매 사이클 호출
-    일반 가상 포지션 + 차단 건 가상 추적 모두 처리"""
+    일반 가상 포지션 + 차단 건 가상 추적 + 대기열(Pending Queue) 처리"""
     now = time.time()
     with _SHADOW_LOCK:
-        if not _SHADOW_VIRTUAL_POSITIONS and not _SHADOW_BLOCKED_POSITIONS:
+        if not _SHADOW_VIRTUAL_POSITIONS and not _SHADOW_BLOCKED_POSITIONS and not _SHADOW_PENDING_SIGNALS:
             return
         all_vps = _SHADOW_VIRTUAL_POSITIONS + _SHADOW_BLOCKED_POSITIONS
-        markets = list(set(vp["market"] for vp in all_vps))
+        pending_markets = [ps["market"] for ps in _SHADOW_PENDING_SIGNALS]
+        markets = list(set(vp["market"] for vp in all_vps) | set(pending_markets))
 
     # 시세 일괄 조회 (API 호출 절약)
     price_map = {}
@@ -11341,6 +11357,50 @@ def _shadow_evaluate_positions():
                     price_map[t["market"]] = t.get("trade_price", 0)
         except Exception:
             pass
+
+    # --- Pending Queue 처리: gate_delay_sec 경과 후 dd_peak 기반 승격/폐기 ---
+    with _SHADOW_LOCK:
+        pending_remaining = []
+        for ps in _SHADOW_PENDING_SIGNALS:
+            cur_price = price_map.get(ps["market"], 0)
+            if cur_price <= 0:
+                pending_remaining.append(ps)
+                continue
+            if cur_price > ps["best_price"]:
+                ps["best_price"] = cur_price
+            if cur_price < ps["worst_price"]:
+                ps["worst_price"] = cur_price
+            elapsed = now - ps["signal_ts"]
+            gate_sec = ps["gate_delay_sec"]
+            if elapsed < gate_sec:
+                pending_remaining.append(ps)
+                continue
+            # gate 시점 도달 — dd_peak 평가
+            sig_price = ps["signal_price"]
+            dd_peak = (ps["best_price"] - cur_price) / sig_price if sig_price > 0 else 1.0
+            gate_max = ps["gate_dd_peak_max"]
+            if dd_peak <= gate_max:
+                # 생존 확인 → VP 생성 (현재가로 진입)
+                ep = ps["exit_params"]
+                merged_ind = dict(ps.get("indicators", {}))
+                merged_ind["gate_dd_peak"] = round(dd_peak, 6)
+                merged_ind["gate_elapsed"] = round(elapsed, 1)
+                merged_ind["gate_signal_price"] = sig_price
+                if len(_SHADOW_VIRTUAL_POSITIONS) < SHADOW_MAX_VIRTUAL_POS:
+                    _SHADOW_VIRTUAL_POSITIONS.append({
+                        "route": ps["route"], "strat": ps["strat"],
+                        "market": ps["market"], "entry_price": cur_price,
+                        "entry_ts": now, "best_price": cur_price,
+                        "worst_price": cur_price,
+                        "trail_armed": False, "trail_stop": 0.0,
+                        "exit_params": ep, "bars": 0,
+                        "indicators": merged_ind, "pnl_curve": {},
+                        "_pullback_delay_sec": 0,
+                        "_pullback_best_price": cur_price,
+                        "_pullback_orig_price": cur_price,
+                    })
+            # dd_peak > gate_max → 폐기 (로그 없이 drop)
+        _SHADOW_PENDING_SIGNALS[:] = pending_remaining
 
     closed_results = []
     blocked_closed = []
@@ -11464,6 +11524,9 @@ def _shadow_evaluate_positions():
         stale_b = [k for k, v in _SHADOW_BLOCKED_DEDUP.items() if now - v > SHADOW_DEDUP_CD_SEC * 2]
         for k in stale_b:
             _SHADOW_BLOCKED_DEDUP.pop(k, None)
+        stale_p = [k for k, v in _SHADOW_PENDING_DEDUP.items() if now - v > SHADOW_DEDUP_CD_SEC * 2]
+        for k in stale_p:
+            _SHADOW_PENDING_DEDUP.pop(k, None)
 
 
 def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
@@ -11564,12 +11627,30 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             continue
 
         if hit:
-            # 정상 시그널 → 기존 가상 포지션 등록
             dedup_key = f"{route}_{market}"
             ep = strat.get("exit_params", _V4_DEFAULT_EXIT).copy()
             merged_ind = dict(universal_ind)
             own_ind = sig.get("indicators", {})
             merged_ind.update(own_ind)
+            # GATE 전략: 시그널 → Pending Queue (VP 즉시 생성 대신 대기열 등록)
+            _gate_sec = strat.get("gate_delay_sec", 0)
+            if _gate_sec > 0:
+                with _SHADOW_LOCK:
+                    last_ps = _SHADOW_PENDING_DEDUP.get(dedup_key, 0)
+                    if now_ts - last_ps < SHADOW_DEDUP_CD_SEC:
+                        continue
+                    _SHADOW_PENDING_DEDUP[dedup_key] = now_ts
+                    _SHADOW_PENDING_SIGNALS.append({
+                        "route": route, "strat": strat_name,
+                        "market": market, "signal_price": entry_price,
+                        "signal_ts": now_ts, "best_price": entry_price,
+                        "worst_price": entry_price,
+                        "gate_delay_sec": _gate_sec,
+                        "gate_dd_peak_max": strat.get("gate_dd_peak_max", 0.0),
+                        "exit_params": ep, "indicators": merged_ind,
+                    })
+                continue
+            # 일반 시그널 → VP 즉시 등록
             if route == "SVE1":
                 _s2_score, _s2_dec, _s2_thr, _s2_feat = _sve2_compute_score(merged_ind)
                 merged_ind["sve2_score"] = _s2_score
@@ -11588,7 +11669,6 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                 if len(_SHADOW_VIRTUAL_POSITIONS) >= SHADOW_MAX_VIRTUAL_POS:
                     continue
                 _SHADOW_DEDUP[dedup_key] = now_ts
-                # v18e: B pullback entry — 30초 대기 후 최저가로 진입 (G는 30s부터 양수라 제외)
                 _pb_delay = 0
                 _SHADOW_VIRTUAL_POSITIONS.append({
                     "route": route, "strat": strat_name,
@@ -11814,7 +11894,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "RET_CALM"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "RET_CALM", "LTRP_GATE30"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
