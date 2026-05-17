@@ -10393,14 +10393,7 @@ _STRATEGY_REGISTRY = {
         "gate_dd_peak_max": 0.0,
         "description": "LTRP+Gate30(30s관찰→dd_peak≤0→진입) [GT exit] (shadow)",
     },
-    "눌림재진입_CALM": {
-        "check_fn": _v0_check_retest_entry,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "retest", "route": "RET_CALM",
-        "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
-        "description": "RET+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
-    },
+    # RET_CALM 폐기: n=80, PnL=-0.04%, cap=-20%. MAE 개선은 있으나 수익 전환 실패
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11897,7 +11890,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "RET_CALM", "LTRP_GATE30"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "LTRP_GATE30"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
