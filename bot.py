@@ -10393,13 +10393,37 @@ _STRATEGY_REGISTRY = {
         "gate_dd_peak_max": 0.0,
         "description": "LTRP+Gate30(30s관찰→dd_peak≤0→진입) [GT exit] (shadow)",
     },
-    "눌림재진입_CALM": {
-        "check_fn": _v0_check_retest_entry,
+    # RET_CALM 폐기: n=80, PnL=-0.04%, cap=-20%. MAE 개선은 있으나 수익 전환 실패
+    # ━━━ Track L: Survival Filter — dd_peak_30s 기반 pre-entry gate ━━━
+    # SVE1 dd_peak_30s d=0.97: W=-0.002 L=0.003 → ≤0.001 추천
+    # GT dd_peak_30s d=0.98: A-zone WR=67% PnL=+0.42%
+    "모멘텀_SVE1_GATE30": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE1_GATE30",
+        "gate_delay_sec": 30,
+        "gate_dd_peak_max": 0.001,
+        "description": "SVE1+Gate30(30s→dd_peak≤0.1%→진입) [SVE1 exit] (shadow)",
+    },
+    "모멘텀_GT_GATE30": {
+        "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "retest", "route": "RET_CALM",
-        "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
-        "description": "RET+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
+        "pipeline_key": "momentum", "route": "GT_GATE30",
+        "gate_delay_sec": 30,
+        "gate_dd_peak_max": 0.001,
+        "description": "GT+Gate30(30s→dd_peak≤0.1%→진입) [GT exit] (shadow)",
+    },
+    # ━━━ Track M: Spread Filter — entry_spread_pct 기반 환경 필터 ━━━
+    # SVE1: A=0.579 C=1.081 d=0.75, scoring threshold=0.83
+    "모멘텀_SVE1_SPR": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE1_SPR",
+        "ind_filters": [("entry_spread_pct", "<=", 0.83)],
+        "description": "SVE1+SpreadFilter(spread≤0.83%) [SVE1 exit] (shadow)",
     },
 }
 
@@ -11897,7 +11921,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "RET_CALM", "LTRP_GATE30"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "LTRP_GATE30", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
