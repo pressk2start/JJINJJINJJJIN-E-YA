@@ -2248,7 +2248,7 @@ def _save_bot_state(force=False):
         }
         tmp_path = STATE_PERSIST_PATH + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False)
         os.replace(tmp_path, STATE_PERSIST_PATH)
     except Exception as e:
         print(f"[STATE_PERSIST] 저장 실패: {e}")
@@ -7267,9 +7267,9 @@ def _refresh_session():
         pass
 
 
-def upbit_get(url, params=None, timeout=7):
+def upbit_get(url, params=None, timeout=7, retries=3):
     global _CONSEC_CONN_ERR
-    for attempt in range(3):  # 4 -> 3 유지
+    for attempt in range(retries):
         try:
             _throttle()
             # 🔧 FIX 7차: SESSION 참조를 락으로 보호하여 캐시 (교체 중 닫힌 세션 사용 방지)
@@ -7301,7 +7301,7 @@ def upbit_get(url, params=None, timeout=7):
                 _BUCKET["cap"]  = min(6.0, float(_BUCKET.get("cap", 4.0)) + 0.10)
             return r.json()
         except requests.exceptions.Timeout:
-            if attempt == 2: return None
+            if attempt == retries - 1: return None
             time.sleep(0.35 * (2**attempt))
         except requests.exceptions.ConnectionError:
             REQ_STATS["errors"] += 1
@@ -7315,10 +7315,10 @@ def upbit_get(url, params=None, timeout=7):
                 time.sleep(0.6)
             else:
                 time.sleep(0.4 * (2**attempt))
-            if attempt == 2: return None
+            if attempt == retries - 1: return None
         except Exception:
             REQ_STATS["errors"] += 1
-            if attempt == 2: return None
+            if attempt == retries - 1: return None
             time.sleep(0.2 * (2**attempt))
     return None
 
@@ -7684,7 +7684,7 @@ def get_minutes_candles(u, m, c):
         "market": m,
         "count": c
     },
-                   timeout=6)
+                   timeout=3, retries=2)
     _record_tagged_fetch(u, (time.time() - _t_gmc) * 1000)
     return list(reversed(js)) if js else []
 
@@ -14789,7 +14789,11 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
             _c15 = _get_c15_cached(m, count=50)  # v18f Phase B: 전역 캐시 (TTL 60s)
             _c60 = _get_c60_cached(m, count=30)  # v18f: 전역 캐시 (TTL 300s)
         _c30 = []  # dead fetch 제거 (signature 호환성만 유지)
-        _pipeline_record_stage("dl_multitf_fetch", (time.time() - _dl_t_mf0) * 1000)
+        _dl_mf_ms = (time.time() - _dl_t_mf0) * 1000
+        _pipeline_record_stage("dl_multitf_fetch", _dl_mf_ms)
+        if _dl_mf_ms > 10000:
+            print(f"[SLOW_FETCH] {m} multi-TF {_dl_mf_ms:.0f}ms — skip")
+            return None
 
         # 📊 캔들 데이터 정합성 진단 (NaN/부족 원인 파악용)
         _tf_diag = (f"c1={len(c1)} c5={len(_c5)} c15={len(_c15)} "
