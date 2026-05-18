@@ -10850,11 +10850,11 @@ def _load_shadow_stats():
 def _save_shadow_stats():
     """섀도우 성과 통계 파일 저장 (일반 + 차단 건 동시 저장)"""
     with _SHADOW_PERF_LOCK:
-        data = copy.deepcopy(_SHADOW_PERF_STATS)
+        payload = json.dumps(_SHADOW_PERF_STATS, ensure_ascii=False)
     try:
         tmp = SHADOW_STATS_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write(payload)
         os.replace(tmp, SHADOW_STATS_PATH)
     except Exception as e:
         print(f"[SHADOW_STATS] 저장 실패: {e}")
@@ -10922,11 +10922,11 @@ def _check_blocked_filter_alerts_on_load():
 def _save_blocked_stats():
     """차단 건 통계 파일 저장 (atomic write)"""
     with _SHADOW_PERF_LOCK:
-        data = copy.deepcopy(_SHADOW_BLOCKED_STATS)
+        payload = json.dumps(_SHADOW_BLOCKED_STATS, ensure_ascii=False)
     try:
         tmp = SHADOW_BLOCKED_STATS_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write(payload)
         os.replace(tmp, SHADOW_BLOCKED_STATS_PATH)
     except Exception as e:
         print(f"[BLOCKED_STATS] 저장 실패: {e}")
