@@ -10343,13 +10343,8 @@ _STRATEGY_REGISTRY = {
         "description": "안뜨거운데계속사는놈:RSI58-72+ATR≤0.9+2/3양봉+저tick [A_BYPASS] (shadow)",
     },
     # ━━━ Track F: v24 W/L d-score 기반 필터/exit 실험 ━━━
-    "과열감지_S30": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_S30,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_S30",
-        "description": "CLM+30초survival(dd_peak≤0.2%) [bucket: 하WR52%+0.39 vs 상WR23%-0.41] (shadow)",
-    },
+    # CLM_S30 폐기: n=349, cap=3%, 2회 연속 cap<5%
+    # CLM_S30A 폐기: n=289, cap=4%, 2회 연속 cap<5%
     "MACD반등_F": {
         "check_fn": _v0_check_macd_cross,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10357,13 +10352,6 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "macd_cross", "route": "MZC_F",
         "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
         "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
-    },
-    "과열감지_S30_ATR": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_S30_ATR,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_S30A",
-        "description": "CLM+30초ATR적응gate(저0.2%/중0.3%/고0.45%) [S30 실패→adaptive 재실험] (shadow)",
     },
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
     # ━━━ Track H: Death Filter shadow (SZD+PER — CLM_DF만 생존) ━━━
@@ -11205,8 +11193,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            if len(s["trade_records"]) > 100:
-                s["trade_records"] = s["trade_records"][-100:]
+            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "LTRP_GATE30", "CLM_DF", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR") else 50
+            if len(s["trade_records"]) > _tr_cap:
+                s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
         if mae is not None:
             s["mae_sum"] = round(s.get("mae_sum", 0.0) + mae, 6)
@@ -11935,7 +11924,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_S30", "CLM_S30A", "CLM_DF", "CLM_CALM", "LTRP_CALM", "LTRP_GATE30", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "LTRP_GATE30", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
