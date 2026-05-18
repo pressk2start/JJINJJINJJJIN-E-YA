@@ -1472,6 +1472,8 @@ def _pipeline_mini_report():
     _PIPELINE_MINI_PREV = c
 
 
+_SHADOW_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+
 def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, final_alert,
                       extra_info=""):
     """섀도우 모드 CSV 로그 1줄 기록"""
@@ -1479,6 +1481,13 @@ def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, fin
     with _SHADOW_LOG_LOCK:
         write_header = not _SHADOW_LOG_INITIALIZED
         try:
+            if os.path.exists(_SHADOW_LOG_PATH) and os.path.getsize(_SHADOW_LOG_PATH) > _SHADOW_LOG_MAX_BYTES:
+                bak = _SHADOW_LOG_PATH + ".bak"
+                try:
+                    os.replace(_SHADOW_LOG_PATH, bak)
+                except Exception:
+                    pass
+                write_header = True
             with open(_SHADOW_LOG_PATH, "a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 if write_header:
@@ -8532,8 +8541,8 @@ def _collect_universal_indicators(c1, c5, c15, c30, c60, market=None):
                 ui["tick_consec_buy"] = _max_consec
                 # 데이터 신선도 (초)
                 ui["tick_age"] = round(t10["age"], 1)
-        except Exception:
-            pass
+        except Exception as _tick_err:
+            print(f"[TICK_IND] {market}: {_tick_err}")
     # --- TFX: Toxic Flow flag (매수편향 극단 + 낮은 가격효율 = 독성 주문흐름) ---
     _tb30 = ui.get("tick_buy_30s")
     _per = ui.get("per_5")
@@ -10943,6 +10952,9 @@ def _shadow_record_blocked_result(route, strat_name, market, pnl_pct, mfe_pct,
     is_win = pnl_pct > 0
     with _SHADOW_PERF_LOCK:
         if key not in _SHADOW_BLOCKED_STATS:
+            if len(_SHADOW_BLOCKED_STATS) >= 200:
+                min_key = min(_SHADOW_BLOCKED_STATS, key=lambda k: _SHADOW_BLOCKED_STATS[k].get("signals", 0))
+                del _SHADOW_BLOCKED_STATS[min_key]
             _SHADOW_BLOCKED_STATS[key] = {
                 "filter": blocked_by, "route": route, "strat": strat_name,
                 "signals": 0, "wins": 0, "losses": 0,
@@ -11165,7 +11177,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             cnt = s.get(cnt_key, {})
             m2 = s.get(m2_key, {})
             for k, v in indicators.items():
-                if isinstance(v, (int, float)):
+                if isinstance(v, (int, float)) and not (math.isnan(v) or math.isinf(v)):
                     cnt[k] = cnt.get(k, 0) + 1
                     cn = cnt[k]
                     if cn == 1:
@@ -11174,7 +11186,6 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                     else:
                         old_avg = avg[k]
                         avg[k] = round(old_avg + (v - old_avg) / cn, 6)
-                        # Welford: M2 += (x - old_mean) * (x - new_mean)
                         m2[k] = round(m2[k] + (v - old_avg) * (v - avg[k]), 6)
             s[avg_key] = avg
             s[cnt_key] = cnt
@@ -17434,6 +17445,7 @@ def main():
 
     # 🔧 FIX: _scan_cycle_start 초기화 (첫 반복에서 레이턴시 기록 시 NameError 방지)
     _scan_cycle_start = time.time()
+    _main_err_count = 0
 
     while True:
         try:
@@ -18577,6 +18589,7 @@ def main():
             # 사이클 내부 누적 측정 flush (detect_leader, universal_ind 각각)
             _flush_cycle_internal_timing()
             # 시간대별 동적 스캔 간격 적용
+            _main_err_count = 0
             aligned_sleep(get_scan_interval())
 
         except KeyboardInterrupt:
@@ -18598,11 +18611,18 @@ def main():
                 pass
             break
         except Exception as e:
-            print("[MAIN_ERR]", e)
+            _main_err_count += 1
+            _backoff = min(5 * (2 ** min(_main_err_count - 1, 6)), 300)
+            print(f"[MAIN_ERR] ({_main_err_count}연속) {e}")
             traceback.print_exc()
-            print("[MAIN] 5초 후 재시작...")
-            time.sleep(5)
-            continue  # 💡 다시 루프 시작
+            if _main_err_count == 5:
+                try:
+                    tg_send(f"⚠️ [MAIN_ERR] 5회 연속 에러\n{type(e).__name__}: {str(e)[:200]}")
+                except Exception:
+                    pass
+            print(f"[MAIN] {_backoff}초 후 재시작...")
+            time.sleep(_backoff)
+            continue
 
 if __name__ == "__main__":
     validate_config()
