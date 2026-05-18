@@ -2287,7 +2287,10 @@ atexit.register(_shutdown_save_all)
 def _signal_handler(signum, frame):
     """SIGTERM/SIGINT 수신 시 저장 후 종료"""
     print(f"[SHUTDOWN] 시그널 {signum} 수신")
-    _shutdown_save_all()
+    try:
+        _shutdown_save_all()
+    except Exception as _e:
+        print(f"[SHUTDOWN] 저장 중 오류(무시): {_e}")
     sys.exit(0)
 
 
@@ -17311,8 +17314,21 @@ def start_watchdogs():
                 time.sleep(300)  # 5분
                 req_summary()     # 429/5xx/에러 카운트
                 cut_summary()     # 필터 컷 카운트 요약
+                _rss_mb = 0
+                try:
+                    with open("/proc/self/status") as _pf:
+                        for _line in _pf:
+                            if _line.startswith("VmRSS:"):
+                                _rss_mb = int(_line.split()[1]) // 1024
+                                break
+                except Exception:
+                    pass
+                _shadow_keys = len(_SHADOW_PERF_STATS)
+                _shadow_trades = sum(s.get("signals", 0) for s in _SHADOW_PERF_STATS.values())
+                _threads = threading.active_count()
                 print(f"[HB] {now_kst_str()} open={len(OPEN_POSITIONS)} "
-                      f"rate={_BUCKET.get('rate', 0):.2f} cap={_BUCKET.get('cap', 0):.2f}")
+                      f"rate={_BUCKET.get('rate', 0):.2f} cap={_BUCKET.get('cap', 0):.2f} "
+                      f"RSS={_rss_mb}MB threads={_threads} shadow={_shadow_keys}routes/{_shadow_trades}trades")
 
                 # === 모니터 watchdog: 포지션 있는데 모니터 죽은 경우 failsafe ===
                 with _POSITION_LOCK:
@@ -18613,19 +18629,44 @@ def main():
         except Exception as e:
             _main_err_count += 1
             _backoff = min(5 * (2 ** min(_main_err_count - 1, 6)), 300)
-            print(f"[MAIN_ERR] ({_main_err_count}연속) {e}")
+            _rss_crash = 0
+            try:
+                with open("/proc/self/status") as _pf:
+                    for _line in _pf:
+                        if _line.startswith("VmRSS:"):
+                            _rss_crash = int(_line.split()[1]) // 1024
+                            break
+            except Exception:
+                pass
+            print(f"[MAIN_ERR] ({_main_err_count}연속) RSS={_rss_crash}MB threads={threading.active_count()} {e}")
             traceback.print_exc()
             if _main_err_count == 5:
                 try:
-                    tg_send(f"⚠️ [MAIN_ERR] 5회 연속 에러\n{type(e).__name__}: {str(e)[:200]}")
+                    tg_send(f"⚠️ [MAIN_ERR] 5회 연속 에러\nRSS={_rss_crash}MB threads={threading.active_count()}\n{type(e).__name__}: {str(e)[:200]}")
                 except Exception:
                     pass
+            try:
+                with open(os.path.join(os.getcwd(), "crash.log"), "w") as _cf:
+                    _cf.write(f"{now_kst_str()} MAIN_ERR #{_main_err_count} RSS={_rss_crash}MB threads={threading.active_count()}\n")
+                    _cf.write(f"{type(e).__name__}: {e}\n")
+                    traceback.print_exc(file=_cf)
+            except Exception:
+                pass
             print(f"[MAIN] {_backoff}초 후 재시작...")
             time.sleep(_backoff)
             continue
 
 if __name__ == "__main__":
     validate_config()
+    _crash_log = os.path.join(os.getcwd(), "crash.log")
+    if os.path.exists(_crash_log):
+        try:
+            with open(_crash_log) as _cf:
+                _prev = _cf.read().strip()
+            if _prev:
+                print(f"[STARTUP] 이전 크래시 감지:\n{_prev}")
+        except Exception:
+            pass
     bot_start_time = time.time()
     start_health_server()
     start_watchdogs()  # 🐕 워치독 시작 (헬스비트/세션리프레시/락청소)
