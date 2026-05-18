@@ -7195,8 +7195,8 @@ def _new_session():
     except TypeError:
         # urllib3 < 1.26 fallback
         retry = Retry(method_whitelist=frozenset(["GET"]), **retry_kwargs)  # POST 제거
-    adapter = HTTPAdapter(pool_connections=256,
-                          pool_maxsize=256,
+    adapter = HTTPAdapter(pool_connections=10,
+                          pool_maxsize=10,
                           max_retries=retry)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
@@ -11205,8 +11205,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            if len(s["trade_records"]) > 300:
-                s["trade_records"] = s["trade_records"][-300:]
+            if len(s["trade_records"]) > 100:
+                s["trade_records"] = s["trade_records"][-100:]
         # MAE 누적
         if mae is not None:
             s["mae_sum"] = round(s.get("mae_sum", 0.0) + mae, 6)
