@@ -10383,47 +10383,24 @@ _STRATEGY_REGISTRY = {
         "description": "LTRP+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
     },
     # ━━━ Track K: GATE30 — 시그널 후 30초 관찰 → 생존 확인 → 진입 ━━━
-    # LTRP A-zone (dd_peak_30s≤0): WR=55%, PnL=+0.64% (가장 높은 기대값)
-    "유동성함정_GATE30": {
-        "check_fn": _v0_check_liquidity_trap,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "liq_trap", "route": "LTRP_GATE30",
-        "gate_delay_sec": 30,
-        "gate_dd_peak_max": 0.0,
-        "description": "LTRP+Gate30(30s관찰→dd_peak≤0→진입) [GT exit] (shadow)",
-    },
+    # LTRP_GATE30 폐기: n=31, cap=-17%, PnL=-0.12%. 궤적 17%→-11%→-17%
+    # LTRP_GATE30 폐기: n=31, cap=-17%, PnL=-0.12%. 궤적 17%→-11%→-17%
     # RET_CALM 폐기: n=80, PnL=-0.04%, cap=-20%. MAE 개선은 있으나 수익 전환 실패
     # ━━━ Track L: Survival Filter — dd_peak_30s 기반 pre-entry gate ━━━
-    # SVE1 dd_peak_30s d=0.97: W=-0.002 L=0.003 → ≤0.001 추천
-    # GT dd_peak_30s d=0.98: A-zone WR=67% PnL=+0.42%
-    "모멘텀_SVE1_GATE30": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE1_GATE30",
-        "gate_delay_sec": 30,
-        "gate_dd_peak_max": 0.001,
-        "description": "SVE1+Gate30(30s→dd_peak≤0.1%→진입) [SVE1 exit] (shadow)",
-    },
-    "모멘텀_GT_GATE30": {
-        "check_fn": _v0_check_momentum_rsi,
+    # SVE1_GATE30 폐기: n=23, cap=-19%, PnL=-0.05%. gate 단독으론 SVE1 개선 실패
+    # GT_GATE30 폐기: n=23, cap=-3%, PnL=-0.01%. 음수 전환
+    # ━━━ Track M: Spread Filter — entry_spread_pct 기반 환경 필터 ━━━
+    # SVE1_SPR 폐기: n=42, cap=14%, PnL=+0.04%. small-n 착시(76%→14%). 조건부 edge 잔존하나 단독 필터로 불충분
+    # ━━━ Track N: CLM 고순도화 — 30초 생존 gate ━━━
+    # CLM n=786 PnL+0.08% cap=15% 기반. dd_peak_30s≤0.001 구간: WR=62% PnL=+0.57%
+    "과열감지_CORE30": {
+        "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "momentum", "route": "GT_GATE30",
+        "pipeline_key": "climax", "route": "CLM_CORE30",
         "gate_delay_sec": 30,
         "gate_dd_peak_max": 0.001,
-        "description": "GT+Gate30(30s→dd_peak≤0.1%→진입) [GT exit] (shadow)",
-    },
-    # ━━━ Track M: Spread Filter — entry_spread_pct 기반 환경 필터 ━━━
-    # SVE1: A=0.579 C=1.081 d=0.75, scoring threshold=0.83
-    "모멘텀_SVE1_SPR": {
-        "check_fn": _v0_check_momentum_rsi,
-        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "momentum", "route": "SVE1_SPR",
-        "ind_filters": [("entry_spread_pct", "<=", 0.83)],
-        "description": "SVE1+SpreadFilter(spread≤0.83%) [SVE1 exit] (shadow)",
+        "description": "CLM+Gate30(30s관찰→dd_peak≤0.1%→진입) [GT exit] (shadow)",
     },
 }
 
@@ -11193,7 +11170,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "LTRP_GATE30", "CLM_DF", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR") else 50
+            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM_DF", "CLM_CORE30", "CLM") else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
@@ -11924,7 +11901,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "LTRP_GATE30", "SVE1_GATE30", "GT_GATE30", "SVE1_SPR"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "CLM_CORE30"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -12168,7 +12145,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"], "CLM_S30": ["dd_peak_30s"], "CLM_S30A": ["atr_pct", "dd_peak_30s"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "CLM_CORE30": ["dd_peak_30s", "close_strength"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
