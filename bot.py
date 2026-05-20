@@ -1095,7 +1095,7 @@ def _pipeline_report(force=False):
         )
 
     # ━━━━ Tier 3: SCORE (1-line per route) ━━━━
-    _score_lines = _v4_shadow_score_compact()
+    _score_lines, _compact_routes = _v4_shadow_score_compact()
     if _score_lines:
         lines.append("SCORE (shadow):")
         lines.extend(_score_lines)
@@ -1188,7 +1188,7 @@ def _pipeline_report(force=False):
     _rl = []
 
     # shadow 시나리오 성과 상세
-    shadow_lines = _v4_shadow_report_lines()
+    shadow_lines, _research_routes = _v4_shadow_report_lines()
     if shadow_lines:
         _rl.extend(shadow_lines)
 
@@ -1276,9 +1276,19 @@ def _pipeline_report(force=False):
     if _hourly_parts:
         _rl.append(f"🕐 시간대: {' '.join(_hourly_parts)}")
 
+    # registry-report consistency check
+    _report_consistency_check(_compact_routes, _research_routes)
+
     # research 메시지 전송 (데이터 있을 때만)
     if _rl:
-        _rl.insert(0, "📋 RESEARCH DETAIL")
+        # ACTIONABLE 요약 상단 삽입
+        _action = _build_actionable_summary()
+        _header = ["📋 RESEARCH DETAIL"]
+        if _action:
+            _header.extend(_action)
+            _header.append("")
+        for i, h in enumerate(_header):
+            _rl.insert(i, h)
         _research_msg = "\n".join(_rl)
         print(_research_msg)
         tg_send(_research_msg)
@@ -8602,6 +8612,89 @@ def _build_route_priority():
             _pri.setdefault(route, 50)
     _ROUTE_REPORT_PRIORITY = _pri
 
+
+def _get_route_sets():
+    """registry에서 LIVE/Research route 셋 생성 — compact/research 공통 사용"""
+    prod = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
+    research = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - prod
+    return prod, research
+
+
+def _report_consistency_check(compact_routes, research_routes):
+    """registry vs 리포트 출력 불일치 감지"""
+    prod, active_research = _get_route_sets()
+    all_registry = prod | active_research
+    all_reported = compact_routes | research_routes
+    warns = []
+    missing_compact = prod - compact_routes
+    if missing_compact:
+        warns.append(f"[REPORT_WARN] LIVE route in registry but not in compact: {missing_compact}")
+    missing_research = all_registry - research_routes
+    if missing_research:
+        warns.append(f"[REPORT_WARN] registry route not in research: {missing_research}")
+    extra = all_reported - all_registry
+    if extra:
+        warns.append(f"[REPORT_WARN] route in report but not in registry: {extra}")
+    for w in warns:
+        print(w)
+    return warns
+
+
+def _build_actionable_summary():
+    """research 메시지 상단 ACTIONABLE 요약 5줄 — 변화/판단 가능한 핵심만"""
+    items = []
+    prod, research = _get_route_sets()
+    # 1) survival ENABLE/BLOCK 변화
+    try:
+        sa = _survival_analysis()
+        for route, data in sa.items():
+            grps = data["groups"]
+            a_g, c_g = grps["A"], grps["C"]
+            if a_g["n"] < 3 or c_g["n"] < 3:
+                continue
+            ac_lift = a_g["avg_pnl"] - c_g["avg_pnl"]
+            total_n = a_g["n"] + grps["B"]["n"] + c_g["n"]
+            sc = data.get("scoring", {})
+            hl_lift = 0.0
+            if sc and sc.get("rules"):
+                hi, lo = sc["hi"], sc["lo"]
+                if hi["n"] > 0 and lo["n"] > 0:
+                    hl_lift = hi["pnl"] - lo["pnl"]
+            if (total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30
+                    and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0):
+                items.append(f"🟢 {route} ENABLE 조건충족")
+            elif total_n >= 30 and ac_lift < 0.1:
+                items.append(f"🔴 {route} survival 미달 lift{ac_lift:+.2f}")
+    except Exception:
+        pass
+    # 2) shadow 성과 급변 route (pnl < -0.1% or cap < -30)
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            n = s.get("signals", 0)
+            route = s.get("route", "?")
+            if n < 20 or route not in prod:
+                continue
+            avg_pnl = s.get("total_pnl", 0) / n * 100
+            mfes = s.get("mfes", [])
+            avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
+            cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
+            if avg_pnl < -0.1:
+                items.append(f"⚠ {route} LIVE pnl{avg_pnl:+.2f}% 적자")
+            elif cap < -30:
+                items.append(f"⚠ {route} cap{cap:.0f}% 비효율")
+    # 3) 필터 재검토 필요 (차단건 중 승률>55%)
+    with _SHADOW_PERF_LOCK:
+        for bkey, bs in _SHADOW_BLOCKED_STATS.items():
+            bn = bs.get("signals", 0)
+            if bn < 10:
+                continue
+            bwr = bs.get("wins", 0) / bn * 100
+            broute = bs.get("route", "?")
+            if bwr >= 55 and broute in (prod | research):
+                items.append(f"⚠ {broute}:{bs.get('filter',bkey)} 필터재검토 wr{bwr:.0f}%")
+    return items[:5]
+
+
 _V0_EXIT_PARAMS = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -11884,20 +11977,22 @@ def _threshold_sweep_table(trade_records, fail_values_list, current_threshold, d
 def _v4_shadow_score_compact():
     """텔레그램 본문용 — top routes compact scoreboard
     색상: pnl 기준 (🟢양수+cap양호 / 🟡보류 / 🔴음수)
-    LIVE는 텍스트 태그로만 표시"""
+    LIVE는 텍스트 태그로만 표시
+    Returns: (lines, reported_routes)"""
     TOP_SCORE_SHOW = 3
     lines = []
-    _PRODUCTION_ROUTES = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
-    _ACTIVE_RESEARCH = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - _PRODUCTION_ROUTES
+    _PRODUCTION_ROUTES, _ACTIVE_RESEARCH = _get_route_sets()
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
-            return []
+            return [], set()
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
                                              -x[1].get("signals", 0)))
         _seen_routes = set()
+        _reported_routes = set()
         _pending = []
         _scored_routes = []
+        _scored_route_names = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
             if n < 1:
@@ -11915,8 +12010,8 @@ def _v4_shadow_score_compact():
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
             if n < 10:
                 _pending.append(f"{route} n{n}")
+                _reported_routes.add(route)
                 continue
-            # 색상 = pnl 기준
             if avg_pnl > 0 and cap > 0:
                 icon = "🟢"
             elif avg_pnl > -0.05:
@@ -11927,14 +12022,18 @@ def _v4_shadow_score_compact():
             _scored_routes.append(
                 f"{icon} {route} n{n} wr{wr:.0f}"
                 f" pnl{avg_pnl:+.2f} cap{cap:.0f}{tag}")
-        for _line in _scored_routes[:TOP_SCORE_SHOW]:
+            _scored_route_names.append(route)
+        for i, _line in enumerate(_scored_routes[:TOP_SCORE_SHOW]):
             lines.append(_line)
+            _reported_routes.add(_scored_route_names[i])
         _rest = len(_scored_routes) - TOP_SCORE_SHOW
         if _rest > 0:
             _pending.insert(0, f"+{_rest}routes")
+            for rn in _scored_route_names[TOP_SCORE_SHOW:]:
+                _reported_routes.add(rn)
         if _pending:
             lines.append(f"🟡 collecting: {', '.join(_pending)}")
-    return lines
+    return lines, _reported_routes
 
 
 def _v4_shadow_report_lines():
@@ -11943,15 +12042,15 @@ def _v4_shadow_report_lines():
     v11: 라이브(A,B) + 섀도우(C~L) 전체 11개 시나리오 지표 수집"""
     _update_coin_bias()
     lines = []
+    _research_reported = set()
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
-            return []
+            return [], set()
         lines.append("📡 시나리오 성과 (shadow 기준):")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
                                              -x[1].get("signals", 0)))
-        _PRODUCTION_ROUTES = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
-        _ACTIVE_RESEARCH = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - _PRODUCTION_ROUTES
+        _PRODUCTION_ROUTES, _ACTIVE_RESEARCH = _get_route_sets()
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -11982,7 +12081,7 @@ def _v4_shadow_report_lines():
                 icon = "🔴"
                 state = "weak"
             if route in _PRODUCTION_ROUTES:
-                # capture ratio
+                _research_reported.add(route)
                 cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
                 lines.append(
                     f"{icon}[{route}] n{n} wr{wr:.0f}% PnL{avg_pnl:+.2f}%"
@@ -12058,6 +12157,7 @@ def _v4_shadow_report_lines():
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"  📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
             elif route in _ACTIVE_RESEARCH:
+                _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
                 continue
             else:
@@ -12320,7 +12420,7 @@ def _v4_shadow_report_lines():
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
     if active_b > 0:
         lines.append(f"  ⏳ 차단건 추적 중: {active_b}건")
-    return lines
+    return lines, _research_reported
 
 
 def _survival_analysis(routes=None, min_n=10):
