@@ -1033,17 +1033,40 @@ def _pipeline_report(force=False):
     except Exception:
         pass
 
-    # ━━━━ Tier 1: EXEC SUMMARY ━━━━
+    # ━━━━ scan p95 선계산 (ACTION 라인에서 사용) ━━━━
+    _scan_p95_s = 0
+    with _PIPELINE_SCAN_LAT_LOCK:
+        lat_list = list(_PIPELINE_SCAN_LATENCIES)
+    if lat_list:
+        lat_sorted = sorted(lat_list)
+        _scan_p95_s = lat_sorted[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] / 1000 if len(lat_list) >= 5 else max(lat_list) / 1000
+
+    # ━━━━ Tier 1: EXEC SUMMARY + ACTION ━━━━
     _live_pnl = _sve1_daily_pnl()
     _live_cnt = _sve1_daily_trade_count()
     _guard_pct = _live_pnl / min(SVE1_DAILY_MAX_LOSS_PCT, -0.001) * 100
-    _guard_warn = f" ⚠{_guard_pct:.0f}%" if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7 else ""
+    _guard_warn = f" ⚠가드{_guard_pct:.0f}%" if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7 else ""
     lines = [
         f"{'🟢' if _live_cnt > 0 else '⚪'} LIVE {_live_cnt}/{SVE1_DAILY_MAX_TRADES}"
-        f" | PnL {_live_pnl*100:+.2f}/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}{_guard_warn}",
-        f"일반 n{_st_normal['n']} wr{_st_normal['wr']} {_st_normal['pnl']}"
-        f" | A군 n{_st_bypass['n']} wr{_st_bypass['wr']} {_st_bypass['pnl']}",
+        f" PnL {_live_pnl*100:+.2f}/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}{_guard_warn}",
     ]
+    # ACTION 라인 — 운영 판단 자동 요약
+    _act = []
+    if _succ == 0 and _raw == 0:
+        _act.append("신규진입 중단")
+    elif _succ == 0 and _raw > 0:
+        _act.append(f"raw{_raw} 통과못함")
+    if _guard_pct > 100:
+        _act.append(f"가드{_guard_pct:.0f}%초과")
+    if _scan_p95_s > 15:
+        _act.append(f"scan p95 {_scan_p95_s:.0f}s")
+    if c.get('suspend_block', 0) > 0:
+        _act.append(f"차단{c['suspend_block']}")
+    if _act:
+        lines.append(f"ACTION: {' | '.join(_act)}")
+    lines.append(
+        f"일반 n{_st_normal['n']} wr{_st_normal['wr']} {_st_normal['pnl']}"
+        f" | A군 n{_st_bypass['n']} wr{_st_bypass['wr']} {_st_bypass['pnl']}")
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
 
@@ -1108,13 +1131,7 @@ def _pipeline_report(force=False):
         lines.extend(_score_lines)
 
     # ━━━━ Tier 4: DEBUG (1줄 요약 + p95>25s시 상세) ━━━━
-    # scan latency 계산
-    _scan_p95_s = 0
-    with _PIPELINE_SCAN_LAT_LOCK:
-        lat_list = list(_PIPELINE_SCAN_LATENCIES)
-    if lat_list:
-        lat_sorted = sorted(lat_list)
-        _scan_p95_s = lat_sorted[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] / 1000 if len(lat_list) >= 5 else max(lat_list) / 1000
+    # (_scan_p95_s, lat_list 는 Tier 1 상단에서 선계산됨)
     # cache hit rate
     _cache_rate = 0
     with _CHECK_FN_CACHE_LOCK:
