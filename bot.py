@@ -1056,9 +1056,9 @@ def _pipeline_report(force=False):
         _act.append("신규진입 중단")
     elif _succ == 0 and _raw > 0:
         _act.append(f"raw{_raw} 통과못함")
-    if _guard_pct > 100:
+    if _guard_pct > REPORT_ACTION_GUARD_PCT:
         _act.append(f"가드{_guard_pct:.0f}%초과")
-    if _scan_p95_s > 15:
+    if _scan_p95_s > REPORT_ACTION_SCAN_P95_S:
         _act.append(f"scan p95 {_scan_p95_s:.0f}s")
     if c.get('suspend_block', 0) > 0:
         _act.append(f"차단{c['suspend_block']}")
@@ -1160,7 +1160,7 @@ def _pipeline_report(force=False):
     # 1줄 debug 요약
     _dbg_parts = []
     if _scan_p95_s > 0:
-        _scan_warn = "⚠" if _scan_p95_s > 25 else ""
+        _scan_warn = "⚠" if _scan_p95_s > REPORT_DEBUG_SCAN_P95_S else ""
         _dbg_parts.append(f"p95 {_scan_p95_s:.1f}s{_scan_warn}")
     _dbg_parts.append(f"cache{_cache_rate:.0f}%")
     if _shadow_active > 0:
@@ -1168,17 +1168,17 @@ def _pipeline_report(force=False):
     if c.get('suspend_block', 0) > 0:
         _dbg_parts.append("⚠차단")
     lines.append(f"DBG: {' '.join(_dbg_parts)}")
-    if _scan_p95_s > 25 and _stage_rows:
+    if _scan_p95_s > REPORT_DEBUG_SCAN_P95_S and _stage_rows:
         lines.append(f"  ⚠slow: {' '.join(_stage_rows[:3])}")
 
     lines.append("report v7")
 
     # ━━━━ 조건부 DEBUG DETAIL (이상 시에만 compact에 append) ━━━━
     _abnormal = (
-        _scan_p95_s > 25
+        _scan_p95_s > REPORT_DEBUG_SCAN_P95_S
         or c.get('suspend_block', 0) > 0
-        or _cache_rate < 30
-        or _guard_pct > 150
+        or _cache_rate < REPORT_DEBUG_CACHE_LOW_PCT
+        or _guard_pct > REPORT_DEBUG_GUARD_HIGH_PCT
     )
     if _abnormal:
         lines.append("")
@@ -8620,6 +8620,16 @@ TOP_COIN_STATS = 3
 TOP_BUCKET_KEYS = 1
 TOP_FILTER_FINDINGS = 3
 
+# ━━━ Report 임계치 (ACTION/DEBUG/ACTIONABLE 발동 기준 중앙 관리) ━━━
+REPORT_ACTION_GUARD_PCT = 100       # ACTION: 가드 초과 경고
+REPORT_ACTION_SCAN_P95_S = 15      # ACTION: scan 지연 경고
+REPORT_DEBUG_SCAN_P95_S = 25       # DEBUG: slow stage 표시 기준
+REPORT_DEBUG_CACHE_LOW_PCT = 30    # DEBUG DETAIL: cache 저조 발동
+REPORT_DEBUG_GUARD_HIGH_PCT = 150  # DEBUG DETAIL: 가드 심각 발동
+REPORT_ACT_PNL_WARN = -0.05       # ACTIONABLE: LIVE pnl 적자 경고 (%)
+REPORT_ACT_CAP_WARN = -15         # ACTIONABLE: cap 비효율 경고 (%)
+REPORT_ACT_FILTER_WR = 50         # ACTIONABLE: 차단건 필터 재검토 승률 (%)
+
 # ━━━ Report priority (낮을수록 상단 출력, LIVE 먼저 → 핵심 research → collecting) ━━━
 _ROUTE_REPORT_PRIORITY = {}
 
@@ -8713,11 +8723,11 @@ def _build_actionable_summary():
             mfes = s.get("mfes", [])
             avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
-            if avg_pnl < -0.05:
+            if avg_pnl < REPORT_ACT_PNL_WARN:
                 items.append(f"⚠ {route} LIVE pnl{avg_pnl:+.2f}% 적자")
-            elif cap < -15:
+            elif cap < REPORT_ACT_CAP_WARN:
                 items.append(f"⚠ {route} cap{cap:.0f}% 비효율")
-    # 3) 필터 재검토 필요 (차단건 중 승률>=50%)
+    # 3) 필터 재검토 필요
     with _SHADOW_PERF_LOCK:
         for bkey, bs in _SHADOW_BLOCKED_STATS.items():
             bn = bs.get("signals", 0)
@@ -8725,7 +8735,7 @@ def _build_actionable_summary():
                 continue
             bwr = bs.get("wins", 0) / bn * 100
             broute = bs.get("route", "?")
-            if bwr >= 50 and broute in all_routes:
+            if bwr >= REPORT_ACT_FILTER_WR and broute in all_routes:
                 bfilt = bs.get("filter", bkey)
                 items.append(f"⚠ {broute}:{bfilt} 필터재검토 wr{bwr:.0f}%")
     return items[:5]
