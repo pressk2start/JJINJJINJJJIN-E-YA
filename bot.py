@@ -10392,16 +10392,7 @@ _STRATEGY_REGISTRY = {
     # ━━━ Track M: Spread Filter — entry_spread_pct 기반 환경 필터 ━━━
     # SVE1_SPR 폐기: n=42, cap=14%, PnL=+0.04%. small-n 착시(76%→14%). 조건부 edge 잔존하나 단독 필터로 불충분
     # ━━━ Track N: CLM 고순도화 — 30초 생존 gate ━━━
-    # CLM n=786 PnL+0.08% cap=15% 기반. dd_peak_30s≤0.001 구간: WR=62% PnL=+0.57%
-    "과열감지_CORE30": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_CORE30",
-        "gate_delay_sec": 30,
-        "gate_dd_peak_max": 0.001,
-        "description": "CLM+Gate30(30s관찰→dd_peak≤0.1%→진입) [GT exit] (shadow)",
-    },
+    # CLM_CORE30 폐기: n=10, cap=-118%, PnL=-0.34%, MAE=-0.64%. CLM+gate30=구조적 충돌(속도edge vs 지연진입). 차단건이 통과건보다 양호→역선택 확인
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11170,7 +11161,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM_DF", "CLM_CORE30", "CLM") else 50
+            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM_DF", "CLM") else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
@@ -11901,7 +11892,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "CLM_CORE30"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -12145,7 +12136,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "CLM_CORE30": ["dd_peak_30s", "close_strength"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
