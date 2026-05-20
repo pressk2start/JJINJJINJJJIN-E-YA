@@ -1096,7 +1096,7 @@ def _pipeline_report(force=False):
         _rlabel = "/".join(_routes)
         _line = f"  [{_rlabel}] {_meta_desc} 입{_enter_cnt}→pass{_pass_cnt}({_conv})"
         if _fails:
-            _line += "\n    " + " ".join(_fails[:8])
+            _line += "\n    " + " ".join(_fails[:TOP_GATE_FAILS])
         lines.append(_line)
     # gate 탈락 (condensed)
     _gate_parts = []
@@ -1143,11 +1143,10 @@ def _pipeline_report(force=False):
     except Exception:
         print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
 
-    # ━━━━ Tier 4: DEBUG ━━━━
-    lines.append("━━ DEBUG ━━")
-
-    # 📈 값 분포 + 니어미스
+    # ━━━━ Tier 4: DEBUG (이상 시만 상세) ━━━━
     vs = _pipeline_value_summary()
+    _debug_abnormal = False
+    _dl = []
     val_lines = ["📉 <b>값 분포 + 니어미스</b>"]
     _m3 = vs.get("m3_pct", {})
     if _m3.get("n", 0) > 0:
@@ -1167,7 +1166,7 @@ def _pipeline_report(force=False):
     _gap = vs.get("20bar_gap_pct", {})
     if _gap.get("n", 0) > 0:
         val_lines.append(f"  20봉gap%: max={_gap['max']:.2f} avg={_gap['avg']:.2f} 🎯NM={_gap['near_miss']}")
-    lines.extend(val_lines)
+    _dl.extend(val_lines)
 
     # 📊 gate 지표 평균
     _gs = vs.get("gate_spread", {})
@@ -1176,56 +1175,56 @@ def _pipeline_report(force=False):
     _ga = vs.get("gate_accel", {})
     _gf = vs.get("gate_flow_kps", {})
     if any(v.get("n", 0) > 0 for v in [_gs, _gb, _gv]):
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("📊 <b>gate 진입 지표 평균</b>")
-        if _gs.get("n"): lines.append(f"  스프레드: avg={_gs['avg']:.2f}% max={_gs['max']:.2f}%")
-        if _gb.get("n"): lines.append(f"  매수비: avg={_gb['avg']:.0%} min={_gb['min']:.0%}")
-        if _gv.get("n"): lines.append(f"  거래대금: avg={_gv['avg']:.0f}M max={_gv['max']:.0f}M")
-        if _ga.get("n"): lines.append(f"  가속: avg={_ga['avg']:.1f}x max={_ga['max']:.1f}x")
-        if _gf.get("n"): lines.append(f"  거래속도: avg={_gf['avg']:.0f}K/s max={_gf['max']:.0f}K/s")
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("📊 <b>gate 진입 지표 평균</b>")
+        if _gs.get("n"): _dl.append(f"  스프레드: avg={_gs['avg']:.2f}% max={_gs['max']:.2f}%")
+        if _gb.get("n"): _dl.append(f"  매수비: avg={_gb['avg']:.0%} min={_gb['min']:.0%}")
+        if _gv.get("n"): _dl.append(f"  거래대금: avg={_gv['avg']:.0f}M max={_gv['max']:.0f}M")
+        if _ga.get("n"): _dl.append(f"  가속: avg={_ga['avg']:.1f}x max={_ga['max']:.1f}x")
+        if _gf.get("n"): _dl.append(f"  거래속도: avg={_gf['avg']:.0f}K/s max={_gf['max']:.0f}K/s")
 
     # 🏆 전략별 통과 비율
     with _PIPELINE_STRATEGY_LOCK:
         strat = dict(_PIPELINE_STRATEGY_PASS)
     strat_total = sum(strat.values())
     if strat_total > 0:
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("🏆 <b>전략별 시그널</b>")
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("🏆 <b>전략별 시그널</b>")
         for sname, scount in sorted(strat.items(), key=lambda x: -x[1]):
-            lines.append(f"  {sname}: {scount} ({scount/strat_total*100:.0f}%)")
+            _dl.append(f"  {sname}: {scount} ({scount/strat_total*100:.0f}%)")
 
     # 🪙 Top-5 탈락 코인
     with _PIPELINE_COIN_HITS_LOCK:
         coin_totals = {coin: sum(reasons.values()) for coin, reasons in _PIPELINE_COIN_HITS.items()}
     if coin_totals:
-        top_coins = sorted(coin_totals.items(), key=lambda x: -x[1])[:5]
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("🪙 <b>Top-5 탈락 코인</b>")
+        top_coins = sorted(coin_totals.items(), key=lambda x: -x[1])[:TOP_DEBUG_COINS]
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("🪙 <b>Top-5 탈락 코인</b>")
         for coin, cnt in top_coins:
             reasons = _PIPELINE_COIN_HITS.get(coin, {})
             top_reason = max(reasons, key=reasons.get) if reasons else "?"
-            lines.append(f"  {coin}: {cnt}회 (주사유: {top_reason})")
+            _dl.append(f"  {coin}: {cnt}회 (주사유: {top_reason})")
 
     # 💡 최근 시그널 종목
     with _PIPELINE_SIGNAL_COINS_LOCK:
         recent_signals = list(_PIPELINE_SIGNAL_COINS)
     if recent_signals:
         # 최근 5개
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("💡 <b>최근 시그널 종목</b>")
-        for sig in recent_signals[-5:]:
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("💡 <b>최근 시그널 종목</b>")
+        for sig in recent_signals[-TOP_DEBUG_SIGNALS:]:
             _sig_market = sig["market"].split("-")[-1] if "-" in sig["market"] else sig["market"]
-            lines.append(f"  {_sig_market} [{sig['strategy']}]")
+            _dl.append(f"  {_sig_market} [{sig['strategy']}]")
 
     # 🎯 가장 아까운 근접 탈락 (최근 3개)
     with _PIPELINE_NEAR_MISS_LOCK:
         nm_list = list(_PIPELINE_NEAR_MISS)
     if nm_list:
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("🎯 <b>근접 탈락 (아깝게 놓친 것)</b>")
-        for nm in nm_list[-3:]:
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("🎯 <b>근접 탈락 (아깝게 놓친 것)</b>")
+        for nm in nm_list[-TOP_NEAR_MISS:]:
             _nm_market = nm["market"].split("-")[-1] if "-" in nm["market"] else nm["market"]
-            lines.append(f"  {_nm_market}: {nm['metrics']}")
+            _dl.append(f"  {_nm_market}: {nm['metrics']}")
 
     # ⏱️ 스캔 레이턴시
     with _PIPELINE_SCAN_LAT_LOCK:
@@ -1234,8 +1233,8 @@ def _pipeline_report(force=False):
         lat_avg = sum(lat_list) / len(lat_list)
         lat_max = max(lat_list)
         lat_p95 = sorted(lat_list)[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] if len(lat_list) >= 5 else lat_max
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append(f"⏱️ 스캔 레이턴시(사이클): avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append(f"⏱️ 스캔 레이턴시(사이클): avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
 
     # 🔁 마켓별 재스캔 간격 — 한 코인이 다음에 다시 스캔되는 실 간격
     # (사이클 80s ÷ 마켓수 ≠ 코인별 재스캔 간격. 진짜 alpha decay 척도)
@@ -1247,7 +1246,7 @@ def _pipeline_report(force=False):
         ms_p50 = ms_sorted[len(ms_sorted) // 2]
         ms_p95 = ms_sorted[min(int(len(ms_sorted) * 0.95), len(ms_sorted) - 1)]
         ms_max = ms_sorted[-1]
-        lines.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
+        _dl.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
 
     # 🔍 단계별 레이턴시 — 사이클 내 각 단계 elapsed (병목 위치 파악)
     # scan_fetch (네트워크 I/O) vs scan_detect (CPU 루프) 분리로 병목 특정
@@ -1281,10 +1280,10 @@ def _pipeline_report(force=False):
                 f"   {_stage_name:14} avg={_s_avg:5.0f}ms p95={_s_p95:6.0f}ms max={_s_max:7.0f}ms"
             )
     if _stage_rows:
-        lines.append(f"🔍 레이턴시 (p95≥50ms만, {_stage_summary_cnt}단계 중 {len(_stage_rows)}개)")
-        lines.extend(_stage_rows)
+        _dl.append(f"🔍 레이턴시 (p95≥50ms만, {_stage_summary_cnt}단계 중 {len(_stage_rows)}개)")
+        _dl.extend(_stage_rows)
     elif _stage_summary_cnt > 0:
-        lines.append(f"🔍 레이턴시: 전 {_stage_summary_cnt}단계 p95<50ms ✅")
+        _dl.append(f"🔍 레이턴시: 전 {_stage_summary_cnt}단계 p95<50ms ✅")
 
     # 🔎 fetch by call-site tag — 어느 경로에서 얼마나 호출되는지 분해
     # key 예: c5_detect_leader, c15_detect_leader, c1_other(ThreadPool/기타)
@@ -1311,9 +1310,9 @@ def _pipeline_report(force=False):
             )
         _tag_rows.sort(key=lambda x: -x[0])
         if _tag_rows:
-            lines.append(f"🔎 fetch top-5/{len(_tag_rows)} (cost순)")
-            for _, _row in _tag_rows[:5]:
-                lines.append(_row)
+            _dl.append(f"🔎 fetch top-{TOP_DEBUG_COINS}/{len(_tag_rows)} (cost순)")
+            for _, _row in _tag_rows[:TOP_DEBUG_COINS]:
+                _dl.append(_row)
 
     # 🧠 check_fn 캐시 hit/miss 직접 계측 — 캐시가 진짜 작동하는지 확인
     with _CHECK_FN_CACHE_LOCK:
@@ -1324,7 +1323,7 @@ def _pipeline_report(force=False):
         _total_misses = sum(_cache_misses_snap.values())
         _total_calls = _total_hits + _total_misses
         _hit_rate = (_total_hits / _total_calls * 100) if _total_calls > 0 else 0
-        lines.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
+        _dl.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
         # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
 
     # 🗂️ candle 캐시 hit/miss — c1/c5/c15/c60 캐시 실효성 확인 (v18h: c5 추가)
@@ -1337,7 +1336,7 @@ def _pipeline_report(force=False):
             _rate = (_h / _total * 100) if _total > 0 else 0
             _candle_cache_rows.append(f"{_tf_key}:hit={_h}/miss={_mi}({_rate:.0f}%)")
     if _candle_cache_rows:
-        lines.append("🗂️ candle 캐시: " + " | ".join(_candle_cache_rows))
+        _dl.append("🗂️ candle 캐시: " + " | ".join(_candle_cache_rows))
 
     # 🚧 pre-check 컷 현황 (v18g: c1 fetch 전 저비용 필터로 걸러낸 종목)
     _pre_rows = []
@@ -1352,7 +1351,7 @@ def _pipeline_report(force=False):
         if _v > 0:
             _pre_rows.append(f"{_label}:{_v}")
     if _pre_rows:
-        lines.append("🚧 pre-cut: " + " | ".join(_pre_rows))
+        _dl.append("🚧 pre-cut: " + " | ".join(_pre_rows))
 
     # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
     with _CHECK_FN_EXEC_LOCK:
@@ -1361,7 +1360,7 @@ def _pipeline_report(force=False):
     if _exec_calls_snap:
         _total_all_ms = sum(_exec_total_snap.values())
         _total_all_calls = sum(_exec_calls_snap.values())
-        lines.append(f"⏱️ check_fn 실행 시간 (cache miss만, 함수별 누적): 총 {_total_all_ms/1000:.1f}s / {_total_all_calls}회")
+        _dl.append(f"⏱️ check_fn 실행 시간 (cache miss만, 함수별 누적): 총 {_total_all_ms/1000:.1f}s / {_total_all_calls}회")
         # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
         _exec_rows = []
         _SHOW_FN_DETAIL = False
@@ -1378,7 +1377,7 @@ def _pipeline_report(force=False):
             _exec_rows.append((_total_ms, f"   {_short:28} n={_n:6} total={_total_ms/1000:7.2f}s avg={_avg_ms:5.2f}ms ({_share:4.1f}%)"))
         _exec_rows.sort(key=lambda x: -x[0])
         for _, _row in _exec_rows:
-            lines.append(_row)
+            _dl.append(_row)
 
     # 🕐 시간대별 신호 (non-zero만)
     with _PIPELINE_HOURLY_LOCK:
@@ -1390,13 +1389,22 @@ def _pipeline_report(force=False):
         if h_sig[h] > 0 or h_gp[h] > 0 or h_succ[h] > 0:
             _hourly_parts.append(f"{h}시:{h_sig[h]}/{h_gp[h]}/{h_succ[h]}")
     if _hourly_parts:
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("🕐 <b>시간대별 (raw/gate/성공)</b>")
+        _dl.append("━━━━━━━━━━━━━━━━")
+        _dl.append("🕐 <b>시간대별 (raw/gate/성공)</b>")
         # 6개씩 한 줄
         for i in range(0, len(_hourly_parts), 6):
-            lines.append("  " + " | ".join(_hourly_parts[i:i+6]))
+            _dl.append("  " + " | ".join(_hourly_parts[i:i+6]))
 
-    # (Tier 3 SCOREBOARD는 상단에서 이미 출력)
+    # abnormality 판정: 하나라도 이상이면 전체 디버그 출력
+    if c.get('suspend_block', 0) > 0:
+        _debug_abnormal = True
+    if _stage_rows:
+        _debug_abnormal = True
+    if _debug_abnormal:
+        lines.append("━━ DEBUG ━━")
+        lines.extend(_dl)
+    else:
+        lines.append(f"⚙ debug ok ({len(_dl)}항목 정상)")
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
@@ -1408,6 +1416,7 @@ def _pipeline_report(force=False):
     except Exception:
         pass
 
+    lines.append("report v5 compact")
     msg = "\n".join(lines)
     print(msg)
     tg_send(msg)
@@ -8690,6 +8699,37 @@ _PIPELINE_CHECK_FN_META = {
     "pbr": "5m급등→1m눌림→재돌파+volR",
 }
 
+# ━━━ Report Top-N 상수 (리포트 출력 제한값 중앙 관리) ━━━
+TOP_D_SCORE_PROD = 5
+TOP_D_SCORE_DETAIL = 3
+TOP_D_SCORE_SURVIVAL = 3
+TOP_FAIL_REASONS = 3
+TOP_GATE_FAILS = 8
+TOP_DEBUG_COINS = 5
+TOP_DEBUG_SIGNALS = 5
+TOP_NEAR_MISS = 3
+TOP_RESEARCH = 3
+TOP_BLOCKED_SHOW = 15
+TOP_COIN_STATS = 3
+TOP_BUCKET_KEYS = 1
+TOP_FILTER_FINDINGS = 3
+
+# ━━━ Report priority (낮을수록 상단 출력, LIVE 먼저 → 핵심 research → collecting) ━━━
+_ROUTE_REPORT_PRIORITY = {}
+
+def _build_route_priority():
+    global _ROUTE_REPORT_PRIORITY
+    _pri = {}
+    for sname, sconf in _STRATEGY_REGISTRY.items():
+        route = sconf.get("route", "")
+        if not route:
+            continue
+        if sconf.get("enabled"):
+            _pri.setdefault(route, 10)
+        else:
+            _pri.setdefault(route, 50)
+    _ROUTE_REPORT_PRIORITY = _pri
+
 _V0_EXIT_PARAMS = {
     "strategy": "TRAIL",
     "sl_pct": 0.007,
@@ -10428,6 +10468,8 @@ _STRATEGY_REGISTRY = {
     },
 }
 
+_build_route_priority()
+
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
 _SHADOW_LOCK = threading.Lock()
 # 가상포지션: { route, strat, market, entry_price, entry_ts,
@@ -11976,11 +12018,10 @@ def _v4_shadow_report_lines():
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 시나리오 성과 (Production + Research Top-3):")
+        lines.append("📡 시나리오 성과:")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
-                              key=lambda x: x[1].get("signals", 0), reverse=True)
-        # v19: 3-level output — PRODUCTION full / RESEARCH top-3 summary / rest skip
-        # 레지스트리 기반 동적 생성 — 시나리오 추가/삭제 시 자동 반영
+                              key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
+                                             -x[1].get("signals", 0)))
         _PRODUCTION_ROUTES = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
         _ACTIVE_RESEARCH = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - _PRODUCTION_ROUTES
         _research_pnl = []
@@ -11991,96 +12032,77 @@ def _v4_shadow_report_lines():
             wins = s.get("wins", 0)
             wr = wins / n * 100
             avg_pnl = s.get("total_pnl", 0) / n * 100
-            coins = len(s.get("coins", []))
-            if wr >= 55:
-                tag = "🟢"
-            elif wr >= 45:
-                tag = "🟡"
-            else:
-                tag = "🔴"
             route = s.get("route", "?")
             strat = s.get("strat", "?")
             avg_mfe = sum(s.get("mfes", [])) / max(len(s.get("mfes", [])), 1) * 100
             mae_cnt = s.get("mae_cnt", 0)
-            avg_mae_str = ""
-            if mae_cnt > 0:
-                avg_mae = s.get("mae_sum", 0) / mae_cnt * 100
-                avg_mae_str = f" MAE{avg_mae:+.2f}%"
-            # v19: 3-level routing
-            if route in _PRODUCTION_ROUTES:
-                lines.append(
-                    f"  {tag}{route}:{strat} {n}건 승률{wr:.0f}%"
-                    f" PnL{avg_pnl:+.2f}% MFE{avg_mfe:+.2f}%{avg_mae_str} ({coins}코인)"
-                )
-            elif route in _ACTIVE_RESEARCH:
-                _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae_str, tag, key, s))
-                continue  # top-3 선별 후 출력
+            avg_mae = s.get("mae_sum", 0) / mae_cnt * 100 if mae_cnt > 0 else 0
+            # severity icon
+            if n < 10:
+                icon = "🟡"
+                state = "collecting"
+            elif route in _PRODUCTION_ROUTES:
+                icon = "🟢" if wr >= 50 else "🟠" if wr >= 40 else "🔴"
+                state = "LIVE"
+            elif wr >= 55:
+                icon = "🟢"
+                state = "cont"
+            elif wr >= 45:
+                icon = "🟡"
+                state = "watch"
             else:
-                continue  # 비활성 old route — 텔레그램 출력 안 함
-            # 청산 사유 분포 (상위 3개)
-            reasons = s.get("exit_reasons", {})
-            if reasons:
-                top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3]
-                reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
-                lines.append(f"    └ {reason_str}")
-            # PnL 시간곡선
-            cs = s.get("pnl_curve_sum", {})
-            cc = s.get("pnl_curve_cnt", {})
-            if cs:
-                curve_parts = []
-                for snap_s in _SHADOW_PNL_SNAP_SECS:
-                    sk = str(snap_s)
-                    if sk in cs and cc.get(sk, 0) > 0:
-                        avg_snap = cs[sk] / cc[sk] * 100
-                        curve_parts.append(f"{snap_s}s:{avg_snap:+.2f}%")
-                if curve_parts:
-                    lines.append(f"    ⏱️ {' → '.join(curve_parts)}")
-            # v18d: SL 히트 시점 분포
-            sl_secs = s.get("sl_hit_secs", [])
-            if sl_secs and len(sl_secs) >= 3:
-                avg_sl = sum(sl_secs) / len(sl_secs)
-                # 구간별 분포: 0-30s, 30-60s, 60-120s, 120s+
-                b1 = sum(1 for x in sl_secs if x <= 30)
-                b2 = sum(1 for x in sl_secs if 30 < x <= 60)
-                b3 = sum(1 for x in sl_secs if 60 < x <= 120)
-                b4 = sum(1 for x in sl_secs if x > 120)
+                icon = "🔴"
+                state = "weak"
+            if route in _PRODUCTION_ROUTES:
+                # capture ratio
+                cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
                 lines.append(
-                    f"    🛑 SL평균{avg_sl:.0f}초"
-                    f" (0-30s:{b1} 30-60s:{b2} 60-120s:{b3} 120s+:{b4})"
+                    f"{icon}[{route}] n{n} wr{wr:.0f}% PnL{avg_pnl:+.2f}%"
+                    f" MFE{avg_mfe:+.2f}% MAE{avg_mae:+.2f}% cap{cap:.0f}% {state}"
                 )
-            # v18d: 시간 기반 청산 PnL 비교 (트레일 vs 시간청산)
-            if cs and n >= 20:
-                # 현재 실제 PnL vs 각 시점 고정 청산 PnL
-                time_exit_parts = []
-                for snap_s in _SHADOW_PNL_SNAP_SECS:
-                    sk = str(snap_s)
-                    if sk in cs and cc.get(sk, 0) > 0:
-                        time_pnl = cs[sk] / cc[sk] * 100
-                        diff = time_pnl - avg_pnl
-                        if abs(diff) >= 0.01:
-                            sign = "+" if diff >= 0 else ""
-                            time_exit_parts.append(f"{snap_s}s→{sign}{diff:.2f}%p")
-                if time_exit_parts:
-                    lines.append(f"    📐 시간청산시 차이: {' '.join(time_exit_parts)}")
-            # v18d: 코인별 승률 (상위/하위 3개)
-            coin_wl = s.get("coin_wl", {})
-            if coin_wl and len(coin_wl) >= 5:
-                coin_stats = []
-                for c_name, (cw, cl) in coin_wl.items():
-                    ct = cw + cl
-                    if ct >= 3:  # 최소 3건
-                        coin_stats.append((c_name, cw, cl, ct, cw / ct * 100))
-                if len(coin_stats) >= 3:
-                    coin_stats.sort(key=lambda x: x[4], reverse=True)
-                    top3 = coin_stats[:3]
-                    bot3 = coin_stats[-3:]
-                    top_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in top3)
-                    bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
-                    lines.append(f"    🏆 상위: {top_str}")
-                    lines.append(f"    💀 하위: {bot_str}")
-            # v19: SVE1만 지표 W/L 표시
-            _show_indicators = route in _PRODUCTION_ROUTES
-            if _show_indicators:
+                # 조건부 확장: production은 상세 표시
+                reasons = s.get("exit_reasons", {})
+                if reasons:
+                    top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:TOP_FAIL_REASONS]
+                    reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
+                    lines.append(f"  └ {reason_str}")
+                cs = s.get("pnl_curve_sum", {})
+                cc = s.get("pnl_curve_cnt", {})
+                if cs:
+                    curve_parts = []
+                    for snap_s in (30, 60, 120, 180, 300):
+                        sk = str(snap_s)
+                        if sk in cs and cc.get(sk, 0) > 0:
+                            avg_snap = cs[sk] / cc[sk] * 100
+                            curve_parts.append(f"{snap_s}s:{avg_snap:+.2f}%")
+                    if curve_parts:
+                        lines.append(f"  ⏱ {' → '.join(curve_parts)}")
+                sl_secs = s.get("sl_hit_secs", [])
+                if sl_secs and len(sl_secs) >= 3:
+                    avg_sl = sum(sl_secs) / len(sl_secs)
+                    b1 = sum(1 for x in sl_secs if x <= 30)
+                    b2 = sum(1 for x in sl_secs if 30 < x <= 60)
+                    b3 = sum(1 for x in sl_secs if 60 < x <= 120)
+                    b4 = sum(1 for x in sl_secs if x > 120)
+                    lines.append(
+                        f"  🛑 SL평균{avg_sl:.0f}초"
+                        f" (0-30s:{b1} 30-60s:{b2} 60-120s:{b3} 120s+:{b4})"
+                    )
+                coin_wl = s.get("coin_wl", {})
+                if coin_wl and len(coin_wl) >= 5:
+                    coin_stats = []
+                    for c_name, (cw, cl) in coin_wl.items():
+                        ct = cw + cl
+                        if ct >= 3:
+                            coin_stats.append((c_name, cw, cl, ct, cw / ct * 100))
+                    if len(coin_stats) >= 3:
+                        coin_stats.sort(key=lambda x: x[4], reverse=True)
+                        top3 = coin_stats[:TOP_COIN_STATS]
+                        bot3 = coin_stats[-TOP_COIN_STATS:]
+                        top_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in top3)
+                        bot_str = " ".join(f"{c}({w}W{l}L {wr:.0f}%)" for c, w, l, _, wr in bot3)
+                        lines.append(f"  🏆 상위: {top_str}")
+                        lines.append(f"  💀 하위: {bot_str}")
                 w_ind = s.get("win_ind_avg", {})
                 w_cnt = s.get("win_ind_cnt", {})
                 w_m2 = s.get("win_ind_m2", {})
@@ -12104,9 +12126,14 @@ def _v4_shadow_report_lines():
                             d = abs(wv - lv) / max(pooled ** 0.5, 0.0001)
                             _scored.append((d, ik, wv, wn, lv, ln))
                     _scored.sort(reverse=True)
-                    for _d, ik, wv, wn, lv, ln in _scored[:5]:
+                    for _d, ik, wv, wn, lv, ln in _scored[:TOP_D_SCORE_PROD]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
-                        lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
+                        lines.append(f"  📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
+            elif route in _ACTIVE_RESEARCH:
+                _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
+                continue
+            else:
+                continue
     # SVE2 score별 PnL (SVE1 trade_records에서 계산)
     with _SHADOW_PERF_LOCK:
         for _s2key, _s2s in _SHADOW_PERF_STATS.items():
@@ -12136,8 +12163,6 @@ def _v4_shadow_report_lines():
                     if _s2_thr_strs:
                         lines.append(f"    📐 SVE2 thr(P{int(_SVE2_PERCENTILE*100)}): {' '.join(_s2_thr_strs)}")
             break
-    # v19: Research Top-3 출력 (quality score 기준, n<10 제외)
-    # score = PnL × min(log2(n), 5) — 샘플 많을수록 신뢰도 가중, n<10 노이즈 제거
     import math
     if _research_pnl:
         _qualified = []
@@ -12145,24 +12170,28 @@ def _v4_shadow_report_lines():
         for item in _research_pnl:
             _r_n = item[2]
             _r_pnl = item[4]
-            _r_mae_raw = item[9].get("mae_sum", 0) / max(item[9].get("mae_cnt", 1), 1) if item[9].get("mae_cnt", 0) > 0 else 0
+            _r_mae = item[6]
             if _r_n < 10:
                 _pending.append(item)
                 continue
-            _r_mae_abs = abs(_r_mae_raw) * 100
-            _mae_factor = max(1.0 - _r_mae_abs, 0.1)
+            _mae_factor = max(1.0 - abs(_r_mae), 0.1)
             _score = _r_pnl * _mae_factor * min(math.log2(max(_r_n, 2)), 5)
             _qualified.append((_score, item))
         _qualified.sort(key=lambda x: x[0], reverse=True)
         if _qualified:
-            lines.append("🧪 Research Top-3:")
-            for _score, (_r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae_str, _r_tag, _r_key, _r_s) in _qualified[:3]:
+            lines.append(f"🧪 Research Top-{TOP_RESEARCH}:")
+            for _score, (_r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae, _r_icon, _r_key, _r_s, _r_state) in _qualified[:TOP_RESEARCH]:
+                _r_cap = _r_pnl / _r_mfe * 100 if _r_mfe > 0 else 0
                 lines.append(
-                    f"  {_r_tag}{_r_route}:{_r_strat} {_r_n}건 승률{_r_wr:.0f}%"
-                    f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}%{_r_mae_str}"
+                    f"{_r_icon}[{_r_route}] n{_r_n} wr{_r_wr:.0f}%"
+                    f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}% MAE{_r_mae:+.02f}%"
+                    f" cap{_r_cap:.0f}% {_r_state}"
                 )
         if _pending:
-            lines.append(f"  ⏳ 수집중: {', '.join(p[0] for p in _pending)} (n<10)")
+            _pend_parts = []
+            for p in _pending:
+                _pend_parts.append(f"{p[0]}(n{p[2]})")
+            lines.append(f"  ⏳ 수집중: {', '.join(_pend_parts)}")
     # v21: 시나리오별 MFE/MAE/Hold/Continuation 상세 리포트 (n≥10인 전체 시나리오)
     with _SHADOW_PERF_LOCK:
         _all_scenario_stats = []
@@ -12233,12 +12262,12 @@ def _v4_shadow_report_lines():
                     for _dd, ik, *_ in _d_pairs:
                         if ik not in _POST_ENTRY and _dd >= 0.4 and ik not in _bk_keys:
                             _bk_keys.append(ik)
-                            if len(_bk_keys) >= 1:
+                            if len(_bk_keys) >= TOP_BUCKET_KEYS:
                                 break
                     for wk in _BUCKET_WATCH.get(route, []):
                         if wk not in _bk_keys:
                             _bk_keys.append(wk)
-                    for bk_key in _bk_keys[:1]:
+                    for bk_key in _bk_keys[:TOP_BUCKET_KEYS]:
                         bk_vals = [(tr["inds"][bk_key], tr["pnl"]) for tr in _trs
                                    if bk_key in tr.get("inds", {})]
                         if len(bk_vals) < 9:
@@ -12258,20 +12287,26 @@ def _v4_shadow_report_lines():
                 "pnl": avg_pnl, "mfe": avg_mfe, "mae": avg_mae,
                 "curve": curve, "cont": cont_flag,
                 "hold": avg_hold, "capture": capture,
-                "d_pairs": _d_pairs[:3],
+                "d_pairs": _d_pairs[:TOP_D_SCORE_DETAIL],
                 "buckets": _bucket_rows,
             })
         if _all_scenario_stats:
-            _all_scenario_stats.sort(key=lambda x: x["pnl"], reverse=True)
-            lines.append("📊 시나리오별 MFE/MAE 상세:")
+            _all_scenario_stats.sort(key=lambda x: (
+                _ROUTE_REPORT_PRIORITY.get(x["route"], 99), -x["pnl"]))
+            lines.append("📊 시나리오별 상세:")
             for sc in _all_scenario_stats:
-                curve_str = " ".join(f"{k}s:{v:+.2f}%" for k, v in sorted(sc["curve"].items()))
                 cont_str = f" {sc['cont']}" if sc['cont'] else ""
                 lines.append(
                     f"  {sc['route']}:{sc['strat']} n={sc['n']}"
                     f" PnL{sc['pnl']:+.2f}% MFE{sc['mfe']:+.2f}% MAE{sc['mae']:+.2f}%"
                     f" cap={sc['capture']:.0f}%{cont_str}"
                 )
+                _expand = (abs(sc['pnl']) >= 0.25 or sc['capture'] <= -20
+                           or sc['wr'] <= 20 or sc['n'] >= 3000
+                           or any(_dd >= 0.8 for _dd, *_ in sc.get("d_pairs", [])))
+                if not _expand:
+                    continue
+                curve_str = " ".join(f"{k}s:{v:+.2f}%" for k, v in sorted(sc["curve"].items()))
                 if curve_str:
                     lines.append(f"    ⏱ {curve_str}")
                 if sc.get("d_pairs") and sc["route"] in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
@@ -12305,7 +12340,7 @@ def _v4_shadow_report_lines():
                     lines.append("🔍 필터 후보 자동 탐지:")
                     _shown = True
                 lines.append(f"  [{akey}]")
-                for f in findings[:3]:
+                for f in findings[:TOP_FILTER_FINDINGS]:
                     star = "★" if f["effect"] >= 1.5 else "☆"
                     lines.append(
                         f"    {star}{f['ind']}: W={f['w_avg']} L={f['l_avg']}"
@@ -12325,7 +12360,7 @@ def _v4_shadow_report_lines():
                                -x[1].get("signals", 0)))
             _blocked_shown = 0
             _blocked_pending = 0  # 샘플 부족 건수
-            _BLOCKED_MAX_SHOW = 15  # Phase2: 상위 15개만 표시
+            _BLOCKED_MAX_SHOW = TOP_BLOCKED_SHOW
             for bkey, bs in sorted_blocked:
                 if _blocked_shown >= _BLOCKED_MAX_SHOW:
                     break
@@ -12648,7 +12683,7 @@ def _survival_analysis_lines():
             lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
                          f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
         lines.append(f"    → A-C lift: {ac_lift:+.2f}%p")
-        ds = data["d_scores"][:3]
+        ds = data["d_scores"][:TOP_D_SCORE_SURVIVAL]
         if ds:
             lines.append(f"    📊 d-score TOP3:")
             for item in ds:
