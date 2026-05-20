@@ -12447,10 +12447,12 @@ def _v4_shadow_report_lines():
     return lines
 
 
-def _survival_analysis(routes=("SVE1", "GT", "CG"), min_n=10):
+def _survival_analysis(routes=None, min_n=10):
     """dd_peak_60s 기반 survival quality 분석.
     A(dd<0.3%), B(0.3~0.5%), C(>0.5%) 그룹 분리 → PnL/feature d-score 산출.
     Returns dict: {route: {groups, d_scores, scoring_rules}} or empty."""
+    if routes is None:
+        routes = {s["route"] for s in _STRATEGY_REGISTRY.values()}
     _ENTRY_FEATURES = [
         "tick_age", "vr5", "rsi_15m", "adx_15", "adx_60",
         "entry_spread_pct", "entry_vol_krw_m", "gap_20bar",
