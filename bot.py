@@ -1147,24 +1147,56 @@ def _pipeline_report(force=False):
     if _scan_p95_s > 25 and _stage_rows:
         lines.append(f"  ⚠slow: {' '.join(_stage_rows[:3])}")
 
-    lines.append("report v6")
+    lines.append("report v7")
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 하단 DETAIL — 스크롤해서 볼 상세 데이터
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    lines.append("")
-    lines.append("━━ DETAIL ━━")
+    # ━━━━ 조건부 DEBUG DETAIL (이상 시에만 compact에 append) ━━━━
+    _abnormal = (
+        _scan_p95_s > 25
+        or c.get('suspend_block', 0) > 0
+        or _cache_rate < 30
+        or _guard_pct > 150
+    )
+    if _abnormal:
+        lines.append("")
+        lines.append("━━ DEBUG DETAIL ━━")
+        if _stage_rows:
+            lines.append(f"⚠ stage: {' '.join(_stage_rows)}")
+        if lat_list:
+            lat_avg = sum(lat_list) / len(lat_list)
+            lines.append(f"scan avg={lat_avg:.0f}ms p95={_scan_p95_s*1000:.0f}ms")
+        if _total_cache > 0:
+            lines.append(f"cache {_cache_rate:.0f}%({_total_hits}/{_total_cache})")
+        _pre_rows = []
+        for _key, _label in [("pre_cut_spread", "sprd"), ("pre_cut_depth", "depth"),
+                              ("pre_cut_sell_dominant", "sell"), ("pre_cut_coin_loss", "cd"),
+                              ("pre_cut_dead_market", "dead")]:
+            _v = c.get(_key, 0)
+            if _v > 0:
+                _pre_rows.append(f"{_label}:{_v}")
+        if _pre_rows:
+            lines.append(f"precut: {' '.join(_pre_rows)}")
+
+    # ━━━━ compact 메시지 전송 (항상) ━━━━
+    msg = "\n".join(lines)
+    print(msg)
+    tg_send(msg)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # RESEARCH 리포트 — 별도 메시지 (데이터 있을 때만)
+    # 튜닝/분석용 상세 데이터, 운영 compact와 분리
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    _rl = []
 
     # shadow 시나리오 성과 상세
     shadow_lines = _v4_shadow_report_lines()
     if shadow_lines:
-        lines.extend(shadow_lines)
+        _rl.extend(shadow_lines)
 
     # survival analysis
     try:
         surv_lines = _survival_analysis_lines()
         if surv_lines:
-            lines.extend(surv_lines)
+            _rl.extend(surv_lines)
     except Exception:
         print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
 
@@ -1181,7 +1213,7 @@ def _pipeline_report(force=False):
     if _atr.get("n", 0) > 0:
         _val_parts.append(f"ATR:NM{_atr['near_miss']}")
     if _val_parts:
-        lines.append(f"📉 니어미스: {' '.join(_val_parts)}")
+        _rl.append(f"📉 니어미스: {' '.join(_val_parts)}")
 
     # gate 지표 평균
     _gs = vs.get("gate_spread", {})
@@ -1192,23 +1224,23 @@ def _pipeline_report(force=False):
         if _gs.get("n"): _gparts.append(f"sprd={_gs['avg']:.2f}%")
         if _gb.get("n"): _gparts.append(f"buy={_gb['avg']:.0%}")
         if _gv.get("n"): _gparts.append(f"vol={_gv['avg']:.0f}M")
-        lines.append(f"📊 gate avg: {' '.join(_gparts)}")
+        _rl.append(f"📊 gate avg: {' '.join(_gparts)}")
 
     # 스캔 레이턴시 상세
     if lat_list:
         lat_avg = sum(lat_list) / len(lat_list)
-        lines.append(f"⏱ scan: avg={lat_avg:.0f}ms p95={_scan_p95_s*1000:.0f}ms ({len(lat_list)}cyc)")
+        _rl.append(f"⏱ scan: avg={lat_avg:.0f}ms p95={_scan_p95_s*1000:.0f}ms ({len(lat_list)}cyc)")
 
     with _MARKET_SCAN_LOCK:
         ms_list = list(_MARKET_SCAN_INTERVALS)
     if ms_list and len(ms_list) >= 10:
         ms_sorted = sorted(ms_list)
         ms_p95 = ms_sorted[min(int(len(ms_sorted) * 0.95), len(ms_sorted) - 1)]
-        lines.append(f"🔁 재스캔: avg={sum(ms_list)/len(ms_list)/1000:.1f}s p95={ms_p95/1000:.1f}s")
+        _rl.append(f"🔁 재스캔: avg={sum(ms_list)/len(ms_list)/1000:.1f}s p95={ms_p95/1000:.1f}s")
 
     # check_fn 캐시
     if _total_cache > 0:
-        lines.append(f"🧠 cache: fn {_cache_rate:.0f}%({_total_hits}/{_total_cache})")
+        _rl.append(f"🧠 cache: fn {_cache_rate:.0f}%({_total_hits}/{_total_cache})")
 
     # candle 캐시
     _cc_parts = []
@@ -1219,18 +1251,18 @@ def _pipeline_report(force=False):
         if _total > 0:
             _cc_parts.append(f"{_tf_key}:{_h/(_total)*100:.0f}%")
     if _cc_parts:
-        lines.append(f"🗂 candle: {' '.join(_cc_parts)}")
+        _rl.append(f"🗂 candle: {' '.join(_cc_parts)}")
 
     # pre-cut
-    _pre_rows = []
+    _pre_rows_full = []
     for _key, _label in [("pre_cut_spread", "sprd"), ("pre_cut_depth", "depth"),
                           ("pre_cut_sell_dominant", "sell"), ("pre_cut_coin_loss", "cd"),
                           ("pre_cut_dead_market", "dead")]:
         _v = c.get(_key, 0)
         if _v > 0:
-            _pre_rows.append(f"{_label}:{_v}")
-    if _pre_rows:
-        lines.append(f"🚧 pre-cut: {' '.join(_pre_rows)}")
+            _pre_rows_full.append(f"{_label}:{_v}")
+    if _pre_rows_full:
+        _rl.append(f"🚧 pre-cut: {' '.join(_pre_rows_full)}")
 
     # 시간대별 (condensed)
     with _PIPELINE_HOURLY_LOCK:
@@ -1242,7 +1274,14 @@ def _pipeline_report(force=False):
         if h_sig[h] > 0 or h_gp[h] > 0 or h_succ[h] > 0:
             _hourly_parts.append(f"{h}시:{h_sig[h]}/{h_gp[h]}/{h_succ[h]}")
     if _hourly_parts:
-        lines.append(f"🕐 시간대: {' '.join(_hourly_parts)}")
+        _rl.append(f"🕐 시간대: {' '.join(_hourly_parts)}")
+
+    # research 메시지 전송 (데이터 있을 때만)
+    if _rl:
+        _rl.insert(0, "📋 RESEARCH DETAIL")
+        _research_msg = "\n".join(_rl)
+        print(_research_msg)
+        tg_send(_research_msg)
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
@@ -1253,10 +1292,6 @@ def _pipeline_report(force=False):
         _pipeline_gauge_csv_write()
     except Exception:
         pass
-
-    msg = "\n".join(lines)
-    print(msg)
-    tg_send(msg)
 
     # 섀도우 통계 저장 (누적 — 초기화하지 않음)
     try:
