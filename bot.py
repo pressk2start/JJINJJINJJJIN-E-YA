@@ -3557,7 +3557,15 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 _sve2_ind["macd_hist_5m_bps"] = round(_sve2_hist / _sve2_closes5[-1] * 10000, 2)
         _s2_score, _s2_decision, _s2_thr, _s2_feat = _sve2_compute_score(_sve2_ind)
         _pipeline_inc(f"sve2_{_s2_decision.lower()}")
-        print(f"[SVE2_LOG] {m} score={_s2_score} → {_s2_decision} (관찰전용)")
+        if _s2_decision == "SKIP":
+            print(f"[SVE2_BLOCK] {m} score={_s2_score} → SKIP (toxic entry blocked)")
+            return None
+        if _s2_decision == "REDUCED":
+            _sve2_mult = _SVE2_SIZE_MAP.get(_s2_score, 1.0)
+            entry_fraction *= _sve2_mult
+            print(f"[SVE2_REDUCE] {m} score={_s2_score} → ×{_sve2_mult:.1f}")
+        else:
+            print(f"[SVE2_PASS] {m} score={_s2_score} → {_s2_decision}")
         # A군 연패우회 페널티 적용 (SVE2와 독립)
         _a_penalty = pre.get("_suspend_a_penalty")
         if _a_penalty:
@@ -11497,6 +11505,27 @@ def _shadow_evaluate_positions():
                 blocked_remaining.append(vp)
         _SHADOW_BLOCKED_POSITIONS[:] = blocked_remaining
 
+    # 청산 시점 호가창 스냅샷 → 슬리피지 추정
+    if closed_results:
+        _exit_mkts = list(set(t[0]["market"] for t in closed_results))
+        try:
+            _exit_ob = fetch_orderbook_cache(_exit_mkts)
+        except Exception:
+            _exit_ob = {}
+        for tup in closed_results:
+            _vp_m = tup[0]["market"]
+            _ci = tup[6]
+            _eob = _exit_ob.get(_vp_m)
+            if _eob and isinstance(_eob.get("raw"), dict):
+                _eu = _eob["raw"].get("orderbook_units", [])
+                if _eu:
+                    _ci["ob_exit_bid1_krw"] = round(_eu[0].get("bid_price", 0) * _eu[0].get("bid_size", 0))
+                    _ci["ob_exit_ask1_krw"] = round(_eu[0].get("ask_price", 0) * _eu[0].get("ask_size", 0))
+                    for _amt in (100_000, 300_000, 500_000):
+                        _ss = _calc_vwap_slip(_eu, _amt, "sell")
+                        if _ss is not None:
+                            _ci[f"ob_exit_slip_sell_{_amt // 1000}k"] = _ss
+
     # 일반 결과 기록
     for vp, pnl, mfe, mae, reason, hold, indicators, pnl_curve in closed_results:
         _shadow_record_result(vp["route"], vp["strat"], vp["market"],
@@ -11552,6 +11581,27 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         print(f"[SHADOW] universal_ind 수집 실패: {e}")
         universal_ind = {}
     _add_cycle_universal_ind_ms((time.time() - _t_uni) * 1000)
+
+    # 호가창 스냅샷 → 슬리피지 추정 (shadow 진입 시점 execution quality 측정)
+    _ob_data = m3_info.get("ob_data")
+    if _ob_data and isinstance(_ob_data.get("raw"), dict):
+        _ob_units = _ob_data["raw"].get("orderbook_units", [])
+        if _ob_units:
+            _b1 = _ob_units[0].get("bid_price", 0)
+            _a1 = _ob_units[0].get("ask_price", 0)
+            _b1s = _ob_units[0].get("bid_size", 0)
+            _a1s = _ob_units[0].get("ask_size", 0)
+            universal_ind["ob_bid1_krw"] = round(_b1 * _b1s)
+            universal_ind["ob_ask1_krw"] = round(_a1 * _a1s)
+            universal_ind["ob_spread_pct"] = round((_a1 - _b1) / max((_a1 + _b1) / 2, 1) * 100, 4) if _a1 > 0 and _b1 > 0 else 0
+            for _amt in (100_000, 300_000, 500_000):
+                _sk = _amt // 1000
+                _sb = _calc_vwap_slip(_ob_units, _amt, "buy")
+                _ss = _calc_vwap_slip(_ob_units, _amt, "sell")
+                if _sb is not None:
+                    universal_ind[f"ob_slip_buy_{_sk}k"] = _sb
+                if _ss is not None:
+                    universal_ind[f"ob_slip_sell_{_sk}k"] = _ss
 
     # ⭐ Per-call check_fn 캐시 — 같은 함수는 1회만 호출하고 재사용
     # 키: check_fn 객체 식별자 / 값: (sig, all_fails) 튜플
@@ -12622,7 +12672,7 @@ def v4_get_strategy_registry():
 
 # --- 공개 API (v6 signal_v4 60일 WF 데이터 기반) ---
 
-def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
+def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None, ob_data=None):
     """
     통합 진입 판정 — detect_leader_stock()에서 호출
 
@@ -12636,7 +12686,7 @@ def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None):
 
     # === v0: 섀도우 테스트 — 게이트 없이 전 시나리오 실행 ===
     try:
-        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, {"market": market})
+        _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, {"market": market, "ob_data": ob_data})
     except Exception as e:
         print(f"[SHADOW] 섀도우 테스트 오류: {e}")
 
@@ -14811,7 +14861,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         # strategy_v4 통합 진입 판정 (c1 전달 — VR5/ATR% 계산용)
         _t_dv = time.time()
         _dl_t_v4 = time.time()
-        _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1)
+        _v4_signal = v4_evaluate_entry(m, _c5, _c15, _c30, _c60, c1=c1, ob_data=ob)
         _pipeline_record_stage("dl_v4_eval", (time.time() - _dl_t_v4) * 1000)
         _add_cycle_detect_v4_ms((time.time() - _t_dv) * 1000)
 
@@ -17339,6 +17389,39 @@ def start_watchdogs():
     threading.Thread(target=session_refresher, daemon=True, name="SessionRefresh").start()
     threading.Thread(target=lock_cleaner, daemon=True, name="LockCleaner").start()
     print("🐕 워치독 시작됨 (헬스비트 5분, 세션리프레시 10분, 락청소 10분)")
+
+
+# ===== 오더북 VWAP 슬리피지 계산 =====
+def _calc_vwap_slip(ob_units, krw_amount, side="buy"):
+    """시장가 주문 시 예상 VWAP 슬리피지 계산.
+    Returns slip_pct (mid 대비 %, 양수=불리) or None."""
+    if not ob_units or krw_amount <= 0:
+        return None
+    b1 = ob_units[0].get("bid_price", 0)
+    a1 = ob_units[0].get("ask_price", 0)
+    if b1 <= 0 or a1 <= 0:
+        return None
+    mid = (b1 + a1) / 2
+    remaining = krw_amount
+    total_qty = 0.0
+    total_cost = 0.0
+    for u in ob_units:
+        price = u.get("ask_price" if side == "buy" else "bid_price", 0)
+        size = u.get("ask_size" if side == "buy" else "bid_size", 0)
+        if price <= 0 or size <= 0:
+            continue
+        level_krw = price * size
+        consume = min(remaining, level_krw)
+        total_cost += consume
+        total_qty += consume / price
+        remaining -= consume
+        if remaining <= 0:
+            break
+    if total_qty <= 0:
+        return None
+    vwap = total_cost / total_qty
+    slip = (vwap - mid) / mid * 100 if side == "buy" else (mid - vwap) / mid * 100
+    return round(slip, 4)
 
 
 # ===== 오더북 캐시 =====
