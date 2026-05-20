@@ -12018,7 +12018,7 @@ def _v4_shadow_report_lines():
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 시나리오 성과:")
+        lines.append("📡 시나리오 성과 (shadow 기준):")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
                                              -x[1].get("signals", 0)))
