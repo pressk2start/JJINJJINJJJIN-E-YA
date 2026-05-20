@@ -1054,7 +1054,7 @@ def _pipeline_report(force=False):
     lines.append(
         f"  raw{_raw} gate{_gp}"
         f" entry{_succ} 전체{pct(_succ, _det)}")
-    # pass 요약 — 통과 있는 것만
+    # pass 요약 — non-zero만, route 대표명
     _pass_parts = []
     _seen_pkeys = set()
     for _sname, _sconf in _STRATEGY_REGISTRY.items():
@@ -1062,11 +1062,18 @@ def _pipeline_report(force=False):
         if _pk and _pk not in _seen_pkeys:
             _seen_pkeys.add(_pk)
             _pass_cnt = c.get(f"{_pk}_pass", 0)
+            if _pass_cnt == 0:
+                continue
             _routes = sorted(set(
                 _sc.get("route", "") for _sc in _STRATEGY_REGISTRY.values()
                 if _sc.get("pipeline_key") == _pk))
-            _pass_parts.append(f"{'/'.join(_routes)} {_pass_cnt}")
-    lines.append(f"PASS: {' | '.join(_pass_parts)}")
+            _label = _routes[0] if len(_routes) == 1 else _routes[0]
+            _extra = len(_routes) - 1
+            if _extra > 0:
+                _label += f"+{_extra}"
+            _pass_parts.append(f"{_label} {_pass_cnt}")
+    if _pass_parts:
+        lines.append(f"PASS: {' '.join(_pass_parts)}")
     # gate 탈락 — non-zero만 1줄
     _gate_raw = []
     for _gk, _gl in [("gate_fail_no_v4","no_v4"), ("gate_fail_coin_cd","cd"),
@@ -8644,7 +8651,8 @@ def _build_actionable_summary():
     """research 메시지 상단 ACTIONABLE 요약 5줄 — 변화/판단 가능한 핵심만"""
     items = []
     prod, research = _get_route_sets()
-    # 1) survival ENABLE/BLOCK 변화
+    all_routes = prod | research
+    # 1) survival ENABLE 진행도 / 미달
     try:
         sa = _survival_analysis()
         for route, data in sa.items():
@@ -8660,29 +8668,39 @@ def _build_actionable_summary():
                 hi, lo = sc["hi"], sc["lo"]
                 if hi["n"] > 0 and lo["n"] > 0:
                     hl_lift = hi["pnl"] - lo["pnl"]
-            if (total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30
-                    and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0):
-                items.append(f"🟢 {route} ENABLE 조건충족")
-            elif total_n >= 30 and ac_lift < 0.1:
+            _checks = {
+                "n": total_n >= 100, "A": a_g["n"] >= 30,
+                "C": c_g["n"] >= 30, "ac": ac_lift > 0.5,
+                "hl": hl_lift > 0.3, "pnl": a_g["avg_pnl"] > 0,
+            }
+            _pass = sum(1 for v in _checks.values() if v)
+            if _pass == len(_checks):
+                items.append(f"🟢 {route} ENABLE 조건충족 {_pass}/{len(_checks)}")
+            elif _pass >= 4:
+                _missing = [k for k, v in _checks.items() if not v]
+                items.append(f"🟡 {route} ENABLE {_pass}/{len(_checks)} 미충족:{','.join(_missing)}")
+            elif total_n >= 50 and ac_lift < 0.2:
                 items.append(f"🔴 {route} survival 미달 lift{ac_lift:+.2f}")
     except Exception:
         pass
-    # 2) shadow 성과 급변 route (pnl < -0.1% or cap < -30)
+    # 2) LIVE route 성과 경고 (pnl < -0.05% or cap < -15%)
+    _seen_routes = set()
     with _SHADOW_PERF_LOCK:
         for key, s in _SHADOW_PERF_STATS.items():
             n = s.get("signals", 0)
             route = s.get("route", "?")
-            if n < 20 or route not in prod:
+            if n < 20 or route not in prod or route in _seen_routes:
                 continue
+            _seen_routes.add(route)
             avg_pnl = s.get("total_pnl", 0) / n * 100
             mfes = s.get("mfes", [])
             avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
-            if avg_pnl < -0.1:
+            if avg_pnl < -0.05:
                 items.append(f"⚠ {route} LIVE pnl{avg_pnl:+.2f}% 적자")
-            elif cap < -30:
+            elif cap < -15:
                 items.append(f"⚠ {route} cap{cap:.0f}% 비효율")
-    # 3) 필터 재검토 필요 (차단건 중 승률>55%)
+    # 3) 필터 재검토 필요 (차단건 중 승률>=50%)
     with _SHADOW_PERF_LOCK:
         for bkey, bs in _SHADOW_BLOCKED_STATS.items():
             bn = bs.get("signals", 0)
@@ -8690,8 +8708,9 @@ def _build_actionable_summary():
                 continue
             bwr = bs.get("wins", 0) / bn * 100
             broute = bs.get("route", "?")
-            if bwr >= 55 and broute in (prod | research):
-                items.append(f"⚠ {broute}:{bs.get('filter',bkey)} 필터재검토 wr{bwr:.0f}%")
+            if bwr >= 50 and broute in all_routes:
+                bfilt = bs.get("filter", bkey)
+                items.append(f"⚠ {broute}:{bfilt} 필터재검토 wr{bwr:.0f}%")
     return items[:5]
 
 
