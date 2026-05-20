@@ -8680,6 +8680,8 @@ _STRAT_DESC_MAP = {
     "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
     "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
     "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
+    "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
+    "PBR_STRICT": "PBR + spread≤0.15 (tight liquidity filter)",
 }
 
 _V0_EXIT_PARAMS = {
@@ -9602,6 +9604,55 @@ def _v0_check_time_momentum(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
+def _v0_check_pullback_reclaim(c1, c5, c15, c30, c60, gate_info=None):
+    """PBR 눌림재돌파: 5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 + 윗꼬리필터"""
+    _pipeline_inc("pbr_enter")
+    if not c5 or len(c5) < 10:
+        return None
+    if not c1 or len(c1) < 7:
+        return None
+    closes_5m = [c["trade_price"] for c in c5]
+    recent_high_5m = max(closes_5m[-5:])
+    pre_surge = closes_5m[-10] if len(closes_5m) >= 10 else closes_5m[0]
+    surge_pct = (recent_high_5m - pre_surge) / max(pre_surge, 1) * 100
+    if surge_pct < 1.0:
+        if _pipeline_inc("pbr_surge_fail", value=round(surge_pct, 2), threshold=1.0, direction="gte"): return None
+    cur = c1[-1]
+    cur_price = cur["trade_price"]
+    prev_1m_high = max(c["high_price"] for c in c1[-4:-1])
+    pullback_from_high = (prev_1m_high - min(c["low_price"] for c in c1[-3:])) / max(prev_1m_high, 1) * 100
+    if pullback_from_high < 0.3:
+        if _pipeline_inc("pbr_pull_shallow", value=round(pullback_from_high, 2), threshold=0.3, direction="gte"): return None
+    if pullback_from_high > 0.8:
+        if _pipeline_inc("pbr_pull_deep", value=round(pullback_from_high, 2), threshold=0.8, direction="lte"): return None
+    if cur["high_price"] <= prev_1m_high:
+        if _pipeline_inc("pbr_no_reclaim"): return None
+    cur_vol = cur.get("candle_acc_trade_price", 0)
+    avg_vol_5 = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5 if len(c1) >= 6 else 0
+    if avg_vol_5 <= 0 or cur_vol < avg_vol_5 * 1.3:
+        if _pipeline_inc("pbr_vol_weak", value=round(cur_vol / max(avg_vol_5, 1), 2), threshold=1.3, direction="gte"): return None
+    body = abs(cur["trade_price"] - cur["opening_price"])
+    full_range = cur["high_price"] - cur["low_price"]
+    upper_wick = cur["high_price"] - max(cur["trade_price"], cur["opening_price"])
+    wick_ratio = upper_wick / max(full_range, 1e-8)
+    if wick_ratio > 0.45:
+        if _pipeline_inc("pbr_wick_fail", value=round(wick_ratio, 2), threshold=0.45, direction="lte"): return None
+    _pipeline_inc("pbr_pass")
+    vol_ratio = round(cur_vol / max(avg_vol_5, 1), 2)
+    return {
+        "signal_tag": "눌림재돌파",
+        "entry_mode": "confirm",
+        "logic_group": "PBR",
+        "filters_hit": [f"surge={surge_pct:.1f}%", f"pull={pullback_from_high:.2f}%",
+                        f"reclaim={cur['high_price']:.0f}>{prev_1m_high:.0f}",
+                        f"volR={vol_ratio}", f"wick={wick_ratio:.2f}"],
+        "exit_params": {},
+        "indicators": {"surge_pct": round(surge_pct, 2), "pullback_depth": round(pullback_from_high, 4),
+                       "prev_1m_high": round(prev_1m_high, 2), "vol_reexpand": vol_ratio,
+                       "upper_wick_ratio": round(wick_ratio, 4)},
+    }
+
+
 def _v0_check_retest_entry(c1, c5, c15, c30, c60, gate_info=None):
     """RET 눌림재진입: 급등 후 EMA20 근처 눌림 + 저점방어 + 재양봉"""
     _pipeline_inc("retest_enter")
@@ -10401,6 +10452,25 @@ _STRATEGY_REGISTRY = {
     # SVE1_SPR 폐기: n=42, cap=14%, PnL=+0.04%. small-n 착시(76%→14%). 조건부 edge 잔존하나 단독 필터로 불충분
     # ━━━ Track N: CLM 고순도화 — 30초 생존 gate ━━━
     # CLM_CORE30 폐기: n=10, cap=-118%, PnL=-0.34%, MAE=-0.64%. CLM+gate30=구조적 충돌(속도edge vs 지연진입). 차단건이 통과건보다 양호→역선택 확인
+    # ━━━ Track O: PBR — 눌림재돌파 (pullback breakout reclaim) ━━━
+    # 가설: "강함 확인 → 바로 진입"이 아닌 "강함 확인 → 한번 식힘 → 재돌파 시 진입"
+    # RET와 차이: RET=눌림+양봉(재확인 없음), PBR=눌림+고점재돌파+거래량재증가(재확인 있음)
+    "눌림재돌파": {
+        "check_fn": _v0_check_pullback_reclaim,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "pbr", "route": "PBR",
+        "ind_filters": [("entry_spread_pct", "<=", 0.20)],
+        "description": "5m급등→1m눌림(-0.3~-0.8%)→고점재돌파+volReexpand+wick필터 [GT exit] spread≤0.20 (shadow)",
+    },
+    "눌림재돌파_STRICT": {
+        "check_fn": _v0_check_pullback_reclaim,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "pbr", "route": "PBR_STRICT",
+        "ind_filters": [("entry_spread_pct", "<=", 0.15)],
+        "description": "PBR + spread≤0.15 (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -11942,7 +12012,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
