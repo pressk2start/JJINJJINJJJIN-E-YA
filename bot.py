@@ -11361,6 +11361,20 @@ def _shadow_sim_exit(vp, cur_price):
                 return True, "생존탈락"
             vp["_survival_passed"] = True
 
+    # 1.6) Early DD cut — GT/SVE1: 초반 DD 기반 조기탈출
+    # 근거: GT A(0~0.3%dd) PnL+0.15%, C(0.5%+) PnL-1.09%, A-C lift +1.24%p (n=290)
+    # 30s+: dd_peak>0.5% 즉시탈출 / 60s+: dd_peak_60s>0.3% 강제탈출
+    _route = vp.get("route", "")
+    if _route in ("GT", "SVE1"):
+        if hold_sec >= 30 and entry_price > 0:
+            _dd_now = (vp["best_price"] - cur_price) / entry_price
+            if _dd_now > 0.005:
+                return True, "DD즉시탈출"
+        if hold_sec >= 60:
+            _dd60 = vp.get("dd_peak_60s")
+            if _dd60 is not None and _dd60 > 0.003:
+                return True, "초반DD탈출"
+
     # 1.7) Adaptive peak exit — 구간별 peak DD 추적 (GTSV_E3)
     # _mfe_sec: best_price 마지막 갱신 시점 (peak 안정 여부 판단에 재활용)
     _ape = ep.get("adaptive_peak_exit")
