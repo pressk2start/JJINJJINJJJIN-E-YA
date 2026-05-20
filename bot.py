@@ -8682,6 +8682,7 @@ _STRAT_DESC_MAP = {
     "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
     "PBR_STRICT": "PBR + spread≤0.15 (tight liquidity filter)",
+    "PBR_MOMO": "PBR + 중간강도 모멘텀(RSI5m≥62 + ADX15≥18 + VR15m≥1.5)",
 }
 
 _V0_EXIT_PARAMS = {
@@ -10471,6 +10472,14 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("entry_spread_pct", "<=", 0.15)],
         "description": "PBR + spread≤0.15 (shadow)",
     },
+    "눌림재돌파_MOMO": {
+        "check_fn": _v0_check_pullback_reclaim,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "pbr", "route": "PBR_MOMO",
+        "ind_filters": [("entry_spread_pct", "<=", 0.20), ("rsi_5m", ">=", 62), ("adx_15", ">=", 18), ("vr5_15m", ">=", 1.5)],
+        "description": "PBR + 중간강도 모멘텀필터(RSI5m≥62+ADX15≥18+VR15m≥1.5) [GT exit] (shadow)",
+    },
 }
 
 # === v9: 섀도우 가상매매 + 실제 청산 로직 시뮬레이션 ===
@@ -12012,7 +12021,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
