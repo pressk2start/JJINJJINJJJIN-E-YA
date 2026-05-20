@@ -8669,7 +8669,6 @@ _STRAT_DESC_MAP = {
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     # Research - filtered
-    "CLM_DF": "CLM + DeathFilter(spread_z≤1.3 + PER≥0.20) → n=75 체크포인트",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
@@ -10355,16 +10354,9 @@ _STRATEGY_REGISTRY = {
     # CLM_S30 폐기: n=349, cap=3%, 2회 연속 cap<5%
     # CLM_S30A 폐기: n=289, cap=4%, 2회 연속 cap<5%
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
-    # ━━━ Track H: Death Filter shadow (SZD+PER — CLM_DF만 생존) ━━━
+    # ━━━ Track H: Death Filter shadow (SZD+PER) ━━━
     # GT_DF 폐기: n=37, cap=-27%, death filter 단독으론 GT에서 edge 생성 실패
-    "과열감지_DF": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_DF",
-        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
-        "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
-    },
+    # CLM_DF 폐기: n=56, cap=31→25→22→20→16→10% edge붕괴 궤적. CLM기본(cap=15%)이 더 나음 — DF가 좋은 CLM을 깎은 것
     # Track I 폐기: SVE1_PER n=12, cap=-199%, per_3≥0.65가 SVE1에서 역효과
     # ━━━ Track J: CALM GATE — 고요한 환경 필터 (entry_spread+ATR 저조건) ━━━
     "과열감지_CALM": {
@@ -11189,7 +11181,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM_DF", "CLM") else 50
+            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM") else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
@@ -11976,7 +11968,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "RX", "LTRP", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "RX", "LTRP", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
