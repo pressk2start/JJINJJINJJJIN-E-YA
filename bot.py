@@ -8663,23 +8663,16 @@ _V4_DEFAULT_EXIT = {
 _STRAT_DESC_MAP = {
     # Production
     "SVE1": "5분RSI≥74.55 + 생존게이트60s + 120s강제종료 (LIVE)",
-    # Research - entry structures
-    "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입",
+    # Research - core
+    "RET": "급등후 EMA20 눌림 + 저점방어 + 재양봉 → 눌림 재진입 (PBR baseline)",
     "CLM": "장대양봉 + 윗꼬리 + VR과열 → 과열 감지 (진입금지 추적)",
-    # Research - v20 scenarios
-    "DRY": "3봉저거래량 → VR폭발 + 5봉돌파 → 건조 돌파",
-    "MZC": "5m MACD hist 음→양 + 양봉 → MACD 반등",
-    # Research - v21 scenarios
-    "CLMP": "CLM과열 후 30-90s 눌림 + 재양봉 → 과열 pullback",
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
-    "CPRS": "코인별 승패편향 반영 → coin personality",
-    "FBR": "1차돌파실패 → 밀림 → 저점상승 → 재돌파 → failed breakout 2nd entry",
-    "LATE_CONT": "FBR/CLMP전용: 초반DD허용 + 300s연장 (늦은continuation 포착)",
-    "LHC": "낮은tick_rate + 높은tick_buy + 낮은ATR + RSI중간 → 저열 continuation",
-    "MZC_F": "MZC + rsi60m≥66 + tick_buy 0.58~0.82 → 정제된 MACD반등",
-    "CLM_S30": "CLM + 30초 dd_peak survival gate(≤0.2%) → 초반DD 컷",
-    "CLM_S30A": "CLM + 30초 ATR적응gate(저0.2%/중0.3%/고0.45%) → 변동성적응 생존",
+    # Research - filtered
+    "CLM_DF": "CLM + DeathFilter(spread_z≤1.3 + PER≥0.20) → n=75 체크포인트",
+    "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
+    "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
+    # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
     "PBR_STRICT": "PBR + spread≤0.15 (tight liquidity filter)",
     "PBR_MOMO": "PBR + 중간강도 모멘텀(RSI5m≥62 + ADX15≥18 + VR15m≥1.5)",
@@ -10327,7 +10320,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
         "pipeline_key": "retest", "route": "RET",
-        "description": "급등후 EMA20눌림 + 저점방어 + 재양봉 [GT exit] (shadow)",
+        "description": "급등후 EMA20눌림 + 저점방어 + 재양봉 [GT exit] (shadow/baseline only)",
     },
     "과열감지": {
         "check_fn": _v0_check_climax,
@@ -10336,34 +10329,13 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM",
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
     },
-    # ━━━ Track C: v20 신규 시나리오 ━━━
-    # (SHK 제거: n=806 cap=-44% PnL -0.08%, 회복추세 없음)
-    "거래량건조": {
-        "check_fn": _v0_check_dry_breakout,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "dry", "route": "DRY",
-        "description": "3봉저거래량→VR폭발+5봉돌파 [GT exit] (shadow)",
-    },
-    "MACD반등": {
-        "check_fn": _v0_check_macd_cross,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "macd_cross", "route": "MZC",
-        "description": "5m MACD hist 음→양+양봉+15mVR1.0 [GT exit] (shadow)",
-    },
-    # (TAC 제거: cap 음수 지속, 분리력 없음)
-
-    # ━━━ Track D: v21b 신규 시나리오 (조건식 정밀화) ━━━
-    # (SHR 제거: n>1000 cap=-38% PnL음수 지속, 회복추세 없음)
-    "CLM눌림": {
-        "check_fn": _v0_check_clm_pullback,
-        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "clm_pullback", "route": "CLMP",
-        "ind_filters": [("entry_spread_pct", "<=", 0.9)],
-        "description": "과열봉후눌림+재양봉 [LATE_CONT:300s/wideSL] (shadow)",
-    },
+    # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
+    # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
+    # CLMP 폐기: n=1442, cap=-15%, PnL=-0.06%. 연구종료
+    # FBR 폐기: n=1709, cap=-26%, PnL=-0.08%. 연구종료
+    # LHC 폐기: n=772, cap=-13%, PnL=-0.04%. 양수전환 가능성 없음
+    # CPRS 폐기: 리포트 미표시, 유지 가치 없음
+    # MZC_F 폐기: n=47, cap=-17%. 기반(MZC) 사망으로 파생 실험 종료
     "범위확장": {
         "check_fn": _v0_check_range_expand,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
@@ -10379,40 +10351,9 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "liq_trap", "route": "LTRP",
         "description": "5조건scoring(spread/ATR/wick/MACD/VR) 3/5이상→함정탐지 [GT] (shadow)",
     },
-    "코인성격": {
-        "check_fn": _v0_check_coin_personality,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "coin_pers", "route": "CPRS",
-        "description": "SVE1코인WR≥60%+n≥3+PnL양수+양봉 [A_BYPASS] (shadow)",
-    },
-    "실패돌파2차": {
-        "check_fn": _v0_check_failed_breakout,
-        "exit_params": _V0_EXIT_PARAMS_LATE_CONT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "failed_breakout", "route": "FBR",
-        "description": "1차돌파실패→재돌파+spread감소 [LATE_CONT:300s/wideSL] (shadow)",
-    },
-    # ━━━ Track E: v21c ━━━
-    "저열continuation": {
-        "check_fn": _v0_check_low_heat_cont,
-        "exit_params": _V0_EXIT_PARAMS_A_BYPASS,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "low_heat_cont", "route": "LHC",
-        "ind_filters": [("tick_rate_30s", "<=", 2.0), ("tick_buy_30s", ">=", 0.60), ("entry_spread_pct", "<=", 0.8)],
-        "description": "안뜨거운데계속사는놈:RSI58-72+ATR≤0.9+2/3양봉+저tick [A_BYPASS] (shadow)",
-    },
     # ━━━ Track F: v24 W/L d-score 기반 필터/exit 실험 ━━━
     # CLM_S30 폐기: n=349, cap=3%, 2회 연속 cap<5%
     # CLM_S30A 폐기: n=289, cap=4%, 2회 연속 cap<5%
-    "MACD반등_F": {
-        "check_fn": _v0_check_macd_cross,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "macd_cross", "route": "MZC_F",
-        "ind_filters": [("rsi_60m", ">=", 66), ("tick_buy_30s", ">=", 0.58), ("tick_buy_30s", "<=", 0.82)],
-        "description": "MZC+rsi60m≥66+tick_buy0.58~0.82 [GT exit] (shadow)",
-    },
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
     # ━━━ Track H: Death Filter shadow (SZD+PER — CLM_DF만 생존) ━━━
     # GT_DF 폐기: n=37, cap=-27%, death filter 단독으론 GT에서 edge 생성 실패
@@ -12035,7 +11976,7 @@ def _v4_shadow_report_lines():
                               key=lambda x: x[1].get("signals", 0), reverse=True)
         # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
         _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "DRY", "MZC", "CLMP", "RX", "LTRP", "CPRS", "FBR", "LHC", "MZC_F", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
+        _ACTIVE_RESEARCH = {"RET", "CLM", "RX", "LTRP", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -12279,7 +12220,7 @@ def _v4_shadow_report_lines():
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                 _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
                                "dd_peak_120s", "mae_120s", "mfe_120s"}
-                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"], "LHC": ["vr5"], "MZC": ["tick_buy_30s"], "MZC_F": ["tick_buy_30s"]}
+                _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
