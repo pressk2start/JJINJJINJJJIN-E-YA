@@ -1048,57 +1048,31 @@ def _pipeline_report(force=False):
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
     lines.append(
-        f"SVE2 F{c.get('sve2_full',0)}/R{c.get('sve2_reduced',0)}/S{c.get('sve2_skip',0)}"
-        f" buf={min(len(rp) for rp in _SVE2_ROLLING.values())}"
-        f" | 오늘 일반 n={_st_normal['n']} wr={_st_normal['wr']} {_st_normal['pnl']}"
+        f"오늘 일반 n={_st_normal['n']} wr={_st_normal['wr']} {_st_normal['pnl']}"
         f" A군 n={_st_bypass['n']} wr={_st_bypass['wr']} {_st_bypass['pnl']}"
+        f" | SVE2 F{c.get('sve2_full',0)}/R{c.get('sve2_reduced',0)}/S{c.get('sve2_skip',0)}"
     )
-    if _ab_stats["total"] > 0:
-        lines.append(
-            f"A군상세: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
-            f" | tr{_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
-            f" atr{_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
-            f" macd{_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}"
-            f" sprd{_ab_stats['pass_avg'].get('entry_spread_pct',0):.2f}↔{_ab_stats['fail_avg'].get('entry_spread_pct',0):.2f}"
-        )
 
-    # ━━━━ Tier 2: PIPELINE ━━━━
-    lines.append("━━ PIPELINE ━━")
+    # ━━━━ Tier 2: PIPELINE (condensed) ━━━━
     lines.append(
-        f"스캔{c['scan_markets']}({c['c1_ok']}ok)"
-        f" detect{_det}(Δ{d('detect_called')})"
-        f" v4{_v4}(Δ{d('v4_called')}) raw{_raw}(Δ{d('v4_raw_hit')})"
-        f" 시간차단{c.get('v4_time_block',0)}"
+        f"PIPE: scan{c['scan_markets']} v4 {_v4}({pct(_v4, _det)})"
+        f" raw{_raw} gate{_gp} entry{_succ}"
+        f" | <b>전체 {pct(_succ, _det)}</b>"
     )
-    # check_fn 필터 (레지스트리 기반 동적 생성)
+    # pass 요약 — 통과 있는 것만
+    _pass_parts = []
     _seen_pkeys = set()
-    _pkey_order = []
     for _sname, _sconf in _STRATEGY_REGISTRY.items():
         _pk = _sconf.get("pipeline_key", "")
         if _pk and _pk not in _seen_pkeys:
             _seen_pkeys.add(_pk)
-            _pkey_order.append(_pk)
-    for _pk in _pkey_order:
-        _enter_cnt = c.get(f"{_pk}_enter", 0)
-        _pass_cnt = c.get(f"{_pk}_pass", 0)
-        if _enter_cnt == 0:
-            continue
-        _conv = f"{_pass_cnt/_enter_cnt*100:.1f}%"
-        _fails = []
-        for _ck in sorted(c.keys()):
-            if (_ck.startswith(f"{_pk}_") and not _ck.endswith("_enter")
-                    and not _ck.endswith("_pass") and c.get(_ck, 0) > 0):
-                _fails.append(f"{_ck[len(_pk)+1:]}:{c[_ck]}")
-        _routes = sorted(set(
-            _sc.get("route", "") for _sc in _STRATEGY_REGISTRY.values()
-            if _sc.get("pipeline_key") == _pk))
-        _meta_desc = _PIPELINE_CHECK_FN_META.get(_pk, "")
-        _rlabel = "/".join(_routes)
-        _line = f"  [{_rlabel}] {_meta_desc} 입{_enter_cnt}→pass{_pass_cnt}({_conv})"
-        if _fails:
-            _line += "\n    " + " ".join(_fails[:TOP_GATE_FAILS])
-        lines.append(_line)
-    # gate 탈락 (condensed)
+            _pass_cnt = c.get(f"{_pk}_pass", 0)
+            _routes = sorted(set(
+                _sc.get("route", "") for _sc in _STRATEGY_REGISTRY.values()
+                if _sc.get("pipeline_key") == _pk))
+            _pass_parts.append(f"{'/'.join(_routes)} {_pass_cnt}")
+    lines.append(f"PASS: {' | '.join(_pass_parts)}")
+    # gate 탈락 — non-zero만 1줄
     _gate_parts = []
     for _gk, _gl in [("gate_fail_no_v4","no_v4"), ("gate_fail_coin_cd","cd"),
                       ("gate_fail_tick_age","tick"), ("gate_fail_fresh","fresh"),
@@ -1108,303 +1082,70 @@ def _pipeline_report(force=False):
         _gv = c.get(_gk, 0)
         if _gv > 0:
             _gate_parts.append(f"{_gl}:{_gv}")
-    lines.append(f"gate: {' '.join(_gate_parts)} → 통과{_gp}(Δ{d('gate_pass')})")
-    lines.append(
-        f"cd{c['cooldown_block']} pos{c['position_block']}"
-        f" post{c['postcheck_block']} lock{c['lock_block']}"
-        f" 차단{c['suspend_block']}(daily{c.get('block_daily_guard',0)}"
-        f" lat{c.get('block_latency_kill',0)}"
-        f" c_kill{c.get('block_c_killswitch',0)} c_rate{c.get('block_c_rate',0)}"
-        f" 연패{c.get('block_loss_streak',0)}"
-        f" A우회{c.get('suspend_a_bypass',0)})"
-    )
-    lines.append(
-        f"진입{c['send_attempt']}(Δ{d('send_attempt')})"
-        f" 성공{_succ}(Δ{d('send_success')})"
-    )
-    lines.append(
-        f"퍼널: d→v4 {pct(_v4, _det)} v4→raw {pct(_raw, _v4)}"
-        f" raw→gate {pct(_gp, _raw)} gate→성공 {pct(_succ, _gp)}"
-        f" | <b>전체 {pct(_succ, _det)}</b>"
-    )
+    if _gate_parts:
+        lines.append(f"BLOCK: {' '.join(_gate_parts)}")
+    if c.get('suspend_block', 0) > 0:
+        lines.append(
+            f"차단{c['suspend_block']}(daily{c.get('block_daily_guard',0)}"
+            f" lat{c.get('block_latency_kill',0)}"
+            f" 연패{c.get('block_loss_streak',0)}"
+            f" A우회{c.get('suspend_a_bypass',0)})"
+        )
 
-    # ━━━━ Tier 3: SCOREBOARD ━━━━
-    lines.append("━━ SCOREBOARD ━━")
-    _live_sig_report = get_all_signal_stats_report()
-    if _live_sig_report:
-        lines.append(_live_sig_report)
-    shadow_lines = _v4_shadow_report_lines()
-    if shadow_lines:
-        lines.extend(shadow_lines)
-    try:
-        surv_lines = _survival_analysis_lines()
-        if surv_lines:
-            lines.extend(surv_lines)
-    except Exception:
-        print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
+    # ━━━━ Tier 3: SCORE (1-line per route) ━━━━
+    _score_lines = _v4_shadow_score_compact()
+    if _score_lines:
+        lines.append("SCORE (shadow):")
+        lines.extend(_score_lines)
 
-    # ━━━━ Tier 4: DEBUG (이상 시만 상세) ━━━━
-    vs = _pipeline_value_summary()
+    # ━━━━ Tier 4: DEBUG (1줄 요약 + 이상 시만 상세) ━━━━
     _debug_abnormal = False
-    _dl = []
-    val_lines = ["📉 <b>값 분포 + 니어미스</b>"]
-    _m3 = vs.get("m3_pct", {})
-    if _m3.get("n", 0) > 0:
-        val_lines.append(f"  m3%: max={_m3['max']:.3f} avg={_m3['avg']:.3f} thr={_m3['thr']:.3f} 🎯NM={_m3['near_miss']}")
-    _vr5 = vs.get("vr5", {})
-    if _vr5.get("n", 0) > 0:
-        val_lines.append(f"  VR5: max={_vr5['max']:.1f} avg={_vr5['avg']:.1f} thr=3.2 🎯NM={_vr5['near_miss']}")
-    _atr = vs.get("atr_pct", {})
-    if _atr.get("n", 0) > 0:
-        val_lines.append(f"  ATR%: max={_atr['max']:.2f} avg={_atr['avg']:.2f} thr=0.7 🎯NM={_atr['near_miss']}")
-    _adx_v = vs.get("adx_15_vol3x", {})
-    _adx_b = vs.get("adx_15_20bar", {})
-    if _adx_v.get("n", 0) > 0:
-        val_lines.append(f"  ADX(vol3x): max={_adx_v['max']:.1f} avg={_adx_v['avg']:.1f} thr=20 🎯NM={_adx_v['near_miss']}")
-    if _adx_b.get("n", 0) > 0:
-        val_lines.append(f"  ADX(20bar): max={_adx_b['max']:.1f} avg={_adx_b['avg']:.1f} thr=25 🎯NM={_adx_b['near_miss']}")
-    _gap = vs.get("20bar_gap_pct", {})
-    if _gap.get("n", 0) > 0:
-        val_lines.append(f"  20봉gap%: max={_gap['max']:.2f} avg={_gap['avg']:.2f} 🎯NM={_gap['near_miss']}")
-    _dl.extend(val_lines)
 
-    # 📊 gate 지표 평균
-    _gs = vs.get("gate_spread", {})
-    _gb = vs.get("gate_buy_ratio", {})
-    _gv = vs.get("gate_vol_krw", {})
-    _ga = vs.get("gate_accel", {})
-    _gf = vs.get("gate_flow_kps", {})
-    if any(v.get("n", 0) > 0 for v in [_gs, _gb, _gv]):
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("📊 <b>gate 진입 지표 평균</b>")
-        if _gs.get("n"): _dl.append(f"  스프레드: avg={_gs['avg']:.2f}% max={_gs['max']:.2f}%")
-        if _gb.get("n"): _dl.append(f"  매수비: avg={_gb['avg']:.0%} min={_gb['min']:.0%}")
-        if _gv.get("n"): _dl.append(f"  거래대금: avg={_gv['avg']:.0f}M max={_gv['max']:.0f}M")
-        if _ga.get("n"): _dl.append(f"  가속: avg={_ga['avg']:.1f}x max={_ga['max']:.1f}x")
-        if _gf.get("n"): _dl.append(f"  거래속도: avg={_gf['avg']:.0f}K/s max={_gf['max']:.0f}K/s")
-
-    # 🏆 전략별 통과 비율
-    with _PIPELINE_STRATEGY_LOCK:
-        strat = dict(_PIPELINE_STRATEGY_PASS)
-    strat_total = sum(strat.values())
-    if strat_total > 0:
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("🏆 <b>전략별 시그널</b>")
-        for sname, scount in sorted(strat.items(), key=lambda x: -x[1]):
-            _dl.append(f"  {sname}: {scount} ({scount/strat_total*100:.0f}%)")
-
-    # 🪙 Top-5 탈락 코인
-    with _PIPELINE_COIN_HITS_LOCK:
-        coin_totals = {coin: sum(reasons.values()) for coin, reasons in _PIPELINE_COIN_HITS.items()}
-    if coin_totals:
-        top_coins = sorted(coin_totals.items(), key=lambda x: -x[1])[:TOP_DEBUG_COINS]
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("🪙 <b>Top-5 탈락 코인</b>")
-        for coin, cnt in top_coins:
-            reasons = _PIPELINE_COIN_HITS.get(coin, {})
-            top_reason = max(reasons, key=reasons.get) if reasons else "?"
-            _dl.append(f"  {coin}: {cnt}회 (주사유: {top_reason})")
-
-    # 💡 최근 시그널 종목
-    with _PIPELINE_SIGNAL_COINS_LOCK:
-        recent_signals = list(_PIPELINE_SIGNAL_COINS)
-    if recent_signals:
-        # 최근 5개
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("💡 <b>최근 시그널 종목</b>")
-        for sig in recent_signals[-TOP_DEBUG_SIGNALS:]:
-            _sig_market = sig["market"].split("-")[-1] if "-" in sig["market"] else sig["market"]
-            _dl.append(f"  {_sig_market} [{sig['strategy']}]")
-
-    # 🎯 가장 아까운 근접 탈락 (최근 3개)
-    with _PIPELINE_NEAR_MISS_LOCK:
-        nm_list = list(_PIPELINE_NEAR_MISS)
-    if nm_list:
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("🎯 <b>근접 탈락 (아깝게 놓친 것)</b>")
-        for nm in nm_list[-TOP_NEAR_MISS:]:
-            _nm_market = nm["market"].split("-")[-1] if "-" in nm["market"] else nm["market"]
-            _dl.append(f"  {_nm_market}: {nm['metrics']}")
-
-    # ⏱️ 스캔 레이턴시
+    # scan latency 계산 (1줄 요약 + 이상 감지)
+    _scan_p95_s = 0
     with _PIPELINE_SCAN_LAT_LOCK:
         lat_list = list(_PIPELINE_SCAN_LATENCIES)
     if lat_list:
-        lat_avg = sum(lat_list) / len(lat_list)
-        lat_max = max(lat_list)
-        lat_p95 = sorted(lat_list)[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] if len(lat_list) >= 5 else lat_max
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append(f"⏱️ 스캔 레이턴시(사이클): avg={lat_avg:.0f}ms p95={lat_p95:.0f}ms max={lat_max:.0f}ms ({len(lat_list)}cycle)")
-
-    # 🔁 마켓별 재스캔 간격 — 한 코인이 다음에 다시 스캔되는 실 간격
-    # (사이클 80s ÷ 마켓수 ≠ 코인별 재스캔 간격. 진짜 alpha decay 척도)
-    with _MARKET_SCAN_LOCK:
-        ms_list = list(_MARKET_SCAN_INTERVALS)
-    if ms_list and len(ms_list) >= 10:
-        ms_sorted = sorted(ms_list)
-        ms_avg = sum(ms_list) / len(ms_list)
-        ms_p50 = ms_sorted[len(ms_sorted) // 2]
-        ms_p95 = ms_sorted[min(int(len(ms_sorted) * 0.95), len(ms_sorted) - 1)]
-        ms_max = ms_sorted[-1]
-        _dl.append(f"🔁 마켓별 재스캔간격: avg={ms_avg/1000:.1f}s p50={ms_p50/1000:.1f}s p95={ms_p95/1000:.1f}s max={ms_max/1000:.1f}s ({len(ms_list)}건)")
-
-    # 🔍 단계별 레이턴시 — 사이클 내 각 단계 elapsed (병목 위치 파악)
-    # scan_fetch (네트워크 I/O) vs scan_detect (CPU 루프) 분리로 병목 특정
-    # sample count(n=) 포함 — 호출 빈도가 낮은 단계의 outlier 영향 파악
+        lat_sorted = sorted(lat_list)
+        _scan_p95_s = lat_sorted[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] / 1000 if len(lat_list) >= 5 else max(lat_list) / 1000
+    # cache hit rate
+    _cache_rate = 0
+    with _CHECK_FN_CACHE_LOCK:
+        _total_hits = sum(_CHECK_FN_CACHE_HITS.values())
+        _total_misses = sum(_CHECK_FN_CACHE_MISSES.values())
+    _total_cache = _total_hits + _total_misses
+    if _total_cache > 0:
+        _cache_rate = _total_hits / _total_cache * 100
+    # stage p95≥50ms 카운트
+    _stage_rows = []
     with _PIPELINE_STAGE_LOCK:
         stage_snapshot = {k: list(v) for k, v in _PIPELINE_STAGE_LATENCIES.items()}
-    _stage_order = (
-        "scan_fetch", "scan_detect",
-        "detect_leader",                   # detect 루프 총합
-        "dl_precheck", "dl_c1_fetch",      # v18g: detect_leader 내부 분해
-        "dl_multitf_fetch", "dl_v4_eval",  # v18g: detect_leader 내부 분해
-        "detect_v4", "universal_ind",      # detect_leader 내부 (fetch는 tag 기반 별도 섹션)
-        "shadow_eval",
-        "save_state", "report_full", "report_mini",
-        "tg_flush", "health_check",
-    )
-    _stage_rows = []
-    _stage_summary_cnt = 0
-    for _stage_name in _stage_order:
-        _lst = stage_snapshot.get(_stage_name, [])
-        _n = len(_lst)
-        if _n < 5:
-            continue
-        _lst_sorted = sorted(_lst)
-        _s_avg = sum(_lst) / _n
-        _s_p95 = _lst_sorted[min(int(_n * 0.95), _n - 1)]
-        _s_max = _lst_sorted[-1]
-        _stage_summary_cnt += 1
-        if _s_p95 >= 50:
-            _stage_rows.append(
-                f"   {_stage_name:14} avg={_s_avg:5.0f}ms p95={_s_p95:6.0f}ms max={_s_max:7.0f}ms"
-            )
-    if _stage_rows:
-        _dl.append(f"🔍 레이턴시 (p95≥50ms만, {_stage_summary_cnt}단계 중 {len(_stage_rows)}개)")
-        _dl.extend(_stage_rows)
-    elif _stage_summary_cnt > 0:
-        _dl.append(f"🔍 레이턴시: 전 {_stage_summary_cnt}단계 p95<50ms ✅")
-
-    # 🔎 fetch by call-site tag — 어느 경로에서 얼마나 호출되는지 분해
-    # key 예: c5_detect_leader, c15_detect_leader, c1_other(ThreadPool/기타)
-    with _TAGGED_FETCH_LOCK:
-        _tag_snap = {k: list(v) for k, v in _TAGGED_FETCH_HISTORY.items()}
-    if _tag_snap:
-        _tag_rows = []
-        for _key in sorted(_tag_snap.keys()):
-            _hist = _tag_snap[_key]
-            if len(_hist) < 5:
-                continue
-            _n_cyc = len(_hist)
-            _total_ms = sum(ms for ms, _c in _hist)
-            _total_calls = sum(_c for _m, _c in _hist)
-            if _total_calls == 0:
-                continue
-            _avg_ms_cyc = _total_ms / _n_cyc
-            _avg_calls_cyc = _total_calls / _n_cyc
-            _per_call = _total_ms / _total_calls
-            _tag_rows.append(
-                (_avg_ms_cyc,
-                 f"   {_key:28} n={_n_cyc:3} cyc_avg={_avg_ms_cyc:7.1f}ms "
-                 f"calls/cyc={_avg_calls_cyc:6.1f} per_call={_per_call:5.2f}ms")
-            )
-        _tag_rows.sort(key=lambda x: -x[0])
-        if _tag_rows:
-            _dl.append(f"🔎 fetch top-{TOP_DEBUG_COINS}/{len(_tag_rows)} (cost순)")
-            for _, _row in _tag_rows[:TOP_DEBUG_COINS]:
-                _dl.append(_row)
-
-    # 🧠 check_fn 캐시 hit/miss 직접 계측 — 캐시가 진짜 작동하는지 확인
-    with _CHECK_FN_CACHE_LOCK:
-        _cache_hits_snap = dict(_CHECK_FN_CACHE_HITS)
-        _cache_misses_snap = dict(_CHECK_FN_CACHE_MISSES)
-    if _cache_hits_snap or _cache_misses_snap:
-        _total_hits = sum(_cache_hits_snap.values())
-        _total_misses = sum(_cache_misses_snap.values())
-        _total_calls = _total_hits + _total_misses
-        _hit_rate = (_total_hits / _total_calls * 100) if _total_calls > 0 else 0
-        _dl.append(f"🧠 check_fn 캐시: hit={_total_hits} miss={_total_misses} hit_rate={_hit_rate:.1f}%")
-        # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
-
-    # 🗂️ candle 캐시 hit/miss — c1/c5/c15/c60 캐시 실효성 확인 (v18h: c5 추가)
-    _candle_cache_rows = []
-    for _tf_key in ("c1", "c5", "c15", "c60"):
-        _h = c.get(f"{_tf_key}_cache_hit", 0)
-        _mi = c.get(f"{_tf_key}_cache_miss", 0)
-        _total = _h + _mi
-        if _total > 0:
-            _rate = (_h / _total * 100) if _total > 0 else 0
-            _candle_cache_rows.append(f"{_tf_key}:hit={_h}/miss={_mi}({_rate:.0f}%)")
-    if _candle_cache_rows:
-        _dl.append("🗂️ candle 캐시: " + " | ".join(_candle_cache_rows))
-
-    # 🚧 pre-check 컷 현황 (v18g: c1 fetch 전 저비용 필터로 걸러낸 종목)
-    _pre_rows = []
-    for _key, _label in [
-        ("pre_cut_spread", "spread"),
-        ("pre_cut_depth", "depth"),
-        ("pre_cut_sell_dominant", "sell우세"),
-        ("pre_cut_coin_loss", "cooldown"),
-        ("pre_cut_dead_market", "dead시장"),
-    ]:
-        _v = c.get(_key, 0)
-        if _v > 0:
-            _pre_rows.append(f"{_label}:{_v}")
-    if _pre_rows:
-        _dl.append("🚧 pre-cut: " + " | ".join(_pre_rows))
-
-    # ⏱️ check_fn 실행 시간 — 진짜 병목 함수 특정 (cache miss 시점만 측정)
-    with _CHECK_FN_EXEC_LOCK:
-        _exec_total_snap = dict(_CHECK_FN_EXEC_TOTAL_MS)
-        _exec_calls_snap = dict(_CHECK_FN_EXEC_CALLS)
-    if _exec_calls_snap:
-        _total_all_ms = sum(_exec_total_snap.values())
-        _total_all_calls = sum(_exec_calls_snap.values())
-        _dl.append(f"⏱️ check_fn 실행 시간 (cache miss만, 함수별 누적): 총 {_total_all_ms/1000:.1f}s / {_total_all_calls}회")
-        # Phase2: 함수별 상세 생략 (인프라 안정 확인 완료)
-        _exec_rows = []
-        _SHOW_FN_DETAIL = False
-        for _fn in _exec_total_snap.keys():
-            if not _SHOW_FN_DETAIL:
-                break
-            _total_ms = _exec_total_snap.get(_fn, 0.0)
-            _n = _exec_calls_snap.get(_fn, 0)
-            if _n < 10:
-                continue
-            _avg_ms = _total_ms / _n if _n > 0 else 0
-            _share = (_total_ms / _total_all_ms * 100) if _total_all_ms > 0 else 0
-            _short = _fn.replace("_v0_check_", "")
-            _exec_rows.append((_total_ms, f"   {_short:28} n={_n:6} total={_total_ms/1000:7.2f}s avg={_avg_ms:5.2f}ms ({_share:4.1f}%)"))
-        _exec_rows.sort(key=lambda x: -x[0])
-        for _, _row in _exec_rows:
-            _dl.append(_row)
-
-    # 🕐 시간대별 신호 (non-zero만)
-    with _PIPELINE_HOURLY_LOCK:
-        h_sig = list(_PIPELINE_HOURLY_SIGNALS)
-        h_gp = list(_PIPELINE_HOURLY_GATE_PASS)
-        h_succ = list(_PIPELINE_HOURLY_SUCCESS)
-    _hourly_parts = []
-    for h in range(24):
-        if h_sig[h] > 0 or h_gp[h] > 0 or h_succ[h] > 0:
-            _hourly_parts.append(f"{h}시:{h_sig[h]}/{h_gp[h]}/{h_succ[h]}")
-    if _hourly_parts:
-        _dl.append("━━━━━━━━━━━━━━━━")
-        _dl.append("🕐 <b>시간대별 (raw/gate/성공)</b>")
-        # 6개씩 한 줄
-        for i in range(0, len(_hourly_parts), 6):
-            _dl.append("  " + " | ".join(_hourly_parts[i:i+6]))
-
-    # abnormality 판정: 하나라도 이상이면 전체 디버그 출력
+    for _sn in ("scan_fetch", "scan_detect", "detect_leader", "dl_c1_fetch",
+                "dl_multitf_fetch", "shadow_eval"):
+        _lst = stage_snapshot.get(_sn, [])
+        if len(_lst) >= 5:
+            _s_p95 = sorted(_lst)[min(int(len(_lst) * 0.95), len(_lst) - 1)]
+            if _s_p95 >= 50:
+                _stage_rows.append(f"{_sn}:{_s_p95:.0f}ms")
+    # shadow VP 추적 수
+    with _SHADOW_LOCK:
+        _shadow_active = len(_SHADOW_VIRTUAL_POSITIONS)
+    # 1줄 debug 요약
+    _dbg_parts = []
+    if _scan_p95_s > 0:
+        _scan_warn = " ⚠" if _scan_p95_s > 25 else ""
+        _dbg_parts.append(f"scan p95 {_scan_p95_s:.1f}s{_scan_warn}")
+    _dbg_parts.append(f"cache {_cache_rate:.0f}%")
+    if _shadow_active > 0:
+        _dbg_parts.append(f"shadow {_shadow_active}건")
     if c.get('suspend_block', 0) > 0:
         _debug_abnormal = True
+        _dbg_parts.append("⚠차단")
     if _stage_rows:
         _debug_abnormal = True
-    if _debug_abnormal:
-        lines.append("━━ DEBUG ━━")
-        lines.extend(_dl)
-    else:
-        lines.append(f"⚙ debug ok ({len(_dl)}항목 정상)")
+    lines.append(f"DEBUG: {' | '.join(_dbg_parts)}")
+    if _debug_abnormal and _stage_rows:
+        lines.append(f"  ⚠ slow: {' '.join(_stage_rows)}")
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
@@ -12009,6 +11750,57 @@ def _threshold_sweep_table(trade_records, fail_values_list, current_threshold, d
     return rows
 
 
+def _v4_shadow_score_compact():
+    """텔레그램 본문용 — 1-line per route compact scoreboard"""
+    lines = []
+    _PRODUCTION_ROUTES = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
+    _ACTIVE_RESEARCH = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - _PRODUCTION_ROUTES
+    with _SHADOW_PERF_LOCK:
+        if not _SHADOW_PERF_STATS:
+            return []
+        sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
+                              key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
+                                             -x[1].get("signals", 0)))
+        _seen_routes = set()
+        _pending = []
+        for key, s in sorted_stats:
+            n = s.get("signals", 0)
+            if n < 1:
+                continue
+            route = s.get("route", "?")
+            if route in _seen_routes:
+                continue
+            _seen_routes.add(route)
+            if route not in _PRODUCTION_ROUTES and route not in _ACTIVE_RESEARCH:
+                continue
+            wins = s.get("wins", 0)
+            wr = wins / n * 100
+            avg_pnl = s.get("total_pnl", 0) / n * 100
+            avg_mfe = sum(s.get("mfes", [])) / max(len(s.get("mfes", [])), 1) * 100
+            cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
+            if n < 10:
+                _pending.append(f"{route}(n{n})")
+                continue
+            if route in _PRODUCTION_ROUTES:
+                icon = "🟢" if wr >= 50 else "🟠" if wr >= 40 else "🔴"
+                tag = "LIVE"
+            elif wr >= 55:
+                icon = "🟢"
+                tag = ""
+            elif wr >= 45:
+                icon = "🟡"
+                tag = ""
+            else:
+                icon = "🔴"
+                tag = ""
+            _tag_str = f" {tag}" if tag else ""
+            lines.append(
+                f"{icon} {route} n{n} wr{wr:.0f} pnl{avg_pnl:+.2f} MFE{avg_mfe:+.2f} cap{cap:.0f}{_tag_str}")
+        if _pending:
+            lines.append(f"🟡 수집중: {', '.join(_pending)}")
+    return lines
+
+
 def _v4_shadow_report_lines():
     """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
     루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
@@ -12018,7 +11810,7 @@ def _v4_shadow_report_lines():
     with _SHADOW_PERF_LOCK:
         if not _SHADOW_PERF_STATS:
             return []
-        lines.append("📡 시나리오 성과:")
+        lines.append("📡 시나리오 성과 (shadow 기준):")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: (_ROUTE_REPORT_PRIORITY.get(x[1].get("route", "?"), 99),
                                              -x[1].get("signals", 0)))
@@ -12348,133 +12140,46 @@ def _v4_shadow_report_lines():
                     )
     except Exception:
         pass
-    # 🔍 차단 건 가상 추적 리포트 (counterfactual)
-    # v15: 요약 + 상세 2줄 구조, ⚠재검토 우선, 전체 표시
+    # 🔍 차단 건 가상 추적 리포트 — 요약만 (⚠재검토 건만 상세)
     with _SHADOW_PERF_LOCK:
         if _SHADOW_BLOCKED_STATS:
-            lines.append("🚫 필터 효과 검증 (차단 안했으면?):")
-            # 재검토(승률 높은 것) 우선 → 시그널 수 내림차순
             sorted_blocked = sorted(
                 _SHADOW_BLOCKED_STATS.items(),
                 key=lambda x: (-1 if x[1].get("wins", 0) / max(x[1].get("signals", 1), 1) >= 0.55 else 0,
                                -x[1].get("signals", 0)))
-            _blocked_shown = 0
-            _blocked_pending = 0  # 샘플 부족 건수
-            _BLOCKED_MAX_SHOW = TOP_BLOCKED_SHOW
+            _blocked_pending = 0
+            _valid_cnt = 0
+            _review_lines = []
             for bkey, bs in sorted_blocked:
-                if _blocked_shown >= _BLOCKED_MAX_SHOW:
-                    break
                 bn = bs.get("signals", 0)
                 if bn < 1:
                     continue
                 if bn < 10:
                     _blocked_pending += 1
-                    continue  # 10건 미만은 판정 보류
+                    continue
                 bw = bs.get("wins", 0)
-                bl = bs.get("losses", 0)
                 bwr = bw / bn * 100
                 bavg = bs.get("total_pnl", 0) / bn * 100
                 broute = bs.get("route", "?")
                 bfilter = bs.get("filter", bkey)
-                # v19: 비활성 old route 스킵 — 현재 active 경로만 표시
                 if broute not in _PRODUCTION_ROUTES and broute not in _ACTIVE_RESEARCH:
                     continue
-                # 필터 효과 판정
                 if bwr <= 45:
-                    verdict = "✅유효"
+                    _valid_cnt += 1
                 elif bwr >= 55:
-                    verdict = "⚠재검토!"
+                    _review_lines.append(
+                        f"  ⚠ {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}%")
                 else:
-                    verdict = "🔸관찰중"
-                # 1줄: 요약 (읽기 쉬운 판정)
-                lines.append(
-                    f"{verdict} {broute}:{bfilter} — {bn}건 중 {bw}승 ({bwr:.0f}%) {bavg:+.2f}%"
-                )
-                # 2줄: 상세 수치 (가로 구분)
-                mfe_list = bs.get("mfes", [])
-                avg_mfe = sum(mfe_list) / max(len(mfe_list), 1) * 100
-                hold_list = bs.get("hold_secs", [])
-                avg_hold = sum(hold_list) / max(len(hold_list), 1)
-                # 보유시간 읽기 쉽게
-                if avg_hold >= 60:
-                    hold_str = f"{avg_hold/60:.1f}m"
-                else:
-                    hold_str = f"{avg_hold:.0f}s"
-                mae_part = ""
-                if bs.get("mae_cnt", 0) > 0:
-                    avg_mae = bs.get("mae_sum", 0.0) / bs.get("mae_cnt", 1) * 100
-                    mae_part = f" | 최대손실{avg_mae:+.2f}%"
-                _blocked_shown += 1
-                lines.append(
-                    f" └ 최고{avg_mfe:+.2f}%{mae_part} | 평균보유 {hold_str}"
-                )
-                # v18: threshold sweep — 임계치 최적화 제안 + ±5% 전체건 비교
-                fv_list = bs.get("fail_values", [])
-                f_th = bs.get("fail_threshold")
-                f_dir = bs.get("fail_direction")
-                if fv_list and f_th is not None and f_dir:
-                    bfilter_name = bs.get("filter", "")
-                    ind_key = _SWEEP_FILTER_TO_IND.get(bfilter_name)
-                    # 해당 route의 perf stats에서 trade_records 가져오기
-                    tr_list = []
-                    if ind_key:
-                        for pk, ps in _SHADOW_PERF_STATS.items():
-                            if ps.get("route") == broute:
-                                tr_list = ps.get("trade_records", [])
-                                break
-                    # 💡 최적 임계치 탐색 (차단건 + 전체건 합산)
-                    sweep = _threshold_sweep(fv_list, f_th, f_dir,
-                                             trade_records=tr_list, ind_key=ind_key)
-                    if sweep:
-                        lines.append(
-                            f" └ 💡임계치 {f_th}→{sweep['new_th']} 시"
-                            f" 차단건+{sweep['fail_n']}건 승률{sweep['fail_wr']:.0f}%"
-                            f" PnL{sweep['fail_avg_pnl']:+.02f}%"
-                            f" → 전체{sweep['total_n']}건"
-                            f" 승률{sweep['total_wr']:.0f}%"
-                            f" PnL{sweep['total_avg_pnl']:+.02f}%"
-                        )
-                    # ±5% 전체건 비교 테이블
-                    if ind_key:
-                        table = _threshold_sweep_table(tr_list, fv_list, f_th, f_dir, ind_key)
-                        if table:
-                            # 현재 기준값 추출 (변화량 표시용)
-                            cur_row = next((r for r in table if r["is_current"]), None)
-                            for row in table:
-                                diff_n = row["n"] - cur_row["n"] if cur_row else 0
-                                diff_wr = row["wr"] - cur_row["wr"] if cur_row else 0
-                                diff_sign = "+" if diff_n >= 0 else ""
-                                wr_sign = "+" if diff_wr >= 0 else ""
-                                if row["is_current"]:
-                                    lines.append(
-                                        f"      ● {row['th']:>8g}(현재):"
-                                        f" {row['n']}건 W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}% PnL{row['avg_pnl']:+.02f}%"
-                                    )
-                                elif row.get("is_loosen"):
-                                    new_part = ""
-                                    if row["new_n"] > 0:
-                                        new_part = (f" | 신규+{row['new_n']}건"
-                                                    f" W{row['new_wins']}/L{row['new_losses']}"
-                                                    f" 승률{row['new_wr']:.0f}%")
-                                    lines.append(
-                                        f"      ▼ {row['th']:>8g}(풀림):"
-                                        f" {row['n']}건({diff_sign}{diff_n})"
-                                        f" W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}%({wr_sign}{diff_wr:.0f}%p)"
-                                        f" PnL{row['avg_pnl']:+.02f}%"
-                                        f"{new_part}"
-                                    )
-                                else:
-                                    lines.append(
-                                        f"      ▲ {row['th']:>8g}(조임):"
-                                        f" {row['n']}건({diff_sign}{diff_n})"
-                                        f" W{row['wins']}/L{row['losses']}"
-                                        f" 승률{row['wr']:.0f}%({wr_sign}{diff_wr:.0f}%p)"
-                                        f" PnL{row['avg_pnl']:+.02f}%"
-                                    )
+                    _review_lines.append(
+                        f"  🔸 {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}%")
+            _blk_summary = f"🚫 필터검증: ✅유효{_valid_cnt}개"
+            if _review_lines:
+                _blk_summary += f" ⚠재검토{len(_review_lines)}개"
             if _blocked_pending > 0:
-                lines.append(f"  📎 {_blocked_pending}개 필터 수집 중 (10건 미만)")
+                _blk_summary += f" ⏳수집{_blocked_pending}개"
+            lines.append(_blk_summary)
+            for _rl in _review_lines:
+                lines.append(_rl)
     with _SHADOW_LOCK:
         active_b = len(_SHADOW_BLOCKED_POSITIONS)
     if active_b > 0:
