@@ -1033,104 +1033,122 @@ def _pipeline_report(force=False):
     except Exception:
         pass
 
+    # ━━━━ Tier 1: EXEC SUMMARY ━━━━
+    _live_pnl = _sve1_daily_pnl()
+    _live_cnt = _sve1_daily_trade_count()
     lines = [
-        f"📊 <b>파이프라인 계측 (누적 {elapsed_min:.0f}분 | Δ{delta_min:.0f}분)</b>",
-        f"━━━━━━━━━━━━━━━━",
-        f"🔍 스캔: {c['scan_markets']}마켓 | c1성공: {c['c1_ok']}",
-        f"🔬 detect: {_det}(Δ{d('detect_called')})",
-        f"📡 v4: {_v4}(Δ{d('v4_called')})",
-        f"🎯 raw_hit: {_raw}(Δ{d('v4_raw_hit')}) | 시간차단: {c.get('v4_time_block',0)}",
-        f"━ check_fn 필터 세부 (8 시나리오) ━",
-        f"  [G모멘텀] 5mRSI≧74.55 + 1m양봉 + 1mVR5≦3.2 + 15mVR≧2.0",
-        f"    진입{c.get('momentum_enter',0)}"
-        f" → 5mRSI&lt;74.55:{c.get('momentum_rsi5_fail',0)}"
-        f" 1m음봉:{c.get('momentum_1m_fail',0)}"
-        f" 1mVR5&gt;3.2:{c.get('momentum_vr5_over_fail',0)}"
-        f" 15mVR&lt;2.0:{c.get('momentum_vr5_15m_fail',0)}"
-        f" ✅통과:{c.get('momentum_pass',0)}",
-        f"    ├ SVE1(LIVE): gate60s/dd≦0.3%/120s강제",
-        f"    └ GT(shadow): max240s/no-trail/SL2.5→1.5→1.0%",
-        f"  [B돌파] 종가>20봉고점 + 양봉 + 15mVR≧1.5",
-        f"    진입{c.get('breakout_enter',0)}"
-        f" → 종가≦20봉고점:{c.get('breakout_price_fail',0)}"
-        f" 음봉:{c.get('breakout_bull_fail',0)}"
-        f" 15mVR&lt;1.5:{c.get('breakout_vr5_15m_fail',0)}"
-        f" ✅통과:{c.get('breakout_pass',0)}",
-        f"    └ B(shadow): trail SL1.0%/act0.4%/trail0.3%/max270s",
-        f"  [MIC마이크로] 1m양봉 + tick_rate_30s≧0.5 + tick_buy_30s≧0.60",
-        f"    진입{c.get('broad_enter',0)}"
-        f" → 음봉:{c.get('broad_bull_fail',0)}"
-        f" ✅통과:{c.get('broad_pass',0)}",
-        f"    └ MIC(shadow): gate60s/dd≦0.3%/120s강제 [SVE1 exit]",
-        f"  [RET눌림] 5m급등≧1.0% + pullback0.3~2.0% + EMA20gap-0.5~+0.8% + 양봉",
-        f"    진입{c.get('retest_enter',0)}"
-        f" → surge&lt;1.0%:{c.get('retest_surge_fail',0)}"
-        f" pullback&lt;0.3%:{c.get('retest_pullback_shallow',0)}"
-        f" pullback&gt;2.0%:{c.get('retest_pullback_deep',0)}"
-        f" EMA20&lt;-0.5%:{c.get('retest_ema_below',0)}"
-        f" EMA20&gt;+0.8%:{c.get('retest_ema_above',0)}"
-        f" 음봉:{c.get('retest_bull_fail',0)}"
-        f" ✅통과:{c.get('retest_pass',0)}",
-        f"    └ RET(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [CLM과열] body≧0.3% + wick_ratio≧0.3 + VR5≧2.0",
-        f"    진입{c.get('climax_enter',0)}"
-        f" → body&lt;0.3%:{c.get('climax_body_fail',0)}"
-        f" wick&lt;0.3:{c.get('climax_wick_fail',0)}"
-        f" VR5&lt;2.0:{c.get('climax_vr_fail',0)}"
-        f" ✅통과:{c.get('climax_pass',0)}",
-        f"    └ CLM(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [DRY거래량건조] 3봉저거래량→VR≧2.0폭발 + 양봉 + 5봉돌파",
-        f"    진입{c.get('dry_enter',0)}"
-        f" → 음봉:{c.get('dry_bull_fail',0)}"
-        f" 건조아님:{c.get('dry_volume_fail',0)}"
-        f" VR&lt;2.0:{c.get('dry_vr5_fail',0)}"
-        f" 돌파실패:{c.get('dry_breakout_fail',0)}"
-        f" ✅통과:{c.get('dry_pass',0)}",
-        f"    └ DRY(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"  [MZC MACD반등] 5m hist 음→양 + 양봉 + 15mVR≧1.0",
-        f"    진입{c.get('macd_cross_enter',0)}"
-        f" → 크로스실패:{c.get('macd_cross_signal_fail',0)}"
-        f" 음봉:{c.get('macd_cross_bull_fail',0)}"
-        f" 15mVR&lt;1.0:{c.get('macd_cross_vr15_fail',0)}"
-        f" ✅통과:{c.get('macd_cross_pass',0)}",
-        f"    └ MZC(shadow): max240s/no-trail/SL2.5→1.5→1.0% [GT exit]",
-        f"━━━━━━━━━━━━━━━━",
-        f"🚫 gate탈락:",
-        f"  v4없음: {c['gate_fail_no_v4']} | 코인CD: {c['gate_fail_coin_cd']}",
-        f"  tick_age: {c.get('gate_fail_tick_age', 0)} | 신선도: {c['gate_fail_fresh']} | 스프레드: {c['gate_fail_spread']}",
-        f"  거래대금: {c['gate_fail_vol_min']} | 매수비: {c['gate_fail_buy_ratio']}",
-        f"  가속: {c['gate_fail_accel']} | 거래속도: {c['gate_fail_early_flow']}",
-        f"✅ gate통과: {_gp}(Δ{d('gate_pass')})",
-        f"━━━━━━━━━━━━━━━━",
-        f"🧊 쿨다운: {c['cooldown_block']} | 포지션: {c['position_block']}",
-        f"📋 postcheck: {c['postcheck_block']} | 락: {c['lock_block']}",
-        f"⛔ 차단{c['suspend_block']}: daily:{c.get('block_daily_guard',0)}"
-        f" lat_kill:{c.get('block_latency_kill',0)}"
-        f" c_kill:{c.get('block_c_killswitch',0)} c_rate:{c.get('block_c_rate',0)}"
-        f" 연패:{c.get('block_loss_streak',0)} | A군우회:{c.get('suspend_a_bypass',0)}",
-        f"📊 일일가드: 거래{_sve1_daily_trade_count()}/{SVE1_DAILY_MAX_TRADES}"
-        f" PnL:{_sve1_daily_pnl()*100:.2f}%/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%"
-        f" | A군:{_a_cnt}/{A_DAILY_MAX_TRADES} PnL:{_a_pnl*100:.2f}%/{A_DAILY_MAX_LOSS_PCT*100:.1f}%",
-        f"🎯 SVE2: FULL:{c.get('sve2_full',0)} REDUCED:{c.get('sve2_reduced',0)} SKIP:{c.get('sve2_skip',0)}"
-        f" | buf={min(len(rp) for rp in _SVE2_ROLLING.values())}",
-        f"🧪 A군: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
-        f" | 차이: tr30 {_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
-        f" atr {_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
-        f" macd {_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}"
-        f" sprd {_ab_stats['pass_avg'].get('entry_spread_pct',0):.2f}↔{_ab_stats['fail_avg'].get('entry_spread_pct',0):.2f}",
-        f"📈 성과비교(오늘): 일반 n={_st_normal['n']} wr={_st_normal['wr']} pnl={_st_normal['pnl']}"
-        f" | A군 n={_st_bypass['n']} wr={_st_bypass['wr']} pnl={_st_bypass['pnl']}",
-        f"🚀 진입: {c['send_attempt']}(Δ{d('send_attempt')}) | 성공: {_succ}(Δ{d('send_success')})",
-        f"━━━━━━━━━━━━━━━━",
-        f"📈 <b>퍼널 전환율</b>",
-        f"  detect→v4: {pct(_v4, _det)} | v4→raw: {pct(_raw, _v4)}",
-        f"  raw→gate: {pct(_gp, _raw)} | gate→성공: {pct(_succ, _gp)}",
-        f"  <b>전체: detect→성공 {pct(_succ, _det)}</b>",
+        f"{'🟢' if _live_cnt > 0 else '⚪'} <b>LIVE</b>"
+        f" PnL{_live_pnl*100:+.2f}%/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%"
+        f" {_live_cnt}/{SVE1_DAILY_MAX_TRADES}건"
+        f" | A군 {_a_cnt}/{A_DAILY_MAX_TRADES} {_a_pnl*100:+.2f}%/{A_DAILY_MAX_LOSS_PCT*100:.1f}%"
+        f" ({elapsed_min:.0f}분 Δ{delta_min:.0f}분)",
     ]
+    if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7:
+        lines.append(f"⚠ 가드소진 {_live_pnl/min(SVE1_DAILY_MAX_LOSS_PCT,-0.001)*100:.0f}%")
+    if c.get('block_daily_guard', 0) > 0:
+        lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
+    lines.append(
+        f"SVE2 F{c.get('sve2_full',0)}/R{c.get('sve2_reduced',0)}/S{c.get('sve2_skip',0)}"
+        f" buf={min(len(rp) for rp in _SVE2_ROLLING.values())}"
+        f" | 오늘 일반 n={_st_normal['n']} wr={_st_normal['wr']} {_st_normal['pnl']}"
+        f" A군 n={_st_bypass['n']} wr={_st_bypass['wr']} {_st_bypass['pnl']}"
+    )
+    if _ab_stats["total"] > 0:
+        lines.append(
+            f"A군상세: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
+            f" | tr{_ab_stats['pass_avg'].get('tick_rate_30s',0):.1f}↔{_ab_stats['fail_avg'].get('tick_rate_30s',0):.1f}"
+            f" atr{_ab_stats['pass_avg'].get('atr_pct',0):.2f}↔{_ab_stats['fail_avg'].get('atr_pct',0):.2f}"
+            f" macd{_ab_stats['pass_avg'].get('macd_hist_5m_bps',0):.0f}↔{_ab_stats['fail_avg'].get('macd_hist_5m_bps',0):.0f}"
+            f" sprd{_ab_stats['pass_avg'].get('entry_spread_pct',0):.2f}↔{_ab_stats['fail_avg'].get('entry_spread_pct',0):.2f}"
+        )
+
+    # ━━━━ Tier 2: PIPELINE ━━━━
+    lines.append("━━ PIPELINE ━━")
+    lines.append(
+        f"스캔{c['scan_markets']}({c['c1_ok']}ok)"
+        f" detect{_det}(Δ{d('detect_called')})"
+        f" v4{_v4}(Δ{d('v4_called')}) raw{_raw}(Δ{d('v4_raw_hit')})"
+        f" 시간차단{c.get('v4_time_block',0)}"
+    )
+    # check_fn 필터 (레지스트리 기반 동적 생성)
+    _seen_pkeys = set()
+    _pkey_order = []
+    for _sname, _sconf in _STRATEGY_REGISTRY.items():
+        _pk = _sconf.get("pipeline_key", "")
+        if _pk and _pk not in _seen_pkeys:
+            _seen_pkeys.add(_pk)
+            _pkey_order.append(_pk)
+    for _pk in _pkey_order:
+        _enter_cnt = c.get(f"{_pk}_enter", 0)
+        _pass_cnt = c.get(f"{_pk}_pass", 0)
+        if _enter_cnt == 0:
+            continue
+        _conv = f"{_pass_cnt/_enter_cnt*100:.1f}%"
+        _fails = []
+        for _ck in sorted(c.keys()):
+            if (_ck.startswith(f"{_pk}_") and not _ck.endswith("_enter")
+                    and not _ck.endswith("_pass") and c.get(_ck, 0) > 0):
+                _fails.append(f"{_ck[len(_pk)+1:]}:{c[_ck]}")
+        _routes = sorted(set(
+            _sc.get("route", "") for _sc in _STRATEGY_REGISTRY.values()
+            if _sc.get("pipeline_key") == _pk))
+        _meta_desc = _PIPELINE_CHECK_FN_META.get(_pk, "")
+        _rlabel = "/".join(_routes)
+        _line = f"  [{_rlabel}] {_meta_desc} 입{_enter_cnt}→pass{_pass_cnt}({_conv})"
+        if _fails:
+            _line += "\n    " + " ".join(_fails[:8])
+        lines.append(_line)
+    # gate 탈락 (condensed)
+    _gate_parts = []
+    for _gk, _gl in [("gate_fail_no_v4","no_v4"), ("gate_fail_coin_cd","cd"),
+                      ("gate_fail_tick_age","tick"), ("gate_fail_fresh","fresh"),
+                      ("gate_fail_spread","sprd"), ("gate_fail_vol_min","vol"),
+                      ("gate_fail_buy_ratio","buy"), ("gate_fail_accel","accel"),
+                      ("gate_fail_early_flow","flow")]:
+        _gv = c.get(_gk, 0)
+        if _gv > 0:
+            _gate_parts.append(f"{_gl}:{_gv}")
+    lines.append(f"gate: {' '.join(_gate_parts)} → 통과{_gp}(Δ{d('gate_pass')})")
+    lines.append(
+        f"cd{c['cooldown_block']} pos{c['position_block']}"
+        f" post{c['postcheck_block']} lock{c['lock_block']}"
+        f" 차단{c['suspend_block']}(daily{c.get('block_daily_guard',0)}"
+        f" lat{c.get('block_latency_kill',0)}"
+        f" c_kill{c.get('block_c_killswitch',0)} c_rate{c.get('block_c_rate',0)}"
+        f" 연패{c.get('block_loss_streak',0)}"
+        f" A우회{c.get('suspend_a_bypass',0)})"
+    )
+    lines.append(
+        f"진입{c['send_attempt']}(Δ{d('send_attempt')})"
+        f" 성공{_succ}(Δ{d('send_success')})"
+    )
+    lines.append(
+        f"퍼널: d→v4 {pct(_v4, _det)} v4→raw {pct(_raw, _v4)}"
+        f" raw→gate {pct(_gp, _raw)} gate→성공 {pct(_succ, _gp)}"
+        f" | <b>전체 {pct(_succ, _det)}</b>"
+    )
+
+    # ━━━━ Tier 3: SCOREBOARD ━━━━
+    lines.append("━━ SCOREBOARD ━━")
+    _live_sig_report = get_all_signal_stats_report()
+    if _live_sig_report:
+        lines.append(_live_sig_report)
+    shadow_lines = _v4_shadow_report_lines()
+    if shadow_lines:
+        lines.extend(shadow_lines)
+    try:
+        surv_lines = _survival_analysis_lines()
+        if surv_lines:
+            lines.extend(surv_lines)
+    except Exception:
+        print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
+
+    # ━━━━ Tier 4: DEBUG ━━━━
+    lines.append("━━ DEBUG ━━")
 
     # 📈 값 분포 + 니어미스
     vs = _pipeline_value_summary()
-    val_lines = ["━━━━━━━━━━━━━━━━", "📉 <b>값 분포 (max/avg) + 니어미스</b>"]
+    val_lines = ["📉 <b>값 분포 + 니어미스</b>"]
     _m3 = vs.get("m3_pct", {})
     if _m3.get("n", 0) > 0:
         val_lines.append(f"  m3%: max={_m3['max']:.3f} avg={_m3['avg']:.3f} thr={_m3['thr']:.3f} 🎯NM={_m3['near_miss']}")
@@ -1247,6 +1265,7 @@ def _pipeline_report(force=False):
         "tg_flush", "health_check",
     )
     _stage_rows = []
+    _stage_summary_cnt = 0
     for _stage_name in _stage_order:
         _lst = stage_snapshot.get(_stage_name, [])
         _n = len(_lst)
@@ -1256,12 +1275,16 @@ def _pipeline_report(force=False):
         _s_avg = sum(_lst) / _n
         _s_p95 = _lst_sorted[min(int(_n * 0.95), _n - 1)]
         _s_max = _lst_sorted[-1]
-        _stage_rows.append(
-            f"   {_stage_name:14} n={_n:3} avg={_s_avg:6.1f}ms p95={_s_p95:7.1f}ms max={_s_max:8.1f}ms"
-        )
+        _stage_summary_cnt += 1
+        if _s_p95 >= 50:
+            _stage_rows.append(
+                f"   {_stage_name:14} avg={_s_avg:5.0f}ms p95={_s_p95:6.0f}ms max={_s_max:7.0f}ms"
+            )
     if _stage_rows:
-        lines.append("🔍 단계별 레이턴시 (p95/max에 튀는 단계 = 병목)")
+        lines.append(f"🔍 레이턴시 (p95≥50ms만, {_stage_summary_cnt}단계 중 {len(_stage_rows)}개)")
         lines.extend(_stage_rows)
+    elif _stage_summary_cnt > 0:
+        lines.append(f"🔍 레이턴시: 전 {_stage_summary_cnt}단계 p95<50ms ✅")
 
     # 🔎 fetch by call-site tag — 어느 경로에서 얼마나 호출되는지 분해
     # key 예: c5_detect_leader, c15_detect_leader, c1_other(ThreadPool/기타)
@@ -1288,8 +1311,8 @@ def _pipeline_report(force=False):
             )
         _tag_rows.sort(key=lambda x: -x[0])
         if _tag_rows:
-            lines.append("🔎 fetch call-site별 분해 (tag=호출 위치)")
-            for _, _row in _tag_rows:
+            lines.append(f"🔎 fetch top-5/{len(_tag_rows)} (cost순)")
+            for _, _row in _tag_rows[:5]:
                 lines.append(_row)
 
     # 🧠 check_fn 캐시 hit/miss 직접 계측 — 캐시가 진짜 작동하는지 확인
@@ -1373,26 +1396,7 @@ def _pipeline_report(force=False):
         for i in range(0, len(_hourly_parts), 6):
             lines.append("  " + " | ".join(_hourly_parts[i:i+6]))
 
-    # 📊 실전 전략별 성과 (shadow와 나란히 비교하기 위해 먼저 출력)
-    _live_sig_report = get_all_signal_stats_report()
-    if _live_sig_report:
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append(_live_sig_report)
-
-    # 📡 섀도우 루트 계측 (v8)
-    shadow_lines = _v4_shadow_report_lines()
-    if shadow_lines:
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.extend(shadow_lines)
-
-    # 🧬 Survival Analysis
-    try:
-        surv_lines = _survival_analysis_lines()
-        if surv_lines:
-            lines.append("━━━━━━━━━━━━━━━━")
-            lines.extend(surv_lines)
-    except Exception:
-        print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
+    # (Tier 3 SCOREBOARD는 상단에서 이미 출력)
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
@@ -8669,13 +8673,21 @@ _STRAT_DESC_MAP = {
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     # Research - filtered
-    "CLM_DF": "CLM + DeathFilter(spread_z≤1.3 + PER≥0.20) → n=75 체크포인트",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
     "PBR_STRICT": "PBR + spread≤0.15 (tight liquidity filter)",
     "PBR_MOMO": "PBR + 중간강도 모멘텀(RSI5m≥62 + ADX15≥18 + VR15m≥1.5)",
+}
+
+_PIPELINE_CHECK_FN_META = {
+    "momentum": "5mRSI≥74.55+1m양봉+VR",
+    "retest": "5m급등→EMA눌림→재양봉",
+    "climax": "장대양봉+윗꼬리+VR과열",
+    "range_expand": "ATR압축→거래대금→돌파",
+    "liq_trap": "5조건스코어→함정",
+    "pbr": "5m급등→1m눌림→재돌파+volR",
 }
 
 _V0_EXIT_PARAMS = {
@@ -10355,16 +10367,9 @@ _STRATEGY_REGISTRY = {
     # CLM_S30 폐기: n=349, cap=3%, 2회 연속 cap<5%
     # CLM_S30A 폐기: n=289, cap=4%, 2회 연속 cap<5%
     # (Track G 제거: CLMP_W cap=-86% 실패확정, SHK_W cap=-32% 실패확정)
-    # ━━━ Track H: Death Filter shadow (SZD+PER — CLM_DF만 생존) ━━━
+    # ━━━ Track H: Death Filter shadow (SZD+PER) ━━━
     # GT_DF 폐기: n=37, cap=-27%, death filter 단독으론 GT에서 edge 생성 실패
-    "과열감지_DF": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_DF",
-        "ind_filters": [("spread_z", "<=", 1.3), ("per_5", ">=", 0.20)],
-        "description": "CLM+DeathFilter(spread_z≤1.3+PER≥0.20) [GT exit] (shadow)",
-    },
+    # CLM_DF 폐기: n=56, cap=31→25→22→20→16→10% edge붕괴 궤적. CLM기본(cap=15%)이 더 나음 — DF가 좋은 CLM을 깎은 것
     # Track I 폐기: SVE1_PER n=12, cap=-199%, per_3≥0.65가 SVE1에서 역효과
     # ━━━ Track J: CALM GATE — 고요한 환경 필터 (entry_spread+ATR 저조건) ━━━
     "과열감지_CALM": {
@@ -11189,7 +11194,7 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM_DF", "CLM") else 50
+            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM") else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
@@ -11974,9 +11979,10 @@ def _v4_shadow_report_lines():
         lines.append("📡 시나리오 성과 (Production + Research Top-3):")
         sorted_stats = sorted(_SHADOW_PERF_STATS.items(),
                               key=lambda x: x[1].get("signals", 0), reverse=True)
-        # v19: 3-level output — PRODUCTION(SVE1) full / RESEARCH top-3 summary / rest skip
-        _PRODUCTION_ROUTES = {"SVE1"}
-        _ACTIVE_RESEARCH = {"RET", "CLM", "RX", "LTRP", "CLM_DF", "CLM_CALM", "LTRP_CALM", "PBR", "PBR_STRICT", "PBR_MOMO"}
+        # v19: 3-level output — PRODUCTION full / RESEARCH top-3 summary / rest skip
+        # 레지스트리 기반 동적 생성 — 시나리오 추가/삭제 시 자동 반영
+        _PRODUCTION_ROUTES = {s["route"] for s in _STRATEGY_REGISTRY.values() if s.get("enabled")}
+        _ACTIVE_RESEARCH = {s["route"] for s in _STRATEGY_REGISTRY.values() if not s.get("enabled")} - _PRODUCTION_ROUTES
         _research_pnl = []
         for key, s in sorted_stats:
             n = s.get("signals", 0)
@@ -12098,7 +12104,7 @@ def _v4_shadow_report_lines():
                             d = abs(wv - lv) / max(pooled ** 0.5, 0.0001)
                             _scored.append((d, ik, wv, wn, lv, ln))
                     _scored.sort(reverse=True)
-                    for _d, ik, wv, wn, lv, ln in _scored[:8]:
+                    for _d, ik, wv, wn, lv, ln in _scored[:5]:
                         _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
                         lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
     # SVE2 score별 PnL (SVE1 trade_records에서 계산)
@@ -12232,7 +12238,7 @@ def _v4_shadow_report_lines():
                     for wk in _BUCKET_WATCH.get(route, []):
                         if wk not in _bk_keys:
                             _bk_keys.append(wk)
-                    for bk_key in _bk_keys[:2]:
+                    for bk_key in _bk_keys[:1]:
                         bk_vals = [(tr["inds"][bk_key], tr["pnl"]) for tr in _trs
                                    if bk_key in tr.get("inds", {})]
                         if len(bk_vals) < 9:
@@ -12252,7 +12258,7 @@ def _v4_shadow_report_lines():
                 "pnl": avg_pnl, "mfe": avg_mfe, "mae": avg_mae,
                 "curve": curve, "cont": cont_flag,
                 "hold": avg_hold, "capture": capture,
-                "d_pairs": _d_pairs[:5],
+                "d_pairs": _d_pairs[:3],
                 "buckets": _bucket_rows,
             })
         if _all_scenario_stats:
@@ -12640,9 +12646,9 @@ def _survival_analysis_lines():
             lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
                          f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
         lines.append(f"    → A-C lift: {ac_lift:+.2f}%p")
-        ds = data["d_scores"][:5]
+        ds = data["d_scores"][:3]
         if ds:
-            lines.append(f"    📊 Entry→Survival d-score TOP5:")
+            lines.append(f"    📊 d-score TOP3:")
             for item in ds:
                 lines.append(
                     f"      {item['feat']}: A={item['a_mean']:.3f}"
