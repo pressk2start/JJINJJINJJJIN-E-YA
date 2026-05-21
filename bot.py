@@ -1348,6 +1348,33 @@ def _pipeline_report(force=False):
     if _cc_parts:
         _rl.append(f"🗂 candle: {' '.join(_cc_parts)}")
 
+    # tagged fetch breakdown (per-TF API call time)
+    with _TAGGED_FETCH_LOCK:
+        _tf_snap = {k: list(v) for k, v in _TAGGED_FETCH_HISTORY.items()}
+    _tf_parts = []
+    for _tfk in sorted(_tf_snap.keys()):
+        _samples = _tf_snap[_tfk]
+        if len(_samples) >= 3:
+            _avg_ms = sum(s[0] for s in _samples) / len(_samples)
+            _avg_calls = sum(s[1] for s in _samples) / len(_samples)
+            if _avg_ms >= 100 or _avg_calls >= 1:
+                _tf_parts.append(f"{_tfk}:{_avg_ms:.0f}ms/{_avg_calls:.1f}c")
+    if _tf_parts:
+        _rl.append(f"📡 fetch: {' '.join(_tf_parts)}")
+
+    # detect internal stage breakdown
+    _di_parts = []
+    for _dsk in ("dl_precheck", "dl_c1_fetch", "dl_multitf_fetch", "dl_v4_eval"):
+        _ds_list = stage_snapshot.get(_dsk, [])
+        if len(_ds_list) >= 3:
+            _ds_avg = sum(_ds_list) / len(_ds_list)
+            _ds_p95 = sorted(_ds_list)[min(int(len(_ds_list) * 0.95), len(_ds_list) - 1)]
+            if _ds_avg >= 10:
+                _short = _dsk.replace("dl_", "").replace("_fetch", "")
+                _di_parts.append(f"{_short}:avg{_ds_avg:.0f}/p95={_ds_p95:.0f}ms")
+    if _di_parts:
+        _rl.append(f"🔬 detect: {' '.join(_di_parts)}")
+
     # pre-cut
     _pre_rows_full = []
     for _key, _label in [("pre_cut_spread", "sprd"), ("pre_cut_depth", "depth"),
