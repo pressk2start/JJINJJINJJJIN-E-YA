@@ -8960,9 +8960,19 @@ def _build_state_change_alerts():
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
                 _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
             _pass = sum(1 for v in _checks.values() if v)
+            _tot = len(_checks)
+            if total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30 and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0:
+                _action = "ENABLE"
+            elif total_n >= 50 and a_g["n"] >= 15 and c_g["n"] >= 15 and ac_lift > 0.3 and hl_lift > 0.2:
+                _action = "SHADOW"
+            else:
+                _action = "BLOCK"
             if route in current:
                 current[route]["enable_pass"] = _pass
-                current[route]["enable_total"] = len(_checks)
+                current[route]["enable_total"] = _tot
+                current[route]["action"] = _action
+                current[route]["ac_lift"] = round(ac_lift, 2)
+                current[route]["hl_lift"] = round(hl_lift, 2)
     except Exception:
         pass
     if not _REPORT_PREV_STATE:
@@ -8988,6 +8998,20 @@ def _build_state_change_alerts():
         cap_delta = cur["cap"] - p["cap"]
         if cap_delta < -15 and cur["n"] >= 20:
             alerts.append(f"📉 {route} cap{cap_delta:+.0f}%p 악화")
+        cur_act = cur.get("action", "")
+        prev_act = p.get("action", "")
+        if cur_act and prev_act and cur_act != prev_act:
+            _reasons = []
+            _c_hl = cur.get("hl_lift", 0)
+            _p_hl = p.get("hl_lift", 0)
+            if _c_hl != _p_hl:
+                _reasons.append(f"hl:{_p_hl:+.2f}→{_c_hl:+.2f}")
+            _c_ac = cur.get("ac_lift", 0)
+            _p_ac = p.get("ac_lift", 0)
+            if abs(_c_ac - _p_ac) >= 0.05:
+                _reasons.append(f"lift:{_p_ac:+.2f}→{_c_ac:+.2f}")
+            _reason_str = f" ({', '.join(_reasons)})" if _reasons else ""
+            alerts.append(f"🔄 {route} {prev_act}→{cur_act}{_reason_str}")
         cur_en = cur.get("enable_pass", -1)
         prev_en = p.get("enable_pass", -1)
         cur_tot = cur.get("enable_total", -1)
