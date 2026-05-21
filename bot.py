@@ -1417,6 +1417,7 @@ def _pipeline_report(force=False):
         _save_shadow_stats()
     except Exception:
         pass
+    _save_report_state()
 
 
 _PIPELINE_MINI_LAST_TS = 0
@@ -8888,7 +8889,29 @@ def _build_actionable_summary():
 
 
 # ━━━ State-change 감지 (Top-N 외에 상태 변화 기반 알림) ━━━
-_REPORT_PREV_STATE = {}  # {route: {n, pnl, cap, enable_pass, enable_total}}
+_REPORT_STATE_PATH = os.path.join(os.getcwd(), "report_state.json")
+_REPORT_PREV_STATE = {}  # {route: {n, pnl, cap, enable_pass, enable_total, is_live}}
+
+
+def _load_report_state():
+    """프로세스 재시작 후에도 state-change 감지 유지"""
+    global _REPORT_PREV_STATE
+    try:
+        if os.path.exists(_REPORT_STATE_PATH):
+            with open(_REPORT_STATE_PATH, "r", encoding="utf-8") as f:
+                _REPORT_PREV_STATE = json.load(f)
+    except Exception:
+        _REPORT_PREV_STATE = {}
+
+
+def _save_report_state():
+    try:
+        tmp = _REPORT_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_REPORT_PREV_STATE, f)
+        os.replace(tmp, _REPORT_STATE_PATH)
+    except Exception:
+        pass
 
 
 def _build_state_change_alerts():
@@ -8911,7 +8934,8 @@ def _build_state_change_alerts():
             mfes = s.get("mfes", [])
             avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
-            current[route] = {"n": n, "pnl": avg_pnl, "cap": cap}
+            _is_live = route in prod
+            current[route] = {"n": n, "pnl": avg_pnl, "cap": cap, "is_live": _is_live}
     try:
         sa = _survival_analysis()
         for route, data in sa.items():
@@ -8951,6 +8975,11 @@ def _build_state_change_alerts():
             if cur["n"] >= 10:
                 alerts.append(f"🆕 {route} 신규등장 n={cur['n']}")
             continue
+        if cur.get("is_live") != p.get("is_live"):
+            if cur.get("is_live"):
+                alerts.append(f"🔴→🟢 {route} Research→LIVE 전환")
+            else:
+                alerts.append(f"🟢→🔴 {route} LIVE→Research 전환")
         pnl_delta = cur["pnl"] - p["pnl"]
         if pnl_delta < -0.1 and cur["n"] >= 20:
             alerts.append(f"📉 {route} pnl{pnl_delta:+.2f}%p 급락")
@@ -17777,6 +17806,7 @@ def main():
 
     # 📡 섀도우 가상매매 누적 통계 로드
     _load_shadow_stats()
+    _load_report_state()
     _sve2_warmup_from_trade_records()
     _s2_lens = {k: len(rp) for k, rp in _SVE2_ROLLING.items()}
     print(f"[SVE2] warmup 완료: {_s2_lens}")
