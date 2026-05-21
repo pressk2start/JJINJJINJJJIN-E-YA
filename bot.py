@@ -1000,7 +1000,7 @@ def _pipeline_report(force=False):
         n = len(trades)
         wins = sum(1 for t in trades if t.get("win"))
         avg_pnl = sum(t.get("pnl", 0) for t in trades) / n
-        return {"n": n, "wr": f"{wins/n*100:.0f}%", "pnl": f"{avg_pnl*100:+.2f}%"}
+        return {"n": n, "wins": wins, "wr": f"{wins/n*100:.0f}%", "pnl": f"{avg_pnl*100:+.2f}%"}
     _st_normal = _grp_stats(_normal_trades)
     _st_bypass = _grp_stats(_bypass_trades)
     # A군 전용 guard 현황
@@ -1065,8 +1065,8 @@ def _pipeline_report(force=False):
     if _act:
         lines.append(f"ACTION: {' | '.join(_act)}")
     lines.append(
-        f"일반 n{_st_normal['n']} wr{_st_normal['wr']} {_st_normal['pnl']}"
-        f" | A군 n{_st_bypass['n']} wr{_st_bypass['wr']} {_st_bypass['pnl']}")
+        f"일반 {_st_normal['n']}전{_st_normal.get('wins',0)}승 wr{_st_normal['wr']} {_st_normal['pnl']}"
+        f" | A군 {_st_bypass['n']}전{_st_bypass.get('wins',0)}승 wr{_st_bypass['wr']} {_st_bypass['pnl']}")
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
 
@@ -12379,7 +12379,7 @@ def _v4_shadow_score_compact():
             avg_mfe = sum(s.get("mfes", [])) / max(len(s.get("mfes", [])), 1) * 100
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
             if n < 10:
-                _pending.append(f"{route} n{n}")
+                _pending.append(f"{route} {n}전{wins}승")
                 _reported_routes.add(route)
                 continue
             if avg_pnl > 0 and cap > 0:
@@ -12390,7 +12390,7 @@ def _v4_shadow_score_compact():
                 icon = "🔴"
             tag = " LIVE" if route in _PRODUCTION_ROUTES else ""
             _scored_routes.append(
-                f"{icon} {route} n{n} wr{wr:.0f}"
+                f"{icon} {route} {n}전{wins}승 wr{wr:.0f}%"
                 f" pnl{avg_pnl:+.2f} cap{cap:.0f}{tag}")
             _scored_route_names.append(route)
         for i, _line in enumerate(_scored_routes[:TOP_SCORE_SHOW]):
@@ -12454,8 +12454,8 @@ def _v4_shadow_report_lines():
                 _research_reported.add(route)
                 cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
                 lines.append(
-                    f"{icon}[{route}] n{n} wr{wr:.0f}% PnL{avg_pnl:+.2f}%"
-                    f" MFE{avg_mfe:+.2f}% MAE{avg_mae:+.2f}% cap{cap:.0f}% {state}"
+                    f"{icon}[{route}] {n}전{wins}승 wr{wr:.0f}% PnL{avg_pnl:+.2f}%"
+                    f" MAE{avg_mae:+.2f}% cap{cap:.0f}% {state}"
                 )
                 # 조건부 확장: production은 상세 표시
                 reasons = s.get("exit_reasons", {})
@@ -12580,15 +12580,16 @@ def _v4_shadow_report_lines():
             lines.append(f"🧪 Research Top-{TOP_RESEARCH}:")
             for _score, (_r_route, _r_strat, _r_n, _r_wr, _r_pnl, _r_mfe, _r_mae, _r_icon, _r_key, _r_s, _r_state) in _qualified[:TOP_RESEARCH]:
                 _r_cap = _r_pnl / _r_mfe * 100 if _r_mfe > 0 else 0
+                _r_wins = _r_s.get("wins", 0)
                 lines.append(
-                    f"{_r_icon}[{_r_route}] n{_r_n} wr{_r_wr:.0f}%"
-                    f" PnL{_r_pnl:+.02f}% MFE{_r_mfe:+.02f}% MAE{_r_mae:+.02f}%"
-                    f" cap{_r_cap:.0f}% {_r_state}"
+                    f"{_r_icon}[{_r_route}] {_r_n}전{_r_wins}승 wr{_r_wr:.0f}%"
+                    f" PnL{_r_pnl:+.02f}% cap{_r_cap:.0f}% {_r_state}"
                 )
         if _pending:
             _pend_parts = []
             for p in _pending:
-                _pend_parts.append(f"{p[0]}(n{p[2]})")
+                _p_wins = p[9].get("wins", 0) if isinstance(p[9], dict) else 0
+                _pend_parts.append(f"{p[0]}({p[2]}전{_p_wins}승)")
             lines.append(f"  ⏳ 수집중: {', '.join(_pend_parts)}")
     # v21: 시나리오별 MFE/MAE/Hold/Continuation 상세 리포트 (n≥10인 전체 시나리오)
     with _SHADOW_PERF_LOCK:
