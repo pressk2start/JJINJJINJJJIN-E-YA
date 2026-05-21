@@ -8655,17 +8655,32 @@ def _get_route_sets():
 
 
 def _report_consistency_check(compact_routes, research_routes):
-    """registry vs 리포트 출력 불일치 감지"""
+    """registry vs 리포트 출력 불일치 감지
+    신규 route(shadow 데이터 없음)는 false positive 방지를 위해 제외"""
     prod, active_research = _get_route_sets()
     all_registry = prod | active_research
     all_reported = compact_routes | research_routes
+    # shadow 데이터가 있는 route만 추출
+    _routes_with_data = set()
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            r = s.get("route", "")
+            if s.get("signals", 0) >= 1:
+                _routes_with_data.add(r)
     warns = []
     missing_compact = prod - compact_routes
     if missing_compact:
-        warns.append(f"[REPORT_WARN] LIVE route in registry but not in compact: {missing_compact}")
+        _real_missing = missing_compact & _routes_with_data
+        if _real_missing:
+            warns.append(f"[REPORT_WARN] LIVE route in registry but not in compact: {_real_missing}")
+        _new = missing_compact - _routes_with_data
+        if _new:
+            warns.append(f"[REPORT_INFO] LIVE route collecting (no data yet): {_new}")
     missing_research = all_registry - research_routes
     if missing_research:
-        warns.append(f"[REPORT_WARN] registry route not in research: {missing_research}")
+        _real_missing = missing_research & _routes_with_data
+        if _real_missing:
+            warns.append(f"[REPORT_WARN] registry route not in research: {_real_missing}")
     extra = all_reported - all_registry
     if extra:
         warns.append(f"[REPORT_WARN] route in report but not in registry: {extra}")
