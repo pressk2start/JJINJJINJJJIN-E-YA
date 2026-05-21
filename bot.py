@@ -1033,17 +1033,40 @@ def _pipeline_report(force=False):
     except Exception:
         pass
 
-    # ━━━━ Tier 1: EXEC SUMMARY ━━━━
+    # ━━━━ scan p95 선계산 (ACTION 라인에서 사용) ━━━━
+    _scan_p95_s = 0
+    with _PIPELINE_SCAN_LAT_LOCK:
+        lat_list = list(_PIPELINE_SCAN_LATENCIES)
+    if lat_list:
+        lat_sorted = sorted(lat_list)
+        _scan_p95_s = lat_sorted[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] / 1000 if len(lat_list) >= 5 else max(lat_list) / 1000
+
+    # ━━━━ Tier 1: EXEC SUMMARY + ACTION ━━━━
     _live_pnl = _sve1_daily_pnl()
     _live_cnt = _sve1_daily_trade_count()
     _guard_pct = _live_pnl / min(SVE1_DAILY_MAX_LOSS_PCT, -0.001) * 100
-    _guard_warn = f" ⚠{_guard_pct:.0f}%" if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7 else ""
+    _guard_warn = f" ⚠가드{_guard_pct:.0f}%" if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7 else ""
     lines = [
         f"{'🟢' if _live_cnt > 0 else '⚪'} LIVE {_live_cnt}/{SVE1_DAILY_MAX_TRADES}"
-        f" | PnL {_live_pnl*100:+.2f}/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}{_guard_warn}",
-        f"일반 n{_st_normal['n']} wr{_st_normal['wr']} {_st_normal['pnl']}"
-        f" | A군 n{_st_bypass['n']} wr{_st_bypass['wr']} {_st_bypass['pnl']}",
+        f" PnL {_live_pnl*100:+.2f}/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}{_guard_warn}",
     ]
+    # ACTION 라인 — 운영 판단 자동 요약
+    _act = []
+    if _succ == 0 and _raw == 0:
+        _act.append("신규진입 중단")
+    elif _succ == 0 and _raw > 0:
+        _act.append(f"raw{_raw} 통과못함")
+    if _guard_pct > REPORT_ACTION_GUARD_PCT:
+        _act.append(f"가드{_guard_pct:.0f}%초과")
+    if _scan_p95_s > REPORT_ACTION_SCAN_P95_S:
+        _act.append(f"scan p95 {_scan_p95_s:.0f}s")
+    if c.get('suspend_block', 0) > 0:
+        _act.append(f"차단{c['suspend_block']}")
+    if _act:
+        lines.append(f"ACTION: {' | '.join(_act)}")
+    lines.append(
+        f"일반 n{_st_normal['n']} wr{_st_normal['wr']} {_st_normal['pnl']}"
+        f" | A군 n{_st_bypass['n']} wr{_st_bypass['wr']} {_st_bypass['pnl']}")
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
 
@@ -1054,7 +1077,7 @@ def _pipeline_report(force=False):
     lines.append(
         f"  raw{_raw} gate{_gp}"
         f" entry{_succ} 전체{pct(_succ, _det)}")
-    # pass 요약 — 통과 있는 것만
+    # pass 요약 — non-zero만, route 대표명
     _pass_parts = []
     _seen_pkeys = set()
     for _sname, _sconf in _STRATEGY_REGISTRY.items():
@@ -1062,11 +1085,18 @@ def _pipeline_report(force=False):
         if _pk and _pk not in _seen_pkeys:
             _seen_pkeys.add(_pk)
             _pass_cnt = c.get(f"{_pk}_pass", 0)
+            if _pass_cnt == 0:
+                continue
             _routes = sorted(set(
                 _sc.get("route", "") for _sc in _STRATEGY_REGISTRY.values()
                 if _sc.get("pipeline_key") == _pk))
-            _pass_parts.append(f"{'/'.join(_routes)} {_pass_cnt}")
-    lines.append(f"PASS: {' | '.join(_pass_parts)}")
+            _label = _routes[0] if len(_routes) == 1 else _routes[0]
+            _extra = len(_routes) - 1
+            if _extra > 0:
+                _label += f"+{_extra}"
+            _pass_parts.append(f"{_label} {_pass_cnt}")
+    if _pass_parts:
+        lines.append(f"PASS: {' '.join(_pass_parts)}")
     # gate 탈락 — non-zero만 1줄
     _gate_raw = []
     for _gk, _gl in [("gate_fail_no_v4","no_v4"), ("gate_fail_coin_cd","cd"),
@@ -1101,13 +1131,7 @@ def _pipeline_report(force=False):
         lines.extend(_score_lines)
 
     # ━━━━ Tier 4: DEBUG (1줄 요약 + p95>25s시 상세) ━━━━
-    # scan latency 계산
-    _scan_p95_s = 0
-    with _PIPELINE_SCAN_LAT_LOCK:
-        lat_list = list(_PIPELINE_SCAN_LATENCIES)
-    if lat_list:
-        lat_sorted = sorted(lat_list)
-        _scan_p95_s = lat_sorted[min(int(len(lat_list) * 0.95), len(lat_list) - 1)] / 1000 if len(lat_list) >= 5 else max(lat_list) / 1000
+    # (_scan_p95_s, lat_list 는 Tier 1 상단에서 선계산됨)
     # cache hit rate
     _cache_rate = 0
     with _CHECK_FN_CACHE_LOCK:
@@ -1136,7 +1160,7 @@ def _pipeline_report(force=False):
     # 1줄 debug 요약
     _dbg_parts = []
     if _scan_p95_s > 0:
-        _scan_warn = "⚠" if _scan_p95_s > 25 else ""
+        _scan_warn = "⚠" if _scan_p95_s > REPORT_DEBUG_SCAN_P95_S else ""
         _dbg_parts.append(f"p95 {_scan_p95_s:.1f}s{_scan_warn}")
     _dbg_parts.append(f"cache{_cache_rate:.0f}%")
     if _shadow_active > 0:
@@ -1144,17 +1168,17 @@ def _pipeline_report(force=False):
     if c.get('suspend_block', 0) > 0:
         _dbg_parts.append("⚠차단")
     lines.append(f"DBG: {' '.join(_dbg_parts)}")
-    if _scan_p95_s > 25 and _stage_rows:
+    if _scan_p95_s > REPORT_DEBUG_SCAN_P95_S and _stage_rows:
         lines.append(f"  ⚠slow: {' '.join(_stage_rows[:3])}")
 
     lines.append("report v7")
 
     # ━━━━ 조건부 DEBUG DETAIL (이상 시에만 compact에 append) ━━━━
     _abnormal = (
-        _scan_p95_s > 25
+        _scan_p95_s > REPORT_DEBUG_SCAN_P95_S
         or c.get('suspend_block', 0) > 0
-        or _cache_rate < 30
-        or _guard_pct > 150
+        or _cache_rate < REPORT_DEBUG_CACHE_LOW_PCT
+        or _guard_pct > REPORT_DEBUG_GUARD_HIGH_PCT
     )
     if _abnormal:
         lines.append("")
@@ -8596,6 +8620,16 @@ TOP_COIN_STATS = 3
 TOP_BUCKET_KEYS = 1
 TOP_FILTER_FINDINGS = 3
 
+# ━━━ Report 임계치 (ACTION/DEBUG/ACTIONABLE 발동 기준 중앙 관리) ━━━
+REPORT_ACTION_GUARD_PCT = 100       # ACTION: 가드 초과 경고
+REPORT_ACTION_SCAN_P95_S = 15      # ACTION: scan 지연 경고
+REPORT_DEBUG_SCAN_P95_S = 25       # DEBUG: slow stage 표시 기준
+REPORT_DEBUG_CACHE_LOW_PCT = 30    # DEBUG DETAIL: cache 저조 발동
+REPORT_DEBUG_GUARD_HIGH_PCT = 150  # DEBUG DETAIL: 가드 심각 발동
+REPORT_ACT_PNL_WARN = -0.05       # ACTIONABLE: LIVE pnl 적자 경고 (%)
+REPORT_ACT_CAP_WARN = -15         # ACTIONABLE: cap 비효율 경고 (%)
+REPORT_ACT_FILTER_WR = 50         # ACTIONABLE: 차단건 필터 재검토 승률 (%)
+
 # ━━━ Report priority (낮을수록 상단 출력, LIVE 먼저 → 핵심 research → collecting) ━━━
 _ROUTE_REPORT_PRIORITY = {}
 
@@ -8644,7 +8678,8 @@ def _build_actionable_summary():
     """research 메시지 상단 ACTIONABLE 요약 5줄 — 변화/판단 가능한 핵심만"""
     items = []
     prod, research = _get_route_sets()
-    # 1) survival ENABLE/BLOCK 변화
+    all_routes = prod | research
+    # 1) survival ENABLE 진행도 / 미달
     try:
         sa = _survival_analysis()
         for route, data in sa.items():
@@ -8660,29 +8695,39 @@ def _build_actionable_summary():
                 hi, lo = sc["hi"], sc["lo"]
                 if hi["n"] > 0 and lo["n"] > 0:
                     hl_lift = hi["pnl"] - lo["pnl"]
-            if (total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30
-                    and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0):
-                items.append(f"🟢 {route} ENABLE 조건충족")
-            elif total_n >= 30 and ac_lift < 0.1:
+            _checks = {
+                "n": total_n >= 100, "A": a_g["n"] >= 30,
+                "C": c_g["n"] >= 30, "ac": ac_lift > 0.5,
+                "hl": hl_lift > 0.3, "pnl": a_g["avg_pnl"] > 0,
+            }
+            _pass = sum(1 for v in _checks.values() if v)
+            if _pass == len(_checks):
+                items.append(f"🟢 {route} ENABLE 조건충족 {_pass}/{len(_checks)}")
+            elif _pass >= 4:
+                _missing = [k for k, v in _checks.items() if not v]
+                items.append(f"🟡 {route} ENABLE {_pass}/{len(_checks)} 미충족:{','.join(_missing)}")
+            elif total_n >= 50 and ac_lift < 0.2:
                 items.append(f"🔴 {route} survival 미달 lift{ac_lift:+.2f}")
     except Exception:
         pass
-    # 2) shadow 성과 급변 route (pnl < -0.1% or cap < -30)
+    # 2) LIVE route 성과 경고 (pnl < -0.05% or cap < -15%)
+    _seen_routes = set()
     with _SHADOW_PERF_LOCK:
         for key, s in _SHADOW_PERF_STATS.items():
             n = s.get("signals", 0)
             route = s.get("route", "?")
-            if n < 20 or route not in prod:
+            if n < 20 or route not in prod or route in _seen_routes:
                 continue
+            _seen_routes.add(route)
             avg_pnl = s.get("total_pnl", 0) / n * 100
             mfes = s.get("mfes", [])
             avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
             cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
-            if avg_pnl < -0.1:
+            if avg_pnl < REPORT_ACT_PNL_WARN:
                 items.append(f"⚠ {route} LIVE pnl{avg_pnl:+.2f}% 적자")
-            elif cap < -30:
+            elif cap < REPORT_ACT_CAP_WARN:
                 items.append(f"⚠ {route} cap{cap:.0f}% 비효율")
-    # 3) 필터 재검토 필요 (차단건 중 승률>55%)
+    # 3) 필터 재검토 필요
     with _SHADOW_PERF_LOCK:
         for bkey, bs in _SHADOW_BLOCKED_STATS.items():
             bn = bs.get("signals", 0)
@@ -8690,8 +8735,9 @@ def _build_actionable_summary():
                 continue
             bwr = bs.get("wins", 0) / bn * 100
             broute = bs.get("route", "?")
-            if bwr >= 55 and broute in (prod | research):
-                items.append(f"⚠ {broute}:{bs.get('filter',bkey)} 필터재검토 wr{bwr:.0f}%")
+            if bwr >= REPORT_ACT_FILTER_WR and broute in all_routes:
+                bfilt = bs.get("filter", bkey)
+                items.append(f"⚠ {broute}:{bfilt} 필터재검토 wr{bwr:.0f}%")
     return items[:5]
 
 
