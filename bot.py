@@ -8700,6 +8700,9 @@ def _build_actionable_summary():
                 "C": c_g["n"] >= 30, "ac": ac_lift > 0.5,
                 "hl": hl_lift > 0.3, "pnl": a_g["avg_pnl"] > 0,
             }
+            mae_dist = data.get("mae_dist", {})
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
             _pass = sum(1 for v in _checks.values() if v)
             if _pass == len(_checks):
                 items.append(f"🟢 {route} ENABLE 조건충족 {_pass}/{len(_checks)}")
