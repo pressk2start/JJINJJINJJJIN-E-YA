@@ -1337,8 +1337,12 @@ def _pipeline_report(force=False):
     if _total_cache > 0:
         _rl.append(f"🧠 cache: fn {_cache_rate:.0f}%({_total_hits}/{_total_cache})")
 
-    # candle 캐시
+    # candle + tick 캐시
     _cc_parts = []
+    _tick_h = c.get("tick_cache_hit", 0)
+    _tick_m = c.get("tick_cache_miss", 0)
+    if _tick_h + _tick_m > 0:
+        _cc_parts.append(f"tick:{_tick_h/(_tick_h+_tick_m)*100:.0f}%({_tick_m}miss)")
     for _tf_key in ("c1", "c5", "c15", "c60"):
         _h = c.get(f"{_tf_key}_cache_hit", 0)
         _mi = c.get(f"{_tf_key}_cache_miss", 0)
@@ -1346,7 +1350,7 @@ def _pipeline_report(force=False):
         if _total > 0:
             _cc_parts.append(f"{_tf_key}:{_h/(_total)*100:.0f}%")
     if _cc_parts:
-        _rl.append(f"🗂 candle: {' '.join(_cc_parts)}")
+        _rl.append(f"🗂 cache: {' '.join(_cc_parts)}")
 
     # tagged fetch breakdown (per-TF API call time)
     with _TAGGED_FETCH_LOCK:
@@ -7755,9 +7759,11 @@ def get_recent_ticks(m, c=100, allow_network=True):
     now_ms = int(time.time() * 1000)
     hit = _TICKS_CACHE.get(m)
     if hit and (now_ms - hit["ts"] <= _TICKS_TTL * 1000):
+        _pipeline_inc("tick_cache_hit")
         return hit["ticks"][:c]  # 🔧 요청 수만큼 slice 반환
     if not allow_network:
         return hit["ticks"][:c] if hit else []
+    _pipeline_inc("tick_cache_miss")
 
     # ✅ 안전 래퍼로 변경 — 항상 최대치 요청 (캐시 재활용 극대화)
     js = safe_upbit_get("https://api.upbit.com/v1/trades/ticks", {
