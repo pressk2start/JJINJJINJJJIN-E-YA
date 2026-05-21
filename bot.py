@@ -1211,6 +1211,77 @@ def _pipeline_report(force=False):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     _rl = []
 
+    # ── A1: 퍼널 전환율 ──
+    _funnel_stages = [
+        ("detect", _det), ("v4", _v4), ("raw", _raw),
+        ("gate", _gp), ("entry", _succ),
+    ]
+    _funnel_parts = []
+    for i in range(1, len(_funnel_stages)):
+        _prev_name, _prev_val = _funnel_stages[i - 1]
+        _cur_name, _cur_val = _funnel_stages[i]
+        _rate = pct(_cur_val, _prev_val)
+        _funnel_parts.append(f"{_prev_name}→{_cur_name}:{_rate}")
+    if _det > 0:
+        _rl.append(f"🔀 퍼널: {' | '.join(_funnel_parts)}")
+        if _raw > 0 and _gp == 0:
+            _rl.append(f"  ⚠ raw{_raw}건 전부 gate탈락")
+
+    # ── A2: check_fn 필터 상세 (시나리오별 탈락 분해) ──
+    _cfn_sections = []
+    _seen_pk = set()
+    for _sname, _sconf in _STRATEGY_REGISTRY.items():
+        _pk = _sconf.get("pipeline_key", "")
+        if not _pk or _pk in _seen_pk:
+            continue
+        _seen_pk.add(_pk)
+        _enter = c.get(f"{_pk}_enter", 0)
+        _pass_cnt = c.get(f"{_pk}_pass", 0)
+        if _enter == 0:
+            continue
+        _route = _sconf.get("route", _pk)
+        _fails = []
+        for _ck, _cv in c.items():
+            if _ck.startswith(f"{_pk}_") and _ck.endswith("_fail") and _cv > 0:
+                _fname = _ck[len(_pk) + 1:-5]
+                _fails.append((_fname, _cv))
+        if _fails:
+            _fails.sort(key=lambda x: -x[1])
+            _fail_str = " ".join(f"{fn}:{fv}" for fn, fv in _fails[:5])
+            _cfn_sections.append(f"  {_route}: in{_enter} pass{_pass_cnt} | {_fail_str}")
+    if _cfn_sections:
+        _rl.append("🔍 check_fn 필터:")
+        _rl.extend(_cfn_sections)
+
+    # ── A3: 진입 차단 상세 (cooldown/position/postcheck/lock) ──
+    _block_items = []
+    for _bk, _bl in [("cooldown_block", "cool"), ("position_block", "pos"),
+                      ("postcheck_block", "post"), ("lock_block", "lock"),
+                      ("block_daily_guard", "guard"), ("block_latency_kill", "lat"),
+                      ("block_c_killswitch", "c_kill"), ("block_c_rate", "c_rate"),
+                      ("block_loss_streak", "streak")]:
+        _bv = c.get(_bk, 0)
+        if _bv > 0:
+            _block_items.append(f"{_bl}:{_bv}")
+    if _block_items:
+        _rl.append(f"🚫 진입차단: {' '.join(_block_items)}")
+
+    # ── A4: Top-5 탈락 코인 ──
+    with _PIPELINE_COIN_HITS_LOCK:
+        _coin_snap = {coin: dict(reasons) for coin, reasons in _PIPELINE_COIN_HITS.items()}
+    if _coin_snap:
+        _coin_totals = []
+        for _coin, _reasons in _coin_snap.items():
+            _total = sum(_reasons.values())
+            _top_reason = max(_reasons, key=_reasons.get) if _reasons else "?"
+            _coin_totals.append((_coin, _total, _top_reason, _reasons[_top_reason]))
+        _coin_totals.sort(key=lambda x: -x[1])
+        _top5 = _coin_totals[:5]
+        _coin_lines = []
+        for _coin, _total, _top_r, _top_cnt in _top5:
+            _coin_lines.append(f"{_coin}:{_total}({_top_r}:{_top_cnt})")
+        _rl.append(f"💀 탈락코인 Top5: {' '.join(_coin_lines)}")
+
     # shadow 시나리오 성과 상세
     shadow_lines, _research_routes = _v4_shadow_report_lines()
     if shadow_lines:
