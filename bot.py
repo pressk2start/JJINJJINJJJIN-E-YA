@@ -12583,7 +12583,7 @@ def _v4_shadow_report_lines():
                 _r_wins = _r_s.get("wins", 0)
                 lines.append(
                     f"{_r_icon}[{_r_route}] {_r_n}전{_r_wins}승 wr{_r_wr:.0f}%"
-                    f" PnL{_r_pnl:+.02f}% cap{_r_cap:.0f}% {_r_state}"
+                    f" PnL{_r_pnl:+.02f}% MAE{_r_mae:+.02f}% cap{_r_cap:.0f}% {_r_state}"
                 )
         if _pending:
             _pend_parts = []
