@@ -1243,9 +1243,7 @@ def _pipeline_report(force=False):
         _fails = []
         for _ck, _cv in c.items():
             if _ck.startswith(f"{_pk}_") and _ck.endswith("_fail") and _cv > 0:
-                _fname = _ck[len(_pk) + 1:-5]
-                if not _fname:
-                    continue
+                _fname = _ck[len(_pk) + 1:-5] or "기타"
                 _fails.append((_fname, _cv))
         if _fails:
             _fails.sort(key=lambda x: -x[1])
@@ -1349,6 +1347,33 @@ def _pipeline_report(force=False):
             _cc_parts.append(f"{_tf_key}:{_h/(_total)*100:.0f}%")
     if _cc_parts:
         _rl.append(f"🗂 candle: {' '.join(_cc_parts)}")
+
+    # tagged fetch breakdown (per-TF API call time)
+    with _TAGGED_FETCH_LOCK:
+        _tf_snap = {k: list(v) for k, v in _TAGGED_FETCH_HISTORY.items()}
+    _tf_parts = []
+    for _tfk in sorted(_tf_snap.keys()):
+        _samples = _tf_snap[_tfk]
+        if len(_samples) >= 3:
+            _avg_ms = sum(s[0] for s in _samples) / len(_samples)
+            _avg_calls = sum(s[1] for s in _samples) / len(_samples)
+            if _avg_ms >= 100 or _avg_calls >= 1:
+                _tf_parts.append(f"{_tfk}:{_avg_ms:.0f}ms/{_avg_calls:.1f}c")
+    if _tf_parts:
+        _rl.append(f"📡 fetch: {' '.join(_tf_parts)}")
+
+    # detect internal stage breakdown
+    _di_parts = []
+    for _dsk in ("dl_precheck", "dl_c1_fetch", "dl_multitf_fetch", "dl_v4_eval"):
+        _ds_list = stage_snapshot.get(_dsk, [])
+        if len(_ds_list) >= 3:
+            _ds_avg = sum(_ds_list) / len(_ds_list)
+            _ds_p95 = sorted(_ds_list)[min(int(len(_ds_list) * 0.95), len(_ds_list) - 1)]
+            if _ds_avg >= 10:
+                _short = _dsk.replace("dl_", "").replace("_fetch", "")
+                _di_parts.append(f"{_short}:avg{_ds_avg:.0f}/p95={_ds_p95:.0f}ms")
+    if _di_parts:
+        _rl.append(f"🔬 detect: {' '.join(_di_parts)}")
 
     # pre-cut
     _pre_rows_full = []
@@ -8962,9 +8987,19 @@ def _build_state_change_alerts():
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
                 _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
             _pass = sum(1 for v in _checks.values() if v)
+            _tot = len(_checks)
+            if total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30 and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0:
+                _action = "ENABLE"
+            elif total_n >= 50 and a_g["n"] >= 15 and c_g["n"] >= 15 and ac_lift > 0.3 and hl_lift > 0.2:
+                _action = "SHADOW"
+            else:
+                _action = "BLOCK"
             if route in current:
                 current[route]["enable_pass"] = _pass
-                current[route]["enable_total"] = len(_checks)
+                current[route]["enable_total"] = _tot
+                current[route]["action"] = _action
+                current[route]["ac_lift"] = round(ac_lift, 2)
+                current[route]["hl_lift"] = round(hl_lift, 2)
     except Exception:
         pass
     if not _REPORT_PREV_STATE:
@@ -8990,6 +9025,20 @@ def _build_state_change_alerts():
         cap_delta = cur["cap"] - p["cap"]
         if cap_delta < -15 and cur["n"] >= 20:
             alerts.append(f"📉 {route} cap{cap_delta:+.0f}%p 악화")
+        cur_act = cur.get("action", "")
+        prev_act = p.get("action", "")
+        if cur_act and prev_act and cur_act != prev_act:
+            _reasons = []
+            _c_hl = cur.get("hl_lift", 0)
+            _p_hl = p.get("hl_lift", 0)
+            if _c_hl != _p_hl:
+                _reasons.append(f"hl:{_p_hl:+.2f}→{_c_hl:+.2f}")
+            _c_ac = cur.get("ac_lift", 0)
+            _p_ac = p.get("ac_lift", 0)
+            if abs(_c_ac - _p_ac) >= 0.05:
+                _reasons.append(f"lift:{_p_ac:+.2f}→{_c_ac:+.2f}")
+            _reason_str = f" ({', '.join(_reasons)})" if _reasons else ""
+            alerts.append(f"🔄 {route} {prev_act}→{cur_act}{_reason_str}")
         cur_en = cur.get("enable_pass", -1)
         prev_en = p.get("enable_pass", -1)
         cur_tot = cur.get("enable_total", -1)
