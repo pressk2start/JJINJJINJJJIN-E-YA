@@ -15098,7 +15098,8 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c["candle_acc_trade_price"] > 0]
 
     # 틱 확보
-    ticks = get_recent_ticks(m, 100)
+    with _fetch_tag('detect_leader'):
+        ticks = get_recent_ticks(m, 100)
     if not ticks:
         cut("TICKS_LOW", f"{m} no ticks")
         _pipeline_inc("gate_fail_no_ticks")
