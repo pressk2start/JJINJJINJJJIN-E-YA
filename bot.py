@@ -1243,9 +1243,7 @@ def _pipeline_report(force=False):
         _fails = []
         for _ck, _cv in c.items():
             if _ck.startswith(f"{_pk}_") and _ck.endswith("_fail") and _cv > 0:
-                _fname = _ck[len(_pk) + 1:-5]
-                if not _fname:
-                    continue
+                _fname = _ck[len(_pk) + 1:-5] or "기타"
                 _fails.append((_fname, _cv))
         if _fails:
             _fails.sort(key=lambda x: -x[1])
