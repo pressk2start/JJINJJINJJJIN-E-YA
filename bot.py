@@ -1282,6 +1282,30 @@ def _pipeline_report(force=False):
             _coin_lines.append(f"{_coin}:{_total}({_top_r}:{_top_cnt})")
         _rl.append(f"💀 탈락코인 Top5: {' '.join(_coin_lines)}")
 
+    # ── SVE2 모드 분포 ──
+    with _SVE2_LOCK:
+        _s2_log = list(_SVE2_SCORE_LOG)
+    if _s2_log:
+        _s2_dist = {}
+        for _s2e in _s2_log:
+            _d = _s2e.get("decision", "?")
+            _s2_dist[_d] = _s2_dist.get(_d, 0) + 1
+        _s2_total = sum(_s2_dist.values())
+        _s2_parts_mode = []
+        for _d in ("FULL", "REDUCED", "SKIP"):
+            _cnt = _s2_dist.get(_d, 0)
+            if _cnt > 0:
+                _s2_parts_mode.append(f"{_d}:{_cnt}({_cnt/_s2_total*100:.0f}%)")
+        if _s2_parts_mode:
+            _rl.append(f"🎯 SVE2: {' '.join(_s2_parts_mode)} (최근{_s2_total}건)")
+
+    # ── A군 바이패스 요약 ──
+    if _ab_stats["total"] > 0:
+        _ab_line = f"🅰 A군: 후보{_ab_stats['total']} 통과{_ab_stats['pass']} 진입{_ab_stats['entered']}"
+        if _ab_stats["wr"] != "N/A":
+            _ab_line += f" wr{_ab_stats['wr']} {_ab_stats['pnl']}"
+        _rl.append(_ab_line)
+
     # shadow 시나리오 성과 상세
     shadow_lines, _research_routes = _v4_shadow_report_lines()
     if shadow_lines:
@@ -7765,12 +7789,15 @@ def get_recent_ticks(m, c=100, allow_network=True):
         return hit["ticks"][:c] if hit else []
     _pipeline_inc("tick_cache_miss")
 
+    _t_tick = time.time()
     # ✅ 안전 래퍼로 변경 — 항상 최대치 요청 (캐시 재활용 극대화)
     js = safe_upbit_get("https://api.upbit.com/v1/trades/ticks", {
         "market": m,
         "count": _MAX_TICKS
     },
                         timeout=6)
+    _tick_ms = (time.time() - _t_tick) * 1000
+    _record_tagged_fetch("tick", _tick_ms)
 
     if not js or not isinstance(js, list):
         return hit["ticks"][:c] if hit else []
@@ -12583,7 +12610,7 @@ def _v4_shadow_report_lines():
                 _r_wins = _r_s.get("wins", 0)
                 lines.append(
                     f"{_r_icon}[{_r_route}] {_r_n}전{_r_wins}승 wr{_r_wr:.0f}%"
-                    f" PnL{_r_pnl:+.02f}% cap{_r_cap:.0f}% {_r_state}"
+                    f" PnL{_r_pnl:+.02f}% MAE{_r_mae:+.02f}% cap{_r_cap:.0f}% {_r_state}"
                 )
         if _pending:
             _pend_parts = []
@@ -15038,7 +15065,8 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
 
     # === v18g lazy c1 fetch: 위 사전차단 통과한 심볼만 c1 호출 ===
     if c1 is None:
-        c1 = _get_c1_cached(m, 30)
+        with _fetch_tag('detect_leader'):
+            c1 = _get_c1_cached(m, 30)
     if not c1 or len(c1) < 3:
         return None
     if ob.get("depth_krw", 0) <= 0:
@@ -15070,7 +15098,8 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c["candle_acc_trade_price"] > 0]
 
     # 틱 확보
-    ticks = get_recent_ticks(m, 100)
+    with _fetch_tag('detect_leader'):
+        ticks = get_recent_ticks(m, 100)
     if not ticks:
         cut("TICKS_LOW", f"{m} no ticks")
         _pipeline_inc("gate_fail_no_ticks")
