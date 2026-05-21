@@ -1300,17 +1300,31 @@ def _pipeline_report(force=False):
     if _hourly_parts:
         _rl.append(f"🕐 시간대: {' '.join(_hourly_parts)}")
 
-    # registry-report consistency check
-    _report_consistency_check(_compact_routes, _research_routes)
+    # registry-report consistency check (4단계)
+    _consistency_warns = _report_consistency_check(_compact_routes, _research_routes)
+
+    # state-change alerts
+    _sc_alerts, _ = _build_state_change_alerts()
 
     # research 메시지 전송 (데이터 있을 때만)
     if _rl:
-        # ACTIONABLE 요약 상단 삽입
+        # ACTIONABLE 요약 + STATE CHANGE 상단 삽입
         _action = _build_actionable_summary()
         _header = ["📋 RESEARCH DETAIL"]
         if _action:
             _header.extend(_action)
+        if _sc_alerts:
+            _header.append("── STATE CHANGE ──")
+            _header.extend(_sc_alerts)
+        if _action or _sc_alerts:
             _header.append("")
+        # consistency WARN (실제 경고만 메시지에 포함)
+        _real_warns = [w for w in _consistency_warns if "REPORT_WARN" in w]
+        if _real_warns:
+            _rl.append("")
+            _rl.append("⚠ CONSISTENCY")
+            for w in _real_warns[:5]:
+                _rl.append(f"  {w}")
         for i, h in enumerate(_header):
             _rl.insert(i, h)
         _research_msg = "\n".join(_rl)
@@ -8655,35 +8669,78 @@ def _get_route_sets():
 
 
 def _report_consistency_check(compact_routes, research_routes):
-    """registry vs 리포트 출력 불일치 감지
-    신규 route(shadow 데이터 없음)는 false positive 방지를 위해 제외"""
+    """registry vs 리포트 출력 4단계 일관성 검증
+    A: registry→score (등록됐는데 데이터 0)
+    B: score→report (데이터 있는데 출력 안 됨)
+    C: ACTIONABLE coverage (중요 상태인데 알림 안 떴나)
+    D: survival↔actionable 기준 일치
+    신규 route(shadow 데이터 없음)는 false positive 방지를 위해 INFO 처리"""
     prod, active_research = _get_route_sets()
     all_registry = prod | active_research
     all_reported = compact_routes | research_routes
-    # shadow 데이터가 있는 route만 추출
-    _routes_with_data = set()
+    _routes_with_data = {}
     with _SHADOW_PERF_LOCK:
         for key, s in _SHADOW_PERF_STATS.items():
             r = s.get("route", "")
-            if s.get("signals", 0) >= 1:
-                _routes_with_data.add(r)
+            n = s.get("signals", 0)
+            if n >= 1:
+                if r not in _routes_with_data or n > _routes_with_data[r]:
+                    _routes_with_data[r] = n
     warns = []
+    # ── A: registry→score 누락 (등록됐는데 shadow 데이터 0) ──
+    for r in all_registry:
+        if r not in _routes_with_data:
+            warns.append(f"[REPORT_INFO] {r} registry등록 but shadow n=0 (수집대기)")
+        elif _routes_with_data[r] < 3:
+            warns.append(f"[REPORT_INFO] {r} shadow n={_routes_with_data[r]} (수집초기)")
+    # ── B: score→report 누락 (데이터 있는데 리포트 미출력) ──
     missing_compact = prod - compact_routes
     if missing_compact:
-        _real_missing = missing_compact & _routes_with_data
+        _real_missing = missing_compact & set(_routes_with_data.keys())
         if _real_missing:
-            warns.append(f"[REPORT_WARN] LIVE route in registry but not in compact: {_real_missing}")
-        _new = missing_compact - _routes_with_data
-        if _new:
-            warns.append(f"[REPORT_INFO] LIVE route collecting (no data yet): {_new}")
+            for r in _real_missing:
+                warns.append(f"[REPORT_WARN] LIVE {r}(n={_routes_with_data.get(r,0)}) compact 미출력")
     missing_research = all_registry - research_routes
     if missing_research:
-        _real_missing = missing_research & _routes_with_data
+        _real_missing = missing_research & set(k for k, v in _routes_with_data.items() if v >= 1)
         if _real_missing:
-            warns.append(f"[REPORT_WARN] registry route not in research: {_real_missing}")
+            for r in _real_missing:
+                warns.append(f"[REPORT_WARN] {r}(n={_routes_with_data.get(r,0)}) research 미출력")
     extra = all_reported - all_registry
     if extra:
-        warns.append(f"[REPORT_WARN] route in report but not in registry: {extra}")
+        warns.append(f"[REPORT_WARN] registry 미등록 route 출력됨: {extra}")
+    # ── C: ACTIONABLE coverage (중요 상태 무음 감지) ──
+    with _SHADOW_PERF_LOCK:
+        for key, s in _SHADOW_PERF_STATS.items():
+            n = s.get("signals", 0)
+            route = s.get("route", "?")
+            if n < 20 or route not in prod:
+                continue
+            avg_pnl = s.get("total_pnl", 0) / n * 100
+            if avg_pnl < REPORT_ACT_PNL_WARN * 3:
+                warns.append(f"[REPORT_WARN] LIVE {route} pnl{avg_pnl:+.2f}% 심각 — ACTIONABLE 확인필요")
+            elif avg_pnl < REPORT_ACT_PNL_WARN:
+                pass  # ACTIONABLE에서 이미 처리
+    # ── D: survival↔actionable ENABLE 기준 일치 (7조건 동기화 확인) ──
+    try:
+        sa = _survival_analysis()
+        for route, data in sa.items():
+            grps = data["groups"]
+            a_g, c_g = grps["A"], grps["C"]
+            if a_g["n"] < 3 or c_g["n"] < 3:
+                continue
+            total_n = a_g["n"] + grps["B"]["n"] + c_g["n"]
+            surv_checks = 6
+            mae_dist = data.get("mae_dist", {})
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                surv_checks = 7
+            act_checks = 6
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                act_checks = 7
+            if surv_checks != act_checks:
+                warns.append(f"[REPORT_WARN] {route} survival({surv_checks})↔actionable({act_checks}) 기준수 불일치")
+    except Exception:
+        pass
     for w in warns:
         print(w)
     return warns
@@ -8757,6 +8814,98 @@ def _build_actionable_summary():
                 bfilt = bs.get("filter", bkey)
                 items.append(f"⚠ {broute}:{bfilt} 필터재검토 wr{bwr:.0f}%")
     return items[:5]
+
+
+# ━━━ State-change 감지 (Top-N 외에 상태 변화 기반 알림) ━━━
+_REPORT_PREV_STATE = {}  # {route: {n, pnl, cap, enable_pass, enable_total}}
+
+
+def _build_state_change_alerts():
+    """이전 리포트 대비 상태 변화 감지 — Top-N에서 가려질 수 있는 변동 탐지
+    Returns: (alert_lines, current_state_snapshot)"""
+    global _REPORT_PREV_STATE
+    alerts = []
+    current = {}
+    prod, research = _get_route_sets()
+    all_routes = prod | research
+    with _SHADOW_PERF_LOCK:
+        _seen = set()
+        for key, s in _SHADOW_PERF_STATS.items():
+            n = s.get("signals", 0)
+            route = s.get("route", "?")
+            if n < 5 or route in _seen or route not in all_routes:
+                continue
+            _seen.add(route)
+            avg_pnl = s.get("total_pnl", 0) / n * 100
+            mfes = s.get("mfes", [])
+            avg_mfe = sum(mfes) / max(len(mfes), 1) * 100 if mfes else 0
+            cap = avg_pnl / avg_mfe * 100 if avg_mfe > 0 else 0
+            current[route] = {"n": n, "pnl": avg_pnl, "cap": cap}
+    try:
+        sa = _survival_analysis()
+        for route, data in sa.items():
+            grps = data["groups"]
+            a_g, c_g = grps["A"], grps["C"]
+            if a_g["n"] < 3 or c_g["n"] < 3:
+                continue
+            ac_lift = a_g["avg_pnl"] - c_g["avg_pnl"]
+            total_n = a_g["n"] + grps["B"]["n"] + c_g["n"]
+            sc = data.get("scoring", {})
+            hl_lift = 0.0
+            if sc and sc.get("rules"):
+                hi, lo = sc["hi"], sc["lo"]
+                if hi["n"] > 0 and lo["n"] > 0:
+                    hl_lift = hi["pnl"] - lo["pnl"]
+            _checks = {
+                "n": total_n >= 100, "A": a_g["n"] >= 30,
+                "C": c_g["n"] >= 30, "ac": ac_lift > 0.5,
+                "hl": hl_lift > 0.3, "pnl": a_g["avg_pnl"] > 0,
+            }
+            mae_dist = data.get("mae_dist", {})
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
+            _pass = sum(1 for v in _checks.values() if v)
+            if route in current:
+                current[route]["enable_pass"] = _pass
+                current[route]["enable_total"] = len(_checks)
+    except Exception:
+        pass
+    if not _REPORT_PREV_STATE:
+        _REPORT_PREV_STATE = current
+        return [], current
+    prev = _REPORT_PREV_STATE
+    for route, cur in current.items():
+        p = prev.get(route)
+        if not p:
+            if cur["n"] >= 10:
+                alerts.append(f"🆕 {route} 신규등장 n={cur['n']}")
+            continue
+        pnl_delta = cur["pnl"] - p["pnl"]
+        if pnl_delta < -0.1 and cur["n"] >= 20:
+            alerts.append(f"📉 {route} pnl{pnl_delta:+.2f}%p 급락")
+        elif pnl_delta > 0.15 and cur["n"] >= 20:
+            alerts.append(f"📈 {route} pnl{pnl_delta:+.2f}%p 급등")
+        cap_delta = cur["cap"] - p["cap"]
+        if cap_delta < -15 and cur["n"] >= 20:
+            alerts.append(f"📉 {route} cap{cap_delta:+.0f}%p 악화")
+        cur_en = cur.get("enable_pass", -1)
+        prev_en = p.get("enable_pass", -1)
+        cur_tot = cur.get("enable_total", -1)
+        if cur_en >= 0 and prev_en >= 0 and cur_en != prev_en:
+            if cur_en == cur_tot:
+                alerts.append(f"🟢 {route} ENABLE 달성! {cur_en}/{cur_tot}")
+            elif cur_en > prev_en:
+                alerts.append(f"⬆ {route} ENABLE {prev_en}→{cur_en}/{cur_tot}")
+            elif cur_en < prev_en:
+                alerts.append(f"⬇ {route} ENABLE {prev_en}→{cur_en}/{cur_tot} 후퇴")
+        n_delta = cur["n"] - p["n"]
+        if n_delta > 50:
+            alerts.append(f"📊 {route} n+{n_delta} 샘플급증")
+    for route in prev:
+        if route not in current and route in all_routes:
+            alerts.append(f"⚠ {route} 데이터소실 (prev n={prev[route]['n']})")
+    _REPORT_PREV_STATE = current
+    return alerts[:8], current
 
 
 _V0_EXIT_PARAMS = {
