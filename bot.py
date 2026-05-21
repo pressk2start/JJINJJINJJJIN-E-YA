@@ -1044,11 +1044,18 @@ def _pipeline_report(force=False):
     # ━━━━ Tier 1: EXEC SUMMARY + ACTION ━━━━
     _live_pnl = _sve1_daily_pnl()
     _live_cnt = _sve1_daily_trade_count()
+    _live_wins = sum(1 for t in _today_trades if t.get("win"))
+    _live_wr = f" wr{_live_wins/_live_cnt*100:.0f}%" if _live_cnt > 0 else ""
     _guard_pct = _live_pnl / min(SVE1_DAILY_MAX_LOSS_PCT, -0.001) * 100
-    _guard_warn = f" ⚠가드{_guard_pct:.0f}%" if _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7 else ""
+    _limit_str = f"{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}%"
+    _guard_warn = ""
+    if _guard_pct >= 100:
+        _guard_warn = f" 🚫한도{_limit_str}초과"
+    elif _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7:
+        _guard_warn = f" ⚠한도{_limit_str}의 {_guard_pct:.0f}%"
     lines = [
-        f"{'🟢' if _live_cnt > 0 else '⚪'} LIVE {_live_cnt}/{SVE1_DAILY_MAX_TRADES}"
-        f" PnL {_live_pnl*100:+.2f}/{SVE1_DAILY_MAX_LOSS_PCT*100:.1f}{_guard_warn}",
+        f"{'🟢' if _live_cnt > 0 else '⚪'} LIVE {_live_cnt}전{_live_wins}승{_live_wr}"
+        f" PnL{_live_pnl*100:+.2f}%/{_limit_str}{_guard_warn}",
     ]
     # ACTION 라인 — 운영 판단 자동 요약
     _act = []
