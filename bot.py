@@ -1244,6 +1244,8 @@ def _pipeline_report(force=False):
         for _ck, _cv in c.items():
             if _ck.startswith(f"{_pk}_") and _ck.endswith("_fail") and _cv > 0:
                 _fname = _ck[len(_pk) + 1:-5]
+                if not _fname:
+                    continue
                 _fails.append((_fname, _cv))
         if _fails:
             _fails.sort(key=lambda x: -x[1])
@@ -12635,6 +12637,8 @@ def _v4_shadow_report_lines():
             _all_scenario_stats.sort(key=lambda x: (
                 _ROUTE_REPORT_PRIORITY.get(x["route"], 99), -x["pnl"]))
             lines.append("📊 시나리오별 상세:")
+            _expand_cnt = 0
+            _MAX_EXPAND = 3
             for sc in _all_scenario_stats:
                 cont_str = f" {sc['cont']}" if sc['cont'] else ""
                 lines.append(
@@ -12642,11 +12646,13 @@ def _v4_shadow_report_lines():
                     f" PnL{sc['pnl']:+.2f}% MFE{sc['mfe']:+.2f}% MAE{sc['mae']:+.2f}%"
                     f" cap={sc['capture']:.0f}%{cont_str}"
                 )
-                _expand = (abs(sc['pnl']) >= 0.25 or sc['capture'] <= -20
-                           or sc['wr'] <= 20 or sc['n'] >= 3000
-                           or any(_dd >= 0.8 for _dd, *_ in sc.get("d_pairs", [])))
+                _expand = (_expand_cnt < _MAX_EXPAND and (
+                    abs(sc['pnl']) >= 0.25 or sc['capture'] <= -20
+                    or sc['wr'] <= 20 or sc['n'] >= 3000
+                    or any(_dd >= 0.8 for _dd, *_ in sc.get("d_pairs", []))))
                 if not _expand:
                     continue
+                _expand_cnt += 1
                 curve_str = " ".join(f"{k}s:{v:+.2f}%" for k, v in sorted(sc["curve"].items()))
                 if curve_str:
                     lines.append(f"    ⏱ {curve_str}")
@@ -12921,11 +12927,29 @@ def _survival_analysis_lines():
                     _early_warn = f" ⚠조기붕괴({','.join(_fails)})"
         if not lines:
             lines.append("🧬 Survival Analysis (dd_peak_60s 기준):")
-        lines.append(f"  [{route}] A(0~0.3%):{a_g['n']}건"
-                     f" B(0.3~0.5%):{grps['B']['n']}건"
-                     f" C(0.5%~):{c_g['n']}건"
-                     f" → {action}{_early_warn}")
-        for g_name in ("A", "B", "C"):
+        # ENABLE 체크 (상세/요약 분기 판단에도 사용)
+        mae_dist = data.get("mae_dist", {})
+        _checks = {}
+        if total_n >= 80:
+            _checks = {
+                "n↑100": total_n >= 100,
+                "A↑30": a_g["n"] >= 30,
+                "C↑30": c_g["n"] >= 30,
+                "ac↑0.5": ac_lift > 0.5,
+                "hl↑0.3": hl_lift > 0.3,
+                "A_pnl↑0": a_g["avg_pnl"] > 0,
+            }
+            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
+                _checks["A_mae80%↓0.3"] = mae_dist["A"]["within_03_pct"] >= 80
+        _en_pass = sum(1 for v in _checks.values() if v) if _checks else 0
+        _en_total = len(_checks) if _checks else 7
+        _is_near_enable = _en_pass >= 4
+        lines.append(f"  [{route}] A:{a_g['n']} B:{grps['B']['n']} C:{c_g['n']}"
+                     f" lift{ac_lift:+.2f} hl{hl_lift:+.2f}"
+                     f" → {action} {_en_pass}/{_en_total}{_early_warn}")
+        if not _is_near_enable and action == "BLOCK":
+            continue
+        for g_name in ("A", "C"):
             g = grps[g_name]
             if g["n"] == 0:
                 continue
@@ -12936,55 +12960,25 @@ def _survival_analysis_lines():
                                                            key=lambda x: int(x[0])))
             lines.append(f"    {g_name}: 승률{g['wr']:.0f}%"
                          f" PnL{g['avg_pnl']:+.2f}%{curve_str}")
-        lines.append(f"    → A-C lift: {ac_lift:+.2f}%p")
         ds = data["d_scores"][:TOP_D_SCORE_SURVIVAL]
         if ds:
-            lines.append(f"    📊 d-score TOP3:")
-            for item in ds:
-                lines.append(
-                    f"      {item['feat']}: A={item['a_mean']:.3f}"
-                    f" C={item['c_mean']:.3f} d={item['d']:.2f}"
-                    f" ({item['direction']})")
+            _ds_str = " ".join(f"{item['feat']}({item['d']:.2f})" for item in ds)
+            lines.append(f"    📊 d-top: {_ds_str}")
         if sc and sc.get("rules"):
             hi, lo = sc["hi"], sc["lo"]
-            rule_str = " & ".join(f"{f}{op}{th}" for f, op, th in sc["rules"])
-            lines.append(f"    🎯 Scoring (score 2+): {rule_str}")
-            lines.append(f"      HI: {hi['n']}건 승률{hi['wr']:.0f}%"
-                         f" PnL{hi['pnl']:+.2f}%"
-                         f" | LO: {lo['n']}건 승률{lo['wr']:.0f}%"
-                         f" PnL{lo['pnl']:+.2f}%")
-            if hl_lift != 0:
-                lines.append(f"      → HI-LO lift: {hl_lift:+.2f}%p")
-        # mae_60s 분포 (early_sl 검증용)
-        mae_dist = data.get("mae_dist", {})
+            lines.append(f"    🎯 HI:{hi['n']}건 {hi['pnl']:+.2f}%"
+                         f" LO:{lo['n']}건 {lo['pnl']:+.2f}%"
+                         f" lift{hl_lift:+.2f}")
         if "A" in mae_dist:
             md = mae_dist["A"]
             lines.append(
-                f"    📉 A mae_60s: n={md['n']}"
-                f" p50={md['p50']:+.3f}%"
-                f" p80={md['p80']:+.3f}%"
-                f" worst={md['worst']:+.3f}%"
-                f" (0.3%내 {md['within_03_pct']:.0f}%"
-                f" 0.5%내 {md['within_05_pct']:.0f}%)")
-        # ENABLE 자동 validation (n>=80부터 표시)
-        if total_n >= 80:
-            _checks = {
-                "n↑100": total_n >= 100,
-                "A↑30": _a_n >= 30,
-                "C↑30": _c_n >= 30,
-                "ac↑0.5": ac_lift > 0.5,
-                "hl↑0.3": hl_lift > 0.3,
-                "A_pnl↑0": _a_pos,
-            }
-            _dd_ok = True
-            if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _dd_ok = mae_dist["A"]["within_03_pct"] >= 80
-                _checks["A_mae80%↓0.3"] = _dd_ok
-            _pass = sum(1 for v in _checks.values() if v)
-            _total = len(_checks)
+                f"    📉 mae: n={md['n']}"
+                f" 0.3%내{md['within_03_pct']:.0f}%"
+                f" 0.5%내{md['within_05_pct']:.0f}%")
+        if _checks:
             _marks = " ".join(
                 f"{'✅' if v else '❌'}{k}" for k, v in _checks.items())
-            lines.append(f"    🔑 ENABLE: {_pass}/{_total} {_marks}")
+            lines.append(f"    🔑 ENABLE: {_en_pass}/{_en_total} {_marks}")
             if all(_checks.values()):
                 print(f"[ENABLE_READY] {route}: ALL conditions met! {_checks}")
     return lines
