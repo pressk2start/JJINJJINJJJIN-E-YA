@@ -1465,17 +1465,14 @@ def _pipeline_report(force=False):
     if _tf_parts:
         _rl.append(f"📡 fetch: {' '.join(_tf_parts)}")
 
-    # lazy tick shadow measurement
+    # lazy-tick 적용 후 실측
     _lt_snap = list(_LAZY_TICK_HISTORY)
     if len(_lt_snap) >= 3:
         _lt_avg_f = sum(s[0] for s in _lt_snap) / len(_lt_snap)
         _lt_avg_v4 = sum(s[1] for s in _lt_snap) / len(_lt_snap)
         _lt_avg_g = sum(s[2] for s in _lt_snap) / len(_lt_snap)
-        _lt_wasted = _lt_avg_f - _lt_avg_v4
-        _lt_save_pct = (_lt_wasted / _lt_avg_f * 100) if _lt_avg_f > 0 else 0
         _rl.append(
-            f"🔀 lazy-tick: tick{_lt_avg_f:.1f}→v4{_lt_avg_v4:.1f}→gate{_lt_avg_g:.1f}"
-            f" 절감{_lt_wasted:.1f}c({_lt_save_pct:.0f}%) n={len(_lt_snap)}"
+            f"🔀 lazy-tick: {_lt_avg_f:.1f}c/cycle→v4{_lt_avg_v4:.1f}→gate{_lt_avg_g:.1f} n={len(_lt_snap)}"
         )
 
     # detect internal stage breakdown
@@ -15200,44 +15197,10 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     current_volume = cur.get("candle_acc_trade_price", 0)
     past_volumes = [c["candle_acc_trade_price"] for c in c1[-7:-2] if c["candle_acc_trade_price"] > 0]
 
-    # 틱 확보
-    with _fetch_tag('detect_leader'):
-        ticks = get_recent_ticks(m, 100)
-    _lazy_tick_inc("fetched")
-    if not ticks:
-        cut("TICKS_LOW", f"{m} no ticks")
-        _pipeline_inc("gate_fail_no_ticks")
-        return None
-
-    # 🔧 진입지연개선: 실시간 러닝바로 price_change 보강 (캔들 확정 전 조기 감지)
-    _running = running_1m_bar(ticks, prev)
-    if _running and _running.get("change_from_prev", 0) > price_change:
-        _running_pc = _running["change_from_prev"]
-        # 🔧 FIX: 스푸핑 방지 — 러닝바 가격변동이 비정상(5%초과)이면 무시
-        if 0 < _running_pc <= 0.05:
-            price_change = max(price_change, _running_pc * 0.9)
-            # 러닝바 거래대금으로 current_volume도 보강
-            _running_vol = _running.get("volume_krw", 0)
-            # 🔧 FIX: 거래대금도 이전 평균의 10배 이내만 허용
-            _vol_cap = max(current_volume, sum(past_volumes) / max(len(past_volumes), 1)) * 10
-            if 0 < _running_vol <= _vol_cap and _running_vol > current_volume:
-                current_volume = max(current_volume, _running_vol * 0.85)
-
-    # 🔥 평시 TPS 업데이트 (점화 감지용)
-    update_baseline_tps(m, ticks)
-
-    # === 테이프 지표 (stage1_gate용) ===
-    t15 = micro_tape_stats_from_ticks(ticks, 15)
-    t45 = micro_tape_stats_from_ticks(ticks, 45)
-    twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
-    turn = twin["krw"] / max(ob["depth_krw"], 1)
-
-    # 🔥 1단계 게이트 적용 (단일 통합 필터)
-    # 🔧 FIX: SMA → EMA 기반 vol_surge (펌프 초반 더 빠른 반응)
+    # vol_surge 기본값 (c1 기반, tick 없이 계산)
     if past_volumes and len(past_volumes) >= 3:
         vol_ema = ema_last(past_volumes, min(len(past_volumes), 10))
         vol_surge_ema = current_volume / max(vol_ema, 1) if vol_ema else 1.0
-        # 3분 누적 비교 추가 (c1[-3:] 최근 3분 vs 과거 평균)
         if len(c1) >= 6:
             sum_3 = sum(c["candle_acc_trade_price"] for c in c1[-3:])
             past_sums = []
@@ -15245,30 +15208,15 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
                 if i >= 2:
                     s = sum(c["candle_acc_trade_price"] for c in c1[i-2:i+1])
                     past_sums.append(s)
-            # 🔧 FIX: 표본 3개 미만이면 mean 신뢰도 부족 → EMA 폴백 (노이즈성 vol_surge 방지)
             vol_surge_3m = (sum_3 / max(statistics.mean(past_sums), 1)) if len(past_sums) >= 3 else vol_surge_ema
             vol_surge = max(vol_surge_ema, vol_surge_3m * 0.8)
         else:
             vol_surge = vol_surge_ema
     else:
-        # 🔧 FIX: 데이터 부족 시 중립값 (8.0은 무조건 통과 티켓 → 오진입 유발)
         vol_surge = 1.0
-    accel = calc_flow_acceleration(ticks)
-    turn_pct = turn * 100  # decimal → %
-    imbalance = calc_orderbook_imbalance(ob)
-    fresh_ok, fresh_age, fresh_max_age = last_two_ticks_fresh(ticks, return_age=True)
 
-    # 🔥 섀도우 모드용 지표 미리 계산
-    ia = inter_arrival_stats(ticks, 60)  # 60초 윈도우 (샘플 충분해야 CV 안정)
-    cv = ia["cv"]
-    pstd10 = price_band_std(ticks, 10)  # 10초 윈도우 (현재 순간 흔들림 감지)
-    # 🔧 FIX: None이면 None 유지 → gate에서 데이터 부족 시 pstd 체크 스킵
-    cons_buys = calc_consecutive_buys(ticks, 15)
-    overheat = accel * vol_surge
-    spread = ob.get("spread", 9.9)
-
-    # 🕯️ 캔들 모멘텀 지표 (stage1_gate 캔들 보너스용)
-    candle_body_pct = (cur["trade_price"] / max(cur["opening_price"], 1) - 1)  # 종가-시가 %
+    # 🕯️ 캔들 모멘텀 지표 (c1 기반 — tick 불필요)
+    candle_body_pct = (cur["trade_price"] / max(cur["opening_price"], 1) - 1)
     _green_streak = 0
     for _gc in reversed(c1):
         if _gc["trade_price"] > _gc["opening_price"]:
@@ -15277,7 +15225,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
             break
     green_streak = _green_streak
 
-    # 📊 윗꼬리 비율 계산 (180신호분석: uw<10% wr21.9%, 10-30% wr50.9% 최적)
+    # 📊 윗꼬리 비율 계산
     _uw_high = cur.get("high_price", cur["trade_price"])
     _uw_low = cur.get("low_price", cur["trade_price"])
     _uw_close = cur["trade_price"]
@@ -15288,41 +15236,24 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     else:
         upper_wick_ratio = 0.0
 
-    # 🛑 하드 컷: 극단 스푸핑 패턴 (확신 구간만 차단)
-    # buy_ratio >= 0.98 AND pstd <= 0.001 AND CV >= 2.5
-    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
-        cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
-        _pipeline_inc("gate_fail_fake_flow")
-        return None
-
-    # 🚀 신규 조건 계산: EMA20 돌파, 고점 돌파, 거래량 MA 대비
+    # 🚀 EMA20 돌파, 고점 돌파, 거래량 MA (c1 기반)
     cur_price = cur["trade_price"]
-    cur_high = cur.get("high_price", cur_price)  # 🔧 현재봉 고가
+    cur_high = cur.get("high_price", cur_price)
     closes = [x["trade_price"] for x in c1]
     ema20 = ema_last(closes, 20) if len(closes) >= 20 else None
     ema20_breakout = (ema20 is not None and cur_price > ema20)
 
-    # 🔧 FIX: 고점 돌파 - 윗꼬리 오탐 방지 (점화 아닐 때는 종가 확인)
     prev_high = prev_high_from_candles(c1, lookback=12, skip_recent=1)
-    high_breakout_wick = (prev_high > 0 and cur_high > prev_high)  # 고가 기준 (윅 포함)
-    high_breakout_close = (prev_high > 0 and cur_price > prev_high * 1.0005)  # 종가 기준 (0.05% 버퍼)
+    high_breakout_wick = (prev_high > 0 and cur_high > prev_high)
+    high_breakout_close = (prev_high > 0 and cur_price > prev_high * 1.0005)
 
     vol_ma20 = vol_ma_from_candles(c1, period=20)
     vol_vs_ma = current_volume / max(vol_ma20, 1) if vol_ma20 > 0 else 0.0
 
-    # 🔥 점화 감지 점수 계산 (stage1_gate에 전달)
-    _, ignition_reason, ignition_score = ignition_detected(
-        market=m,
-        ticks=ticks,
-        avg_candle_volume=vol_ma20,
-        ob=ob,
-        cooldown_ms=15000
-    )
-
-    # 🔧 WF데이터: 20봉_고점돌파 비활성화됨 — high_breakout 판정 불필요
-    high_breakout = False  # WF FAIL 시그널
-
-    _ign_candidate = (ignition_score >= 3)
+    high_breakout = False
+    mega = False
+    imbalance = calc_orderbook_imbalance(ob)
+    spread = ob.get("spread", 9.9)
 
     # ============================================================
     # 🔧 WF 데이터 기반: strategy_v4.evaluate_entry() 통합 진입 판정
@@ -15407,13 +15338,61 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
           f"필터={_v4_signal['filters_hit']} 청산={_v4_exit_params['description']}")
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
-    # 같은 코인에서 연속 2회 이상 손절 → 30분 쿨다운
     if is_coin_loss_cooldown(m):
         cut("COIN_LOSS_CD", f"{m} 코인별연패쿨다운 (최근 30분 내 {COIN_LOSS_MAX}패 → 재진입 차단)", near_miss=False)
         _pipeline_inc("gate_fail_coin_cd")
         return None
 
-    # 🔧 GT tick_age 필터 (shadow n=246: W5.2 vs L3.4 — 늦은 진입이 승률 높음)
+    # === lazy-tick: v4 통과 후에만 tick fetch (36→0.1 calls/cycle) ===
+    _lazy_tick_inc("fetched")
+    with _fetch_tag('detect_leader'):
+        ticks = get_recent_ticks(m, 100)
+    if not ticks:
+        cut("TICKS_LOW", f"{m} no ticks")
+        _pipeline_inc("gate_fail_no_ticks")
+        return None
+
+    # 러닝바로 price_change/current_volume 보강
+    _running = running_1m_bar(ticks, prev)
+    if _running and _running.get("change_from_prev", 0) > price_change:
+        _running_pc = _running["change_from_prev"]
+        if 0 < _running_pc <= 0.05:
+            price_change = max(price_change, _running_pc * 0.9)
+            _running_vol = _running.get("volume_krw", 0)
+            _vol_cap = max(current_volume, sum(past_volumes) / max(len(past_volumes), 1)) * 10
+            if 0 < _running_vol <= _vol_cap and _running_vol > current_volume:
+                current_volume = max(current_volume, _running_vol * 0.85)
+
+    update_baseline_tps(m, ticks)
+
+    # === 테이프 지표 ===
+    t15 = micro_tape_stats_from_ticks(ticks, 15)
+    t45 = micro_tape_stats_from_ticks(ticks, 45)
+    twin = t15 if t15["krw_per_sec"] >= t45["krw_per_sec"] else t45
+    turn = twin["krw"] / max(ob["depth_krw"], 1)
+    turn_pct = turn * 100
+    accel = calc_flow_acceleration(ticks)
+    fresh_ok, fresh_age, fresh_max_age = last_two_ticks_fresh(ticks, return_age=True)
+    overheat = accel * vol_surge
+
+    ia = inter_arrival_stats(ticks, 60)
+    cv = ia["cv"]
+    pstd10 = price_band_std(ticks, 10)
+    cons_buys = calc_consecutive_buys(ticks, 15)
+
+    # 점화 감지
+    _, ignition_reason, ignition_score = ignition_detected(
+        market=m, ticks=ticks, avg_candle_volume=vol_ma20, ob=ob, cooldown_ms=15000
+    )
+    _ign_candidate = (ignition_score >= 3)
+
+    # 🛑 하드 컷: 극단 스푸핑 패턴
+    if twin["buy_ratio"] >= 0.98 and pstd10 is not None and pstd10 <= 0.001 and cv is not None and cv >= 2.5:
+        cut("FAKE_FLOW_HARD", f"{m} buy{twin['buy_ratio']:.2f} pstd{pstd10:.4f} cv{cv:.2f}")
+        _pipeline_inc("gate_fail_fake_flow")
+        return None
+
+    # 🔧 GT tick_age 필터
     if _v4_signal.get("logic_group") == "GT":
         _t10_gate = micro_tape_stats_from_ticks(ticks, 10)
         _entry_tick_age = _t10_gate["age"]
