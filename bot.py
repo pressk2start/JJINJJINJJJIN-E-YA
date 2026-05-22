@@ -604,6 +604,11 @@ _CYCLE_UNIVERSAL_IND_MS = 0.0
 _CYCLE_DETECT_V4_MS = 0.0
 _CYCLE_TIMING_LOCK = threading.Lock()
 
+_CYCLE_LAZY_TICK_FETCHED = 0
+_CYCLE_LAZY_TICK_TO_V4 = 0
+_CYCLE_LAZY_TICK_TO_GATE = 0
+_LAZY_TICK_HISTORY = deque(maxlen=200)
+
 # call-site tag 기반 fetch 측정 (thread-local tag + 함수 레벨 wrap)
 # get_minutes_candles(tf, ...) 호출 시점에 현재 tag를 읽어 key=f"c{tf}_{tag}"로 분류
 # → 모든 호출 경로 자동 추적 (detect_leader / orphan / box / circle / other 등)
@@ -645,6 +650,17 @@ def _record_tagged_fetch(tf, elapsed_ms):
         cur[1] += 1
 
 
+def _lazy_tick_inc(stage):
+    global _CYCLE_LAZY_TICK_FETCHED, _CYCLE_LAZY_TICK_TO_V4, _CYCLE_LAZY_TICK_TO_GATE
+    with _CYCLE_TIMING_LOCK:
+        if stage == "fetched":
+            _CYCLE_LAZY_TICK_FETCHED += 1
+        elif stage == "v4":
+            _CYCLE_LAZY_TICK_TO_V4 += 1
+        elif stage == "gate":
+            _CYCLE_LAZY_TICK_TO_GATE += 1
+
+
 def _add_cycle_detect_leader_ms(ms):
     """detect_leader_stock 한 번 호출 시간 누적"""
     global _CYCLE_DETECT_LEADER_MS
@@ -669,19 +685,28 @@ def _add_cycle_detect_v4_ms(ms):
 def _flush_cycle_internal_timing():
     """사이클 끝에서 호출 — 누적값을 stage 측정으로 flush + 리셋"""
     global _CYCLE_DETECT_LEADER_MS, _CYCLE_UNIVERSAL_IND_MS, _CYCLE_DETECT_V4_MS
+    global _CYCLE_LAZY_TICK_FETCHED, _CYCLE_LAZY_TICK_TO_V4, _CYCLE_LAZY_TICK_TO_GATE
     with _CYCLE_TIMING_LOCK:
         _dl = _CYCLE_DETECT_LEADER_MS
         _ui = _CYCLE_UNIVERSAL_IND_MS
         _dv = _CYCLE_DETECT_V4_MS
+        _lt_fetched = _CYCLE_LAZY_TICK_FETCHED
+        _lt_v4 = _CYCLE_LAZY_TICK_TO_V4
+        _lt_gate = _CYCLE_LAZY_TICK_TO_GATE
         _CYCLE_DETECT_LEADER_MS = 0.0
         _CYCLE_UNIVERSAL_IND_MS = 0.0
         _CYCLE_DETECT_V4_MS = 0.0
+        _CYCLE_LAZY_TICK_FETCHED = 0
+        _CYCLE_LAZY_TICK_TO_V4 = 0
+        _CYCLE_LAZY_TICK_TO_GATE = 0
     if _dl > 0:
         _pipeline_record_stage("detect_leader", _dl)
     if _ui > 0:
         _pipeline_record_stage("universal_ind", _ui)
     if _dv > 0:
         _pipeline_record_stage("detect_v4", _dv)
+    if _lt_fetched > 0:
+        _LAZY_TICK_HISTORY.append((_lt_fetched, _lt_v4, _lt_gate))
     # tag 기반 fetch 누적 flush
     with _TAGGED_FETCH_LOCK:
         tag_snap = {k: list(v) for k, v in _CYCLE_FETCH_BY_TAG.items()}
@@ -1439,6 +1464,19 @@ def _pipeline_report(force=False):
                 _tf_parts.append(f"{_tfk}:{_avg_ms:.0f}ms/{_avg_calls:.1f}c")
     if _tf_parts:
         _rl.append(f"📡 fetch: {' '.join(_tf_parts)}")
+
+    # lazy tick shadow measurement
+    _lt_snap = list(_LAZY_TICK_HISTORY)
+    if len(_lt_snap) >= 3:
+        _lt_avg_f = sum(s[0] for s in _lt_snap) / len(_lt_snap)
+        _lt_avg_v4 = sum(s[1] for s in _lt_snap) / len(_lt_snap)
+        _lt_avg_g = sum(s[2] for s in _lt_snap) / len(_lt_snap)
+        _lt_wasted = _lt_avg_f - _lt_avg_v4
+        _lt_save_pct = (_lt_wasted / _lt_avg_f * 100) if _lt_avg_f > 0 else 0
+        _rl.append(
+            f"🔀 lazy-tick: tick{_lt_avg_f:.1f}→v4{_lt_avg_v4:.1f}→gate{_lt_avg_g:.1f}"
+            f" 절감{_lt_wasted:.1f}c({_lt_save_pct:.0f}%) n={len(_lt_snap)}"
+        )
 
     # detect internal stage breakdown
     _di_parts = []
@@ -15165,6 +15203,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # 틱 확보
     with _fetch_tag('detect_leader'):
         ticks = get_recent_ticks(m, 100)
+    _lazy_tick_inc("fetched")
     if not ticks:
         cut("TICKS_LOW", f"{m} no ticks")
         _pipeline_inc("gate_fail_no_ticks")
@@ -15352,6 +15391,8 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _v4_signal = None
 
     # v4 신호 없으면 → 진입 차단
+    if _v4_signal:
+        _lazy_tick_inc("v4")
     if not _v4_signal:
         cut("NO_V4_SIGNAL", f"{m} v4 진입 조건 미충족")
         _pipeline_inc("gate_fail_no_v4")
@@ -15524,6 +15565,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
 
     # 🔧 WF데이터: spike tracker 갱신 비활성화 (1파/2파 비활성화됨)
 
+    _lazy_tick_inc("gate")
     _pipeline_inc("gate_pass")
     _pipeline_hourly_inc("gate_pass")
     _pipeline_record_pass_metrics(m, {
