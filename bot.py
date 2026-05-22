@@ -1326,6 +1326,49 @@ def _pipeline_report(force=False):
     except Exception:
         print(f"[SURVIVAL_REPORT_ERR] {traceback.format_exc()}")
 
+    # ── 호가 분포 (route별 best_ask/bid p10/p50) ──
+    def _fmt_man(v):
+        return f"{v/10000:,.0f}만" if v >= 10000 else f"{v:,.0f}"
+    try:
+        _ob_routes = {}
+        with _SHADOW_PERF_LOCK:
+            for _obk, _obs in _SHADOW_PERF_STATS.items():
+                _obr = _obs.get("route", "?")
+                if _obr not in (_PRODUCTION_ROUTES | _ACTIVE_RESEARCH):
+                    continue
+                for _tr in _obs.get("trade_records", [])[-200:]:
+                    _inds = _tr.get("inds", {})
+                    _ask = _inds.get("best_ask_krw", 0)
+                    _bid = _inds.get("best_bid_krw", 0)
+                    if _ask > 0:
+                        _ob_routes.setdefault(_obr, {"ask": [], "bid": [], "w_ask": [], "l_ask": []})
+                        _ob_routes[_obr]["ask"].append(_ask)
+                        if _bid > 0:
+                            _ob_routes[_obr]["bid"].append(_bid)
+                        if _tr.get("pnl", 0) > 0:
+                            _ob_routes[_obr]["w_ask"].append(_ask)
+                        else:
+                            _ob_routes[_obr]["l_ask"].append(_ask)
+        if _ob_routes:
+            _ob_lines = []
+            for _obr, _obd in sorted(_ob_routes.items()):
+                _asks = sorted(_obd["ask"])
+                if len(_asks) < 10:
+                    continue
+                _p10 = _asks[len(_asks) // 10]
+                _p50 = _asks[len(_asks) // 2]
+                _line = f"  {_obr}: ask p10={_fmt_man(_p10)} p50={_fmt_man(_p50)}"
+                if len(_obd.get("w_ask", [])) >= 5 and len(_obd.get("l_ask", [])) >= 5:
+                    _w_med = sorted(_obd["w_ask"])[len(_obd["w_ask"]) // 2]
+                    _l_med = sorted(_obd["l_ask"])[len(_obd["l_ask"]) // 2]
+                    _line += f" W={_fmt_man(_w_med)} L={_fmt_man(_l_med)}"
+                _ob_lines.append(_line)
+            if _ob_lines:
+                _rl.append("📊 호가1 분포:")
+                _rl.extend(_ob_lines)
+    except Exception:
+        pass
+
     # 값 분포 + 니어미스
     vs = _pipeline_value_summary()
     _m3 = vs.get("m3_pct", {})
@@ -4247,8 +4290,10 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             try:
                 u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
                 best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+                best_bid_krw = float(u0["bid_price"]) * float(u0["bid_size"])
             except Exception:
                 best_ask_krw = 0.0
+                best_bid_krw = 0.0
 
             # 🔍 경로 정보: signal_tag 하나로 통일
             log_trade_features({
@@ -4275,6 +4320,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "cv": round(cv, 2),
                 "pstd": round(pstd * 100, 4),
                 "best_ask_krw": int(best_ask_krw),
+                "best_bid_krw": int(best_bid_krw),
                 "shadow_flags": pre.get("shadow_flags", ""),
                 "would_cut": 1 if pre.get("would_cut", False) else 0,
                 "is_prebreak": 1 if pre.get("is_prebreak", False) else 0,
@@ -12558,8 +12604,14 @@ def _v4_shadow_report_lines():
                             _scored.append((d, ik, wv, wn, lv, ln))
                     _scored.sort(reverse=True)
                     for _d, ik, wv, wn, lv, ln in _scored[:TOP_D_SCORE_PROD]:
-                        _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
-                        lines.append(f"  📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_d:.2f}")
+                        if "krw" in ik.lower() and abs(wv) >= 10000:
+                            _wstr = f"{wv/10000:,.0f}만"
+                            _lstr = f"{lv/10000:,.0f}만"
+                        else:
+                            _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
+                            _wstr = f"{wv:{_fmt}}"
+                            _lstr = f"{lv:{_fmt}}"
+                        lines.append(f"  📊{ik}: W{_wstr}({wn}) / L{_lstr}({ln}) d={_d:.2f}")
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
@@ -12748,8 +12800,14 @@ def _v4_shadow_report_lines():
                     lines.append(f"    ⏱ {curve_str}")
                 if sc.get("d_pairs") and sc["route"] in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
                     for _dd, ik, wv, wn, lv, ln, _dir in sc["d_pairs"]:
-                        _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
-                        lines.append(f"    📊{ik}: W{wv:{_fmt}}({wn}) / L{lv:{_fmt}}({ln}) d={_dd:.2f} ({_dir})")
+                        if "krw" in ik.lower() and abs(wv) >= 10000:
+                            _wstr = f"{wv/10000:,.0f}만"
+                            _lstr = f"{lv/10000:,.0f}만"
+                        else:
+                            _fmt = ".3f" if abs(wv) < 10 and abs(lv) < 10 else ".1f"
+                            _wstr = f"{wv:{_fmt}}"
+                            _lstr = f"{lv:{_fmt}}"
+                        lines.append(f"    📊{ik}: W{_wstr}({wn}) / L{_lstr}({ln}) d={_dd:.2f} ({_dir})")
                 if sc.get("buckets"):
                     _prev_bk = None
                     for bk_key, lo, hi, bn, bwr, bpnl in sc["buckets"]:
@@ -15559,8 +15617,10 @@ def snapshot_row(m, entry_price, pre, c1, ob, t15, btc1m, btc5m,
     try:
         u0 = ob.get("raw", {}).get("orderbook_units", [])[0]
         best_ask_krw = float(u0["ask_price"]) * float(u0["ask_size"])
+        best_bid_krw = float(u0["bid_price"]) * float(u0["bid_size"])
     except Exception:
         best_ask_krw = 0.0
+        best_bid_krw = 0.0
 
     row = {
         "ts": now_kst_str(),
@@ -15596,6 +15656,7 @@ def snapshot_row(m, entry_price, pre, c1, ob, t15, btc1m, btc5m,
         "cv": round(cv, 2),
         "pstd": round(pstd * 100, 4),  # % 단위
         "best_ask_krw": int(best_ask_krw),
+        "best_bid_krw": int(best_bid_krw),
         "prebreak_band": round(prebreak_band * 100, 2),  # % 단위
         "is_prebreak": is_prebreak,
         # 🔥 GATE 핵심 지표
