@@ -957,9 +957,12 @@ _EXEC_QUALITY_LOG_PATH = os.path.join(os.getcwd(), "exec_quality.csv")
 _EXEC_QUALITY_LOCK = threading.Lock()
 _EXEC_QUALITY_INITIALIZED = False
 _EXEC_QUALITY_MAX_BYTES = 50 * 1024 * 1024  # 50MB rotation
+_EXEC_QUALITY_MEM = {}  # route → deque of {slip_50w, slip_100w, ..., ask1_krw, ...}
+_EXEC_QUALITY_MEM_MAX = 500
 _EXEC_QUALITY_FIELDS = [
     "ts", "market", "route", "is_live",
     "signal_price", "fill_price", "fill_slip_pct",
+    "fill_delay_ms", "seed_krw",
     "mid_price", "spread_pct",
     "ask1_krw", "bid1_krw",
     "ask_cum3_krw", "ask_cum5_krw", "ask_cum10_krw",
@@ -970,7 +973,8 @@ _EXEC_QUALITY_FIELDS = [
 
 
 def _log_exec_quality(market, route, is_live, signal_price, ob_units,
-                      fill_price=0.0, fill_slip_pct=0.0):
+                      fill_price=0.0, fill_slip_pct=0.0,
+                      fill_delay_ms=0, seed_krw=0):
     """호가창 깊이 + VWAP 슬리피지 시뮬레이션 로그 (시드 결정용)"""
     global _EXEC_QUALITY_INITIALIZED
     if not ob_units:
@@ -989,6 +993,8 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
         "signal_price": round(signal_price, 2),
         "fill_price": round(fill_price, 2) if fill_price else "",
         "fill_slip_pct": round(fill_slip_pct, 4) if fill_price else "",
+        "fill_delay_ms": int(fill_delay_ms) if fill_delay_ms else "",
+        "seed_krw": int(seed_krw) if seed_krw else "",
         "mid_price": round(mid, 2), "spread_pct": spread_pct,
         "ask1_krw": a1_krw, "bid1_krw": b1_krw,
     }
@@ -1020,6 +1026,45 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
                 w.writerow(row)
         except Exception as e:
             print(f"[EXEC_QUALITY_ERR] {e}")
+    # in-memory 집계 (route별 capacity tracking)
+    _mem_entry = {}
+    for label in ("50w", "100w", "300w", "500w", "1000w"):
+        v = row.get(f"slip_buy_{label}")
+        if v != "":
+            _mem_entry[f"slip_{label}"] = float(v)
+    _mem_entry["ask1_krw"] = row.get("ask1_krw", 0)
+    _mem_entry["ask_cum5_krw"] = row.get("ask_cum5_krw", 0)
+    _mem_entry["spread_pct"] = row.get("spread_pct", 0)
+    _r = route
+    if _r not in _EXEC_QUALITY_MEM:
+        _EXEC_QUALITY_MEM[_r] = deque(maxlen=_EXEC_QUALITY_MEM_MAX)
+    _EXEC_QUALITY_MEM[_r].append(_mem_entry)
+
+
+def _exec_quality_summary_lines():
+    """route별 execution capacity 요약 (리포트용)"""
+    if not _EXEC_QUALITY_MEM:
+        return []
+    lines = ["📊 exec capacity (route별 VWAP slip bps):"]
+    header = "route      n  50w  100w  300w  500w 1000w  ask1평균"
+    lines.append(f"<code>{header}</code>")
+    for route in sorted(_EXEC_QUALITY_MEM.keys()):
+        entries = list(_EXEC_QUALITY_MEM[route])
+        n = len(entries)
+        if n < 3:
+            continue
+        cols = []
+        for label in ("50w", "100w", "300w", "500w", "1000w"):
+            vals = [e[f"slip_{label}"] for e in entries if f"slip_{label}" in e]
+            if vals:
+                avg_bps = sum(vals) / len(vals) * 100
+                cols.append(f"{avg_bps:5.1f}")
+            else:
+                cols.append("    -")
+        avg_ask1 = sum(e.get("ask1_krw", 0) for e in entries) / n
+        row_str = f"{route:<10s} {n:>3d} {''.join(cols)}  {avg_ask1/1e6:5.1f}M"
+        lines.append(f"<code>{row_str}</code>")
+    return lines
 
 
 _BLOCKED_THREAD_LOCAL = threading.local()  # 차단 건 가상 추적용 thread-local
@@ -1579,6 +1624,12 @@ def _pipeline_report(force=False):
             _hourly_parts.append(f"{h}시:{h_sig[h]}/{h_gp[h]}/{h_succ[h]}")
     if _hourly_parts:
         _rl.append(f"🕐 시간대: {' '.join(_hourly_parts)}")
+
+    # exec capacity 요약 (route별 슬리피지/호가깊이)
+    _eq_lines = _exec_quality_summary_lines()
+    if _eq_lines:
+        _rl.append("")
+        _rl.extend(_eq_lines)
 
     # registry-report consistency check (4단계)
     _consistency_warns = _report_consistency_check(_compact_routes, _research_routes)
@@ -4291,10 +4342,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         try:
             _eq_ob = pre.get("ob", {})
             _eq_units = _eq_ob.get("raw", {}).get("orderbook_units", []) if _eq_ob else []
+            _eq_delay = (time.time() - pre.get("signal_ts", time.time())) * 1000
             if _eq_units:
                 _log_exec_quality(m, pre.get("signal_tag", "LIVE"), True,
                                   signal_price, _eq_units,
-                                  fill_price=avg_price, fill_slip_pct=slip_pct)
+                                  fill_price=avg_price, fill_slip_pct=slip_pct,
+                                  fill_delay_ms=_eq_delay, seed_krw=krw_to_use)
         except Exception:
             pass
 
@@ -15655,6 +15708,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         "v4_exit_params": _v4_exit_params,
         "v4_logic_group": _v4_signal.get("logic_group", "A") if _v4_signal else "A",
         "v4_filters_hit": _v4_signal.get("filters_hit", []) if _v4_signal else [],
+        "signal_ts": time.time(),
     }
 
     # 🔧 WF데이터: spike tracker 갱신 비활성화 (1파/2파 비활성화됨)
