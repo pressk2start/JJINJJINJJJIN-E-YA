@@ -1047,24 +1047,22 @@ def _exec_quality_summary_lines():
     """route별 execution capacity 요약 (리포트용)"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 체결품질 (route별 예상 슬리피지 bps):"]
-    header = "route       n   50만 100만 300만 500만 1000만 ask1평균"
-    lines.append(f"<code>{header}</code>")
+    lines = ["📊 체결품질 (slip bps):"]
+    lines.append("<code>        n 100만 500만 1천만</code>")
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
         if n < 3:
             continue
         cols = []
-        for label in ("50w", "100w", "300w", "500w", "1000w"):
+        for label in ("100w", "500w", "1000w"):
             vals = [e[f"slip_{label}"] for e in entries if f"slip_{label}" in e]
             if vals:
                 avg_bps = sum(vals) / len(vals) * 100
                 cols.append(f"{avg_bps:5.1f}")
             else:
                 cols.append("    -")
-        avg_ask1 = sum(e.get("ask1_krw", 0) for e in entries) / n
-        row_str = f"{route:<10s} {n:>3d} {''.join(cols)}  {avg_ask1/1e6:5.1f}M"
+        row_str = f"{route:<7s} {n:>2d}{''.join(cols)}"
         lines.append(f"<code>{row_str}</code>")
     return lines
 
