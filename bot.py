@@ -1050,6 +1050,21 @@ def _percentile(vals, pct):
     return s[min(idx, len(s) - 1)]
 
 
+def _fmt_krw(v):
+    """KRW 금액을 단위 자동선택하여 간결하게 표시."""
+    v = abs(v)
+    if v >= 1e8:
+        return f"{v/1e8:.1f}억"
+    if v >= 1e6:
+        return f"{v/1e4:.0f}만"
+    if v >= 1e4:
+        m = v / 1e4
+        return f"{m:.0f}만" if m == int(m) else f"{m:.1f}만"
+    if v >= 1e3:
+        return f"{v/1e3:.1f}천"
+    return f"{v:.0f}원"
+
+
 def _exec_quality_summary_lines():
     """route별 호가현황 — percentile 기반 (모바일 최적)"""
     if not _EXEC_QUALITY_MEM:
@@ -1067,7 +1082,7 @@ def _exec_quality_summary_lines():
         sp_p50 = _percentile(sp_vals, 50)
         sp_p90 = _percentile(sp_vals, 90)
         lines.append(f"📈 {route} (n={n})")
-        lines.append(f"  매도1호가: 보통{a1_p50/1e6:.0f}만 하위{a1_p10/1e6:.0f}만")
+        lines.append(f"  매도1호가: 보통{_fmt_krw(a1_p50)} 하위{_fmt_krw(a1_p10)}")
         lines.append(f"  스프레드: 보통{sp_p50:.2f}% 상위{sp_p90:.2f}%")
     return lines
 
@@ -4374,13 +4389,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
         # FIX [M4]: _SLIP_HISTORY 제거됨 (entry/exit 분리로 대체)
 
-        # 실행품질 로그 (LIVE)
+        # 실행품질 로그 (LIVE) — route는 registry route 사용 (shadow와 같은 키)
         try:
             _eq_ob = pre.get("ob", {})
             _eq_units = _eq_ob.get("raw", {}).get("orderbook_units", []) if _eq_ob else []
             _eq_delay = (time.time() - pre.get("signal_ts", time.time())) * 1000
+            _eq_route = _strat_conf.get("route", "") if _strat_conf else ""
+            if not _eq_route:
+                _eq_route = "LIVE"
             if _eq_units:
-                _log_exec_quality(m, pre.get("signal_tag", "LIVE"), True,
+                _log_exec_quality(m, _eq_route, True,
                                   signal_price, _eq_units,
                                   fill_price=avg_price, fill_slip_pct=slip_pct,
                                   fill_delay_ms=_eq_delay, seed_krw=krw_to_use)
@@ -8991,6 +9009,8 @@ _STRAT_DESC_MAP = {
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     # Research - filtered
+    "CLM_A": "CLM + 호가스프레드≤0.15% (execution cost filter)",
+    "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
@@ -11009,6 +11029,22 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM", "mae_threshold": 0.35,
         "max_seed_krw": 500_000,
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (micro-LIVE: execution연구)",
+    },
+    "과열감지_A": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_A", "mae_threshold": 0.35,
+        "ind_filters": [("ob_spread_pct", "<=", 0.15)],
+        "description": "CLM + 호가스프레드≤0.15% A군 execution필터 (shadow)",
+    },
+    "과열감지_A2": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_A2", "mae_threshold": 0.35,
+        "ind_filters": [("ob_spread_pct", "<=", 0.20)],
+        "description": "CLM + 호가스프레드≤0.20% execution필터 (shadow, CLM_A 비교용)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
@@ -13137,6 +13173,7 @@ def _survival_analysis(routes=None, min_n=10):
         "tick_mom_30s", "rsi_5m", "rsi_60m", "atr_pct",
         "ema_spread_15", "ema_spread_60", "vr5_15m",
         "macd_hist_5m_bps", "macd_hist_15_bps", "m3_60m",
+        "ob_spread_pct", "ob_ask1_krw", "ob_bid1_krw",
     ]
     results = {}
     with _SHADOW_PERF_LOCK:
