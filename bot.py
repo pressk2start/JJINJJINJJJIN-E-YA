@@ -1042,25 +1042,33 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
     _EXEC_QUALITY_MEM[_r].append(_mem_entry)
 
 
+def _percentile(vals, pct):
+    if not vals:
+        return 0
+    s = sorted(vals)
+    idx = int(len(s) * pct / 100)
+    return s[min(idx, len(s) - 1)]
+
+
 def _exec_quality_summary_lines():
-    """route별 호가창 현황 요약 — 모바일 최적"""
+    """route별 호가현황 — percentile 기반 (모바일 최적)"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 호가현황 (진입시점 평균)"]
+    lines = ["📊 호가현황"]
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
         if n < 3:
             continue
-        a1 = sum(e["ask1_krw"] for e in entries) / n
-        b1 = sum(e["bid1_krw"] for e in entries) / n
-        a3 = sum(e["ask_cum3_krw"] for e in entries) / n
-        b3 = sum(e["bid_cum3_krw"] for e in entries) / n
-        sp = sum(e["spread_pct"] for e in entries) / n
+        a1_vals = [e["ask1_krw"] for e in entries]
+        sp_vals = [e["spread_pct"] for e in entries]
+        a1_p50 = _percentile(a1_vals, 50)
+        a1_p10 = _percentile(a1_vals, 10)
+        sp_p50 = _percentile(sp_vals, 50)
+        sp_p90 = _percentile(sp_vals, 90)
         lines.append(f"📈 {route} (n={n})")
-        lines.append(f"  매도벽 1호가:{a1/1e6:.0f}만 3호가:{a3/1e6:.0f}만")
-        lines.append(f"  매수벽 1호가:{b1/1e6:.0f}만 3호가:{b3/1e6:.0f}만")
-        lines.append(f"  스프레드:{sp:.2f}%")
+        lines.append(f"  매도1호가: 보통{a1_p50/1e6:.0f}만 하위{a1_p10/1e6:.0f}만")
+        lines.append(f"  스프레드: 보통{sp_p50:.2f}% 상위{sp_p90:.2f}%")
     return lines
 
 
@@ -4088,6 +4096,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if _max_seed > 0 and krw_to_use > _max_seed:
             print(f"[SEED_CAP] {m} {_strat_tag} {krw_to_use:,}원 > max_seed {_max_seed:,}원 → 캡")
             krw_to_use = _max_seed
+
+        # 유동성 기반 시드 캡 (호가 0.15% 밀림 이내 최대 금액)
+        try:
+            _liq_units = pre.get("ob", {}).get("raw", {}).get("orderbook_units", [])
+            if _liq_units:
+                _liq_cap = _calc_liq_cap(_liq_units, max_slip_pct=0.15)
+                if 0 < _liq_cap < krw_to_use:
+                    print(f"[LIQ_CAP] {m} 유동성한도 {_liq_cap:,}원 (0.15%이내) < 주문 {krw_to_use:,}원 → 캡")
+                    krw_to_use = _liq_cap
+        except Exception:
+            pass
 
         # 🔧 임팩트캡 후 최소주문금액 재검증
         if krw_to_use < min_order_krw:
@@ -18108,6 +18127,32 @@ def _calc_vwap_slip(ob_units, krw_amount, side="buy"):
     vwap = total_cost / total_qty
     slip = (vwap - mid) / mid * 100 if side == "buy" else (mid - vwap) / mid * 100
     return round(slip, 4)
+
+
+def _calc_liq_cap(ob_units, max_slip_pct=0.15):
+    """호가창에서 max_slip_pct 이내로 체결 가능한 최대 KRW 금액.
+    이진탐색으로 slip 한도 내 최대 주문금액 산출."""
+    if not ob_units:
+        return 0
+    total_ask_krw = sum(u.get("ask_price", 0) * u.get("ask_size", 0) for u in ob_units)
+    if total_ask_krw <= 0:
+        return 0
+    lo, hi = 0, int(total_ask_krw)
+    for _ in range(30):
+        mid_amt = (lo + hi) // 2
+        if mid_amt <= 0:
+            break
+        slip = _calc_vwap_slip(ob_units, mid_amt, "buy")
+        if slip is None:
+            hi = mid_amt
+            continue
+        if slip <= max_slip_pct:
+            lo = mid_amt
+        else:
+            hi = mid_amt
+        if hi - lo <= 10000:
+            break
+    return lo
 
 
 # ===== 오더북 캐시 =====
