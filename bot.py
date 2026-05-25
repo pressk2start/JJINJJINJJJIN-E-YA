@@ -4106,13 +4106,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                     OPEN_POSITIONS.pop(m, None)
                 return
 
-        # kill-switch: route별 LIVE 성과 자동 차단 (n≥5, avg_pnl < -0.5%)
+        # kill-switch: route별 LIVE 성과 자동 차단 (n≥10, avg_pnl < -0.8%)
         if _strat_tag and _strat_tag != "기본":
             _ks_trades = [t for t in TRADE_HISTORY if t.get("signal") == _strat_tag]
-            if len(_ks_trades) >= 5:
+            if len(_ks_trades) >= 10:
                 _ks_avg = statistics.mean([t["pnl"] for t in _ks_trades])
-                if _ks_avg < -0.005:
-                    signal_skip(f"kill-switch: {_strat_tag} avg_pnl {_ks_avg*100:.2f}% < -0.5% (n={len(_ks_trades)})")
+                if _ks_avg < -0.008:
+                    signal_skip(f"kill-switch: {_strat_tag} avg_pnl {_ks_avg*100:.2f}% < -0.8% (n={len(_ks_trades)})")
                     tg_send(f"🛑 <b>kill-switch</b> {m}\n• {_strat_tag} LIVE avg_pnl {_ks_avg*100:.2f}% (n={len(_ks_trades)})\n• 자동 진입중단")
                     with _POSITION_LOCK:
                         OPEN_POSITIONS.pop(m, None)
