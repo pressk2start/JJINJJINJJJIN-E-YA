@@ -4389,13 +4389,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
         # FIX [M4]: _SLIP_HISTORY 제거됨 (entry/exit 분리로 대체)
 
-        # 실행품질 로그 (LIVE)
+        # 실행품질 로그 (LIVE) — route는 registry route 사용 (shadow와 같은 키)
         try:
             _eq_ob = pre.get("ob", {})
             _eq_units = _eq_ob.get("raw", {}).get("orderbook_units", []) if _eq_ob else []
             _eq_delay = (time.time() - pre.get("signal_ts", time.time())) * 1000
+            _eq_route = _strat_conf.get("route", "") if _strat_conf else ""
+            if not _eq_route:
+                _eq_route = "LIVE"
             if _eq_units:
-                _log_exec_quality(m, pre.get("signal_tag", "LIVE"), True,
+                _log_exec_quality(m, _eq_route, True,
                                   signal_price, _eq_units,
                                   fill_price=avg_price, fill_slip_pct=slip_pct,
                                   fill_delay_ms=_eq_delay, seed_krw=krw_to_use)
