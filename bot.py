@@ -10816,6 +10816,14 @@ _STRATEGY_REGISTRY = {
         "mae_threshold": 0.3,
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
+    "모멘텀GT_ASK1": {
+        "check_fn": _v0_check_momentum_rsi,
+        "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "momentum", "route": "SVE1_ASK1", "mae_threshold": 0.3,
+        "ind_filters": [("ob_ask1_krw", "<=", 20_000_000)],
+        "description": "SVE1+ask1≤2000만 gate (W796만vsL2472만 d=0.75) (shadow)",
+    },
     # ━━━ Track B: RESEARCH — 진입 구조 ━━━
     # (VOL 제거: n>1000 cap=-26% PnL음수 지속, 회복추세 없음)
     "눌림재진입": {
