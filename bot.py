@@ -1070,6 +1070,8 @@ def _exec_quality_summary_lines():
     if not _EXEC_QUALITY_MEM:
         return []
     lines = ["📊 호가현황"]
+    all_a1 = []
+    all_sp = []
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
@@ -1077,6 +1079,8 @@ def _exec_quality_summary_lines():
             continue
         a1_vals = [e["ask1_krw"] for e in entries]
         sp_vals = [e["spread_pct"] for e in entries]
+        all_a1.extend(a1_vals)
+        all_sp.extend(sp_vals)
         a1_p50 = _percentile(a1_vals, 50)
         a1_p10 = _percentile(a1_vals, 10)
         sp_p50 = _percentile(sp_vals, 50)
@@ -1084,6 +1088,12 @@ def _exec_quality_summary_lines():
         lines.append(f"📈 {route} (n={n})")
         lines.append(f"  매도1호가: 보통{_fmt_krw(a1_p50)} 하위{_fmt_krw(a1_p10)}")
         lines.append(f"  스프레드: 보통{sp_p50:.2f}% 상위{sp_p90:.2f}%")
+    if all_sp:
+        _t_n = len(all_sp)
+        _t_a1_p50 = _percentile(all_a1, 50)
+        _t_sp_p50 = _percentile(all_sp, 50)
+        _t_sp_p90 = _percentile(all_sp, 90)
+        lines.append(f"── 전체 (n={_t_n}) 매도1:{_fmt_krw(_t_a1_p50)} sprd:{_t_sp_p50:.2f}%/{_t_sp_p90:.2f}%")
     return lines
 
 
@@ -1233,6 +1243,22 @@ def _pipeline_report(force=False):
     lines.append(
         f"일반 {_st_normal['n']}전{_st_normal.get('wins',0)}승 wr{_st_normal['wr']} {_st_normal['pnl']}"
         f" | A군 {_st_bypass['n']}전{_st_bypass.get('wins',0)}승 wr{_st_bypass['wr']} {_st_bypass['pnl']}")
+    # 시나리오별 LIVE 성과 breakdown (signal_tag 기반)
+    _tag_groups = {}
+    for t in _today_trades:
+        _tt = t.get("signal_tag", "기본")
+        if _tt not in _tag_groups:
+            _tag_groups[_tt] = []
+        _tag_groups[_tt].append(t)
+    if len(_tag_groups) > 1 or (len(_tag_groups) == 1 and "기본" not in _tag_groups):
+        _tag_parts = []
+        for _tg_name, _tg_trades in sorted(_tag_groups.items(), key=lambda x: -len(x[1])):
+            _tg_n = len(_tg_trades)
+            _tg_w = sum(1 for t in _tg_trades if t.get("win"))
+            _tg_pnl = sum(t.get("pnl", 0) for t in _tg_trades) / _tg_n * 100
+            _tg_route = _STRATEGY_REGISTRY.get(_tg_name, {}).get("route", _tg_name)
+            _tag_parts.append(f"{_tg_route}:{_tg_n}전{_tg_w}승{_tg_pnl:+.1f}%")
+        lines.append(f"  └ {' | '.join(_tag_parts)}")
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
 
