@@ -1028,15 +1028,14 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
                 w.writerow(row)
         except Exception as e:
             print(f"[EXEC_QUALITY_ERR] {e}")
-    # in-memory 집계 (route별 capacity tracking)
-    _mem_entry = {}
-    for label in ("50w", "100w", "300w", "500w", "1000w"):
-        v = row.get(f"slip_buy_{label}")
-        if v != "":
-            _mem_entry[f"slip_{label}"] = float(v)
-    _mem_entry["ask1_krw"] = row.get("ask1_krw", 0)
-    _mem_entry["ask_cum5_krw"] = row.get("ask_cum5_krw", 0)
-    _mem_entry["spread_pct"] = row.get("spread_pct", 0)
+    # in-memory 집계 (route별 호가창 현황)
+    _mem_entry = {
+        "ask1_krw": row.get("ask1_krw", 0),
+        "bid1_krw": row.get("bid1_krw", 0),
+        "ask_cum3_krw": row.get("ask_cum3_krw", 0),
+        "bid_cum3_krw": row.get("bid_cum3_krw", 0),
+        "spread_pct": row.get("spread_pct", 0),
+    }
     _r = route
     if _r not in _EXEC_QUALITY_MEM:
         _EXEC_QUALITY_MEM[_r] = deque(maxlen=_EXEC_QUALITY_MEM_MAX)
@@ -1044,28 +1043,24 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
 
 
 def _exec_quality_summary_lines():
-    """route별 execution capacity 요약 (리포트용)"""
+    """route별 호가창 현황 요약 — 모바일 최적"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 체결품질 (route별 예상 슬리피지 bps):"]
-    header = "route       n   50만 100만 300만 500만 1000만 ask1평균"
-    lines.append(f"<code>{header}</code>")
+    lines = ["📊 호가현황 (진입시점 평균)"]
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
         if n < 3:
             continue
-        cols = []
-        for label in ("50w", "100w", "300w", "500w", "1000w"):
-            vals = [e[f"slip_{label}"] for e in entries if f"slip_{label}" in e]
-            if vals:
-                avg_bps = sum(vals) / len(vals) * 100
-                cols.append(f"{avg_bps:5.1f}")
-            else:
-                cols.append("    -")
-        avg_ask1 = sum(e.get("ask1_krw", 0) for e in entries) / n
-        row_str = f"{route:<10s} {n:>3d} {''.join(cols)}  {avg_ask1/1e6:5.1f}M"
-        lines.append(f"<code>{row_str}</code>")
+        a1 = sum(e["ask1_krw"] for e in entries) / n
+        b1 = sum(e["bid1_krw"] for e in entries) / n
+        a3 = sum(e["ask_cum3_krw"] for e in entries) / n
+        b3 = sum(e["bid_cum3_krw"] for e in entries) / n
+        sp = sum(e["spread_pct"] for e in entries) / n
+        lines.append(f"📈 {route} (n={n})")
+        lines.append(f"  매도벽 1호가:{a1/1e6:.0f}만 3호가:{a3/1e6:.0f}만")
+        lines.append(f"  매수벽 1호가:{b1/1e6:.0f}만 3호가:{b3/1e6:.0f}만")
+        lines.append(f"  스프레드:{sp:.2f}%")
     return lines
 
 
