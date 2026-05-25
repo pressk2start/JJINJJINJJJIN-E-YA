@@ -1044,26 +1044,30 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
 
 
 def _exec_quality_summary_lines():
-    """route별 execution capacity 요약 (리포트용)"""
+    """route별 execution capacity 요약 — 카드형 (모바일 최적)"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 체결품질 (slip bps):"]
-    lines.append("<code>        n 100만 500만 1천만</code>")
+    lines = ["📊 체결품질"]
+    seeds = [("50w", "50만"), ("100w", "100만"), ("300w", "300만"),
+             ("500w", "500만"), ("1000w", "1000만")]
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
         if n < 3:
             continue
-        cols = []
-        for label in ("100w", "500w", "1000w"):
-            vals = [e[f"slip_{label}"] for e in entries if f"slip_{label}" in e]
-            if vals:
-                avg_bps = sum(vals) / len(vals) * 100
-                cols.append(f"{avg_bps:5.1f}")
-            else:
-                cols.append("    -")
-        row_str = f"{route:<7s} {n:>2d}{''.join(cols)}"
-        lines.append(f"<code>{row_str}</code>")
+        avg_ask1 = sum(e.get("ask1_krw", 0) for e in entries) / n
+        prev_bps = 0.0
+        card = [f"📈 {route} (n={n}) ask1:{avg_ask1/1e6:.1f}M"]
+        for key, label in seeds:
+            vals = [e[f"slip_{key}"] for e in entries if f"slip_{key}" in e]
+            if not vals:
+                card.append(f"  {label:>5s}: -")
+                continue
+            avg_bps = sum(vals) / len(vals) * 100
+            delta = f" (+{avg_bps - prev_bps:.1f})" if prev_bps > 0 else ""
+            card.append(f"  {label:>5s}: {avg_bps:.1f}bps{delta}")
+            prev_bps = avg_bps
+        lines.extend(card)
     return lines
 
 
