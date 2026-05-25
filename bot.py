@@ -961,7 +961,8 @@ _EXEC_QUALITY_MEM = {}  # route → deque of {slip_50w, slip_100w, ..., ask1_krw
 _EXEC_QUALITY_MEM_MAX = 500
 _EXEC_QUALITY_FIELDS = [
     "ts", "market", "route", "is_live",
-    "signal_price", "fill_price", "fill_slip_pct",
+    "signal_price", "best_ask", "best_bid",
+    "fill_price", "fill_slip_pct",
     "fill_delay_ms", "seed_krw",
     "mid_price", "spread_pct",
     "ask1_krw", "bid1_krw",
@@ -991,6 +992,7 @@ def _log_exec_quality(market, route, is_live, signal_price, ob_units,
         "ts": now_kst_str(), "market": market, "route": route,
         "is_live": 1 if is_live else 0,
         "signal_price": round(signal_price, 2),
+        "best_ask": round(a1, 2), "best_bid": round(b1, 2),
         "fill_price": round(fill_price, 2) if fill_price else "",
         "fill_slip_pct": round(fill_slip_pct, 4) if fill_price else "",
         "fill_delay_ms": int(fill_delay_ms) if fill_delay_ms else "",
