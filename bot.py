@@ -8994,7 +8994,7 @@ def _build_actionable_summary():
             }
             mae_dist = data.get("mae_dist", {})
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
+                _checks["mae80"] = mae_dist["A"].get("within_threshold_pct", mae_dist["A"]["within_03_pct"]) >= 80
             _pass = sum(1 for v in _checks.values() if v)
             if _pass == len(_checks):
                 items.append(f"🟢 {route} ENABLE 조건충족 {_pass}/{len(_checks)}")
@@ -9106,7 +9106,7 @@ def _build_state_change_alerts():
             }
             mae_dist = data.get("mae_dist", {})
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _checks["mae80"] = mae_dist["A"]["within_03_pct"] >= 80
+                _checks["mae80"] = mae_dist["A"].get("within_threshold_pct", mae_dist["A"]["within_03_pct"]) >= 80
             _pass = sum(1 for v in _checks.values() if v)
             _tot = len(_checks)
             if total_n >= 100 and a_g["n"] >= 30 and c_g["n"] >= 30 and ac_lift > 0.5 and hl_lift > 0.3 and a_g["avg_pnl"] > 0:
@@ -10813,6 +10813,7 @@ _STRATEGY_REGISTRY = {
         "enabled": True,
         "pipeline_key": "momentum",
         "route": "SVE1",
+        "mae_threshold": 0.3,
         "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
     },
     # ━━━ Track B: RESEARCH — 진입 구조 ━━━
@@ -10821,14 +10822,14 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_retest_entry,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "retest", "route": "RET",
+        "pipeline_key": "retest", "route": "RET", "mae_threshold": 0.3,
         "description": "급등후 EMA20눌림 + 저점방어 + 재양봉 [GT exit] (shadow/baseline only)",
     },
     "과열감지": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM",
+        "pipeline_key": "climax", "route": "CLM", "mae_threshold": 0.35,
         "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
@@ -10842,7 +10843,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_range_expand,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "range_expand", "route": "RX",
+        "pipeline_key": "range_expand", "route": "RX", "mae_threshold": 0.3,
         "ind_filters": [("entry_spread_pct", "<=", 0.8), ("tick_rate_30s", ">=", 1.0), ("tick_rate_30s", "<=", 2.8)],
         "description": "20봉고저폭≤70%+ATR<0.8+20봉돌파+거래대금1.5x [GT] (shadow)",
     },
@@ -10850,7 +10851,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_liquidity_trap,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "liq_trap", "route": "LTRP",
+        "pipeline_key": "liq_trap", "route": "LTRP", "mae_threshold": 0.5,
         "description": "5조건scoring(spread/ATR/wick/MACD/VR) 3/5이상→함정탐지 [GT] (shadow)",
     },
     # ━━━ Track F: v24 W/L d-score 기반 필터/exit 실험 ━━━
@@ -10866,7 +10867,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_CALM",
+        "pipeline_key": "climax", "route": "CLM_CALM", "mae_threshold": 0.35,
         "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
         "description": "CLM+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
     },
@@ -10874,7 +10875,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_liquidity_trap,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "liq_trap", "route": "LTRP_CALM",
+        "pipeline_key": "liq_trap", "route": "LTRP_CALM", "mae_threshold": 0.5,
         "ind_filters": [("entry_spread_pct", "<=", 0.50), ("atr_pct", "<=", 0.50)],
         "description": "LTRP+CalmGate(spread≤0.5%+ATR≤0.5%) [GT exit] (shadow)",
     },
@@ -10896,7 +10897,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_pullback_reclaim,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "pbr", "route": "PBR",
+        "pipeline_key": "pbr", "route": "PBR", "mae_threshold": 0.3,
         "ind_filters": [("entry_spread_pct", "<=", 0.20)],
         "description": "5m급등→1m눌림(-0.3~-0.8%)→고점재돌파+volReexpand+wick필터 [GT exit] spread≤0.20 (shadow)",
     },
@@ -10904,7 +10905,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_pullback_reclaim,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "pbr", "route": "PBR_STRICT",
+        "pipeline_key": "pbr", "route": "PBR_STRICT", "mae_threshold": 0.3,
         "ind_filters": [("entry_spread_pct", "<=", 0.15)],
         "description": "PBR + spread≤0.15 (shadow)",
     },
@@ -10912,7 +10913,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_pullback_reclaim,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
         "priority": 10, "enabled": False,
-        "pipeline_key": "pbr", "route": "PBR_MOMO",
+        "pipeline_key": "pbr", "route": "PBR_MOMO", "mae_threshold": 0.3,
         "ind_filters": [("entry_spread_pct", "<=", 0.20), ("rsi_5m", ">=", 62), ("adx_15", ">=", 18), ("vr5_15m", ">=", 1.5)],
         "description": "PBR + 중간강도 모멘텀필터(RSI5m≥62+ADX15≥18+VR15m≥1.5) [GT exit] (shadow)",
     },
@@ -12925,6 +12926,14 @@ def _v4_shadow_report_lines():
     return lines, _research_reported
 
 
+def _route_mae_threshold(route):
+    """registry에서 route별 mae_threshold 조회 (% 단위, 기본 0.3)"""
+    for s in _STRATEGY_REGISTRY.values():
+        if s.get("route") == route:
+            return s.get("mae_threshold", 0.3)
+    return 0.3
+
+
 def _survival_analysis(routes=None, min_n=10):
     """dd_peak_60s 기반 survival quality 분석.
     A(dd<0.3%), B(0.3~0.5%), C(>0.5%) 그룹 분리 → PnL/feature d-score 산출.
@@ -13034,7 +13043,8 @@ def _survival_analysis(routes=None, min_n=10):
                     "hi": _quick(hi_trades),
                     "lo": _quick(lo_trades),
                 }
-            # mae_60s 분포 (early_sl 파라미터 검증용)
+            # mae_60s 분포 (route별 mae_threshold 적용)
+            _mae_thr = _route_mae_threshold(route)
             mae_dist = {}
             for grp_name, grp_list in [("A", grp_a), ("C", grp_c)]:
                 mae_vals = [t["inds"].get("mae_60s") for t in grp_list
@@ -13044,10 +13054,13 @@ def _survival_analysis(routes=None, min_n=10):
                     n_m = len(mae_sorted)
                     within_03 = sum(1 for v in mae_sorted if v >= -0.003)
                     within_05 = sum(1 for v in mae_sorted if v >= -0.005)
+                    within_thr = sum(1 for v in mae_sorted if v >= -_mae_thr / 100)
                     mae_dist[grp_name] = {
                         "n": n_m,
                         "within_03_pct": round(within_03 / n_m * 100, 1),
                         "within_05_pct": round(within_05 / n_m * 100, 1),
+                        "within_threshold_pct": round(within_thr / n_m * 100, 1),
+                        "mae_threshold": _mae_thr,
                         "p50": round(mae_sorted[n_m // 2] * 100, 3),
                         "p80": round(mae_sorted[int(n_m * 0.8)] * 100, 3),
                         "worst": round(mae_sorted[0] * 100, 3),
@@ -13123,7 +13136,8 @@ def _survival_analysis_lines():
                 "A_pnl↑0": a_g["avg_pnl"] > 0,
             }
             if "A" in mae_dist and mae_dist["A"]["n"] >= 10:
-                _checks["A_mae80%↓0.3"] = mae_dist["A"]["within_03_pct"] >= 80
+                _mt = mae_dist["A"].get("mae_threshold", 0.3)
+                _checks[f"A_mae80%↓{_mt}"] = mae_dist["A"].get("within_threshold_pct", mae_dist["A"]["within_03_pct"]) >= 80
         _en_pass = sum(1 for v in _checks.values() if v) if _checks else 0
         _en_total = len(_checks) if _checks else 7
         _is_near_enable = _en_pass >= 4
@@ -13154,9 +13168,11 @@ def _survival_analysis_lines():
                          f" lift{hl_lift:+.2f}")
         if "A" in mae_dist:
             md = mae_dist["A"]
+            _mt = md.get("mae_threshold", 0.3)
+            _wt = md.get("within_threshold_pct", md["within_03_pct"])
             lines.append(
                 f"    📉 mae: n={md['n']}"
-                f" 0.3%내{md['within_03_pct']:.0f}%"
+                f" {_mt}%내{_wt:.0f}%"
                 f" 0.5%내{md['within_05_pct']:.0f}%")
         if _checks:
             _marks = " ".join(
