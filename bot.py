@@ -1047,8 +1047,8 @@ def _exec_quality_summary_lines():
     """route별 execution capacity 요약 (리포트용)"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 exec capacity (route별 VWAP slip bps):"]
-    header = "route      n  50w  100w  300w  500w 1000w  ask1평균"
+    lines = ["📊 체결품질 (route별 예상 슬리피지 bps):"]
+    header = "route       n   50만 100만 300만 500만 1000만 ask1평균"
     lines.append(f"<code>{header}</code>")
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
@@ -4086,6 +4086,14 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         krw_to_use = int(krw_to_use)
 
+        # route별 max_seed_krw 캡 (micro-LIVE: execution 연구용 소규모 제한)
+        _strat_tag = pre.get("signal_tag", "")
+        _strat_conf = _STRATEGY_REGISTRY.get(_strat_tag, {})
+        _max_seed = _strat_conf.get("max_seed_krw", 0)
+        if _max_seed > 0 and krw_to_use > _max_seed:
+            print(f"[SEED_CAP] {m} {_strat_tag} {krw_to_use:,}원 > max_seed {_max_seed:,}원 → 캡")
+            krw_to_use = _max_seed
+
         # 🔧 임팩트캡 후 최소주문금액 재검증
         if krw_to_use < min_order_krw:
             if krw_bal >= min_order_krw * 2:
@@ -4097,6 +4105,18 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 with _POSITION_LOCK:
                     OPEN_POSITIONS.pop(m, None)
                 return
+
+        # kill-switch: route별 LIVE 성과 자동 차단 (n≥5, avg_pnl < -0.5%)
+        if _strat_tag and _strat_tag != "기본":
+            _ks_trades = [t for t in TRADE_HISTORY if t.get("signal") == _strat_tag]
+            if len(_ks_trades) >= 5:
+                _ks_avg = statistics.mean([t["pnl"] for t in _ks_trades])
+                if _ks_avg < -0.005:
+                    signal_skip(f"kill-switch: {_strat_tag} avg_pnl {_ks_avg*100:.2f}% < -0.5% (n={len(_ks_trades)})")
+                    tg_send(f"🛑 <b>kill-switch</b> {m}\n• {_strat_tag} LIVE avg_pnl {_ks_avg*100:.2f}% (n={len(_ks_trades)})\n• 자동 진입중단")
+                    with _POSITION_LOCK:
+                        OPEN_POSITIONS.pop(m, None)
+                    return
 
         # === 매수 ===
         # 🔧 FIX: 매수 전 보유량 저장 (체결 재검증용)
@@ -10945,11 +10965,11 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_momentum_rsi,
         "exit_params": _V0_EXIT_PARAMS_GTSV_E1,
         "priority": 7,
-        "enabled": True,
+        "enabled": False,
         "pipeline_key": "momentum",
         "route": "SVE1",
         "mae_threshold": 0.3,
-        "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (LIVE)",
+        "description": "5mRSI≥74.55 [SVE1:survival60+120s강제] (DISABLED: 속도edge 구조한계)",
     },
     "모멘텀GT_ASK1": {
         "check_fn": _v0_check_momentum_rsi,
@@ -10971,9 +10991,10 @@ _STRATEGY_REGISTRY = {
     "과열감지": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
-        "priority": 10, "enabled": False,
+        "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CLM", "mae_threshold": 0.35,
-        "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (shadow)",
+        "max_seed_krw": 500_000,
+        "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (micro-LIVE: execution연구)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
