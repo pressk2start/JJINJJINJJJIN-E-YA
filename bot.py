@@ -1047,27 +1047,23 @@ def _exec_quality_summary_lines():
     """route별 execution capacity 요약 — 카드형 (모바일 최적)"""
     if not _EXEC_QUALITY_MEM:
         return []
-    lines = ["📊 체결품질"]
-    seeds = [("50w", "50만"), ("100w", "100만"), ("300w", "300만"),
-             ("500w", "500만"), ("1000w", "1000만")]
+    lines = ["📊 체결품질 (시드→예상 밀림%)"]
+    seeds = [("100w", "100만"), ("500w", "500만"), ("1000w", "1천만")]
     for route in sorted(_EXEC_QUALITY_MEM.keys()):
         entries = list(_EXEC_QUALITY_MEM[route])
         n = len(entries)
         if n < 3:
             continue
-        avg_ask1 = sum(e.get("ask1_krw", 0) for e in entries) / n
-        prev_bps = 0.0
-        card = [f"📈 {route} (n={n}) ask1:{avg_ask1/1e6:.1f}M"]
+        parts = []
         for key, label in seeds:
             vals = [e[f"slip_{key}"] for e in entries if f"slip_{key}" in e]
-            if not vals:
-                card.append(f"  {label:>5s}: -")
-                continue
-            avg_bps = sum(vals) / len(vals) * 100
-            delta = f" (+{avg_bps - prev_bps:.1f})" if prev_bps > 0 else ""
-            card.append(f"  {label:>5s}: {avg_bps:.1f}bps{delta}")
-            prev_bps = avg_bps
-        lines.extend(card)
+            if vals:
+                avg_pct = sum(vals) / len(vals)
+                parts.append(f"{label}→{avg_pct:.2f}%")
+            else:
+                parts.append(f"{label}→-")
+        lines.append(f"📈 {route} (n={n})")
+        lines.append(f"  {' '.join(parts)}")
     return lines
 
 
