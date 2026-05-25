@@ -9010,6 +9010,7 @@ _STRAT_DESC_MAP = {
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     # Research - filtered
     "CLM_A": "CLM + 호가스프레드≤0.15% (execution cost filter)",
+    "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
@@ -11036,6 +11037,14 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_A", "mae_threshold": 0.35,
         "ind_filters": [("ob_spread_pct", "<=", 0.15)],
         "description": "CLM + 호가스프레드≤0.15% A군 execution필터 (shadow)",
+    },
+    "과열감지_A2": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_A2", "mae_threshold": 0.35,
+        "ind_filters": [("ob_spread_pct", "<=", 0.20)],
+        "description": "CLM + 호가스프레드≤0.20% execution필터 (shadow, CLM_A 비교용)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
