@@ -952,6 +952,75 @@ _SHADOW_LOG_PATH = os.path.join(os.getcwd(), "pipeline_shadow.csv")
 _SHADOW_LOG_LOCK = threading.Lock()
 _SHADOW_LOG_INITIALIZED = False
 
+# 실행품질 로그 — 시드 결정용 호가창 깊이 데이터 수집
+_EXEC_QUALITY_LOG_PATH = os.path.join(os.getcwd(), "exec_quality.csv")
+_EXEC_QUALITY_LOCK = threading.Lock()
+_EXEC_QUALITY_INITIALIZED = False
+_EXEC_QUALITY_MAX_BYTES = 50 * 1024 * 1024  # 50MB rotation
+_EXEC_QUALITY_FIELDS = [
+    "ts", "market", "route", "is_live",
+    "signal_price", "fill_price", "fill_slip_pct",
+    "mid_price", "spread_pct",
+    "ask1_krw", "bid1_krw",
+    "ask_cum3_krw", "ask_cum5_krw", "ask_cum10_krw",
+    "bid_cum3_krw", "bid_cum5_krw", "bid_cum10_krw",
+    "slip_buy_50w", "slip_buy_100w", "slip_buy_300w", "slip_buy_500w", "slip_buy_1000w",
+    "slip_sell_50w", "slip_sell_100w", "slip_sell_300w", "slip_sell_500w", "slip_sell_1000w",
+]
+
+
+def _log_exec_quality(market, route, is_live, signal_price, ob_units,
+                      fill_price=0.0, fill_slip_pct=0.0):
+    """호가창 깊이 + VWAP 슬리피지 시뮬레이션 로그 (시드 결정용)"""
+    global _EXEC_QUALITY_INITIALIZED
+    if not ob_units:
+        return
+    b1 = ob_units[0].get("bid_price", 0)
+    a1 = ob_units[0].get("ask_price", 0)
+    if b1 <= 0 or a1 <= 0:
+        return
+    mid = (b1 + a1) / 2
+    spread_pct = round((a1 - b1) / mid * 100, 4)
+    a1_krw = round(a1 * ob_units[0].get("ask_size", 0))
+    b1_krw = round(b1 * ob_units[0].get("bid_size", 0))
+    row = {
+        "ts": now_kst_str(), "market": market, "route": route,
+        "is_live": 1 if is_live else 0,
+        "signal_price": round(signal_price, 2),
+        "fill_price": round(fill_price, 2) if fill_price else "",
+        "fill_slip_pct": round(fill_slip_pct, 4) if fill_price else "",
+        "mid_price": round(mid, 2), "spread_pct": spread_pct,
+        "ask1_krw": a1_krw, "bid1_krw": b1_krw,
+    }
+    for n in (3, 5, 10):
+        ask_cum = sum(u.get("ask_price", 0) * u.get("ask_size", 0) for u in ob_units[:n])
+        bid_cum = sum(u.get("bid_price", 0) * u.get("bid_size", 0) for u in ob_units[:n])
+        row[f"ask_cum{n}_krw"] = round(ask_cum)
+        row[f"bid_cum{n}_krw"] = round(bid_cum)
+    for amt, label in [(500_000, "50w"), (1_000_000, "100w"), (3_000_000, "300w"),
+                       (5_000_000, "500w"), (10_000_000, "1000w")]:
+        sb = _calc_vwap_slip(ob_units, amt, "buy")
+        ss = _calc_vwap_slip(ob_units, amt, "sell")
+        row[f"slip_buy_{label}"] = round(sb, 4) if sb is not None else ""
+        row[f"slip_sell_{label}"] = round(ss, 4) if ss is not None else ""
+    with _EXEC_QUALITY_LOCK:
+        write_header = not _EXEC_QUALITY_INITIALIZED
+        try:
+            if os.path.exists(_EXEC_QUALITY_LOG_PATH) and os.path.getsize(_EXEC_QUALITY_LOG_PATH) > _EXEC_QUALITY_MAX_BYTES:
+                try:
+                    os.replace(_EXEC_QUALITY_LOG_PATH, _EXEC_QUALITY_LOG_PATH + ".bak")
+                except Exception:
+                    pass
+                write_header = True
+            with open(_EXEC_QUALITY_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=_EXEC_QUALITY_FIELDS)
+                if write_header:
+                    w.writeheader()
+                    _EXEC_QUALITY_INITIALIZED = True
+                w.writerow(row)
+        except Exception as e:
+            print(f"[EXEC_QUALITY_ERR] {e}")
+
 
 _BLOCKED_THREAD_LOCAL = threading.local()  # 차단 건 가상 추적용 thread-local
 
@@ -4217,6 +4286,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         slip_cost = min(0.01, max(0.0, slip_pct))  # 불리한 것만 반영
         _ENTRY_SLIP_HISTORY.append(slip_cost)  # 🔧 FIX: entry 전용
         # FIX [M4]: _SLIP_HISTORY 제거됨 (entry/exit 분리로 대체)
+
+        # 실행품질 로그 (LIVE)
+        try:
+            _eq_ob = pre.get("ob", {})
+            _eq_units = _eq_ob.get("raw", {}).get("orderbook_units", []) if _eq_ob else []
+            if _eq_units:
+                _log_exec_quality(m, pre.get("signal_tag", "LIVE"), True,
+                                  signal_price, _eq_units,
+                                  fill_price=avg_price, fill_slip_pct=slip_pct)
+        except Exception:
+            pass
 
         # 진입 사유 한 줄 생성 (pre dict에서 직접 추출)
         signal_tag = pre.get("signal_tag", "기본")
@@ -12124,6 +12204,7 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
 
     # 호가창 스냅샷 → 슬리피지 추정 (shadow 진입 시점 execution quality 측정)
     _ob_data = m3_info.get("ob_data")
+    _ob_units = []
     if _ob_data and isinstance(_ob_data.get("raw"), dict):
         _ob_units = _ob_data["raw"].get("orderbook_units", [])
         if _ob_units:
@@ -12134,7 +12215,12 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
             universal_ind["ob_bid1_krw"] = round(_b1 * _b1s)
             universal_ind["ob_ask1_krw"] = round(_a1 * _a1s)
             universal_ind["ob_spread_pct"] = round((_a1 - _b1) / max((_a1 + _b1) / 2, 1) * 100, 4) if _a1 > 0 and _b1 > 0 else 0
-            for _amt in (100_000, 300_000, 500_000):
+            for _n in (3, 5, 10):
+                _ac = sum(_eu.get("ask_price", 0) * _eu.get("ask_size", 0) for _eu in _ob_units[:_n])
+                _bc = sum(_eu.get("bid_price", 0) * _eu.get("bid_size", 0) for _eu in _ob_units[:_n])
+                universal_ind[f"ob_ask_cum{_n}_krw"] = round(_ac)
+                universal_ind[f"ob_bid_cum{_n}_krw"] = round(_bc)
+            for _amt in (100_000, 300_000, 500_000, 1_000_000, 3_000_000, 5_000_000, 10_000_000):
                 _sk = _amt // 1000
                 _sb = _calc_vwap_slip(_ob_units, _amt, "buy")
                 _ss = _calc_vwap_slip(_ob_units, _amt, "sell")
@@ -12270,6 +12356,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "_pullback_best_price": entry_price,
                     "_pullback_orig_price": entry_price,
                 })
+                if _ob_units:
+                    try:
+                        _log_exec_quality(market, route, False, entry_price, _ob_units)
+                    except Exception:
+                        pass
         elif all_fails:
             # v0: 실패한 필터 각각에 대해 차단건 가상 추적
             dedup_key = f"{route}_{market}"
