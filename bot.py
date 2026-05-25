@@ -1050,6 +1050,21 @@ def _percentile(vals, pct):
     return s[min(idx, len(s) - 1)]
 
 
+def _fmt_krw(v):
+    """KRW 금액을 단위 자동선택하여 간결하게 표시."""
+    v = abs(v)
+    if v >= 1e8:
+        return f"{v/1e8:.1f}억"
+    if v >= 1e6:
+        return f"{v/1e4:.0f}만"
+    if v >= 1e4:
+        m = v / 1e4
+        return f"{m:.0f}만" if m == int(m) else f"{m:.1f}만"
+    if v >= 1e3:
+        return f"{v/1e3:.1f}천"
+    return f"{v:.0f}원"
+
+
 def _exec_quality_summary_lines():
     """route별 호가현황 — percentile 기반 (모바일 최적)"""
     if not _EXEC_QUALITY_MEM:
@@ -1067,7 +1082,7 @@ def _exec_quality_summary_lines():
         sp_p50 = _percentile(sp_vals, 50)
         sp_p90 = _percentile(sp_vals, 90)
         lines.append(f"📈 {route} (n={n})")
-        lines.append(f"  매도1호가: 보통{a1_p50/1e6:.0f}만 하위{a1_p10/1e6:.0f}만")
+        lines.append(f"  매도1호가: 보통{_fmt_krw(a1_p50)} 하위{_fmt_krw(a1_p10)}")
         lines.append(f"  스프레드: 보통{sp_p50:.2f}% 상위{sp_p90:.2f}%")
     return lines
 
