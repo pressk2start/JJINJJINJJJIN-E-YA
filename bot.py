@@ -2180,7 +2180,7 @@ def sve1_daily_guard_ok():
     return True, ""
 
 
-def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry_type: str = "NORMAL"):
+def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry_type: str = "NORMAL", signal_tag: str = "기본"):
     """거래 결과 기록. entry_type: NORMAL / BYPASS_DAILY_A / BYPASS_LOSS_A"""
     global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL, _ENTRY_MAX_MODE
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
@@ -2200,6 +2200,7 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry
         "win": is_win,
         "time": time.time(),
         "signal": signal_type,
+        "signal_tag": signal_tag,
         "entry_type": entry_type,
     })
 
@@ -4137,7 +4138,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
 
         # kill-switch: route별 LIVE 성과 자동 차단 (n≥10, avg_pnl < -0.8%)
         if _strat_tag and _strat_tag != "기본":
-            _ks_trades = [t for t in TRADE_HISTORY if t.get("signal") == _strat_tag]
+            _ks_trades = [t for t in TRADE_HISTORY if t.get("signal_tag") == _strat_tag]
             if len(_ks_trades) >= 10:
                 _ks_avg = statistics.mean([t["pnl"] for t in _ks_trades])
                 if _ks_avg < -0.008:
@@ -4944,7 +4945,7 @@ def close_auto_position(m, reason=""):
                         # 🔧 FIX: 수수료 반영한 순수익률 사용
                         net_ret_delayed = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
                         try:
-                            record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"))  # 🔧 수수료 반영
+                            record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"))  # 🔧 수수료 반영
                         except Exception as _e:
                             print("[DELAYED_TRADE_RECORD_ERR]", _e)
                         # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
@@ -4990,7 +4991,7 @@ def close_auto_position(m, reason=""):
                                 # 🔧 FIX: 후속확인 청산에서도 record_trade + trade result 기록 (누락 방지)
                                 try:
                                     _net_ret = (_fup_exit_price / entry_price - 1.0 - FEE_RATE_ROUNDTRIP) if entry_price > 0 else 0
-                                    record_trade(m, _net_ret, pos.get("signal_type", "기본"))  # 🔧 FIX: 승률/연패 추적 누락 방지
+                                    record_trade(m, _net_ret, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"))  # 🔧 FIX: 승률/연패 추적 누락 방지
                                 except Exception:
                                     pass
                                 # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
@@ -5114,7 +5115,7 @@ def close_auto_position(m, reason=""):
             try:
                 _et = "BYPASS_DAILY_A" if pos.get("a_bypass") and not pos.get("is_losing_stop") else (
                     "BYPASS_LOSS_A" if pos.get("a_bypass") else "NORMAL")
-                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et)
+                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et, signal_tag=pos.get("signal_tag", "기본"))
                 _clear_pending_pnl(m)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
@@ -5552,7 +5553,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
                 _et2 = "BYPASS_DAILY_A" if backup_pos_snapshot.get("a_bypass") and not backup_pos_snapshot.get("is_losing_stop") else (
                     "BYPASS_LOSS_A" if backup_pos_snapshot.get("a_bypass") else "NORMAL")
-                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"), entry_type=_et2)
+                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"), entry_type=_et2, signal_tag=backup_pos_snapshot.get("signal_tag", "기본"))
                 _ps_mfe = backup_pos_snapshot.get("mfe_pct", 0.0) if backup_pos_snapshot else 0.0
                 _ps_mae = backup_pos_snapshot.get("mae_pct", 0.0) if backup_pos_snapshot else 0.0
                 update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
@@ -9009,6 +9010,7 @@ _STRAT_DESC_MAP = {
     "RX": "ATR압축 + 거래대금증가 + 박스상단 접근 → range expansion",
     "LTRP": "tick_rate급증 + spread확대 + 과열 → 유동성 함정 (진입금지)",
     # Research - filtered
+    "SVE1_ASK1": "SVE1 + ask1량≤2000만 gate (shadow)",
     "CLM_A": "CLM + 호가스프레드≤0.15% (execution cost filter)",
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
