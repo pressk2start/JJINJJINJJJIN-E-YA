@@ -1257,7 +1257,10 @@ def _pipeline_report(force=False):
             _tg_w = sum(1 for t in _tg_trades if t.get("win"))
             _tg_pnl = sum(t.get("pnl", 0) for t in _tg_trades) / _tg_n * 100
             _tg_route = _STRATEGY_REGISTRY.get(_tg_name, {}).get("route", _tg_name)
-            _tag_parts.append(f"{_tg_route}:{_tg_n}전{_tg_w}승{_tg_pnl:+.1f}%")
+            _tg_hi = sum(1 for t in _tg_trades if t.get("predicted_group") == "HI")
+            _tg_lo = sum(1 for t in _tg_trades if t.get("predicted_group") == "LO")
+            _pg_str = f"(HI{_tg_hi}/LO{_tg_lo})" if _tg_hi + _tg_lo > 0 else ""
+            _tag_parts.append(f"{_tg_route}:{_tg_n}전{_tg_w}승{_tg_pnl:+.1f}%{_pg_str}")
         lines.append(f"  └ {' | '.join(_tag_parts)}")
     if c.get('block_daily_guard', 0) > 0:
         lines.append(f"🚫 일일가드차단 {c['block_daily_guard']}회")
@@ -2206,7 +2209,7 @@ def sve1_daily_guard_ok():
     return True, ""
 
 
-def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry_type: str = "NORMAL", signal_tag: str = "기본"):
+def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry_type: str = "NORMAL", signal_tag: str = "기본", predicted_group: str = None):
     """거래 결과 기록. entry_type: NORMAL / BYPASS_DAILY_A / BYPASS_LOSS_A"""
     global _lose_streak, _win_streak, _ENTRY_SUSPEND_UNTIL, _ENTRY_MAX_MODE
     # 🔧 FIX: 단위 자동 정규화 — % 단위(예: 2.3)가 들어오면 소수(0.023)로 변환
@@ -2228,6 +2231,7 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry
         "signal": signal_type,
         "signal_tag": signal_tag,
         "entry_type": entry_type,
+        "predicted_group": predicted_group,
     })
 
     # 🔧 수익개선: 전략별 승률 로깅 (어떤 전략이 돈을 까먹는지 파악)
@@ -4406,6 +4410,8 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
                 "c1_candle_age": round(_entry_c1_candle_age_sec, 1),
                 "a_bypass": pre.get("_suspend_a_penalty"),
                 "is_losing_stop": pre.get("_is_losing_stop", False),
+                "predicted_group": pre.get("predicted_group"),
+                "survival_score": pre.get("survival_score", 0),
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
@@ -4971,7 +4977,7 @@ def close_auto_position(m, reason=""):
                         # 🔧 FIX: 수수료 반영한 순수익률 사용
                         net_ret_delayed = ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
                         try:
-                            record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"))  # 🔧 수수료 반영
+                            record_trade(m, net_ret_delayed / 100.0, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"), predicted_group=pos.get("predicted_group"))  # 🔧 수수료 반영
                         except Exception as _e:
                             print("[DELAYED_TRADE_RECORD_ERR]", _e)
                         # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
@@ -5017,7 +5023,7 @@ def close_auto_position(m, reason=""):
                                 # 🔧 FIX: 후속확인 청산에서도 record_trade + trade result 기록 (누락 방지)
                                 try:
                                     _net_ret = (_fup_exit_price / entry_price - 1.0 - FEE_RATE_ROUNDTRIP) if entry_price > 0 else 0
-                                    record_trade(m, _net_ret, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"))  # 🔧 FIX: 승률/연패 추적 누락 방지
+                                    record_trade(m, _net_ret, pos.get("signal_type", "기본"), signal_tag=pos.get("signal_tag", "기본"), predicted_group=pos.get("predicted_group"))  # 🔧 FIX: 승률/연패 추적 누락 방지
                                 except Exception:
                                     pass
                                 # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
@@ -5141,7 +5147,7 @@ def close_auto_position(m, reason=""):
             try:
                 _et = "BYPASS_DAILY_A" if pos.get("a_bypass") and not pos.get("is_losing_stop") else (
                     "BYPASS_LOSS_A" if pos.get("a_bypass") else "NORMAL")
-                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et, signal_tag=pos.get("signal_tag", "기본"))
+                record_trade(m, net_ret_pct / 100.0, pos.get("signal_type", "기본"), entry_type=_et, signal_tag=pos.get("signal_tag", "기본"), predicted_group=pos.get("predicted_group"))
                 _clear_pending_pnl(m)
             except Exception as _e:
                 print("[TRADE_RECORD_ERR]", _e)
@@ -5579,7 +5585,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                 # 🔧 FIX: record_trade(net) 호출 - TRADE_HISTORY/streak 업데이트
                 _et2 = "BYPASS_DAILY_A" if backup_pos_snapshot.get("a_bypass") and not backup_pos_snapshot.get("is_losing_stop") else (
                     "BYPASS_LOSS_A" if backup_pos_snapshot.get("a_bypass") else "NORMAL")
-                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"), entry_type=_et2, signal_tag=backup_pos_snapshot.get("signal_tag", "기본"))
+                record_trade(m, net_ret_pct / 100.0, backup_pos_snapshot.get("signal_type", "기본"), entry_type=_et2, signal_tag=backup_pos_snapshot.get("signal_tag", "기본"), predicted_group=backup_pos_snapshot.get("predicted_group"))
                 _ps_mfe = backup_pos_snapshot.get("mfe_pct", 0.0) if backup_pos_snapshot else 0.0
                 _ps_mae = backup_pos_snapshot.get("mae_pct", 0.0) if backup_pos_snapshot else 0.0
                 update_trade_result(m, exit_price_used, net_ret_pct / 100.0, hold_sec,
@@ -11183,6 +11189,11 @@ _SHADOW_PERF_STATS = {}
 _SHADOW_PERF_LOCK = threading.Lock()
 _SHADOW_TRADE_COUNT = 0
 
+_SURVIVAL_SCORING_CACHE = {}
+_SURVIVAL_SCORING_LOCK = threading.Lock()
+_LAST_UNIVERSAL_IND = {}
+_LAST_UNIVERSAL_IND_LOCK = threading.Lock()
+
 # 차단 건 가상 추적 (counterfactual tracking)
 # 필터에 걸려 차단된 시그널도 가상 포지션으로 추적 → 필터 효과 검증
 _SHADOW_BLOCKED_POSITIONS = []
@@ -12355,6 +12366,9 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         print(f"[SHADOW] universal_ind 수집 실패: {e}")
         universal_ind = {}
     _add_cycle_universal_ind_ms((time.time() - _t_uni) * 1000)
+    if universal_ind and market:
+        with _LAST_UNIVERSAL_IND_LOCK:
+            _LAST_UNIVERSAL_IND[market] = dict(universal_ind)
 
     # 호가창 스냅샷 → 슬리피지 추정 (shadow 진입 시점 execution quality 측정)
     _ob_data = m3_info.get("ob_data")
@@ -13298,6 +13312,8 @@ def _survival_analysis(routes=None, min_n=10):
                     "hi": _quick(hi_trades),
                     "lo": _quick(lo_trades),
                 }
+                with _SURVIVAL_SCORING_LOCK:
+                    _SURVIVAL_SCORING_CACHE[route] = list(rules)
             # mae_60s 분포 (route별 mae_threshold 적용)
             _mae_thr = _route_mae_threshold(route)
             mae_dist = {}
@@ -13323,6 +13339,22 @@ def _survival_analysis(routes=None, min_n=10):
             results[route] = {"groups": groups, "d_scores": d_scores,
                               "scoring": scoring, "mae_dist": mae_dist}
     return results
+
+
+def _predict_survival_group(route, indicators):
+    """캐시된 survival rules로 HI/LO 예측. 순수 로깅용, 진입 차단 없음."""
+    with _SURVIVAL_SCORING_LOCK:
+        rules = _SURVIVAL_SCORING_CACHE.get(route)
+    if not rules:
+        return None, 0
+    score = 0
+    for feat, op, th in rules:
+        v = indicators.get(feat)
+        if v is None:
+            continue
+        if (op == "↓" and v <= th) or (op == "↑" and v >= th):
+            score += 1
+    return ("HI" if score >= 2 else "LO"), score
 
 
 def _survival_analysis_lines():
@@ -15813,6 +15845,15 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         "v4_filters_hit": _v4_signal.get("filters_hit", []) if _v4_signal else [],
         "signal_ts": time.time(),
     }
+
+    # survival prediction 로깅 (진입 차단 없음, attribution용)
+    _sv_route = _v4_signal.get("logic_group", "") if _v4_signal else ""
+    if _sv_route:
+        with _LAST_UNIVERSAL_IND_LOCK:
+            _sv_ind = _LAST_UNIVERSAL_IND.get(m, {})
+        _sv_group, _sv_score = _predict_survival_group(_sv_route, _sv_ind)
+        pre["predicted_group"] = _sv_group
+        pre["survival_score"] = _sv_score
 
     # 🔧 WF데이터: spike tracker 갱신 비활성화 (1파/2파 비활성화됨)
 
