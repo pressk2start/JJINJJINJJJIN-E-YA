@@ -1159,7 +1159,7 @@ def _pipeline_report(force=False):
     _det = c["detect_called"]
 
     # 🧪 A군 vs 일반 성과 비교 (TRADE_HISTORY 기반)
-    _today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    _today_start = _today_start_kst()
     _today_trades = [t for t in TRADE_HISTORY if t.get("time", 0) >= _today_start]
     _normal_trades = [t for t in _today_trades if t.get("entry_type", "NORMAL") == "NORMAL"]
     _bypass_trades = [t for t in _today_trades if t.get("entry_type", "").startswith("BYPASS_")]
@@ -2154,7 +2154,7 @@ def _clear_pending_pnl(market):
                 break
 
 def _pending_daily_pnl():
-    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today_start = _today_start_kst()
     with _PENDING_CLOSE_PNL_LOCK:
         return sum(p["pnl"] for p in _PENDING_CLOSE_PNL if p["time"] >= today_start)
 
@@ -2164,21 +2164,21 @@ LATENCY_KILLSWITCH_P95_MS = 60000   # scan_detect p95 임계치 (60초)
 LATENCY_KILLSWITCH_MIN_SAMPLES = 10  # 최소 샘플 수 (미달 시 kill-switch 비활성)
 
 def _sve1_daily_trade_count():
-    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today_start = _today_start_kst()
     return sum(1 for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
 
 def _sve1_daily_pnl():
-    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today_start = _today_start_kst()
     realized = sum(t.get("pnl", 0) for t in TRADE_HISTORY if t.get("time", 0) >= today_start)
     return realized + _pending_daily_pnl()
 
 def _a_daily_trade_count():
-    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today_start = _today_start_kst()
     return sum(1 for t in TRADE_HISTORY
                if t.get("time", 0) >= today_start and t.get("entry_type", "").startswith("BYPASS_"))
 
 def _a_daily_pnl():
-    today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today_start = _today_start_kst()
     return sum(t.get("pnl", 0) for t in TRADE_HISTORY
                if t.get("time", 0) >= today_start and t.get("entry_type", "").startswith("BYPASS_"))
 
@@ -2190,7 +2190,7 @@ def _a_daily_guard_ok(market=None):
     if pnl <= A_DAILY_MAX_LOSS_PCT:
         return False, f"A군 일일 PnL {pnl*100:.2f}% ≤ {A_DAILY_MAX_LOSS_PCT*100:.1f}%"
     if market:
-        today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        today_start = _today_start_kst()
         same_coin = any(t for t in TRADE_HISTORY
                         if t.get("time", 0) >= today_start
                         and t.get("entry_type", "").startswith("BYPASS_")
@@ -7593,6 +7593,11 @@ KST = timezone(timedelta(hours=9))
 
 def now_kst():
     return datetime.now(KST)
+
+def _today_start_kst():
+    """KST 기준 오늘 자정의 UTC epoch timestamp."""
+    d = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return d.timestamp()
 
 def now_kst_str():
     return now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
