@@ -13202,6 +13202,7 @@ def _survival_analysis(routes=None, min_n=10):
         "ema_spread_15", "ema_spread_60", "vr5_15m",
         "macd_hist_5m_bps", "macd_hist_15_bps", "m3_60m",
         "ob_spread_pct", "ob_ask1_krw", "ob_bid1_krw",
+        "ob_slip_sell_10000k",
     ]
     results = {}
     with _SHADOW_PERF_LOCK:
