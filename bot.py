@@ -9223,7 +9223,11 @@ def _build_actionable_summary():
                 items.append(f"🟢 {route} ENABLE 조건충족 {_pass}/{len(_checks)}")
             elif _pass >= 4:
                 _missing = [k for k, v in _checks.items() if not v]
-                items.append(f"🟡 {route} ENABLE {_pass}/{len(_checks)} 미충족:{','.join(_missing)}")
+                _is_live = any(s.get("enabled") and s.get("route") == route for s in _STRATEGY_REGISTRY.values())
+                if _is_live:
+                    items.append(f"🟡 {route} LIVE | research {_pass}/{len(_checks)} 미충족:{','.join(_missing)}")
+                else:
+                    items.append(f"🟡 {route} ENABLE {_pass}/{len(_checks)} 미충족:{','.join(_missing)}")
             elif total_n >= 50 and ac_lift < 0.2:
                 items.append(f"🔴 {route} survival 미달 lift{ac_lift:+.2f}")
     except Exception:
