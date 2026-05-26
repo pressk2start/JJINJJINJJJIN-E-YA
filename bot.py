@@ -1254,6 +1254,8 @@ def _pipeline_report(force=False):
         _tag_parts = []
         for _tg_name, _tg_trades in sorted(_tag_groups.items(), key=lambda x: -len(x[1])):
             _tg_n = len(_tg_trades)
+            if _tg_n == 0:
+                continue
             _tg_w = sum(1 for t in _tg_trades if t.get("win"))
             _tg_pnl = sum(t.get("pnl", 0) for t in _tg_trades) / _tg_n * 100
             _tg_route = _STRATEGY_REGISTRY.get(_tg_name, {}).get("route", _tg_name)
@@ -4170,7 +4172,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         if _strat_tag and _strat_tag != "기본":
             _ks_trades = [t for t in TRADE_HISTORY if t.get("signal_tag") == _strat_tag]
             if len(_ks_trades) >= 10:
-                _ks_avg = statistics.mean([t["pnl"] for t in _ks_trades])
+                _ks_avg = statistics.mean([t.get("pnl", 0) for t in _ks_trades])
                 if _ks_avg < -0.008:
                     signal_skip(f"kill-switch: {_strat_tag} avg_pnl {_ks_avg*100:.2f}% < -0.8% (n={len(_ks_trades)})")
                     tg_send(f"🛑 <b>kill-switch</b> {m}\n• {_strat_tag} LIVE avg_pnl {_ks_avg*100:.2f}% (n={len(_ks_trades)})\n• 자동 진입중단")
