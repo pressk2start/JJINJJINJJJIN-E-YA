@@ -9540,16 +9540,14 @@ _V0_EXIT_PARAMS_CLM_ADAPTIVE = {
     ],
     "adaptive_trail": {
         "feature": "ob_slip_sell_10000k",
-        "arm_after_sec": 30,
+        "arm_after_sec": 60,
         "tiers": [
             (0.10, 0.005, 300),
             (0.14, 0.004, 240),
             (9.99, 0.003, 180),
         ],
-        "time_relax": [
-            (120, 1.3),
-            (180, 1.5),
-        ],
+        "relax_after_sec": 120,
+        "relax_mult": 1.5,
     },
     "description": "CLM adaptive trail: ob_slip기반 trail폭+hold시간 동적조정",
 }
@@ -12160,20 +12158,25 @@ def _shadow_sim_exit(vp, cur_price):
         _at_feat = vp.get("indicators", {}).get(_at["feature"])
         _at_trail = _at["tiers"][-1][1]
         _at_max_hold = _at["tiers"][-1][2]
+        _at_tier_label = "default"
         if _at_feat is not None:
             for _at_slip_max, _at_t, _at_mh in _at["tiers"]:
                 if _at_feat <= _at_slip_max:
                     _at_trail = _at_t
                     _at_max_hold = _at_mh
+                    _at_tier_label = f"slip<={_at_slip_max}"
                     break
-        _tr_mult = 1.0
-        for _tr_sec, _tr_m in _at.get("time_relax", []):
-            if hold_sec >= _tr_sec:
-                _tr_mult = _tr_m
-        _at_trail = _at_trail * _tr_mult
+        if hold_sec >= _at.get("relax_after_sec", 9999):
+            _at_trail = _at_trail * _at.get("relax_mult", 1.0)
         if not vp.get("_at_armed"):
             vp["_at_armed"] = True
             vp["_at_stop"] = vp["best_price"] * (1 - _at_trail)
+            vp["_at_meta"] = {
+                "ob_slip": _at_feat,
+                "tier": _at_tier_label,
+                "base_trail_pct": round(_at_trail * 100, 3),
+                "max_hold": _at_max_hold,
+            }
         else:
             _at_new = vp["best_price"] * (1 - _at_trail)
             if _at_new > vp.get("_at_stop", 0):
@@ -12320,6 +12323,12 @@ def _shadow_evaluate_positions():
                 for _sk in ("mfe_30s", "dd_peak_30s", "mfe_60s", "dd_peak_60s", "mae_60s"):
                     if _sk in vp:
                         _close_ind[_sk] = vp[_sk]
+                _at_meta = vp.get("_at_meta")
+                if _at_meta:
+                    _close_ind["at_ob_slip"] = _at_meta.get("ob_slip")
+                    _close_ind["at_trail_pct"] = _at_meta.get("base_trail_pct")
+                    _close_ind["at_tier"] = _at_meta.get("tier")
+                    _close_ind["at_max_hold"] = _at_meta.get("max_hold")
                 closed_results.append((vp, pnl, mfe, mae, reason, hold,
                                        _close_ind, vp.get("pnl_curve", {})))
             else:
