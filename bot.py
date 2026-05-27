@@ -9525,6 +9525,35 @@ _V0_EXIT_PARAMS_MOMENTUM_GT = {
     "description": "GT_SL_tiered(2.5/1.5/1.0)/no-trail/max240s",
 }
 
+_V0_EXIT_PARAMS_CLM_ADAPTIVE = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,            # 300s — adaptive trail이 먼저 청산하므로 넉넉히
+    "disable_trail": True,      # 기존 trail 비활성 (adaptive_trail이 대체)
+    "sl_tiers": [
+        (60,   0.025),
+        (120,  0.015),
+        (9999, 0.010),
+    ],
+    "adaptive_trail": {
+        "feature": "ob_slip_sell_10000k",
+        "arm_after_sec": 30,
+        "tiers": [
+            (0.10, 0.005, 300),
+            (0.14, 0.004, 240),
+            (9.99, 0.003, 180),
+        ],
+        "time_relax": [
+            (120, 1.3),
+            (180, 1.5),
+        ],
+    },
+    "description": "CLM adaptive trail: ob_slip기반 trail폭+hold시간 동적조정",
+}
+
 _V0_EXIT_PARAMS_GT_SURV60 = {
     "strategy": "TRAIL",
     "sl_pct": 0.020,
@@ -11069,27 +11098,27 @@ _STRATEGY_REGISTRY = {
     },
     "과열감지": {
         "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CLM", "mae_threshold": 0.35,
         "max_seed_krw": 500_000,
-        "description": "장대양봉+윗꼬리+VR과열 → 진입금지구간 추적 [GT exit] (micro-LIVE: execution연구)",
+        "description": "장대양봉+윗꼬리+VR과열 → adaptive trail (ob_slip기반 exit) (micro-LIVE: execution연구)",
     },
     "과열감지_A": {
         "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_A", "mae_threshold": 0.35,
         "ind_filters": [("ob_spread_pct", "<=", 0.15)],
-        "description": "CLM + 호가스프레드≤0.15% A군 execution필터 (shadow)",
+        "description": "CLM + 호가스프레드≤0.15% A군 execution필터 (adaptive trail)",
     },
     "과열감지_A2": {
         "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM_GT,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_A2", "mae_threshold": 0.35,
         "ind_filters": [("ob_spread_pct", "<=", 0.20)],
-        "description": "CLM + 호가스프레드≤0.20% execution필터 (shadow, CLM_A 비교용)",
+        "description": "CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
@@ -12124,6 +12153,36 @@ def _shadow_sim_exit(vp, cur_price):
     # 3) 본절 스톱 (G는 120초 이후에만)
     if _trail_allowed and mfe >= checkpoint and pnl <= 0:
         return True, "본절SL"
+
+    # 3.5) Adaptive trail — ob_slip 기반 동적 trail (disable_trail 대체)
+    _at = ep.get("adaptive_trail")
+    if _at and hold_sec >= _at["arm_after_sec"]:
+        _at_feat = vp.get("indicators", {}).get(_at["feature"])
+        _at_trail = _at["tiers"][-1][1]
+        _at_max_hold = _at["tiers"][-1][2]
+        if _at_feat is not None:
+            for _at_slip_max, _at_t, _at_mh in _at["tiers"]:
+                if _at_feat <= _at_slip_max:
+                    _at_trail = _at_t
+                    _at_max_hold = _at_mh
+                    break
+        _tr_mult = 1.0
+        for _tr_sec, _tr_m in _at.get("time_relax", []):
+            if hold_sec >= _tr_sec:
+                _tr_mult = _tr_m
+        _at_trail = _at_trail * _tr_mult
+        if not vp.get("_at_armed"):
+            vp["_at_armed"] = True
+            vp["_at_stop"] = vp["best_price"] * (1 - _at_trail)
+        else:
+            _at_new = vp["best_price"] * (1 - _at_trail)
+            if _at_new > vp.get("_at_stop", 0):
+                vp["_at_stop"] = _at_new
+        if cur_price <= vp.get("_at_stop", 0):
+            _at_pnl = (vp["_at_stop"] - entry_price) / entry_price
+            return True, "AT익절" if _at_pnl > 0 else "AT본절"
+        if hold_sec >= _at_max_hold:
+            return True, "AT타임아웃"
 
     # 4) 타임아웃 (max_bars × RECHECK_SEC)
     if hold_sec >= max_bars * RECHECK_SEC:
