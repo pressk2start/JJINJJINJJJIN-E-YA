@@ -11900,7 +11900,8 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                                   ("win_ind_m2", {}), ("loss_ind_m2", {}),
                                   ("mae_sum", 0.0), ("mae_cnt", 0),
                                   ("pnl_curve_sum", {}), ("pnl_curve_cnt", {}),
-                                  ("sl_hit_secs", []), ("coin_wl", {})):
+                                  ("sl_hit_secs", []), ("coin_wl", {}),
+                                  ("exit_reason_stats", {})):
             if _field not in s:
                 s[_field] = _default
         s["signals"] += 1
@@ -11917,6 +11918,14 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             s["mfes"] = s["mfes"][-200:]
         # 청산 사유별 카운트
         s["exit_reasons"][exit_reason] = s["exit_reasons"].get(exit_reason, 0) + 1
+        if exit_reason.startswith("AT"):
+            _ers = s.setdefault("exit_reason_stats", {})
+            if exit_reason not in _ers:
+                _ers[exit_reason] = {"pnl_sum": 0.0, "mfe_sum": 0.0, "hold_sum": 0.0, "n": 0}
+            _ers[exit_reason]["pnl_sum"] += pnl_pct
+            _ers[exit_reason]["mfe_sum"] += mfe_pct
+            _ers[exit_reason]["hold_sum"] += hold_sec
+            _ers[exit_reason]["n"] += 1
         # 보유 시간
         s["hold_secs"].append(round(hold_sec, 1))
         if len(s["hold_secs"]) > 200:
@@ -12925,6 +12934,24 @@ def _v4_shadow_report_lines():
                     top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:TOP_FAIL_REASONS]
                     reason_str = " ".join(f"{r}:{c}" for r, c in top_reasons)
                     lines.append(f"  └ {reason_str}")
+                _ers = s.get("exit_reason_stats", {})
+                if _ers:
+                    _at_parts = []
+                    _at_pnl_total, _at_mfe_total, _at_n_total = 0.0, 0.0, 0
+                    for _atr in ("AT익절", "AT본절", "AT타임아웃"):
+                        _ast = _ers.get(_atr)
+                        if _ast and _ast["n"] > 0:
+                            _a_pnl = _ast["pnl_sum"] / _ast["n"] * 100
+                            _a_hold = _ast["hold_sum"] / _ast["n"]
+                            _at_parts.append(f"{_atr}:{_ast['n']}건 {_a_pnl:+.2f}%/{_a_hold:.0f}s")
+                            _at_pnl_total += _ast["pnl_sum"]
+                            _at_mfe_total += _ast["mfe_sum"]
+                            _at_n_total += _ast["n"]
+                    if _at_parts:
+                        lines.append(f"  📐 {' | '.join(_at_parts)}")
+                        if _at_mfe_total > 0 and _at_n_total > 0:
+                            _at_ratio = _at_pnl_total / _at_mfe_total * 100
+                            lines.append(f"  📐 AT realized/MFE: {_at_ratio:.0f}%")
                 cs = s.get("pnl_curve_sum", {})
                 cc = s.get("pnl_curve_cnt", {})
                 if cs:
