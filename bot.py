@@ -12955,9 +12955,13 @@ def _v4_shadow_report_lines():
                             _dt_n_total += _da["n"]
                     if _dt_parts:
                         lines.append(f"  🎯 {' | '.join(_dt_parts)}")
-                        if _dt_mfe_total > 0 and _dt_n_total > 0:
-                            _dt_ratio = _dt_pnl_total / _dt_mfe_total * 100
-                            lines.append(f"  🎯 realized/MFE: {_dt_ratio:.0f}%")
+                        _mfe_pos = [t for t in _trs if t.get("exit_reason") in _detail_keys and t.get("mfe", 0) > 0]
+                        if _mfe_pos:
+                            _rm_pnl = sum(t["pnl"] for t in _mfe_pos)
+                            _rm_mfe = sum(t["mfe"] for t in _mfe_pos)
+                            if _rm_mfe > 0:
+                                _dt_ratio = _rm_pnl / _rm_mfe * 100
+                                lines.append(f"  🎯 realized/MFE: {_dt_ratio:.0f}%")
                 cs = s.get("pnl_curve_sum", {})
                 cc = s.get("pnl_curve_cnt", {})
                 if cs:
