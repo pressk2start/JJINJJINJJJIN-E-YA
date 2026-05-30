@@ -70,6 +70,7 @@ load_dotenv("/home/ubuntu/bot/.env")
 SCAN_INTERVAL = 1.0           # 초
 LOOKBACK_TICKS = 20           # 최근 N틱 기준 변동성 측정 (~20초)
 ANOMALY_THRESHOLD = 3.0       # 평소 변동성 대비 X배 이상이면 감지
+ANOMALY_CEILING = 7.0         # z-score 상한 — 과열 구간 추격 차단 (3~5 WR34% vs 10+ WR18%)
 TRAILING_STOP_PCT = 0.25      # 트레일링 스탑 (고점 대비 -X% 하락 시 청산)
 TARGET_PROFIT_PCT = 0.3       # 목표 수익률 도달 시 즉시 청산
 MAX_HOLD_SEC = 180            # 최대 보유 시간 (초)
@@ -246,7 +247,7 @@ def detect_anomaly(market, current_price, now_ts):
     z_score = (recent_avg - mean_r) / std_r
     base_price = prices[-4][1]
     abs_move = (current_price - base_price) / base_price * 100
-    price_z_ok = z_score >= ANOMALY_THRESHOLD and abs_move > 0
+    price_z_ok = ANOMALY_THRESHOLD <= z_score <= ANOMALY_CEILING and abs_move > 0
     if not price_z_ok:
         return None
     breakout_ok = True
@@ -512,7 +513,7 @@ def analyze_buckets():
     ]))
     sections.append("▶ z-score별:")
     sections.append(bucket_stats(closed_trades, "z_score", [
-        (3, 5, "3~5"), (5, 10, "5~10"), (10, 20, "10~20"), (20, 9e18, "20+"),
+        (3, 5, "3~5"), (5, 7, "5~7"), (7, 10, "7~10"), (10, 9e18, "10+"),
     ]))
     sections.append("▶ 거래대금z별:")
     sections.append(bucket_stats(closed_trades, "vol_z", [
@@ -739,7 +740,7 @@ def main():
     log_fh = open(LOG_FILE, "a")
     print("=" * 60)
     print("업비트 모멘텀 스캐너 — Paper Trading")
-    print(f"감지: z≥{ANOMALY_THRESHOLD} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%")
+    print(f"감지: z:{ANOMALY_THRESHOLD}~{ANOMALY_CEILING} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%")
     print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / timeout {MAX_HOLD_SEC}s")
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
     print(f"breakout: {'ON' if BREAKOUT_REQUIRED else 'OFF'} (직전{BREAKOUT_WINDOW}틱 고점 돌파) / vol_ratio gate: {VOLUME_RATIO_THRESHOLD}")
@@ -768,7 +769,7 @@ def main():
             f"━━━━━━━━━━━━━━━\n"
             f"모니터: 상위{len(top_markets)}개"
             + (f" + 하위{len(bottom_markets)}" if bottom_markets else "") + "\n"
-            f"감지: z≥{ANOMALY_THRESHOLD} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%\n"
+            f"감지: z:{ANOMALY_THRESHOLD}~{ANOMALY_CEILING} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%\n"
             f"필터: spread≤{MAX_SPREAD_PCT}%\n"
             f"청산: +{TARGET_PROFIT_PCT}% / -{TRAILING_STOP_PCT}% / {MAX_HOLD_SEC}s"
         )
