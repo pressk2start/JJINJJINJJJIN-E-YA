@@ -12941,7 +12941,7 @@ def _v4_shadow_report_lines():
                         _exit_agg[_er]["mfe_sum"] += _t.get("mfe", 0.0)
                         _exit_agg[_er]["hold_sum"] += _t.get("hold", 0.0)
                         _exit_agg[_er]["n"] += 1
-                    _detail_keys = ("트레일익절", "트레일본절", "타임아웃", "손절SL")
+                    _detail_keys = ("트레일익절", "트레일본절", "AT익절", "AT본절", "AT타임아웃", "타임아웃", "손절SL", "본절SL")
                     _dt_parts = []
                     _dt_pnl_total, _dt_mfe_total, _dt_n_total = 0.0, 0.0, 0
                     for _dk in _detail_keys:
