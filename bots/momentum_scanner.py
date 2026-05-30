@@ -21,10 +21,27 @@ import json
 import csv
 import os
 import sys
+import subprocess
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 
 KST = timezone(timedelta(hours=9))
+
+def _get_git_info():
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sha = subprocess.check_output(
+            ["git", "-C", repo, "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL).decode().strip()
+        msg = subprocess.check_output(
+            ["git", "-C", repo, "log", "-1", "--format=%s"],
+            stderr=subprocess.DEVNULL).decode().strip()[:40]
+        return sha, msg
+    except Exception:
+        return "unknown", ""
+
+_GIT_SHA, _GIT_MSG = _get_git_info()
+_BOOT_TIME = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 # ─── .env 파일 로드 (기존 봇 폴더에서 자동 읽기) ───
 def load_dotenv(path):
@@ -684,7 +701,11 @@ def main():
 
     if TG_ENABLED:
         tg_send(
-            f"📊 모멘텀 스캐너 시작\n"
+            f"🚀 모멘텀 스캐너 배포 시작\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"버전: {_GIT_SHA} ({_GIT_MSG})\n"
+            f"시각: {_BOOT_TIME}\n"
+            f"━━━━━━━━━━━━━━━\n"
             f"모니터: 상위{len(top_markets)}개"
             + (f" + 하위{len(bottom_markets)}" if bottom_markets else "") + "\n"
             f"감지: z≥{ANOMALY_THRESHOLD} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%\n"
