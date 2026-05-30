@@ -12942,6 +12942,7 @@ def _v4_shadow_report_lines():
                         _exit_agg[_er]["hold_sum"] += _t.get("hold", 0.0)
                         _exit_agg[_er]["n"] += 1
                     _detail_keys = ("트레일익절", "트레일본절", "AT익절", "AT본절", "AT타임아웃", "타임아웃", "손절SL", "본절SL")
+                    _display = {"AT본절": "AT소손절"}
                     _dt_parts = []
                     _dt_pnl_total, _dt_mfe_total, _dt_n_total = 0.0, 0.0, 0
                     for _dk in _detail_keys:
@@ -12949,7 +12950,9 @@ def _v4_shadow_report_lines():
                         if _da and _da["n"] > 0:
                             _d_pnl = _da["pnl_sum"] / _da["n"] * 100
                             _d_hold = _da["hold_sum"] / _da["n"]
-                            _dt_parts.append(f"{_dk}:{_da['n']}건 {_d_pnl:+.2f}%/{_d_hold:.0f}s")
+                            _d_mfe = _da["mfe_sum"] / _da["n"] * 100
+                            _lbl = _display.get(_dk, _dk)
+                            _dt_parts.append(f"{_lbl}:{_da['n']}건 {_d_pnl:+.2f}%/{_d_hold:.0f}s mfe{_d_mfe:+.2f}%")
                             _dt_pnl_total += _da["pnl_sum"]
                             _dt_mfe_total += _da["mfe_sum"]
                             _dt_n_total += _da["n"]
