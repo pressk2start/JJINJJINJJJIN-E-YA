@@ -221,6 +221,8 @@ def classify_markets(tickers):
 # 감지
 # ═══════════════════════════════════════════════
 def detect_anomaly(market, current_price, now_ts):
+    """z-score, abs_move, breakout 각각 독립 판정 반환.
+    진입 여부는 caller가 조합해서 결정."""
     history = price_history[market]
     if history and now_ts - history[-1][0] > STALE_GAP_SEC:
         history.clear()
@@ -244,17 +246,21 @@ def detect_anomaly(market, current_price, now_ts):
     z_score = (recent_avg - mean_r) / std_r
     base_price = prices[-4][1]
     abs_move = (current_price - base_price) / base_price * 100
-    if z_score >= ANOMALY_THRESHOLD and abs_move > 0:
-        if BREAKOUT_REQUIRED:
-            win = min(BREAKOUT_WINDOW + 1, len(prices))
-            prev_high = max(p[1] for p in prices[-win:-1])
-            if current_price <= prev_high:
-                return None
-        return {
-            "z_score": round(z_score, 2),
-            "abs_move": round(abs_move, 3),
-        }
-    return None
+    price_z_ok = z_score >= ANOMALY_THRESHOLD and abs_move > 0
+    if not price_z_ok:
+        return None
+    breakout_ok = True
+    if BREAKOUT_REQUIRED:
+        win = min(BREAKOUT_WINDOW + 1, len(prices))
+        prev_high = max(p[1] for p in prices[-win:-1])
+        if current_price <= prev_high:
+            breakout_ok = False
+    return {
+        "z_score": round(z_score, 2),
+        "abs_move": round(abs_move, 3),
+        "price_z_ok": True,
+        "breakout_ok": breakout_ok,
+    }
 
 def volume_stats(market, acc_price, now_ts):
     """[D/H] 거래대금 delta z-score와 ratio(recent/mean) 동시 반환."""
@@ -336,6 +342,7 @@ def manage_positions(tickers_dict, now_ts):
                 "ask_krw": pos["ask_krw"],
                 "bid_krw": pos["bid_krw"],
                 "slip_buy": pos["slip_buy"],
+                "cond_flags": pos.get("cond_flags", {}),
             })
     for trade in to_close:
         market = trade["market"]
@@ -345,18 +352,22 @@ def manage_positions(tickers_dict, now_ts):
         emoji = "🟢" if trade["net_pnl"] > 0 else "🔴"
         coin = market.replace("KRW-", "")
         price_diff = trade["exit_price"] - trade["entry_price"]
-        peak_price = trade["entry_price"] * (1 + trade["peak_pnl"] / 100)
         n_total = len(closed_trades)
         n_wins = sum(1 for t in closed_trades if t["net_pnl"] > 0)
         sum_pnl = sum(t["net_pnl"] for t in closed_trades)
         wr = n_wins / n_total * 100 if n_total else 0
+        cf = trade.get("cond_flags", {})
+        ck = lambda k: "V" if cf.get(k, True) else "X"
+        cond_line = f"진입조건: 가격Z{ck('price_z')} 거래대금{ck('vol_z')} 돌파{ck('breakout')} 호가{ck('spread')} depth{ck('depth')}"
         msg = (
             f"{emoji} {trade['net_pnl']:+.3f}% ({price_diff:+,.0f}원) {coin} [{trade['group']}]\n"
+            f"{cond_line}\n"
             f"━━━━━━━━━━━━━━━\n"
             f"{trade['entry_price']:,.0f} → {trade['exit_price']:,.0f}원\n"
             f"손익 {trade['pnl']:+.3f}% 수수료후 {trade['net_pnl']:+.3f}%\n"
-            f"보유 {trade['hold_sec']:.0f}초 | {trade['reason']} | MFE{trade['peak_pnl']:+.3f}% MAE{trade['mae']:+.3f}%\n"
-            f"spread:{trade['spread_pct']:.3f}% z:{trade['z_score']} vz:{trade['vol_z']} vr:{trade['vol_ratio']}\n"
+            f"보유 {trade['hold_sec']:.0f}초 | {trade['reason']}\n"
+            f"MFE{trade['peak_pnl']:+.3f}% MAE{trade['mae']:+.3f}%\n"
+            f"z:{trade['z_score']} vz:{trade['vol_z']} vr:{trade['vol_ratio']} spread:{trade['spread_pct']:.3f}%\n"
             f"━━━━━━━━━━━━━━━\n"
             f"누적: {n_total}전 {n_wins}승 wr{wr:.0f}% sum{sum_pnl:+.3f}%"
         )
@@ -447,14 +458,24 @@ def save_results(tag=""):
             "scan_count": scan_count,
         }, f, ensure_ascii=False, indent=2)
     csv_path = os.path.join(SAVE_DIR, f"{prefix}.csv")
+    csv_fields = [
+        "time", "market", "group", "entry_price", "exit_price",
+        "pnl", "net_pnl", "mae", "peak_pnl", "hold_sec", "reason",
+        "z_score", "vol_z", "vol_ratio", "abs_move", "spread_pct", "ask_krw", "bid_krw", "slip_buy",
+        "c_price_z", "c_vol_z", "c_breakout", "c_spread", "c_depth",
+    ]
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "time", "market", "group", "entry_price", "exit_price",
-            "pnl", "net_pnl", "mae", "peak_pnl", "hold_sec", "reason",
-            "z_score", "vol_z", "vol_ratio", "abs_move", "spread_pct", "ask_krw", "bid_krw", "slip_buy"
-        ])
+        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(closed_trades)
+        for t in closed_trades:
+            row = dict(t)
+            cf = t.get("cond_flags", {})
+            row["c_price_z"] = int(cf.get("price_z", True))
+            row["c_vol_z"] = int(cf.get("vol_z", True))
+            row["c_breakout"] = int(cf.get("breakout", True))
+            row["c_spread"] = int(cf.get("spread", True))
+            row["c_depth"] = int(cf.get("depth", True))
+            writer.writerow(row)
     log(f"저장: {json_path}")
     return json_path
 
@@ -513,6 +534,41 @@ def analyze_buckets():
         avg_mae = sum(t["mae"] for t in subset) / n
         sections.append(f"  {grp}: {n}건 wr{w/n*100:.0f}% avg{avg:+.3f}% mae{avg_mae:+.3f}%")
     return "\n".join(sections)
+
+def _analyze_condition_combos():
+    """조건별 승/패 분해 — 어떤 조건 조합이 승리에 기여했는지 분석."""
+    if not closed_trades:
+        return "데이터 없음"
+    trades_with_flags = [t for t in closed_trades if t.get("cond_flags")]
+    if len(trades_with_flags) < 3:
+        return "조건 태그 데이터 부족 (3건 미만)"
+    cond_keys = ["price_z", "vol_z", "breakout", "spread", "depth"]
+    lines = []
+    wins = [t for t in trades_with_flags if t["net_pnl"] > 0]
+    losses = [t for t in trades_with_flags if t["net_pnl"] <= 0]
+    lines.append(f"  전체: {len(trades_with_flags)}건 (W{len(wins)} L{len(losses)})")
+    lines.append("")
+    lines.append("  [조건별 승률]")
+    for k in cond_keys:
+        on = [t for t in trades_with_flags if t["cond_flags"].get(k, True)]
+        if not on:
+            continue
+        w = sum(1 for t in on if t["net_pnl"] > 0)
+        avg = sum(t["net_pnl"] for t in on) / len(on)
+        lines.append(f"  {k:10s} {len(on):3d}건 wr{w/len(on)*100:3.0f}% avg{avg:+.3f}%")
+    lines.append("")
+    lines.append("  [승리 거래 조건 충족률]")
+    if wins:
+        for k in cond_keys:
+            cnt = sum(1 for t in wins if t["cond_flags"].get(k, True))
+            lines.append(f"  {k:10s} {cnt}/{len(wins)} ({cnt/len(wins)*100:.0f}%)")
+    lines.append("")
+    lines.append("  [패배 거래 조건 충족률]")
+    if losses:
+        for k in cond_keys:
+            cnt = sum(1 for t in losses if t["cond_flags"].get(k, True))
+            lines.append(f"  {k:10s} {cnt}/{len(losses)} ({cnt/len(losses)*100:.0f}%)")
+    return "\n".join(lines)
 
 # ═══════════════════════════════════════════════
 # [F] 주기적 회고 + 개선점 추천
@@ -667,6 +723,10 @@ def generate_review():
         "━━━━━━━━━━━━━━━",
         "▶ Bucket 상세:",
         analyze_buckets(),
+        "",
+        "━━━━━━━━━━━━━━━",
+        "▶ 조건별 승패 분해:",
+        _analyze_condition_combos(),
     ]
     return "\n".join(lines)
 
@@ -746,12 +806,15 @@ def main():
                 vol_z, vol_ratio = volume_stats(market, ticker.get("acc_trade_price_24h", 0), now_ts)
                 if not signal:
                     continue
-                if VOLUME_Z_THRESHOLD > 0 and (vol_z is None or vol_z < VOLUME_Z_THRESHOLD):
-                    continue
-                if VOLUME_RATIO_THRESHOLD > 0 and (vol_ratio is None or vol_ratio < VOLUME_RATIO_THRESHOLD):
-                    continue
                 vol_z_val = vol_z if vol_z is not None else 0
                 vol_ratio_val = vol_ratio if vol_ratio is not None else 0
+
+                # 조건별 독립 판정
+                cond_price_z = signal["price_z_ok"]
+                cond_breakout = signal["breakout_ok"]
+                cond_vol_z = not (VOLUME_Z_THRESHOLD > 0 and (vol_z is None or vol_z < VOLUME_Z_THRESHOLD))
+                cond_vol_ratio = not (VOLUME_RATIO_THRESHOLD > 0 and (vol_ratio is None or vol_ratio < VOLUME_RATIO_THRESHOLD))
+                cond_abs_move = signal["abs_move"] >= MIN_ABS_MOVE
 
                 ob = get_orderbook(market)
                 if not ob:
@@ -761,11 +824,23 @@ def main():
                 ask_krw = ask * ob["ask_size"]
                 bid_krw = bid * ob["bid_size"]
                 spread_pct = (ask - bid) / bid * 100
-                if ask_krw < MIN_ASK_KRW or bid_krw < MIN_BID_KRW:
-                    continue
-                if spread_pct > MAX_SPREAD_PCT:
-                    continue
-                if signal["abs_move"] < MIN_ABS_MOVE:
+
+                cond_spread = spread_pct <= MAX_SPREAD_PCT
+                cond_depth = ask_krw >= MIN_ASK_KRW and bid_krw >= MIN_BID_KRW
+
+                cond_flags = {
+                    "price_z": cond_price_z,
+                    "vol_z": cond_vol_z,
+                    "breakout": cond_breakout,
+                    "spread": cond_spread,
+                    "depth": cond_depth,
+                }
+                cond_tag = " ".join(
+                    f"{'V' if v else 'X'}{k}" for k, v in cond_flags.items()
+                )
+                all_pass = all(cond_flags.values()) and cond_abs_move and cond_vol_ratio
+
+                if not all_pass:
                     continue
 
                 group = "상위" if market in top_markets else "하위"
@@ -786,19 +861,19 @@ def main():
                     "ask_krw": round(ask_krw),
                     "bid_krw": round(bid_krw),
                     "slip_buy": round(slip_buy, 4),
+                    "cond_flags": cond_flags,
                 }
                 coin = market.replace("KRW-", "")
                 target_price = entry_price * (1 + TARGET_PROFIT_PCT / 100)
                 fmt_krw = fmt_krw_g
+                ck = lambda v: "V" if v else "X"
                 msg = (
                     f"🔥 ENTRY {coin} [{group}]\n"
+                    f"조건: 가격Z{ck(cond_price_z)} 거래대금{ck(cond_vol_z)} 돌파{ck(cond_breakout)} 호가{ck(cond_spread)} depth{ck(cond_depth)}\n"
                     f"━━━━━━━━━━━━━━━\n"
-                    f"현재가: {price:,.0f}원 ({chg_rate:+.2f}%)\n"
-                    f"매수(ask): {ask:,.0f}원 ({slip_buy:+.3f}%) depth {fmt_krw(ask_krw)}\n"
-                    f"매도(bid): {bid:,.0f}원 depth {fmt_krw(bid_krw)}\n"
-                    f"스프레드: {spread_pct:.3f}%\n"
-                    f"순간등락: {signal['abs_move']:+.3f}% (평소의 {signal['z_score']}배)\n"
-                    f"거래대금z:{vol_z_val} ratio:{vol_ratio_val}\n"
+                    f"z:{signal['z_score']} vz:{vol_z_val} vr:{vol_ratio_val}\n"
+                    f"등락:{signal['abs_move']:+.3f}% spread:{spread_pct:.3f}%\n"
+                    f"ask:{ask:,.0f} ({fmt_krw(ask_krw)}) bid:{bid:,.0f} ({fmt_krw(bid_krw)})\n"
                     f"목표: {target_price:,.0f}원 (+{TARGET_PROFIT_PCT}%)\n"
                     f"스탑: trail -{TRAILING_STOP_PCT}% / {MAX_HOLD_SEC}s"
                 )
