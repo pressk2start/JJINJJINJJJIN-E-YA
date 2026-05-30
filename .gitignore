@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .study_crashes
+# momentum scanner runtime files
+bots/momentum_*.json
+bots/momentum_*.csv
+bots/momentum_*.log
