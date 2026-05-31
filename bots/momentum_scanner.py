@@ -775,6 +775,7 @@ def main():
             f"━━━━━━━━━━━━━━━\n"
             f"버전: {_GIT_SHA} ({_GIT_MSG})\n"
             f"시각: {_BOOT_TIME}\n"
+            f"depth≥ask{MIN_ASK_KRW//10000}만/bid{MIN_BID_KRW//10000}만\n"
             f"━━━━━━━━━━━━━━━\n"
             f"모니터: 상위{len(top_markets)}개"
             + (f" + 하위{len(bottom_markets)}" if bottom_markets else "") + "\n"
