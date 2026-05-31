@@ -12965,6 +12965,30 @@ def _v4_shadow_report_lines():
                             if _rm_mfe > 0:
                                 _dt_ratio = _rm_pnl / _rm_mfe * 100
                                 lines.append(f"  🎯 realized/MFE: {_dt_ratio:.0f}%")
+                        _at_wins = [t for t in _trs if t.get("exit_reason") == "AT익절" and t.get("mfe", 0) > 0]
+                        if len(_at_wins) >= 5:
+                            _mfe_bk = [(0, 0.005, "0~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
+                            _bk_parts = []
+                            for _blo, _bhi, _blbl in _mfe_bk:
+                                _bk = [t for t in _at_wins if _blo <= t["mfe"] < _bhi]
+                                if _bk:
+                                    _bp = sum(t["pnl"] for t in _bk) / len(_bk) * 100
+                                    _bm = sum(t["mfe"] for t in _bk) / len(_bk) * 100
+                                    _bc = _bp / _bm * 100 if _bm > 0 else 0
+                                    _bk_parts.append(f"{_blbl}:{len(_bk)}건 {_bp:+.2f}% cap{_bc:.0f}%")
+                            if _bk_parts:
+                                lines.append(f"  🎯 AT익절mfe: {' | '.join(_bk_parts)}")
+                        _at_loss = [t for t in _trs if t.get("exit_reason") == "AT본절"]
+                        if len(_at_loss) >= 5:
+                            _sl_bk = [(0, 0.001, "0~0.1%"), (0.001, 0.003, "0.1~0.3%"), (0.003, 0.005, "0.3~0.5%"), (0.005, 99, "0.5%+")]
+                            _sl_parts = []
+                            for _slo, _shi, _slbl in _sl_bk:
+                                _sk = [t for t in _at_loss if _slo <= t.get("mfe", 0) < _shi]
+                                if _sk:
+                                    _sp = sum(t["pnl"] for t in _sk) / len(_sk) * 100
+                                    _sl_parts.append(f"{_slbl}:{len(_sk)}건 {_sp:+.2f}%")
+                            if _sl_parts:
+                                lines.append(f"  🎯 AT소손절mfe: {' | '.join(_sl_parts)}")
                 cs = s.get("pnl_curve_sum", {})
                 cc = s.get("pnl_curve_cnt", {})
                 if cs:
