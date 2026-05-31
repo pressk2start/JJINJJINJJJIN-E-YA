@@ -524,6 +524,12 @@ _PIPELINE_COUNTERS = {
 _PIPELINE_LAST_REPORT_TS = 0
 _PIPELINE_REPORT_INTERVAL = 600  # 10분
 _PIPELINE_START_TS = time.time()  # 누적 계측 시작 시각
+try:
+    import subprocess as _sp
+    _DEPLOY_GIT_HASH = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=_sp.DEVNULL, timeout=3).decode().strip()
+except Exception:
+    _DEPLOY_GIT_HASH = "unknown"
+_DEPLOY_TS_STR = time.strftime("%m/%d %H:%M", time.localtime(_PIPELINE_START_TS))
 
 # ======================================================================
 # 📊 확장 파이프라인 계측 — delta, conversion, 코인별, 시간대별, 레이턴시
@@ -1368,7 +1374,7 @@ def _pipeline_report(force=False):
     if _scan_p95_s > REPORT_DEBUG_SCAN_P95_S and _stage_rows:
         lines.append(f"  ⚠slow: {' '.join(_stage_rows[:3])}")
 
-    lines.append("report v7")
+    lines.append(f"report v7 | {_DEPLOY_GIT_HASH} deploy {_DEPLOY_TS_STR}")
 
     # ━━━━ 조건부 DEBUG DETAIL (이상 시에만 compact에 append) ━━━━
     _abnormal = (
