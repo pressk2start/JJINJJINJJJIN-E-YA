@@ -85,8 +85,8 @@ MAX_SPREAD_PCT = 0.15         # [C] 진입 최대 스프레드 (수수료 고려
 STALE_GAP_SEC = 5.0           # [B] 직전 틱과 간격이 이보다 크면 이력 리셋 (stale 오신호 차단)
 VOLUME_Z_THRESHOLD = 1.5      # [D] 거래대금 delta z-score 최소 (0이면 게이트 해제·로깅만)
 MIN_ABS_MOVE = 0.15           # [E] 진입 최소 순간등락 — 목표(TARGET)와 분리 (작게 보고 크게 잡는다)
-REVIEW_INTERVAL_SEC = 3600    # [F] 누적 데이터 회고+개선점 추천 주기 (1시간) — 0이면 비활성
-REVIEW_MIN_TRADES = 50        # [F] 회고 분석 최소 표본 (통계적 유의성 위해 50건 이상)
+REVIEW_INTERVAL_SEC = 600     # [F] 누적 데이터 회고+개선점 추천 주기 (10분) — 0이면 비활성
+REVIEW_MIN_TRADES = 10        # [F] 회고 분석 최소 표본
 BREAKOUT_REQUIRED = True      # [G] 진입 시 직전 N틱 고점 돌파 요구 (fake bounce / mean-revert 제거)
 BREAKOUT_WINDOW = 10          # [G] 돌파 비교 윈도 (틱 수)
 VOLUME_RATIO_THRESHOLD = 0.0  # [H] 거래대금 delta ratio 게이트 (0=비활성·로깅만 / 활성 시 2~3 권장)
@@ -775,6 +775,7 @@ def main():
             f"━━━━━━━━━━━━━━━\n"
             f"버전: {_GIT_SHA} ({_GIT_MSG})\n"
             f"시각: {_BOOT_TIME}\n"
+            f"depth≥ask{MIN_ASK_KRW//10000}만/bid{MIN_BID_KRW//10000}만\n"
             f"━━━━━━━━━━━━━━━\n"
             f"모니터: 상위{len(top_markets)}개"
             + (f" + 하위{len(bottom_markets)}" if bottom_markets else "") + "\n"
