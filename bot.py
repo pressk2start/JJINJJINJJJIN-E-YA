@@ -12995,6 +12995,18 @@ def _v4_shadow_report_lines():
                                     _sl_parts.append(f"{_slbl}:{len(_sk)}건 {_sp:+.2f}%")
                             if _sl_parts:
                                 lines.append(f"  🎯 AT소손절mfe: {' | '.join(_sl_parts)}")
+                        _at_to = [t for t in _trs if t.get("exit_reason") == "AT타임아웃" and t.get("hold", 0) > 0]
+                        if len(_at_to) >= 3:
+                            _to_holds = sorted(t["hold"] for t in _at_to)
+                            _to_bk = [(0, 180, "~180s"), (180, 300, "180~300s"), (300, 600, "300~600s"), (600, 99999, "600s+")]
+                            _to_parts = []
+                            for _tlo, _thi, _tlbl in _to_bk:
+                                _tn = sum(1 for h in _to_holds if _tlo <= h < _thi)
+                                if _tn:
+                                    _to_parts.append(f"{_tlbl}:{_tn}")
+                            _to_med = _to_holds[len(_to_holds) // 2]
+                            _to_max = _to_holds[-1]
+                            lines.append(f"  🎯 AT타임아웃hold: {' | '.join(_to_parts)} med={_to_med:.0f}s max={_to_max:.0f}s")
                 cs = s.get("pnl_curve_sum", {})
                 cc = s.get("pnl_curve_cnt", {})
                 if cs:
