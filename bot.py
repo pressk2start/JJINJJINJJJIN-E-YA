@@ -12283,6 +12283,18 @@ def _shadow_evaluate_positions():
         for vp in _SHADOW_VIRTUAL_POSITIONS:
             cur_price = price_map.get(vp["market"], 0)
             if cur_price <= 0:
+                _hard_max = vp["exit_params"].get("max_bars", 60) * RECHECK_SEC + 300
+                if (now - vp["entry_ts"]) >= _hard_max:
+                    _fp = vp.get("best_price", vp["entry_price"])
+                    _fpnl = (_fp - vp["entry_price"]) / vp["entry_price"] if vp["entry_price"] > 0 else 0
+                    closed_results.append({"route": vp["route"], "strat": vp["strat"],
+                        "market": vp["market"], "pnl": round(_fpnl, 6),
+                        "mfe": round((_fp - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
+                        "mae": round((vp.get("worst_price", vp["entry_price"]) - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
+                        "hold": now - vp["entry_ts"], "exit_reason": "가격없음",
+                        "indicators": dict(vp.get("indicators", {})),
+                        "pnl_curve": vp.get("pnl_curve", {})})
+                    continue
                 remaining.append(vp)
                 continue
             if cur_price < vp.get("worst_price", vp["entry_price"]):
