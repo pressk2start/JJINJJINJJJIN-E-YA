@@ -718,6 +718,10 @@ def generate_review():
         lines.append("[종목 WORST3]")
         for m, (c, s) in worst3:
             lines.append(f"  {m.replace('KRW-',''):10s} {c}회 sum{s:+.3f}% avg{s/c:+.3f}%")
+    most_traded = max(by_market.items(), key=lambda x: x[1][0]) if by_market else None
+    if most_traded and most_traded[1][0] >= 5:
+        mc, (mc_n, mc_pnl) = most_traded
+        lines.append(f"[집중도] {mc.replace('KRW-','')} {mc_n}/{n}건 ({mc_n/n*100:.0f}%) sum{mc_pnl:+.3f}%")
     lines += [
         "",
         "━━━━━━━━━━━━━━━",
