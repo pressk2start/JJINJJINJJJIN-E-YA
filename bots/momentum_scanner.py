@@ -81,7 +81,7 @@ MIN_BID_KRW = 2_000_000       # 매수1호가 depth 최소 200만원 (청산)
 TOP_N = 30                    # 거래량 상위 N개만 모니터 (하위 그룹 제거)
 
 # ─── 패치 설정 ───
-MAX_SPREAD_PCT = 0.15         # [C] 진입 최대 스프레드 (수수료 고려 net-positive 유지)
+MAX_SPREAD_PCT = 0.10         # [C] 진입 최대 스프레드 (92건: ≤0.1% wr47% avg-0.033% vs >0.1% wr28% avg-0.178%)
 STALE_GAP_SEC = 5.0           # [B] 직전 틱과 간격이 이보다 크면 이력 리셋 (stale 오신호 차단)
 VOLUME_Z_THRESHOLD = 1.5      # [D] 거래대금 delta z-score 최소 (0이면 게이트 해제·로깅만)
 MIN_ABS_MOVE = 0.15           # [E] 진입 최소 순간등락 — 목표(TARGET)와 분리 (작게 보고 크게 잡는다)
