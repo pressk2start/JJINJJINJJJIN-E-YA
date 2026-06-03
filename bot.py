@@ -13088,6 +13088,33 @@ def _v4_shadow_report_lines():
                             _wstr = f"{wv:{_fmt}}"
                             _lstr = f"{lv:{_fmt}}"
                         lines.append(f"  📊{ik}: W{_wstr}({wn}) / L{_lstr}({ln}) d={_d:.2f}")
+                if route == "CLM" and _trs and len(_trs) >= 50:
+                    _dtop_keys = ["atr_pct", "entry_spread_pct", "rsi_60m"]
+                    _dtop_parts = []
+                    for _dk in _dtop_keys:
+                        _dk_vals = [(t, t.get("inds", {}).get(_dk)) for t in _trs if t.get("inds", {}).get(_dk) is not None]
+                        if len(_dk_vals) < 30:
+                            continue
+                        _dk_vals.sort(key=lambda x: x[1])
+                        _dk_n = len(_dk_vals)
+                        if _dk == "entry_spread_pct":
+                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
+                        else:
+                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
+                        _sk_parts = []
+                        for _slbl, _sdata in _slices:
+                            if not _sdata:
+                                continue
+                            _sp = [t[0]["pnl"] for t in _sdata]
+                            _sn = len(_sp)
+                            _savg = sum(_sp) / _sn * 100
+                            _swr = sum(1 for p in _sp if p > 0) / _sn * 100
+                            _sk_parts.append(f"{_slbl}:{_sn}건 wr{_swr:.0f}% {_savg:+.2f}%")
+                        if _sk_parts:
+                            _dtop_parts.append(f"  🔬 {_dk}: {' | '.join(_sk_parts)}")
+                    if _dtop_parts:
+                        lines.append("  ── d-top 슬라이스 ──")
+                        lines.extend(_dtop_parts)
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
