@@ -13097,10 +13097,7 @@ def _v4_shadow_report_lines():
                             continue
                         _dk_vals.sort(key=lambda x: x[1])
                         _dk_n = len(_dk_vals)
-                        if _dk == "entry_spread_pct":
-                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
-                        else:
-                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
+                        _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
                         _sk_parts = []
                         for _slbl, _sdata in _slices:
                             if not _sdata:
@@ -13115,6 +13112,73 @@ def _v4_shadow_report_lines():
                     if _dtop_parts:
                         lines.append("  ── d-top 슬라이스 ──")
                         lines.extend(_dtop_parts)
+                    _atr_map = {id(t): t.get("inds", {}).get("atr_pct") for t in _trs}
+                    _rsi_map = {id(t): t.get("inds", {}).get("rsi_60m") for t in _trs}
+                    _combo_trs = [t for t in _trs if _atr_map.get(id(t)) is not None and _rsi_map.get(id(t)) is not None]
+                    if len(_combo_trs) >= 30:
+                        _atr_sorted = sorted([_atr_map[id(t)] for t in _combo_trs])
+                        _rsi_sorted = sorted([_rsi_map[id(t)] for t in _combo_trs])
+                        _atr_p70 = _atr_sorted[int(len(_atr_sorted) * 0.7)]
+                        _rsi_p70 = _rsi_sorted[int(len(_rsi_sorted) * 0.7)]
+                        _rsi_p30 = _rsi_sorted[int(len(_rsi_sorted) * 0.3)]
+                        _combo_sets = {
+                            "atr≤p70": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70],
+                            "rsi≤p30": [t for t in _combo_trs if _rsi_map[id(t)] <= _rsi_p30],
+                            "atr≤70+rsi≤30": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70 and _rsi_map[id(t)] <= _rsi_p30],
+                            "atr≤70+rsi≤70": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70 and _rsi_map[id(t)] <= _rsi_p70],
+                        }
+                        _combo_parts = []
+                        for _clbl, _cdata in _combo_sets.items():
+                            if len(_cdata) < 10:
+                                continue
+                            _cp = [t["pnl"] for t in _cdata]
+                            _cn = len(_cp)
+                            _cavg = sum(_cp) / _cn * 100
+                            _cwr = sum(1 for p in _cp if p > 0) / _cn * 100
+                            _combo_parts.append(f"{_clbl}:{_cn}건 wr{_cwr:.0f}% {_cavg:+.2f}%")
+                        if _combo_parts:
+                            lines.append(f"  🔬 combo: {' | '.join(_combo_parts)}")
+                    _cross_trs = [t for t in _trs if t.get("inds", {}).get("dd_peak_60s") is not None
+                                  and t.get("inds", {}).get("atr_pct") is not None]
+                    if len(_cross_trs) >= 30:
+                        _cross_a = [t for t in _cross_trs if t["inds"]["dd_peak_60s"] < 0.003]
+                        _cross_c = [t for t in _cross_trs if t["inds"]["dd_peak_60s"] >= 0.005]
+                        _cross_atr_sorted = sorted(t["inds"]["atr_pct"] for t in _cross_trs)
+                        _cross_atr_p70 = _cross_atr_sorted[int(len(_cross_atr_sorted) * 0.7)]
+                        _cross_sets = []
+                        if len(_cross_a) >= 10:
+                            _cross_sets.append(("A+atr≤70", [t for t in _cross_a if t["inds"]["atr_pct"] <= _cross_atr_p70]))
+                            _cross_sets.append(("A+atr>70", [t for t in _cross_a if t["inds"]["atr_pct"] > _cross_atr_p70]))
+                        if len(_cross_c) >= 5:
+                            _cross_sets.append(("C+atr≤70", [t for t in _cross_c if t["inds"]["atr_pct"] <= _cross_atr_p70]))
+                            _cross_sets.append(("C+atr>70", [t for t in _cross_c if t["inds"]["atr_pct"] > _cross_atr_p70]))
+                        _cross_parts = []
+                        for _xlbl, _xdata in _cross_sets:
+                            if len(_xdata) < 5:
+                                continue
+                            _xp = [t["pnl"] for t in _xdata]
+                            _xn = len(_xp)
+                            _xavg = sum(_xp) / _xn * 100
+                            _xwr = sum(1 for p in _xp if p > 0) / _xn * 100
+                            _cross_parts.append(f"{_xlbl}:{_xn}건 wr{_xwr:.0f}% {_xavg:+.2f}%")
+                        if _cross_parts:
+                            lines.append(f"  🔬 A×ATR: {' | '.join(_cross_parts)}")
+                if route == "CLM" and _trs and len(_trs) >= 60:
+                    _half = len(_trs) // 2
+                    _old_half = _trs[:_half]
+                    _new_half = _trs[_half:]
+                    def _regime_stats(trades):
+                        _rn = len(trades)
+                        _ravg = sum(t["pnl"] for t in trades) / _rn * 100
+                        _rwr = sum(1 for t in trades if t["pnl"] > 0) / _rn * 100
+                        _rmfe = [t.get("mfe", 0) for t in trades if t.get("mfe", 0) > 0]
+                        _rpnl = [t["pnl"] for t in trades if t.get("mfe", 0) > 0]
+                        _rrm = sum(_rpnl) / sum(_rmfe) * 100 if _rmfe and sum(_rmfe) > 0 else 0
+                        return _rn, _rwr, _ravg, _rrm
+                    _on, _owr, _oavg, _orm = _regime_stats(_old_half)
+                    _nn, _nwr, _navg, _nrm = _regime_stats(_new_half)
+                    lines.append(f"  📊 레짐: 전반{_on}건 wr{_owr:.0f}% {_oavg:+.2f}% r/m{_orm:.0f}%"
+                                 f" → 후반{_nn}건 wr{_nwr:.0f}% {_navg:+.2f}% r/m{_nrm:.0f}%")
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
