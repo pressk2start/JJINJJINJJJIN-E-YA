@@ -13097,10 +13097,7 @@ def _v4_shadow_report_lines():
                             continue
                         _dk_vals.sort(key=lambda x: x[1])
                         _dk_n = len(_dk_vals)
-                        if _dk == "entry_spread_pct":
-                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
-                        else:
-                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
+                        _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
                         _sk_parts = []
                         for _slbl, _sdata in _slices:
                             if not _sdata:
@@ -13115,6 +13112,32 @@ def _v4_shadow_report_lines():
                     if _dtop_parts:
                         lines.append("  ── d-top 슬라이스 ──")
                         lines.extend(_dtop_parts)
+                    _atr_map = {id(t): t.get("inds", {}).get("atr_pct") for t in _trs}
+                    _rsi_map = {id(t): t.get("inds", {}).get("rsi_60m") for t in _trs}
+                    _combo_trs = [t for t in _trs if _atr_map.get(id(t)) is not None and _rsi_map.get(id(t)) is not None]
+                    if len(_combo_trs) >= 30:
+                        _atr_sorted = sorted([_atr_map[id(t)] for t in _combo_trs])
+                        _rsi_sorted = sorted([_rsi_map[id(t)] for t in _combo_trs])
+                        _atr_p70 = _atr_sorted[int(len(_atr_sorted) * 0.7)]
+                        _rsi_p70 = _rsi_sorted[int(len(_rsi_sorted) * 0.7)]
+                        _rsi_p30 = _rsi_sorted[int(len(_rsi_sorted) * 0.3)]
+                        _combo_sets = {
+                            "atr≤p70": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70],
+                            "rsi≤p30": [t for t in _combo_trs if _rsi_map[id(t)] <= _rsi_p30],
+                            "atr≤70+rsi≤30": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70 and _rsi_map[id(t)] <= _rsi_p30],
+                            "atr≤70+rsi≤70": [t for t in _combo_trs if _atr_map[id(t)] <= _atr_p70 and _rsi_map[id(t)] <= _rsi_p70],
+                        }
+                        _combo_parts = []
+                        for _clbl, _cdata in _combo_sets.items():
+                            if len(_cdata) < 10:
+                                continue
+                            _cp = [t["pnl"] for t in _cdata]
+                            _cn = len(_cp)
+                            _cavg = sum(_cp) / _cn * 100
+                            _cwr = sum(1 for p in _cp if p > 0) / _cn * 100
+                            _combo_parts.append(f"{_clbl}:{_cn}건 wr{_cwr:.0f}% {_cavg:+.2f}%")
+                        if _combo_parts:
+                            lines.append(f"  🔬 combo: {' | '.join(_combo_parts)}")
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
