@@ -122,6 +122,8 @@ volume_history = defaultdict(lambda: deque(maxlen=LOOKBACK_TICKS + 5))  # [D] �
 positions = {}
 closed_trades = []
 cooldowns = {}
+post_exit_tracks = []  # 청산 후 가격 추적 (trail/timeout만)
+POST_EXIT_CHECKPOINTS = [30, 60, 120, 180]  # 추적 시점 (초)
 scan_count = 0
 start_time = None
 _ob_cache = {}  # market -> {"ts": float, "data": dict}
@@ -351,6 +353,18 @@ def manage_positions(tickers_dict, now_ts):
         del positions[market]
         cooldowns[market] = now_ts
         closed_trades.append(trade)
+        reason_key = trade["reason"].split("(")[0]
+        if reason_key in ("trail", "timeout"):
+            post_exit_tracks.append({
+                "market": market,
+                "exit_time": now_ts,
+                "exit_price": trade["exit_price"],
+                "entry_price": trade["entry_price"],
+                "reason": reason_key,
+                "target_price": trade["entry_price"] * (1 + TARGET_PROFIT_PCT / 100),
+                "prices": {},
+                "done": False,
+            })
         emoji = "🟢" if trade["net_pnl"] > 0 else "🔴"
         coin = market.replace("KRW-", "")
         price_diff = trade["exit_price"] - trade["entry_price"]
@@ -580,6 +594,40 @@ def _analyze_condition_combos():
             lines.append(f"  {k:10s} {cnt}/{len(losses)} ({cnt/len(losses)*100:.0f}%)")
     return "\n".join(lines)
 
+def _analyze_post_exit():
+    """청산 후 가격 추적 분석 (trail/timeout만)."""
+    done = [t for t in post_exit_tracks if t["done"] and len(t["prices"]) >= 2]
+    if len(done) < 5:
+        return None
+    by_reason = defaultdict(list)
+    for t in done:
+        by_reason[t["reason"]].append(t)
+    lines = ["▶ 청산후 추적:"]
+    for reason in ["trail", "timeout"]:
+        tracks = by_reason.get(reason, [])
+        if len(tracks) < 3:
+            continue
+        lines.append(f"  [{reason}] {len(tracks)}건")
+        for cp in POST_EXIT_CHECKPOINTS:
+            subset = [t for t in tracks if cp in t["prices"]]
+            if not subset:
+                continue
+            changes = []
+            target_hits = 0
+            for t in subset:
+                chg = (t["prices"][cp] - t["exit_price"]) / t["exit_price"] * 100
+                changes.append(chg)
+                if t["prices"][cp] >= t["target_price"]:
+                    target_hits += 1
+            avg_chg = sum(changes) / len(changes)
+            pos_cnt = sum(1 for c in changes if c > 0)
+            lines.append(
+                f"    {cp:3d}초후 avg{avg_chg:+.3f}% "
+                f"(↑{pos_cnt}/{len(subset)}) "
+                f"target도달:{target_hits}/{len(subset)}"
+            )
+    return "\n".join(lines)
+
 # ═══════════════════════════════════════════════
 # [F] 주기적 회고 + 개선점 추천
 # ═══════════════════════════════════════════════
@@ -737,6 +785,11 @@ def generate_review():
         "━━━━━━━━━━━━━━━",
         "▶ Bucket 상세:",
         analyze_buckets(),
+    ]
+    pet = _analyze_post_exit()
+    if pet:
+        lines += ["", "━━━━━━━━━━━━━━━", pet]
+    lines += [
         "",
         "━━━━━━━━━━━━━━━",
         "▶ 조건별 승패 분해:",
@@ -808,6 +861,21 @@ def main():
             tickers_dict = {t["market"]: t for t in tickers}
 
             manage_positions(tickers_dict, now_ts)
+
+            for trk in post_exit_tracks:
+                if trk["done"]:
+                    continue
+                elapsed = now_ts - trk["exit_time"]
+                if elapsed > max(POST_EXIT_CHECKPOINTS) + 10:
+                    trk["done"] = True
+                    continue
+                ticker_t = tickers_dict.get(trk["market"])
+                if not ticker_t:
+                    continue
+                price_now = ticker_t["trade_price"]
+                for cp in POST_EXIT_CHECKPOINTS:
+                    if cp not in trk["prices"] and elapsed >= cp:
+                        trk["prices"][cp] = price_now
 
             for ticker in tickers:
                 market = ticker["market"]
