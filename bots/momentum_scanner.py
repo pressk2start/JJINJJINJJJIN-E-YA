@@ -767,10 +767,13 @@ def generate_review():
         if grp in grp_stats:
             ns, ws, ag = grp_stats[grp]
             lines.append(f"  {grp} {ns:3d}전 {ws:3d}승 wr{ws/ns*100:3.0f}% avg{ag:+.3f}%")
+    win_mfes = [t["peak_pnl"] for t in closed_trades if t["net_pnl"] > 0]
+    loss_mfes = [t["peak_pnl"] for t in closed_trades if t["net_pnl"] <= 0]
     lines += [
         "",
         "[리스크]",
         f"  MFE avg{sum(mfes)/n:+.3f}% / max{max(mfes):+.3f}%",
+        f"  MFE W{sum(win_mfes)/len(win_mfes):+.3f}%({len(win_mfes)}건) / L{sum(loss_mfes)/len(loss_mfes):+.3f}%({len(loss_mfes)}건)" if win_mfes and loss_mfes else f"  MFE W/L 분리 불가 (W{len(win_mfes)}건 L{len(loss_mfes)}건)",
         f"  MAE avg{sum(maes)/n:+.3f}% / min{min(maes):+.3f}%",
         f"  보유 avg{sum(holds)/n:.0f}s / max{max(holds):.0f}s",
         "",
