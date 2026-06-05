@@ -628,6 +628,22 @@ def _analyze_post_exit():
             )
     return "\n".join(lines)
 
+def _analyze_mfe_distribution():
+    """MFE 분포 — target이 현실적인지 판단."""
+    if len(closed_trades) < 10:
+        return None
+    n = len(closed_trades)
+    mfes = [t["peak_pnl"] for t in closed_trades]
+    thresholds = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+    lines = ["▶ MFE 도달 분포:"]
+    for th in thresholds:
+        cnt = sum(1 for m in mfes if m >= th)
+        lines.append(f"  +{th:.2f}% 도달: {cnt}/{n}건 ({cnt/n*100:.0f}%)")
+    avg_mfe = sum(mfes) / n
+    med_mfe = sorted(mfes)[n // 2]
+    lines.append(f"  avg{avg_mfe:+.3f}% med{med_mfe:+.3f}%")
+    return "\n".join(lines)
+
 # ═══════════════════════════════════════════════
 # [F] 주기적 회고 + 개선점 추천
 # ═══════════════════════════════════════════════
@@ -789,6 +805,9 @@ def generate_review():
     pet = _analyze_post_exit()
     if pet:
         lines += ["", "━━━━━━━━━━━━━━━", pet]
+    mfe_dist = _analyze_mfe_distribution()
+    if mfe_dist:
+        lines += ["", "━━━━━━━━━━━━━━━", mfe_dist]
     lines += [
         "",
         "━━━━━━━━━━━━━━━",
