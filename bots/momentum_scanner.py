@@ -540,11 +540,13 @@ def analyze_buckets():
     ]))
     sections.append("▶ 거래대금z별:")
     sections.append(bucket_stats(closed_trades, "vol_z", [
-        (-9e18, 2, "<2"), (2, 5, "2~5"), (5, 10, "5~10"), (10, 9e18, "10+"),
+        (-9e18, 2, "<2"), (2, 5, "2~5"), (5, 10, "5~10"),
+        (10, 20, "10~20"), (20, 50, "20~50"), (50, 9e18, "50+"),
     ]))
     sections.append("▶ 거래대금ratio별:")
     sections.append(bucket_stats(closed_trades, "vol_ratio", [
-        (0, 2, "<2"), (2, 5, "2~5"), (5, 10, "5~10"), (10, 9e18, "10+"),
+        (0, 2, "<2"), (2, 5, "2~5"), (5, 10, "5~10"),
+        (10, 50, "10~50"), (50, 200, "50~200"), (200, 9e18, "200+"),
     ]))
     sections.append("▶ 그룹별:")
     for grp in ["상위", "하위"]:
@@ -799,7 +801,10 @@ def generate_review():
     if worst3 and worst3[0][1][1] < 0:
         lines.append("[종목 WORST3]")
         for m, (c, s) in worst3:
-            lines.append(f"  {m.replace('KRW-',''):10s} {c}회 sum{s:+.3f}% avg{s/c:+.3f}%")
+            mt = [t for t in closed_trades if t["market"] == m]
+            avg_vz = sum(t["vol_z"] for t in mt) / len(mt)
+            avg_z = sum(t["z_score"] for t in mt) / len(mt)
+            lines.append(f"  {m.replace('KRW-',''):10s} {c}회 sum{s:+.3f}% avg{s/c:+.3f}% vz{avg_vz:.0f} z{avg_z:.1f}")
     most_traded = max(by_market.items(), key=lambda x: x[1][0]) if by_market else None
     if most_traded and most_traded[1][0] >= 5:
         mc, (mc_n, mc_pnl) = most_traded
