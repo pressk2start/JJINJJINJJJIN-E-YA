@@ -13138,33 +13138,6 @@ def _v4_shadow_report_lines():
                             _combo_parts.append(f"{_clbl}:{_cn}건 wr{_cwr:.0f}% {_cavg:+.2f}%")
                         if _combo_parts:
                             lines.append(f"  🔬 combo: {' | '.join(_combo_parts)}")
-                    for _cx_key, _cx_tag in [("atr_pct", "ATR"), ("entry_spread_pct", "Sprd")]:
-                        _cross_trs = [t for t in _trs if t.get("inds", {}).get("dd_peak_60s") is not None
-                                      and t.get("inds", {}).get(_cx_key) is not None]
-                        if len(_cross_trs) < 30:
-                            continue
-                        _cross_a = [t for t in _cross_trs if t["inds"]["dd_peak_60s"] < 0.003]
-                        _cross_c = [t for t in _cross_trs if t["inds"]["dd_peak_60s"] >= 0.005]
-                        _cx_sorted = sorted(t["inds"][_cx_key] for t in _cross_trs)
-                        _cx_p70 = _cx_sorted[int(len(_cx_sorted) * 0.7)]
-                        _cross_sets = []
-                        if len(_cross_a) >= 10:
-                            _cross_sets.append((f"A+{_cx_tag}≤70", [t for t in _cross_a if t["inds"][_cx_key] <= _cx_p70]))
-                            _cross_sets.append((f"A+{_cx_tag}>70", [t for t in _cross_a if t["inds"][_cx_key] > _cx_p70]))
-                        if len(_cross_c) >= 5:
-                            _cross_sets.append((f"C+{_cx_tag}≤70", [t for t in _cross_c if t["inds"][_cx_key] <= _cx_p70]))
-                            _cross_sets.append((f"C+{_cx_tag}>70", [t for t in _cross_c if t["inds"][_cx_key] > _cx_p70]))
-                        _cross_parts = []
-                        for _xlbl, _xdata in _cross_sets:
-                            if len(_xdata) < 5:
-                                continue
-                            _xp = [t["pnl"] for t in _xdata]
-                            _xn = len(_xp)
-                            _xavg = sum(_xp) / _xn * 100
-                            _xwr = sum(1 for p in _xp if p > 0) / _xn * 100
-                            _cross_parts.append(f"{_xlbl}:{_xn}건 wr{_xwr:.0f}% {_xavg:+.2f}%")
-                        if _cross_parts:
-                            lines.append(f"  🔬 A×{_cx_tag}: {' | '.join(_cross_parts)}")
                 if route == "CLM" and _trs and len(_trs) >= 60:
                     _half = len(_trs) // 2
                     _old_half = _trs[:_half]
