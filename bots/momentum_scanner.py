@@ -91,6 +91,7 @@ BREAKOUT_REQUIRED = True      # [G] 진입 시 직전 N틱 고점 돌파 요구 
 BREAKOUT_WINDOW = 10          # [G] 돌파 비교 윈도 (틱 수)
 VOLUME_RATIO_THRESHOLD = 0.0  # [H] 거래대금 delta ratio 게이트 (0=비활성·로깅만 / 활성 시 2~3 권장)
 VIRTUAL_POSITION_KRW = 1_000_000  # 페이퍼 가상 포지션 (KRW 손익 표시용)
+UNIVERSE_BLACKLIST = {"KRW-SUI", "KRW-NEAR", "KRW-BCH"}
 
 # ─── 저장 경로 ───
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -217,6 +218,7 @@ def get_orderbook(market):
         return cached["data"] if cached else None
 
 def classify_markets(tickers):
+    tickers = [t for t in tickers if t["market"] not in UNIVERSE_BLACKLIST]
     sorted_by_vol = sorted(tickers, key=lambda t: t.get("acc_trade_price_24h", 0))
     top = [t["market"] for t in sorted_by_vol[-TOP_N:]]
     return set(top), set()
@@ -853,6 +855,7 @@ def main():
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
     print(f"breakout: {'ON' if BREAKOUT_REQUIRED else 'OFF'} (직전{BREAKOUT_WINDOW}틱 고점 돌파) / vol_ratio gate: {VOLUME_RATIO_THRESHOLD}")
     print(f"모니터: 상위 {TOP_N}개 (하위 그룹 제거)")
+    print(f"blacklist: {len(UNIVERSE_BLACKLIST)}개 제외 ({', '.join(sorted(c.replace('KRW-','') for c in UNIVERSE_BLACKLIST))})")
     print(f"텔레그램: {'ON' if TG_ENABLED else 'OFF'} ({len(CHAT_IDS)}채널)")
     print("=" * 60)
 
