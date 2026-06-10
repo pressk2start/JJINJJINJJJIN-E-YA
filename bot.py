@@ -13154,6 +13154,33 @@ def _v4_shadow_report_lines():
                     _nn, _nwr, _navg, _nrm = _regime_stats(_new_half)
                     lines.append(f"  📊 레짐: 전반{_on}건 wr{_owr:.0f}% {_oavg:+.2f}% r/m{_orm:.0f}%"
                                  f" → 후반{_nn}건 wr{_nwr:.0f}% {_navg:+.2f}% r/m{_nrm:.0f}%")
+                if route == "CLM" and _trs and len(_trs) >= 50:
+                    _a_trs = [t for t in _trs if t.get("inds", {}).get("dd_peak_60s") is not None and t["inds"]["dd_peak_60s"] < 0.003]
+                    if len(_a_trs) >= 30:
+                        _a_dtop_keys = ["rsi_60m", "rsi_15m", "rsi_5m", "atr_pct", "entry_spread_pct"]
+                        _a_dtop_parts = []
+                        for _dk in _a_dtop_keys:
+                            _dk_vals = [(t, t.get("inds", {}).get(_dk)) for t in _a_trs if t.get("inds", {}).get(_dk) is not None]
+                            if len(_dk_vals) < 15:
+                                continue
+                            _dk_vals.sort(key=lambda x: x[1])
+                            _dk_n = len(_dk_vals)
+                            _slices = [("lo30%", _dk_vals[:int(_dk_n * 0.3)]), ("mid", _dk_vals[int(_dk_n * 0.3):int(_dk_n * 0.7)]), ("hi30%", _dk_vals[int(_dk_n * 0.7):])]
+                            _sk_parts = []
+                            for _slbl, _sdata in _slices:
+                                if not _sdata:
+                                    continue
+                                _sp = [t[0]["pnl"] for t in _sdata]
+                                _sn = len(_sp)
+                                _savg = sum(_sp) / _sn * 100
+                                _swr = sum(1 for p in _sp if p > 0) / _sn * 100
+                                _warn = " ⚠sn" if _sn < 30 else ""
+                                _sk_parts.append(f"{_slbl}:{_sn}건 wr{_swr:.0f}% {_savg:+.2f}%{_warn}")
+                            if _sk_parts:
+                                _a_dtop_parts.append(f"  🔬 A.{_dk}: {' | '.join(_sk_parts)}")
+                        if _a_dtop_parts:
+                            lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
+                            lines.extend(_a_dtop_parts)
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
