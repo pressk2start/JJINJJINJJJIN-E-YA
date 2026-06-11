@@ -13181,6 +13181,26 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct"]
+                        _comp_parts = []
+                        for _ck in _comp_keys:
+                            _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
+                            if len(_ck_vals) < 30:
+                                continue
+                            _ck_vals.sort(key=lambda x: x[1])
+                            _ck_n = len(_ck_vals)
+                            _c_slices = [("lo30%", _ck_vals[:int(_ck_n * 0.3)]), ("mid", _ck_vals[int(_ck_n * 0.3):int(_ck_n * 0.7)]), ("hi30%", _ck_vals[int(_ck_n * 0.7):])]
+                            _bp = []
+                            for _clbl, _cdata in _c_slices:
+                                if not _cdata:
+                                    continue
+                                _ct = len(_cdata)
+                                _ca = sum(1 for t, _ in _cdata if t["inds"]["dd_peak_60s"] < 0.003)
+                                _bp.append(f"{_clbl}:A{_ca/_ct*100:.0f}%")
+                            if _bp:
+                                _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)}")
+                        if _comp_parts:
+                            lines.extend(_comp_parts)
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
