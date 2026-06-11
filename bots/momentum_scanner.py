@@ -85,6 +85,8 @@ MAX_SPREAD_PCT = 0.10         # [C] 진입 최대 스프레드 (92건: ≤0.1% w
 STALE_GAP_SEC = 5.0           # [B] 직전 틱과 간격이 이보다 크면 이력 리셋 (stale 오신호 차단)
 VOLUME_Z_THRESHOLD = 1.5      # [D] 거래대금 delta z-score 최소 (0이면 게이트 해제·로깅만)
 MIN_ABS_MOVE = 0.15           # [E] 진입 최소 순간등락 — 목표(TARGET)와 분리 (작게 보고 크게 잡는다)
+EARLY_EXIT_SEC = 30           # [I] 조기탈출 판정 윈도 (진입 후 N초 이내)
+EARLY_EXIT_DD_PCT = 0.35      # [I] peak 대비 하락 시 즉시 청산 (dd_peak_30s 기반, 644건 d=0.76)
 REVIEW_INTERVAL_SEC = 600     # [F] 누적 데이터 회고+개선점 추천 주기 (10분) — 0이면 비활성
 REVIEW_MIN_TRADES = 10        # [F] 회고 분석 최소 표본
 BREAKOUT_REQUIRED = True      # [G] 진입 시 직전 N틱 고점 돌파 요구 (fake bounce / mean-revert 제거)
@@ -326,6 +328,8 @@ def manage_positions(tickers_dict, now_ts):
         reason = None
         if pnl_pct >= TARGET_PROFIT_PCT:
             reason = f"target({pnl_pct:+.2f}%)"
+        elif hold_sec <= EARLY_EXIT_SEC and drawdown >= EARLY_EXIT_DD_PCT:
+            reason = f"early_dd({drawdown:.2f}%@{hold_sec:.0f}s)"
         elif drawdown >= trail_pct:
             reason = f"trail({drawdown:.2f}%/{trail_pct:.2f})"
         elif hold_sec >= MAX_HOLD_SEC:
@@ -361,7 +365,7 @@ def manage_positions(tickers_dict, now_ts):
         cooldowns[market] = now_ts
         closed_trades.append(trade)
         reason_key = trade["reason"].split("(")[0]
-        if reason_key in ("trail", "timeout"):
+        if reason_key in ("trail", "timeout", "early_dd"):
             post_exit_tracks.append({
                 "market": market,
                 "exit_time": now_ts,
@@ -612,7 +616,7 @@ def _analyze_post_exit():
     for t in done:
         by_reason[t["reason"]].append(t)
     lines = ["▶ 청산후 추적:"]
-    for reason in ["trail", "timeout"]:
+    for reason in ["trail", "early_dd", "timeout"]:
         tracks = by_reason.get(reason, [])
         if len(tracks) < 3:
             continue
@@ -766,7 +770,7 @@ def generate_review():
         f"",
         f"[청산사유]",
     ]
-    for r in ["target", "trail", "timeout"]:
+    for r in ["target", "trail", "early_dd", "timeout"]:
         c, s = reason_stats.get(r, [0, 0.0])
         if c > 0:
             lines.append(f"  {r:8s} {c:3d}회 ({c/n*100:3.0f}%) avg{s/c:+.3f}%")
@@ -856,7 +860,7 @@ def main():
     print("=" * 60)
     print("업비트 모멘텀 스캐너 — Paper Trading")
     print(f"감지: z:{ANOMALY_THRESHOLD}~{ANOMALY_CEILING} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%")
-    print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / timeout {MAX_HOLD_SEC}s")
+    print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / early_dd -{EARLY_EXIT_DD_PCT}%({EARLY_EXIT_SEC}s) / timeout {MAX_HOLD_SEC}s")
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
     print(f"breakout: {'ON' if BREAKOUT_REQUIRED else 'OFF'} (직전{BREAKOUT_WINDOW}틱 고점 돌파) / vol_ratio gate: {VOLUME_RATIO_THRESHOLD}")
     print(f"모니터: 상위 {TOP_N}개 (하위 그룹 제거)")
