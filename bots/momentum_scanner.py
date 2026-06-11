@@ -86,7 +86,7 @@ STALE_GAP_SEC = 5.0           # [B] 직전 틱과 간격이 이보다 크면 이
 VOLUME_Z_THRESHOLD = 1.5      # [D] 거래대금 delta z-score 최소 (0이면 게이트 해제·로깅만)
 MIN_ABS_MOVE = 0.15           # [E] 진입 최소 순간등락 — 목표(TARGET)와 분리 (작게 보고 크게 잡는다)
 EARLY_EXIT_SEC = 30           # [I] 조기탈출 판정 윈도 (진입 후 N초 이내)
-EARLY_EXIT_DD_PCT = 0.35      # [I] peak 대비 하락 시 즉시 청산 (dd_peak_30s 기반, 644건 d=0.76)
+EARLY_EXIT_ENTRY_PCT = 0.35   # [I] 진입가 대비 하락 시 즉시 청산 (dd_peak_30s: L avg 0.4%, trail과 독립)
 REVIEW_INTERVAL_SEC = 600     # [F] 누적 데이터 회고+개선점 추천 주기 (10분) — 0이면 비활성
 REVIEW_MIN_TRADES = 10        # [F] 회고 분석 최소 표본
 BREAKOUT_REQUIRED = True      # [G] 진입 시 직전 N틱 고점 돌파 요구 (fake bounce / mean-revert 제거)
@@ -328,8 +328,8 @@ def manage_positions(tickers_dict, now_ts):
         reason = None
         if pnl_pct >= TARGET_PROFIT_PCT:
             reason = f"target({pnl_pct:+.2f}%)"
-        elif hold_sec <= EARLY_EXIT_SEC and drawdown >= EARLY_EXIT_DD_PCT:
-            reason = f"early_dd({drawdown:.2f}%@{hold_sec:.0f}s)"
+        elif hold_sec <= EARLY_EXIT_SEC and pnl_pct <= -EARLY_EXIT_ENTRY_PCT:
+            reason = f"early_dd({pnl_pct:+.2f}%@{hold_sec:.0f}s)"
         elif drawdown >= trail_pct:
             reason = f"trail({drawdown:.2f}%/{trail_pct:.2f})"
         elif hold_sec >= MAX_HOLD_SEC:
@@ -860,7 +860,7 @@ def main():
     print("=" * 60)
     print("업비트 모멘텀 스캐너 — Paper Trading")
     print(f"감지: z:{ANOMALY_THRESHOLD}~{ANOMALY_CEILING} & 거래대금z≥{VOLUME_Z_THRESHOLD} & 등락≥{MIN_ABS_MOVE}%")
-    print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / early_dd -{EARLY_EXIT_DD_PCT}%({EARLY_EXIT_SEC}s) / timeout {MAX_HOLD_SEC}s")
+    print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / early_dd -{EARLY_EXIT_ENTRY_PCT}%({EARLY_EXIT_SEC}s내) / timeout {MAX_HOLD_SEC}s")
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
     print(f"breakout: {'ON' if BREAKOUT_REQUIRED else 'OFF'} (직전{BREAKOUT_WINDOW}틱 고점 돌파) / vol_ratio gate: {VOLUME_RATIO_THRESHOLD}")
     print(f"모니터: 상위 {TOP_N}개 (하위 그룹 제거)")
