@@ -13181,7 +13181,7 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
-                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct"]
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k"]
                         _comp_parts = []
                         for _ck in _comp_keys:
                             _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
