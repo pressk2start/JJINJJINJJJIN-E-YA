@@ -13201,6 +13201,63 @@ def _v4_shadow_report_lines():
                                 _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)}")
                         if _comp_parts:
                             lines.extend(_comp_parts)
+                        # ── 진입 파라미터 PnL 슬라이싱 ──
+                        _entry_keys = ["body_pct", "wick_ratio", "vr5", "close_strength"]
+                        _entry_parts = []
+                        for _ek in _entry_keys:
+                            _ek_vals = [(t, t.get("inds", {}).get(_ek)) for t in _trs if t.get("inds", {}).get(_ek) is not None]
+                            if len(_ek_vals) < 45:
+                                continue
+                            _ek_vals.sort(key=lambda x: x[1])
+                            _ek_n = len(_ek_vals)
+                            _e_slices = [("lo30%", _ek_vals[:int(_ek_n * 0.3)]), ("mid", _ek_vals[int(_ek_n * 0.3):int(_ek_n * 0.7)]), ("hi30%", _ek_vals[int(_ek_n * 0.7):])]
+                            _ep = []
+                            for _elbl, _edata in _e_slices:
+                                if not _edata:
+                                    continue
+                                _en = len(_edata)
+                                _ew = sum(1 for t, _ in _edata if t["pnl"] > 0)
+                                _eavg = sum(t["pnl"] for t, _ in _edata) / _en * 100
+                                _ep.append(f"{_elbl}:{_en}건 wr{_ew/_en*100:.0f}% {_eavg:+.2f}%")
+                            if _ep:
+                                _entry_parts.append(f"  🔬 P.{_ek}: {' | '.join(_ep)}")
+                        if _entry_parts:
+                            lines.append("  ── 진입 파라미터 검증 ──")
+                            lines.extend(_entry_parts)
+                        # ── 청산 파라미터 PnL 슬라이싱 ──
+                        if len(_trs) >= 30:
+                            _x_parts = []
+                            _hold_buckets = [(0, 60, "0~60s"), (60, 120, "60~120s"), (120, 180, "120~180s"), (180, 9e18, "180s+")]
+                            _hb_parts = []
+                            for _hlo, _hhi, _hlbl in _hold_buckets:
+                                _hdata = [t for t in _trs if _hlo <= t.get("hold", 0) < _hhi]
+                                if not _hdata:
+                                    continue
+                                _hn = len(_hdata)
+                                _hw = sum(1 for t in _hdata if t["pnl"] > 0)
+                                _havg = sum(t["pnl"] for t in _hdata) / _hn * 100
+                                _hb_parts.append(f"{_hlbl}:{_hn}건 wr{_hw/_hn*100:.0f}% {_havg:+.2f}%")
+                            if _hb_parts:
+                                _x_parts.append(f"  🔬 X.hold: {' | '.join(_hb_parts)}")
+                            _mfe_vals = [(t, t.get("mfe", 0)) for t in _trs if t.get("mfe") is not None]
+                            if len(_mfe_vals) >= 30:
+                                _mfe_vals.sort(key=lambda x: x[1])
+                                _mn = len(_mfe_vals)
+                                _m_slices = [("lo30%", _mfe_vals[:int(_mn * 0.3)]), ("mid", _mfe_vals[int(_mn * 0.3):int(_mn * 0.7)]), ("hi30%", _mfe_vals[int(_mn * 0.7):])]
+                                _mp = []
+                                for _mlbl, _mdata in _m_slices:
+                                    if not _mdata:
+                                        continue
+                                    _mdn = len(_mdata)
+                                    _m_avg_mfe = sum(t.get("mfe", 0) for t, _ in _mdata) / _mdn * 100
+                                    _m_avg_pnl = sum(t["pnl"] for t, _ in _mdata) / _mdn * 100
+                                    _m_rm = (_m_avg_pnl / _m_avg_mfe * 100) if _m_avg_mfe > 0 else 0
+                                    _mp.append(f"{_mlbl}:{_mdn}건 mfe{_m_avg_mfe:+.2f}% pnl{_m_avg_pnl:+.2f}% r/m{_m_rm:.0f}%")
+                                if _mp:
+                                    _x_parts.append(f"  🔬 X.mfe: {' | '.join(_mp)}")
+                            if _x_parts:
+                                lines.append("  ── 청산 파라미터 검증 ──")
+                                lines.extend(_x_parts)
             elif route in _ACTIVE_RESEARCH:
                 _research_reported.add(route)
                 _research_pnl.append((route, strat, n, wr, avg_pnl, avg_mfe, avg_mae, icon, key, s, state))
