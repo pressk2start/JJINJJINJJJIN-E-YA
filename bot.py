@@ -13191,16 +13191,26 @@ def _v4_shadow_report_lines():
                             _ck_n = len(_ck_vals)
                             _c_slices = [("lo30%", _ck_vals[:int(_ck_n * 0.3)]), ("mid", _ck_vals[int(_ck_n * 0.3):int(_ck_n * 0.7)]), ("hi30%", _ck_vals[int(_ck_n * 0.7):])]
                             _bp = []
+                            _boundaries = []
                             for _clbl, _cdata in _c_slices:
                                 if not _cdata:
                                     continue
                                 _ct = len(_cdata)
                                 _ca = sum(1 for t, _ in _cdata if t["inds"]["dd_peak_60s"] < 0.003)
                                 _bp.append(f"{_clbl}:A{_ca/_ct*100:.0f}%")
+                            _b30 = _ck_vals[int(_ck_n * 0.3)][1]
+                            _b70 = _ck_vals[int(_ck_n * 0.7)][1]
                             if _bp:
-                                _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)}")
+                                _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)} [p30={_b30:.3f} p70={_b70:.3f}]")
                         if _comp_parts:
                             lines.extend(_comp_parts)
+                        _tick_diag = {}
+                        for _td_k in ["tick_rate_30s", "tick_buy_30s", "tick_strength_30s"]:
+                            _td_n = sum(1 for t in _trs if t.get("inds", {}).get(_td_k) is not None)
+                            _tick_diag[_td_k] = _td_n
+                        if any(v > 0 for v in _tick_diag.values()):
+                            _td_parts = [f"{k.replace('tick_','t.')}:{v}/{len(_trs)}" for k, v in _tick_diag.items()]
+                            lines.append(f"  📡 tick진단: {' '.join(_td_parts)}")
                         # ── 진입 파라미터 PnL 슬라이싱 ──
                         _entry_keys = ["body_pct", "wick_ratio", "vr5", "close_strength"]
                         _entry_parts = []
@@ -13255,6 +13265,18 @@ def _v4_shadow_report_lines():
                                     _mp.append(f"{_mlbl}:{_mdn}건 mfe{_m_avg_mfe:+.2f}% pnl{_m_avg_pnl:+.2f}% r/m{_m_rm:.0f}%")
                                 if _mp:
                                     _x_parts.append(f"  🔬 X.mfe: {' | '.join(_mp)}")
+                            _at_60_120 = [t for t in _trs if 60 <= t.get("hold", 0) < 120 and t.get("curve")]
+                            if len(_at_60_120) >= 10:
+                                _at_n = len(_at_60_120)
+                                _at_had_pos60 = sum(1 for t in _at_60_120 if t["curve"].get("60", 0) > 0)
+                                _at_loss = [t for t in _at_60_120 if t["pnl"] < 0]
+                                _at_loss_had_pos = sum(1 for t in _at_loss if t["curve"].get("60", 0) > 0)
+                                _at_by_reason = {}
+                                for t in _at_60_120:
+                                    r = t.get("exit_reason", "?")
+                                    _at_by_reason[r] = _at_by_reason.get(r, 0) + 1
+                                _reason_str = " ".join(f"{r}:{c}" for r, c in sorted(_at_by_reason.items(), key=lambda x: -x[1])[:3])
+                                _x_parts.append(f"  🔬 X.60~120s분석: {_at_n}건 중 60s양수:{_at_had_pos60}건({_at_had_pos60/_at_n*100:.0f}%) 손실{len(_at_loss)}건(60s양수→손실:{_at_loss_had_pos}) | {_reason_str}")
                             if _x_parts:
                                 lines.append("  ── 청산 파라미터 검증 ──")
                                 lines.extend(_x_parts)
