@@ -132,6 +132,9 @@ closed_trades = []
 cooldowns = {}
 post_exit_tracks = []  # 청산 후 가격 추적 (trail/timeout만)
 POST_EXIT_CHECKPOINTS = [30, 60, 120, 180]  # 추적 시점 (초)
+blocked_signals = []  # 차단된 신호 사후 추적 (최대 200건 FIFO)
+BLOCKED_MAX = 200
+cooldown_block_count = 0  # 쿨다운 차단 횟수
 scan_count = 0
 start_time = None
 _ob_cache = {}  # market -> {"ts": float, "data": dict}
@@ -559,6 +562,33 @@ def analyze_buckets():
         (0, 2, "<2"), (2, 5, "2~5"), (5, 10, "5~10"),
         (10, 50, "10~50"), (50, 200, "50~200"), (200, 9e18, "200+"),
     ]))
+    sections.append("▶ abs_move별:")
+    sections.append(bucket_stats(closed_trades, "abs_move", [
+        (0, 0.15, "<0.15"), (0.15, 0.25, "0.15~0.25"), (0.25, 0.40, "0.25~0.40"),
+        (0.40, 0.60, "0.40~0.60"), (0.60, 9e18, "0.60+"),
+    ]))
+    sections.append("▶ trail구간별:")
+    def trail_tier(t):
+        sp = t.get("spread_pct", 0.15)
+        sl = t.get("slip_buy", 0.15)
+        if sp <= 0.12 and sl <= 0.10:
+            return "loose(0.35)"
+        elif sp >= 0.22 or sl >= 0.18:
+            return "tight(0.18)"
+        return "base(0.25)"
+    for tier in ["tight(0.18)", "base(0.25)", "loose(0.35)"]:
+        subset = [t for t in closed_trades if trail_tier(t) == tier]
+        if not subset:
+            sections.append(f"  {tier}: -")
+            continue
+        n = len(subset)
+        w = sum(1 for t in subset if t["net_pnl"] > 0)
+        avg = sum(t["net_pnl"] for t in subset) / n
+        sections.append(f"  {tier}: {n}건 wr{w/n*100:.0f}% avg{avg:+.3f}%")
+    sections.append("▶ 보유시간별:")
+    sections.append(bucket_stats(closed_trades, "hold_sec", [
+        (0, 30, "<30s"), (30, 60, "30~60s"), (60, 120, "60~120s"), (120, 180, "120~180s"), (180, 9e18, "180s+"),
+    ]))
     sections.append("▶ 그룹별:")
     for grp in ["상위", "하위"]:
         subset = [t for t in closed_trades if t["group"] == grp]
@@ -655,6 +685,35 @@ def _analyze_mfe_distribution():
     avg_mfe = sum(mfes) / n
     med_mfe = sorted(mfes)[n // 2]
     lines.append(f"  avg{avg_mfe:+.3f}% med{med_mfe:+.3f}%")
+    return "\n".join(lines)
+
+def _analyze_blocked_signals():
+    """차단된 신호 사후 분석 — 어떤 필터가 좋은 거래를 막았는지 확인."""
+    done = [b for b in blocked_signals if b["done"] and 180 in b.get("prices", {})]
+    if len(done) < 3:
+        return ""
+    lines = [f"▶ 차단 신호 사후추적 ({len(done)}건, cooldown차단 {cooldown_block_count}회):"]
+    blocker_stats = defaultdict(lambda: {"n": 0, "wins": 0, "pnl_sum": 0.0, "mfe_sum": 0.0})
+    for b in done:
+        ask = b["ask"]
+        peak = b.get("peak", ask)
+        p180 = b["prices"][180]
+        hypo_pnl = (p180 - ask) / ask * 100 - FEE_PCT * 2
+        hypo_mfe = (peak - ask) / ask * 100
+        for blocker in b["blockers"]:
+            s = blocker_stats[blocker]
+            s["n"] += 1
+            s["pnl_sum"] += hypo_pnl
+            s["mfe_sum"] += hypo_mfe
+            if hypo_pnl > 0:
+                s["wins"] += 1
+    for blocker, s in sorted(blocker_stats.items(), key=lambda x: -x[1]["n"]):
+        n = s["n"]
+        wr = s["wins"] / n * 100
+        avg_pnl = s["pnl_sum"] / n
+        avg_mfe = s["mfe_sum"] / n
+        verdict = "✅유효" if avg_pnl < -0.05 else "⚠재검토" if avg_pnl < 0.05 else "❌과잉차단"
+        lines.append(f"  {blocker:10s} {n:3d}건 wr{wr:.0f}% avg{avg_pnl:+.3f}% mfe{avg_mfe:+.3f}% {verdict}")
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════
@@ -848,13 +907,16 @@ def generate_review():
         "▶ 조건별 승패 분해:",
         _analyze_condition_combos(),
     ]
+    blocked_analysis = _analyze_blocked_signals()
+    if blocked_analysis:
+        lines += ["", "━━━━━━━━━━━━━━━", blocked_analysis]
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════
 # 메인
 # ═══════════════════════════════════════════════
 def main():
-    global scan_count, start_time, log_fh
+    global scan_count, start_time, log_fh, cooldown_block_count
     start_time = time.time()
     log_fh = open(LOG_FILE, "a")
     print("=" * 60)
@@ -932,12 +994,35 @@ def main():
                     if cp not in trk["prices"] and elapsed >= cp:
                         trk["prices"][cp] = price_now
 
+            for blk in blocked_signals:
+                if blk["done"]:
+                    continue
+                elapsed = now_ts - blk["time"]
+                if elapsed > MAX_HOLD_SEC + 10:
+                    blk["done"] = True
+                    continue
+                ticker_b = tickers_dict.get(blk["market"])
+                if not ticker_b:
+                    continue
+                bp = ticker_b["trade_price"]
+                if "peak" not in blk:
+                    blk["peak"] = bp
+                elif bp > blk["peak"]:
+                    blk["peak"] = bp
+                for cp in [30, 60, 120, 180]:
+                    if cp not in blk["prices"] and elapsed >= cp:
+                        blk["prices"][cp] = bp
+
             for ticker in tickers:
                 market = ticker["market"]
                 price = ticker["trade_price"]
                 if market in positions:
                     continue
                 if market in cooldowns and now_ts - cooldowns[market] < COOLDOWN_SEC:
+                    signal_chk = detect_anomaly(market, price, now_ts)
+                    volume_stats(market, ticker.get("acc_trade_price_24h", 0), now_ts)
+                    if signal_chk and signal_chk["price_z_ok"]:
+                        cooldown_block_count += 1
                     continue
 
                 signal = detect_anomaly(market, price, now_ts)
@@ -979,6 +1064,24 @@ def main():
                 all_pass = all(cond_flags.values()) and cond_abs_move and cond_vol_ratio
 
                 if not all_pass:
+                    blockers = [k for k, v in cond_flags.items() if not v]
+                    if not cond_abs_move:
+                        blockers.append("abs_move")
+                    if not cond_vol_ratio:
+                        blockers.append("vol_ratio")
+                    if len(blocked_signals) >= BLOCKED_MAX:
+                        blocked_signals.pop(0)
+                    blocked_signals.append({
+                        "market": market,
+                        "time": now_ts,
+                        "ask": ask,
+                        "blockers": blockers,
+                        "z_score": signal["z_score"],
+                        "vol_z": vol_z_val,
+                        "abs_move": signal["abs_move"],
+                        "prices": {},
+                        "done": False,
+                    })
                     continue
 
                 group = "상위" if market in top_markets else "하위"
