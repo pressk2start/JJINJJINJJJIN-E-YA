@@ -13262,18 +13262,15 @@ def _v4_shadow_report_lines():
                                 _rn = len(_loss_60_120)
                                 _avg_exit = sum(t["pnl"] for t in _loss_60_120) / _rn * 100
                                 _avg_mfe = sum(t.get("mfe", 0) for t in _loss_60_120) / _rn * 100
+                                _pos15 = sum(1 for t in _loss_60_120 if t["curve"].get("15", 0) > 0)
+                                _pos30 = sum(1 for t in _loss_60_120 if t["curve"].get("30", 0) > 0)
                                 _pos60 = sum(1 for t in _loss_60_120 if t["curve"].get("60", 0) > 0)
-                                _has90 = [(t, t["curve"]["90"]) for t in _loss_60_120 if "90" in t["curve"]]
-                                _rec90_str = ""
-                                if _has90:
-                                    _rec90_pos = sum(1 for _, v in _has90 if v > 0)
-                                    _rec90_str = f" 90s>0:{_rec90_pos}/{len(_has90)}({_rec90_pos/len(_has90)*100:.0f}%)"
                                 _by_reason = {}
                                 for t in _loss_60_120:
                                     r = t.get("exit_reason", "?")
                                     _by_reason[r] = _by_reason.get(r, 0) + 1
                                 _rs = " ".join(f"{r}:{c}" for r, c in sorted(_by_reason.items(), key=lambda x: -x[1])[:3])
-                                _x_parts.append(f"  🔬 X.회복률: 60~120s손실{_rn}건 60s>0:{_pos60}건({_pos60/_rn*100:.0f}%){_rec90_str} mfe{_avg_mfe:+.2f}% exit{_avg_exit:+.2f}% | {_rs}")
+                                _x_parts.append(f"  🔬 X.회복률: 60~120s손실{_rn}건 15s>0:{_pos15}({_pos15/_rn*100:.0f}%) 30s>0:{_pos30}({_pos30/_rn*100:.0f}%) 60s>0:{_pos60}({_pos60/_rn*100:.0f}%) mfe{_avg_mfe:+.2f}% exit{_avg_exit:+.2f}% | {_rs}")
                             if _x_parts:
                                 lines.append("  ── 청산 파라미터 검증 ──")
                                 lines.extend(_x_parts)
