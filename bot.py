@@ -11124,6 +11124,14 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("ob_spread_pct", "<=", 0.20)],
         "description": "CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
     },
+    "과열감지_BODYCAP": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_BC", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.68)],
+        "description": "CLM + body_pct≤0.68% 상한필터 (장대몸통 추격 제거) (shadow)",
+    },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
     # CLMP 폐기: n=1442, cap=-15%, PnL=-0.06%. 연구종료
