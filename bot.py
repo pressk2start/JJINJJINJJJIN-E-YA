@@ -11234,6 +11234,8 @@ _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
 _SHADOW_PENDING_SIGNALS = []
 _SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
+_SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+_shadow_scan_idx = 0  # 메인 루프 스캔 카운터
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
 _SHADOW_CHECK_OVERRIDES = {}
@@ -12517,8 +12519,16 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     _local_exec_ms = {}
     _local_exec_calls = {}
 
+    _is_shadow_eval_cycle = (_shadow_scan_idx % _SHADOW_EVAL_INTERVAL == 0)
+
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
+
+        # Shadow interval: 비활성 route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+        if not strat["enabled"] and not _is_shadow_eval_cycle:
+            _pipeline_inc("shadow_interval_skip")
+            continue
+
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
         _fn_name = getattr(check_fn, "__name__", str(check_fn))
 
@@ -18670,7 +18680,7 @@ _cursor_lock = threading.Lock()  # 🔧 FIX: _cursor 레이스 컨디션 방지
 
 
 def main():
-    global _cursor
+    global _cursor, _shadow_scan_idx
 
     # 🧠 시작 시 학습된 가중치 & 매도 파라미터 로드
     if AUTO_LEARN_ENABLED:
@@ -19285,6 +19295,7 @@ def main():
 
             _scan_cycle_start = time.time()
             _t_fetch = _scan_cycle_start  # scan_fetch 단계 시작 (네트워크 I/O)
+            _shadow_scan_idx += 1
 
             obc = fetch_orderbook_cache(shard)
 
