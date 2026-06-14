@@ -10502,6 +10502,8 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     body_pct = body / max(last["opening_price"], 1) * 100
     if body_pct < 0.3:
         if _pipeline_inc("climax_body_fail", value=round(body_pct, 2), threshold=0.3, direction="gte"): return None
+    if body_pct > 0.68:
+        if _pipeline_inc("climax_body_hi_fail", value=round(body_pct, 2), threshold=0.68, direction="lte"): return None
     upper_wick = last["high_price"] - last["trade_price"]
     wick_ratio = upper_wick / total_range
     if wick_ratio < 0.3:
