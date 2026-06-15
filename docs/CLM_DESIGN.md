@@ -137,7 +137,13 @@ ENTRY_CLM 7 조건 (ENABLE=7, 즉 모두 만족 요구):
 7. predicted_cohort == "A"  (§4)
 ```
 
-> **ENABLE=7의 의미**: 7개 조건 모두 만족. 초기에는 데이터 부족 → ENABLE=5로 완화하고 (조건 3, 7 끄기) paper run, 진입 빈도/품질 보면서 단계적으로 강화하는 안도 미해결 질문(§11)에 포함.
+> **Phase 분리 (핵심 설계 결정)**:
+> - **Phase 1 (CLM_RAW)**: 조건 1~6만 사용 (코호트 예측 OFF). RSI+EMA 신호 자체의 알파를 먼저 검증.
+> - **Phase 2 (라벨링)**: Phase 1 데이터 50건으로 실제 A/B/C 사후 라벨링.
+> - **Phase 3 (A 예측기)**: 실제 라벨 기반으로 assign_cohort() 작성, 조건 7 활성화.
+>
+> 근거: CLM 신호와 A 예측기를 동시에 켜면 실패 원인을 분리할 수 없음.
+> A 예측기가 틀리면 CLM 자체 성능 평가가 불가능해짐. **신호 먼저, 예측기 나중에.**
 
 ---
 
@@ -168,11 +174,24 @@ ENTRY_CLM 7 조건 (ENABLE=7, 즉 모두 만족 요구):
 | `bid_depth / ask_depth` | 1.0 초과면 A | 매수벽 우세 |
 | 직전 10분 신고가까지 거리 | 가까울수록 A | 추세 살아있음 |
 
-### 4.3 초기 구현: 간이 룰
+### 4.3 구현 순서: 신호 먼저, 예측기 나중에
 
-ML 모델 없이 시작. 초기에는 **점수 합산**:
+> ⚠ **Phase 1 (CLM_RAW)에서는 코호트 예측 OFF.**
+> 모든 overheat 신호를 A로 간주하고 진입 → 사후 라벨링으로 실제 A/B/C 비율 측정.
+> 예측기는 Phase 3에서 실데이터 기반으로 작성.
+
+**Phase 1**: `assign_cohort()` 호출 안 함. detect_overheat 통과 = 진입.
+모든 진입에 대해 30s/60s/180s MFE/MAE 기록 → 사후 코호트 라벨 자동 부여.
+
+**Phase 2** (50건 누적 후): 사후 라벨 분석.
+- A/B/C 비율은 어떤가
+- A와 C의 PnL 차이가 외부 lift(+0.67)에 근접하는가
+- 어떤 진입 시점 feature가 A/C를 분리하는가
+
+**Phase 3** (라벨 분석 후): 간이 룰 예측기 작성.
 
 ```python
+# Phase 3에서만 활성화 — Phase 1/2에서는 이 코드 사용 안 함
 score = 0
 if rsi_5m_slope_3 > 0:                score += 1
 if ema_spread_15_slope > 0:           score += 1
@@ -182,9 +201,10 @@ if bid_depth_top5 >= ask_depth_top5:  score += 1
 if dist_from_10m_high_pct <= 0.15:    score += 1
 
 predicted_cohort = "A" if score >= COHORT_A_SCORE_MIN else "C"
-# 초기 COHORT_A_SCORE_MIN = 4 (6개 중 4개 이상 만족)
+# COHORT_A_SCORE_MIN은 Phase 2 데이터로 결정 (초기 추정 4)
 ```
 
+feature 목록과 가중치는 Phase 2 데이터가 결정. 위 6개는 가설일 뿐.
 데이터 100건 누적 후 logistic regression 또는 단순 의사결정 트리로 재학습 검토.
 
 ---
@@ -397,16 +417,17 @@ for ticker in tickers:
     if overheat is None:
         continue
 
-    cohort = assign_cohort(market, overheat, ticker)
-    if cohort != "A":
-        log_skipped(market, "cohort_C", overheat)
-        continue
+    # Phase 1 (CLM_RAW): 코호트 예측 OFF — overheat 통과 = 진입
+    # Phase 3 이후 아래 블록 활성화:
+    # cohort = assign_cohort(market, overheat, ticker)
+    # if cohort != "A":
+    #     log_skipped(market, "cohort_C", overheat)
+    #     continue
 
     # 기존 v2.1 진입 로직: ob 재조회 → spread/depth 최종 검사 → positions[] 추가
     enter_position(market, ticker, now_ts, meta={
-        "strategy": "CLM_A",
+        "strategy": "CLM_RAW",  # Phase 1. Phase 3 이후 "CLM_A"로 변경
         "overheat": overheat,
-        "cohort": "A",
     })
 ```
 
@@ -582,24 +603,46 @@ score 룰은 고정. 시장 regime 바뀌면 A 정의도 바뀜. 50건/100건마
 
 ---
 
-## 13. 다음 행동
+## 13. 다음 행동 (Phase 분리 적용)
 
-1. **지금**:
-   - 본 문서 §11의 질문 1, 5에 대해 외부 시스템 운영자에게 가능하면 추가 정보 요청
-   - 답 안 와도 paper run으로 진행 가능
-2. **구현 1단계** (코드 작성):
-   - `calc_rsi`, `calc_ema`, `fetch_candles_multi_tf` 단위 테스트부터
-   - `detect_overheat`, `assign_cohort` 순서로 추가
+> **핵심 원칙**: CLM 신호와 A 예측기를 분리해서 단계적 검증.
+> A 예측기가 틀리면 CLM 자체 성능 평가가 불가능 → 신호 먼저 검증.
+
+### Phase 1: CLM_RAW (신호 검증)
+
+1. **구현**:
+   - `calc_rsi`, `calc_ema`, `fetch_candles_multi_tf` 작성 + 단위 테스트
+   - `detect_overheat` 작성 (조건 1~6, 코호트 예측 없음)
    - 별도 파일 `momentum_scanner_clm.py`
-3. **paper run 1단계** (10~20건):
-   - ENABLE=5 (조건 3, 7 끄기) 완화 시작
-   - 진입 빈도/품질 보고 조건 3, 7 단계적 활성화
-4. **paper 50건**:
-   - 코호트 예측 적중률, MFE 갭, WR 측정
-   - 외부 통계 재현 여부 판정
-5. **승격 결정**:
-   - CLM이 v2.1보다 우월하면 메인 전환
-   - 그렇지 않으면 §11 질문 데이터 답변 후 재튜닝 또는 폐기
+   - 모든 진입에 30s/60s/180s MFE/MAE 자동 기록 (사후 라벨링용)
+2. **paper run**: CLM_RAW로 50건 수집
+3. **판정 기준**:
+   - CLM_RAW PnL/trade > v2.1 PnL/trade? → 신호 자체에 알파 존재
+   - MFE 승/패 갭이 v2.1(5.5x)보다 줄었나? → 진입 품질 개선
+   - WR이 v2.1(14~21%)보다 높은가?
+   - 진입 빈도는 얼마인가? (너무 적으면 의미 없음)
+
+### Phase 2: 사후 라벨링 (A/B/C 정의)
+
+1. Phase 1의 50건 데이터에서 30s MFE/MAE로 A/B/C 사후 라벨 부여
+2. 분석:
+   - A/B/C 비율 확인 (외부: A ~30% 추정)
+   - A vs C PnL 차이 → 외부 lift +0.67 근접 여부
+   - 어떤 진입 시점 feature(RSI slope, EMA slope, vol_z, spread, depth, 신고가 거리)가 A/C 분리력 보유하는지
+3. **판정**: A/C lift가 유의미하면 Phase 3 진행. lift 없으면 CLM_RAW 상태로 유지 또는 전략 재검토
+
+### Phase 3: A 예측기 구축
+
+1. Phase 2 라벨 데이터 기반으로 `assign_cohort()` 작성
+   - feature 선정: Phase 2에서 분리력 확인된 것만
+   - 가중치/임계치: 실데이터 기반 (추정 아님)
+2. A 예측기 ON 상태로 50건 추가 수집
+3. **판정**: 예측 적중률 ≥ 50% AND CLM_A PnL > CLM_RAW PnL → A 게이트 유지
+
+### Phase 4: 승격 결정
+
+- CLM (RAW 또는 A) > v2.1 확정 시 메인 전환
+- 그렇지 않으면 §11 미해결 질문 재검토 후 재튜닝 또는 폐기
 
 ---
 
@@ -616,14 +659,18 @@ V3 PBR (외부 +0.01%, 사실상 폐기)
 1초 tick → 신호 → CANDIDATE → PULLBACK → CONFIRM → ENTER
   └─ 시간 스케일은 여전히 초 단위, 알파 미미
 
-V3 CLM (본 문서 채택)
+V3 CLM Phase 1 (CLM_RAW, 본 문서 채택)
 ─────────────────────────────
 1초 tick → 30s 캔들 캐시:
   5m RSI ≥ 70 AND 15m RSI ≥ 65 AND
   rsi_5m > rsi_15m AND
   ema_spread_15 ∈ [0.6, 3.0] AND
-  vol_z_5m / vol_ratio_5m OK AND
-  cohort_predicted == "A"
+  vol_z_5m / vol_ratio_5m OK
+  → ENTER (코호트 예측 OFF, 사후 라벨링)
+
+V3 CLM Phase 3 (CLM_A, 데이터 기반 예측기 추가 후)
+─────────────────────────────
+  Phase 1 조건 + cohort_predicted == "A"
   → ENTER (외부 기대치 WR 38%, +0.18%)
 ```
 
