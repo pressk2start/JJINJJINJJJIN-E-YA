@@ -678,13 +678,14 @@ def main():
     )
 
     print("=" * 60)
-    print("CLM_RAW Phase 1 — Multi-TF RSI 과열감지 Paper Trading")
+    print("CLM_RAW Phase 1 — Multi-TF RSI 과열감지 [PAPER ONLY]")
     print(f"진입: rsi5m≥{RSI_5M_THRESHOLD} & rsi15m≥{RSI_15M_THRESHOLD} & "
           f"ema_spread∈[{EMA_SPREAD_MIN_PCT},{EMA_SPREAD_MAX_PCT}]%")
     print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / "
           f"early_dd -{EARLY_EXIT_ENTRY_PCT}%({EARLY_EXIT_SEC}s내) / timeout {MAX_HOLD_SEC}s")
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
     print(f"코호트 A 예측: OFF (Phase 3 deferred)")
+    print(f"모드: PAPER ONLY (실주문 없음)")
     print(f"모니터: 상위 {TOP_N}개")
     print(f"텔레그램: {'ON' if TG_ENABLED else 'OFF'} ({len(CHAT_IDS)}채널)")
     print("=" * 60)
@@ -699,7 +700,7 @@ def main():
 
     if TG_ENABLED:
         tg_send(
-            f"🚀 CLM_RAW Phase 1 시작\n"
+            f"🚀 CLM_RAW Phase 1 시작 [PAPER ONLY]\n"
             f"━━━━━━━━━━━━━━━\n"
             f"버전: {_GIT_SHA} ({_GIT_MSG})\n"
             f"시각: {_BOOT_TIME}\n"
@@ -707,7 +708,10 @@ def main():
             f"진입: rsi5m≥{RSI_5M_THRESHOLD} & rsi15m≥{RSI_15M_THRESHOLD}\n"
             f"ema_spread∈[{EMA_SPREAD_MIN_PCT},{EMA_SPREAD_MAX_PCT}]%\n"
             f"코호트: OFF (Phase 1)\n"
-            f"청산: +{TARGET_PROFIT_PCT}% / -{TRAILING_STOP_PCT}% / {MAX_HOLD_SEC}s"
+            f"모드: paper only\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / "
+            f"early_dd -{EARLY_EXIT_ENTRY_PCT}%({EARLY_EXIT_SEC}s) / timeout {MAX_HOLD_SEC}s"
         )
 
     last_reclassify = time.time()
