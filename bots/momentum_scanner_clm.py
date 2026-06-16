@@ -616,6 +616,17 @@ def generate_review():
         f"  보유 avg{sum(holds)/n:.0f}s / max{max(holds):.0f}s",
     ]
 
+    avg_rsi5 = sum(t["rsi_5m"] for t in closed_trades) / n
+    avg_rsi15 = sum(t["rsi_15m"] for t in closed_trades) / n
+    avg_ema_sp = sum(t["ema_spread_pct"] for t in closed_trades) / n
+    lines += [
+        "",
+        "[신호 품질]",
+        f"  RSI5   avg {avg_rsi5:.1f}",
+        f"  RSI15  avg {avg_rsi15:.1f}",
+        f"  EMA_SP avg {avg_ema_sp:.2f}%",
+    ]
+
     if win_trades and loss_trades:
         w_rsi5 = sum(t["rsi_5m"] for t in win_trades) / len(win_trades)
         l_rsi5 = sum(t["rsi_5m"] for t in loss_trades) / len(loss_trades)
