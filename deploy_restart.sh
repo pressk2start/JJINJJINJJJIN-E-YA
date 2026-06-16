@@ -34,6 +34,17 @@ fi
 echo "[deploy] systemctl restart momentum-scanner ..."
 sudo systemctl restart momentum-scanner
 
+# CLM Phase 1 서비스 (설치 안 됐으면 설치 후 시작)
+if ! systemctl is-enabled momentum-clm &>/dev/null; then
+    echo "[deploy] momentum-clm 서비스 최초 설치 ..."
+    sudo cp /home/ubuntu/bot/bots/momentum-clm.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable momentum-clm
+fi
+echo "[deploy] systemctl restart momentum-clm ..."
+sudo systemctl restart momentum-clm
+
 echo "[deploy] 완료 — $(date)"
 sudo systemctl status upbit-bot --no-pager
 sudo systemctl status momentum-scanner --no-pager
+sudo systemctl status momentum-clm --no-pager
