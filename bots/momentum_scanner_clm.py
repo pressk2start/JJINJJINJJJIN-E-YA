@@ -63,6 +63,7 @@ load_dotenv("/home/ubuntu/bot/.env")
 
 # ─── 설정 (청산/유니버스는 v2.1 동일) ───
 SCAN_INTERVAL = 1.0
+CLM_SIGNAL_INTERVAL = 30.0
 TRAILING_STOP_PCT = 0.25
 TARGET_PROFIT_PCT = 0.25
 MAX_HOLD_SEC = 180
@@ -729,6 +730,7 @@ def main():
     last_summary_tg = time.time()
     last_autosave = time.time()
     last_review = time.time()
+    last_clm_check = 0
     print("-" * 60)
 
     try:
@@ -783,9 +785,15 @@ def main():
                     if cp not in blk["prices"] and elapsed >= cp:
                         blk["prices"][cp] = bp
 
-            # ─── CLM 진입 스캔 ───
+            # ─── CLM 진입 스캔 (RSI는 상태형이므로 30초 간격으로 충분) ───
+            clm_scan_due = now_ts - last_clm_check >= CLM_SIGNAL_INTERVAL
+            if clm_scan_due:
+                last_clm_check = now_ts
+
             for ticker in tickers:
                 market = ticker["market"]
+                if not clm_scan_due:
+                    continue
                 if market not in top_markets:
                     continue
                 if market in positions:
