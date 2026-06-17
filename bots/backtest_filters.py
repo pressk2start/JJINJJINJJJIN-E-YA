@@ -263,6 +263,8 @@ def build_momentum_filters():
         ("z_score 5-7",          _between("z_score", 5, 7)),
         ("z_score 3-7",          _between("z_score", 3, 7)),
         ("abs_move >= 0.25",     _ge("abs_move", 0.25)),
+        ("no early_dd exits",    lambda r: "early_dd" not in (r.get("reason") or "")),
+        ("exclude SOL",          _exclude_coins(["SOL"])),
         (f"exclude {','.join(EXCLUDE_COINS)}", _exclude_coins(EXCLUDE_COINS)),
     ]
 
@@ -276,9 +278,12 @@ def build_clm_filters():
         ("rsi_5m 70-75",          _between("rsi_5m", 70, 75)),
         ("rsi_5m <= 75",          _le("rsi_5m", 75)),
         ("rsi_15m 65-70",         _between("rsi_15m", 65, 70)),
+        ("rsi_15m 75+",           _ge("rsi_15m", 75)),
         ("ema_spread 0.6-1.0",    _between("ema_spread_pct", 0.6, 1.0)),
         ("ema_spread 1.0-1.5",    _between("ema_spread_pct", 1.0, 1.5)),
         ("ema_spread >= 1.0",     _ge("ema_spread_pct", 1.0)),
+        ("ema_spread >= 1.5",     _ge("ema_spread_pct", 1.5)),
+        ("no early_dd exits",     lambda r: "early_dd" not in (r.get("reason") or "")),
         (f"exclude {','.join(EXCLUDE_COINS)}", _exclude_coins(EXCLUDE_COINS)),
     ]
 
