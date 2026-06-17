@@ -119,6 +119,8 @@ POST_EXIT_CHECKPOINTS = [30, 60, 120, 180]
 blocked_signals = []
 BLOCKED_MAX = 200
 cooldown_block_count = 0
+cooldown_episodes = 0
+_active_cooldown_markets = set()
 scan_count = 0
 start_time = None
 _ob_cache = {}
@@ -520,14 +522,18 @@ def _analyze_blocked_signals():
     done = [b for b in blocked_signals if b["done"] and 180 in b.get("prices", {})]
     if len(done) < 3:
         return ""
-    lines = [f"▶ 차단 신호 사후추적 ({len(done)}건, cooldown차단 {cooldown_block_count}회):"]
+    lines = [f"▶ 차단 신호 사후추적 ({len(done)}건, cooldown차단 {cooldown_block_count}회, 신호에피소드 {cooldown_episodes}회):"]
     blocker_stats = defaultdict(lambda: {"n": 0, "wins": 0, "pnl_sum": 0.0, "mfe_sum": 0.0})
+    all_rsi5, all_rsi15, all_ema_sp = [], [], []
     for b in done:
         ask = b["ask"]
         peak = b.get("peak", ask)
         p180 = b["prices"][180]
         hypo_pnl = (p180 - ask) / ask * 100 - FEE_PCT * 2
         hypo_mfe = (peak - ask) / ask * 100
+        all_rsi5.append(b.get("rsi_5m", 0))
+        all_rsi15.append(b.get("rsi_15m", 0))
+        all_ema_sp.append(b.get("ema_spread_pct", 0))
         for blocker in b["blockers"]:
             s = blocker_stats[blocker]
             s["n"] += 1
@@ -542,6 +548,16 @@ def _analyze_blocked_signals():
         avg_mfe = s["mfe_sum"] / n
         verdict = "✅유효" if avg_pnl < -0.05 else "⚠재검토" if avg_pnl < 0.05 else "❌과잉차단"
         lines.append(f"  {blocker:10s} {n:3d}건 wr{wr:.0f}% avg{avg_pnl:+.3f}% mfe{avg_mfe:+.3f}% {verdict}")
+    if all_rsi5:
+        avg_r5 = sum(all_rsi5) / len(all_rsi5)
+        avg_r15 = sum(all_rsi15) / len(all_rsi15)
+        avg_sp = sum(all_ema_sp) / len(all_ema_sp)
+        lines.append(f"  [차단 신호 품질] rsi5:{avg_r5:.1f} rsi15:{avg_r15:.1f} ema_sp:{avg_sp:.3f}%")
+        if closed_trades:
+            e_r5 = sum(t["rsi_5m"] for t in closed_trades) / len(closed_trades)
+            e_r15 = sum(t["rsi_15m"] for t in closed_trades) / len(closed_trades)
+            e_sp = sum(t["ema_spread_pct"] for t in closed_trades) / len(closed_trades)
+            lines.append(f"  [진입 신호 품질] rsi5:{e_r5:.1f} rsi15:{e_r15:.1f} ema_sp:{e_sp:.3f}%")
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════
@@ -680,7 +696,7 @@ def generate_review():
 # 메인
 # ═══════════════════════════════════════════════
 def main():
-    global scan_count, start_time, log_fh, cooldown_block_count
+    global scan_count, start_time, log_fh, cooldown_block_count, cooldown_episodes
     start_time = time.time()
     log_fh = open(LOG_FILE, "a")
 
@@ -696,6 +712,7 @@ def main():
     print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / "
           f"early_dd -{EARLY_EXIT_ENTRY_PCT}%({EARLY_EXIT_SEC}s내) / timeout {MAX_HOLD_SEC}s")
     print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
+    print(f"신호검사: {CLM_SIGNAL_INTERVAL:.0f}초 간격 (포지션관리: {SCAN_INTERVAL:.0f}초)")
     print(f"코호트 A 예측: OFF (Phase 3 deferred)")
     print(f"모드: PAPER ONLY (실주문 없음)")
     print(f"모니터: 상위 {TOP_N}개")
@@ -804,7 +821,12 @@ def main():
 
                 signal = detect_overheat(market)
                 if signal is None:
+                    if market in _active_cooldown_markets:
+                        _active_cooldown_markets.discard(market)
                     continue
+                if market not in _active_cooldown_markets:
+                    _active_cooldown_markets.add(market)
+                    cooldown_episodes += 1
 
                 ob = get_orderbook(market)
                 if not ob:
@@ -835,6 +857,9 @@ def main():
                         "rsi_5m": signal["rsi_5m"],
                         "rsi_15m": signal["rsi_15m"],
                         "ema_spread_pct": signal["ema_spread_pct"],
+                        "spread_pct": spread_pct,
+                        "ask_krw": ask_krw,
+                        "bid_krw": bid_krw,
                         "prices": {},
                         "done": False,
                     })
