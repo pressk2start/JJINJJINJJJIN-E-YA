@@ -12588,8 +12588,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         # ind_filters: shadow variant별 indicator 기반 추가 필터 (예: tick_age ≤ 15)
         _ind_filters = strat.get("ind_filters")
         if hit and _ind_filters:
+            _sig_ind = sig.get("indicators", {}) if sig else {}
             for _fk, _fop, _fth in _ind_filters:
                 _fv = universal_ind.get(_fk)
+                if _fv is None:
+                    _fv = _sig_ind.get(_fk)
                 if _fv is None or (_fop == "<=" and _fv > _fth) or (_fop == ">=" and _fv < _fth):
                     hit = False
                     break
@@ -13211,7 +13214,7 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
-                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "vr5", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k"]
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "vr5", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength"]
                         _comp_parts = []
                         for _ck in _comp_keys:
                             _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
