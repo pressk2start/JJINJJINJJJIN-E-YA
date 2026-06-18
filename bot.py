@@ -12588,8 +12588,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         # ind_filters: shadow variant별 indicator 기반 추가 필터 (예: tick_age ≤ 15)
         _ind_filters = strat.get("ind_filters")
         if hit and _ind_filters:
+            _sig_ind = sig.get("indicators", {}) if sig else {}
             for _fk, _fop, _fth in _ind_filters:
                 _fv = universal_ind.get(_fk)
+                if _fv is None:
+                    _fv = _sig_ind.get(_fk)
                 if _fv is None or (_fop == "<=" and _fv > _fth) or (_fop == ">=" and _fv < _fth):
                     hit = False
                     break
