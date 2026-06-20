@@ -9059,6 +9059,8 @@ _STRAT_DESC_MAP = {
     "CLM_A": "CLM + 호가스프레드≤0.15% (execution cost filter)",
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
+    "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
+    "CLM_CS": "CLM + close_strength≤0.50 (약마감 캔들 선별)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -10502,6 +10504,8 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     body_pct = body / max(last["opening_price"], 1) * 100
     if body_pct < 0.3:
         if _pipeline_inc("climax_body_fail", value=round(body_pct, 2), threshold=0.3, direction="gte"): return None
+    if body_pct > 0.68:
+        if _pipeline_inc("climax_body_hi_fail", value=round(body_pct, 2), threshold=0.68, direction="lte"): return None
     upper_wick = last["high_price"] - last["trade_price"]
     wick_ratio = upper_wick / total_range
     if wick_ratio < 0.3:
@@ -10515,6 +10519,8 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     hi = last["high_price"]
     lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
     close_strength = (cl - lo) / total_range
+    if _ENABLE_CLOSE_STRENGTH_FILTER and close_strength > 0.50:
+        if _pipeline_inc("climax_close_strength_fail", value=round(close_strength, 2), threshold=0.50, direction="lte"): return None
     wick_asym = (upper_wick - lower_wick) / total_range
     body_range = abs(body) / total_range
     return {
@@ -11124,6 +11130,22 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("ob_spread_pct", "<=", 0.20)],
         "description": "CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
     },
+    "과열감지_BODY60": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B60", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.60)],
+        "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
+    },
+    "과열감지_CS": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_CS", "mae_threshold": 0.35,
+        "ind_filters": [("close_strength", "<=", 0.50)],
+        "description": "CLM + close_strength≤0.50 (고점대비 약마감 선별, P 6연속 lo>hi) (shadow)",
+    },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
     # CLMP 폐기: n=1442, cap=-15%, PnL=-0.06%. 연구종료
@@ -11224,6 +11246,9 @@ _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
 _SHADOW_PENDING_SIGNALS = []
 _SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
+_SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+_shadow_scan_idx = 0  # 메인 루프 스캔 카운터
+_ENABLE_CLOSE_STRENGTH_FILTER = True  # close_strength > 0.50 차단 (LIVE 임시 방어 필터)
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
 _SHADOW_CHECK_OVERRIDES = {}
@@ -12507,8 +12532,16 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     _local_exec_ms = {}
     _local_exec_calls = {}
 
+    _is_shadow_eval_cycle = (_shadow_scan_idx % _SHADOW_EVAL_INTERVAL == 0)
+
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
+
+        # Shadow interval: 비활성 route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+        if not strat["enabled"] and not _is_shadow_eval_cycle:
+            _pipeline_inc("shadow_interval_skip")
+            continue
+
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
         _fn_name = getattr(check_fn, "__name__", str(check_fn))
 
@@ -12558,8 +12591,11 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
         # ind_filters: shadow variant별 indicator 기반 추가 필터 (예: tick_age ≤ 15)
         _ind_filters = strat.get("ind_filters")
         if hit and _ind_filters:
+            _sig_ind = sig.get("indicators", {}) if sig else {}
             for _fk, _fop, _fth in _ind_filters:
                 _fv = universal_ind.get(_fk)
+                if _fv is None:
+                    _fv = _sig_ind.get(_fk)
                 if _fv is None or (_fop == "<=" and _fv > _fth) or (_fop == ">=" and _fv < _fth):
                     hit = False
                     break
@@ -13181,7 +13217,7 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
-                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "vr5"]
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength"]
                         _comp_parts = []
                         for _ck in _comp_keys:
                             _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
@@ -13197,8 +13233,10 @@ def _v4_shadow_report_lines():
                                 _ct = len(_cdata)
                                 _ca = sum(1 for t, _ in _cdata if t["inds"]["dd_peak_60s"] < 0.003)
                                 _bp.append(f"{_clbl}:A{_ca/_ct*100:.0f}%")
+                            _b30 = _ck_vals[int(_ck_n * 0.3)][1]
+                            _b70 = _ck_vals[int(_ck_n * 0.7)][1]
                             if _bp:
-                                _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)}")
+                                _comp_parts.append(f"  🔬 A率.{_ck}: {' | '.join(_bp)} [p30={_b30:.3f} p70={_b70:.3f}]")
                         if _comp_parts:
                             lines.extend(_comp_parts)
                         # ── 진입 파라미터 PnL 슬라이싱 ──
@@ -13255,6 +13293,20 @@ def _v4_shadow_report_lines():
                                     _mp.append(f"{_mlbl}:{_mdn}건 mfe{_m_avg_mfe:+.2f}% pnl{_m_avg_pnl:+.2f}% r/m{_m_rm:.0f}%")
                                 if _mp:
                                     _x_parts.append(f"  🔬 X.mfe: {' | '.join(_mp)}")
+                            _loss_60_120 = [t for t in _trs if 60 <= t.get("hold", 0) < 120 and t["pnl"] < 0 and t.get("curve")]
+                            if len(_loss_60_120) >= 10:
+                                _rn = len(_loss_60_120)
+                                _avg_exit = sum(t["pnl"] for t in _loss_60_120) / _rn * 100
+                                _avg_mfe = sum(t.get("mfe", 0) for t in _loss_60_120) / _rn * 100
+                                _pos15 = sum(1 for t in _loss_60_120 if t["curve"].get("15", 0) > 0)
+                                _pos30 = sum(1 for t in _loss_60_120 if t["curve"].get("30", 0) > 0)
+                                _pos60 = sum(1 for t in _loss_60_120 if t["curve"].get("60", 0) > 0)
+                                _by_reason = {}
+                                for t in _loss_60_120:
+                                    r = t.get("exit_reason", "?")
+                                    _by_reason[r] = _by_reason.get(r, 0) + 1
+                                _rs = " ".join(f"{r}:{c}" for r, c in sorted(_by_reason.items(), key=lambda x: -x[1])[:3])
+                                _x_parts.append(f"  🔬 X.회복률: 60~120s손실{_rn}건 15s>0:{_pos15}({_pos15/_rn*100:.0f}%) 30s>0:{_pos30}({_pos30/_rn*100:.0f}%) 60s>0:{_pos60}({_pos60/_rn*100:.0f}%) mfe{_avg_mfe:+.2f}% exit{_avg_exit:+.2f}% | {_rs}")
                             if _x_parts:
                                 lines.append("  ── 청산 파라미터 검증 ──")
                                 lines.extend(_x_parts)
@@ -18644,7 +18696,7 @@ _cursor_lock = threading.Lock()  # 🔧 FIX: _cursor 레이스 컨디션 방지
 
 
 def main():
-    global _cursor
+    global _cursor, _shadow_scan_idx
 
     # 🧠 시작 시 학습된 가중치 & 매도 파라미터 로드
     if AUTO_LEARN_ENABLED:
@@ -19259,6 +19311,7 @@ def main():
 
             _scan_cycle_start = time.time()
             _t_fetch = _scan_cycle_start  # scan_fetch 단계 시작 (네트워크 I/O)
+            _shadow_scan_idx += 1
 
             obc = fetch_orderbook_cache(shard)
 
