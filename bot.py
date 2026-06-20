@@ -9059,8 +9059,8 @@ _STRAT_DESC_MAP = {
     "CLM_A": "CLM + 호가스프레드≤0.15% (execution cost filter)",
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
-    "CLM_BC": "CLM + body_pct≤0.68 (장대몸통 상한)",
-    "CLM_B60": "CLM + body_pct≤0.60 (body상한 강화, CLM_BC 비교용)",
+    "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
+    "CLM_CS": "CLM + close_strength≤0.50 (약마감 캔들 선별)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -11128,21 +11128,21 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("ob_spread_pct", "<=", 0.20)],
         "description": "CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
     },
-    "과열감지_BODYCAP": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_BC", "mae_threshold": 0.35,
-        "ind_filters": [("body_pct", "<=", 0.68)],
-        "description": "CLM + body_pct≤0.68 상한필터 (장대몸통 추격 제거) (shadow)",
-    },
     "과열감지_BODY60": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B60", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.60)],
-        "description": "CLM + body_pct≤0.60 상한강화 (CLM_BC 대비 효과 비교) (shadow)",
+        "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
+    },
+    "과열감지_CS": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_CS", "mae_threshold": 0.35,
+        "ind_filters": [("close_strength", "<=", 0.50)],
+        "description": "CLM + close_strength≤0.50 (고점대비 약마감 선별, P 6연속 lo>hi) (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
@@ -13214,7 +13214,7 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
-                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "vr5", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength"]
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength"]
                         _comp_parts = []
                         for _ck in _comp_keys:
                             _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
