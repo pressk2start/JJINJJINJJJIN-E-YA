@@ -10519,6 +10519,8 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     hi = last["high_price"]
     lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
     close_strength = (cl - lo) / total_range
+    if _ENABLE_CLOSE_STRENGTH_FILTER and close_strength > 0.50:
+        if _pipeline_inc("climax_close_strength_fail", value=round(close_strength, 2), threshold=0.50, direction="lte"): return None
     wick_asym = (upper_wick - lower_wick) / total_range
     body_range = abs(body) / total_range
     return {
@@ -11246,6 +11248,7 @@ _SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
 _SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
 _shadow_scan_idx = 0  # 메인 루프 스캔 카운터
+_ENABLE_CLOSE_STRENGTH_FILTER = True  # close_strength > 0.50 차단 (LIVE 임시 방어 필터)
 
 # 섀도우 전용 check_fn 매핑 (v0: 불필요 — 모든 전략이 직접 로직 보유)
 _SHADOW_CHECK_OVERRIDES = {}
