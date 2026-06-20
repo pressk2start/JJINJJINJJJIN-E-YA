@@ -63,7 +63,7 @@ load_dotenv("/home/ubuntu/bot/.env")
 
 # ─── 설정 (청산/유니버스는 v2.1 동일) ───
 SCAN_INTERVAL = 1.0
-CLM_SIGNAL_INTERVAL = 5.0
+CLM_SIGNAL_INTERVAL = 30.0
 TRAILING_STOP_PCT = 0.25
 TARGET_PROFIT_PCT = 0.25
 MAX_HOLD_SEC = 180
