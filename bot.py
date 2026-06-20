@@ -10513,14 +10513,14 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     vr5 = _v4_volume_ratio_5(c1)
     if vr5 < 2.0:
         if _pipeline_inc("climax_vr_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
-    _pipeline_inc("climax_pass")
     lo = last["low_price"]
     cl = last["trade_price"]
     hi = last["high_price"]
-    lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
     close_strength = (cl - lo) / total_range
     if _ENABLE_CLOSE_STRENGTH_FILTER and close_strength > 0.50:
         if _pipeline_inc("climax_close_strength_fail", value=round(close_strength, 2), threshold=0.50, direction="lte"): return None
+    _pipeline_inc("climax_pass")
+    lower_wick = last["opening_price"] - lo if body >= 0 else cl - lo
     wick_asym = (upper_wick - lower_wick) / total_range
     body_range = abs(body) / total_range
     return {
