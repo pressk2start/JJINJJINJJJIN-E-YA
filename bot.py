@@ -9062,6 +9062,9 @@ _STRAT_DESC_MAP = {
     "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
     "CLM_CS": "CLM + close_strength≤0.50 (약마감 캔들 선별)",
     "CLM_RSI5": "CLM + rsi_5m≤51 (A率 23pp gap, lo77/hi54)",
+    "CLM_ATR": "CLM + atr_pct≤0.32 (A率 20pp gap, d-top 1등)",
+    "CLM_EMA15": "CLM + ema_spread_15≤-0.23 (A率 15pp gap)",
+    "CLM_OBSLIP": "CLM + ob_slip_sell≤0.15% (실행비용 필터)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -11154,6 +11157,30 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_RSI5", "mae_threshold": 0.35,
         "ind_filters": [("rsi_5m", "<=", 51.0)],
         "description": "CLM + rsi_5m≤51 (A率 lo77/hi54 gap23pp, 최강 gradient) (shadow)",
+    },
+    "과열감지_ATR": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_ATR", "mae_threshold": 0.35,
+        "ind_filters": [("atr_pct", "<=", 0.32)],
+        "description": "CLM + atr_pct≤0.32 (A率 lo76/hi56 gap20pp, d-top 1등) (shadow)",
+    },
+    "과열감지_EMA15": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_EMA15", "mae_threshold": 0.35,
+        "ind_filters": [("ema_spread_15", "<=", -0.23)],
+        "description": "CLM + ema_spread_15≤-0.23 (A率 lo72/hi57 gap15pp) (shadow)",
+    },
+    "과열감지_OBSLIP": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_OBSLIP", "mae_threshold": 0.35,
+        "ind_filters": [("ob_slip_sell_10000k", "<=", 0.15)],
+        "description": "CLM + ob_slip_sell≤0.15% (A率 lo68/hi57 gap11pp, 실행비용) (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
