@@ -49,6 +49,17 @@ FILTERS = [
     ("CS_55", "close_strength", "<=", 0.55, "close_strength≤0.55"),
     ("CS_60", "close_strength", "<=", 0.60, "close_strength≤0.60"),
     ("WICK_HI", "wick_ratio", ">=", 0.50, "wick_ratio≥0.50"),
+    ("RSI15", "rsi_15m", "<=", 49.3, "rsi_15m≤49.3"),
+    ("RSI15_55", "rsi_15m", "<=", 55.0, "rsi_15m≤55"),
+]
+
+COMBO_FILTERS = [
+    ("B60+R5", [("body_pct", "<=", 0.60), ("rsi_5m", "<=", 51.0)], "body≤0.60 + rsi5≤51"),
+    ("B60+ATR", [("body_pct", "<=", 0.60), ("atr_pct", "<=", 0.50)], "body≤0.60 + atr≤0.50"),
+    ("B60+EMA", [("body_pct", "<=", 0.60), ("ema_spread_15", "<=", 0.0)], "body≤0.60 + ema≤0"),
+    ("R5+ATR", [("rsi_5m", "<=", 51.0), ("atr_pct", "<=", 0.50)], "rsi5≤51 + atr≤0.50"),
+    ("R5+CS", [("rsi_5m", "<=", 51.0), ("close_strength", "<=", 0.50)], "rsi5≤51 + cs≤0.50"),
+    ("B60+OB", [("body_pct", "<=", 0.60), ("ob_slip_sell_10000k", "<=", 0.27)], "body≤0.60 + obslip≤0.27"),
 ]
 
 
@@ -153,6 +164,21 @@ def main():
         st = calc_stats(filtered)
         promoted, reasons, reduction = check_promotion(base, st)
         results.append((name, desc, st, promoted, reasons, reduction, skipped))
+
+    # ── 조합 필터 ──
+    for name, conditions, desc in COMBO_FILTERS:
+        filtered = list(records)
+        total_skipped = 0
+        for fkey, op, thresh in conditions:
+            filtered, skipped = apply_filter(filtered, fkey, op, thresh)
+            total_skipped += skipped
+            if not filtered:
+                break
+        if not filtered:
+            continue
+        st = calc_stats(filtered)
+        promoted, reasons, reduction = check_promotion(base, st)
+        results.append((name, desc, st, promoted, reasons, reduction, total_skipped))
 
     results.sort(key=lambda x: -x[2]["pnl"])
 

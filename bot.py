@@ -9065,6 +9065,11 @@ _STRAT_DESC_MAP = {
     "CLM_ATR": "CLM + atr_pct≤0.32 (A率 20pp gap, d-top 1등)",
     "CLM_EMA15": "CLM + ema_spread_15≤-0.23 (A率 15pp gap)",
     "CLM_OBSLIP": "CLM + ob_slip_sell≤0.15% (실행비용 필터)",
+    "CLM_B60R5": "CLM + body≤0.60 + rsi5≤51 (B60×RSI5 조합)",
+    "CLM_B60AT": "CLM + body≤0.60 + atr≤0.50 (B60×ATR MAE축소)",
+    "CLM_H120": "CLM + hold120 (adaptive trail 120초 후 시작)",
+    "CLM_H180": "CLM + hold180 (adaptive trail 180초 후 시작)",
+    "CLM_R15": "CLM + rsi_15m≤49.3 (15분 RSI 과열도)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -9562,6 +9567,58 @@ _V0_EXIT_PARAMS_CLM_ADAPTIVE = {
         "relax_mult": 1.5,
     },
     "description": "CLM adaptive trail: ob_slip기반 trail폭+hold시간 동적조정",
+}
+
+_V0_EXIT_PARAMS_CLM_HOLD120 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,
+    "disable_trail": True,
+    "sl_tiers": [
+        (120,  0.025),
+        (9999, 0.010),
+    ],
+    "adaptive_trail": {
+        "feature": "ob_slip_sell_10000k",
+        "arm_after_sec": 120,
+        "tiers": [
+            (0.10, 0.005, 300),
+            (0.14, 0.004, 240),
+            (9.99, 0.003, 180),
+        ],
+        "relax_after_sec": 180,
+        "relax_mult": 1.5,
+    },
+    "description": "CLM hold120: adaptive trail 120초 후 시작, 초반 SL 완충 확대",
+}
+
+_V0_EXIT_PARAMS_CLM_HOLD180 = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,
+    "disable_trail": True,
+    "sl_tiers": [
+        (180,  0.025),
+        (9999, 0.010),
+    ],
+    "adaptive_trail": {
+        "feature": "ob_slip_sell_10000k",
+        "arm_after_sec": 180,
+        "tiers": [
+            (0.10, 0.005, 300),
+            (0.14, 0.004, 240),
+            (9.99, 0.003, 180),
+        ],
+        "relax_after_sec": 240,
+        "relax_mult": 1.5,
+    },
+    "description": "CLM hold180: adaptive trail 180초 후 시작, X.hold 180s+ WR54% 검증",
 }
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
@@ -11181,6 +11238,47 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_OBSLIP", "mae_threshold": 0.35,
         "ind_filters": [("ob_slip_sell_10000k", "<=", 0.15)],
         "description": "CLM + ob_slip_sell≤0.15% (A率 lo68/hi57 gap11pp, 실행비용) (shadow)",
+    },
+    # ── 조합 필터 (단일 필터 최강 B60 위에 2차 필터) ──
+    "과열감지_B60_RSI5": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B60R5", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.60), ("rsi_5m", "<=", 51.0)],
+        "description": "CLM + body≤0.60 + rsi5≤51 (B60×RSI5 조합) (shadow)",
+    },
+    "과열감지_B60_ATR": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B60AT", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.60), ("atr_pct", "<=", 0.50)],
+        "description": "CLM + body≤0.60 + atr≤0.50 (MAE 축소 목적) (shadow)",
+    },
+    # ── Exit 변형 (진입 동일, 청산 다름) ──
+    "과열감지_HOLD120": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_HOLD120,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_H120", "mae_threshold": 0.35,
+        "description": "CLM + hold120: adaptive trail 120초 후 시작 (X.hold 120s+ WR40%) (shadow)",
+    },
+    "과열감지_HOLD180": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_HOLD180,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_H180", "mae_threshold": 0.35,
+        "description": "CLM + hold180: adaptive trail 180초 후 시작 (X.hold 180s+ WR54%) (shadow)",
+    },
+    # ── RSI 15m (과열 다중 타임프레임) ──
+    "과열감지_RSI15": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_R15", "mae_threshold": 0.35,
+        "ind_filters": [("rsi_15m", "<=", 49.3)],
+        "description": "CLM + rsi_15m≤49.3 (A率 lo73/hi57 gap16pp) (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
