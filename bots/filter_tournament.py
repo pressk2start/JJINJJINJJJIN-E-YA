@@ -33,7 +33,7 @@ DIM = "\033[2m"
 
 FILTERS = [
     ("B60", "body_pct", "<=", 0.60, "body_pct≤0.60"),
-    ("CS", "close_strength", "<=", 0.50, "close_strength≤0.50"),
+    # CS 제거: check_fn에서 cs>0.50 이미 차단, ind_filter 중복
     ("RSI5", "rsi_5m", "<=", 51.0, "rsi_5m≤51"),
     ("RSI5_55", "rsi_5m", "<=", 55.0, "rsi_5m≤55"),
     ("RSI5_60", "rsi_5m", "<=", 60.0, "rsi_5m≤60"),
@@ -46,8 +46,7 @@ FILTERS = [
     ("OBSLIP", "ob_slip_sell_10000k", "<=", 0.15, "ob_slip≤0.15%"),
     ("OBSLIP_20", "ob_slip_sell_10000k", "<=", 0.20, "ob_slip≤0.20%"),
     ("OBSLIP_27", "ob_slip_sell_10000k", "<=", 0.27, "ob_slip≤0.27%"),
-    ("CS_55", "close_strength", "<=", 0.55, "close_strength≤0.55"),
-    ("CS_60", "close_strength", "<=", 0.60, "close_strength≤0.60"),
+    # CS_55/CS_60 제거: check_fn cs>0.50 차단 때문에 0.55/0.60은 의미 없음 (모든 trade가 ≤0.50)
     ("WICK_HI", "wick_ratio", ">=", 0.50, "wick_ratio≥0.50"),
     ("RSI15", "rsi_15m", "<=", 49.3, "rsi_15m≤49.3"),
     ("RSI15_55", "rsi_15m", "<=", 55.0, "rsi_15m≤55"),
@@ -58,7 +57,7 @@ COMBO_FILTERS = [
     ("B60+ATR", [("body_pct", "<=", 0.60), ("atr_pct", "<=", 0.50)], "body≤0.60 + atr≤0.50"),
     ("B60+EMA", [("body_pct", "<=", 0.60), ("ema_spread_15", "<=", 0.0)], "body≤0.60 + ema≤0"),
     ("R5+ATR", [("rsi_5m", "<=", 51.0), ("atr_pct", "<=", 0.50)], "rsi5≤51 + atr≤0.50"),
-    ("R5+CS", [("rsi_5m", "<=", 51.0), ("close_strength", "<=", 0.50)], "rsi5≤51 + cs≤0.50"),
+    # R5+CS 제거: cs≤0.50은 check_fn에서 이미 강제, 조합 의미 없음
     ("B60+OB", [("body_pct", "<=", 0.60), ("ob_slip_sell_10000k", "<=", 0.27)], "body≤0.60 + obslip≤0.27"),
 ]
 

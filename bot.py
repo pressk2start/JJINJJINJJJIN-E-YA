@@ -9060,7 +9060,7 @@ _STRAT_DESC_MAP = {
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
-    "CLM_CS": "CLM + close_strength≤0.50 (약마감 캔들 선별)",
+    # CLM_CS 폐기: check_fn cs>0.50 차단과 중복 (CLM_BC 동일 사례)
     "CLM_RSI5": "CLM + rsi_5m≤51 (A率 23pp gap, lo77/hi54)",
     "CLM_ATR": "CLM + atr_pct≤0.32 (A率 20pp gap, d-top 1등)",
     "CLM_EMA15": "CLM + ema_spread_15≤-0.23 (A率 15pp gap)",
@@ -11199,14 +11199,8 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("body_pct", "<=", 0.60)],
         "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
     },
-    "과열감지_CS": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_CS", "mae_threshold": 0.35,
-        "ind_filters": [("close_strength", "<=", 0.50)],
-        "description": "CLM + close_strength≤0.50 (고점대비 약마감 선별, P 6연속 lo>hi) (shadow)",
-    },
+    # CLM_CS 폐기: check_fn에 _ENABLE_CLOSE_STRENGTH_FILTER=True로 cs>0.50 이미 차단.
+    # ind_filter cs≤0.50은 항상 통과 → CLM과 동일. CLM_BC와 같은 중복 구조.
     "과열감지_RSI5": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
