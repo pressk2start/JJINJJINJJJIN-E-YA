@@ -9061,6 +9061,7 @@ _STRAT_DESC_MAP = {
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
     "CLM_CS": "CLM + close_strength≤0.50 (약마감 캔들 선별)",
+    "CLM_RSI5": "CLM + rsi_5m≤51 (A率 23pp gap, lo77/hi54)",
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -11145,6 +11146,14 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_CS", "mae_threshold": 0.35,
         "ind_filters": [("close_strength", "<=", 0.50)],
         "description": "CLM + close_strength≤0.50 (고점대비 약마감 선별, P 6연속 lo>hi) (shadow)",
+    },
+    "과열감지_RSI5": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_RSI5", "mae_threshold": 0.35,
+        "ind_filters": [("rsi_5m", "<=", 51.0)],
+        "description": "CLM + rsi_5m≤51 (A率 lo77/hi54 gap23pp, 최강 gradient) (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
