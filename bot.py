@@ -9060,6 +9060,9 @@ _STRAT_DESC_MAP = {
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
+    "CLM_B50": "CLM + body_pct≤0.50 (B60 임계값 민감도 — 하한)",
+    "CLM_B55": "CLM + body_pct≤0.55 (B60 임계값 민감도 — 중간)",
+    "CLM_B65": "CLM + body_pct≤0.65 (B60 임계값 민감도 — 상한)",
     "CLM_OBSLIP": "CLM + ob_slip_sell≤0.15% (실행비용 필터)",
     # 기각: CLM_RSI5(-0.09%), CLM_ATR(-0.06%), CLM_EMA15(-0.34%), CLM_R15(-0.37%)
     #       CLM_B60R5(-0.09%), CLM_B60AT(-0.06%) — 단일/조합 지표 필터 전멸 (39차)
@@ -11143,6 +11146,31 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_B60", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.60)],
         "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
+    },
+    # ── body_pct 임계값 민감도 테스트 (B60이 우연인지 구조적인지 검증) ──
+    "과열감지_BODY50": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B50", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.50)],
+        "description": "CLM + body_pct≤0.50 (B60 하한 — 임계값 민감도) (shadow)",
+    },
+    "과열감지_BODY55": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B55", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.55)],
+        "description": "CLM + body_pct≤0.55 (B60 중간 — 임계값 민감도) (shadow)",
+    },
+    "과열감지_BODY65": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B65", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.65)],
+        "description": "CLM + body_pct≤0.65 (B60 상한 — check_fn 0.68 바로 아래) (shadow)",
     },
     # 기각 routes 제거 (39차 토너먼트 결과):
     # CLM_CS/CLM_BC: check_fn 중복
