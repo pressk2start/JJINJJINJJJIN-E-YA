@@ -1450,7 +1450,7 @@ def _pipeline_report(force=False):
                 _fails.append((_fname, _cv))
         if _fails:
             _fails.sort(key=lambda x: -x[1])
-            _fail_str = " ".join(f"{fn}:{fv}" for fn, fv in _fails[:5])
+            _fail_str = " ".join(f"{fn}:{fv}" for fn, fv in _fails[:8])
             _cfn_sections.append(f"  {_route}: in{_enter} pass{_pass_cnt} | {_fail_str}")
     if _cfn_sections:
         _rl.append("🔍 check_fn 필터:")
@@ -9060,16 +9060,14 @@ _STRAT_DESC_MAP = {
     "CLM_A2": "CLM + 호가스프레드≤0.20% (CLM_A 비교용)",
     "CLM_CALM": "CLM + CalmGate(spread≤0.5% + ATR≤0.5%)",
     "CLM_B60": "CLM + body_pct≤0.60 (check_fn 0.68 대비 추가 제거 효과)",
-    # CLM_CS 폐기: check_fn cs>0.50 차단과 중복 (CLM_BC 동일 사례)
-    "CLM_RSI5": "CLM + rsi_5m≤51 (A率 23pp gap, lo77/hi54)",
-    "CLM_ATR": "CLM + atr_pct≤0.32 (A率 20pp gap, d-top 1등)",
-    "CLM_EMA15": "CLM + ema_spread_15≤-0.23 (A率 15pp gap)",
+    "CLM_B50": "CLM + body_pct≤0.50 (B60 임계값 민감도 — 하한)",
+    "CLM_B55": "CLM + body_pct≤0.55 (B60 임계값 민감도 — 중간)",
+    "CLM_B65": "CLM + body_pct≤0.65 (B60 임계값 민감도 — 상한)",
     "CLM_OBSLIP": "CLM + ob_slip_sell≤0.15% (실행비용 필터)",
-    "CLM_B60R5": "CLM + body≤0.60 + rsi5≤51 (B60×RSI5 조합)",
-    "CLM_B60AT": "CLM + body≤0.60 + atr≤0.50 (B60×ATR MAE축소)",
-    "CLM_H120": "CLM + hold120 (adaptive trail 120초 후 시작)",
-    "CLM_H180": "CLM + hold180 (adaptive trail 180초 후 시작)",
-    "CLM_R15": "CLM + rsi_15m≤49.3 (15분 RSI 과열도)",
+    # 기각: CLM_RSI5(-0.09%), CLM_ATR(-0.06%), CLM_EMA15(-0.34%), CLM_R15(-0.37%)
+    #       CLM_B60R5(-0.09%), CLM_B60AT(-0.06%) — 단일/조합 지표 필터 전멸 (39차)
+    # 기각: CLM_H180(-0.01% MAE-0.46%), CLM_H120(0.00%) — exit 지연 무효 (n=55, 39차)
+    # 기각: CLM_CS, CLM_BC — check_fn 중복
     "LTRP_CALM": "LTRP + CalmGate(spread≤0.5% + ATR≤0.5%)",
     # Research - PBR (pullback breakout reclaim)
     "PBR": "5m급등 → 1m눌림(-0.3~-0.8%) → 직전1m고점 재돌파 + 거래량재증가 (spread≤0.20)",
@@ -9569,57 +9567,7 @@ _V0_EXIT_PARAMS_CLM_ADAPTIVE = {
     "description": "CLM adaptive trail: ob_slip기반 trail폭+hold시간 동적조정",
 }
 
-_V0_EXIT_PARAMS_CLM_HOLD120 = {
-    "strategy": "TRAIL",
-    "sl_pct": 0.020,
-    "activation_pct": 1.0,
-    "trail_pct": 0.005,
-    "hold_bars": 0,
-    "max_bars": 100,
-    "disable_trail": True,
-    "sl_tiers": [
-        (120,  0.025),
-        (9999, 0.010),
-    ],
-    "adaptive_trail": {
-        "feature": "ob_slip_sell_10000k",
-        "arm_after_sec": 120,
-        "tiers": [
-            (0.10, 0.005, 300),
-            (0.14, 0.004, 240),
-            (9.99, 0.003, 180),
-        ],
-        "relax_after_sec": 180,
-        "relax_mult": 1.5,
-    },
-    "description": "CLM hold120: adaptive trail 120초 후 시작, 초반 SL 완충 확대",
-}
-
-_V0_EXIT_PARAMS_CLM_HOLD180 = {
-    "strategy": "TRAIL",
-    "sl_pct": 0.020,
-    "activation_pct": 1.0,
-    "trail_pct": 0.005,
-    "hold_bars": 0,
-    "max_bars": 100,
-    "disable_trail": True,
-    "sl_tiers": [
-        (180,  0.025),
-        (9999, 0.010),
-    ],
-    "adaptive_trail": {
-        "feature": "ob_slip_sell_10000k",
-        "arm_after_sec": 180,
-        "tiers": [
-            (0.10, 0.005, 300),
-            (0.14, 0.004, 240),
-            (9.99, 0.003, 180),
-        ],
-        "relax_after_sec": 240,
-        "relax_mult": 1.5,
-    },
-    "description": "CLM hold180: adaptive trail 180초 후 시작, X.hold 180s+ WR54% 검증",
-}
+# CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
     "strategy": "TRAIL",
@@ -11199,32 +11147,36 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("body_pct", "<=", 0.60)],
         "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
     },
-    # CLM_CS 폐기: check_fn에 _ENABLE_CLOSE_STRENGTH_FILTER=True로 cs>0.50 이미 차단.
-    # ind_filter cs≤0.50은 항상 통과 → CLM과 동일. CLM_BC와 같은 중복 구조.
-    "과열감지_RSI5": {
+    # ── body_pct 임계값 민감도 테스트 (B60이 우연인지 구조적인지 검증) ──
+    "과열감지_BODY50": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_RSI5", "mae_threshold": 0.35,
-        "ind_filters": [("rsi_5m", "<=", 51.0)],
-        "description": "CLM + rsi_5m≤51 (A率 lo77/hi54 gap23pp, 최강 gradient) (shadow)",
+        "pipeline_key": "climax", "route": "CLM_B50", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.50)],
+        "description": "CLM + body_pct≤0.50 (B60 하한 — 임계값 민감도) (shadow)",
     },
-    "과열감지_ATR": {
+    "과열감지_BODY55": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_ATR", "mae_threshold": 0.35,
-        "ind_filters": [("atr_pct", "<=", 0.32)],
-        "description": "CLM + atr_pct≤0.32 (A率 lo76/hi56 gap20pp, d-top 1등) (shadow)",
+        "pipeline_key": "climax", "route": "CLM_B55", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.55)],
+        "description": "CLM + body_pct≤0.55 (B60 중간 — 임계값 민감도) (shadow)",
     },
-    "과열감지_EMA15": {
+    "과열감지_BODY65": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
         "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_EMA15", "mae_threshold": 0.35,
-        "ind_filters": [("ema_spread_15", "<=", -0.23)],
-        "description": "CLM + ema_spread_15≤-0.23 (A率 lo72/hi57 gap15pp) (shadow)",
+        "pipeline_key": "climax", "route": "CLM_B65", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.65)],
+        "description": "CLM + body_pct≤0.65 (B60 상한 — check_fn 0.68 바로 아래) (shadow)",
     },
+    # 기각 routes 제거 (39차 토너먼트 결과):
+    # CLM_CS/CLM_BC: check_fn 중복
+    # CLM_RSI5(-0.09%), CLM_ATR(-0.06%), CLM_EMA15(-0.34%), CLM_R15(-0.37%): 단일 지표 전멸
+    # CLM_B60R5(-0.09%), CLM_B60AT(-0.06%): 조합 필터 전멸
+    # CLM_H180(-0.01% MAE-0.46%), CLM_H120(0.00% MAE-0.36%): exit 지연 무효 (n=55)
     "과열감지_OBSLIP": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
@@ -11232,47 +11184,6 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_OBSLIP", "mae_threshold": 0.35,
         "ind_filters": [("ob_slip_sell_10000k", "<=", 0.15)],
         "description": "CLM + ob_slip_sell≤0.15% (A率 lo68/hi57 gap11pp, 실행비용) (shadow)",
-    },
-    # ── 조합 필터 (단일 필터 최강 B60 위에 2차 필터) ──
-    "과열감지_B60_RSI5": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_B60R5", "mae_threshold": 0.35,
-        "ind_filters": [("body_pct", "<=", 0.60), ("rsi_5m", "<=", 51.0)],
-        "description": "CLM + body≤0.60 + rsi5≤51 (B60×RSI5 조합) (shadow)",
-    },
-    "과열감지_B60_ATR": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_B60AT", "mae_threshold": 0.35,
-        "ind_filters": [("body_pct", "<=", 0.60), ("atr_pct", "<=", 0.50)],
-        "description": "CLM + body≤0.60 + atr≤0.50 (MAE 축소 목적) (shadow)",
-    },
-    # ── Exit 변형 (진입 동일, 청산 다름) ──
-    "과열감지_HOLD120": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_HOLD120,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_H120", "mae_threshold": 0.35,
-        "description": "CLM + hold120: adaptive trail 120초 후 시작 (X.hold 120s+ WR40%) (shadow)",
-    },
-    "과열감지_HOLD180": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_HOLD180,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_H180", "mae_threshold": 0.35,
-        "description": "CLM + hold180: adaptive trail 180초 후 시작 (X.hold 180s+ WR54%) (shadow)",
-    },
-    # ── RSI 15m (과열 다중 타임프레임) ──
-    "과열감지_RSI15": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_R15", "mae_threshold": 0.35,
-        "ind_filters": [("rsi_15m", "<=", 49.3)],
-        "description": "CLM + rsi_15m≤49.3 (A率 lo73/hi57 gap16pp) (shadow)",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
@@ -13345,7 +13256,7 @@ def _v4_shadow_report_lines():
                         if _a_dtop_parts:
                             lines.append(f"  ── Survival A 내부 d-top (n={len(_a_trs)}, key=dd_peak_60s) ──")
                             lines.extend(_a_dtop_parts)
-                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength"]
+                        _comp_keys = ["rsi_5m", "rsi_15m", "atr_pct", "entry_spread_pct", "body_pct", "wick_ratio", "ema_spread_15", "tick_rate_30s", "tick_buy_30s", "tick_strength_30s", "ob_slip_sell_10000k", "close_strength", "adx_60"]
                         _comp_parts = []
                         for _ck in _comp_keys:
                             _ck_vals = [(t, t.get("inds", {}).get(_ck)) for t in _trs if t.get("inds", {}).get(_ck) is not None and t.get("inds", {}).get("dd_peak_60s") is not None]
