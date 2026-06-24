@@ -17114,6 +17114,33 @@ def monitor_position(m,
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
 
+    # === AT shadow 비교 모드 (adaptive trail vs 실제 청산 대조) ===
+    _at_shadow_enabled = False
+    _at_shadow_armed = False
+    _at_shadow_stop = 0.0
+    _at_shadow_verdict = None
+    _at_shadow_sec = 0
+    _at_cfg = pre.get("v4_exit_params", {}).get("adaptive_trail")
+    _at_sl_tiers = pre.get("v4_exit_params", {}).get("sl_tiers")
+    if _at_cfg and _at_sl_tiers:
+        _at_shadow_enabled = True
+        _at_arm_sec = _at_cfg.get("arm_after_sec", 60)
+        _at_tiers = _at_cfg.get("tiers", [])
+        _at_relax_sec = _at_cfg.get("relax_after_sec", 120)
+        _at_relax_mult = _at_cfg.get("relax_mult", 1.5)
+        _at_feat_key = _at_cfg.get("feature", "ob_slip_sell_10000k")
+        _at_feat_val = None
+        _ob_raw = pre.get("ob", {}).get("raw", {})
+        if _ob_raw:
+            try:
+                _ob_units = _ob_raw.get("orderbook_units", [])
+                if _ob_units:
+                    _at_feat_val = _calc_vwap_slip(_ob_units, 10_000_000, "sell")
+            except Exception:
+                pass
+        if _at_feat_val is None:
+            _at_feat_val = 0.20
+
     ob = pre.get("ob")
 
     last_price = entry_price
@@ -17778,6 +17805,45 @@ def monitor_position(m,
                 # 🔧 FIX: trail_stop이 base_stop 아래로 내려가지 않도록 바닥 보장
                 trail_stop = max(trail_stop, base_stop)
 
+            # === AT shadow 매 사이클 계산 (로그만, 실제 청산 안 함) ===
+            if _at_shadow_enabled and _at_shadow_verdict is None:
+                _at_hold = alive_sec
+                _at_pnl = (curp / entry_price - 1.0) if entry_price > 0 else 0
+                # 1) tiered SL 체크
+                _at_eff_sl = 0.020
+                for _at_tier_sec, _at_tier_pct in _at_sl_tiers:
+                    if _at_hold < _at_tier_sec:
+                        _at_eff_sl = _at_tier_pct
+                        break
+                if _at_pnl <= -_at_eff_sl:
+                    _at_shadow_verdict = "AT손절SL"
+                    _at_shadow_sec = int(_at_hold)
+                # 2) arm 후 trail 계산
+                elif _at_hold >= _at_arm_sec:
+                    _at_trail_pct = _at_tiers[-1][1] if _at_tiers else 0.005
+                    _at_max_hold = _at_tiers[-1][2] if _at_tiers else 300
+                    for _at_slip_max, _at_t, _at_mh in _at_tiers:
+                        if _at_feat_val <= _at_slip_max:
+                            _at_trail_pct = _at_t
+                            _at_max_hold = _at_mh
+                            break
+                    if _at_hold >= _at_relax_sec:
+                        _at_trail_pct = _at_trail_pct * _at_relax_mult
+                    if not _at_shadow_armed:
+                        _at_shadow_armed = True
+                        _at_shadow_stop = best * (1 - _at_trail_pct)
+                    else:
+                        _at_new_stop = best * (1 - _at_trail_pct)
+                        if _at_new_stop > _at_shadow_stop:
+                            _at_shadow_stop = _at_new_stop
+                    if curp <= _at_shadow_stop:
+                        _at_shadow_pnl = (_at_shadow_stop - entry_price) / entry_price if entry_price > 0 else 0
+                        _at_shadow_verdict = "AT익절" if _at_shadow_pnl > 0 else "AT본절"
+                        _at_shadow_sec = int(_at_hold)
+                    elif _at_hold >= _at_max_hold:
+                        _at_shadow_verdict = "AT타임아웃"
+                        _at_shadow_sec = int(_at_hold)
+
             # 🔧 트레일링 손절 실제 청산 트리거 (디바운스 적용)
             if trail_armed and curp < trail_stop:
                 # 디바운스: 연속 N회 또는 T초 유지 시에만 실제 청산
@@ -18165,6 +18231,25 @@ def monitor_position(m,
             ret_pct = 0.0
             maxrun = 0.0
             maxdd = 0.0
+
+        # === AT shadow 비교 결과 로깅 ===
+        if _at_shadow_enabled:
+            _at_actual_sec = int(time.time() - start_ts)
+            _at_actual_pnl = ret_pct
+            if _at_shadow_verdict:
+                _at_exit_pnl = (_at_shadow_stop / entry_price - 1.0 - FEE_RATE) * 100 if entry_price > 0 and _at_shadow_stop > 0 else 0
+                _at_diff = _at_exit_pnl - _at_actual_pnl
+                _at_log = (f"🔬 AT비교 {m}: AT={_at_shadow_sec}초 {_at_shadow_verdict} {_at_exit_pnl:+.2f}% | "
+                           f"실제={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}% | "
+                           f"차이={_at_diff:+.2f}%p ob_slip={_at_feat_val:.3f}")
+            else:
+                _at_log = (f"🔬 AT비교 {m}: AT=미청산(아직 verdict없음) | "
+                           f"실제={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}%")
+            print(_at_log)
+            try:
+                tg_send_mid(_at_log)
+            except Exception:
+                pass
 
         # ================================
         # 2) 끝알람 문구 생성
