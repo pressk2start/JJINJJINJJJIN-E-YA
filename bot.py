@@ -13060,7 +13060,7 @@ def _v4_shadow_report_lines():
                                 lines.append(f"  🎯 realized/MFE: {_dt_ratio:.0f}%")
                         _at_wins = [t for t in _trs if t.get("exit_reason") == "AT익절" and t.get("mfe", 0) > 0]
                         if len(_at_wins) >= 5:
-                            _mfe_bk = [(0, 0.005, "0~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
+                            _mfe_bk = [(0, 0.002, "0~0.2%"), (0.002, 0.005, "0.2~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
                             _bk_parts = []
                             for _blo, _bhi, _blbl in _mfe_bk:
                                 _bk = [t for t in _at_wins if _blo <= t["mfe"] < _bhi]
@@ -13082,6 +13082,14 @@ def _v4_shadow_report_lines():
                                     _sl_parts.append(f"{_slbl}:{len(_sk)}건 {_sp:+.2f}%")
                             if _sl_parts:
                                 lines.append(f"  🎯 AT소손절mfe: {' | '.join(_sl_parts)}")
+                            _at_loss_hi = [t for t in _at_loss if t.get("mfe", 0) >= 0.001]
+                            if len(_at_loss_hi) >= 3:
+                                _alh_n = len(_at_loss_hi)
+                                _alh_pnl = sum(t["pnl"] for t in _at_loss_hi) / _alh_n * 100
+                                _alh_mfe = sum(t["mfe"] for t in _at_loss_hi) / _alh_n * 100
+                                _alh_hold = sum(t.get("hold", 0) for t in _at_loss_hi) / _alh_n
+                                _alh_rm = _alh_pnl / _alh_mfe * 100 if _alh_mfe > 0 else 0
+                                lines.append(f"  🔎 AT소손절(mfe≥0.1%): {_alh_n}건 PnL{_alh_pnl:+.2f}% mfe{_alh_mfe:+.2f}% hold{_alh_hold:.0f}s r/m{_alh_rm:.0f}%")
                         _at_to = [t for t in _trs if t.get("exit_reason") == "AT타임아웃" and t.get("hold", 0) > 0]
                         if len(_at_to) >= 3:
                             _to_holds = sorted(t["hold"] for t in _at_to)
@@ -13279,7 +13287,7 @@ def _v4_shadow_report_lines():
                         if _comp_parts:
                             lines.extend(_comp_parts)
                         # ── 진입 파라미터 PnL 슬라이싱 ──
-                        _entry_keys = ["body_pct", "wick_ratio", "vr5", "close_strength"]
+                        _entry_keys = ["body_pct", "wick_ratio", "vr5", "close_strength", "adx_60"]
                         _entry_parts = []
                         for _ek in _entry_keys:
                             _ek_vals = [(t, t.get("inds", {}).get(_ek)) for t in _trs if t.get("inds", {}).get(_ek) is not None]
@@ -13570,6 +13578,30 @@ def _v4_shadow_report_lines():
                             _prev_bk = bk_key
                         _f = ".2f" if abs(lo) < 10 else ".1f"
                         lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
+    # ── B-ladder d-score 비교 (body_pct 임계값 실험) ──
+    if _all_scenario_stats:
+        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65"]
+        _bl_parts = []
+        for rk in _bladder:
+            for sc in _all_scenario_stats:
+                if sc["route"] == rk:
+                    _bl_d = {}
+                    for _dd, ik, wv, wn, lv, ln, _dir in sc.get("d_pairs", []):
+                        if ik in ("mfe_30s", "mfe_60s"):
+                            _bl_d[ik] = _dd
+                    _d_str = ""
+                    if _bl_d:
+                        _d_parts = []
+                        if "mfe_30s" in _bl_d:
+                            _d_parts.append(f"30sd={_bl_d['mfe_30s']:.2f}")
+                        if "mfe_60s" in _bl_d:
+                            _d_parts.append(f"60sd={_bl_d['mfe_60s']:.2f}")
+                        _d_str = f" {' '.join(_d_parts)}"
+                    _bl_parts.append(f"  {rk}: n={sc['n']} PnL{sc['pnl']:+.2f}% MAE{sc['mae']:+.2f}% MFE{sc['mfe']:+.2f}%{_d_str}")
+                    break
+        if len(_bl_parts) >= 3:
+            lines.append("📐 B-ladder (body_pct 민감도):")
+            lines.extend(_bl_parts)
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
