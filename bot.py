@@ -9567,6 +9567,19 @@ _V0_EXIT_PARAMS_CLM_ADAPTIVE = {
     "description": "CLM adaptive trail: ob_slip기반 trail폭+hold시간 동적조정",
 }
 
+# live 청산 근사 — adaptive_trail/sl_tiers 제거, flat SL + timeout만
+# shadow에서 live 청산 방식(ATR SL + horizon timeout)을 근사하여
+# adaptive vs live 청산 성과 분리 가능
+_V0_EXIT_PARAMS_CLM_LIVEEXIT = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,
+    "disable_trail": True,
+}
+
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
@@ -11171,6 +11184,22 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_B65", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.65)],
         "description": "CLM + body_pct≤0.65 (B60 상한 — check_fn 0.68 바로 아래) (shadow)",
+    },
+    # ── live 청산 근사 (adaptive vs live exit 성과 분리용) ──
+    "과열감지_LIVEEXIT": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_LIVEEXIT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_LE", "mae_threshold": 0.35,
+        "description": "CLM + live청산근사(flat SL+timeout, AT없음) — adaptive vs live 분리 (shadow)",
+    },
+    "과열감지_B60_LIVEEXIT": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_LIVEEXIT,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B60_LE", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.60)],
+        "description": "CLM_B60 + live청산근사 — B60 진입edge 확인용 (shadow)",
     },
     # 기각 routes 제거 (39차 토너먼트 결과):
     # CLM_CS/CLM_BC: check_fn 중복
@@ -13580,7 +13609,7 @@ def _v4_shadow_report_lines():
                         lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
     # ── B-ladder d-score 비교 (body_pct 임계값 실험) ──
     if _all_scenario_stats:
-        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65"]
+        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE"]
         _bl_parts = []
         for rk in _bladder:
             for sc in _all_scenario_stats:
@@ -13600,7 +13629,7 @@ def _v4_shadow_report_lines():
                     _bl_parts.append(f"  {rk}: n={sc['n']} PnL{sc['pnl']:+.2f}% MAE{sc['mae']:+.2f}% MFE{sc['mfe']:+.2f}%{_d_str}")
                     break
         if len(_bl_parts) >= 3:
-            lines.append("📐 B-ladder (body_pct 민감도):")
+            lines.append("📐 B-ladder + LIVEEXIT:")
             lines.extend(_bl_parts)
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
@@ -17139,7 +17168,7 @@ def monitor_position(m,
             except Exception:
                 pass
         if _at_feat_val is None:
-            _at_feat_val = 0.20
+            _at_shadow_enabled = False
 
     ob = pre.get("ob")
 
