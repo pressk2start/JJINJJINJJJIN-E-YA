@@ -9580,6 +9580,35 @@ _V0_EXIT_PARAMS_CLM_LIVEEXIT = {
     "disable_trail": True,
 }
 
+# Profit Protect shadow — AT + MFE≥0.30% retrace 보호 (r/m 0.3~0.5% 구간 개선 실험)
+def _make_clm_pp(retrace_pct):
+    ep = {
+        "strategy": "TRAIL",
+        "sl_pct": 0.020,
+        "activation_pct": 1.0,
+        "trail_pct": 0.005,
+        "hold_bars": 0,
+        "max_bars": 100,
+        "disable_trail": True,
+        "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
+        "adaptive_trail": {
+            "feature": "ob_slip_sell_10000k",
+            "arm_after_sec": 60,
+            "tiers": [(0.10, 0.005, 300), (0.14, 0.004, 240), (9.99, 0.003, 180)],
+            "relax_after_sec": 120,
+            "relax_mult": 1.5,
+        },
+        "profit_protect": {
+            "activation_mfe": 0.003,
+            "retrace_pct": retrace_pct,
+        },
+    }
+    return ep
+
+_V0_EXIT_PARAMS_CLM_PP20 = _make_clm_pp(0.20)
+_V0_EXIT_PARAMS_CLM_PP30 = _make_clm_pp(0.30)
+_V0_EXIT_PARAMS_CLM_PP40 = _make_clm_pp(0.40)
+
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
@@ -11201,6 +11230,28 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("body_pct", "<=", 0.60)],
         "description": "CLM_B60 + live청산근사 — B60 진입edge 확인용 (shadow)",
     },
+    # ── Profit Protect shadow (MFE 0.3~0.5% r/m -10% 구간 개선 실험) ──
+    "과열감지_PP20": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_PP20,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_PP20", "mae_threshold": 0.35,
+        "description": "CLM + AT + PP(MFE≥0.3% 후 20% retrace 청산) (shadow)",
+    },
+    "과열감지_PP30": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_PP30,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_PP30", "mae_threshold": 0.35,
+        "description": "CLM + AT + PP(MFE≥0.3% 후 30% retrace 청산) (shadow)",
+    },
+    "과열감지_PP40": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_PP40,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_PP40", "mae_threshold": 0.35,
+        "description": "CLM + AT + PP(MFE≥0.3% 후 40% retrace 청산) (shadow)",
+    },
     # 기각 routes 제거 (39차 토너먼트 결과):
     # CLM_CS/CLM_BC: check_fn 중복
     # CLM_RSI5(-0.09%), CLM_ATR(-0.06%), CLM_EMA15(-0.34%), CLM_R15(-0.37%): 단일 지표 전멸
@@ -12253,6 +12304,13 @@ def _shadow_sim_exit(vp, cur_price):
     # 3) 본절 스톱 (G는 120초 이후에만)
     if _trail_allowed and mfe >= checkpoint and pnl <= 0:
         return True, "본절SL"
+
+    # 3.4) Profit Protect — MFE 도달 후 retrace 비율 기반 수익 보호
+    _pp = ep.get("profit_protect")
+    if _pp and mfe >= _pp["activation_mfe"] and vp["best_price"] > entry_price:
+        _pp_retrace = (vp["best_price"] - cur_price) / (vp["best_price"] - entry_price)
+        if _pp_retrace >= _pp["retrace_pct"]:
+            return True, "PP익절" if pnl > 0 else "PP본절"
 
     # 3.5) Adaptive trail — ob_slip 기반 동적 trail (disable_trail 대체)
     _at = ep.get("adaptive_trail")
@@ -13635,7 +13693,7 @@ def _v4_shadow_report_lines():
                         lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
     # ── B-ladder d-score 비교 (body_pct 임계값 실험) ──
     if _all_scenario_stats:
-        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE"]
+        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE", "CLM_PP20", "CLM_PP30", "CLM_PP40"]
         _bl_parts = []
         for rk in _bladder:
             for sc in _all_scenario_stats:
@@ -13655,7 +13713,7 @@ def _v4_shadow_report_lines():
                     _bl_parts.append(f"  {rk}: n={sc['n']} PnL{sc['pnl']:+.2f}% MAE{sc['mae']:+.2f}% MFE{sc['mfe']:+.2f}%{_d_str}")
                     break
         if len(_bl_parts) >= 3:
-            lines.append("📐 B-ladder + LIVEEXIT:")
+            lines.append("📐 B-ladder + LE + PP:")
             lines.extend(_bl_parts)
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
