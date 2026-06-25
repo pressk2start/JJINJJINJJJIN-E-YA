@@ -75,6 +75,7 @@ TOP_N = 30
 MAX_SPREAD_PCT = 0.10
 EARLY_EXIT_SEC = 30
 EARLY_EXIT_ENTRY_PCT = 0.20
+MAX_ENTRIES_PER_COIN = 3      # [J] 세션당 동일 종목 최대 진입 횟수 (SOL 6/13 집중 방지)
 REVIEW_INTERVAL_SEC = 600
 REVIEW_MIN_TRADES = 10
 VIRTUAL_POSITION_KRW = 1_000_000
@@ -711,7 +712,7 @@ def main():
           f"ema_spread∈[{EMA_SPREAD_MIN_PCT},{EMA_SPREAD_MAX_PCT}]%")
     print(f"청산: target +{TARGET_PROFIT_PCT}% / trail -{TRAILING_STOP_PCT}% / "
           f"early_dd -{EARLY_EXIT_ENTRY_PCT}%({EARLY_EXIT_SEC}s내) / timeout {MAX_HOLD_SEC}s")
-    print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,}")
+    print(f"필터: spread≤{MAX_SPREAD_PCT}% / ask≥{MIN_ASK_KRW:,} / bid≥{MIN_BID_KRW:,} / 종목당max{MAX_ENTRIES_PER_COIN}회")
     print(f"신호검사: {CLM_SIGNAL_INTERVAL:.0f}초 간격 (포지션관리: {SCAN_INTERVAL:.0f}초)")
     print(f"코호트 A 예측: OFF (Phase 3 deferred)")
     print(f"모드: PAPER ONLY (실주문 없음)")
@@ -818,6 +819,13 @@ def main():
                 if market in cooldowns and now_ts - cooldowns[market] < COOLDOWN_SEC:
                     cooldown_block_count += 1
                     continue
+
+                if MAX_ENTRIES_PER_COIN > 0:
+                    coin_entries = sum(1 for t in closed_trades if t["market"] == market)
+                    if market in positions:
+                        coin_entries += 1
+                    if coin_entries >= MAX_ENTRIES_PER_COIN:
+                        continue
 
                 signal = detect_overheat(market)
                 if signal is None:
