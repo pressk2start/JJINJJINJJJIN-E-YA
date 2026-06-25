@@ -13087,6 +13087,18 @@ def _v4_shadow_report_lines():
                             if _rm_mfe > 0:
                                 _dt_ratio = _rm_pnl / _rm_mfe * 100
                                 lines.append(f"  🎯 realized/MFE: {_dt_ratio:.0f}%")
+                            _rm_bk = [(0.001, 0.003, "0.1~0.3%"), (0.003, 0.005, "0.3~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
+                            _rm_parts = []
+                            for _rlo, _rhi, _rlbl in _rm_bk:
+                                _rk = [t for t in _mfe_pos if _rlo <= t["mfe"] < _rhi]
+                                if len(_rk) >= 3:
+                                    _rk_pnl = sum(t["pnl"] for t in _rk)
+                                    _rk_mfe = sum(t["mfe"] for t in _rk)
+                                    _rk_ratio = _rk_pnl / _rk_mfe * 100 if _rk_mfe > 0 else 0
+                                    _rk_avg = _rk_pnl / len(_rk) * 100
+                                    _rm_parts.append(f"{_rlbl}:{len(_rk)}건 r/m{_rk_ratio:.0f}% avg{_rk_avg:+.2f}%")
+                            if _rm_parts:
+                                lines.append(f"  🎯 r/m버킷: {' | '.join(_rm_parts)}")
                         _at_wins = [t for t in _trs if t.get("exit_reason") == "AT익절" and t.get("mfe", 0) > 0]
                         if len(_at_wins) >= 5:
                             _mfe_bk = [(0, 0.002, "0~0.2%"), (0.002, 0.005, "0.2~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
