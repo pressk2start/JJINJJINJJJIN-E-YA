@@ -13341,7 +13341,7 @@ def _v4_shadow_report_lines():
                         # ── body_pct 밴드별 PnL (B-ladder 대조용) ──
                         _bp_vals = [(t, t.get("inds", {}).get("body_pct")) for t in _trs if t.get("inds", {}).get("body_pct") is not None]
                         if len(_bp_vals) >= 30:
-                            _bp_bands = [(0, 0.40, "≤0.40"), (0.40, 0.50, "0.40-0.50"), (0.50, 0.60, "0.50-0.60"), (0.60, 0.69, "0.60-0.68")]
+                            _bp_bands = [(0, 0.40, "≤0.40"), (0.40, 0.50, "0.40-0.50"), (0.50, 0.55, "0.50-0.55"), (0.55, 0.60, "0.55-0.60"), (0.60, 0.69, "0.60-0.68")]
                             _bp_parts = []
                             for _blo, _bhi, _blbl in _bp_bands:
                                 _bd = [t for t, v in _bp_vals if _blo <= v < _bhi] if _blo > 0 else [t for t, v in _bp_vals if v < _bhi]
@@ -13355,6 +13355,20 @@ def _v4_shadow_report_lines():
                                 _bp_parts.append(f"[{_blbl}]n={_bn} wr{_bw/_bn*100:.0f}% {_bavg:+.2f}% mfe{_bmfe:+.2f}%")
                             if _bp_parts:
                                 lines.append(f"  📊 body_band: {' | '.join(_bp_parts)}")
+                            _b60_trs = [t for t, v in _bp_vals if v <= 0.60]
+                            if len(_b60_trs) >= 40:
+                                _b6h = len(_b60_trs) // 2
+                                _b6o = _b60_trs[:_b6h]
+                                _b6n = _b60_trs[_b6h:]
+                                def _b6regime(trs):
+                                    _n = len(trs)
+                                    _wr = sum(1 for t in trs if t["pnl"] > 0) / _n * 100
+                                    _avg = sum(t["pnl"] for t in trs) / _n * 100
+                                    return _n, _wr, _avg
+                                _b6on, _b6owr, _b6oavg = _b6regime(_b6o)
+                                _b6nn, _b6nwr, _b6navg = _b6regime(_b6n)
+                                lines.append(f"  📊 B60레짐: 전반{_b6on}건 wr{_b6owr:.0f}% {_b6oavg:+.2f}%"
+                                             f" → 후반{_b6nn}건 wr{_b6nwr:.0f}% {_b6navg:+.2f}%")
                         # ── 청산 파라미터 PnL 슬라이싱 ──
                         if len(_trs) >= 30:
                             _x_parts = []
