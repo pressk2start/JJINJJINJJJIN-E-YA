@@ -519,6 +519,35 @@ def _analyze_mfe_distribution():
     lines.append(f"  avg{avg_mfe:+.3f}% med{med_mfe:+.3f}%")
     return "\n".join(lines)
 
+def _analyze_realized_mfe_buckets():
+    """MFE 구간별 realized/MFE — 어디서 수익을 흘리는지 진단."""
+    mfe_pos = [t for t in closed_trades if t["peak_pnl"] > 0]
+    if len(mfe_pos) < 3:
+        return None
+    buckets = [
+        (0.10, 0.30, "0.1~0.3%"),
+        (0.30, 0.50, "0.3~0.5%"),
+        (0.50, 1.00, "0.5~1%"),
+        (1.00, 2.00, "1~2%"),
+        (2.00, 100.0, "2%+"),
+    ]
+    total_pnl = sum(t["net_pnl"] for t in mfe_pos)
+    total_mfe = sum(t["peak_pnl"] for t in mfe_pos)
+    overall_rm = (total_pnl / total_mfe * 100) if total_mfe else 0
+    parts = []
+    for lo, hi, label in buckets:
+        sub = [t for t in mfe_pos if lo <= t["peak_pnl"] < hi]
+        if not sub:
+            continue
+        s_pnl = sum(t["net_pnl"] for t in sub)
+        s_mfe = sum(t["peak_pnl"] for t in sub)
+        rm = (s_pnl / s_mfe * 100) if s_mfe else 0
+        parts.append(f"{label}:{len(sub)}건 r/m{rm:.0f}%")
+    lines = [f"▶ realized/MFE: {overall_rm:.0f}%"]
+    if parts:
+        lines.append(f"▶ r/m구간: {' | '.join(parts)}")
+    return "\n".join(lines)
+
 def _analyze_blocked_signals():
     done = [b for b in blocked_signals if b["done"] and 180 in b.get("prices", {})]
     if len(done) < 3:
@@ -688,6 +717,9 @@ def generate_review():
     mfe_dist = _analyze_mfe_distribution()
     if mfe_dist:
         lines += ["", "━━━━━━━━━━━━━━━", mfe_dist]
+    rm_buckets = _analyze_realized_mfe_buckets()
+    if rm_buckets:
+        lines += ["", rm_buckets]
     blocked_analysis = _analyze_blocked_signals()
     if blocked_analysis:
         lines += ["", "━━━━━━━━━━━━━━━", blocked_analysis]
