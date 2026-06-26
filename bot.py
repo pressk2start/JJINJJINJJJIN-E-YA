@@ -11252,6 +11252,15 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_PP40", "mae_threshold": 0.35,
         "description": "CLM + AT + PP(MFE≥0.3% 후 40% retrace 청산) (shadow)",
     },
+    # ── B60 + PP30 교차 실험 (최강 진입 × 최강 청산) ──
+    "과열감지_B60_PP30": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_PP30,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_B60_PP30", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.60)],
+        "description": "CLM_B60 + PP30 — 최강 진입(B60) × 최강 청산(PP30) 교차 검증 (shadow)",
+    },
     # 기각 routes 제거 (39차 토너먼트 결과):
     # CLM_CS/CLM_BC: check_fn 중복
     # CLM_RSI5(-0.09%), CLM_ATR(-0.06%), CLM_EMA15(-0.34%), CLM_R15(-0.37%): 단일 지표 전멸
@@ -13693,7 +13702,7 @@ def _v4_shadow_report_lines():
                         lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
     # ── B-ladder d-score 비교 (body_pct 임계값 실험) ──
     if _all_scenario_stats:
-        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE", "CLM_PP20", "CLM_PP30", "CLM_PP40"]
+        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30"]
         _bl_parts = []
         for rk in _bladder:
             for sc in _all_scenario_stats:
@@ -13715,6 +13724,36 @@ def _v4_shadow_report_lines():
         if len(_bl_parts) >= 3:
             lines.append("📐 B-ladder + LE + PP:")
             lines.extend(_bl_parts)
+    # ── PP r/m 버킷 비교 (CLM AT vs PP30 구간별 수익 효율) ──
+    _pp_rm_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30"]
+    _pp_rm_bk = [(0.001, 0.003, "0.1~0.3%"), (0.003, 0.005, "0.3~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
+    with _SHADOW_PERF_LOCK:
+        _pp_rm_data = {}
+        for _prk, _prs in _SHADOW_PERF_STATS.items():
+            _pr_route = _prs.get("route", "?")
+            if _pr_route not in _pp_rm_routes:
+                continue
+            _pr_trs = _prs.get("trade_records", [])
+            if len(_pr_trs) < 10:
+                continue
+            _pr_mfe_pos = [t for t in _pr_trs if t.get("mfe", 0) > 0]
+            if not _pr_mfe_pos:
+                continue
+            _pr_bk_parts = []
+            for _prlo, _prhi, _prlbl in _pp_rm_bk:
+                _prk_items = [t for t in _pr_mfe_pos if _prlo <= t["mfe"] < _prhi]
+                if len(_prk_items) >= 3:
+                    _prk_pnl = sum(t["pnl"] for t in _prk_items)
+                    _prk_mfe = sum(t["mfe"] for t in _prk_items)
+                    _prk_ratio = _prk_pnl / _prk_mfe * 100 if _prk_mfe > 0 else 0
+                    _pr_bk_parts.append(f"{_prlbl}:r/m{_prk_ratio:.0f}%({len(_prk_items)})")
+            if _pr_bk_parts:
+                _pp_rm_data[_pr_route] = _pr_bk_parts
+    if len(_pp_rm_data) >= 2:
+        lines.append("🔬 PP r/m비교:")
+        for _pr_route in _pp_rm_routes:
+            if _pr_route in _pp_rm_data:
+                lines.append(f"  {_pr_route}: {' | '.join(_pp_rm_data[_pr_route])}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
