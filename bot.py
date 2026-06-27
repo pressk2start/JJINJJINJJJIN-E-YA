@@ -13754,6 +13754,40 @@ def _v4_shadow_report_lines():
         for _pr_route in _pp_rm_routes:
             if _pr_route in _pp_rm_data:
                 lines.append(f"  {_pr_route}: {' | '.join(_pp_rm_data[_pr_route])}")
+    # ── PP exit reason breakdown (PP가 실제 몇 건 청산했는지 — AT vs PP 분담 진단) ──
+    _pp_er_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30"]
+    _pp_er_keys = ("PP익절", "PP본절", "AT익절", "AT본절", "AT타임아웃", "타임아웃", "손절SL", "본절SL", "트레일익절", "트레일본절", "생존탈락")
+    with _SHADOW_PERF_LOCK:
+        _pp_er_data = {}
+        for _ek, _es in _SHADOW_PERF_STATS.items():
+            _e_route = _es.get("route", "?")
+            if _e_route not in _pp_er_routes:
+                continue
+            _e_trs = _es.get("trade_records", [])
+            if len(_e_trs) < 10:
+                continue
+            _e_agg = {}
+            for _t in _e_trs:
+                _er = _t.get("exit_reason")
+                if not _er:
+                    continue
+                if _er not in _e_agg:
+                    _e_agg[_er] = {"n": 0, "pnl_sum": 0.0}
+                _e_agg[_er]["n"] += 1
+                _e_agg[_er]["pnl_sum"] += _t.get("pnl", 0.0)
+            _e_parts = []
+            for _ek_name in _pp_er_keys:
+                _ea = _e_agg.get(_ek_name)
+                if _ea and _ea["n"] > 0:
+                    _ep_avg = _ea["pnl_sum"] / _ea["n"] * 100
+                    _e_parts.append(f"{_ek_name}:{_ea['n']}({_ep_avg:+.2f}%)")
+            if _e_parts:
+                _pp_er_data[_e_route] = _e_parts
+    if len(_pp_er_data) >= 2:
+        lines.append("🔬 PP 청산이유:")
+        for _e_route in _pp_er_routes:
+            if _e_route in _pp_er_data:
+                lines.append(f"  {_e_route}: {' '.join(_pp_er_data[_e_route])}")
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
