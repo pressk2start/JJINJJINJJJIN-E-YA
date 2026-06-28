@@ -13788,6 +13788,53 @@ def _v4_shadow_report_lines():
         for _e_route in _pp_er_routes:
             if _e_route in _pp_er_data:
                 lines.append(f"  {_e_route}: {' '.join(_pp_er_data[_e_route])}")
+    # ── EarlyCut 분류 분석 (CLM trade_records, 60s 시점 조건별 후보군 검증) ──
+    # 실제 cut 안 함. 조건 만족 거래의 최종 PnL이 정말 손실인지만 측정 → 2단계(shadow route) 진행 여부 판단
+    # 판정: PnL≤-0.30% 🟢cut후보 | -0.30~-0.10% 🟡보류 | >-0.10% 🔴cut금지
+    _ec_conds = [
+        ("A: mfe60<0.10%", lambda i, c: i.get("mfe_60s") is not None and i["mfe_60s"] < 0.001),
+        ("B: mfe60<0.10%+dd60>0.20%", lambda i, c: i.get("mfe_60s") is not None and i.get("dd_peak_60s") is not None and i["mfe_60s"] < 0.001 and i["dd_peak_60s"] > 0.002),
+        ("C: mfe60<0.15%+pnl60<0", lambda i, c: i.get("mfe_60s") is not None and c.get("60") is not None and i["mfe_60s"] < 0.0015 and c["60"] < 0),
+        ("D: mfe30<0.05%+pnl30<0", lambda i, c: i.get("mfe_30s") is not None and c.get("30") is not None and i["mfe_30s"] < 0.0005 and c["30"] < 0),
+    ]
+    with _SHADOW_PERF_LOCK:
+        for _ek, _es in _SHADOW_PERF_STATS.items():
+            if _es.get("route") != "CLM":
+                continue
+            _ec_trs = _es.get("trade_records", [])
+            if len(_ec_trs) < 50:
+                break
+            _ec_lines = []
+            for _cnd_lbl, _cnd_fn in _ec_conds:
+                _hit = []
+                _miss = []
+                for _t in _ec_trs:
+                    _i = _t.get("inds", {})
+                    _c = _t.get("curve", {})
+                    try:
+                        if _cnd_fn(_i, _c):
+                            _hit.append(_t)
+                        else:
+                            _miss.append(_t)
+                    except Exception:
+                        _miss.append(_t)
+                if len(_hit) < 5:
+                    continue
+                _hit_pnl = sum(t.get("pnl", 0) for t in _hit) / len(_hit) * 100
+                _hit_win = sum(1 for t in _hit if t.get("pnl", 0) > 0) / len(_hit) * 100
+                _miss_pnl = sum(t.get("pnl", 0) for t in _miss) / len(_miss) * 100 if _miss else 0
+                _miss_win = sum(1 for t in _miss if t.get("pnl", 0) > 0) / len(_miss) * 100 if _miss else 0
+                if _hit_pnl <= -0.30:
+                    _vd = "🟢"
+                elif _hit_pnl <= -0.10:
+                    _vd = "🟡"
+                else:
+                    _vd = "🔴"
+                _ec_lines.append(f"  {_vd} {_cnd_lbl}: 만족{len(_hit)}건 PnL{_hit_pnl:+.2f}% wr{_hit_win:.0f}% | 비만족{len(_miss)}건 PnL{_miss_pnl:+.2f}% wr{_miss_win:.0f}%")
+            if _ec_lines:
+                lines.append("✂️ EarlyCut 분류 (CLM 60s 시점 조건별, 실제cut안함):")
+                lines.extend(_ec_lines)
+            break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
         active = len(_SHADOW_VIRTUAL_POSITIONS)
