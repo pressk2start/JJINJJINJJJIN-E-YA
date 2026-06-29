@@ -9627,7 +9627,7 @@ _V0_EXIT_PARAMS_CLM_EC_A = {
         "relax_after_sec": 120,
         "relax_mult": 1.5,
     },
-    "early_cut_60s": {"mfe_thr": 0.001, "dd_thr": 0.002},
+    "early_cut_60s": {"mode": "A", "mfe_thr": 0.001, "dd_thr": 0.002},
 }
 
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
@@ -11274,7 +11274,6 @@ _STRATEGY_REGISTRY = {
         "description": "CLM + AT + PP(MFE≥0.3% 후 40% retrace 청산) (shadow)",
     },
     # ── EarlyCut shadow (51차 분류 분석 기반: 60s 시점 죽은 거래 조기 절단) ──
-    # B 단독 우선 (C는 B와 상당부분 겹침, D는 30s 기준이라 노이즈 가능성)
     "과열감지_EC_A": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_EC_A,
@@ -12312,8 +12311,8 @@ def _shadow_sim_exit(vp, cur_price):
                             return True, "peak_dd"
                         break
 
-    # 1.8) Early Cut — 60s 시점 mfe_60s + dd_peak_60s 기반 죽은 거래 조기 절단
-    # 분류 데이터(51차): mfe60<0.10% AND dd60>0.20% 만족 55건 PnL-0.69% wr 0%
+    # 1.8) Early Cut — 60s 시점 mfe<0.10% AND dd>0.20% 죽은 거래 조기 절단
+    # 51차 분류 분석: 만족 55건 PnL-0.69% wr 0%
     _ec = ep.get("early_cut_60s")
     if _ec and hold_sec >= 60 and not vp.get("_ec_checked"):
         vp["_ec_checked"] = True
@@ -13865,16 +13864,40 @@ def _v4_shadow_report_lines():
                 _hit_win = sum(1 for t in _hit if t.get("pnl", 0) > 0) / len(_hit) * 100
                 _miss_pnl = sum(t.get("pnl", 0) for t in _miss) / len(_miss) * 100 if _miss else 0
                 _miss_win = sum(1 for t in _miss if t.get("pnl", 0) > 0) / len(_miss) * 100 if _miss else 0
+                # 만족군의 30s/60s 시점 PnL 평균 (Exit 타이밍 진단용)
+                _hit_p30 = [t.get("curve", {}).get("30") for t in _hit if t.get("curve", {}).get("30") is not None]
+                _hit_p60 = [t.get("curve", {}).get("60") for t in _hit if t.get("curve", {}).get("60") is not None]
+                _p30_str = f" 30s:{sum(_hit_p30)/len(_hit_p30)*100:+.2f}%" if _hit_p30 else ""
+                _p60_str = f" 60s:{sum(_hit_p60)/len(_hit_p60)*100:+.2f}%" if _hit_p60 else ""
                 if _hit_pnl <= -0.30:
                     _vd = "🟢"
                 elif _hit_pnl <= -0.10:
                     _vd = "🟡"
                 else:
                     _vd = "🔴"
-                _ec_lines.append(f"  {_vd} {_cnd_lbl}: 만족{len(_hit)}건 PnL{_hit_pnl:+.2f}% wr{_hit_win:.0f}% | 비만족{len(_miss)}건 PnL{_miss_pnl:+.2f}% wr{_miss_win:.0f}%")
+                _ec_lines.append(f"  {_vd} {_cnd_lbl}: 만족{len(_hit)}건 최종{_hit_pnl:+.2f}%(시점{_p30_str}{_p60_str}) wr{_hit_win:.0f}% | 비만족{len(_miss)}건 {_miss_pnl:+.2f}% wr{_miss_win:.0f}%")
             if _ec_lines:
                 lines.append("✂️ EarlyCut 분류 (CLM 60s 시점 조건별, 실제cut안함):")
                 lines.extend(_ec_lines)
+            # B 만족군 회복 추적 — 60s/90s/120s/180s/240s/300s/최종 평균 PnL
+            # Exit 타이밍 진단: 60s 컷 vs 90s/120s 컷 vs 그대로 두기 비교
+            _ec_b_hit = []
+            for _t in _ec_trs:
+                _i = _t.get("inds", {})
+                _mfe60 = _i.get("mfe_60s")
+                _dd60 = _i.get("dd_peak_60s")
+                if _mfe60 is not None and _dd60 is not None and _mfe60 < 0.001 and _dd60 > 0.002:
+                    _ec_b_hit.append(_t)
+            if len(_ec_b_hit) >= 10:
+                _rec_parts = []
+                for _sec in (60, 90, 120, 180, 240, 300):
+                    _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_hit if t.get("curve", {}).get(str(_sec)) is not None]
+                    if _vals:
+                        _avg = sum(_vals) / len(_vals) * 100
+                        _rec_parts.append(f"{_sec}s:{_avg:+.2f}%")
+                _final_avg = sum(t.get("pnl", 0) for t in _ec_b_hit) / len(_ec_b_hit) * 100
+                if _rec_parts:
+                    lines.append(f"🔍 EC_B 회복추적 n={len(_ec_b_hit)}: {' → '.join(_rec_parts)} → 최종:{_final_avg:+.2f}%")
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
