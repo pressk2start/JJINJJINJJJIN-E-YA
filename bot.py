@@ -9609,32 +9609,26 @@ _V0_EXIT_PARAMS_CLM_PP20 = _make_clm_pp(0.20)
 _V0_EXIT_PARAMS_CLM_PP30 = _make_clm_pp(0.30)
 _V0_EXIT_PARAMS_CLM_PP40 = _make_clm_pp(0.40)
 
-# EarlyCut shadow — 60s 시점 죽은 거래 조기 절단
-# A: mfe60<0.10% AND dd60>0.20% — 분류 만족 55건 PnL-0.69% wr 0%
-# C: mfe60<0.15% AND pnl60<0    — 분류 만족 65건 PnL-0.64% wr 0% (더 직관적, 대상 넓음)
-def _make_clm_ec(mode_kwargs):
-    ep = {
-        "strategy": "TRAIL",
-        "sl_pct": 0.020,
-        "activation_pct": 1.0,
-        "trail_pct": 0.005,
-        "hold_bars": 0,
-        "max_bars": 100,
-        "disable_trail": True,
-        "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
-        "adaptive_trail": {
-            "feature": "ob_slip_sell_10000k",
-            "arm_after_sec": 60,
-            "tiers": [(0.10, 0.005, 300), (0.14, 0.004, 240), (9.99, 0.003, 180)],
-            "relax_after_sec": 120,
-            "relax_mult": 1.5,
-        },
-        "early_cut_60s": mode_kwargs,
-    }
-    return ep
-
-_V0_EXIT_PARAMS_CLM_EC_A = _make_clm_ec({"mode": "A", "mfe_thr": 0.001, "dd_thr": 0.002})
-_V0_EXIT_PARAMS_CLM_EC_C = _make_clm_ec({"mode": "C", "mfe_thr": 0.0015})
+# EarlyCut shadow — 60s 시점 mfe<0.10% AND dd>0.20% 죽은 거래 조기 절단
+# 51차 분류 분석: 만족 55건 PnL-0.69% wr 0%, 비만족 245건 +0.06%
+_V0_EXIT_PARAMS_CLM_EC_A = {
+    "strategy": "TRAIL",
+    "sl_pct": 0.020,
+    "activation_pct": 1.0,
+    "trail_pct": 0.005,
+    "hold_bars": 0,
+    "max_bars": 100,
+    "disable_trail": True,
+    "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
+    "adaptive_trail": {
+        "feature": "ob_slip_sell_10000k",
+        "arm_after_sec": 60,
+        "tiers": [(0.10, 0.005, 300), (0.14, 0.004, 240), (9.99, 0.003, 180)],
+        "relax_after_sec": 120,
+        "relax_mult": 1.5,
+    },
+    "early_cut_60s": {"mode": "A", "mfe_thr": 0.001, "dd_thr": 0.002},
+}
 
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
@@ -11285,14 +11279,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_CLM_EC_A,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_EC_A", "mae_threshold": 0.35,
-        "description": "CLM + EarlyCut A(mfe60<0.10% AND dd60>0.20% → 60s 강제청산) (shadow)",
-    },
-    "과열감지_EC_C": {
-        "check_fn": _v0_check_climax,
-        "exit_params": _V0_EXIT_PARAMS_CLM_EC_C,
-        "priority": 10, "enabled": False,
-        "pipeline_key": "climax", "route": "CLM_EC_C", "mae_threshold": 0.35,
-        "description": "CLM + EarlyCut C(mfe60<0.15% AND pnl60<0 → 60s 강제청산) (shadow)",
+        "description": "CLM + EarlyCut(mfe60<0.10% AND dd60>0.20% → 60s 강제청산) (shadow)",
     },
     # ── B60 + PP30 교차 실험 (최강 진입 × 최강 청산) ──
     "과열감지_B60_PP30": {
@@ -12324,24 +12311,16 @@ def _shadow_sim_exit(vp, cur_price):
                             return True, "peak_dd"
                         break
 
-    # 1.8) Early Cut — 60s 시점 죽은 거래 조기 절단
-    # A: mfe60<0.10% AND dd60>0.20% (분류 PnL-0.69% wr 0%)
-    # C: mfe60<0.15% AND pnl60<0    (분류 PnL-0.64% wr 0%)
+    # 1.8) Early Cut — 60s 시점 mfe<0.10% AND dd>0.20% 죽은 거래 조기 절단
+    # 51차 분류 분석: 만족 55건 PnL-0.69% wr 0%
     _ec = ep.get("early_cut_60s")
     if _ec and hold_sec >= 60 and not vp.get("_ec_checked"):
         vp["_ec_checked"] = True
         _ec_mfe60 = vp.get("mfe_60s")
-        _ec_mode = _ec.get("mode", "A")
-        if _ec_mode == "A":
-            _ec_dd60 = vp.get("dd_peak_60s")
-            if _ec_mfe60 is not None and _ec_dd60 is not None:
-                if _ec_mfe60 < _ec.get("mfe_thr", 0.001) and _ec_dd60 > _ec.get("dd_thr", 0.002):
-                    return True, "EC조기절단"
-        elif _ec_mode == "C":
-            _ec_pnl60 = vp.get("pnl_curve", {}).get("60")
-            if _ec_mfe60 is not None and _ec_pnl60 is not None:
-                if _ec_mfe60 < _ec.get("mfe_thr", 0.0015) and _ec_pnl60 < 0:
-                    return True, "EC조기절단"
+        _ec_dd60 = vp.get("dd_peak_60s")
+        if _ec_mfe60 is not None and _ec_dd60 is not None:
+            if _ec_mfe60 < _ec.get("mfe_thr", 0.001) and _ec_dd60 > _ec.get("dd_thr", 0.002):
+                return True, "EC조기절단"
 
     # G-v2: min_hold 120초 + 조기탈출 제거 + 트레일 지연
     # 120초 이상 건: +1.03%, 미만: -0.95%. 빨리 건드리면 죽고 버티면 산다.
@@ -13763,7 +13742,7 @@ def _v4_shadow_report_lines():
                         lines.append(f"      [{lo:{_f}}~{hi:{_f}}] n={bn} WR={bwr:.0f}% PnL={bpnl:+.2f}%")
     # ── B-ladder d-score 비교 (body_pct 임계값 실험) ──
     if _all_scenario_stats:
-        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A", "CLM_EC_C"]
+        _bladder = ["CLM", "CLM_B50", "CLM_B55", "CLM_B60", "CLM_B65", "CLM_LE", "CLM_B60_LE", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A"]
         _bl_parts = []
         for rk in _bladder:
             for sc in _all_scenario_stats:
@@ -13786,7 +13765,7 @@ def _v4_shadow_report_lines():
             lines.append("📐 B-ladder + LE + PP:")
             lines.extend(_bl_parts)
     # ── PP r/m 버킷 비교 (CLM AT vs PP30 구간별 수익 효율) ──
-    _pp_rm_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A", "CLM_EC_C"]
+    _pp_rm_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A"]
     _pp_rm_bk = [(0.001, 0.003, "0.1~0.3%"), (0.003, 0.005, "0.3~0.5%"), (0.005, 0.01, "0.5~1%"), (0.01, 0.02, "1~2%"), (0.02, 99, "2%+")]
     with _SHADOW_PERF_LOCK:
         _pp_rm_data = {}
@@ -13816,7 +13795,7 @@ def _v4_shadow_report_lines():
             if _pr_route in _pp_rm_data:
                 lines.append(f"  {_pr_route}: {' | '.join(_pp_rm_data[_pr_route])}")
     # ── PP exit reason breakdown (PP가 실제 몇 건 청산했는지 — AT vs PP 분담 진단) ──
-    _pp_er_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A", "CLM_EC_C"]
+    _pp_er_routes = ["CLM", "CLM_PP20", "CLM_PP30", "CLM_PP40", "CLM_B60_PP30", "CLM_EC_A"]
     _pp_er_keys = ("PP익절", "PP본절", "EC조기절단", "AT익절", "AT본절", "AT타임아웃", "타임아웃", "손절SL", "본절SL", "트레일익절", "트레일본절", "생존탈락")
     with _SHADOW_PERF_LOCK:
         _pp_er_data = {}
