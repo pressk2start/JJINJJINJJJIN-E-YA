@@ -13864,13 +13864,18 @@ def _v4_shadow_report_lines():
                 _hit_win = sum(1 for t in _hit if t.get("pnl", 0) > 0) / len(_hit) * 100
                 _miss_pnl = sum(t.get("pnl", 0) for t in _miss) / len(_miss) * 100 if _miss else 0
                 _miss_win = sum(1 for t in _miss if t.get("pnl", 0) > 0) / len(_miss) * 100 if _miss else 0
+                # 만족군의 30s/60s 시점 PnL 평균 (Exit 타이밍 진단용)
+                _hit_p30 = [t.get("curve", {}).get("30") for t in _hit if t.get("curve", {}).get("30") is not None]
+                _hit_p60 = [t.get("curve", {}).get("60") for t in _hit if t.get("curve", {}).get("60") is not None]
+                _p30_str = f" 30s:{sum(_hit_p30)/len(_hit_p30)*100:+.2f}%" if _hit_p30 else ""
+                _p60_str = f" 60s:{sum(_hit_p60)/len(_hit_p60)*100:+.2f}%" if _hit_p60 else ""
                 if _hit_pnl <= -0.30:
                     _vd = "🟢"
                 elif _hit_pnl <= -0.10:
                     _vd = "🟡"
                 else:
                     _vd = "🔴"
-                _ec_lines.append(f"  {_vd} {_cnd_lbl}: 만족{len(_hit)}건 PnL{_hit_pnl:+.2f}% wr{_hit_win:.0f}% | 비만족{len(_miss)}건 PnL{_miss_pnl:+.2f}% wr{_miss_win:.0f}%")
+                _ec_lines.append(f"  {_vd} {_cnd_lbl}: 만족{len(_hit)}건 최종{_hit_pnl:+.2f}%(시점{_p30_str}{_p60_str}) wr{_hit_win:.0f}% | 비만족{len(_miss)}건 {_miss_pnl:+.2f}% wr{_miss_win:.0f}%")
             if _ec_lines:
                 lines.append("✂️ EarlyCut 분류 (CLM 60s 시점 조건별, 실제cut안함):")
                 lines.extend(_ec_lines)
