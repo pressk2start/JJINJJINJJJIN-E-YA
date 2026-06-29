@@ -13879,6 +13879,25 @@ def _v4_shadow_report_lines():
             if _ec_lines:
                 lines.append("✂️ EarlyCut 분류 (CLM 60s 시점 조건별, 실제cut안함):")
                 lines.extend(_ec_lines)
+            # B 만족군 회복 추적 — 60s/90s/120s/180s/240s/300s/최종 평균 PnL
+            # Exit 타이밍 진단: 60s 컷 vs 90s/120s 컷 vs 그대로 두기 비교
+            _ec_b_hit = []
+            for _t in _ec_trs:
+                _i = _t.get("inds", {})
+                _mfe60 = _i.get("mfe_60s")
+                _dd60 = _i.get("dd_peak_60s")
+                if _mfe60 is not None and _dd60 is not None and _mfe60 < 0.001 and _dd60 > 0.002:
+                    _ec_b_hit.append(_t)
+            if len(_ec_b_hit) >= 10:
+                _rec_parts = []
+                for _sec in (60, 90, 120, 180, 240, 300):
+                    _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_hit if t.get("curve", {}).get(str(_sec)) is not None]
+                    if _vals:
+                        _avg = sum(_vals) / len(_vals) * 100
+                        _rec_parts.append(f"{_sec}s:{_avg:+.2f}%")
+                _final_avg = sum(t.get("pnl", 0) for t in _ec_b_hit) / len(_ec_b_hit) * 100
+                if _rec_parts:
+                    lines.append(f"🔍 EC_B 회복추적 n={len(_ec_b_hit)}: {' → '.join(_rec_parts)} → 최종:{_final_avg:+.2f}%")
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
