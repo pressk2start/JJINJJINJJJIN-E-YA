@@ -13890,7 +13890,8 @@ def _v4_shadow_report_lines():
                     _ec_b_hit.append(_t)
             if len(_ec_b_hit) >= 10:
                 _rec_parts = []
-                for _sec in (60, 90, 120, 180, 240, 300):
+                # 10/20/30s 앞쪽 시점 추가 — 진입 직후 곡선 + 30초 컷 시점 평균 직접 측정
+                for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
                     _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_hit if t.get("curve", {}).get(str(_sec)) is not None]
                     if _vals:
                         _avg = sum(_vals) / len(_vals) * 100
@@ -13907,7 +13908,7 @@ def _v4_shadow_report_lines():
                     _surv_pnl_avg = sum(t.get("pnl", 0) for t in _ec_b_survivors) / _surv_n * 100
                     # 살아난 거래의 시점별 평균
                     _surv_rec = []
-                    for _sec in (60, 90, 120, 180, 240, 300):
+                    for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
                         _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_survivors if t.get("curve", {}).get(str(_sec)) is not None]
                         if _vals:
                             _surv_rec.append(f"{_sec}s:{sum(_vals)/len(_vals)*100:+.2f}%")
