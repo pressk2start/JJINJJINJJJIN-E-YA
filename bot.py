@@ -13930,6 +13930,23 @@ def _v4_shadow_report_lines():
                         lines.append(f"  └ 시점PnL: {' → '.join(_surv_rec)}")
                     if _feat_diffs:
                         lines.append(f"  └ 특징차이: {' | '.join(_feat_diffs[:4])}")
+            # EC_A 실제 곡선 — 분류 vs 실전 전략 곡선 직접 비교
+            for _eak, _eas in _SHADOW_PERF_STATS.items():
+                if _eas.get("route") != "CLM_EC_A":
+                    continue
+                _ea_trs = _eas.get("trade_records", [])
+                if len(_ea_trs) < 10:
+                    break
+                _ea_parts = []
+                for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
+                    _vals = [t.get("curve", {}).get(str(_sec)) for t in _ea_trs if t.get("curve", {}).get(str(_sec)) is not None]
+                    if _vals:
+                        _avg = sum(_vals) / len(_vals) * 100
+                        _ea_parts.append(f"{_sec}s:{_avg:+.2f}%")
+                _ea_final = sum(t.get("pnl", 0) for t in _ea_trs) / len(_ea_trs) * 100
+                if _ea_parts:
+                    lines.append(f"🔍 EC_A 실제 n={len(_ea_trs)}: {' → '.join(_ea_parts)} → 최종:{_ea_final:+.2f}%")
+                break
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
