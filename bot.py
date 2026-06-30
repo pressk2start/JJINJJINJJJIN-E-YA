@@ -13947,8 +13947,8 @@ def _v4_shadow_report_lines():
                 if _ea_parts:
                     lines.append(f"🔍 EC_A 실제 n={len(_ea_trs)}: {' → '.join(_ea_parts)} → 최종:{_ea_final:+.2f}%")
                 break
-            # CLM 전체 30초 PnL 버킷 — threshold 탐색용 (False positive 직접 확인)
-            # 각 버킷의 최종 PnL이 양수면 cut 금지, 음수면 cut 후보
+            # CLM 30초 PnL 버킷 (fixed) — threshold 탐색용
+            # MFE 추가: "죽는 거래" vs "청산 못한 거래" 구분
             _p30_buckets = [
                 (-99, -0.006, "<-0.6%"),
                 (-0.006, -0.004, "-0.6~-0.4%"),
@@ -13962,9 +13962,24 @@ def _v4_shadow_report_lines():
                 if len(_bk) >= 5:
                     _bk_pnl = sum(t.get("pnl", 0) for t in _bk) / len(_bk) * 100
                     _bk_wr = sum(1 for t in _bk if t.get("pnl", 0) > 0) / len(_bk) * 100
-                    _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}% 최종{_bk_pnl:+.2f}%")
+                    _bk_mfe = sum(t.get("mfe", 0) for t in _bk) / len(_bk) * 100
+                    _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}% 최종{_bk_pnl:+.2f}% mfe{_bk_mfe:+.2f}%")
             if _bk_lines:
-                lines.append(f"📊 30s PnL 버킷 (CLM, threshold 탐색): {' | '.join(_bk_lines)}")
+                lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
+            # CLM 30초 PnL 버킷 (quantile) — 레짐 변화 대응 (균등 분포)
+            _p30_vals = sorted([(t["curve"]["30"], t) for t in _ec_trs if t.get("curve", {}).get("30") is not None])
+            if len(_p30_vals) >= 50:
+                _q_lines = []
+                for _q_lo, _q_hi, _q_lbl in [(0, 20, "p0~20"), (20, 40, "p20~40"), (40, 60, "p40~60"), (60, 80, "p60~80"), (80, 100, "p80~100")]:
+                    _slice = _p30_vals[int(len(_p30_vals) * _q_lo / 100):int(len(_p30_vals) * _q_hi / 100)]
+                    if len(_slice) >= 5:
+                        _strs = [s[1] for s in _slice]
+                        _qp = sum(t.get("pnl", 0) for t in _strs) / len(_strs) * 100
+                        _qm = sum(t.get("mfe", 0) for t in _strs) / len(_strs) * 100
+                        _qwr = sum(1 for t in _strs if t.get("pnl", 0) > 0) / len(_strs) * 100
+                        _q_lines.append(f"{_q_lbl}[{_slice[0][0]*100:+.2f}~{_slice[-1][0]*100:+.2f}]:{len(_strs)}건 wr{_qwr:.0f}% 최종{_qp:+.2f}% mfe{_qm:+.2f}%")
+                if _q_lines:
+                    lines.append(f"📊 30s PnL 버킷 quantile: {' | '.join(_q_lines)}")
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
