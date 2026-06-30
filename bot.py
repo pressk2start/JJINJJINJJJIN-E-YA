@@ -13947,6 +13947,24 @@ def _v4_shadow_report_lines():
                 if _ea_parts:
                     lines.append(f"🔍 EC_A 실제 n={len(_ea_trs)}: {' → '.join(_ea_parts)} → 최종:{_ea_final:+.2f}%")
                 break
+            # CLM 전체 30초 PnL 버킷 — threshold 탐색용 (False positive 직접 확인)
+            # 각 버킷의 최종 PnL이 양수면 cut 금지, 음수면 cut 후보
+            _p30_buckets = [
+                (-99, -0.006, "<-0.6%"),
+                (-0.006, -0.004, "-0.6~-0.4%"),
+                (-0.004, -0.002, "-0.4~-0.2%"),
+                (-0.002, 0, "-0.2~0%"),
+                (0, 99, "0%+"),
+            ]
+            _bk_lines = []
+            for _blo, _bhi, _blbl in _p30_buckets:
+                _bk = [t for t in _ec_trs if t.get("curve", {}).get("30") is not None and _blo <= t["curve"]["30"] < _bhi]
+                if len(_bk) >= 5:
+                    _bk_pnl = sum(t.get("pnl", 0) for t in _bk) / len(_bk) * 100
+                    _bk_wr = sum(1 for t in _bk if t.get("pnl", 0) > 0) / len(_bk) * 100
+                    _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}% 최종{_bk_pnl:+.2f}%")
+            if _bk_lines:
+                lines.append(f"📊 30s PnL 버킷 (CLM, threshold 탐색): {' | '.join(_bk_lines)}")
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
