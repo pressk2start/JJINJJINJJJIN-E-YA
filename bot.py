@@ -13891,11 +13891,12 @@ def _v4_shadow_report_lines():
             if len(_ec_b_hit) >= 10:
                 _rec_parts = []
                 # 10/20/30s 앞쪽 시점 추가 — 진입 직후 곡선 + 30초 컷 시점 평균 직접 측정
+                # 시점별 n 표시 — 청산 거래로 표본이 줄어드는 것 명시
                 for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
                     _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_hit if t.get("curve", {}).get(str(_sec)) is not None]
                     if _vals:
                         _avg = sum(_vals) / len(_vals) * 100
-                        _rec_parts.append(f"{_sec}s:{_avg:+.2f}%")
+                        _rec_parts.append(f"{_sec}s:{_avg:+.2f}%(n={len(_vals)})")
                 _final_avg = sum(t.get("pnl", 0) for t in _ec_b_hit) / len(_ec_b_hit) * 100
                 if _rec_parts:
                     lines.append(f"🔍 EC_B 회복추적 n={len(_ec_b_hit)}: {' → '.join(_rec_parts)} → 최종:{_final_avg:+.2f}%")
@@ -13911,7 +13912,7 @@ def _v4_shadow_report_lines():
                     for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
                         _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_survivors if t.get("curve", {}).get(str(_sec)) is not None]
                         if _vals:
-                            _surv_rec.append(f"{_sec}s:{sum(_vals)/len(_vals)*100:+.2f}%")
+                            _surv_rec.append(f"{_sec}s:{sum(_vals)/len(_vals)*100:+.2f}%(n={len(_vals)})")
                     # 공통 특징: RSI/ATR/wick_ratio 평균 비교 (생존 vs 사망)
                     _feat_keys = ("rsi_60m", "rsi_15m", "rsi_5m", "atr_pct", "wick_ratio", "close_strength", "vr5")
                     _feat_diffs = []
@@ -13930,22 +13931,35 @@ def _v4_shadow_report_lines():
                         lines.append(f"  └ 시점PnL: {' → '.join(_surv_rec)}")
                     if _feat_diffs:
                         lines.append(f"  └ 특징차이: {' | '.join(_feat_diffs[:4])}")
-            # EC_A 실제 곡선 — 분류 vs 실전 전략 곡선 직접 비교
+            # EC_A 실제 곡선 — 절단(EC조기절단) vs 비절단(자연 청산) 분리 비교
+            # exit_reason 문자열로 분리 (향후 EC조기절단(30s) 등 추가 시 startswith 변경 필요)
             for _eak, _eas in _SHADOW_PERF_STATS.items():
                 if _eas.get("route") != "CLM_EC_A":
                     continue
                 _ea_trs = _eas.get("trade_records", [])
                 if len(_ea_trs) < 10:
                     break
-                _ea_parts = []
-                for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
-                    _vals = [t.get("curve", {}).get(str(_sec)) for t in _ea_trs if t.get("curve", {}).get(str(_sec)) is not None]
-                    if _vals:
-                        _avg = sum(_vals) / len(_vals) * 100
-                        _ea_parts.append(f"{_sec}s:{_avg:+.2f}%")
-                _ea_final = sum(t.get("pnl", 0) for t in _ea_trs) / len(_ea_trs) * 100
-                if _ea_parts:
-                    lines.append(f"🔍 EC_A 실제 n={len(_ea_trs)}: {' → '.join(_ea_parts)} → 최종:{_ea_final:+.2f}%")
+                _ea_cut = [t for t in _ea_trs if t.get("exit_reason") == "EC조기절단"]
+                _ea_keep = [t for t in _ea_trs if t.get("exit_reason") != "EC조기절단"]
+                def _ea_curve(trs):
+                    parts = []
+                    for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
+                        _vals = [t.get("curve", {}).get(str(_sec)) for t in trs if t.get("curve", {}).get(str(_sec)) is not None]
+                        if _vals:
+                            parts.append(f"{_sec}s:{sum(_vals)/len(_vals)*100:+.2f}%(n={len(_vals)})")
+                    return parts
+                # 절단 거래 (60s에서 강제 청산) — 60s까지만 데이터
+                if len(_ea_cut) >= 1:
+                    _cut_parts = _ea_curve(_ea_cut)
+                    _cut_final = sum(t.get("pnl", 0) for t in _ea_cut) / len(_ea_cut) * 100
+                    if _cut_parts:
+                        lines.append(f"🔍 EC_A 절단 n={len(_ea_cut)}: {' → '.join(_cut_parts)} → 최종:{_cut_final:+.2f}%")
+                # 비절단 거래 — 자연 청산까지 풀 곡선
+                if len(_ea_keep) >= 5:
+                    _keep_parts = _ea_curve(_ea_keep)
+                    _keep_final = sum(t.get("pnl", 0) for t in _ea_keep) / len(_ea_keep) * 100
+                    if _keep_parts:
+                        lines.append(f"🔍 EC_A 비절단 n={len(_ea_keep)}: {' → '.join(_keep_parts)} → 최종:{_keep_final:+.2f}%")
                 break
             # CLM 30초 PnL 버킷 (fixed) — threshold 탐색용
             # MFE 추가: "죽는 거래" vs "청산 못한 거래" 구분
@@ -13967,7 +13981,7 @@ def _v4_shadow_report_lines():
             if _bk_lines:
                 lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
             # CLM 30초 PnL 버킷 (quantile) — 레짐 변화 대응 (균등 분포)
-            _p30_vals = sorted([(t["curve"]["30"], t) for t in _ec_trs if t.get("curve", {}).get("30") is not None])
+            _p30_vals = sorted([(t["curve"]["30"], t) for t in _ec_trs if t.get("curve", {}).get("30") is not None], key=lambda x: x[0])
             if len(_p30_vals) >= 50:
                 _q_lines = []
                 for _q_lo, _q_hi, _q_lbl in [(0, 20, "p0~20"), (20, 40, "p20~40"), (40, 60, "p40~60"), (60, 80, "p60~80"), (80, 100, "p80~100")]:
