@@ -13898,6 +13898,37 @@ def _v4_shadow_report_lines():
                 _final_avg = sum(t.get("pnl", 0) for t in _ec_b_hit) / len(_ec_b_hit) * 100
                 if _rec_parts:
                     lines.append(f"🔍 EC_B 회복추적 n={len(_ec_b_hit)}: {' → '.join(_rec_parts)} → 최종:{_final_avg:+.2f}%")
+                # EC_B 만족군 중 "살아난 거래"(최종 PnL>0) 분리 분석 — 회복 패턴/공통 특징 진단
+                _ec_b_survivors = [t for t in _ec_b_hit if t.get("pnl", 0) > 0]
+                _ec_b_died = [t for t in _ec_b_hit if t.get("pnl", 0) <= 0]
+                _surv_n = len(_ec_b_survivors)
+                if _surv_n >= 1:
+                    _surv_ratio = _surv_n / len(_ec_b_hit) * 100
+                    _surv_pnl_avg = sum(t.get("pnl", 0) for t in _ec_b_survivors) / _surv_n * 100
+                    # 살아난 거래의 시점별 평균
+                    _surv_rec = []
+                    for _sec in (60, 90, 120, 180, 240, 300):
+                        _vals = [t.get("curve", {}).get(str(_sec)) for t in _ec_b_survivors if t.get("curve", {}).get(str(_sec)) is not None]
+                        if _vals:
+                            _surv_rec.append(f"{_sec}s:{sum(_vals)/len(_vals)*100:+.2f}%")
+                    # 공통 특징: RSI/ATR/wick_ratio 평균 비교 (생존 vs 사망)
+                    _feat_keys = ("rsi_60m", "rsi_15m", "rsi_5m", "atr_pct", "wick_ratio", "close_strength", "vr5")
+                    _feat_diffs = []
+                    for _fk in _feat_keys:
+                        _s_vals = [t.get("inds", {}).get(_fk) for t in _ec_b_survivors if t.get("inds", {}).get(_fk) is not None]
+                        _d_vals = [t.get("inds", {}).get(_fk) for t in _ec_b_died if t.get("inds", {}).get(_fk) is not None]
+                        if len(_s_vals) >= 1 and len(_d_vals) >= 3:
+                            _s_avg = sum(_s_vals) / len(_s_vals)
+                            _d_avg = sum(_d_vals) / len(_d_vals)
+                            _diff = _s_avg - _d_avg
+                            if abs(_diff) > 0.001:
+                                _fmt = ".3f" if abs(_s_avg) < 10 else ".1f"
+                                _feat_diffs.append(f"{_fk}:생존{_s_avg:{_fmt}}/사망{_d_avg:{_fmt}}(Δ{_diff:+{_fmt}})")
+                    lines.append(f"🌱 EC_B 생존자 n={_surv_n}/{len(_ec_b_hit)}({_surv_ratio:.0f}%) 평균{_surv_pnl_avg:+.2f}%")
+                    if _surv_rec:
+                        lines.append(f"  └ 시점PnL: {' → '.join(_surv_rec)}")
+                    if _feat_diffs:
+                        lines.append(f"  └ 특징차이: {' | '.join(_feat_diffs[:4])}")
             break
     # 현재 추적 중인 가상포지션 수
     with _SHADOW_LOCK:
