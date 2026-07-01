@@ -13960,6 +13960,30 @@ def _v4_shadow_report_lines():
                     _keep_final = sum(t.get("pnl", 0) for t in _ea_keep) / len(_ea_keep) * 100
                     if _keep_parts:
                         lines.append(f"🔍 EC_A 비절단 n={len(_ea_keep)}: {' → '.join(_keep_parts)} → 최종:{_keep_final:+.2f}%")
+                # EC_A False Positive 감지 — 절단됐지만 만약 안 잘랐다면 살아났을 거래
+                # 절단 거래는 60s에 청산되어 최종 = 청산 시점 PnL. 그 시점 PnL이 +면 잘못 자른 것.
+                # 현재 절단 거래 최종 PnL > 0인 건수 + 공통 특징 (있으면) 출력
+                _ea_fp = [t for t in _ea_cut if t.get("pnl", 0) > 0]
+                _ea_tp = [t for t in _ea_cut if t.get("pnl", 0) <= 0]
+                if len(_ea_fp) >= 1 and len(_ea_cut) >= 3:
+                    _fp_ratio = len(_ea_fp) / len(_ea_cut) * 100
+                    _fp_pnl = sum(t.get("pnl", 0) for t in _ea_fp) / len(_ea_fp) * 100
+                    # 공통 특징: FP vs TP 인디케이터 평균 차이
+                    _fp_feats = ("rsi_60m", "rsi_15m", "rsi_5m", "atr_pct", "wick_ratio", "close_strength", "vr5", "entry_spread_pct", "ob_slip_sell_10000k")
+                    _fp_diffs = []
+                    for _fk in _fp_feats:
+                        _fv = [t.get("inds", {}).get(_fk) for t in _ea_fp if t.get("inds", {}).get(_fk) is not None]
+                        _tv = [t.get("inds", {}).get(_fk) for t in _ea_tp if t.get("inds", {}).get(_fk) is not None]
+                        if len(_fv) >= 1 and len(_tv) >= 3:
+                            _fa = sum(_fv) / len(_fv)
+                            _ta = sum(_tv) / len(_tv)
+                            _diff = _fa - _ta
+                            if abs(_diff) > 0.001:
+                                _fmt = ".3f" if abs(_fa) < 10 else ".1f"
+                                _fp_diffs.append(f"{_fk}:FP{_fa:{_fmt}}/TP{_ta:{_fmt}}(Δ{_diff:+{_fmt}})")
+                    lines.append(f"⚠️ EC_A False Positive n={len(_ea_fp)}/{len(_ea_cut)}({_fp_ratio:.0f}%) 평균{_fp_pnl:+.2f}%")
+                    if _fp_diffs:
+                        lines.append(f"  └ 특징차이: {' | '.join(_fp_diffs[:4])}")
                 break
             # CLM 30초 PnL 버킷 (fixed) — threshold 탐색용
             # MFE 추가: "죽는 거래" vs "청산 못한 거래" 구분
