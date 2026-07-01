@@ -13911,6 +13911,16 @@ def _v4_shadow_report_lines():
                         _delta_parts.append(f"{_sa}→{_sb}:{_d:+.2f}%")
                 if _delta_parts:
                     lines.append(f"🔍 EC_B 변화량 Δ: {' | '.join(_delta_parts)}")
+                # 누적 비중 — 각 시점 손실이 최종 손실의 몇%인지 (컷 타이밍 직관적 판단)
+                # 최종이 음수일 때만 의미 있음 (양수면 비중 계산 왜곡)
+                if _final_avg < -0.05:
+                    _cum_parts = []
+                    for _sec in (10, 20, 30, 60):
+                        if _sec in _rec_avgs:
+                            _pct = _rec_avgs[_sec] / _final_avg * 100
+                            _cum_parts.append(f"{_sec}s:{_pct:.0f}%")
+                    if _cum_parts:
+                        lines.append(f"🔍 EC_B 누적비중 (최종{_final_avg:+.2f}% 대비): {' | '.join(_cum_parts)}")
                 # EC_B 만족군 중 "살아난 거래"(최종 PnL>0) 분리 분석 — 회복 패턴/공통 특징 진단
                 _ec_b_survivors = [t for t in _ec_b_hit if t.get("pnl", 0) > 0]
                 _ec_b_died = [t for t in _ec_b_hit if t.get("pnl", 0) <= 0]
