@@ -13890,6 +13890,7 @@ def _v4_shadow_report_lines():
                     _ec_b_hit.append(_t)
             if len(_ec_b_hit) >= 10:
                 _rec_parts = []
+                _rec_avgs = {}  # 변화량 계산용
                 # 10/20/30s 앞쪽 시점 추가 — 진입 직후 곡선 + 30초 컷 시점 평균 직접 측정
                 # 시점별 n 표시 — 청산 거래로 표본이 줄어드는 것 명시
                 for _sec in (10, 20, 30, 60, 90, 120, 180, 240, 300):
@@ -13897,9 +13898,19 @@ def _v4_shadow_report_lines():
                     if _vals:
                         _avg = sum(_vals) / len(_vals) * 100
                         _rec_parts.append(f"{_sec}s:{_avg:+.2f}%(n={len(_vals)})")
+                        _rec_avgs[_sec] = _avg
                 _final_avg = sum(t.get("pnl", 0) for t in _ec_b_hit) / len(_ec_b_hit) * 100
                 if _rec_parts:
                     lines.append(f"🔍 EC_B 회복추적 n={len(_ec_b_hit)}: {' → '.join(_rec_parts)} → 최종:{_final_avg:+.2f}%")
+                # 구간별 변화량 (Δ) — 손실 가속 구간 진단. 표본 편향 큰 90s 이후는 제외
+                _delta_parts = []
+                _delta_secs = [(10, 20), (20, 30), (30, 60), (60, 90), (90, 120)]
+                for _sa, _sb in _delta_secs:
+                    if _sa in _rec_avgs and _sb in _rec_avgs:
+                        _d = _rec_avgs[_sb] - _rec_avgs[_sa]
+                        _delta_parts.append(f"{_sa}→{_sb}:{_d:+.2f}%")
+                if _delta_parts:
+                    lines.append(f"🔍 EC_B 변화량 Δ: {' | '.join(_delta_parts)}")
                 # EC_B 만족군 중 "살아난 거래"(최종 PnL>0) 분리 분석 — 회복 패턴/공통 특징 진단
                 _ec_b_survivors = [t for t in _ec_b_hit if t.get("pnl", 0) > 0]
                 _ec_b_died = [t for t in _ec_b_hit if t.get("pnl", 0) <= 0]
