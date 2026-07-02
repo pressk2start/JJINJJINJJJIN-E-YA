@@ -14022,9 +14022,44 @@ def _v4_shadow_report_lines():
                     _bk_pnl = sum(t.get("pnl", 0) for t in _bk) / len(_bk) * 100
                     _bk_wr = sum(1 for t in _bk if t.get("pnl", 0) > 0) / len(_bk) * 100
                     _bk_mfe = sum(t.get("mfe", 0) for t in _bk) / len(_bk) * 100
-                    _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}% 최종{_bk_pnl:+.2f}% mfe{_bk_mfe:+.2f}%")
+                    # 30→60 구간 손실 가속 진단: 60s 시점 평균 추가
+                    _bk_60 = [t.get("curve", {}).get("60") for t in _bk if t.get("curve", {}).get("60") is not None]
+                    _bk_60_str = f"→60s:{sum(_bk_60)/len(_bk_60)*100:+.2f}%" if _bk_60 else ""
+                    _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}%{_bk_60_str}→최종{_bk_pnl:+.2f}% mfe{_bk_mfe:+.2f}%")
             if _bk_lines:
                 lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
+            # EC30 shadow sim — "만약 30s에 잘랐다면?" 재생 (실청산 X, LIVE 100% 동일)
+            # CLM trade_records의 저장된 pnl_curve["30"]/mfe_30s/dd_peak_30s로 시뮬레이션
+            # 판정: saved 양수 = 30s cut 유리 | FP 다수 = 정상 거래 절단 위험
+            _ec30_thresholds = [
+                ("T1[pnl30<-0.30%]", lambda t: t.get("curve", {}).get("30") is not None and t["curve"]["30"] < -0.003),
+                ("T2[pnl30<-0.20%]", lambda t: t.get("curve", {}).get("30") is not None and t["curve"]["30"] < -0.002),
+                ("T3[mfe30<0.05%+dd30>0.15%]", lambda t: t.get("inds", {}).get("mfe_30s") is not None and t.get("inds", {}).get("dd_peak_30s") is not None and t["inds"]["mfe_30s"] < 0.0005 and t["inds"]["dd_peak_30s"] > 0.0015),
+            ]
+            _ec30_lines = []
+            for _th_lbl, _th_fn in _ec30_thresholds:
+                _cut = []
+                for _t in _ec_trs:
+                    try:
+                        if _th_fn(_t):
+                            _cut.append(_t)
+                    except Exception:
+                        pass
+                if len(_cut) < 5:
+                    continue
+                _cut_30s = [t["curve"]["30"] for t in _cut if t.get("curve", {}).get("30") is not None]
+                if not _cut_30s:
+                    continue
+                _cut_avg = sum(_cut_30s) / len(_cut_30s) * 100
+                _orig_avg = sum(t.get("pnl", 0) for t in _cut) / len(_cut) * 100
+                _saved = _cut_avg - _orig_avg
+                _fp = [t for t in _cut if t.get("pnl", 0) > 0]
+                _fp_ratio = len(_fp) / len(_cut) * 100
+                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} 30s{_cut_avg:+.2f}% 원래최종{_orig_avg:+.2f}% saved{_saved:+.2f}%p FP{len(_fp)}({_fp_ratio:.0f}%)")
+            if _ec30_lines:
+                lines.append("🔍 EC30 shadow sim (실청산X, 재생):")
+                for _l in _ec30_lines:
+                    lines.append(f"  {_l}")
             # CLM 30초 PnL 버킷 (quantile) — 레짐 변화 대응 (균등 분포)
             _p30_vals = sorted([(t["curve"]["30"], t) for t in _ec_trs if t.get("curve", {}).get("30") is not None], key=lambda x: x[0])
             if len(_p30_vals) >= 50:
