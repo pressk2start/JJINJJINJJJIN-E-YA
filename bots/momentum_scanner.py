@@ -142,6 +142,40 @@ _ob_cache = {}  # market -> {"ts": float, "data": dict}
 OB_CACHE_TTL = 1.5  # 초
 log_fh = None
 
+# ─── [K] Regime feature snapshot (계측 전용, 전략 무영향) ───
+regime_snapshot = {
+    "btc_ret_24h": 0.0,       # BTC 24h signed_change_rate (%)
+    "market_turnover": 0.0,   # top30 acc_trade_price_24h 합 (원)
+    "breadth_pos": 0.0,       # top30 중 상승 종목 비율 (0~1)
+    "btc_dominance": 0.0,     # BTC turnover / top30 total
+    "top5_conc": 0.0,         # top5 turnover / top30 total
+    "ts": 0.0,                # 마지막 갱신 시각
+}
+
+def update_regime_snapshot(all_tickers):
+    """[K] regime feature 갱신 — 5분마다 재분류 루프에서 호출."""
+    try:
+        by_vol = sorted(all_tickers, key=lambda t: t.get("acc_trade_price_24h", 0), reverse=True)
+        top30 = by_vol[:30]
+        if not top30:
+            return
+        total_turnover = sum(t.get("acc_trade_price_24h", 0) for t in top30)
+        top5_turnover = sum(t.get("acc_trade_price_24h", 0) for t in top30[:5])
+        btc = next((t for t in all_tickers if t.get("market") == "KRW-BTC"), None)
+        btc_turnover = btc.get("acc_trade_price_24h", 0) if btc else 0
+        btc_ret = (btc.get("signed_change_rate", 0) * 100) if btc else 0
+        n_pos = sum(1 for t in top30 if t.get("signed_change_rate", 0) > 0)
+        regime_snapshot.update({
+            "btc_ret_24h": round(btc_ret, 3),
+            "market_turnover": round(total_turnover),
+            "breadth_pos": round(n_pos / len(top30), 3),
+            "btc_dominance": round(btc_turnover / total_turnover, 3) if total_turnover else 0,
+            "top5_conc": round(top5_turnover / total_turnover, 3) if total_turnover else 0,
+            "ts": time.time(),
+        })
+    except Exception as e:
+        log(f"⚠ regime snapshot 실패: {e}")
+
 # ═══════════════════════════════════════════════
 # 텔레그램
 # ═══════════════════════════════════════════════
@@ -362,6 +396,11 @@ def manage_positions(tickers_dict, now_ts):
                 "bid_krw": pos["bid_krw"],
                 "slip_buy": pos["slip_buy"],
                 "cond_flags": pos.get("cond_flags", {}),
+                "rg_btc_ret": pos.get("rg_btc_ret", 0),
+                "rg_turnover": pos.get("rg_turnover", 0),
+                "rg_breadth": pos.get("rg_breadth", 0),
+                "rg_btc_dom": pos.get("rg_btc_dom", 0),
+                "rg_top5": pos.get("rg_top5", 0),
             })
     for trade in to_close:
         market = trade["market"]
@@ -502,6 +541,7 @@ def save_results(tag=""):
         "pnl", "net_pnl", "mae", "peak_pnl", "hold_sec", "reason",
         "z_score", "vol_z", "vol_ratio", "abs_move", "spread_pct", "ask_krw", "bid_krw", "slip_buy",
         "c_price_z", "c_vol_z", "c_breakout", "c_spread", "c_depth",
+        "rg_btc_ret", "rg_turnover", "rg_breadth", "rg_btc_dom", "rg_top5",
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
@@ -686,6 +726,35 @@ def _analyze_mfe_distribution():
     avg_mfe = sum(mfes) / n
     med_mfe = sorted(mfes)[n // 2]
     lines.append(f"  avg{avg_mfe:+.3f}% med{med_mfe:+.3f}%")
+    return "\n".join(lines)
+
+def _analyze_regime_features():
+    """[K] 세션 regime feature 요약 + W/L 분리 (계측 전용)."""
+    trades_with_rg = [t for t in closed_trades if "rg_btc_ret" in t]
+    if len(trades_with_rg) < 3:
+        return None
+    def _avg(rows, key):
+        vals = [r.get(key, 0) for r in rows]
+        return sum(vals) / len(vals) if vals else 0
+    win = [t for t in trades_with_rg if t["net_pnl"] > 0]
+    loss = [t for t in trades_with_rg if t["net_pnl"] <= 0]
+    lines = ["▶ Regime feature (진입시점 스냅샷 평균):"]
+    lines.append(
+        f"  BTC24h {_avg(trades_with_rg,'rg_btc_ret'):+.2f}% / "
+        f"turnover {_avg(trades_with_rg,'rg_turnover')/1e12:.2f}조 / "
+        f"breadth {_avg(trades_with_rg,'rg_breadth')*100:.0f}% / "
+        f"BTC_dom {_avg(trades_with_rg,'rg_btc_dom')*100:.0f}% / "
+        f"top5 {_avg(trades_with_rg,'rg_top5')*100:.0f}%"
+    )
+    if win and loss:
+        lines.append(
+            f"  W: BTC{_avg(win,'rg_btc_ret'):+.2f}% breadth{_avg(win,'rg_breadth')*100:.0f}% "
+            f"dom{_avg(win,'rg_btc_dom')*100:.0f}% top5{_avg(win,'rg_top5')*100:.0f}%"
+        )
+        lines.append(
+            f"  L: BTC{_avg(loss,'rg_btc_ret'):+.2f}% breadth{_avg(loss,'rg_breadth')*100:.0f}% "
+            f"dom{_avg(loss,'rg_btc_dom')*100:.0f}% top5{_avg(loss,'rg_top5')*100:.0f}%"
+        )
     return "\n".join(lines)
 
 def _analyze_realized_mfe_buckets():
@@ -932,6 +1001,9 @@ def generate_review():
     rm_buckets = _analyze_realized_mfe_buckets()
     if rm_buckets:
         lines += ["", rm_buckets]
+    rg_features = _analyze_regime_features()
+    if rg_features:
+        lines += ["", "━━━━━━━━━━━━━━━", rg_features]
     lines += [
         "",
         "━━━━━━━━━━━━━━━",
@@ -965,6 +1037,7 @@ def main():
     markets = get_all_krw_markets()
     log(f"전체 KRW 마켓: {len(markets)}개")
     tickers = get_tickers(markets)
+    update_regime_snapshot(tickers)
     top_markets, bottom_markets = classify_markets(tickers)
     monitor_markets = top_markets | bottom_markets
     monitor_list = sorted(monitor_markets)
@@ -1141,6 +1214,11 @@ def main():
                     "bid_krw": round(bid_krw),
                     "slip_buy": round(slip_buy, 4),
                     "cond_flags": cond_flags,
+                    "rg_btc_ret": regime_snapshot["btc_ret_24h"],
+                    "rg_turnover": regime_snapshot["market_turnover"],
+                    "rg_breadth": regime_snapshot["breadth_pos"],
+                    "rg_btc_dom": regime_snapshot["btc_dominance"],
+                    "rg_top5": regime_snapshot["top5_conc"],
                 }
                 coin = market.replace("KRW-", "")
                 target_price = entry_price * (1 + TARGET_PROFIT_PCT / 100)
@@ -1194,6 +1272,7 @@ def main():
             if now_ts - last_reclassify > 300:
                 try:
                     all_tickers = get_tickers(markets)
+                    update_regime_snapshot(all_tickers)
                     top_markets, bottom_markets = classify_markets(all_tickers)
                     monitor_markets = top_markets | bottom_markets
                     monitor_list = sorted(monitor_markets)
