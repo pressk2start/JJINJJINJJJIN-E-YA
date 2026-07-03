@@ -14084,16 +14084,20 @@ def _v4_shadow_report_lines():
                 _recovery = _realized / _perfect_exit * 100 if _perfect_exit > 0 else 0
                 lines.append(f"🔬 Ceiling n={_mn}: 실제{_realized:+.2f}% | PerfectExit{_perfect_exit:+.2f}% PerfectEntry{_perfect_entry:+.2f}% PerfectBoth{_perfect_both:+.2f}%")
                 lines.append(f"  손실기여: ExitLoss+{_exit_loss:.2f}%p | EntryLoss+{_entry_loss:.2f}%p | 회수율{_recovery:.0f}%")
-                # 시간 Ceiling — MFE peak 도달 시점 분포 (최적 청산 시점 근거)
+                # MFE peak 도달 시점 분포 + 누적 (최적 청산 시점 근거)
+                # 10s 단위 세분화: EC30/EC60/PP 등 청산 시점 설계에 직접 근거
                 _peak_secs = [t.get("inds", {}).get("mfe_peak_sec") for t in _ce_trs if t.get("inds", {}).get("mfe_peak_sec") is not None]
                 if len(_peak_secs) >= 30:
-                    _time_bk = [(0, 30, "0~30s"), (30, 60, "30~60s"), (60, 120, "60~120s"), (120, 180, "120~180s"), (180, 999, "180s+")]
+                    # 세분화 버킷
+                    _time_bk = [(0, 10, "10s"), (10, 20, "20s"), (20, 30, "30s"), (30, 60, "60s"), (60, 120, "120s"), (120, 180, "180s"), (180, 999, "180s+")]
                     _time_parts = []
+                    _cum = 0
                     for _tlo, _thi, _tlbl in _time_bk:
                         _tcnt = sum(1 for s in _peak_secs if _tlo <= s < _thi)
                         _tpct = _tcnt / len(_peak_secs) * 100
-                        _time_parts.append(f"{_tlbl}:{_tcnt}({_tpct:.0f}%)")
-                    lines.append(f"  시간Ceiling(MFE peak 시점 n={len(_peak_secs)}): {' | '.join(_time_parts)}")
+                        _cum += _tpct
+                        _time_parts.append(f"{_tlbl}:{_tpct:.0f}%(누적{_cum:.0f}%)")
+                    lines.append(f"  ⏱ MFE peak 시점 n={len(_peak_secs)}: {' | '.join(_time_parts)}")
 
             # EC30 shadow sim — "만약 30s에 잘랐다면?" 재생 (실청산 X, LIVE 100% 동일)
             # CLM trade_records의 저장된 pnl_curve["30"]/mfe_30s/dd_peak_30s로 시뮬레이션
@@ -14129,12 +14133,20 @@ def _v4_shadow_report_lines():
                 _fp_mfe_max = max((t.get("mfe", 0) for t in _fp), default=0) * 100 if _fp else 0
                 _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%pnl{_fp_avg:+.2f}%mfeavg{_fp_mfe_avg:+.2f}%max{_fp_mfe_max:+.2f}%)" if _fp else "FP0"
                 # saved 거래별 분포 — 큰 절감 vs 작은 절감 vs cut이 오히려 나쁨
+                # 각 버킷의 평균값도 추가 (건수만 봐서는 의미 판단 어려움)
                 _saved_per = [(t["curve"]["30"] - t.get("pnl", 0)) * 100 for t in _cut if t.get("curve", {}).get("30") is not None]
-                _neg = sum(1 for s in _saved_per if s < 0)
-                _small = sum(1 for s in _saved_per if 0 <= s < 0.1)
-                _mid = sum(1 for s in _saved_per if 0.1 <= s < 0.5)
-                _big = sum(1 for s in _saved_per if s >= 0.5)
-                _bkt_str = f"분포[손해{_neg}|<0.1:{_small}|0.1~0.5:{_mid}|0.5+:{_big}]"
+                _neg_vals = [s for s in _saved_per if s < 0]
+                _small_vals = [s for s in _saved_per if 0 <= s < 0.1]
+                _mid_vals = [s for s in _saved_per if 0.1 <= s < 0.5]
+                _big_vals = [s for s in _saved_per if s >= 0.5]
+                def _avg_or_zero(vs):
+                    return sum(vs) / len(vs) if vs else 0
+                _bkt_str = (
+                    f"분포[손해{len(_neg_vals)}({_avg_or_zero(_neg_vals):+.2f}%)"
+                    f"|<0.1:{len(_small_vals)}({_avg_or_zero(_small_vals):+.2f}%)"
+                    f"|0.1~0.5:{len(_mid_vals)}({_avg_or_zero(_mid_vals):+.2f}%)"
+                    f"|0.5+:{len(_big_vals)}({_avg_or_zero(_big_vals):+.2f}%)]"
+                )
                 # saved quantile — 평균이 큰 손실 몇 건에 끌려가는 것 방지
                 # median이 계속 양수면 "대부분의 cut이 실제로 도움"
                 _q_str = ""

@@ -42,7 +42,13 @@ def main():
     parser.add_argument("--output", type=str, default="research/clm_events.parquet")
     parser.add_argument("--skip-download", action="store_true", help="다운로드 건너뛰기")
     parser.add_argument("--force", action="store_true", help="캐시 무시하고 재다운로드")
+    parser.add_argument("--no-tg", action="store_true", help="텔레그램 전송 스킵")
     args = parser.parse_args()
+
+    # --no-tg 지정 시 무효화
+    global tg_send
+    if args.no_tg:
+        tg_send = None
 
     t0 = time.time()
 
