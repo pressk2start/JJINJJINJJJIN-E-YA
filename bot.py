@@ -13140,6 +13140,13 @@ def _v4_shadow_report_lines():
     """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
     루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
     v11: 라이브(A,B) + 섀도우(C~L) 전체 11개 시나리오 지표 수집"""
+    # Research용 trade_records 자동 export — 매 리포트 시 최신 데이터로 갱신
+    # 봇 메모리의 실제 trade_records를 저장하므로 새 프로세스에서 0건 문제 해결
+    try:
+        export_trade_records("/tmp/clm_trades.json")
+    except Exception as _exp_err:
+        print(f"[export_trade_records 실패] {_exp_err}")
+
     _update_coin_bias()
     lines = []
     _research_reported = set()
