@@ -11,7 +11,16 @@ bot.py와 동일한 환경변수 사용:
 """
 import os
 import time
+import socket
 import requests
+import urllib3.util.connection as _urllib3_conn
+
+
+# IPv4 강제 — Python requests가 IPv6 시도 후 hang하는 것 방지
+# (curl은 자동 fallback하지만 requests는 안 함)
+def _force_ipv4():
+    return socket.AF_INET
+_urllib3_conn.allowed_gai_family = _force_ipv4
 
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
@@ -73,7 +82,7 @@ def send(title, body, code_block=True):
                         "parse_mode": "Markdown",
                         "disable_web_page_preview": True,
                     },
-                    timeout=10,
+                    timeout=(5, 10),  # (connect_timeout, read_timeout)
                 )
                 if r.status_code != 200:
                     print(f"[tg_notify] chat_id={chat_id} 실패: {r.status_code} {r.text[:200]}")
