@@ -83,6 +83,11 @@ def generate_synthetic_candles(n=5000, seed=42):
 
 
 def main():
+    # --no-tg 플래그
+    global tg_send
+    if "--no-tg" in sys.argv:
+        tg_send = None
+
     print("=" * 55)
     print("  합성 데이터 파이프라인 검증")
     print("=" * 55)

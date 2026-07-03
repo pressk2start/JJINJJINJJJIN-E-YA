@@ -121,8 +121,8 @@ def build_events_from_records(df, route_filter=None):
     return events
 
 
-def enhanced_report(events, label=""):
-    """ceiling analysis + 추가 분석. 결과는 콘솔+텔레그램 병행 출력."""
+def enhanced_report(events, label="", send_tg=True):
+    """ceiling analysis + 추가 분석. send_tg=False면 텔레그램 스킵 (route 반복 시)."""
     from io import StringIO
     result = ceiling_analysis(events)
     report = format_report(result)
@@ -162,8 +162,8 @@ def enhanced_report(events, label=""):
         print(s)
         tg_buf.write(s)
 
-    # 텔레그램 전송
-    if tg_send:
+    # 텔레그램 전송 (send_tg=False면 스킵 — route 반복 시 폭탄 방지)
+    if tg_send and send_tg:
         title = f"🔬 Ceiling: {label or 'ALL'}"
         tg_send(title, tg_buf.getvalue())
 
@@ -171,36 +171,66 @@ def enhanced_report(events, label=""):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 research/from_trade_records.py <trade_records.json> [route_filter]")
-        print("\nbot.py에서 export:")
-        print("  export_trade_records('clm_trades.json')")
+    # --no-tg 플래그 처리
+    args_list = [a for a in sys.argv[1:] if a != "--no-tg"]
+    no_tg = "--no-tg" in sys.argv
+
+    if len(args_list) < 1:
+        print("Usage: python3 research/from_trade_records.py <trade_records.json> [route_filter] [--no-tg]")
+        print("\n옵션:")
+        print("  --no-tg     텔레그램 전송 스킵 (콘솔만)")
+        print("\n예시:")
+        print("  # CLM만 상세 텔레그램")
+        print("  python3 research/from_trade_records.py /tmp/clm_trades.json CLM")
+        print("  # 전체 요약만 텔레그램 (route별은 콘솔만)")
+        print("  python3 research/from_trade_records.py /tmp/clm_trades.json")
+        print("  # 텔레그램 완전 스킵")
+        print("  python3 research/from_trade_records.py /tmp/clm_trades.json --no-tg")
         return
 
-    filepath = sys.argv[1]
-    route_filter = sys.argv[2] if len(sys.argv) > 2 else None
+    filepath = args_list[0]
+    route_filter = args_list[1] if len(args_list) > 1 else None
+
+    # --no-tg 지정 시 tg_send 무효화
+    global tg_send
+    if no_tg:
+        tg_send = None
 
     df = load_trade_records(filepath)
     if df.empty:
         print("데이터 없음")
         return
 
-    # route_filter 지정 시 해당 route만
+    # route_filter 지정 시 해당 route만 (텔레그램 전송)
     if route_filter:
         events = build_events_from_records(df, route_filter)
-        enhanced_report(events, route_filter)
+        enhanced_report(events, route_filter, send_tg=True)
     else:
-        # 전체 분석
+        # 전체 분석 → 텔레그램 1개만 (전체 요약)
         events = build_events_from_records(df)
-        enhanced_report(events, "전체")
+        enhanced_report(events, "전체", send_tg=True)
 
-        # route별 분석
+        # route별 분석 → 콘솔만 (텔레그램 폭탄 방지)
+        # 상세 원하면 route 지정해서 개별 실행
         if "route" in df.columns:
+            route_summary = []  # 텔레그램용 요약 1줄씩
             for route in df["route"].unique():
                 sub = df[df["route"] == route]
                 if len(sub) >= 10:
                     events_r = build_events_from_records(df, route)
-                    enhanced_report(events_r, route)
+                    enhanced_report(events_r, route, send_tg=False)  # ← 스킵
+                    # 요약 1줄
+                    r = ceiling_analysis(events_r)
+                    pe_avg = r.get("perfect_exit", {}).get("avg_mfe", 0)
+                    cur_avg = r.get("current", {}).get("avg_pnl", 0)
+                    wr = r.get("current", {}).get("winrate", 0)
+                    route_summary.append(
+                        f"  {route:<16} n={len(events_r):>4}  실제{cur_avg:+.3f}%  PerfectExit{pe_avg:+.3f}%  wr{wr:.0f}%"
+                    )
+            # 최종 요약을 텔레그램에 1번만 전송
+            if tg_send and route_summary:
+                summary_text = "\n".join(route_summary)
+                tg_send("🔬 Route별 요약", summary_text)
 
 
 if __name__ == "__main__":
