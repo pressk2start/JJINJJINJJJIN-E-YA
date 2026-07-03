@@ -14028,6 +14028,28 @@ def _v4_shadow_report_lines():
                     _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}%{_bk_60_str}→최종{_bk_pnl:+.2f}% mfe{_bk_mfe:+.2f}%")
             if _bk_lines:
                 lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
+            # ── Ceiling Analysis — CLM 진입 알파의 이론적 상한 (백테스트 전 방향 결정) ──
+            # Perfect Exit: 각 거래 MFE 지점에서 청산했다면? → 청산 개선의 상한
+            # 회수율: 현재가 이론 상한의 몇% 회수하는가
+            _ce_trs = [t for t in _ec_trs if t.get("mfe") is not None and t.get("pnl") is not None]
+            if len(_ce_trs) >= 100:
+                _realized = sum(t["pnl"] for t in _ce_trs) / len(_ce_trs) * 100
+                _perfect = sum(t["mfe"] for t in _ce_trs) / len(_ce_trs) * 100
+                _gap = _perfect - _realized
+                _recovery = _realized / _perfect * 100 if _perfect > 0 else 0
+                _mfes_sorted = sorted(t["mfe"] for t in _ce_trs)
+                _mn = len(_mfes_sorted)
+                _mfe_med = _mfes_sorted[_mn // 2] * 100
+                _mfe_p70 = _mfes_sorted[int(_mn * 0.7)] * 100
+                _mfe_top30 = _mfes_sorted[int(_mn * 0.7):]
+                _mfe_top30_avg = sum(_mfe_top30) / len(_mfe_top30) * 100 if _mfe_top30 else 0
+                # 상위 30% (수익 나오는 거래만) 진입 시 이론 상한
+                _pnls_sorted = sorted((t["pnl"] for t in _ce_trs), reverse=True)
+                _top30_realized = sum(_pnls_sorted[:int(_mn * 0.3)]) / max(1, int(_mn * 0.3)) * 100
+                lines.append(f"🔬 Ceiling n={len(_ce_trs)}: 실제{_realized:+.2f}% PerfectExit{_perfect:+.2f}% Gap+{_gap:.2f}%p 회수율{_recovery:.0f}%")
+                lines.append(f"  MFE분포: med{_mfe_med:+.2f}% p70{_mfe_p70:+.2f}% 상위30%avg{_mfe_top30_avg:+.2f}%")
+                lines.append(f"  PerfectEntry(상위30% 진입 시 realized 평균): {_top30_realized:+.2f}%")
+
             # EC30 shadow sim — "만약 30s에 잘랐다면?" 재생 (실청산 X, LIVE 100% 동일)
             # CLM trade_records의 저장된 pnl_curve["30"]/mfe_30s/dd_peak_30s로 시뮬레이션
             # 판정: saved 양수 = 30s cut 유리 | FP 다수 = 정상 거래 절단 위험
