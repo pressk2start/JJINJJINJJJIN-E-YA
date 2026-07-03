@@ -14028,6 +14028,37 @@ def _v4_shadow_report_lines():
                     _bk_lines.append(f"{_blbl}:{len(_bk)}건 wr{_bk_wr:.0f}%{_bk_60_str}→최종{_bk_pnl:+.2f}% mfe{_bk_mfe:+.2f}%")
             if _bk_lines:
                 lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
+            # ── Ceiling Analysis — CLM 진입 알파의 이론적 상한 (백테스트 전 방향 결정) ──
+            # 세 가지 Ceiling: Perfect Exit / Perfect Entry / Perfect Both
+            # + Exit Loss / Entry Loss 분리 → 어느 쪽에 개선 여력 있는지 즉시 판단
+            _ce_trs = [t for t in _ec_trs if t.get("mfe") is not None and t.get("pnl") is not None]
+            if len(_ce_trs) >= 100:
+                _realized = sum(t["pnl"] for t in _ce_trs) / len(_ce_trs) * 100
+                _perfect_exit = sum(t["mfe"] for t in _ce_trs) / len(_ce_trs) * 100
+                _mn = len(_ce_trs)
+                # Perfect Entry: 상위 30% 최종 PnL만 골라서 realized
+                _top30_by_pnl = sorted(_ce_trs, key=lambda t: t["pnl"], reverse=True)[:int(_mn * 0.3)]
+                _perfect_entry = sum(t["pnl"] for t in _top30_by_pnl) / len(_top30_by_pnl) * 100 if _top30_by_pnl else 0
+                # Perfect Both: 상위 30% 진입 + 각 거래 MFE 청산
+                _perfect_both = sum(t["mfe"] for t in _top30_by_pnl) / len(_top30_by_pnl) * 100 if _top30_by_pnl else 0
+                # Exit Loss: 청산이 완벽했다면 얻을 수 있었던 금액
+                _exit_loss = _perfect_exit - _realized
+                # Entry Loss: 진입이 완벽했다면 얻을 수 있었던 추가 금액 (실제 대비)
+                _entry_loss = _perfect_entry - _realized
+                _recovery = _realized / _perfect_exit * 100 if _perfect_exit > 0 else 0
+                lines.append(f"🔬 Ceiling n={_mn}: 실제{_realized:+.2f}% | PerfectExit{_perfect_exit:+.2f}% PerfectEntry{_perfect_entry:+.2f}% PerfectBoth{_perfect_both:+.2f}%")
+                lines.append(f"  손실기여: ExitLoss+{_exit_loss:.2f}%p | EntryLoss+{_entry_loss:.2f}%p | 회수율{_recovery:.0f}%")
+                # 시간 Ceiling — MFE peak 도달 시점 분포 (최적 청산 시점 근거)
+                _peak_secs = [t.get("inds", {}).get("mfe_peak_sec") for t in _ce_trs if t.get("inds", {}).get("mfe_peak_sec") is not None]
+                if len(_peak_secs) >= 30:
+                    _time_bk = [(0, 30, "0~30s"), (30, 60, "30~60s"), (60, 120, "60~120s"), (120, 180, "120~180s"), (180, 999, "180s+")]
+                    _time_parts = []
+                    for _tlo, _thi, _tlbl in _time_bk:
+                        _tcnt = sum(1 for s in _peak_secs if _tlo <= s < _thi)
+                        _tpct = _tcnt / len(_peak_secs) * 100
+                        _time_parts.append(f"{_tlbl}:{_tcnt}({_tpct:.0f}%)")
+                    lines.append(f"  시간Ceiling(MFE peak 시점 n={len(_peak_secs)}): {' | '.join(_time_parts)}")
+
             # EC30 shadow sim — "만약 30s에 잘랐다면?" 재생 (실청산 X, LIVE 100% 동일)
             # CLM trade_records의 저장된 pnl_curve["30"]/mfe_30s/dd_peak_30s로 시뮬레이션
             # 판정: saved 양수 = 30s cut 유리 | FP 다수 = 정상 거래 절단 위험
@@ -14055,9 +14086,12 @@ def _v4_shadow_report_lines():
                 _saved = _cut_avg - _orig_avg
                 _fp = [t for t in _cut if t.get("pnl", 0) > 0]
                 _fp_ratio = len(_fp) / len(_cut) * 100
-                # FP 평균 PnL — 놓친 수익 크기 (+0.02% 무해, +0.5%+ 심각)
+                # FP 평균 PnL + MFE — 놓친 수익 크기 + 놓친 최대 잠재수익
+                # FP 최종+0.03%인데 MFE+1.25%면 큰 기회 놓친 것. MFE+0.08%면 무시 가능.
                 _fp_avg = sum(t.get("pnl", 0) for t in _fp) / len(_fp) * 100 if _fp else 0
-                _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%avg{_fp_avg:+.2f}%)" if _fp else "FP0"
+                _fp_mfe_avg = sum(t.get("mfe", 0) for t in _fp) / len(_fp) * 100 if _fp else 0
+                _fp_mfe_max = max((t.get("mfe", 0) for t in _fp), default=0) * 100 if _fp else 0
+                _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%pnl{_fp_avg:+.2f}%mfeavg{_fp_mfe_avg:+.2f}%max{_fp_mfe_max:+.2f}%)" if _fp else "FP0"
                 # saved 거래별 분포 — 큰 절감 vs 작은 절감 vs cut이 오히려 나쁨
                 _saved_per = [(t["curve"]["30"] - t.get("pnl", 0)) * 100 for t in _cut if t.get("curve", {}).get("30") is not None]
                 _neg = sum(1 for s in _saved_per if s < 0)
@@ -14065,7 +14099,17 @@ def _v4_shadow_report_lines():
                 _mid = sum(1 for s in _saved_per if 0.1 <= s < 0.5)
                 _big = sum(1 for s in _saved_per if s >= 0.5)
                 _bkt_str = f"분포[손해{_neg}|<0.1:{_small}|0.1~0.5:{_mid}|0.5+:{_big}]"
-                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} saved{_saved:+.2f}%p {_fp_str} {_bkt_str}")
+                # saved quantile — 평균이 큰 손실 몇 건에 끌려가는 것 방지
+                # median이 계속 양수면 "대부분의 cut이 실제로 도움"
+                _q_str = ""
+                if _saved_per:
+                    _sp_sorted = sorted(_saved_per)
+                    _sp_n = len(_sp_sorted)
+                    _p25 = _sp_sorted[int(_sp_n * 0.25)]
+                    _p50 = _sp_sorted[int(_sp_n * 0.50)]
+                    _p75 = _sp_sorted[int(_sp_n * 0.75)]
+                    _q_str = f"q[p25:{_p25:+.2f}|med:{_p50:+.2f}|p75:{_p75:+.2f}]"
+                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} saved{_saved:+.2f}%p {_q_str} {_fp_str} {_bkt_str}")
             if _ec30_lines:
                 lines.append("🔍 EC30 shadow sim (실청산X, 재생):")
                 for _l in _ec30_lines:
