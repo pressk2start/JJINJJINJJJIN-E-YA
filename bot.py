@@ -13100,6 +13100,42 @@ def _v4_shadow_score_compact():
     return lines, _reported_routes
 
 
+def export_trade_records(filepath="clm_trades.json"):
+    """Research 용도: 모든 route의 trade_records를 JSON으로 내보내기.
+
+    사용:
+        from bot import export_trade_records
+        export_trade_records("/tmp/clm_trades.json")
+
+    출력 각 record:
+        route, strat, pnl, mfe, hold, exit_reason, ind_* (indicators), curve (pnl_curve)
+    """
+    import json as _json
+    records = []
+    with _SHADOW_PERF_LOCK:
+        for key, stats in _SHADOW_PERF_STATS.items():
+            route = stats.get("route", key.split(":")[0] if ":" in key else key)
+            strat = stats.get("strat", key.split(":", 1)[1] if ":" in key else "")
+            for tr in stats.get("trade_records", []):
+                rec = {
+                    "route": route,
+                    "strat": strat,
+                    "pnl": tr.get("pnl", 0),
+                    "mfe": tr.get("mfe", 0),
+                    "hold": tr.get("hold", 0),
+                    "exit_reason": tr.get("exit_reason", ""),
+                }
+                for k, v in tr.get("inds", {}).items():
+                    rec[f"ind_{k}"] = v
+                if "curve" in tr:
+                    rec["pnl_curve"] = tr["curve"]
+                records.append(rec)
+    with open(filepath, "w") as f:
+        _json.dump(records, f, indent=2, default=str)
+    print(f"Exported {len(records)} records to {filepath}")
+    return len(records)
+
+
 def _v4_shadow_report_lines():
     """전 시나리오 가상매매 성과 리포트 (10분 텔레그램 리포트용)
     루트별 시그널수, 승률, 평균수익률, MFE, 청산사유 분포 + 유니버설 지표 W/L 표시
