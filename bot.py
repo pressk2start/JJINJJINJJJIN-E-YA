@@ -14055,9 +14055,12 @@ def _v4_shadow_report_lines():
                 _saved = _cut_avg - _orig_avg
                 _fp = [t for t in _cut if t.get("pnl", 0) > 0]
                 _fp_ratio = len(_fp) / len(_cut) * 100
-                # FP 평균 PnL — 놓친 수익 크기 (+0.02% 무해, +0.5%+ 심각)
+                # FP 평균 PnL + MFE — 놓친 수익 크기 + 놓친 최대 잠재수익
+                # FP 최종+0.03%인데 MFE+1.25%면 큰 기회 놓친 것. MFE+0.08%면 무시 가능.
                 _fp_avg = sum(t.get("pnl", 0) for t in _fp) / len(_fp) * 100 if _fp else 0
-                _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%avg{_fp_avg:+.2f}%)" if _fp else "FP0"
+                _fp_mfe_avg = sum(t.get("mfe", 0) for t in _fp) / len(_fp) * 100 if _fp else 0
+                _fp_mfe_max = max((t.get("mfe", 0) for t in _fp), default=0) * 100 if _fp else 0
+                _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%pnl{_fp_avg:+.2f}%mfeavg{_fp_mfe_avg:+.2f}%max{_fp_mfe_max:+.2f}%)" if _fp else "FP0"
                 # saved 거래별 분포 — 큰 절감 vs 작은 절감 vs cut이 오히려 나쁨
                 _saved_per = [(t["curve"]["30"] - t.get("pnl", 0)) * 100 for t in _cut if t.get("curve", {}).get("30") is not None]
                 _neg = sum(1 for s in _saved_per if s < 0)
