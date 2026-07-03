@@ -13111,6 +13111,7 @@ def export_trade_records(filepath="clm_trades.json"):
         route, strat, pnl, mfe, hold, exit_reason, ind_* (indicators), curve (pnl_curve)
     """
     import json as _json
+    import os as _os
     records = []
     with _SHADOW_PERF_LOCK:
         for key, stats in _SHADOW_PERF_STATS.items():
@@ -13130,8 +13131,13 @@ def export_trade_records(filepath="clm_trades.json"):
                 if "curve" in tr:
                     rec["pnl_curve"] = tr["curve"]
                 records.append(rec)
-    with open(filepath, "w") as f:
-        _json.dump(records, f, indent=2, default=str)
+    # atomic write — race condition 방지 (스크립트가 partial JSON 읽는 것 방지)
+    # 임시 파일에 쓰고 rename (같은 파일시스템 내 rename은 atomic)
+    # 또한 indent 제거로 크기 절반 감소 + 파싱 속도 향상
+    tmp_path = filepath + ".tmp"
+    with open(tmp_path, "w") as f:
+        _json.dump(records, f, default=str)
+    _os.rename(tmp_path, filepath)
     print(f"Exported {len(records)} records to {filepath}")
     return len(records)
 
