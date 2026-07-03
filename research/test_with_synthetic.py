@@ -11,6 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from clm_detector import detect_clm
 from event_labeler import label_events
 from ceiling import ceiling_analysis, format_report
+try:
+    from tg_notify import send as tg_send
+except Exception:
+    tg_send = None
 
 
 def generate_synthetic_candles(n=5000, seed=42):
@@ -122,6 +126,13 @@ def main():
 
     print("\n✅ 파이프라인 검증 완료. 모든 모듈 정상 동작.")
     print("   → 실 데이터 실행: python3 research/run_pipeline.py --top-markets 30 --days 90")
+
+    # 텔레그램 전송
+    if tg_send:
+        tg_send(
+            "🧪 Synthetic Test (파이프라인 검증)",
+            f"캔들: {len(df):,}건 → CLM {len(signals)}건 → 라벨 {len(events)}건\n\n{report}\n\n✅ 정상 동작"
+        )
 
 
 if __name__ == "__main__":

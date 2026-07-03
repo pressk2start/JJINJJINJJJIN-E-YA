@@ -42,6 +42,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ceiling import ceiling_analysis, format_report
+try:
+    from tg_notify import send as tg_send
+except Exception:
+    tg_send = None
 
 
 def load_trade_records(filepath):
@@ -118,37 +122,50 @@ def build_events_from_records(df, route_filter=None):
 
 
 def enhanced_report(events, label=""):
-    """ceiling analysis + 추가 분석"""
+    """ceiling analysis + 추가 분석. 결과는 콘솔+텔레그램 병행 출력."""
+    from io import StringIO
     result = ceiling_analysis(events)
     report = format_report(result)
     print(f"\n{report}")
 
+    # 텔레그램용 캡처 버퍼
+    tg_buf = StringIO()
+    tg_buf.write(report + "\n")
+
     # 추가: exit reason 분포
     if "exit_reason" in events.columns:
-        print(f"\n[Exit Reason 분포]")
+        s = "\n[Exit Reason 분포]\n"
         for reason, cnt in events["exit_reason"].value_counts().items():
             sub = events[events["exit_reason"] == reason]
             avg = sub["final_pnl"].mean()
-            print(f"  {reason:<16} {cnt:>4}건  avg={avg:+.4f}%")
+            s += f"  {reason:<16} {cnt:>4}건  avg={avg:+.4f}%\n"
+        print(s)
+        tg_buf.write(s)
 
     # 추가: hold time 분포
     if "hold_sec" in events.columns:
-        print(f"\n[Hold Time 분포]")
         hs = events["hold_sec"]
-        print(f"  평균: {hs.mean():.0f}s  중앙값: {hs.median():.0f}s  p25: {np.percentile(hs, 25):.0f}s  p75: {np.percentile(hs, 75):.0f}s")
+        s = f"\n[Hold Time 분포]\n  평균: {hs.mean():.0f}s  중앙값: {hs.median():.0f}s  p25: {np.percentile(hs, 25):.0f}s  p75: {np.percentile(hs, 75):.0f}s\n"
+        print(s)
+        tg_buf.write(s)
 
     # 추가: 30s/60s MFE 가용 시 EC 관련 분석
     if "mfe_60" in events.columns:
         mfe60 = events["mfe_60"]
-        print(f"\n[EC 관련 — 60초 MFE]")
-        print(f"  MFE60 < 0.10%: {(mfe60 < 0.10).sum()}건 ({(mfe60 < 0.10).mean()*100:.0f}%)")
-        print(f"  MFE60 < 0.15%: {(mfe60 < 0.15).sum()}건 ({(mfe60 < 0.15).mean()*100:.0f}%)")
-        print(f"  MFE60 < 0.20%: {(mfe60 < 0.20).sum()}건 ({(mfe60 < 0.20).mean()*100:.0f}%)")
-
-        # dead trade (mfe60 < 0.10%) 의 최종 PnL
+        s = f"\n[EC 관련 — 60초 MFE]\n"
+        s += f"  MFE60 < 0.10%: {(mfe60 < 0.10).sum()}건 ({(mfe60 < 0.10).mean()*100:.0f}%)\n"
+        s += f"  MFE60 < 0.15%: {(mfe60 < 0.15).sum()}건 ({(mfe60 < 0.15).mean()*100:.0f}%)\n"
+        s += f"  MFE60 < 0.20%: {(mfe60 < 0.20).sum()}건 ({(mfe60 < 0.20).mean()*100:.0f}%)\n"
         dead = events[mfe60 < 0.10]
         if len(dead) > 0:
-            print(f"  Dead(MFE60<0.10%) 최종PnL: avg={dead['final_pnl'].mean():+.4f}% n={len(dead)}")
+            s += f"  Dead(MFE60<0.10%) 최종PnL: avg={dead['final_pnl'].mean():+.4f}% n={len(dead)}\n"
+        print(s)
+        tg_buf.write(s)
+
+    # 텔레그램 전송
+    if tg_send:
+        title = f"🔬 Ceiling: {label or 'ALL'}"
+        tg_send(title, tg_buf.getvalue())
 
     return result
 

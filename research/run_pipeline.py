@@ -27,6 +27,10 @@ from data_loader import get_krw_markets, download_candles, load_candles, quick_v
 from clm_detector import detect_clm
 from event_labeler import label_events
 from ceiling import ceiling_analysis, format_report
+try:
+    from tg_notify import send as tg_send
+except Exception:
+    tg_send = None
 
 
 def main():
@@ -124,9 +128,11 @@ def main():
     report = format_report(result)
     print(report)
 
+    tg_body = report
+
     # 마켓별 요약
     if len(all_events) > 1:
-        print(f"\n[마켓별 요약]")
+        s = "\n[마켓별 요약]\n"
         by_market = combined.groupby("market").agg(
             n=("final_pnl", "count"),
             avg_pnl=("final_pnl", "mean"),
@@ -134,10 +140,18 @@ def main():
             winrate=("final_pnl", lambda x: (x > 0).mean() * 100),
         ).sort_values("n", ascending=False)
         for m, row in by_market.iterrows():
-            print(f"  {m:<12} n={row['n']:>4}  pnl={row['avg_pnl']:+.4f}%  mfe={row['avg_mfe']:+.4f}%  wr={row['winrate']:.0f}%")
+            s += f"  {m:<12} n={row['n']:>4}  pnl={row['avg_pnl']:+.4f}%  mfe={row['avg_mfe']:+.4f}%  wr={row['winrate']:.0f}%\n"
+        print(s)
+        tg_body += "\n" + s
 
     elapsed = time.time() - t0
+    tg_body += f"\n소요시간: {elapsed:.0f}초 | 이벤트: {len(combined):,}건\n"
     print(f"\n소요시간: {elapsed:.0f}초")
+
+    # 텔레그램 전송
+    if tg_send:
+        markets_txt = args.markets or f"top{args.top_markets}" if args.top_markets else "all"
+        tg_send(f"🔬 Pipeline: {markets_txt} ({args.days}d)", tg_body)
 
     return combined
 
