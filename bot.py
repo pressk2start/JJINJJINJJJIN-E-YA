@@ -14055,7 +14055,17 @@ def _v4_shadow_report_lines():
                 _saved = _cut_avg - _orig_avg
                 _fp = [t for t in _cut if t.get("pnl", 0) > 0]
                 _fp_ratio = len(_fp) / len(_cut) * 100
-                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} 30s{_cut_avg:+.2f}% 원래최종{_orig_avg:+.2f}% saved{_saved:+.2f}%p FP{len(_fp)}({_fp_ratio:.0f}%)")
+                # FP 평균 PnL — 놓친 수익 크기 (+0.02% 무해, +0.5%+ 심각)
+                _fp_avg = sum(t.get("pnl", 0) for t in _fp) / len(_fp) * 100 if _fp else 0
+                _fp_str = f"FP{len(_fp)}({_fp_ratio:.0f}%avg{_fp_avg:+.2f}%)" if _fp else "FP0"
+                # saved 거래별 분포 — 큰 절감 vs 작은 절감 vs cut이 오히려 나쁨
+                _saved_per = [(t["curve"]["30"] - t.get("pnl", 0)) * 100 for t in _cut if t.get("curve", {}).get("30") is not None]
+                _neg = sum(1 for s in _saved_per if s < 0)
+                _small = sum(1 for s in _saved_per if 0 <= s < 0.1)
+                _mid = sum(1 for s in _saved_per if 0.1 <= s < 0.5)
+                _big = sum(1 for s in _saved_per if s >= 0.5)
+                _bkt_str = f"분포[손해{_neg}|<0.1:{_small}|0.1~0.5:{_mid}|0.5+:{_big}]"
+                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} saved{_saved:+.2f}%p {_fp_str} {_bkt_str}")
             if _ec30_lines:
                 lines.append("🔍 EC30 shadow sim (실청산X, 재생):")
                 for _l in _ec30_lines:
