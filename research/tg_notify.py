@@ -1,26 +1,21 @@
 """
-Research 결과 텔레그램 전송 유틸.
+Research 결과 텔레그램 전송 유틸 — curl subprocess 방식.
 
 bot.py와 동일한 환경변수 사용:
   TELEGRAM_TOKEN (or TG_TOKEN)
   TG_CHATS (or TELEGRAM_CHAT_ID or TG_CHAT)  — 콤마 구분
+
+curl 사용 이유:
+  Python requests가 일부 환경에서 IPv6 시도 후 hang됨.
+  curl은 자동 IPv4 fallback + 안정적. -4 옵션으로 IPv4 강제.
 
 사용:
     from tg_notify import send
     send("Ceiling 결과", body_text)
 """
 import os
+import subprocess
 import time
-import socket
-import requests
-import urllib3.util.connection as _urllib3_conn
-
-
-# IPv4 강제 — Python requests가 IPv6 시도 후 hang하는 것 방지
-# (curl은 자동 fallback하지만 requests는 안 함)
-def _force_ipv4():
-    return socket.AF_INET
-_urllib3_conn.allowed_gai_family = _force_ipv4
 
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN") or ""
@@ -56,6 +51,9 @@ def send(title, body, code_block=True):
     """
     title: 짧은 헤더 (예: "🔬 Ceiling Analysis")
     body: 본문 (터미널 출력 그대로. code_block=True면 monospace로 감쌈)
+
+    curl subprocess 사용 — Python requests의 IPv6 hang 회피.
+    Returns: True (전부 성공) / False (일부라도 실패)
     """
     if not TG_TOKEN or not CHAT_IDS:
         print("[tg_notify] TELEGRAM_TOKEN 또는 TG_CHATS 없음. 콘솔 출력만.")
@@ -68,25 +66,32 @@ def send(title, body, code_block=True):
         text = f"*{title}*\n\n{body}"
 
     chunks = _split(text)
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     ok = True
+
     for chat_id in CHAT_IDS:
         for i, chunk in enumerate(chunks):
             if i > 0:
-                time.sleep(0.3)
+                time.sleep(0.3)  # rate-limit 방지
             try:
-                r = requests.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": chunk,
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=(5, 10),  # (connect_timeout, read_timeout)
+                result = subprocess.run(
+                    [
+                        "curl", "-sS", "-4",  # -4: IPv4 강제
+                        "--max-time", "10",
+                        "-X", "POST", url,
+                        "-d", f"chat_id={chat_id}",
+                        "-d", "parse_mode=Markdown",
+                        "-d", "disable_web_page_preview=true",
+                        "--data-urlencode", f"text={chunk}",
+                    ],
+                    capture_output=True, text=True, timeout=15,
                 )
-                if r.status_code != 200:
-                    print(f"[tg_notify] chat_id={chat_id} 실패: {r.status_code} {r.text[:200]}")
+                if result.returncode != 0 or '"ok":true' not in result.stdout:
+                    print(f"[tg_notify] chat_id={chat_id} 실패: out={result.stdout[:200]} err={result.stderr[:200]}")
                     ok = False
+            except subprocess.TimeoutExpired:
+                print(f"[tg_notify] chat_id={chat_id} 타임아웃")
+                ok = False
             except Exception as e:
                 print(f"[tg_notify] chat_id={chat_id} 예외: {e}")
                 ok = False
@@ -94,5 +99,9 @@ def send(title, body, code_block=True):
 
 
 if __name__ == "__main__":
-    # 테스트
-    send("🧪 Research Notify Test", "이 메시지가 보이면 정상입니다.\n\nTG_TOKEN, TG_CHATS 확인 완료.")
+    # 자체 테스트
+    result = send(
+        "🧪 Research Notify Test",
+        "이 메시지가 보이면 정상입니다.\n\nTG_TOKEN, TG_CHATS, curl 확인 완료.",
+    )
+    print(f"send() 결과: {result}")
