@@ -14065,7 +14065,17 @@ def _v4_shadow_report_lines():
                 _mid = sum(1 for s in _saved_per if 0.1 <= s < 0.5)
                 _big = sum(1 for s in _saved_per if s >= 0.5)
                 _bkt_str = f"분포[손해{_neg}|<0.1:{_small}|0.1~0.5:{_mid}|0.5+:{_big}]"
-                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} saved{_saved:+.2f}%p {_fp_str} {_bkt_str}")
+                # saved quantile — 평균이 큰 손실 몇 건에 끌려가는 것 방지
+                # median이 계속 양수면 "대부분의 cut이 실제로 도움"
+                _q_str = ""
+                if _saved_per:
+                    _sp_sorted = sorted(_saved_per)
+                    _sp_n = len(_sp_sorted)
+                    _p25 = _sp_sorted[int(_sp_n * 0.25)]
+                    _p50 = _sp_sorted[int(_sp_n * 0.50)]
+                    _p75 = _sp_sorted[int(_sp_n * 0.75)]
+                    _q_str = f"q[p25:{_p25:+.2f}|med:{_p50:+.2f}|p75:{_p75:+.2f}]"
+                _ec30_lines.append(f"{_th_lbl}: cut{len(_cut)} saved{_saved:+.2f}%p {_q_str} {_fp_str} {_bkt_str}")
             if _ec30_lines:
                 lines.append("🔍 EC30 shadow sim (실청산X, 재생):")
                 for _l in _ec30_lines:
