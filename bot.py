@@ -14029,26 +14029,35 @@ def _v4_shadow_report_lines():
             if _bk_lines:
                 lines.append(f"📊 30s PnL 버킷 fixed: {' | '.join(_bk_lines)}")
             # ── Ceiling Analysis — CLM 진입 알파의 이론적 상한 (백테스트 전 방향 결정) ──
-            # Perfect Exit: 각 거래 MFE 지점에서 청산했다면? → 청산 개선의 상한
-            # 회수율: 현재가 이론 상한의 몇% 회수하는가
+            # 세 가지 Ceiling: Perfect Exit / Perfect Entry / Perfect Both
+            # + Exit Loss / Entry Loss 분리 → 어느 쪽에 개선 여력 있는지 즉시 판단
             _ce_trs = [t for t in _ec_trs if t.get("mfe") is not None and t.get("pnl") is not None]
             if len(_ce_trs) >= 100:
                 _realized = sum(t["pnl"] for t in _ce_trs) / len(_ce_trs) * 100
-                _perfect = sum(t["mfe"] for t in _ce_trs) / len(_ce_trs) * 100
-                _gap = _perfect - _realized
-                _recovery = _realized / _perfect * 100 if _perfect > 0 else 0
-                _mfes_sorted = sorted(t["mfe"] for t in _ce_trs)
-                _mn = len(_mfes_sorted)
-                _mfe_med = _mfes_sorted[_mn // 2] * 100
-                _mfe_p70 = _mfes_sorted[int(_mn * 0.7)] * 100
-                _mfe_top30 = _mfes_sorted[int(_mn * 0.7):]
-                _mfe_top30_avg = sum(_mfe_top30) / len(_mfe_top30) * 100 if _mfe_top30 else 0
-                # 상위 30% (수익 나오는 거래만) 진입 시 이론 상한
-                _pnls_sorted = sorted((t["pnl"] for t in _ce_trs), reverse=True)
-                _top30_realized = sum(_pnls_sorted[:int(_mn * 0.3)]) / max(1, int(_mn * 0.3)) * 100
-                lines.append(f"🔬 Ceiling n={len(_ce_trs)}: 실제{_realized:+.2f}% PerfectExit{_perfect:+.2f}% Gap+{_gap:.2f}%p 회수율{_recovery:.0f}%")
-                lines.append(f"  MFE분포: med{_mfe_med:+.2f}% p70{_mfe_p70:+.2f}% 상위30%avg{_mfe_top30_avg:+.2f}%")
-                lines.append(f"  PerfectEntry(상위30% 진입 시 realized 평균): {_top30_realized:+.2f}%")
+                _perfect_exit = sum(t["mfe"] for t in _ce_trs) / len(_ce_trs) * 100
+                _mn = len(_ce_trs)
+                # Perfect Entry: 상위 30% 최종 PnL만 골라서 realized
+                _top30_by_pnl = sorted(_ce_trs, key=lambda t: t["pnl"], reverse=True)[:int(_mn * 0.3)]
+                _perfect_entry = sum(t["pnl"] for t in _top30_by_pnl) / len(_top30_by_pnl) * 100 if _top30_by_pnl else 0
+                # Perfect Both: 상위 30% 진입 + 각 거래 MFE 청산
+                _perfect_both = sum(t["mfe"] for t in _top30_by_pnl) / len(_top30_by_pnl) * 100 if _top30_by_pnl else 0
+                # Exit Loss: 청산이 완벽했다면 얻을 수 있었던 금액
+                _exit_loss = _perfect_exit - _realized
+                # Entry Loss: 진입이 완벽했다면 얻을 수 있었던 추가 금액 (실제 대비)
+                _entry_loss = _perfect_entry - _realized
+                _recovery = _realized / _perfect_exit * 100 if _perfect_exit > 0 else 0
+                lines.append(f"🔬 Ceiling n={_mn}: 실제{_realized:+.2f}% | PerfectExit{_perfect_exit:+.2f}% PerfectEntry{_perfect_entry:+.2f}% PerfectBoth{_perfect_both:+.2f}%")
+                lines.append(f"  손실기여: ExitLoss+{_exit_loss:.2f}%p | EntryLoss+{_entry_loss:.2f}%p | 회수율{_recovery:.0f}%")
+                # 시간 Ceiling — MFE peak 도달 시점 분포 (최적 청산 시점 근거)
+                _peak_secs = [t.get("inds", {}).get("mfe_peak_sec") for t in _ce_trs if t.get("inds", {}).get("mfe_peak_sec") is not None]
+                if len(_peak_secs) >= 30:
+                    _time_bk = [(0, 30, "0~30s"), (30, 60, "30~60s"), (60, 120, "60~120s"), (120, 180, "120~180s"), (180, 999, "180s+")]
+                    _time_parts = []
+                    for _tlo, _thi, _tlbl in _time_bk:
+                        _tcnt = sum(1 for s in _peak_secs if _tlo <= s < _thi)
+                        _tpct = _tcnt / len(_peak_secs) * 100
+                        _time_parts.append(f"{_tlbl}:{_tcnt}({_tpct:.0f}%)")
+                    lines.append(f"  시간Ceiling(MFE peak 시점 n={len(_peak_secs)}): {' | '.join(_time_parts)}")
 
             # EC30 shadow sim — "만약 30s에 잘랐다면?" 재생 (실청산 X, LIVE 100% 동일)
             # CLM trade_records의 저장된 pnl_curve["30"]/mfe_30s/dd_peak_30s로 시뮬레이션
