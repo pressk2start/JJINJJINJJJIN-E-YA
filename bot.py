@@ -2287,15 +2287,16 @@ def record_trade(market: str, pnl_pct: float, signal_type: str = "기본", entry
         else:
             _STRAT_LOSE_STREAK[_sg] = _STRAT_LOSE_STREAK.get(_sg, 0) + 1
             _sl = _STRAT_LOSE_STREAK[_sg]
-            if _sl >= 5:
+            # LOSE_GATE 완화 (사용자 요청): 3/4/5 → 5/7/10
+            if _sl >= 10:
                 _STRAT_SUSPEND_UNTIL[_sg] = time.time() + 1800
                 _STRAT_MAX_MODE[_sg] = "half"
                 print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → 30분 {_sg} 진입 금지")
-            elif _sl >= 4:
+            elif _sl >= 7:
                 _STRAT_SUSPEND_UNTIL[_sg] = time.time() + 600
                 _STRAT_MAX_MODE[_sg] = "half"
                 print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → 10분 {_sg} 진입 금지")
-            elif _sl >= 3:
+            elif _sl >= 5:
                 _STRAT_MAX_MODE[_sg] = "half"
                 print(f"[LOSE_GATE] [{_sg}] 연속 {_sl}패 → {_sg} half만 허용")
 
@@ -11314,8 +11315,8 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
         "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CLM_TR180_15_240", "mae_threshold": 0.35,
-        "max_seed_krw": 500_000,
-        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (LIVE 소액 500k 전환)",
+        "max_seed_krw": 3_000_000,
+        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (LIVE 300만 상한)",
     },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
