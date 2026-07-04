@@ -11241,7 +11241,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_A", "mae_threshold": 0.35,
         "ind_filters": [("ob_spread_pct", "<=", 0.15)],
-        "description": "CLM + 호가스프레드≤0.15% A군 execution필터 (adaptive trail)",
+        "description": "[DEPRECATED] CLM + 호가스프레드≤0.15% A군 execution필터 (adaptive trail)",
     },
     "과열감지_A2": {
         "check_fn": _v0_check_climax,
@@ -11249,7 +11249,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_A2", "mae_threshold": 0.35,
         "ind_filters": [("ob_spread_pct", "<=", 0.20)],
-        "description": "CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
+        "description": "[DEPRECATED] CLM + 호가스프레드≤0.20% execution필터 (adaptive trail)",
     },
     "과열감지_BODY60": {
         "check_fn": _v0_check_climax,
@@ -11257,7 +11257,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B60", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.60)],
-        "description": "CLM + body_pct≤0.60 상한 (check_fn 0.68 대비 추가 제거 효과 비교) (shadow)",
+        "description": "[DEPRECATED] CLM + body_pct≤0.60 상한 (OOS 검증 결과 알파 없음)",
     },
     # ── body_pct 임계값 민감도 테스트 (B60이 우연인지 구조적인지 검증) ──
     "과열감지_BODY50": {
@@ -11266,7 +11266,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B50", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.50)],
-        "description": "CLM + body_pct≤0.50 (B60 하한 — 임계값 민감도) (shadow)",
+        "description": "[DEPRECATED] CLM + body_pct≤0.50 (OOS 검증 결과 알파 없음)",
     },
     "과열감지_BODY55": {
         "check_fn": _v0_check_climax,
@@ -11274,7 +11274,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B55", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.55)],
-        "description": "CLM + body_pct≤0.55 (B60 중간 — 임계값 민감도) (shadow)",
+        "description": "[DEPRECATED] CLM + body_pct≤0.55 (OOS 검증 결과 알파 없음)",
     },
     "과열감지_BODY65": {
         "check_fn": _v0_check_climax,
@@ -11282,7 +11282,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B65", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.65)],
-        "description": "CLM + body_pct≤0.65 (B60 상한 — check_fn 0.68 바로 아래) (shadow)",
+        "description": "[DEPRECATED] CLM + body_pct≤0.65 (OOS 검증 결과 알파 없음)",
     },
     # ── live 청산 근사 (adaptive vs live exit 성과 분리용) ──
     "과열감지_LIVEEXIT": {
@@ -11290,7 +11290,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_CLM_LIVEEXIT,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_LE", "mae_threshold": 0.35,
-        "description": "CLM + live청산근사(flat SL+timeout, AT없음) — adaptive vs live 분리 (shadow)",
+        "description": "[DEPRECATED] CLM + live청산근사 — Trail 승격으로 무의미해짐",
     },
     "과열감지_B60_LIVEEXIT": {
         "check_fn": _v0_check_climax,
@@ -11298,7 +11298,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B60_LE", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.60)],
-        "description": "CLM_B60 + live청산근사 — B60 진입edge 확인용 (shadow)",
+        "description": "[DEPRECATED] CLM_B60 + live청산근사 — 상위 실험(B60/LiveExit) 모두 폐기",
     },
     # ── Profit Protect shadow (MFE 0.3~0.5% r/m -10% 구간 개선 실험) ──
     "과열감지_PP20": {
@@ -11306,21 +11306,21 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_CLM_PP20,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_PP20", "mae_threshold": 0.35,
-        "description": "CLM + AT + PP(MFE≥0.3% 후 20% retrace 청산) (shadow)",
+        "description": "[DEPRECATED] CLM + AT + PP20 retrace — Trail 승격으로 무의미해짐",
     },
     "과열감지_PP30": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_PP30,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_PP30", "mae_threshold": 0.35,
-        "description": "CLM + AT + PP(MFE≥0.3% 후 30% retrace 청산) (shadow)",
+        "description": "[DEPRECATED] CLM + AT + PP30 retrace — Trail 승격으로 무의미해짐",
     },
     "과열감지_PP40": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_PP40,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_PP40", "mae_threshold": 0.35,
-        "description": "CLM + AT + PP(MFE≥0.3% 후 40% retrace 청산) (shadow)",
+        "description": "[DEPRECATED] CLM + AT + PP40 retrace — Trail 승격으로 무의미해짐",
     },
     # ── EarlyCut shadow (51차 분류 분석 기반: 60s 시점 죽은 거래 조기 절단) ──
     "과열감지_EC_A": {
@@ -11328,7 +11328,7 @@ _STRATEGY_REGISTRY = {
         "exit_params": _V0_EXIT_PARAMS_CLM_EC_A,
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_EC_A", "mae_threshold": 0.35,
-        "description": "CLM + EarlyCut(mfe60<0.10% AND dd60>0.20% → 60s 강제청산) (shadow)",
+        "description": "[DEPRECATED] CLM + EarlyCut(60s 강제청산) — Trail 승격으로 무의미해짐",
     },
     # ── Trail Shadow Routes: 백테스트 결과 실전 재현성 검증 ──
     "과열감지_TRAIL180_15_240": {
@@ -11369,7 +11369,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_B60_PP30", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.60)],
-        "description": "CLM_B60 + PP30 — 최강 진입(B60) × 최강 청산(PP30) 교차 검증 (shadow)",
+        "description": "[DEPRECATED] CLM_B60 + PP30 — 상위 실험 모두 폐기",
     },
     # 기각 routes 제거 (39차 토너먼트 결과):
     # CLM_CS/CLM_BC: check_fn 중복
@@ -11382,7 +11382,7 @@ _STRATEGY_REGISTRY = {
         "priority": 10, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_OBSLIP", "mae_threshold": 0.35,
         "ind_filters": [("ob_slip_sell_10000k", "<=", 0.15)],
-        "description": "CLM + ob_slip_sell≤0.15% (A率 lo68/hi57 gap11pp, 실행비용) (shadow)",
+        "description": "[DEPRECATED] CLM + ob_slip_sell≤0.15% — Trail 승격으로 무의미해짐",
     },
     # DRY 폐기: n=1040, cap=-41%, PnL=-0.07%, MFE=+0.17%(최저). 연구종료
     # MZC 폐기: n=779, cap=-40%, PnL=-0.08%. 연구종료
