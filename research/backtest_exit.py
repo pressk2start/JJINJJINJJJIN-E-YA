@@ -200,14 +200,31 @@ def run_backtest(events_df, rules, fee=0.001):
         pnls = events_df.apply(fn, axis=1).values.astype(float)
         pnls = pnls - fee_pct  # 수수료 차감
         n = len(pnls)
+        avg = float(np.mean(pnls))
+        # Sortino: 하방편차만 반영 (avg / std(negative returns))
+        neg = pnls[pnls < 0]
+        downside_std = float(np.std(neg)) if len(neg) > 0 else 1e-9
+        sortino = avg / (downside_std + 1e-9)
+        # Profit Factor: (총 이익) / (총 손실)
+        pos_sum = float(pnls[pnls > 0].sum())
+        neg_sum = float(-pnls[pnls < 0].sum())
+        pf = pos_sum / (neg_sum + 1e-9)
+        # Expectancy: wr × avg_win + (1-wr) × avg_loss
+        wr = float((pnls > 0).mean())
+        avg_win = float(pnls[pnls > 0].mean()) if (pnls > 0).any() else 0
+        avg_loss = float(pnls[pnls <= 0].mean()) if (pnls <= 0).any() else 0
+        expectancy = wr * avg_win + (1 - wr) * avg_loss
         results.append({
             "rule": name,
             "n": n,
-            "avg_pnl": float(np.mean(pnls)),
+            "avg_pnl": avg,
             "median": float(np.median(pnls)),
-            "winrate": float((pnls > 0).mean() * 100),
+            "winrate": wr * 100,
             "std": float(np.std(pnls)),
-            "sharpe_like": float(np.mean(pnls) / (np.std(pnls) + 1e-9)),
+            "sharpe_like": avg / (float(np.std(pnls)) + 1e-9),
+            "sortino": sortino,
+            "profit_factor": pf,
+            "expectancy": expectancy,
             "total_pnl": float(np.sum(pnls)),
             "max_dd": float(np.min(np.cumsum(pnls))),
             "p25": float(np.percentile(pnls, 25)),
@@ -260,15 +277,26 @@ def format_report(results_df, top_n=10):
     # 상위 N개 (avg_pnl 기준)
     top = results_df.sort_values("avg_pnl", ascending=False).head(top_n)
     lines.append(f"\n[상위 {top_n} 규칙 — avg_pnl 순]")
-    lines.append(f"{'Rule':<38} {'n':>4} {'avg':>7} {'med':>7} {'wr%':>5} {'sharpe':>7} {'total':>8}")
-    lines.append("-" * 90)
+    lines.append(f"{'Rule':<38} {'n':>4} {'avg':>7} {'wr%':>5} {'sharpe':>7} {'sortino':>7} {'PF':>5} {'MDD':>7}")
+    lines.append("-" * 100)
     for _, r in top.iterrows():
         lines.append(
             f"{r['rule']:<38} {r['n']:>4.0f} "
-            f"{r['avg_pnl']:>+7.3f} {r['median']:>+7.3f} "
-            f"{r['winrate']:>5.1f} {r['sharpe_like']:>+7.3f} "
-            f"{r['total_pnl']:>+8.2f}"
+            f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+            f"{r['sharpe_like']:>+7.3f} {r['sortino']:>+7.3f} "
+            f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f}"
         )
+
+    # Sortino/PF 관점 상위 5 (avg 아니라)
+    lines.append(f"\n[상위 5 — Sortino 순 (하방편차만 반영)]")
+    top_sort = results_df.sort_values("sortino", ascending=False).head(5)
+    for _, r in top_sort.iterrows():
+        lines.append(f"  {r['rule']:<38} avg={r['avg_pnl']:>+.3f}  sortino={r['sortino']:>+.3f}  PF={r['profit_factor']:.2f}")
+
+    lines.append(f"\n[상위 5 — Profit Factor 순]")
+    top_pf = results_df.sort_values("profit_factor", ascending=False).head(5)
+    for _, r in top_pf.iterrows():
+        lines.append(f"  {r['rule']:<38} avg={r['avg_pnl']:>+.3f}  PF={r['profit_factor']:>5.2f}  MDD={r['max_dd']:>+.2f}")
 
     # Baseline 비교
     baseline = results_df[results_df["rule"] == "Baseline_300s"]
