@@ -99,6 +99,29 @@ def simulate_target_stop(row, target_pct, stop_pct, hold_sec):
     return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
 
 
+def simulate_trailing(row, arm_sec, trail_pct, hold_sec):
+    """arm_sec 이후 trailing — 고점 대비 trail_pct% 하락 시 청산.
+    각 시점의 mfe/pnl로 근사 (고점 = 그 시점까지의 max mfe).
+    """
+    peak_mfe = 0.0
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe = _get(row, f"mfe_{sec}", 0)
+        pnl = _get(row, f"pnl_{sec}", 0)
+        if mfe is not None and mfe > peak_mfe:
+            peak_mfe = mfe
+        # arm 이후에만 trail 체크
+        if sec >= arm_sec and peak_mfe > 0:
+            # 고점 대비 하락폭 = peak - 현재 pnl
+            if pnl is not None:
+                dd_from_peak = peak_mfe - pnl
+                if dd_from_peak >= peak_mfe * trail_pct:
+                    # trail 발동 — peak_mfe × (1 - trail_pct)로 청산
+                    return peak_mfe * (1 - trail_pct) * 0.95  # 슬리피지 5%
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
 def simulate_ec_then_hold(row, ec_sec, ec_mfe_thr, hold_sec, target_pct=None, stop_pct=None):
     """EC 조합: 초기 컷 후 남은 거래는 target/stop 병행"""
     # 1) Early Cut
@@ -157,6 +180,13 @@ def build_rules():
             name,
             lambda r, m=mfe_thr, t=tgt, s=stop, h=hold: simulate_ec_then_hold(r, 60, m, h, t, s),
         ))
+
+    # 7. Trailing — arm 후 고점 대비 X% 하락 시 청산
+    for arm, trail, hold in product([60, 120, 180], [0.15, 0.20, 0.30, 0.40], [180, 240, 300]):
+        if arm >= hold:
+            continue
+        name = f"Trail_arm{arm}_pct{int(trail*100)}_hold{hold}"
+        rules.append((name, lambda r, a=arm, t=trail, h=hold: simulate_trailing(r, a, t, h)))
 
     return rules
 
