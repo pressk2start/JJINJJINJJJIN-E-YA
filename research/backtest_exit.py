@@ -233,6 +233,211 @@ def run_backtest(events_df, rules, fee=0.001):
     return pd.DataFrame(results)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# Entry Filter Grid — CLM 진입 시점 지표별 필터
+# ══════════════════════════════════════════════════════════════════════
+
+def build_entry_filters():
+    """
+    1차원 slice — CLM 시그널의 각 지표를 개별적으로 좁혀 top exit 변화 관찰.
+    filter_fn: events DataFrame → 필터된 subset
+    (None = BASELINE, 필터 없음)
+    """
+    filters = [
+        ("BASELINE", None),
+        # ── vr5 (거래량 폭발 강도) 상향 ──
+        ("vr5_ge_2.5", lambda e: e[e["vr5"] >= 2.5]),
+        ("vr5_ge_3.0", lambda e: e[e["vr5"] >= 3.0]),
+        ("vr5_ge_4.0", lambda e: e[e["vr5"] >= 4.0]),
+        ("vr5_ge_5.0", lambda e: e[e["vr5"] >= 5.0]),
+        # ── wick_ratio (윗꼬리 비중) 상향 ──
+        ("wick_ge_0.35", lambda e: e[e["wick_ratio"] >= 0.35]),
+        ("wick_ge_0.40", lambda e: e[e["wick_ratio"] >= 0.40]),
+        ("wick_ge_0.50", lambda e: e[e["wick_ratio"] >= 0.50]),
+        # ── body_pct (몸통 크기) 상한 ──
+        ("body_le_0.60", lambda e: e[e["body_pct"] <= 0.60]),
+        ("body_le_0.55", lambda e: e[e["body_pct"] <= 0.55]),
+        ("body_le_0.50", lambda e: e[e["body_pct"] <= 0.50]),
+        ("body_le_0.45", lambda e: e[e["body_pct"] <= 0.45]),
+        # ── close_strength (종가 위치) 상한 ──
+        ("cs_le_0.40", lambda e: e[e["close_strength"] <= 0.40]),
+        ("cs_le_0.30", lambda e: e[e["close_strength"] <= 0.30]),
+        ("cs_le_0.20", lambda e: e[e["close_strength"] <= 0.20]),
+    ]
+    return filters
+
+
+def run_entry_grid(events, exit_rules, entry_filters, fee=0.001, min_n=30):
+    """각 entry filter에 대해 exit rule 전량 백테스트.
+    Returns: dict {filter_name: (n, results_df)}"""
+    grid = {}
+    for fname, ffn in entry_filters:
+        filtered = events if ffn is None else ffn(events)
+        n = len(filtered)
+        if n < min_n:
+            print(f"  [{fname}] n={n} < {min_n}, skip")
+            continue
+        results = run_backtest(filtered, exit_rules, fee=fee)
+        top = results.sort_values("avg_pnl", ascending=False).iloc[0]
+        print(f"  [{fname:<15}] n={n:>4}  best: {top['rule']:<35} avg={top['avg_pnl']:>+.3f}%  PF={top['profit_factor']:.2f}")
+        grid[fname] = (n, results)
+    return grid
+
+
+def format_entry_grid_report(grid, top_exit_per_filter=3):
+    """Filter × top-N exit 리포트"""
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Entry Filter Grid — {len(grid)}개 필터, 필터당 top-{top_exit_per_filter} exit")
+    lines.append("=" * 105)
+
+    baseline_top = None
+    if "BASELINE" in grid:
+        _, br = grid["BASELINE"]
+        baseline_top = br.sort_values("avg_pnl", ascending=False).iloc[0]
+
+    lines.append(f"\n{'Filter':<16} {'n':>4} {'BestExit':<36} {'avg':>+7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>+7}")
+    lines.append("-" * 105)
+
+    filter_scores = []  # for later ranking
+    for fname, (n, results) in grid.items():
+        top = results.sort_values("avg_pnl", ascending=False).head(top_exit_per_filter)
+        for i, (_, r) in enumerate(top.iterrows()):
+            delta = (r['avg_pnl'] - baseline_top['avg_pnl']) if baseline_top is not None and fname != "BASELINE" else 0
+            row_prefix = f"{fname:<16} {n:>4}" if i == 0 else f"{'':<16} {'':>4}"
+            lines.append(
+                f"{row_prefix} {r['rule']:<36} "
+                f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+                f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f} "
+                f"{delta:>+7.3f}"
+            )
+            if i == 0:
+                filter_scores.append({
+                    "filter": fname, "n": n,
+                    "best_exit": r['rule'], "avg_pnl": r['avg_pnl'],
+                    "winrate": r['winrate'], "pf": r['profit_factor'],
+                    "delta_base": delta,
+                })
+
+    # 개선폭 정렬 요약
+    lines.append(f"\n[개선폭 상위 (Baseline 대비 avg_pnl 증가)]")
+    ranked = sorted(filter_scores, key=lambda x: -x['delta_base'])
+    for r in ranked[:8]:
+        if r['filter'] == "BASELINE":
+            continue
+        marker = ""
+        if r['delta_base'] >= 0.10:
+            marker = " ✅ 판정통과 (+0.10%p)"
+        elif r['delta_base'] > 0:
+            marker = " ⚠ 미달"
+        else:
+            marker = " ❌ 악화"
+        lines.append(
+            f"  {r['filter']:<16} n={r['n']:>4}  avg={r['avg_pnl']:>+.3f}%  "
+            f"Δ={r['delta_base']:>+.3f}%p  exit={r['best_exit']}{marker}"
+        )
+
+    lines.append("=" * 105)
+    return "\n".join(lines), filter_scores
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Cross Grid — Top-N entry × Top-N exit
+# ══════════════════════════════════════════════════════════════════════
+
+def _rules_by_name(exit_rules):
+    return {name: fn for name, fn in exit_rules}
+
+
+def run_cross_grid(events, entry_filters, exit_rules, filter_scores,
+                   baseline_results, top_n_entry=5, top_n_exit=5,
+                   fee=0.001, min_n=30):
+    """
+    Top-N entry × Top-N exit cross grid.
+    - Top-N entry: filter_scores에서 avg_pnl 상위 (BASELINE 제외)
+    - Top-N exit: baseline entry의 avg_pnl 상위 exit 규칙
+    """
+    # 1) Top-N entry (BASELINE 제외, avg_pnl 순)
+    non_base = [f for f in filter_scores if f['filter'] != "BASELINE"]
+    top_entries = sorted(non_base, key=lambda x: -x['avg_pnl'])[:top_n_entry]
+    entry_fn_by_name = {name: fn for name, fn in entry_filters}
+
+    # 2) Top-N exit (baseline entry 기준)
+    top_exit_rows = baseline_results.sort_values("avg_pnl", ascending=False).head(top_n_exit)
+    exit_fn_by_name = _rules_by_name(exit_rules)
+
+    # 3) Cross grid
+    fee_pct = fee * 100 * 2
+    cross = []
+    for e in top_entries:
+        filtered = entry_fn_by_name[e['filter']](events)
+        for _, xr in top_exit_rows.iterrows():
+            exit_name = xr['rule']
+            exit_fn = exit_fn_by_name[exit_name]
+            pnls = filtered.apply(exit_fn, axis=1).values.astype(float) - fee_pct
+            n = len(pnls)
+            if n < min_n:
+                cross.append({"entry": e['filter'], "exit": exit_name, "n": n, "skip": True})
+                continue
+            pos = pnls[pnls > 0]; neg = pnls[pnls < 0]
+            avg = float(np.mean(pnls))
+            wr = float((pnls > 0).mean() * 100)
+            pf = float(pos.sum()) / (float(-neg.sum()) + 1e-9) if len(neg) else float("inf")
+            mdd = float(np.min(np.cumsum(pnls)))
+            cross.append({
+                "entry": e['filter'], "exit": exit_name, "n": n,
+                "avg_pnl": avg, "winrate": wr, "profit_factor": pf, "max_dd": mdd,
+                "skip": False,
+            })
+    return pd.DataFrame(cross), top_entries, top_exit_rows
+
+
+def format_cross_grid_report(cross_df, top_entries, top_exit_rows, baseline_avg):
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Cross Grid — top-{len(top_entries)} entry × top-{len(top_exit_rows)} exit")
+    lines.append("=" * 105)
+    lines.append(f"\n{'Entry':<16} {'Exit':<36} {'n':>4} {'avg':>+7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>+7}")
+    lines.append("-" * 105)
+    ranked = cross_df[~cross_df.get("skip", False)].sort_values("avg_pnl", ascending=False)
+    for _, r in ranked.iterrows():
+        delta = r['avg_pnl'] - baseline_avg
+        marker = " ✅" if delta >= 0.10 else ""
+        lines.append(
+            f"{r['entry']:<16} {r['exit']:<36} {r['n']:>4.0f} "
+            f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+            f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f} "
+            f"{delta:>+7.3f}{marker}"
+        )
+    lines.append("=" * 105)
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 판정 기준 5개 (사용자 지정)
+# ══════════════════════════════════════════════════════════════════════
+
+def apply_judgment(cross_df, baseline_avg, min_n=100, wr_thr=45.0, pf_thr=1.2, delta_thr=0.10):
+    """5개 판정 기준 적용:
+      1) baseline 대비 +delta_thr%p 이상
+      2) n >= min_n
+      3) WR >= wr_thr% OR PF >= pf_thr
+      4) MDD 유한값
+    (5는 stage 교차검증, 이 함수 밖)
+    Returns: passing rows.
+    """
+    if cross_df.empty:
+        return cross_df
+    df = cross_df[~cross_df.get("skip", False)].copy()
+    df["delta_base"] = df["avg_pnl"] - baseline_avg
+    passed = df[
+        (df["delta_base"] >= delta_thr)
+        & (df["n"] >= min_n)
+        & ((df["winrate"] >= wr_thr) | (df["profit_factor"] >= pf_thr))
+    ].copy()
+    return passed.sort_values("avg_pnl", ascending=False)
+
+
 def load_events(filepath):
     """이벤트 데이터 로드 (parquet or json)"""
     if filepath.endswith(".parquet"):
@@ -324,6 +529,14 @@ def main():
     parser.add_argument("--fee", type=float, default=0.001, help="수수료 (편도, 왕복 x2)")
     parser.add_argument("--output", default=None, help="결과 CSV 저장")
     parser.add_argument("--no-tg", action="store_true", help="텔레그램 스킵")
+    parser.add_argument("--entry-grid", action="store_true",
+                       help="Entry filter grid + cross grid 실행 (Phase 1/2)")
+    parser.add_argument("--min-n", type=int, default=30,
+                       help="Entry filter 후 최소 표본 수 (기본 30)")
+    parser.add_argument("--top-entry", type=int, default=5,
+                       help="Cross grid용 top-N entry")
+    parser.add_argument("--top-exit", type=int, default=5,
+                       help="Cross grid용 top-N exit")
     args = parser.parse_args()
 
     global tg_send
@@ -356,9 +569,71 @@ def main():
         results.to_csv(args.output, index=False)
         print(f"\n저장: {args.output}")
 
+    baseline_avg = float(results[results["rule"] == "Baseline_300s"]["avg_pnl"].iloc[0])
+
+    # ── Phase 1/2: Entry Filter Grid + Cross Grid ──
+    entry_report = None
+    cross_report = None
+    judged = None
+    if args.entry_grid:
+        # Entry Filter Grid
+        needed_cols = ["vr5", "wick_ratio", "body_pct", "close_strength"]
+        missing = [c for c in needed_cols if c not in events.columns]
+        if missing:
+            print(f"\n❌ Entry Grid 컬럼 부족: {missing}")
+        else:
+            print(f"\n{'='*105}")
+            print(f"[Phase 1] Entry Filter Grid 실행")
+            print(f"{'='*105}")
+            entry_filters = build_entry_filters()
+            grid = run_entry_grid(events, rules, entry_filters,
+                                  fee=args.fee, min_n=args.min_n)
+            entry_report, filter_scores = format_entry_grid_report(grid)
+            print(f"\n{entry_report}")
+
+            # ── Phase 2: Cross Grid ──
+            print(f"\n{'='*105}")
+            print(f"[Phase 2] Cross Grid (top-{args.top_entry} entry × top-{args.top_exit} exit)")
+            print(f"{'='*105}")
+            cross_df, top_entries, top_exit_rows = run_cross_grid(
+                events, entry_filters, rules, filter_scores,
+                baseline_results=results,
+                top_n_entry=args.top_entry, top_n_exit=args.top_exit,
+                fee=args.fee, min_n=args.min_n,
+            )
+            cross_report = format_cross_grid_report(cross_df, top_entries, top_exit_rows, baseline_avg)
+            print(f"\n{cross_report}")
+
+            # ── 판정 기준 5개 (n≥100은 표본에 따라 조정 가능) ──
+            print(f"\n{'='*105}")
+            print(f"[판정 기준] baseline({baseline_avg:+.3f}%) 대비 +0.10%p, n≥100, WR≥45% or PF≥1.2")
+            print(f"{'='*105}")
+            judged = apply_judgment(cross_df, baseline_avg,
+                                    min_n=100, wr_thr=45.0, pf_thr=1.2, delta_thr=0.10)
+            if judged.empty:
+                print("❌ 판정 통과 조합 없음. (표본 부족 또는 개선폭 부족)")
+                print("   → top30/90d 후에 top50/180d로 확장 필요할 수 있음.")
+            else:
+                print(f"✅ 판정 통과 {len(judged)}개 조합:")
+                for _, r in judged.iterrows():
+                    print(f"  {r['entry']:<16} × {r['exit']:<36} "
+                          f"n={r['n']:>4.0f} avg={r['avg_pnl']:>+.3f}%  "
+                          f"WR={r['winrate']:>5.1f}%  PF={r['profit_factor']:>4.2f}  "
+                          f"Δbase={r['delta_base']:>+.3f}%p")
+
     if tg_send:
         route_str = args.route or "ALL"
         tg_send(f"🎯 Exit Backtest: {route_str} (n={len(events)})", report)
+        if entry_report:
+            tg_send(f"🔍 Entry Filter Grid (n={len(events)})", entry_report)
+        if cross_report:
+            tg_send(f"⚡ Cross Grid (top-{args.top_entry}×{args.top_exit})", cross_report)
+        if judged is not None and not judged.empty:
+            j_body = "\n".join([
+                f"{r['entry']} × {r['exit']}: avg={r['avg_pnl']:+.3f}% Δ={r['delta_base']:+.3f}%p n={r['n']:.0f} WR={r['winrate']:.1f}% PF={r['profit_factor']:.2f}"
+                for _, r in judged.iterrows()
+            ])
+            tg_send(f"✅ 판정 통과 {len(judged)}개", j_body)
 
 
 if __name__ == "__main__":
