@@ -296,7 +296,7 @@ def format_entry_grid_report(grid, top_exit_per_filter=3):
         _, br = grid["BASELINE"]
         baseline_top = br.sort_values("avg_pnl", ascending=False).iloc[0]
 
-    lines.append(f"\n{'Filter':<16} {'n':>4} {'BestExit':<36} {'avg':>+7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>+7}")
+    lines.append(f"\n{'Filter':<16} {'n':>4} {'BestExit':<36} {'avg':>7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>7}")
     lines.append("-" * 105)
 
     filter_scores = []  # for later ranking
@@ -397,7 +397,7 @@ def format_cross_grid_report(cross_df, top_entries, top_exit_rows, baseline_avg)
     lines.append("=" * 105)
     lines.append(f"  Cross Grid — top-{len(top_entries)} entry × top-{len(top_exit_rows)} exit")
     lines.append("=" * 105)
-    lines.append(f"\n{'Entry':<16} {'Exit':<36} {'n':>4} {'avg':>+7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>+7}")
+    lines.append(f"\n{'Entry':<16} {'Exit':<36} {'n':>4} {'avg':>7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>7}")
     lines.append("-" * 105)
     ranked = cross_df[~cross_df.get("skip", False)].sort_values("avg_pnl", ascending=False)
     for _, r in ranked.iterrows():
