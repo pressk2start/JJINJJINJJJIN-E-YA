@@ -11208,10 +11208,10 @@ _STRATEGY_REGISTRY = {
     "과열감지": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_ADAPTIVE,
-        "priority": 8, "enabled": True,
+        "priority": 8, "enabled": False,
         "pipeline_key": "climax", "route": "CLM", "mae_threshold": 0.35,
         "max_seed_krw": 500_000,
-        "description": "장대양봉+윗꼬리+VR과열 → adaptive trail (ob_slip기반 exit) (micro-LIVE: execution연구)",
+        "description": "장대양봉+윗꼬리+VR과열 → adaptive trail (Trail180_15_240 LIVE 전환으로 disable, 롤백용 유지)",
     },
     "과열감지_A": {
         "check_fn": _v0_check_climax,
@@ -11312,9 +11312,10 @@ _STRATEGY_REGISTRY = {
     "과열감지_TRAIL180_15_240": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
-        "priority": 10, "enabled": False,
+        "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CLM_TR180_15_240", "mae_threshold": 0.35,
-        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (shadow)",
+        "max_seed_krw": 500_000,
+        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (LIVE 소액 500k 전환)",
     },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
