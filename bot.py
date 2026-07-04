@@ -9630,6 +9630,33 @@ _V0_EXIT_PARAMS_CLM_EC_A = {
     "early_cut_60s": {"mode": "A", "mfe_thr": 0.001, "dd_thr": 0.002},
 }
 
+# ── Trail Shadow Routes (Stage1/2 backtest 결과 기반: arm180+pct15) ──
+# 목적: Stage1(+0.19%), Stage2(+0.22%) 백테스트 결과의 실전 재현성 검증
+# adaptive_trail 재사용: feature는 사용 안 함, 단일 tier로 arm/pct/hold 정의
+def _make_clm_trail(arm_sec, trail_pct, hold_sec):
+    return {
+        "strategy": "TRAIL",
+        "sl_pct": 0.020,
+        "activation_pct": 1.0,
+        "trail_pct": 0.005,  # 미사용 (adaptive_trail 사용)
+        "hold_bars": 0,
+        "max_bars": int(hold_sec / 3) + 1,  # RECHECK_SEC=3 가정
+        "disable_trail": True,
+        "sl_tiers": [(60, 0.025), (120, 0.015), (9999, 0.010)],
+        "adaptive_trail": {
+            "feature": "ob_slip_sell_10000k",  # 미사용
+            "arm_after_sec": arm_sec,
+            "tiers": [(9.99, trail_pct, hold_sec)],  # 단일 tier
+            "relax_after_sec": 9999,
+            "relax_mult": 1.0,
+        },
+    }
+
+# 백테스트 상위 규칙 그대로 shadow 검증
+_V0_EXIT_PARAMS_CLM_TRAIL180_15_240 = _make_clm_trail(180, 0.15, 240)  # Stage1 1위
+_V0_EXIT_PARAMS_CLM_TRAIL180_15_300 = _make_clm_trail(180, 0.15, 300)  # Stage2 1위
+_V0_EXIT_PARAMS_CLM_TRAIL120_15_180 = _make_clm_trail(120, 0.15, 180)  # bot300 1위 (대조군)
+
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
@@ -11281,6 +11308,28 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_EC_A", "mae_threshold": 0.35,
         "description": "CLM + EarlyCut(mfe60<0.10% AND dd60>0.20% → 60s 강제청산) (shadow)",
     },
+    # ── Trail Shadow Routes: 백테스트 결과 실전 재현성 검증 ──
+    "과열감지_TRAIL180_15_240": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_TR180_15_240", "mae_threshold": 0.35,
+        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (shadow)",
+    },
+    "과열감지_TRAIL180_15_300": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_300,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_TR180_15_300", "mae_threshold": 0.35,
+        "description": "CLM + Trail(arm180,pct15,hold300) — Stage2 백테스트 1위 (shadow)",
+    },
+    "과열감지_TRAIL120_15_180": {
+        "check_fn": _v0_check_climax,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL120_15_180,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CLM_TR120_15_180", "mae_threshold": 0.35,
+        "description": "CLM + Trail(arm120,pct15,hold180) — bot300 백테스트 1위 대조군 (shadow)",
+    },
     # ── B60 + PP30 교차 실험 (최강 진입 × 최강 청산) ──
     "과열감지_B60_PP30": {
         "check_fn": _v0_check_climax,
@@ -12519,9 +12568,10 @@ def _shadow_evaluate_positions():
                 if sk not in vp.get("pnl_curve", {}) and hold_sec_now >= snap_s:
                     vp.setdefault("pnl_curve", {})[sk] = round(
                         (cur_price - vp["entry_price"]) / vp["entry_price"], 6)
-            # t=30s/60s 상태 스냅샷 (MFE, 고점대비 하락폭)
+            # t=30s/60s/120s/180s/240s 상태 스냅샷 (MFE, 고점대비 하락폭)
+            # Trail backtest 정확도 위해 120/180/240s 추가 (arm 시점 판별용)
             _ep = vp["entry_price"]
-            for _ss in (30, 60):
+            for _ss in (30, 60, 120, 180, 240):
                 _mk = f"mfe_{_ss}s"
                 if _mk not in vp and hold_sec_now >= _ss and _ep > 0:
                     vp[_mk] = round((vp["best_price"] - _ep) / _ep, 6)
