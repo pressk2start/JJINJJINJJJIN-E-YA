@@ -10637,6 +10637,27 @@ def _v0_check_climax(c1, c5, c15, c30, c60, gate_info=None):
     }
 
 
+def _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=None):
+    """
+    CLM + close_strength ≤ 0.40 강화 (백테스트/OOS 검증 반영)
+
+    근거:
+    - n=526 서버 백테스트: cs 단독으로 avg +0.594% (Baseline +0.286% 대비 +0.308%p)
+    - OOS: train +0.534% → test +0.655% (오히려 개선, 재현 확실)
+    - PF 4.21 (Baseline 2.32 대비 강한 개선)
+
+    기존 _v0_check_climax의 cs≤0.50 필터를 cs≤0.40으로 좁힘.
+    """
+    sig = _v0_check_climax(c1, c5, c15, c30, c60, gate_info=gate_info)
+    if not sig:
+        return None
+    cs = sig.get("indicators", {}).get("close_strength", 1.0)
+    if cs > 0.40:
+        _pipeline_inc("climax_cs40_fail", value=round(cs, 2), threshold=0.40, direction="lte")
+        return None
+    return sig
+
+
 # === v20 신규 시나리오 check_fn (5개) ===
 
 def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
@@ -11313,10 +11334,19 @@ _STRATEGY_REGISTRY = {
     "과열감지_TRAIL180_15_240": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
-        "priority": 8, "enabled": True,
+        "priority": 8, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_TR180_15_240", "mae_threshold": 0.35,
         "max_seed_krw": 3_000_000,
-        "description": "CLM + Trail(arm180,pct15,hold240) — Stage1 백테스트 1위 (LIVE 300만 상한)",
+        "description": "CLM + Trail(arm180,pct15,hold240) — CS40 승격으로 disable (롤백용 유지)",
+    },
+    # ── LIVE: cs≤0.40 필터 승격 (n=526 OOS 검증: train+0.534→test+0.655) ──
+    "과열감지_CS40_TRAIL180_15_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
+        "priority": 8, "enabled": True,
+        "pipeline_key": "climax", "route": "CLM_CS40_TR180_15_240", "mae_threshold": 0.35,
+        "max_seed_krw": 3_000_000,
+        "description": "CLM + cs≤0.40 + Trail(arm180,pct15,hold240) — LIVE 승격 (백테스트 avg+0.594%, PF 4.21, OOS test+0.655%)",
     },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
