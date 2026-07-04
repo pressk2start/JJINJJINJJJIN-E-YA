@@ -755,8 +755,28 @@ def main():
                 "exit_name": best_exit_baseline,
             })
 
+            # 사용자 지적 반영: combo filter들도 OOS에 포함
+            # cs+body, cs+vr5 등 조합 필터가 test에서도 유지되는지 확인
+            best_exit_240 = "Trail_arm180_pct15_hold240"  # Combo Grid에서 승자
+            _combo_pool = [
+                ("cs_le_0.40+body_le_0.45", best_exit_240),
+                ("cs_le_0.40+body_le_0.50", best_exit_240),
+                ("cs_le_0.40+vr5_ge_3.0", best_exit_240),
+                ("cs_le_0.40+vr5_ge_4.0", best_exit_240),
+                ("cs_le_0.40+body_le_0.45+vr5_ge_3.0", best_exit_240),
+            ]
+            for _ename, _xname in _combo_pool:
+                oos_targets.insert(2, {
+                    "combo_key": f"{_ename} × {_xname}",
+                    "entry_name": _ename,
+                    "exit_name": _xname,
+                })
+
             rules_by_name = {n: fn for n, fn in rules}
+            # 1차원 + 조합 필터 모두 pool에 등록
             entry_fn_by_name = {n: fn for n, fn in build_entry_filters()}
+            for _cn, _cf in build_combo_filters():
+                entry_fn_by_name[_cn] = _cf
             fee_pct = args.fee * 100 * 2
 
             def _eval(df, target):
