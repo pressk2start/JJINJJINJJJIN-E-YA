@@ -267,6 +267,83 @@ def build_entry_filters():
     return filters
 
 
+def build_combo_filters():
+    """
+    2~3차원 combo — cs_le_0.40을 기준으로 다른 필터와 조합.
+    사용자 요청 (concern #4): cs 단독 효과 vs cs+X 효과 분리 검증.
+
+    cs≤0.40이 진짜 알파의 원천인지, 아니면 다른 지표가 겹쳐서 나오는지 확인.
+    """
+    # 기본 dim (2개 임계값씩)
+    cs = [("cs_le_0.40", lambda e: e[e["close_strength"] <= 0.40])]
+    vr = [("vr5_ge_3.0", lambda e: e[e["vr5"] >= 3.0]),
+          ("vr5_ge_4.0", lambda e: e[e["vr5"] >= 4.0])]
+    bd = [("body_le_0.50", lambda e: e[e["body_pct"] <= 0.50]),
+          ("body_le_0.45", lambda e: e[e["body_pct"] <= 0.45])]
+    wk = [("wick_ge_0.40", lambda e: e[e["wick_ratio"] >= 0.40]),
+          ("wick_ge_0.50", lambda e: e[e["wick_ratio"] >= 0.50])]
+
+    combos = [("BASELINE", None)]
+    # cs 단독 (비교 기준)
+    for cn, cf in cs:
+        combos.append((cn, cf))
+    # cs × X (2-way)
+    for cn, cf in cs:
+        for grp in [vr, bd, wk]:
+            for on, of in grp:
+                name = f"{cn}+{on}"
+                combos.append((name, lambda e, f1=cf, f2=of: f2(f1(e))))
+    # cs × body × vr (3-way, 대표 조합만)
+    for cn, cf in cs:
+        for bn, bf in bd:
+            for vn, vf in vr:
+                name = f"{cn}+{bn}+{vn}"
+                combos.append((name, lambda e, f1=cf, f2=bf, f3=vf: f3(f2(f1(e)))))
+    return combos
+
+
+def run_oos_split(events, ratio=0.6):
+    """
+    time-based train/test split.
+    Returns: (train_df, test_df, split_date)
+    """
+    if "entry_time" not in events.columns:
+        raise ValueError("entry_time 컬럼 필요 (OOS split)")
+    df = events.sort_values("entry_time").reset_index(drop=True)
+    idx = int(len(df) * ratio)
+    if idx <= 0 or idx >= len(df):
+        raise ValueError(f"split ratio {ratio} → idx {idx}가 유효 범위 밖")
+    train = df.iloc[:idx].reset_index(drop=True)
+    test = df.iloc[idx:].reset_index(drop=True)
+    split_date = str(df["entry_time"].iloc[idx])[:10]
+    return train, test, split_date
+
+
+def format_oos_report(train_results, test_results, split_date, judged_rules):
+    """
+    OOS 리포트: judged 통과 조합을 train/test 각각에서 재평가.
+    train에서만 좋고 test에서 나쁘면 overfitting.
+    """
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Out-of-Sample 검증 (train:test = 60:40, split_date={split_date})")
+    lines.append("=" * 105)
+    lines.append(f"\n{'Entry × Exit':<55} {'trainAvg':>9} {'testAvg':>9} {'Δ':>7} {'재현':>5}")
+    lines.append("-" * 105)
+    for r in judged_rules:
+        train_avg = train_results.get(r['combo_key'], {}).get('avg_pnl')
+        test_avg = test_results.get(r['combo_key'], {}).get('avg_pnl')
+        if train_avg is None or test_avg is None:
+            continue
+        delta = test_avg - train_avg
+        # 재현 판정: test avg > 0 && train과 부호 일치 && |delta|<0.30%p
+        replicate = (test_avg > 0) and (train_avg > 0) and (abs(delta) < 0.30)
+        mark = "✅" if replicate else "❌"
+        lines.append(f"{r['combo_key']:<55} {train_avg:>+9.3f} {test_avg:>+9.3f} {delta:>+7.3f} {mark:>5}")
+    lines.append("=" * 105)
+    return "\n".join(lines)
+
+
 def run_entry_grid(events, exit_rules, entry_filters, fee=0.001, min_n=30):
     """각 entry filter에 대해 exit rule 전량 백테스트.
     Returns: dict {filter_name: (n, results_df)}"""
@@ -531,6 +608,12 @@ def main():
     parser.add_argument("--no-tg", action="store_true", help="텔레그램 스킵")
     parser.add_argument("--entry-grid", action="store_true",
                        help="Entry filter grid + cross grid 실행 (Phase 1/2)")
+    parser.add_argument("--combo-grid", action="store_true",
+                       help="Entry combo grid (cs × X 조합) — Phase 1.5")
+    parser.add_argument("--oos", action="store_true",
+                       help="Out-of-sample 검증 (time-based train/test split 60:40)")
+    parser.add_argument("--oos-ratio", type=float, default=0.6,
+                       help="OOS train 비율 (기본 0.6, test 0.4)")
     parser.add_argument("--min-n", type=int, default=30,
                        help="Entry filter 후 최소 표본 수 (기본 30)")
     parser.add_argument("--top-entry", type=int, default=5,
@@ -621,6 +704,95 @@ def main():
                           f"WR={r['winrate']:>5.1f}%  PF={r['profit_factor']:>4.2f}  "
                           f"Δbase={r['delta_base']:>+.3f}%p")
 
+    # ── Phase 1.5: Combo Grid (concern #4) ──
+    combo_report = None
+    combo_grid = None
+    if args.combo_grid:
+        needed_cols = ["vr5", "wick_ratio", "body_pct", "close_strength"]
+        missing = [c for c in needed_cols if c not in events.columns]
+        if missing:
+            print(f"\n❌ Combo Grid 컬럼 부족: {missing}")
+        else:
+            print(f"\n{'='*105}")
+            print(f"[Phase 1.5] Combo Grid — cs 단독 vs cs+X 조합 알파 원천 검증")
+            print(f"{'='*105}")
+            combo_filters = build_combo_filters()
+            combo_grid = run_entry_grid(events, rules, combo_filters,
+                                        fee=args.fee, min_n=args.min_n)
+            combo_report, combo_scores = format_entry_grid_report(combo_grid, top_exit_per_filter=1)
+            print(f"\n{combo_report}")
+
+    # ── Phase 3: OOS 검증 (concern #5) ──
+    oos_report = None
+    if args.oos:
+        try:
+            print(f"\n{'='*105}")
+            print(f"[Phase 3] Out-of-Sample 검증 (train/test = {args.oos_ratio:.0%}/{1-args.oos_ratio:.0%})")
+            print(f"{'='*105}")
+            train_events, test_events, split_date = run_oos_split(events, ratio=args.oos_ratio)
+            print(f"  Train: n={len(train_events)}, Test: n={len(test_events)}, split_date={split_date}")
+
+            # OOS 대상: judged 통과 조합 + 핵심 후보 (Baseline 및 top exit 단독)
+            oos_targets = []
+            if judged is not None and not judged.empty:
+                for _, r in judged.iterrows():
+                    oos_targets.append({
+                        "combo_key": f"{r['entry']} × {r['exit']}",
+                        "entry_name": r['entry'],
+                        "exit_name": r['exit'],
+                    })
+            # Baseline exit + no entry filter도 항상 포함
+            best_exit_baseline = results.sort_values("avg_pnl", ascending=False).iloc[0]['rule']
+            oos_targets.insert(0, {
+                "combo_key": f"NO_FILTER × {best_exit_baseline}",
+                "entry_name": None,
+                "exit_name": best_exit_baseline,
+            })
+            # cs_le_0.40 단독 (핵심 검증 대상)
+            oos_targets.insert(1, {
+                "combo_key": f"cs_le_0.40 × {best_exit_baseline}",
+                "entry_name": "cs_le_0.40",
+                "exit_name": best_exit_baseline,
+            })
+
+            rules_by_name = {n: fn for n, fn in rules}
+            entry_fn_by_name = {n: fn for n, fn in build_entry_filters()}
+            fee_pct = args.fee * 100 * 2
+
+            def _eval(df, target):
+                efn = entry_fn_by_name.get(target["entry_name"]) if target["entry_name"] else None
+                sub = efn(df) if efn else df
+                n = len(sub)
+                if n < 15:
+                    return {"n": n, "avg_pnl": None}
+                pnls = sub.apply(rules_by_name[target["exit_name"]], axis=1).values.astype(float) - fee_pct
+                return {"n": n, "avg_pnl": float(np.mean(pnls))}
+
+            train_res = {t["combo_key"]: _eval(train_events, t) for t in oos_targets}
+            test_res = {t["combo_key"]: _eval(test_events, t) for t in oos_targets}
+
+            oos_report = format_oos_report(train_res, test_res, split_date, oos_targets)
+            print(f"\n{oos_report}")
+
+            # ── 판정 ──
+            print(f"\n{'='*105}")
+            print(f"[OOS 판정] test avg 양수 + train과 부호 일치 + |Δ|<0.30%p → 재현 성공")
+            print(f"{'='*105}")
+            passed = 0; total = 0
+            for t in oos_targets:
+                tr = train_res.get(t["combo_key"], {}).get("avg_pnl")
+                te = test_res.get(t["combo_key"], {}).get("avg_pnl")
+                if tr is None or te is None:
+                    continue
+                total += 1
+                ok = (te > 0) and (tr > 0) and (abs(te - tr) < 0.30)
+                if ok:
+                    passed += 1
+            print(f"{passed}/{total} 조합 재현. 실전 배포 전 반드시 이 결과 확인.")
+        except Exception as e:
+            print(f"\n❌ OOS 검증 실패: {e}")
+            oos_report = None
+
     if tg_send:
         route_str = args.route or "ALL"
         tg_send(f"🎯 Exit Backtest: {route_str} (n={len(events)})", report)
@@ -634,6 +806,10 @@ def main():
                 for _, r in judged.iterrows()
             ])
             tg_send(f"✅ 판정 통과 {len(judged)}개", j_body)
+        if combo_report:
+            tg_send(f"🧪 Combo Grid (n={len(events)})", combo_report)
+        if oos_report:
+            tg_send(f"🔬 OOS 검증 (train/test 60:40)", oos_report)
 
 
 if __name__ == "__main__":
