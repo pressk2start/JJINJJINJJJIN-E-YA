@@ -9658,6 +9658,19 @@ _V0_EXIT_PARAMS_CLM_TRAIL180_15_240 = _make_clm_trail(180, 0.15, 240)  # Stage1 
 _V0_EXIT_PARAMS_CLM_TRAIL180_15_300 = _make_clm_trail(180, 0.15, 300)  # Stage2 1위
 _V0_EXIT_PARAMS_CLM_TRAIL120_15_180 = _make_clm_trail(120, 0.15, 180)  # bot300 1위 (대조군)
 
+# Trail 로직 재검증 (2026-07 발견): trail_pct=0.15는 가격 15% 하락 조건 → 사실상 발동 안 됨
+# 백테스트 재실행 (n=797) 결과:
+#   bp1500 (15%)  → -0.214% (봇 현재)
+#   bp500  (5%)   → -0.206%
+#   bp200  (2%)   → -0.153%
+#   bp100  (1%)   → -0.082%
+#   bp50   (0.5%) → +0.034% (유일한 양수)
+# 병렬 스위프로 실전 최적 파라미터 탐색 (bp30/50/70/100 shadow only)
+_V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240 = _make_clm_trail(180, 0.003, 240)   # 0.3% 하락
+_V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240 = _make_clm_trail(180, 0.005, 240)   # 0.5% 하락 (backtest bp50 양수)
+_V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240 = _make_clm_trail(180, 0.007, 240)   # 0.7% 하락
+_V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240 = _make_clm_trail(180, 0.010, 240)  # 1.0% 하락
+
 # CLM_HOLD120/HOLD180 exit params 제거: n=55에서 CLM과 수렴 (39차 기각)
 
 _V0_EXIT_PARAMS_GT_SURV60 = {
@@ -11347,6 +11360,38 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CLM_CS40_TR180_15_240", "mae_threshold": 0.35,
         "max_seed_krw": 3_000_000,
         "description": "CLM + cs≤0.40 + Trail(arm180,pct15,hold240) — LIVE 승격 (백테스트 avg+0.594%, PF 4.21, OOS test+0.655%)",
+    },
+    # ── Trail 파라미터 스위프 shadow (2026-07): bp30/50/70/100 병렬 비교 ──
+    # 목적: 봇 로직(가격 하락 기반)에서 실전 최적 trail_pct 탐색
+    # 백테스트에서 bp50 (0.5%)이 유일하게 양수 → 병렬 검증
+    # AUTO_TRADE=False 상태이므로 4개 다 shadow만 수집
+    "과열감지_CS40_TR180_bp30_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_TR180_bp30_240", "mae_threshold": 0.35,
+        "description": "CS40 + Trail(arm180, 가격 0.3% 하락, hold240) — 스위프 shadow",
+    },
+    "과열감지_CS40_TR180_bp50_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_TR180_bp50_240", "mae_threshold": 0.35,
+        "description": "CS40 + Trail(arm180, 가격 0.5% 하락, hold240) — 스위프 shadow (backtest bp50 양수)",
+    },
+    "과열감지_CS40_TR180_bp70_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_TR180_bp70_240", "mae_threshold": 0.35,
+        "description": "CS40 + Trail(arm180, 가격 0.7% 하락, hold240) — 스위프 shadow",
+    },
+    "과열감지_CS40_TR180_bp100_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_TR180_bp100_240", "mae_threshold": 0.35,
+        "description": "CS40 + Trail(arm180, 가격 1.0% 하락, hold240) — 스위프 shadow",
     },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
