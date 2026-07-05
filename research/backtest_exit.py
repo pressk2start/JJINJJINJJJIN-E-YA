@@ -99,9 +99,48 @@ def simulate_target_stop(row, target_pct, stop_pct, hold_sec):
     return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
 
 
+def simulate_trailing_shadow(row, arm_sec, trail_pct, hold_sec):
+    """
+    Shadow(bot.py adaptive_trail) 로직과 동일한 가격 기반 trail 시뮬레이션.
+
+    실제 봇 로직 (bot.py:12446-12478):
+      _at_stop = best_price * (1 - trail_pct)
+      if cur_price <= _at_stop: return trail_stop 가격
+
+    즉 "가격이 최고가에서 trail_pct 만큼 하락하면 발동".
+    시장 가격 기준이므로 크립토 스캘핑에서 trail_pct=0.15는 거의 발동 안 됨.
+
+    발동 안 되면 hold_sec 시점 pnl 반환 (AT타임아웃과 동일).
+    슬리피지 별도 미적용 (shadow도 cur_price 그대로 사용).
+    """
+    entry_price = 100.0  # 정규화
+    best_price = 100.0
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe = _get(row, f"mfe_{sec}", 0) or 0
+        pnl = _get(row, f"pnl_{sec}", 0) or 0
+        # MFE(%)를 가격으로 환산
+        current_high = entry_price * (1 + mfe / 100)
+        cur_price = entry_price * (1 + pnl / 100)
+        if current_high > best_price:
+            best_price = current_high
+        if sec >= arm_sec and best_price > entry_price:
+            trail_stop = best_price * (1 - trail_pct)
+            if cur_price <= trail_stop:
+                # 발동 → trail_stop 가격에 청산
+                return (trail_stop - entry_price) / entry_price * 100
+    # 발동 안 됨 → hold_sec 시점 pnl (AT타임아웃)
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
 def simulate_trailing(row, arm_sec, trail_pct, hold_sec):
-    """arm_sec 이후 trailing — 고점 대비 trail_pct% 하락 시 청산.
-    각 시점의 mfe/pnl로 근사 (고점 = 그 시점까지의 max mfe).
+    """
+    [원본] arm_sec 이후 trailing — MFE 대비 trail_pct% 되돌림 시 청산.
+    Peak MFE의 15% 되돌리면 발동 (Profit Protect 스타일).
+
+    ⚠ Shadow(bot.py)와 다른 로직임. shadow는 가격 기반, 이 함수는 수익률 기반.
+    실전과 비교하려면 simulate_trailing_shadow() 사용.
     """
     peak_mfe = 0.0
     for sec in SNAP_TIMES:
@@ -181,12 +220,21 @@ def build_rules():
             lambda r, m=mfe_thr, t=tgt, s=stop, h=hold: simulate_ec_then_hold(r, 60, m, h, t, s),
         ))
 
-    # 7. Trailing — arm 후 고점 대비 X% 하락 시 청산
+    # 7. Trailing — arm 후 고점 대비 X% 하락 시 청산 (원본 Profit Protect 로직)
     for arm, trail, hold in product([60, 120, 180], [0.15, 0.20, 0.30, 0.40], [180, 240, 300]):
         if arm >= hold:
             continue
         name = f"Trail_arm{arm}_pct{int(trail*100)}_hold{hold}"
         rules.append((name, lambda r, a=arm, t=trail, h=hold: simulate_trailing(r, a, t, h)))
+
+    # 8. Trailing (Shadow 로직) — bot.py adaptive_trail과 동일한 가격 기반
+    # trail_pct 다양화 (basis point 표기): 50bp/100bp/200bp/500bp/1500bp
+    for arm, trail, hold in product([60, 120, 180], [0.005, 0.01, 0.02, 0.05, 0.15], [180, 240, 300]):
+        if arm >= hold:
+            continue
+        _bp = int(round(trail * 10000))  # 0.005=50, 0.15=1500
+        name = f"TrailSh_arm{arm}_bp{_bp}_hold{hold}"
+        rules.append((name, lambda r, a=arm, t=trail, h=hold: simulate_trailing_shadow(r, a, t, h)))
 
     return rules
 
