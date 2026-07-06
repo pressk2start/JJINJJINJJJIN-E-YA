@@ -99,39 +99,53 @@ def simulate_target_stop(row, target_pct, stop_pct, hold_sec):
     return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
 
 
-def simulate_trailing_shadow(row, arm_sec, trail_pct, hold_sec):
+def simulate_trailing_shadow(row, arm_sec, trail_pct, hold_sec,
+                             sl_tiers=((60, 0.025), (120, 0.015), (9999, 0.010))):
     """
-    Shadow(bot.py adaptive_trail) 로직과 동일한 가격 기반 trail 시뮬레이션.
+    Shadow(bot.py adaptive_trail + sl_tiers) 로직과 동일한 시뮬레이션.
 
-    실제 봇 로직 (bot.py:12446-12478):
-      _at_stop = best_price * (1 - trail_pct)
-      if cur_price <= _at_stop: return trail_stop 가격
-
-    즉 "가격이 최고가에서 trail_pct 만큼 하락하면 발동".
-    시장 가격 기준이므로 크립토 스캘핑에서 trail_pct=0.15는 거의 발동 안 됨.
-
-    발동 안 되면 hold_sec 시점 pnl 반환 (AT타임아웃과 동일).
-    슬리피지 별도 미적용 (shadow도 cur_price 그대로 사용).
+    봇 로직 매핑 (bot.py:12280-12482):
+      1. SL 티어드 (sl_tiers 기본값 = 봇 CS40 config)
+         0~60s:   2.5%
+         60~120s: 1.5%
+         120s+:   1.0%
+      2. Trail arm: hold_sec >= arm_after_sec
+      3. Trail stop = best_price * (1 - trail_pct)
+      4. cur_price <= trail_stop → 청산 at trail_stop
+      5. hold_sec >= max_hold → AT타임아웃, cur_price
     """
-    entry_price = 100.0  # 정규화
+    entry_price = 100.0
     best_price = 100.0
     for sec in SNAP_TIMES:
         if sec > hold_sec:
             break
         mfe = _get(row, f"mfe_{sec}", 0) or 0
         pnl = _get(row, f"pnl_{sec}", 0) or 0
-        # MFE(%)를 가격으로 환산
+        mae = _get(row, f"mae_{sec}", 0) or 0  # 양수 = 손실 크기 (%)
         current_high = entry_price * (1 + mfe / 100)
         cur_price = entry_price * (1 + pnl / 100)
         if current_high > best_price:
             best_price = current_high
+
+        # ── 1. SL 티어드 체크 (봇 line 12329-12331 동일) ──
+        _eff_sl_pct = None
+        for _tier_sec, _tier_pct in sl_tiers:
+            if sec <= _tier_sec:
+                _eff_sl_pct = _tier_pct * 100  # % 단위로
+                break
+        if _eff_sl_pct is not None and mae >= _eff_sl_pct:
+            # 이 스냅샷까지 mae가 SL 임계 넘음 → SL 발동
+            return -_eff_sl_pct
+
+        # ── 2. Trail 체크 (봇 line 12446-12478 동일) ──
         if sec >= arm_sec and best_price > entry_price:
             trail_stop = best_price * (1 - trail_pct)
             if cur_price <= trail_stop:
-                # 발동 → trail_stop 가격에 청산
+                # AT익절 or AT본절 (봇은 trail_stop 가격 참고)
                 return (trail_stop - entry_price) / entry_price * 100
-    # 발동 안 됨 → hold_sec 시점 pnl (AT타임아웃)
-    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+    # ── 3. Timeout (봇 line 12477 AT타임아웃 동일) ──
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0)) or 0
 
 
 def simulate_trailing(row, arm_sec, trail_pct, hold_sec):
