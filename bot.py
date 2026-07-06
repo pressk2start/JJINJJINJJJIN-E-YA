@@ -11393,6 +11393,42 @@ _STRATEGY_REGISTRY = {
         "pipeline_key": "climax", "route": "CS40_TR180_bp100_240", "mae_threshold": 0.35,
         "description": "CS40 + Trail(arm180, 가격 1.0% 하락, hold240) — 스위프 shadow",
     },
+    # ── CS40 + vr5≥3.0 shadow (예측 최강 조합, 2026-07 fresh 30d 검증) ──
+    # backtest 예측: CS40+vr5+bp30 = +0.168% (Ceiling 25% 회수)
+    # cs_le_0.40 (n=74) → +cs+vr5≥3.0 (n=50) 좁아지지만 알파 강해짐
+    # AUTO_TRADE=False라 4개 shadow 병렬 관찰
+    "과열감지_CS40_VR3_TR180_bp30_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "CS40 + vr5≥3.0 + Trail bp30 — 예측 +0.168% 최강 조합 (backtest 30d n=50)",
+    },
+    "과열감지_CS40_VR3_TR180_bp50_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp50_240", "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "CS40 + vr5≥3.0 + Trail bp50 — 예측 +0.096% (backtest 30d)",
+    },
+    "과열감지_CS40_VR3_TR180_bp70_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp70_240", "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "CS40 + vr5≥3.0 + Trail bp70 — 예측 +0.007%",
+    },
+    "과열감지_CS40_VR3_TR180_bp100_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp100_240", "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "CS40 + vr5≥3.0 + Trail bp100 — 예측 -0.076%",
+    },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_300,
