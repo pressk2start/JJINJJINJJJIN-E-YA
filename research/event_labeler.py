@@ -54,6 +54,7 @@ def label_events(candles_df, signals_df):
             "wick_ratio": sig["wick_ratio"],
             "vr5": sig["vr5"],
             "close_strength": sig["close_strength"],
+            "wick_asym": sig.get("wick_asym", 0.0),  # 신규: shadow에서 발견 (0.67+ 강력)
         }
 
         cumul_high = entry
