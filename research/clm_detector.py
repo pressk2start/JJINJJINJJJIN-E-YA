@@ -41,8 +41,12 @@ def detect_clm(df):
 
     body_pct = body / safe_open * 100
     upper_wick = h - c
+    lower_wick = np.where(body >= 0, o - lo, c - lo)  # bullish/bearish 분기 (bot.py 로직)
     wick_ratio = upper_wick / safe_range
     close_strength = (c - lo) / safe_range
+    # wick_asym: 봇 정의 = (upper_wick - lower_wick) / total_range
+    # 양수 = 윗꼬리 우세 (CLM 특성), 0.67+ 강한 시그널
+    wick_asym = (upper_wick - lower_wick) / safe_range
 
     # VR5: pandas rolling이 loop보다 ~100x 빠름
     vol_s = pd.Series(vol)
@@ -69,6 +73,7 @@ def detect_clm(df):
     signals["wick_ratio"] = wick_ratio[idxs]
     signals["vr5"] = vr5[idxs]
     signals["close_strength"] = close_strength[idxs]
+    signals["wick_asym"] = wick_asym[idxs]  # 신규: shadow 리포트에서 발견된 강력 필터
     signals["_orig_idx"] = idxs
 
     return signals.reset_index(drop=True)

@@ -325,6 +325,11 @@ def build_entry_filters():
         ("cs_le_0.40", lambda e: e[e["close_strength"] <= 0.40]),
         ("cs_le_0.30", lambda e: e[e["close_strength"] <= 0.30]),
         ("cs_le_0.20", lambda e: e[e["close_strength"] <= 0.20]),
+        # ── wick_asym (윗꼬리 우세) 하한 — shadow에서 발견 강력 필터 ──
+        ("wick_asym_ge_0.60", lambda e: e[e.get("wick_asym", 0) >= 0.60] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.65", lambda e: e[e.get("wick_asym", 0) >= 0.65] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.67", lambda e: e[e.get("wick_asym", 0) >= 0.67] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.70", lambda e: e[e.get("wick_asym", 0) >= 0.70] if "wick_asym" in e.columns else e.iloc[0:0]),
     ]
     return filters
 
