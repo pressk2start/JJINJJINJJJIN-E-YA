@@ -11429,6 +11429,76 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("vr5", ">=", 3.0)],
         "description": "CS40 + vr5≥3.0 + Trail bp100 — 예측 -0.076%",
     },
+    # ── B45 + CS40 + VR3 shadow (2026-07-08 fresh 30d 검증, 안정형) ──
+    # backtest 예측: B45+CS40+VR3+bp30 = +0.569% (n=21)
+    # body≤0.45 + cs≤0.40 + vr5≥3.0 3중 필터
+    "과열감지_B45_CS40_VR3_TR180_bp30_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.0)],
+        "description": "B45+CS40+VR3 + Trail bp30 — 예측 +0.569% 안정형 (backtest n=21)",
+    },
+    "과열감지_B45_CS40_VR3_TR180_bp50_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR3_TR180_bp50_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.0)],
+        "description": "B45+CS40+VR3 + Trail bp50 — 예측 +0.463%",
+    },
+    "과열감지_B45_CS40_VR3_TR180_bp70_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR3_TR180_bp70_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.0)],
+        "description": "B45+CS40+VR3 + Trail bp70 — 예측 +0.35%",
+    },
+    "과열감지_B45_CS40_VR3_TR180_bp100_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR3_TR180_bp100_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.0)],
+        "description": "B45+CS40+VR3 + Trail bp100 — 예측 +0.253%",
+    },
+    # ── B45 + CS40 + VR3.5 shadow (2026-07-08 fresh 30d 검증, 고강도형) ──
+    # backtest 예측: B45+CS40+VR3.5+bp30 = +0.862% (n=17, 강도 최고)
+    # VR threshold 3.0 → 3.5 전이에서 알파 +52% 급증 확인
+    "과열감지_B45_CS40_VR35_TR180_bp30_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR35_TR180_bp30_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.5)],
+        "description": "B45+CS40+VR3.5 + Trail bp30 — 예측 +0.862% 고강도형 (backtest n=17)",
+    },
+    "과열감지_B45_CS40_VR35_TR180_bp50_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR35_TR180_bp50_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.5)],
+        "description": "B45+CS40+VR3.5 + Trail bp50 — 예측 +0.726%",
+    },
+    "과열감지_B45_CS40_VR35_TR180_bp70_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR35_TR180_bp70_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.5)],
+        "description": "B45+CS40+VR3.5 + Trail bp70 — 예측 +0.60%",
+    },
+    "과열감지_B45_CS40_VR35_TR180_bp100_240": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240,
+        "priority": 10, "enabled": False,
+        "pipeline_key": "climax", "route": "B45_CS40_VR35_TR180_bp100_240", "mae_threshold": 0.35,
+        "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.5)],
+        "description": "B45+CS40+VR3.5 + Trail bp100 — 예측 +0.479%",
+    },
     "과열감지_TRAIL180_15_300": {
         "check_fn": _v0_check_climax,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_300,

@@ -1,4 +1,5 @@
 data/
+results/
 *.parquet
 *.pyc
 __pycache__/
