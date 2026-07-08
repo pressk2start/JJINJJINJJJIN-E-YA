@@ -2,3 +2,4 @@ data/
 *.parquet
 *.pyc
 __pycache__/
+research/results/
