@@ -18,6 +18,7 @@ Usage:
   python3 research/sweep_defense.py --skip-download --stage A
 """
 import argparse
+import io
 import os
 import sys
 import time
@@ -29,6 +30,22 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_loader import get_krw_markets, download_candles, load_candles, quick_volume_rank, DATA_DIR
 from sweep_full import detect_clm_param, load_market_data
+try:
+    from tg_notify import send as tg_send
+except Exception:
+    tg_send = None
+
+
+class _Tee:
+    """stdout + StringIO 동시 write — 화면 출력 유지하면서 결과 캡처."""
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 
 # ═══════════════════════════════════════════
@@ -640,10 +657,19 @@ def main():
     parser.add_argument("--stage", type=str, default="all",
                         help="A/B/C/D/all")
     parser.add_argument("--output-dir", type=str, default="research/results")
+    parser.add_argument("--no-tg", action="store_true", help="텔레그램 전송 스킵")
     args = parser.parse_args()
+
+    global tg_send
+    if args.no_tg:
+        tg_send = None
 
     t0 = time.time()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    _buf = io.StringIO()
+    _orig_stdout = sys.stdout
+    sys.stdout = _Tee(_orig_stdout, _buf)
 
     # 마켓 결정
     if args.markets:
@@ -687,6 +713,13 @@ def main():
     print(f"  전체 소요: {elapsed:.0f}초 ({elapsed/60:.1f}분)")
     print(f"  결과: {args.output_dir}/")
     print(f"{'='*75}")
+
+    sys.stdout = _orig_stdout
+
+    if tg_send:
+        body = _buf.getvalue()
+        title = f"🛡 Defense Sweep ({args.stage.upper()}, {len(market_data)}mkt, {args.days}d)"
+        tg_send(title, body)
 
 
 if __name__ == "__main__":

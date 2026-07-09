@@ -48,3 +48,14 @@ echo "[deploy] 완료 — $(date)"
 sudo systemctl status upbit-bot --no-pager
 sudo systemctl status momentum-scanner --no-pager
 sudo systemctl status momentum-clm --no-pager
+
+# ── Research: sweep_defense 백그라운드 실행 (실패해도 배포엔 영향 없음) ──
+echo "[deploy] sweep_defense 백그라운드 실행 시작..."
+if ls /home/ubuntu/bot/research/data/*.parquet &>/dev/null; then
+    SWEEP_ARGS="--skip-download --stage all"
+else
+    SWEEP_ARGS="--top-markets 30 --days 90 --stage all"
+fi
+nohup python3 /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
+    > /tmp/sweep_defense.log 2>&1 &
+echo "[deploy] sweep_defense PID=$! args='$SWEEP_ARGS' log=/tmp/sweep_defense.log"
