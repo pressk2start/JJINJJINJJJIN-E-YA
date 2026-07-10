@@ -56,6 +56,14 @@ if ls /home/ubuntu/bot/research/data/*.parquet &>/dev/null; then
 else
     SWEEP_ARGS="--top-markets 30 --days 90 --stage all"
 fi
-nohup python3 /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
+# .env 로드 (TELEGRAM_TOKEN, TG_CHATS 등) — nohup 자식 프로세스에 상속시키기 위해
+if [ -f /home/ubuntu/bot/.env ]; then
+    set -a
+    source /home/ubuntu/bot/.env
+    set +a
+    echo "[deploy] .env 로드 완료 (TG_TOKEN=${TELEGRAM_TOKEN:0:15}...)"
+fi
+# python3 -u: unbuffered stdout → 로그가 실시간으로 파일에 쓰임
+nohup python3 -u /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
     > /tmp/sweep_defense.log 2>&1 &
 echo "[deploy] sweep_defense PID=$! args='$SWEEP_ARGS' log=/tmp/sweep_defense.log"
