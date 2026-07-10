@@ -60,10 +60,9 @@ def send(title, body, code_block=True):
         print(f"\n{title}\n{'='*len(title)}\n{body}")
         return False
 
-    if code_block:
-        text = f"*{title}*\n```\n{body}\n```"
-    else:
-        text = f"*{title}*\n\n{body}"
+    # plain text — parse_mode 없이 발송 (Markdown 특수문자 escape 불필요)
+    # 이전: body의 underscore/asterisk/bracket이 Markdown parser 실패 유발
+    text = f"[{title}]\n{body}"
 
     chunks = _split(text)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -80,7 +79,6 @@ def send(title, body, code_block=True):
                         "--max-time", "10",
                         "-X", "POST", url,
                         "-d", f"chat_id={chat_id}",
-                        "-d", "parse_mode=Markdown",
                         "-d", "disable_web_page_preview=true",
                         "--data-urlencode", f"text={chunk}",
                     ],
