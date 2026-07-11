@@ -48,7 +48,11 @@ WATCH = [
 ]
 
 MILESTONES = [20, 50, 100]
-STATE_FILE = "/tmp/watch_target_state.json"
+
+# 상태 파일: /tmp 대신 영속 경로 (재부팅 시 milestone 중복 알림 방지)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.path.join(_HERE, "state")
+STATE_FILE = os.path.join(STATE_DIR, "watch_target_state.json")
 
 
 def parse_route(text, route):
@@ -130,6 +134,12 @@ def main():
     if not text.strip():
         print("[watch] 입력 없음 (stdin)")
         return
+
+    # 상태 디렉터리 생성 (없으면 만들기)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"[watch] STATE_DIR 생성 실패: {e}")
 
     prev = {}
     if os.path.exists(STATE_FILE):
