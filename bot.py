@@ -11397,19 +11397,23 @@ _STRATEGY_REGISTRY = {
     # backtest 예측: CS40+vr5+bp30 = +0.168% (Ceiling 25% 회수)
     # cs_le_0.40 (n=74) → +cs+vr5≥3.0 (n=50) 좁아지지만 알파 강해짐
     # AUTO_TRADE=False라 4개 shadow 병렬 관찰
-    # ── LIVE: 실주문 파이프라인 검증용 소액 (2026-07-11 승격) ──
+    # ── LIVE: 실주문 파이프라인 검증용 극소액 (2026-07-11 승격, 3단계 증액 계획) ──
     # 목적: shadow 검증된 route (n=24 +0.30%)로 실체결/슬리피지 검증
-    # backtest 47마켓 90d: n=113 PnL +0.4297% WR73% SL 11%
-    # shadow: n=24 PnL +0.30% WR 42% (regression 정상 범위)
-    # AUTO_TRADE=1 필요 (환경변수). 극소액으로 시작.
+    # SL: 티어드 (0-60s 2.5%, 60-120s 1.5%, 120s+ 1.0%) — 봇 표준 로직 그대로
+    # 참고: Backtest Stage D 우승 조합은 SL 1.29 단일값이지만
+    #       shadow n=24 +0.30%는 이미 티어드 SL로 계산됨 → 실 매매도 유사 예상
+    # backtest 47마켓 90d: n=113 PnL +0.4297% WR73% SL 11% (SL1.29 조합)
+    # shadow: n=24 PnL +0.30% WR 42% (티어드 SL, regression 정상)
+    # AUTO_TRADE=1 필요 (환경변수)
+    # 3단계 증액 계획: 100k → (실체결 3건 정상) → 300k → (10건 정상) → 500k
     "과열감지_CS40_VR3_TR180_bp30_240": {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
         "ind_filters": [("vr5", ">=", 3.0)],
-        "max_seed_krw": 500_000,
-        "description": "LIVE 극소액 실주문 검증 (CS40+VR3+bp30, shadow n=24 +0.30%, backtest n=113 +0.43%)",
+        "max_seed_krw": 100_000,
+        "description": "LIVE 극소액 실주문 검증 (CS40+VR3+bp30, shadow n=24 +0.30%, 티어드SL, seed 100k)",
     },
     "과열감지_CS40_VR3_TR180_bp50_240": {
         "check_fn": _v0_check_climax_cs40,
