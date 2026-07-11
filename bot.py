@@ -11645,7 +11645,7 @@ _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
 _SHADOW_PENDING_SIGNALS = []
 _SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
-_SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+_SHADOW_EVAL_INTERVAL = 10  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔) — 2026-07-11 3→10 (44 shadow route × N_market 계산량 폭발로 scan p95 100초 → 봇 자체 진입 중단. 통계 수렴에는 영향 미미, LIVE 실 매매 회복 우선)
 _shadow_scan_idx = 0  # 메인 루프 스캔 카운터
 _ENABLE_CLOSE_STRENGTH_FILTER = True  # close_strength > 0.50 차단 (LIVE 임시 방어 필터)
 
