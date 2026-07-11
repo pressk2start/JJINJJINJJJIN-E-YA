@@ -49,21 +49,43 @@ sudo systemctl status upbit-bot --no-pager
 sudo systemctl status momentum-scanner --no-pager
 sudo systemctl status momentum-clm --no-pager
 
-# ── Research: sweep_defense 백그라운드 실행 (실패해도 배포엔 영향 없음) ──
-echo "[deploy] sweep_defense 백그라운드 실행 시작..."
-if ls /home/ubuntu/bot/research/data/*.parquet &>/dev/null; then
-    SWEEP_ARGS="--skip-download --stage all"
+# ── Research: sweep_defense 조건부 실행 (변경 파일 필터) ──
+# 매 배포마다 89분 sweep 낭비 방지: research/*.py 또는 bot.py의 route registry
+# 관련 변경이 있을 때만 실행. 단순 리포트/문구/README 수정은 sweep 안 돔.
+echo "[deploy] sweep_defense 조건 검사..."
+CHANGED_FILES=$(git diff HEAD~1 HEAD --name-only 2>/dev/null || echo "")
+NEED_SWEEP=0
+if echo "$CHANGED_FILES" | grep -qE "^research/.*\.py$"; then
+    echo "[deploy] research/*.py 변경 감지 → sweep 실행 필요"
+    NEED_SWEEP=1
+fi
+if echo "$CHANGED_FILES" | grep -q "^bot.py$"; then
+    # bot.py 중 route registry 관련 라인이 변경됐는지 (heuristic)
+    if git diff HEAD~1 HEAD bot.py 2>/dev/null | \
+       grep -qE "_STRATEGY_REGISTRY|check_fn|exit_params|ind_filters|route\":"; then
+        echo "[deploy] bot.py route registry 변경 감지 → sweep 실행 필요"
+        NEED_SWEEP=1
+    fi
+fi
+
+if [ "$NEED_SWEEP" = "1" ]; then
+    echo "[deploy] sweep_defense 백그라운드 실행 시작..."
+    if ls /home/ubuntu/bot/research/data/*.parquet &>/dev/null; then
+        SWEEP_ARGS="--skip-download --stage all"
+    else
+        SWEEP_ARGS="--top-markets 30 --days 90 --stage all"
+    fi
+    # .env 로드 (TELEGRAM_TOKEN, TG_CHATS 등) — nohup 자식 프로세스에 상속시키기 위해
+    if [ -f /home/ubuntu/bot/.env ]; then
+        set -a
+        source /home/ubuntu/bot/.env
+        set +a
+        echo "[deploy] .env 로드 완료 (TG_TOKEN=${TELEGRAM_TOKEN:0:15}...)"
+    fi
+    # python3 -u: unbuffered stdout → 로그가 실시간으로 파일에 쓰임
+    nohup python3 -u /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
+        > /tmp/sweep_defense.log 2>&1 &
+    echo "[deploy] sweep_defense PID=$! args='$SWEEP_ARGS' log=/tmp/sweep_defense.log"
 else
-    SWEEP_ARGS="--top-markets 30 --days 90 --stage all"
+    echo "[deploy] 전략 관련 파일 변경 없음 → sweep 스킵 (리소스 절약)"
 fi
-# .env 로드 (TELEGRAM_TOKEN, TG_CHATS 등) — nohup 자식 프로세스에 상속시키기 위해
-if [ -f /home/ubuntu/bot/.env ]; then
-    set -a
-    source /home/ubuntu/bot/.env
-    set +a
-    echo "[deploy] .env 로드 완료 (TG_TOKEN=${TELEGRAM_TOKEN:0:15}...)"
-fi
-# python3 -u: unbuffered stdout → 로그가 실시간으로 파일에 쓰임
-nohup python3 -u /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
-    > /tmp/sweep_defense.log 2>&1 &
-echo "[deploy] sweep_defense PID=$! args='$SWEEP_ARGS' log=/tmp/sweep_defense.log"
