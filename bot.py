@@ -11357,6 +11357,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
         "priority": 8, "enabled": False,
+        "shadow_enabled": True,  # 구 LIVE 기준선 (조언자 관심 route)
         "pipeline_key": "climax", "route": "CLM_CS40_TR180_15_240", "mae_threshold": 0.35,
         "max_seed_krw": 3_000_000,
         "description": "CLM + cs≤0.40 + Trail(arm180,pct15,hold240) — CS40+VR3 승격으로 disable (shadow n=59 PnL-0.09%)",
@@ -11369,6 +11370,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 10, "enabled": False,
+        "shadow_enabled": True,  # VR 효과 확인 기준선 (조언자 관심 route)
         "pipeline_key": "climax", "route": "CS40_TR180_bp30_240", "mae_threshold": 0.35,
         "description": "CS40 + Trail(arm180, 가격 0.3% 하락, hold240) — 스위프 shadow",
     },
@@ -11435,6 +11437,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp100_240,
         "priority": 10, "enabled": False,
+        "shadow_enabled": True,  # exit 비교군 (조언자 관심 route, 240s 궤적 관측)
         "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp100_240", "mae_threshold": 0.35,
         "ind_filters": [("vr5", ">=", 3.0)],
         "description": "CS40 + vr5≥3.0 + Trail bp100 — 예측 -0.076%",
@@ -11446,6 +11449,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 10, "enabled": False,
+        "shadow_enabled": True,  # VR3 안정형 비교군 (조언자 관심 route)
         "pipeline_key": "climax", "route": "B45_CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.0)],
         "description": "B45+CS40+VR3 + Trail bp30 — 예측 +0.569% 안정형 (backtest n=21)",
@@ -11481,6 +11485,7 @@ _STRATEGY_REGISTRY = {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 10, "enabled": False,
+        "shadow_enabled": True,  # 최종 후보 (조언자 관심 route, backtest 우승)
         "pipeline_key": "climax", "route": "B45_CS40_VR35_TR180_bp30_240", "mae_threshold": 0.35,
         "ind_filters": [("body_pct", "<=", 0.45), ("vr5", ">=", 3.5)],
         "description": "B45+CS40+VR3.5 + Trail bp30 — 예측 +0.862% 고강도형 (backtest n=17)",
@@ -11645,7 +11650,7 @@ _SHADOW_DEDUP = {}  # { "route_market": last_entry_ts }
 _SHADOW_PENDING_SIGNALS = []
 _SHADOW_PENDING_DEDUP = {}  # { "route_market": last_signal_ts }
 _SHADOW_PNL_SNAP_SECS = [5, 10, 15, 20, 25, 30, 60, 90, 120, 150, 180, 240, 300]  # v18e: 초반 5초 단위 추가, +240/300 (GT_300s 검증)
-_SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
+_SHADOW_EVAL_INTERVAL = 3  # shadow route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔) — shadow_enabled 화이트리스트 도입으로 원복 (관심 route 5~6개만 활성)
 _shadow_scan_idx = 0  # 메인 루프 스캔 카운터
 _ENABLE_CLOSE_STRENGTH_FILTER = True  # close_strength > 0.50 차단 (LIVE 임시 방어 필터)
 
@@ -12955,10 +12960,19 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     for strat_name, strat in _STRATEGY_REGISTRY.items():
         route = strat.get("route", "?")
 
-        # Shadow interval: 비활성 route는 N 스캔마다 1회만 평가 (LIVE route는 매 스캔)
-        if not strat["enabled"] and not _is_shadow_eval_cycle:
-            _pipeline_inc("shadow_interval_skip")
-            continue
+        # Shadow whitelisting: 2026-07-11 조언자 스펙
+        # - enabled=True: LIVE, 매 스캔 평가
+        # - enabled=False + shadow_enabled=True: 관심 shadow route (interval마다 평가)
+        # - enabled=False + shadow_enabled 없음/False: 완전 skip (계산 안 함)
+        # 이전에는 enabled=False여도 shadow로 계속 계산되어 scan 지연 폭발 (p95 100초).
+        # 관심 route 5~6개만 shadow_enabled=True로 명시하여 계산량 대폭 감소.
+        if not strat["enabled"]:
+            if not strat.get("shadow_enabled", False):
+                _pipeline_inc("shadow_disabled_skip")
+                continue
+            if not _is_shadow_eval_cycle:
+                _pipeline_inc("shadow_interval_skip")
+                continue
 
         check_fn = _SHADOW_CHECK_OVERRIDES.get(strat_name, strat["check_fn"])
         _fn_name = getattr(check_fn, "__name__", str(check_fn))
