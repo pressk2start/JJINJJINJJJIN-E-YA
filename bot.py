@@ -11352,14 +11352,14 @@ _STRATEGY_REGISTRY = {
         "max_seed_krw": 3_000_000,
         "description": "CLM + Trail(arm180,pct15,hold240) — CS40 승격으로 disable (롤백용 유지)",
     },
-    # ── LIVE: cs≤0.40 필터 승격 (n=526 OOS 검증: train+0.534→test+0.655) ──
+    # ── 이전 LIVE (2026-07-11 CS40+VR3+bp30 승격으로 disable, 롤백용 유지) ──
     "과열감지_CS40_TRAIL180_15_240": {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_15_240,
-        "priority": 8, "enabled": True,
+        "priority": 8, "enabled": False,
         "pipeline_key": "climax", "route": "CLM_CS40_TR180_15_240", "mae_threshold": 0.35,
         "max_seed_krw": 3_000_000,
-        "description": "CLM + cs≤0.40 + Trail(arm180,pct15,hold240) — LIVE 승격 (백테스트 avg+0.594%, PF 4.21, OOS test+0.655%)",
+        "description": "CLM + cs≤0.40 + Trail(arm180,pct15,hold240) — CS40+VR3 승격으로 disable (shadow n=59 PnL-0.09%)",
     },
     # ── Trail 파라미터 스위프 shadow (2026-07): bp30/50/70/100 병렬 비교 ──
     # 목적: 봇 로직(가격 하락 기반)에서 실전 최적 trail_pct 탐색
@@ -11397,13 +11397,19 @@ _STRATEGY_REGISTRY = {
     # backtest 예측: CS40+vr5+bp30 = +0.168% (Ceiling 25% 회수)
     # cs_le_0.40 (n=74) → +cs+vr5≥3.0 (n=50) 좁아지지만 알파 강해짐
     # AUTO_TRADE=False라 4개 shadow 병렬 관찰
+    # ── LIVE: 실주문 파이프라인 검증용 소액 (2026-07-11 승격) ──
+    # 목적: shadow 검증된 route (n=24 +0.30%)로 실체결/슬리피지 검증
+    # backtest 47마켓 90d: n=113 PnL +0.4297% WR73% SL 11%
+    # shadow: n=24 PnL +0.30% WR 42% (regression 정상 범위)
+    # AUTO_TRADE=1 필요 (환경변수). 극소액으로 시작.
     "과열감지_CS40_VR3_TR180_bp30_240": {
         "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
-        "priority": 10, "enabled": False,
+        "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
         "ind_filters": [("vr5", ">=", 3.0)],
-        "description": "CS40 + vr5≥3.0 + Trail bp30 — 예측 +0.168% 최강 조합 (backtest 30d n=50)",
+        "max_seed_krw": 500_000,
+        "description": "LIVE 극소액 실주문 검증 (CS40+VR3+bp30, shadow n=24 +0.30%, backtest n=113 +0.43%)",
     },
     "과열감지_CS40_VR3_TR180_bp50_240": {
         "check_fn": _v0_check_climax_cs40,
