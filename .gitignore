@@ -5,3 +5,8 @@ __pycache__/
 bots/momentum_*.json
 bots/momentum_*.csv
 bots/momentum_*.log
+# LIVE 실체결 audit log (JSONL)
+data/live_trades.jsonl
+data/live_trades.jsonl.bak
+pipeline_shadow.csv
+exec_quality.csv

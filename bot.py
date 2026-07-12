@@ -958,6 +958,163 @@ _SHADOW_LOG_PATH = os.path.join(os.getcwd(), "pipeline_shadow.csv")
 _SHADOW_LOG_LOCK = threading.Lock()
 _SHADOW_LOG_INITIALIZED = False
 
+# ── LIVE 실체결 audit log (JSONL append-only event 방식) — 조언자 스펙 반영 ──
+# 목적: shadow와 실 매매를 명확히 분리하여 완결 3건/10건 검증 정확도 확보
+# 방식: append-only 이벤트 2줄 (ENTRY_FILLED + EXIT_FILLED) → trade_id로 조인
+# 원칙:
+#   - Shadow/AT비교/simulated_live_path는 절대 기록하지 않음
+#   - AUTO_ENTRY 호출만으로는 이벤트 생성 X
+#   - 실제 주문 체결이 확인된 경우에만 append
+#   - 기존 Entry/Exit/Gate/주문 로직 완전 무변경
+_LIVE_TRADE_LOG_DIR = os.path.join(os.getcwd(), "data")
+_LIVE_TRADE_LOG_PATH = os.path.join(_LIVE_TRADE_LOG_DIR, "live_trades.jsonl")
+_LIVE_TRADE_LOCK = threading.Lock()  # 파일 append 락 (동시 쓰기 방지)
+_LIVE_TRADE_PENDING = {}  # {market: {trade_id, entry_ts, ...}} — exit 시 조인용 in-memory
+
+
+def _live_trade_write_event(event):
+    """JSONL append-only 이벤트 쓰기. 실패해도 매매 로직 중단 X."""
+    try:
+        with _LIVE_TRADE_LOCK:
+            os.makedirs(_LIVE_TRADE_LOG_DIR, exist_ok=True)
+            with open(_LIVE_TRADE_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[LIVE_TRADE_LOG] event 쓰기 실패: {e}")
+
+
+def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
+                          signal_price=None, entry_order_uuid=None,
+                          entry_fee_krw=None, route=None,
+                          risk_calc_krw=None, max_seed_krw=None):
+    """실 매수 체결 시 호출. trade_id 발급 + ENTRY_FILLED 이벤트 append + pending 저장."""
+    try:
+        import uuid
+        trade_id = str(uuid.uuid4())
+        entry_ts = time.time()
+        entry_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(entry_ts))
+        entry_krw = round(float(filled_price) * float(filled_volume), 2)
+        slippage = 0.0
+        if signal_price and float(signal_price) > 0:
+            slippage = (float(filled_price) - float(signal_price)) / float(signal_price) * 100
+        # risk_override: risk_calc_krw < 실제 entry_krw면 최소주문 상향된 상태
+        risk_override = False
+        if risk_calc_krw is not None:
+            try:
+                risk_override = float(risk_calc_krw) < entry_krw
+            except Exception:
+                pass
+        event = {
+            "event_type": "ENTRY_FILLED",
+            "trade_id": trade_id,
+            "market": market,
+            "route": route,
+            "entry_order_uuid": entry_order_uuid,
+            "entry_time": entry_iso,
+            "entry_ts": entry_ts,
+            "signal_price": signal_price,
+            "order_price": order_price,
+            "requested_price": order_price,
+            "filled_price": filled_price,
+            "filled_volume": filled_volume,
+            "entry_krw": entry_krw,
+            "entry_fee_krw": entry_fee_krw,
+            "entry_slippage_pct": round(slippage, 4),
+            "risk_calc_krw": risk_calc_krw,
+            "risk_override": risk_override,
+            "max_seed_krw": max_seed_krw,
+        }
+        _live_trade_write_event(event)
+        # pending에 exit 조인용 정보만 남김 (trade_id + entry_krw + entry_ts)
+        with _LIVE_TRADE_LOCK:
+            _LIVE_TRADE_PENDING[market] = {
+                "trade_id": trade_id,
+                "entry_ts": entry_ts,
+                "entry_krw": entry_krw,
+                "filled_volume": filled_volume,
+                "filled_price": filled_price,
+            }
+        print(f"[LIVE_ENTRY_FILLED] {market} trade_id={trade_id[:8]} "
+              f"price={filled_price} vol={filled_volume} krw={entry_krw}")
+        return trade_id
+    except Exception as e:
+        print(f"[LIVE_TRADE_LOG] entry 기록 실패 {market}: {e}")
+        return None
+
+
+def _live_trade_log_exit(market, exit_price, exit_reason,
+                         gross_pnl_pct=None, net_pnl_pct=None,
+                         exit_fee_krw=None, hold_sec=None,
+                         exit_order_uuid=None, executed_exit_volume=None,
+                         remaining_volume=0.0):
+    """실 청산 완료 시 호출. EXIT_FILLED + TRADE_CLOSED 이벤트 append."""
+    try:
+        with _LIVE_TRADE_LOCK:
+            pending = _LIVE_TRADE_PENDING.pop(market, None)
+        if not pending:
+            # pending 없음: 봇 재시작 이후 청산 or 이미 처리됨. skip.
+            return
+        exit_ts = time.time()
+        exit_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(exit_ts))
+        trade_id = pending["trade_id"]
+        entry_krw = pending.get("entry_krw", 0)
+        entry_vol = pending.get("filled_volume", 0)
+        # net_pnl_pct 스케일 자동 판별 (소수 vs 퍼센트)
+        if net_pnl_pct is not None:
+            _np = float(net_pnl_pct)
+            if abs(_np) < 1.0:  # 소수 → 퍼센트로 변환
+                _np = _np * 100
+            net_pnl_pct = round(_np, 4)
+        if gross_pnl_pct is not None:
+            _gp = float(gross_pnl_pct)
+            if abs(_gp) < 1.0:
+                _gp = _gp * 100
+            gross_pnl_pct = round(_gp, 4)
+        net_pnl_krw = None
+        if net_pnl_pct is not None and entry_krw:
+            net_pnl_krw = round(entry_krw * net_pnl_pct / 100, 2)
+        # executed_exit_volume 기본값: 전체 volume
+        if executed_exit_volume is None:
+            executed_exit_volume = entry_vol
+        # EXIT_FILLED 이벤트
+        exit_event = {
+            "event_type": "EXIT_FILLED",
+            "trade_id": trade_id,
+            "market": market,
+            "exit_order_uuid": exit_order_uuid,
+            "exit_time": exit_iso,
+            "exit_ts": exit_ts,
+            "requested_exit_volume": entry_vol,
+            "executed_exit_volume": executed_exit_volume,
+            "exit_price": exit_price,
+            "exit_reason": exit_reason,
+            "exit_fee_krw": exit_fee_krw,
+            "hold_sec": round(hold_sec, 1) if hold_sec else None,
+        }
+        _live_trade_write_event(exit_event)
+        # TRADE_CLOSED 이벤트 (최종 요약)
+        closed_event = {
+            "event_type": "TRADE_CLOSED",
+            "trade_id": trade_id,
+            "market": market,
+            "hold_sec": round(hold_sec, 1) if hold_sec else None,
+            "exit_reason": exit_reason,
+            "gross_pnl_pct": gross_pnl_pct,
+            "net_pnl_pct": net_pnl_pct,
+            "net_pnl_krw": net_pnl_krw,
+            "remaining_volume": round(float(remaining_volume), 8),
+            "completed": True,
+        }
+        _live_trade_write_event(closed_event)
+        _print_pct = f"{net_pnl_pct:+.2f}%" if net_pnl_pct is not None else "?"
+        _print_krw = f"{net_pnl_krw:+.0f}원" if net_pnl_krw is not None else "?"
+        print(f"[LIVE_EXIT_FILLED] {market} trade_id={trade_id[:8]} "
+              f"price={exit_price} vol={executed_exit_volume}")
+        print(f"[LIVE_TRADE_CLOSED] {market} trade_id={trade_id[:8]} "
+              f"reason={exit_reason} net={_print_pct} pnl={_print_krw}")
+    except Exception as e:
+        print(f"[LIVE_TRADE_LOG] exit 기록 실패 {market}: {e}")
+
 # 실행품질 로그 — 시드 결정용 호가창 깊이 데이터 수집
 _EXEC_QUALITY_LOG_PATH = os.path.join(os.getcwd(), "exec_quality.csv")
 _EXEC_QUALITY_LOCK = threading.Lock()
@@ -3062,6 +3219,26 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
             state = od.get("state", "")
             if state == "done":
                 print(f"[HYBRID] {market} 지정가 전량체결!")
+                # 실체결 audit log: ENTRY_FILLED 이벤트 append (조언자 스펙)
+                try:
+                    _executed_vol = float(od.get("executed_volume", 0) or 0)
+                    _executed_funds = float(od.get("executed_funds", 0) or 0)
+                    _paid_fee = float(od.get("paid_fee", 0) or 0)
+                    _avg_fill_price = (_executed_funds / _executed_vol) if _executed_vol > 0 else float(ask1_price)
+                    _live_trade_log_entry(
+                        market=market,
+                        order_price=float(ask1_price),
+                        filled_price=_avg_fill_price,
+                        filled_volume=_executed_vol,
+                        signal_price=float(ask1_price),
+                        entry_order_uuid=order_uuid,
+                        entry_fee_krw=round(_paid_fee, 4) if _paid_fee else None,
+                        route=None,  # 상위 caller가 알고 있음 (별도 개선 필요)
+                        risk_calc_krw=None,  # 상위에서 SIZE_BUMP 로직에 있음
+                        max_seed_krw=None,
+                    )
+                except Exception as _ltl_err:
+                    print(f"[LIVE_TRADE_LOG] entry hook 실패 {market}: {_ltl_err}")
                 return limit_res
             if state == "cancel":
                 break
@@ -6162,6 +6339,18 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             _reported_trades.add((market, now_ms))
 
     print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
+
+    # 실체결 audit log: pending 진입 정보와 매칭해서 JSONL append (조언자 스펙)
+    try:
+        _live_trade_log_exit(
+            market=market,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            net_pnl_pct=pnl_pct * 100 if abs(pnl_pct) < 1 else pnl_pct,  # 소수 vs 퍼센트 자동
+            hold_sec=hold_sec,
+        )
+    except Exception as _ltl_err:
+        print(f"[LIVE_TRADE_LOG] exit hook 실패 {market}: {_ltl_err}")
 
     is_win = pnl_pct > 0
     csv_exists = os.path.exists(TRADE_LOG_PATH)
@@ -19085,11 +19274,11 @@ def monitor_position(m,
                 _at_exit_pnl = (_at_shadow_stop / entry_price - 1.0 - FEE_RATE) * 100 if entry_price > 0 and _at_shadow_stop > 0 else 0
                 _at_diff = _at_exit_pnl - _at_actual_pnl
                 _at_log = (f"🔬 AT비교 {m}: AT={_at_shadow_sec}초 {_at_shadow_verdict} {_at_exit_pnl:+.2f}% | "
-                           f"실제={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}% | "
+                           f"simulated_live_path={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}% | "
                            f"차이={_at_diff:+.2f}%p ob_slip={_at_feat_val:.3f}")
             else:
                 _at_log = (f"🔬 AT비교 {m}: AT=미청산(아직 verdict없음) | "
-                           f"실제={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}%")
+                           f"simulated_live_path={_at_actual_sec}초 {verdict} {_at_actual_pnl:+.2f}%")
             print(_at_log)
             try:
                 tg_send_mid(_at_log)
