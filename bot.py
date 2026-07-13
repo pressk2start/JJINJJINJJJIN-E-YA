@@ -1115,6 +1115,168 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
     except Exception as e:
         print(f"[LIVE_TRADE_LOG] exit 기록 실패 {market}: {e}")
 
+
+# ── Gate Fail Reason 계측 (2026-07-13 조언자 스펙) ──
+# 목적: raw XX → gate 0 → entry 0 사이 어떤 사유로 막혔는지 분류·카운트
+# 원칙:
+#   - 기존 gate 조건, Entry/Exit, 주문 로직 절대 변경하지 않음 (로깅만 추가)
+#   - reason_code 목록 고정 (신규 unknown 발생 시 별도 로그)
+#   - 신호 ID 기준 중복 카운트 방지 (동일 (market, cycle_id) 1회만)
+#   - 리포트 구간별 GATE_FAIL SUMMARY로 reason별 건수 표시
+_GATE_FAIL_STATS = {}  # {reason_code: count_since_boot}
+_GATE_FAIL_LAST_REPORT = {}  # {reason_code: count_at_last_report} → delta 계산용
+_GATE_FAIL_SEEN = {}  # {market: last_ts} → 중복 방지 (10초 이내 동일 market 카운트 X)
+_GATE_FAIL_LOCK = threading.Lock()
+
+# reason_code 목록 (조언자 스펙 고정)
+_GATE_FAIL_REASONS = frozenset({
+    "auto_trade_off", "api_key_missing", "entry_lock", "position_exists",
+    "position_limit", "invalid_signal", "prebreak_failed", "price_guard",
+    "pullback_excess", "pullback_timeout", "buy_pressure_weak",
+    "post_pullback_move", "account_query_failed", "spread_high",
+    "stale_tick", "stale_candle", "insufficient_depth", "slippage_guard",
+    "cooldown", "losing_streak", "scan_safety_block", "risk_limit",
+    "balance_issue", "fill_failure", "unknown",
+})
+
+
+def _classify_gate_fail_reason(reason_text):
+    """signal_skip에 넘어온 free-form 사유 텍스트를 reason_code로 매핑."""
+    if not reason_text:
+        return "unknown"
+    t = str(reason_text)
+    # 접두 매칭 (더 구체적인 것부터)
+    if "AUTO_TRADE=False" in t or "AUTO_TRADE=0" in t:
+        return "auto_trade_off"
+    if "API 키" in t:
+        return "api_key_missing"
+    if "entry_lock" in t or "entry lock" in t:
+        return "entry_lock"
+    if "이미 포지션" in t or "포지션 보유" in t:
+        return "position_exists"
+    if "최대 포지션" in t or "MAX_POSITIONS" in t or "position_limit" in t.lower():
+        return "position_limit"
+    if "pre['price']" in t or "무효" in t and "가격" in t:
+        return "invalid_signal"
+    if "PREBREAK" in t:
+        return "prebreak_failed"
+    if "가격가드" in t or "price_guard" in t.lower():
+        return "price_guard"
+    if "풀백 과대" in t:
+        return "pullback_excess"
+    if "풀백 타임아웃" in t:
+        # 풀백 타임아웃 + 매수세 약화는 원인이 buy_pressure_weak 쪽
+        if "매수세 약화" in t:
+            return "buy_pressure_weak"
+        return "pullback_timeout"
+    if "매수세 약화" in t or "매수비" in t:
+        return "buy_pressure_weak"
+    if "풀백 후" in t and ("급등" in t or "급락" in t):
+        return "post_pullback_move"
+    if "계좌 조회" in t:
+        return "account_query_failed"
+    if "스프레드" in t:
+        return "spread_high"
+    if "틱신선도" in t or "stale" in t.lower():
+        return "stale_tick"
+    if "슬리피지" in t:
+        return "slippage_guard"
+    if "쿨다운" in t or "cooldown" in t.lower():
+        return "cooldown"
+    if "연패" in t:
+        return "losing_streak"
+    # 체결 실패 먼저 (잔고 재검증 포함) → balance_issue보다 우선순위 높음
+    if "체결 0" in t or "잔고 재검증" in t:
+        return "fill_failure"
+    if "잔고" in t:
+        return "balance_issue"
+    if "scan" in t.lower() and ("차단" in t or "block" in t.lower()):
+        return "scan_safety_block"
+    if "risk" in t.lower() and "limit" in t.lower():
+        return "risk_limit"
+    return "unknown"
+
+
+def _gate_fail_record(market, reason_text, route=None, value=None, threshold=None):
+    """진입 직전 gate 탈락 계측. signal_skip에서 자동 호출됨.
+    - 신호 ID 기준 중복 방지 (동일 market이 10초 이내 재기록 X)
+    - unknown 사유는 호출 경로도 로그로 남김
+    """
+    try:
+        code = _classify_gate_fail_reason(reason_text)
+        now_ts = time.time()
+        with _GATE_FAIL_LOCK:
+            last_ts = _GATE_FAIL_SEEN.get(market, 0)
+            if now_ts - last_ts < 10:
+                return  # 중복 방지: 동일 market 10초 이내 재기록 안 함
+            _GATE_FAIL_SEEN[market] = now_ts
+            _GATE_FAIL_STATS[code] = _GATE_FAIL_STATS.get(code, 0) + 1
+        # [GATE_FAIL] 통일 로그
+        parts = [f"[GATE_FAIL] market={market}"]
+        if route:
+            parts.append(f"route={route}")
+        parts.append(f"reason={code}")
+        if value is not None:
+            parts.append(f"value={value}")
+        if threshold is not None:
+            parts.append(f"threshold={threshold}")
+        parts.append(f"raw='{reason_text[:80]}'")
+        print(" ".join(parts))
+        # unknown이면 호출 경로 남김 (스택 프레임)
+        if code == "unknown":
+            try:
+                import traceback
+                stack = traceback.extract_stack()[-3:-1]  # 이 함수 호출 직전 2프레임
+                for frame in stack:
+                    print(f"[GATE_FAIL_UNKNOWN_STACK] {frame.filename}:{frame.lineno} in {frame.name}")
+            except Exception:
+                pass
+    except Exception as e:
+        # 로깅 실패가 매매 로직 중단시키면 안 됨
+        try:
+            print(f"[GATE_FAIL_ERR] {market} {e}")
+        except Exception:
+            pass
+
+
+def _gate_fail_summary_since_last():
+    """리포트 표시용: 이전 요약 이후 신규 delta 반환 + snapshot 갱신.
+    Returns:
+        (dict) reason_code -> {count: total, delta: 이번 구간 신규}
+    """
+    result = {}
+    try:
+        with _GATE_FAIL_LOCK:
+            for code in sorted(_GATE_FAIL_STATS.keys()):
+                total = _GATE_FAIL_STATS[code]
+                last = _GATE_FAIL_LAST_REPORT.get(code, 0)
+                delta = total - last
+                result[code] = {"count": total, "delta": delta}
+                _GATE_FAIL_LAST_REPORT[code] = total
+    except Exception as e:
+        print(f"[GATE_FAIL_SUMMARY_ERR] {e}")
+    return result
+
+
+def _gate_fail_format_summary(only_recent=True):
+    """리포트 문자열로 GATE_FAIL SUMMARY 포맷.
+    only_recent=True: delta > 0인 항목만 표시.
+    """
+    stats = _gate_fail_summary_since_last()
+    if not stats:
+        return ""
+    lines = ["GATE_FAIL SUMMARY:"]
+    shown = 0
+    for code, s in stats.items():
+        if only_recent and s["delta"] == 0:
+            continue
+        lines.append(f"  {code}: {s['count']}(Δ{s['delta']:+d})")
+        shown += 1
+    if shown == 0:
+        return "GATE_FAIL SUMMARY: 이번 구간 신규 없음"
+    return "\n".join(lines)
+
+
 # 실행품질 로그 — 시드 결정용 호가창 깊이 데이터 수집
 _EXEC_QUALITY_LOG_PATH = os.path.join(os.getcwd(), "exec_quality.csv")
 _EXEC_QUALITY_LOCK = threading.Lock()
@@ -1403,6 +1565,14 @@ def _pipeline_report(force=False):
         _act.append(f"차단{c['suspend_block']}")
     if _act:
         lines.append(f"ACTION: {' | '.join(_act)}")
+    # Gate 탈락 사유 계측 (2026-07-13 조언자 스펙)
+    try:
+        _gf_summary = _gate_fail_format_summary(only_recent=True)
+        if _gf_summary:
+            for _gf_line in _gf_summary.split("\n"):
+                lines.append(f"  {_gf_line}")
+    except Exception:
+        pass
     lines.append(
         f"일반 {_st_normal['n']}전{_st_normal.get('wins',0)}승 wr{_st_normal['wr']} {_st_normal['pnl']}"
         f" | A군 {_st_bypass['n']}전{_st_bypass.get('wins',0)}승 wr{_st_bypass['wr']} {_st_bypass['pnl']}")
@@ -3896,10 +4066,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     print(f"[AUTO_ENTRY] {m} 시작 (AUTO_TRADE={AUTO_TRADE})")
 
     def signal_skip(reason):
-        """초입신호 후 매수 스킵 로그 (near_miss 출력용)"""
+        """초입신호 후 매수 스킵 로그 (near_miss 출력용).
+        2026-07-13: Gate 탈락 사유 계측 훅 추가 (조언자 스펙, 로깅만).
+        """
         if DEBUG_NEAR_MISS:
             now_str = now_kst().strftime("%H:%M:%S")
             print(f"[SIGNAL_SKIP][{now_str}] {m} | {reason}")
+        # Gate fail 자동 계측 (기존 조건/로직 완전 무변경, 로그만 추가)
+        try:
+            _gate_fail_record(m, reason)
+        except Exception:
+            pass
 
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
