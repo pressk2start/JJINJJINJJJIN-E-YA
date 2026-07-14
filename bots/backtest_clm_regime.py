@@ -147,7 +147,18 @@ def stats(rows):
     }
 
 def stability_score(rows):
-    """세션별 EV의 CV → 1/(1+CV). Range [0, 1], 높을수록 안정."""
+    """
+    Stability Score — regime 분산 측정 전용.
+
+    ⚠ 주의: 이건 '전략 성과'가 아니라 '세션 간 성과 편차' 지표.
+    - 세션별 EV 평균의 CV (coefficient of variation)
+    - 1 / (1 + CV) 로 정규화, 범위 [0, 1]
+    - 1에 가까울수록 세션마다 성과가 균일
+    - 낮을수록 regime 의존도가 큼
+
+    ⚠ 전략 통합 PF는 stats() 에서 gross_profit/gross_loss로 별도 계산.
+    이 함수의 값을 전략 PF 대체로 쓰면 안 됨.
+    """
     by_sess = defaultdict(list)
     for r in rows:
         by_sess[r["session_id"]].append(r["net_pnl"])
@@ -477,6 +488,11 @@ def build_report(all_rows, train, val, results_dir):
     lines.append(f"regime feature 있음: {len(with_reg)}건")
     lines.append(f"Train: {len(train)}건 / Val: {len(val)}건 (세션 단위 {int(TRAIN_RATIO*100)}/{int(100-TRAIN_RATIO*100)} 분할)")
     lines.append("")
+    lines.append("※ 지표 정의:")
+    lines.append("   PF        = 전체 거래의 gross_profit / gross_loss (통합 계산)")
+    lines.append("   Stability = 세션별 EV 평균의 CV → 1/(1+CV). regime 분산 측정 전용.")
+    lines.append("               전략 성과 대체 지표가 아님. 낮으면 regime 의존도 큼.")
+    lines.append("")
 
     lines.append("─" * 70)
     lines.append("[2] EMA spread Grid (Train)")
@@ -525,6 +541,8 @@ def build_report(all_rows, train, val, results_dir):
     lines.append("─" * 70)
     lines.append("[6~8] Top-N 조건 탐색 + Val 검증 + Stability (Train→Val)")
     lines.append(f"      MIN_SAMPLE={MIN_SAMPLE}, 판정: STRONG/SURVIVED/WATCH/FAILED")
+    lines.append("      stab = 세션 간 EV 분산 지표 (regime 안정성, [0,1])")
+    lines.append("             ⚠ 전략 성과 아님. PF/EV와 별개 축.")
     lines.append("─" * 70)
     tops = search_top_conditions(train, val, MIN_SAMPLE)
     lines.append(f"{'rank':<4}{'condition':<40}{'tr_n':>5}{'tr_PF':>7}{'tr_EV':>8}"
