@@ -1159,6 +1159,101 @@ _DETECT_LOG_LAST = time.time()
 # post_signal_enter/blocked/pass 보존식 delta 계산 snapshot
 _POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0}
 
+# PR1: LIVE 라우트 실효 설정 프로세스당 1회 로그 (문서-런타임 정합 증명용)
+# 값은 실제 런타임 객체에서 파생 (리터럴 하드코딩 X)
+_LIVE_EFFECTIVE_CONFIG_LOGGED = False
+
+
+def _log_live_effective_config_once():
+    """PR1 [LIVE_EFFECTIVE_CONFIG] — enabled LIVE 라우트의 실효 설정을 실제 런타임 객체에서 파생 출력.
+    - 프로세스당 1회 (플래그 dedup)
+    - stdout only (텔레 전송 없음)
+    - 매매 로직 무영향 (전략 조건·threshold·주문 로직 무변경)
+    - 실패해도 매매 로직 무전파 (try 격리)
+    """
+    global _LIVE_EFFECTIVE_CONFIG_LOGGED
+    if _LIVE_EFFECTIVE_CONFIG_LOGGED:
+        return
+    try:
+        for name, cfg in _STRATEGY_REGISTRY.items():
+            if not cfg.get("enabled"):
+                continue
+            check_fn = cfg.get("check_fn")
+            check_fn_name = getattr(check_fn, "__name__", "?")
+            ind_filters = cfg.get("ind_filters", [])
+            # ind_filters 는 shadow 경로에서만 소비 → LIVE 실적용 여부 명시
+            ind_filters_live_applied = False
+            declared_vr_min = None
+            for f in ind_filters:
+                if len(f) >= 3 and f[0] == "vr5" and f[1] in (">=", ">"):
+                    try:
+                        declared_vr_min = float(f[2])
+                    except Exception:
+                        pass
+            # exit_params 에서 실행되는 값 파생
+            ep = cfg.get("exit_params", {}) or {}
+            sl_pct = ep.get("sl_pct")
+            standard_trail_activation_raw = ep.get("activation_pct")
+            standard_trail_enabled = not bool(ep.get("disable_trail", False))
+            sl_tiers = ep.get("sl_tiers", [])
+            ap = ep.get("adaptive_trail") or {}
+            adaptive_arm_sec = ap.get("arm_after_sec")
+            adaptive_tiers = ap.get("tiers") or []
+            adaptive_trail_pct = adaptive_tiers[0][1] if adaptive_tiers else None
+            adaptive_hold_sec = adaptive_tiers[0][2] if adaptive_tiers else None
+            # activation 단위: gain_from_entry = curp/entry-1.0 → decimal ratio.
+            # 1.0 = 100%
+            standard_trail_activation_effective_pct = (
+                standard_trail_activation_raw * 100.0
+                if isinstance(standard_trail_activation_raw, (int, float))
+                else None
+            )
+            fields = [
+                ("route", name),
+                ("entry_check_fn", check_fn_name),
+                ("route_vr_min_declared", declared_vr_min),
+                ("route_ind_filters_applied_to_live", str(ind_filters_live_applied).lower()),
+                ("flat_sl_pct", round(sl_pct * 100, 3) if isinstance(sl_pct, (int, float)) else None),
+                ("hard_stop_pct", round(sl_pct * 1.5 * 100, 3) if isinstance(sl_pct, (int, float)) else None),
+                ("standard_trail_enabled", str(standard_trail_enabled).lower()),
+                ("standard_trail_activation_raw", standard_trail_activation_raw),
+                ("standard_trail_activation_effective_pct", standard_trail_activation_effective_pct),
+                ("adaptive_trail_mode", "shadow_only" if ap else "off"),
+                ("adaptive_arm_sec", adaptive_arm_sec),
+                ("adaptive_trail_pct", round(adaptive_trail_pct * 100, 3) if isinstance(adaptive_trail_pct, (int, float)) else None),
+                ("adaptive_hold_sec", adaptive_hold_sec),
+                ("adaptive_sl_tiers", sl_tiers),
+                ("max_seed_krw", cfg.get("max_seed_krw")),
+                ("priority", cfg.get("priority")),
+            ]
+            # 전역 gate threshold (실제 런타임 전역에서 파생)
+            try:
+                fields.extend([
+                    ("gate_spread_max_pct", GATE_SPREAD_MAX),
+                    ("gate_vol_min_krw", GATE_VOL_MIN),
+                    ("gate_buy_ratio_min", GATE_BUY_RATIO_MIN),
+                    ("gate_accel_max_x", GATE_ACCEL_MAX),
+                    ("gate_early_flow_min_krwpsec", EARLY_FLOW_MIN_KRWPSEC),
+                    ("recheck_sec", RECHECK_SEC),
+                ])
+            except NameError:
+                pass
+            # v7 타임아웃 (17-18시 로직에서 파생 상수 — 인라인 리터럴이라 값 자체 명시)
+            fields.extend([
+                ("live_timeout_day_sec_kst_12_18", 1200),
+                ("live_timeout_other_sec", 1800),
+                ("peak_basis", "curp"),
+            ])
+            parts = ["[LIVE_EFFECTIVE_CONFIG]"]
+            parts += [f"{k}={v}" for k, v in fields if v is not None]
+            print(" ".join(parts))
+        _LIVE_EFFECTIVE_CONFIG_LOGGED = True
+    except Exception as exc:
+        try:
+            print(f"[LIVE_EFFECTIVE_CONFIG_ERR] {exc}")
+        except Exception:
+            pass
+
 _DETECT_STAGE = {
     "detect_position":  "pre_signal",  # 이미 포지션 보유 → v4 lookup 이전
     "detect_no_v4":     "pre_signal",  # v4 signal 자체 부재 → raw 이전
@@ -20334,6 +20429,9 @@ def main():
         f"🚀 대장초입 헌터 v3.2.7+Score (자동학습+동적매도) 시작\n"
         f"📊 TOP {TOP_N} | 학습: {AUTO_LEARN_MIN_TRADES}건~ | {now_kst_str()}"
     )
+
+    # PR1: LIVE 라우트 실효 설정 로그 (문서-런타임 정합 증명, 프로세스당 1회)
+    _log_live_effective_config_once()
 
     # 🔧 시작 시 유령 포지션 즉시 동기화
     global _LAST_ORPHAN_SYNC
