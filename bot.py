@@ -1152,6 +1152,12 @@ _PRE_SIGNAL_LAST_REPORT = {}       # delta 계산 snapshot
 _POST_SIGNAL_LAST_REPORT = {}
 _DETECT_GATE_SEEN = {}             # (market, code) -> last_ts
 _DETECT_GATE_LAST_CLEANUP = 0.0
+# POST 상세 로그 전역 rate limit (관측이 scan p95·매매 스레드 흔들지 않게)
+# burst 30, 초당 0.5 충전 → 평균 ~30/분
+_DETECT_LOG_TOKENS = 30.0
+_DETECT_LOG_LAST = time.time()
+# post_signal_enter/blocked/pass 보존식 delta 계산 snapshot
+_POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0}
 
 _DETECT_STAGE = {
     "detect_position":  "pre_signal",  # 이미 포지션 보유 → v4 lookup 이전
@@ -1163,18 +1169,38 @@ _DETECT_STAGE = {
     "detect_fresh":     "post_signal", # 틱 신선도
     "detect_spread":    "post_signal", # 스프레드 과다
     "detect_vol_min":   "post_signal", # 거래대금 부족
+    "detect_spoof100":  "post_signal", # 매수비 100% 스푸핑 하드컷
     "detect_buy_ratio": "post_signal", # 매수비 하한
     "detect_accel":     "post_signal", # 가속 과다
     "detect_early_flow":"post_signal", # 초기 거래속도 하한
 }
 
 
+def _detect_log_allowed(now_ts):
+    """POST 상세 로그 전역 rate limit — burst 30, 초당 0.5 충전(~30/분).
+    _GATE_FAIL_LOCK 공유로 동시성 안전 (여러 스레드 detect_leader 병행 대비)."""
+    global _DETECT_LOG_TOKENS, _DETECT_LOG_LAST
+    try:
+        with _GATE_FAIL_LOCK:
+            elapsed = max(0.0, now_ts - _DETECT_LOG_LAST)
+            _DETECT_LOG_TOKENS = min(30.0, _DETECT_LOG_TOKENS + elapsed * 0.5)
+            _DETECT_LOG_LAST = now_ts
+            if _DETECT_LOG_TOKENS < 1.0:
+                return False
+            _DETECT_LOG_TOKENS -= 1.0
+            return True
+    except Exception:
+        return False
+
+
 def _detect_gate_observe(market, code, **obs):
-    """detect_leader_stock 게이트 관측 (v2).
+    """detect_leader_stock 게이트 관측 (v2 + rate-limit).
     - (market, code) 10초 debounce → 사유 분포 왜곡 방지
     - 60초 TTL 실제 실행 → 메모리 bounded
     - PRE/POST 스테이지 분리 → raw→gate 병목은 POST 만 봄
-    - obs는 관측값·threshold를 kwargs로 (설정값을 관측값처럼 위장하지 않음)
+    - PRE: stats 집계만 (개별 print 없음, no_v4 119만 이벤트 stdout 폭주 방지)
+    - POST 상세 print: 전역 token bucket ~30/분 제한
+    - obs는 관측값·threshold를 kwargs로 (설정값을 관측값처럼 위장하지 않음, 단위 명시 키 권장)
     - 전략 조건·threshold·주문 로직 무변경 (log-only)
     - 실패해도 매매 로직 무영향 (try 격리)
     """
@@ -1196,13 +1222,18 @@ def _detect_gate_observe(market, code, **obs):
             stage = _DETECT_STAGE.get(code, "post_signal")
             stats = _PRE_SIGNAL_FAIL_STATS if stage == "pre_signal" else _POST_SIGNAL_GATE_FAIL_STATS
             stats[code] = stats.get(code, 0) + 1
-        tag = "GATE_FAIL_PRE" if stage == "pre_signal" else "GATE_FAIL_POST"
-        parts = [f"[{tag}] market={market} reason={code}"]
+        # PRE는 stats 집계만 (개별 print 금지 — no_v4 이벤트 폭주 방지)
+        if stage == "pre_signal":
+            return
+        # POST 상세는 전역 token bucket 제한
+        if not _detect_log_allowed(now_ts):
+            return
+        parts = [f"[GATE_FAIL_POST] market={market} reason={code}"]
         parts += [f"{kk}={vv}" for kk, vv in obs.items() if vv is not None]
         print(" ".join(parts))
     except Exception as exc:
         try:
-            print(f"[GATE_OBS_ERR] {market} {code} {exc}")
+            print(f"[GATE_OBS_ERR] market={market} reason={code} err={exc}")
         except Exception:
             pass
 
@@ -1360,9 +1391,43 @@ def _detect_stats_delta(stats_dict, last_report):
     return result
 
 
+def _post_signal_flow_summary():
+    """post_signal_enter = blocked + pass 보존식 (total + delta) + coverage.
+    debounce 무관 실호출 카운터라 배선 정합 자가진단 기준값.
+    관측 누락 판정: observed_reason_total ≤ blocked (debounce 때문에 등호 아닐 수 있음).
+    """
+    try:
+        with _PIPELINE_COUNTERS_LOCK:
+            enter = _PIPELINE_COUNTERS.get("post_signal_enter", 0)
+            blocked = _PIPELINE_COUNTERS.get("post_signal_blocked", 0)
+            passed = _PIPELINE_COUNTERS.get("post_signal_pass", 0)
+        with _GATE_FAIL_LOCK:
+            d_enter = enter - _POST_FLOW_LAST_REPORT["enter"]
+            d_blocked = blocked - _POST_FLOW_LAST_REPORT["blocked"]
+            d_passed = passed - _POST_FLOW_LAST_REPORT["pass"]
+            _POST_FLOW_LAST_REPORT["enter"] = enter
+            _POST_FLOW_LAST_REPORT["blocked"] = blocked
+            _POST_FLOW_LAST_REPORT["pass"] = passed
+            observed_total = sum(_POST_SIGNAL_GATE_FAIL_STATS.values())
+        total_ok = (enter == blocked + passed)
+        delta_ok = (d_enter == d_blocked + d_passed)
+        coverage = (observed_total / blocked * 100.0) if blocked > 0 else 0.0
+        return (
+            "POST_SIGNAL FLOW: "
+            f"total enter={enter} blocked={blocked} pass={passed} "
+            f"check={'OK' if total_ok else 'MISMATCH'} "
+            f"observed={observed_total} coverage={coverage:.1f}% | "
+            f"delta enter={d_enter} blocked={d_blocked} pass={d_passed} "
+            f"check={'OK' if delta_ok else 'MISMATCH'}"
+        )
+    except Exception as exc:
+        return f"POST_SIGNAL FLOW: ERROR {exc}"
+
+
 def _detect_gate_format_summary(only_recent=True):
     """detect_leader 게이트 스테이지별 SUMMARY. POST_SIGNAL을 먼저 표시.
     관측 누락률: observed_reason_total <= post_signal_blocked (debounce 때문).
+    보존식 라인 (POST_SIGNAL FLOW)도 함께 반환.
     """
     parts = []
     for label, stats, last_report in [
@@ -1382,6 +1447,8 @@ def _detect_gate_format_summary(only_recent=True):
         if shown == 0:
             lines = [f"{label} SUMMARY: 이번 구간 신규 없음"]
         parts.append("\n".join(lines))
+    # 보존식 라인 (항상 표시 — MISMATCH 조기 감지)
+    parts.append(_post_signal_flow_summary())
     return "\n".join(parts) if parts else ""
 
 
@@ -11153,30 +11220,6 @@ def _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=None):
     return sig
 
 
-def _v0_check_climax_cs40_vr3(c1, c5, c15, c30, c60, gate_info=None):
-    """CS40 + VR3(vr5>=3.0) 실 진입 강제 — 이름/ind_filters와 LIVE 진입 정합.
-    ind_filters의 vr5>=3.0은 shadow 경로에서만 소비 → LIVE는 base check_fn(vr2)만 게이팅.
-    이 wrapper는 enabled LIVE 라우트에만 붙여 vr3를 실제 강제. 공유 base 무변경.
-    관측 분리: missing / invalid / fail — 게이트 원인 구분 가능."""
-    sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
-    if not sig:
-        return None
-    indicators = sig.get("indicators") or {}
-    vr5_raw = indicators.get("vr5")
-    if vr5_raw is None:
-        _pipeline_inc("climax_vr3_missing", value="none", threshold=3.0, direction="gte")
-        return None
-    try:
-        vr5 = float(vr5_raw)
-    except (TypeError, ValueError):
-        _pipeline_inc("climax_vr3_invalid", value=str(vr5_raw)[:20], threshold=3.0, direction="gte")
-        return None
-    if vr5 < 3.0:
-        _pipeline_inc("climax_vr3_fail", value=round(vr5, 2), threshold=3.0, direction="gte")
-        return None
-    return sig
-
-
 # === v20 신규 시나리오 check_fn (5개) ===
 
 def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
@@ -11915,7 +11958,7 @@ _STRATEGY_REGISTRY = {
     # AUTO_TRADE=1 필요 (환경변수)
     # 3단계 증액 계획: 100k → (실체결 3건 정상) → 300k → (10건 정상) → 500k
     "과열감지_CS40_VR3_TR180_bp30_240": {
-        "check_fn": _v0_check_climax_cs40_vr3,  # 🔧 FIX: 라이브 vr5>=3.0 강제 (이름/ind_filters 정합)
+        "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
@@ -17541,7 +17584,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _detect_gate_observe(
             m, "detect_fake_flow",
             buy_ratio=round(twin["buy_ratio"], 2), buy_ratio_thr=0.98,
-            pstd10=round(pstd10, 4), pstd10_thr=0.001,
+            pstd10_ratio=round(pstd10, 4), pstd10_thr_ratio=0.001,
             cv=round(cv, 2), cv_thr=2.5,
         )
         return None
@@ -17555,7 +17598,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
             _pipeline_inc("gate_fail_tick_age")
             _pipeline_inc("post_signal_blocked")
             _detect_gate_observe(m, "detect_tick_age",
-                tick_age=round(_entry_tick_age, 1), tick_age_thr=5.0)
+                tick_age_sec=round(_entry_tick_age, 1), tick_age_thr_sec=5.0)
             return None
 
     # 🔧 (제거됨) BUY_FADE: final_check DECAY 다운그레이드가 매수세 둔화 감지 → 중복 제거
@@ -17583,7 +17626,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_coin_hit(m, "fresh")
         _pipeline_inc("post_signal_blocked")
         _detect_gate_observe(m, "detect_fresh",
-            fresh_age=round(fresh_age, 1), fresh_age_thr=round(fresh_max_age, 1))
+            fresh_age_sec=round(fresh_age, 1), fresh_age_thr_sec=round(fresh_max_age, 1))
         return None
 
     # 2) 스프레드 (가격대별 동적 상한)
@@ -17600,7 +17643,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_track_value("gate_spread", spread, m, passed=False)
         _pipeline_inc("post_signal_blocked")
         _detect_gate_observe(m, "detect_spread",
-            spread=round(spread, 2), spread_thr=round(eff_spread_max, 2))
+            spread_pct=round(spread, 2), spread_thr_pct=round(eff_spread_max, 2))
         return None
 
     # 3) 최소 거래대금
@@ -17611,13 +17654,21 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_track_value("gate_vol_krw", current_volume / 1e6, m, passed=False)
         _pipeline_inc("post_signal_blocked")
         _detect_gate_observe(m, "detect_vol_min",
-            vol_m=int(current_volume / 1e6), vol_m_thr=int(GATE_VOL_MIN / 1e6))
+            vol_mkrw=int(current_volume / 1e6), vol_thr_mkrw=int(GATE_VOL_MIN / 1e6))
         return None
 
     # 4) 매수비 100% 스푸핑
     if abs(_gate_buy_ratio - 1.0) < 1e-6:
         cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_spoof100")
         _pipeline_coin_hit(m, "spoof")
+        # POST_SIGNAL FLOW 보존식 정합 + 사유 가시화 (조건이 abs(x-1)<1e-6이라 오차 함께 기록)
+        _pipeline_inc("post_signal_blocked")
+        _detect_gate_observe(
+            m, "detect_spoof100",
+            buy_ratio=round(_gate_buy_ratio, 4), buy_ratio_thr=1.0,
+            buy_ratio_diff=round(abs(_gate_buy_ratio - 1.0), 8), buy_ratio_diff_thr=1e-6,
+        )
         return None
 
     # 4-1) 매수비 하한 — 🔧 데드코드→실구현 (0.50, 공포장 대응)
@@ -17639,7 +17690,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_track_value("gate_accel", accel, m, passed=False)
         _pipeline_inc("post_signal_blocked")
         _detect_gate_observe(m, "detect_accel",
-            accel=round(accel, 1), accel_thr=GATE_ACCEL_MAX)
+            accel_x=round(accel, 1), accel_thr_x=GATE_ACCEL_MAX)
         return None
 
     # 5-1) 초기 거래속도 하한 — 🔧 데드코드→실구현 (15K원/초)
@@ -17650,8 +17701,8 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         _pipeline_track_value("gate_flow_kps", t15.get("krw_per_sec", 0) / 1000, m, passed=False)
         _pipeline_inc("post_signal_blocked")
         _detect_gate_observe(m, "detect_early_flow",
-            kps=int(t15.get("krw_per_sec", 0) / 1000),
-            kps_thr=int(EARLY_FLOW_MIN_KRWPSEC / 1000))
+            flow_kkrw_per_sec=int(t15.get("krw_per_sec", 0) / 1000),
+            flow_thr_kkrw_per_sec=int(EARLY_FLOW_MIN_KRWPSEC / 1000))
         return None
 
     # 모든 POST_SIGNAL 게이트 통과 (비-debounce 카운터)
