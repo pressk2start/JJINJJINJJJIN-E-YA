@@ -358,11 +358,13 @@ def manage_positions(tickers_dict, now_ts):
             pos["worst_price"] = exit_price
         drawdown = (pos["peak_price"] - exit_price) / pos["peak_price"] * 100
         pnl_pct = (exit_price - pos["entry_price"]) / pos["entry_price"] * 100
+        # [M1 fix] 진입 게이트 spread<=0.10 이라 기존 0.12/0.22 분기는 죽은 코드.
+        #   → 게이트 안(0~0.10)으로 임계 재보정: clean 0.05 / dirty 0.08.
         trail_pct = TRAILING_STOP_PCT
-        if pos["spread_pct"] <= 0.12 and pos["slip_buy"] <= 0.10:
-            trail_pct = 0.35
-        elif pos["spread_pct"] >= 0.22 or pos["slip_buy"] >= 0.18:
-            trail_pct = 0.18
+        if pos["spread_pct"] <= 0.05 and pos["slip_buy"] <= 0.10:
+            trail_pct = 0.35          # clean → loose
+        elif pos["spread_pct"] >= 0.08 or pos["slip_buy"] >= 0.18:
+            trail_pct = 0.18          # dirty → tight
         reason = None
         if pnl_pct >= TARGET_PROFIT_PCT:
             reason = f"target({pnl_pct:+.2f}%)"
