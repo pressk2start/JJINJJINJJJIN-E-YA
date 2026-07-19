@@ -1138,7 +1138,9 @@ _GATE_FAIL_REASONS = frozenset({
     "cooldown", "losing_streak", "scan_safety_block", "risk_limit",
     "balance_issue", "fill_failure", "unknown",
     # detect_leader_stock 사전-진입 게이트 (관측 배선 확장)
-    "detect_position", "detect_no_v4", "detect_coin_cd", "detect_no_ticks",
+    # ⚠ detect_no_v4는 의도적으로 제외 — "신호 없음"이라 raw→gate 병목이 아니고
+    #    ~119만 건이 다른 게이트 분포를 압도해버림
+    "detect_position", "detect_coin_cd", "detect_no_ticks",
     "detect_fake_flow", "detect_tick_age", "detect_fresh", "detect_spread",
     "detect_vol_min", "detect_buy_ratio", "detect_accel", "detect_early_flow",
 })
@@ -17388,7 +17390,7 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
         cut("NO_V4_SIGNAL", f"{m} v4 진입 조건 미충족")
         _pipeline_inc("gate_fail_no_v4")
         _pipeline_coin_hit(m, "no_v4")
-        _detect_gate_observe(m, "detect_no_v4")
+        # ⚠ detect_no_v4는 GATE_FAIL SUMMARY 관측 배선에서 제외 (raw→gate 병목 아님)
         return None
 
     _15m_signal = _v4_signal["signal_tag"]
