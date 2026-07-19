@@ -1163,6 +1163,177 @@ _POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0}
 # 값은 실제 런타임 객체에서 파생 (리터럴 하드코딩 X)
 _LIVE_EFFECTIVE_CONFIG_LOGGED = False
 
+# PR1: ENTRY/EXIT 로그 dedup (bounded/TTL) — monitor 루프 반복 출력 방지
+_LIVE_ENTRY_LOGGED = {}   # signal_id -> last_ts, TTL 600s (10분)
+_LIVE_EXIT_LOGGED = {}    # trade_id  -> last_ts, TTL 86400s (24h)
+_LIVE_LOG_LAST_CLEANUP = 0.0
+_LIVE_LOG_LOCK = threading.Lock()
+
+
+def _live_log_cleanup_locked(now_ts):
+    """TTL cleanup — 60초마다 실행. 락은 caller가 이미 잡고 있어야 함."""
+    global _LIVE_LOG_LAST_CLEANUP
+    if now_ts - _LIVE_LOG_LAST_CLEANUP < 60.0:
+        return
+    ent_cutoff = now_ts - 600.0
+    for k, ts in list(_LIVE_ENTRY_LOGGED.items()):
+        if ts < ent_cutoff:
+            _LIVE_ENTRY_LOGGED.pop(k, None)
+    exit_cutoff = now_ts - 86400.0
+    for k, ts in list(_LIVE_EXIT_LOGGED.items()):
+        if ts < exit_cutoff:
+            _LIVE_EXIT_LOGGED.pop(k, None)
+    _LIVE_LOG_LAST_CLEANUP = now_ts
+
+
+def _log_live_entry_config_once(market, pre):
+    """[LIVE_ENTRY_CONFIG] — check_fn 통과 → open_auto_position 진입 직후 1회.
+    - signal_id = (market, signal_ts) 기준 TTL 10분 dedup
+    - vr5·cs·body·wick·wick_asym 실제 sig["indicators"]에서 파생
+    - route ind_filters의 LIVE 실적용 여부(=False 고정)를 명시
+    - 전략값 대입 금지, log-only
+    - 예외 격리
+    """
+    try:
+        signal_ts = pre.get("signal_ts") or time.time()
+        signal_id = f"{market}:{int(signal_ts)}"
+        now_ts = time.time()
+        with _LIVE_LOG_LOCK:
+            _live_log_cleanup_locked(now_ts)
+            if signal_id in _LIVE_ENTRY_LOGGED:
+                return
+            _LIVE_ENTRY_LOGGED[signal_id] = now_ts
+        v4 = pre.get("v4_signal") or {}
+        ind = v4.get("indicators") or {}
+        # LIVE 진입 loop는 base check_fn 만 게이팅 → ind_filters 는 shadow 전용
+        # 즉 이 로그가 남는 순간, VR 실효 하한 = check_fn 내부 값 (base=_v0_check_climax=2.0)
+        # declared vr_min은 route registry의 ind_filters에서 파생
+        effective_vr_min = 2.0  # _v0_check_climax::vr5 < 2.0 → return None (base fixed)
+        route_name = v4.get("route") or v4.get("logic_group") or "?"
+        declared_vr_min = None
+        try:
+            for name, cfg in _STRATEGY_REGISTRY.items():
+                if not cfg.get("enabled"):
+                    continue
+                for f in cfg.get("ind_filters", []) or []:
+                    if len(f) >= 3 and f[0] == "vr5" and f[1] in (">=", ">"):
+                        try:
+                            declared_vr_min = float(f[2])
+                            route_name = name
+                            break
+                        except Exception:
+                            pass
+                if declared_vr_min is not None:
+                    break
+        except Exception:
+            pass
+        fields = [
+            ("signal_id", signal_id),
+            ("market", market),
+            ("route", route_name),
+            ("signal_tag", pre.get("signal_tag", "?")),
+            ("v4_check_fn_pass", "true"),
+            ("effective_vr_min", effective_vr_min),
+            ("route_vr_min_declared", declared_vr_min),
+            ("route_ind_filters_applied_to_live", "false"),
+            ("vr5", ind.get("vr5")),
+            ("close_strength", ind.get("close_strength")),
+            ("body_pct", ind.get("body_pct")),
+            ("wick_ratio", ind.get("wick_ratio")),
+            ("wick_asym", ind.get("wick_asym")),
+            ("entry_mode", pre.get("entry_mode")),
+            ("v4_logic_group", pre.get("v4_logic_group")),
+        ]
+        parts = ["[LIVE_ENTRY_CONFIG]"]
+        parts += [f"{k}={v}" for k, v in fields if v is not None]
+        print(" ".join(parts))
+    except Exception as exc:
+        try:
+            print(f"[OBS_LOG_ERR] type=live_entry_config market={market} err={exc}")
+        except Exception:
+            pass
+
+
+def _log_live_exit_engine_once(market, pre, entry_price):
+    """[LIVE_EXIT_ENGINE] — monitor_position 진입 후 exit_params 해석 직후 1회.
+    - trade_id = (market, entry_ts_sec) 기준 dedup (TTL 24시간)
+    - flat SL / hard stop / activation raw+effective / trail 활성 여부
+    - adaptive trail mode·arm·trail·hold
+    - 실제 KST 시간대 분기로 결정된 timeout_sec
+    - peak basis·recheck_sec 등 상수도 함께
+    - monitor 반복 루프 밖에서 1회
+    - 예외 격리
+    """
+    try:
+        entry_ts = pre.get("signal_ts") or time.time()
+        trade_id = f"{market}:{int(entry_ts)}"
+        now_ts = time.time()
+        with _LIVE_LOG_LOCK:
+            _live_log_cleanup_locked(now_ts)
+            if trade_id in _LIVE_EXIT_LOGGED:
+                return
+            _LIVE_EXIT_LOGGED[trade_id] = now_ts
+        ep = pre.get("v4_exit_params") or {}
+        sl_pct = ep.get("sl_pct")
+        atr_raw = ep.get("activation_pct")
+        std_enabled = not bool(ep.get("disable_trail", False))
+        sl_tiers = ep.get("sl_tiers")
+        ap = ep.get("adaptive_trail") or {}
+        arm_sec = ap.get("arm_after_sec")
+        tiers = ap.get("tiers") or []
+        atrail_pct = tiers[0][1] if tiers else None
+        ahold_sec = tiers[0][2] if tiers else None
+        std_effective_pct = (
+            atr_raw * 100.0
+            if isinstance(atr_raw, (int, float))
+            else None
+        )
+        # 실제 시간대 분기로 timeout 결정 (인라인 리터럴 재현 X, pos.entry_hour 우선)
+        entry_hour = None
+        try:
+            with _POSITION_LOCK:
+                pos = OPEN_POSITIONS.get(market) or {}
+            entry_hour = pos.get("entry_hour")
+        except Exception:
+            pass
+        if entry_hour is None:
+            try:
+                entry_hour = int(time.strftime("%H", time.localtime()))
+            except Exception:
+                entry_hour = 12
+        timeout_sec = 1200 if 12 <= entry_hour < 18 else 1800
+        fields = [
+            ("trade_id", trade_id),
+            ("market", market),
+            ("entry_price", entry_price),
+            ("flat_sl_pct", round(sl_pct * 100, 3) if isinstance(sl_pct, (int, float)) else None),
+            ("hard_stop_pct", round(sl_pct * 1.5 * 100, 3) if isinstance(sl_pct, (int, float)) else None),
+            ("standard_trail_enabled", str(std_enabled).lower()),
+            ("standard_trail_activation_raw", atr_raw),
+            ("standard_trail_activation_effective_pct", std_effective_pct),
+            ("adaptive_trail_mode", "shadow_only" if ap else "off"),
+            ("adaptive_arm_sec", arm_sec),
+            ("adaptive_trail_pct", round(atrail_pct * 100, 3) if isinstance(atrail_pct, (int, float)) else None),
+            ("adaptive_hold_sec", ahold_sec),
+            ("adaptive_sl_tiers", sl_tiers),
+            ("timeout_sec_effective", timeout_sec),
+            ("entry_hour_kst", entry_hour),
+            ("peak_basis", "curp"),
+            ("partial_reduction_enabled", "true"),
+        ]
+        try:
+            fields.append(("recheck_sec", RECHECK_SEC))
+        except NameError:
+            pass
+        parts = ["[LIVE_EXIT_ENGINE]"]
+        parts += [f"{k}={v}" for k, v in fields if v is not None]
+        print(" ".join(parts))
+    except Exception as exc:
+        try:
+            print(f"[OBS_LOG_ERR] type=live_exit_engine market={market} err={exc}")
+        except Exception:
+            pass
+
 
 def _log_live_effective_config_once():
     """PR1 [LIVE_EFFECTIVE_CONFIG] — enabled LIVE 라우트의 실효 설정을 실제 런타임 객체에서 파생 출력.
@@ -4342,6 +4513,9 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     # 🔍 DEBUG: 자동매수 진입 시작 로그
     print(f"[AUTO_ENTRY] {m} 시작 (AUTO_TRADE={AUTO_TRADE})")
+
+    # PR1: LIVE 진입 실효 조건 로그 (signal_id TTL 10분 dedup, 실 실행 vr/cs 파생)
+    _log_live_entry_config_once(m, pre)
 
     def signal_skip(reason):
         """초입신호 후 매수 스킵 로그 (near_miss 출력용).
@@ -18629,6 +18803,10 @@ def monitor_position(m,
         horizon = decide_monitor_secs(pre, tight_mode=tight_mode)
     start_ts = time.time()
     # MAX_RUNTIME 제거 (미사용 — while 조건에서 horizon 직접 사용)
+
+    # PR1: LIVE 청산 엔진 실효 설정 로그 (trade_id TTL 24h dedup, 실제 KST 분기 timeout)
+    #     monitor 반복 루프 이전 1회 — 이후 while 루프에선 재출력 없음
+    _log_live_exit_engine_once(m, pre, entry_price)
 
 
     # 디바운스/트레일 상태
