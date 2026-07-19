@@ -72,6 +72,7 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
     cost_pct = (fee_bps * 2 + slippage_bps * 2) / 100.0
 
     peak_price = entry_price
+    # [H3 fix] 트레일 무장에 쓸 peak 는 "직전 봉까지"의 peak. 상세는 sweep_full.py 참조.
     peak_mfe = 0.0
     worst_mae = 0.0
 
@@ -84,8 +85,9 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
             break
 
         sec = k * 60
-        peak_price = max(peak_price, h[j])
-        peak_mfe = max(peak_mfe, (peak_price - entry_price) / entry_price * 100)
+        # [H3] 직전 봉까지의 peak
+        prev_peak = peak_price
+        peak_mfe = max(peak_mfe, (max(peak_price, h[j]) - entry_price) / entry_price * 100)
         cur_mae = (entry_price - lo[j]) / entry_price * 100
         worst_mae = max(worst_mae, cur_mae)
 
@@ -94,14 +96,14 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
 
         pnl_at[sec] = pnl_close
 
-        # SL
+        # SL — pnl_low 기반, 룩어헤드 아님
         if pnl_low <= -sl_pct:
             return {
                 "pnl": -sl_pct - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                 "reason": "SL", "exit_sec": sec, "pnl_at": pnl_at,
             }
 
-        # EarlyCut
+        # EarlyCut — pnl_close 기반, 룩어헤드 아님
         if ec_sec > 0 and sec == ec_sec and ec_pnl_thr is not None:
             if pnl_close < ec_pnl_thr:
                 return {
@@ -109,10 +111,10 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                     "reason": f"EC{ec_sec}s", "exit_sec": sec, "pnl_at": pnl_at,
                 }
 
-        # Trail
+        # Trail — [H3] prev_peak 만 사용 (같은 봉 high 제외)
         if sec >= arm_sec:
             if trail_mode == "price":
-                trail_stop = peak_price * (1 - trail_pct)
+                trail_stop = prev_peak * (1 - trail_pct)
                 if lo[j] <= trail_stop:
                     exit_pnl = (trail_stop - entry_price) / entry_price * 100
                     return {
@@ -120,10 +122,11 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                         "reason": "AT익절", "exit_sec": sec, "pnl_at": pnl_at,
                     }
             elif trail_mode == "retrace":
-                if peak_mfe > 0:
-                    dd = peak_mfe - pnl_close
-                    if dd >= peak_mfe * trail_pct:
-                        exit_pnl = peak_mfe * (1 - trail_pct)
+                prev_peak_mfe = (prev_peak - entry_price) / entry_price * 100
+                if prev_peak_mfe > 0:
+                    dd = prev_peak_mfe - pnl_close
+                    if dd >= prev_peak_mfe * trail_pct:
+                        exit_pnl = prev_peak_mfe * (1 - trail_pct)
                         return {
                             "pnl": exit_pnl - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                             "reason": "AT익절", "exit_sec": sec, "pnl_at": pnl_at,
@@ -135,6 +138,9 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                 "pnl": pnl_close - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                 "reason": "타임아웃", "exit_sec": sec, "pnl_at": pnl_at,
             }
+
+        # [H3] 이 봉 처리 끝 → peak 갱신 (다음 봉부터 반영)
+        peak_price = max(peak_price, h[j])
 
     j_last = min(entry_idx + max_candles, n - 1)
     final = (c[j_last] - entry_price) / entry_price * 100

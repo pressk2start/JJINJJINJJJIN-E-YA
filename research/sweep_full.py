@@ -117,6 +117,11 @@ def simulate_exit(h, lo, c, entry_idx, entry_price,
     max_candles = max_hold_sec // 60
 
     peak_price = entry_price
+    # [H3 fix] 룩어헤드 제거: 트레일 무장에 쓸 peak 는 "직전 봉까지"의 peak.
+    #   기존은 현재 봉 high 로 peak 를 올린 뒤 같은 봉 low 로 트레일 발동 검사
+    #   → "고점 먼저·저점 나중" 순서를 가정 (봉내 순서 미지). PnL 부풀림.
+    #   수정: prev_peak 로 트레일 발동 검사, peak_price 는 이 봉 처리 끝난 뒤 갱신.
+    #   MFE/MAE 계측값은 그대로 (관측 지표라 진짜 값 유지).
     peak_mfe = 0.0
     worst_mae = 0.0
 
@@ -126,13 +131,16 @@ def simulate_exit(h, lo, c, entry_idx, entry_price,
             break
 
         sec = k * 60
-        peak_price = max(peak_price, h[j])
-        peak_mfe = max(peak_mfe, (peak_price - entry_price) / entry_price * 100)
+        # [H3] 이 봉 진입 전(직전 봉까지)의 peak — 트레일 무장 기준
+        prev_peak = peak_price
+        # 관측 지표 (MFE/MAE) 는 현재 봉 high/low 반영 — 진짜 값 유지
+        peak_mfe_this_bar = max(peak_mfe, (max(peak_price, h[j]) - entry_price) / entry_price * 100)
+        peak_mfe = peak_mfe_this_bar
         cur_mae = (entry_price - lo[j]) / entry_price * 100
         worst_mae = max(worst_mae, cur_mae)
         pnl_close = (c[j] - entry_price) / entry_price * 100
 
-        # SL 티어드 (bot 정확 매핑)
+        # SL 티어드 (bot 정확 매핑) — MAE 기반이라 룩어헤드 아님, 유지
         _eff_sl = None
         for _tsec, _tpct in sl_tiers:
             if sec <= _tsec:
@@ -141,28 +149,33 @@ def simulate_exit(h, lo, c, entry_idx, entry_price,
         if _eff_sl is not None and worst_mae >= _eff_sl:
             return -_eff_sl - fee_pct, peak_mfe, worst_mae, "손절SL", sec
 
-        # EarlyCut
+        # EarlyCut — pnl_close 기반, 룩어헤드 아님
         if ec_sec > 0 and sec == ec_sec and ec_pnl_thr is not None:
             if pnl_close < ec_pnl_thr:
                 return pnl_close - fee_pct, peak_mfe, worst_mae, f"EC{ec_sec}s", sec
 
-        # Trail (arm 이후)
+        # Trail (arm 이후) — [H3] prev_peak 만 사용 (같은 봉 high 제외)
         if sec >= arm_sec:
             if trail_mode == "price":
-                trail_stop = peak_price * (1 - trail_pct)
+                trail_stop = prev_peak * (1 - trail_pct)
                 if lo[j] <= trail_stop:
                     exit_pnl = (trail_stop - entry_price) / entry_price * 100
                     return exit_pnl - fee_pct, peak_mfe, worst_mae, "AT익절", sec
             elif trail_mode == "retrace":
-                if peak_mfe > 0:
-                    dd = peak_mfe - pnl_close
-                    if dd >= peak_mfe * trail_pct:
-                        exit_pnl = peak_mfe * (1 - trail_pct)
+                # 직전봉까지의 MFE 기준 (현재봉 high 미반영)
+                prev_peak_mfe = (prev_peak - entry_price) / entry_price * 100
+                if prev_peak_mfe > 0:
+                    dd = prev_peak_mfe - pnl_close
+                    if dd >= prev_peak_mfe * trail_pct:
+                        exit_pnl = prev_peak_mfe * (1 - trail_pct)
                         return exit_pnl - fee_pct, peak_mfe, worst_mae, "AT익절", sec
 
         # Timeout
         if sec >= max_hold_sec:
             return pnl_close - fee_pct, peak_mfe, worst_mae, "AT타임아웃", sec
+
+        # [H3] 이 봉 처리 끝 → peak 갱신 (다음 봉부터 반영)
+        peak_price = max(peak_price, h[j])
 
     # 데이터 부족
     j_last = min(entry_idx + max_candles, n - 1)
