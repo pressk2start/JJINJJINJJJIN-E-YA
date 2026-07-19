@@ -38,6 +38,7 @@ EMA_SPREAD_MIN_PCT = 0.6
 EMA_SPREAD_MAX_PCT = 3.0
 
 CANDLE_CACHE_TTL = 30
+CANDLE_STALE_MAX_SEC = 60   # [M3 fix] API 실패 시 stale 캔들 폴백 허용 상한(초)
 VOL_Z_LOOSE_MIN = 1.0
 
 _UPBIT_CANDLES_URL = "https://api.upbit.com/v1/candles/minutes/{unit}"
@@ -79,7 +80,8 @@ def fetch_candles(
         return candles
     except Exception as e:
         print(f"[clm_detector] fetch_candles fail {market} u={unit}: {e}")
-        if cached is not None:
+        # [M3 fix] 무기한 stale 반환 금지. cached=(ts, candles) → 상한 이내만 재사용.
+        if cached is not None and now - cached[0] <= CANDLE_STALE_MAX_SEC:
             return cached[1]
         return None
 
