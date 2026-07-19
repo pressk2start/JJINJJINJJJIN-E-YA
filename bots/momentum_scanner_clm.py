@@ -221,6 +221,42 @@ def get_tickers(markets):
             time.sleep(0.15)
     return results
 
+def compute_pump_1m(market, entry_ts_epoch):
+    """
+    [L] 진입 순간 직전 완성 1분봉 상승률(%) — 계측 전용, 전략 무영향.
+
+    정의: A/B 스크립트와 동일.
+      entry_ts_epoch 이전 1분(완성된 봉) 의 (close - open) / open * 100
+      → 미래정보 없음. 진입 순간 이미 확정된 1분봉만 사용.
+
+    실패 시 None. 봇 로직에는 영향 없음 (계측만).
+    """
+    try:
+        entry_dt = datetime.fromtimestamp(entry_ts_epoch, tz=timezone.utc).replace(second=0, microsecond=0)
+        target = entry_dt - timedelta(minutes=1)
+        to_iso = entry_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        resp = requests.get(
+            "https://api.upbit.com/v1/candles/minutes/1",
+            params={"market": market, "count": 3, "to": to_iso},
+            timeout=3,
+        )
+        resp.raise_for_status()
+        candles = resp.json()
+        target_iso = target.strftime("%Y-%m-%dT%H:%M:%S")
+        match = next((c for c in candles if c.get("candle_date_time_utc") == target_iso), None)
+        if not match:
+            older = [c for c in candles if c.get("candle_date_time_utc", "") <= target_iso]
+            match = older[0] if older else None
+        if not match:
+            return None
+        op = float(match.get("opening_price", 0))
+        cl = float(match.get("trade_price", 0))
+        if op <= 0:
+            return None
+        return round((cl - op) / op * 100, 3)
+    except Exception:
+        return None
+
 def get_orderbook(market):
     now = time.time()
     cached = _ob_cache.get(market)
@@ -317,6 +353,7 @@ def manage_positions(tickers_dict, now_ts):
                 "rg_breadth": pos.get("rg_breadth", 0),
                 "rg_btc_dom": pos.get("rg_btc_dom", 0),
                 "rg_top5": pos.get("rg_top5", 0),
+                "pump_1m": pos.get("pump_1m"),
             })
 
     for trade in to_close:
@@ -447,6 +484,7 @@ def save_results(tag=""):
         "rsi_5m", "rsi_15m", "ema_spread_pct",
         "spread_pct", "ask_krw", "bid_krw", "slip_buy",
         "rg_btc_ret", "rg_turnover", "rg_breadth", "rg_btc_dom", "rg_top5",
+        "pump_1m",
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
@@ -556,6 +594,37 @@ def _analyze_mfe_distribution():
     avg_mfe = sum(mfes) / n
     med_mfe = sorted(mfes)[n // 2]
     lines.append(f"  avg{avg_mfe:+.3f}% med{med_mfe:+.3f}%")
+    return "\n".join(lines)
+
+def _analyze_pump_1m_buckets():
+    """[L] pump_1m 버킷별 성과 분해 — CLM 진입이 어느 급등 세기에 몰리는지."""
+    trades_with_pump = [t for t in closed_trades if t.get("pump_1m") is not None]
+    if len(trades_with_pump) < 3:
+        return None
+    buckets = [
+        (-999, 1.0, "<1%"),
+        (1.0, 2.0, "1~2%"),
+        (2.0, 3.0, "2~3%"),
+        (3.0, 4.0, "3~4%"),
+        (4.0, 5.0, "4~5%"),
+        (5.0, 999, "5%+"),
+    ]
+    lines = ["▶ pump_1m 버킷별 성과 (진입 직전 1분봉 상승률):"]
+    for lo, hi, label in buckets:
+        sub = [t for t in trades_with_pump if lo <= t["pump_1m"] < hi]
+        if not sub:
+            continue
+        n = len(sub)
+        wins = sum(1 for t in sub if t["net_pnl"] > 0)
+        avg = sum(t["net_pnl"] for t in sub) / n
+        lines.append(f"  {label:>6}: n={n:3d} wr{wins/n*100:.0f}% avg{avg:+.3f}%")
+    pumps = [t["pump_1m"] for t in trades_with_pump]
+    n = len(pumps)
+    med = sorted(pumps)[n // 2]
+    ge2 = sum(1 for p in pumps if p >= 2)
+    ge3 = sum(1 for p in pumps if p >= 3)
+    ge4 = sum(1 for p in pumps if p >= 4)
+    lines.append(f"  분포: n={n} med{med:+.2f}% ≥2%:{ge2/n*100:.0f}% ≥3%:{ge3/n*100:.0f}% ≥4%:{ge4/n*100:.0f}%")
     return "\n".join(lines)
 
 def _analyze_regime_features():
@@ -788,6 +857,9 @@ def generate_review():
     rm_buckets = _analyze_realized_mfe_buckets()
     if rm_buckets:
         lines += ["", rm_buckets]
+    pump_buckets = _analyze_pump_1m_buckets()
+    if pump_buckets:
+        lines += ["", "━━━━━━━━━━━━━━━", pump_buckets]
     rg_features = _analyze_regime_features()
     if rg_features:
         lines += ["", "━━━━━━━━━━━━━━━", rg_features]
@@ -997,6 +1069,7 @@ def main():
                     "rg_breadth": regime_snapshot["breadth_pos"],
                     "rg_btc_dom": regime_snapshot["btc_dominance"],
                     "rg_top5": regime_snapshot["top5_conc"],
+                    "pump_1m": compute_pump_1m(market, now_ts),
                 }
                 coin = market.replace("KRW-", "")
                 target_price = entry_price * (1 + TARGET_PROFIT_PCT / 100)
