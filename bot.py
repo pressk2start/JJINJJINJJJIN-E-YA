@@ -1169,6 +1169,7 @@ _DETECT_STAGE = {
     "detect_fresh":     "post_signal", # 틱 신선도
     "detect_spread":    "post_signal", # 스프레드 과다
     "detect_vol_min":   "post_signal", # 거래대금 부족
+    "detect_spoof100":  "post_signal", # 매수비 100% 스푸핑 하드컷
     "detect_buy_ratio": "post_signal", # 매수비 하한
     "detect_accel":     "post_signal", # 가속 과다
     "detect_early_flow":"post_signal", # 초기 거래속도 하한
@@ -17659,7 +17660,15 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # 4) 매수비 100% 스푸핑
     if abs(_gate_buy_ratio - 1.0) < 1e-6:
         cut("SPOOF100", f"{m} 매수비100%(스푸핑) | {_metrics}", near_miss=False)
+        _pipeline_inc("gate_fail_spoof100")
         _pipeline_coin_hit(m, "spoof")
+        # POST_SIGNAL FLOW 보존식 정합 + 사유 가시화 (조건이 abs(x-1)<1e-6이라 오차 함께 기록)
+        _pipeline_inc("post_signal_blocked")
+        _detect_gate_observe(
+            m, "detect_spoof100",
+            buy_ratio=round(_gate_buy_ratio, 4), buy_ratio_thr=1.0,
+            buy_ratio_diff=round(abs(_gate_buy_ratio - 1.0), 8), buy_ratio_diff_thr=1e-6,
+        )
         return None
 
     # 4-1) 매수비 하한 — 🔧 데드코드→실구현 (0.50, 공포장 대응)
