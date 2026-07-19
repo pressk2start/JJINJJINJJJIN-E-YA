@@ -126,6 +126,7 @@ scan_count = 0
 start_time = None
 _ob_cache = {}
 OB_CACHE_TTL = 1.5
+OB_STALE_MAX_SEC = 5.0   # [M3 fix] API 실패 시 stale 호가 폴백 허용 상한(초)
 
 # ─── [K] Regime feature snapshot (계측 전용, 전략 무영향) ───
 regime_snapshot = {
@@ -280,7 +281,10 @@ def get_orderbook(market):
         _ob_cache[market] = {"ts": now, "data": result}
         return result
     except Exception:
-        return cached["data"] if cached else None
+        # [M3 fix] 무기한 stale 호가 반환 금지 — 상한 이내만 재사용, 초과 시 None.
+        if cached and now - cached["ts"] < OB_STALE_MAX_SEC:
+            return cached["data"]
+        return None
 
 def classify_markets(tickers):
     tickers = [t for t in tickers if t["market"] not in UNIVERSE_BLACKLIST]
@@ -295,13 +299,11 @@ def manage_positions(tickers_dict, now_ts):
     to_close = []
     for market, pos in positions.items():
         ob = get_orderbook(market)
-        if ob:
-            exit_price = ob["bid"]
-        else:
-            ticker = tickers_dict.get(market)
-            if not ticker:
-                continue
-            exit_price = ticker["trade_price"]
+        if not ob:
+            # [M4 fix] 호가 없으면 마지막 체결가(≥bid)로 대체하지 않고 이 tick 스킵.
+            #   못 팔 가격(trade_price)에 target/trail 청산이 잘못 기록되는 것 방지.
+            continue
+        exit_price = ob["bid"]
         hold_sec = now_ts - pos["entry_time"]
         if exit_price > pos["peak_price"]:
             pos["peak_price"] = exit_price
