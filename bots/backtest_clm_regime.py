@@ -33,7 +33,12 @@ from statistics import mean, pstdev
 # 상수
 # ═══════════════════════════════════════════════
 MIN_SAMPLE = 10
-TRAIN_RATIO = 0.70
+# [M5] 3분할 walk-forward: Train discovery / Val selection / Test confirmation.
+#   - 조합을 val 로 필터해 STRONG 태그를 부여하면 val 이 "선택면"이 되어
+#     다중검정 착시 발생. Test 는 val 선별 후 손 안 대고 최종 확인만.
+TRAIN_RATIO = 0.60
+VAL_RATIO = 0.20
+# TEST_RATIO = 1 - TRAIN - VAL = 0.20
 STABILITY_MIN_SESSIONS = 3
 STABILITY_THRESHOLD = 0.7
 RANDOM_SEED = 42
@@ -111,15 +116,32 @@ def _parse_row(raw, session_id, mtime):
         "has_regime": "rg_btc_ret" in raw and raw.get("rg_btc_ret") not in (None, ""),
     }
 
-def split_train_val(rows):
-    """세션 단위 시간순 70/30 분할."""
+def split_train_val_test(rows):
+    """[M5] 세션 단위 시간순 3분할 (train / val / test).
+       - train: 조건 발견 (수백 조합 탐색)
+       - val:   조건 선택 (STRONG/SURVIVED 태그)
+       - test:  최종 확인 (val 선별 결과에만 1회 적용, 손 안 댐)
+    """
     sessions = sorted({(r["session_ts"], r["session_id"]) for r in rows})
-    n_train = max(1, int(len(sessions) * TRAIN_RATIO))
+    n_total = len(sessions)
+    n_train = max(1, int(n_total * TRAIN_RATIO))
+    n_val = max(1, int(n_total * VAL_RATIO))
+    # test = 나머지. train+val 이 전체보다 크면 test 는 최소 1 유지.
+    if n_train + n_val >= n_total:
+        n_train = max(1, n_total - 2)
+        n_val = max(1, n_total - n_train - 1)
     train_ids = {s[1] for s in sessions[:n_train]}
-    val_ids = {s[1] for s in sessions[n_train:]}
+    val_ids = {s[1] for s in sessions[n_train:n_train + n_val]}
+    test_ids = {s[1] for s in sessions[n_train + n_val:]}
     train = [r for r in rows if r["session_id"] in train_ids]
     val = [r for r in rows if r["session_id"] in val_ids]
-    return train, val, train_ids, val_ids
+    test = [r for r in rows if r["session_id"] in test_ids]
+    return train, val, test, train_ids, val_ids, test_ids
+
+# 하위호환 (아직 남은 참조 있으면 대비)
+def split_train_val(rows):
+    tr, va, te, tr_ids, va_ids, te_ids = split_train_val_test(rows)
+    return tr, va, tr_ids, va_ids
 
 # ═══════════════════════════════════════════════
 # 통계
@@ -276,8 +298,24 @@ def enumerate_conditions():
         conds.append((e, r, b, None))
     return conds
 
-def search_top_conditions(train_rows, val_rows, min_sample=MIN_SAMPLE):
-    """Train에서 조건 탐색, Val에서 재평가, Stability까지 산출."""
+def _pf_delta(a_pf, b_pf):
+    """PF 차이 계산 — inf 안전 처리."""
+    if a_pf == float("inf") and b_pf == float("inf"):
+        return 0.0
+    if a_pf == float("inf"):
+        return float("inf")
+    if b_pf == float("inf"):
+        return float("-inf")
+    return a_pf - b_pf
+
+def search_top_conditions(train_rows, val_rows, test_rows, min_sample=MIN_SAMPLE):
+    """[M5] 3분할 walk-forward:
+       - Train: 조건 발견 (min_sample 통과 필터만)
+       - Val:   조건 선택 (STRONG/SURVIVED 태그 부여)
+       - Test:  최종 확인용 통계 함께 계산 (호출부에서 test 확인 게이트)
+       Test 는 여기서 필터하지 않음 — 모든 조건에 대해 값을 붙여만 두고,
+       report/final_recommend 게이트에서만 조회.
+    """
     results = []
     for ema_th, rsi_th, breadth_th, btc_th in enumerate_conditions():
         tr_sub = [r for r in train_rows if _cond_match(r, ema_th, rsi_th, breadth_th, btc_th)]
@@ -286,32 +324,29 @@ def search_top_conditions(train_rows, val_rows, min_sample=MIN_SAMPLE):
         tr_s = stats(tr_sub)
         val_sub = [r for r in val_rows if _cond_match(r, ema_th, rsi_th, breadth_th, btc_th)]
         val_s = stats(val_sub)
-        stab = stability_score(tr_sub + val_sub)
-        if val_s["n"] == 0:
-            d_pf = float("-inf")
-        elif val_s["pf"] == float("inf") and tr_s["pf"] == float("inf"):
-            d_pf = 0.0
-        elif val_s["pf"] == float("inf"):
-            d_pf = float("inf")
-        elif tr_s["pf"] == float("inf"):
-            d_pf = float("-inf")
-        else:
-            d_pf = val_s["pf"] - tr_s["pf"]
+        test_sub = [r for r in test_rows if _cond_match(r, ema_th, rsi_th, breadth_th, btc_th)]
+        test_s = stats(test_sub)
+        stab = stability_score(tr_sub + val_sub + test_sub)
+        d_pf = _pf_delta(val_s["pf"], tr_s["pf"]) if val_s["n"] > 0 else float("-inf")
         results.append({
             "condition": _cond_desc(ema_th, rsi_th, breadth_th, btc_th),
             "ema_th": ema_th, "rsi_th": rsi_th, "breadth_th": breadth_th, "btc_th": btc_th,
             "tr_n": tr_s["n"], "tr_pf": tr_s["pf"], "tr_ev": tr_s["ev"], "tr_mfe_l": tr_s["mfe_l"],
             "val_n": val_s["n"], "val_pf": val_s["pf"], "val_ev": val_s["ev"], "val_mfe_l": val_s["mfe_l"],
+            "test_n": test_s["n"], "test_pf": test_s["pf"], "test_ev": test_s["ev"], "test_mfe_l": test_s["mfe_l"],
             "d_pf": d_pf,
-            "sessions": tr_s["sessions"] + val_s["sessions"],
+            "sessions": tr_s["sessions"] + val_s["sessions"] + test_s["sessions"],
             "stability": stab,
-            "tag": _classify_tag(tr_s, val_s, stab),
+            "tag": _classify_tag(tr_s, val_s, test_s, stab),
         })
     results.sort(key=lambda x: (x["tr_ev"], x["tr_pf"]), reverse=True)
     return results
 
-def _classify_tag(tr_s, val_s, stab):
-    """등급: STRONG / SURVIVED / WATCH / FAILED."""
+def _classify_tag(tr_s, val_s, test_s, stab):
+    """[M5] 등급: STRONG / SURVIVED / WATCH / FAILED.
+       Test 는 confirmed 여부에만 사용 (FINAL_RECOMMEND 게이트).
+       tag 자체는 val 기준 유지 (선택면).
+    """
     if val_s["n"] == 0:
         return "NO_VAL"
     is_survived = val_s["pf"] >= 1.0 and val_s["ev"] > 0
@@ -323,6 +358,12 @@ def _classify_tag(tr_s, val_s, stab):
     if val_s["pf"] >= 0.8 or abs(val_s["ev"]) < 0.03:
         return "WATCH"
     return "FAILED"
+
+def _test_confirmed(row):
+    """[M5] Test set 최종 확인 게이트."""
+    return (row.get("test_n", 0) >= 3
+            and row.get("test_pf", 0) >= 1.0
+            and row.get("test_ev", 0) > 0)
 
 # ═══════════════════════════════════════════════
 # MFE L / 즉사율 분석
@@ -477,21 +518,29 @@ def fmt_dpf(d):
         return "nan"
     return f"{d:+.2f}"
 
-def build_report(all_rows, train, val, results_dir):
+def build_report(all_rows, train, val, test, results_dir):
     lines = []
     lines.append("=" * 70)
-    lines.append("CLM Regime Backtest — 전략 분석 엔진")
+    lines.append("CLM Regime Backtest — 전략 분석 엔진 (M5: 3분할 walk-forward)")
     lines.append("=" * 70)
     all_sess = {r["session_id"] for r in all_rows}
     with_reg = [r for r in all_rows if r["has_regime"]]
     lines.append(f"총 거래: {len(all_rows)}건 / 세션: {len(all_sess)}")
     lines.append(f"regime feature 있음: {len(with_reg)}건")
-    lines.append(f"Train: {len(train)}건 / Val: {len(val)}건 (세션 단위 {int(TRAIN_RATIO*100)}/{int(100-TRAIN_RATIO*100)} 분할)")
+    tr_pct = int(TRAIN_RATIO * 100)
+    va_pct = int(VAL_RATIO * 100)
+    te_pct = 100 - tr_pct - va_pct
+    lines.append(f"Train: {len(train)}건 / Val: {len(val)}건 / Test: {len(test)}건 "
+                 f"(세션 단위 {tr_pct}/{va_pct}/{te_pct} 분할)")
     lines.append("")
     lines.append("※ 지표 정의:")
     lines.append("   PF        = 전체 거래의 gross_profit / gross_loss (통합 계산)")
     lines.append("   Stability = 세션별 EV 평균의 CV → 1/(1+CV). regime 분산 측정 전용.")
     lines.append("               전략 성과 대체 지표가 아님. 낮으면 regime 의존도 큼.")
+    lines.append("   Train     = 조건 발견 (수백 조합 탐색). 여기서 min_sample 통과만 필터.")
+    lines.append("   Val       = 조건 선택 (STRONG/SURVIVED 태그 부여).")
+    lines.append("   Test      = 최종 확인 (val 선별 후 손 안 대고 1회 조회).")
+    lines.append("               test_pf>=1.0 AND test_ev>0 AND test_n>=3 → confirmed.")
     lines.append("")
 
     lines.append("─" * 70)
@@ -539,20 +588,26 @@ def build_report(all_rows, train, val, results_dir):
     lines.append("")
 
     lines.append("─" * 70)
-    lines.append("[6~8] Top-N 조건 탐색 + Val 검증 + Stability (Train→Val)")
-    lines.append(f"      MIN_SAMPLE={MIN_SAMPLE}, 판정: STRONG/SURVIVED/WATCH/FAILED")
+    lines.append("[6~8] Top-N 조건 탐색 + Val 검증 + Test 확인 (Train→Val→Test)")
+    lines.append(f"      MIN_SAMPLE={MIN_SAMPLE}, tag(val): STRONG/SURVIVED/WATCH/FAILED")
+    lines.append("      confirmed: test_pf>=1.0 AND test_ev>0 AND test_n>=3")
     lines.append("      stab = 세션 간 EV 분산 지표 (regime 안정성, [0,1])")
     lines.append("             ⚠ 전략 성과 아님. PF/EV와 별개 축.")
     lines.append("─" * 70)
-    tops = search_top_conditions(train, val, MIN_SAMPLE)
-    lines.append(f"{'rank':<4}{'condition':<40}{'tr_n':>5}{'tr_PF':>7}{'tr_EV':>8}"
-                 f"{'val_n':>6}{'val_PF':>7}{'val_EV':>8}{'ΔPF':>7}{'sess':>5}{'stab':>6}  tag")
+    tops = search_top_conditions(train, val, test, MIN_SAMPLE)
+    lines.append(f"{'rank':<4}{'condition':<40}"
+                 f"{'tr_n':>5}{'tr_PF':>7}{'tr_EV':>8}"
+                 f"{'val_n':>6}{'val_PF':>7}{'val_EV':>8}"
+                 f"{'test_n':>7}{'test_PF':>8}{'test_EV':>9}"
+                 f"{'sess':>5}{'stab':>6}  tag  conf")
     for i, r in enumerate(tops[:20], 1):
+        conf = "✓" if _test_confirmed(r) else "✗"
         lines.append(
-            f"{i:<4}{r['condition']:<40}{r['tr_n']:>5}{fmt_pf(r['tr_pf']):>7}"
-            f"{r['tr_ev']:>+7.3f}%{r['val_n']:>6}{fmt_pf(r['val_pf']):>7}"
-            f"{r['val_ev']:>+7.3f}%{fmt_dpf(r['d_pf']):>7}"
-            f"{r['sessions']:>5}{r['stability']:>6.2f}  {r['tag']}"
+            f"{i:<4}{r['condition']:<40}"
+            f"{r['tr_n']:>5}{fmt_pf(r['tr_pf']):>7}{r['tr_ev']:>+7.3f}%"
+            f"{r['val_n']:>6}{fmt_pf(r['val_pf']):>7}{r['val_ev']:>+7.3f}%"
+            f"{r['test_n']:>7}{fmt_pf(r['test_pf']):>8}{r['test_ev']:>+8.3f}%"
+            f"{r['sessions']:>5}{r['stability']:>6.2f}  {r['tag']:<9} {conf}"
         )
     lines.append("")
 
@@ -588,22 +643,26 @@ def build_report(all_rows, train, val, results_dir):
     lines.append("")
 
     lines.append("─" * 70)
-    lines.append("[12] 최종 추천 조건 (FINAL_RECOMMEND 조건 통과)")
-    lines.append("     Val PF≥1.0, Val EV>0, Sessions≥3, Stability≥0.7, n≥MIN_SAMPLE")
+    lines.append("[12] 최종 추천 조건 (FINAL_RECOMMEND 게이트 통과)")
+    lines.append("     Val PF≥1.0 AND Val EV>0 AND Sessions≥3 AND Stability≥0.7 AND n≥MIN_SAMPLE")
+    lines.append("     [M5] AND Test 확인: test_pf≥1.0 AND test_ev>0 AND test_n≥3")
     lines.append("─" * 70)
     final = [r for r in tops
              if r["val_pf"] >= 1.0 and r["val_ev"] > 0
              and r["sessions"] >= STABILITY_MIN_SESSIONS
              and r["stability"] >= STABILITY_THRESHOLD
-             and r["val_n"] >= MIN_SAMPLE]
+             and r["val_n"] >= MIN_SAMPLE
+             and _test_confirmed(r)]
     if not final:
         lines.append("  ⚠ 조건 통과 없음 — 더 많은 세션/거래 필요, 또는 진짜 alpha 부재")
+        lines.append("     (test 데이터 부족이 원인이면 --min-sample 낮추거나 세션 축적 대기)")
     else:
         for i, r in enumerate(final[:10], 1):
             lines.append(
                 f"  #{i} {r['condition']:<38} "
                 f"tr(n{r['tr_n']} PF{fmt_pf(r['tr_pf'])} EV{r['tr_ev']:+.3f}%) "
                 f"val(n{r['val_n']} PF{fmt_pf(r['val_pf'])} EV{r['val_ev']:+.3f}%) "
+                f"test(n{r['test_n']} PF{fmt_pf(r['test_pf'])} EV{r['test_ev']:+.3f}%) "
                 f"stab{r['stability']:.2f} tag:{r['tag']}"
             )
     lines.append("")
@@ -625,10 +684,16 @@ def build_report(all_rows, train, val, results_dir):
                ["feature", "bin", "n", "wr", "pf", "ev"], reg_flat)
     _write_csv(os.path.join(results_dir, "top_conditions.csv"),
                ["rank", "condition", "tr_n", "tr_pf", "tr_ev", "tr_mfe_l",
-                "val_n", "val_pf", "val_ev", "val_mfe_l", "d_pf", "sessions", "stability", "tag"],
-               [dict(r, rank=i) for i, r in enumerate(tops, 1)])
+                "val_n", "val_pf", "val_ev", "val_mfe_l",
+                "test_n", "test_pf", "test_ev", "test_mfe_l",
+                "d_pf", "sessions", "stability", "tag", "test_confirmed"],
+               [dict(r, rank=i, test_confirmed=int(_test_confirmed(r)))
+                for i, r in enumerate(tops, 1)])
     _write_csv(os.path.join(results_dir, "final_recommendations.csv"),
-               ["rank", "condition", "tr_n", "tr_pf", "tr_ev", "val_n", "val_pf", "val_ev",
+               ["rank", "condition",
+                "tr_n", "tr_pf", "tr_ev",
+                "val_n", "val_pf", "val_ev",
+                "test_n", "test_pf", "test_ev",
                 "sessions", "stability", "tag"],
                [dict(r, rank=i) for i, r in enumerate(final[:10], 1)])
     _write_csv(os.path.join(results_dir, "importance_variance.csv"),
@@ -668,10 +733,11 @@ def main():
 
     rows, files = load_csv_files(args.patterns)
     print(f"로드: {len(files)}개 파일, {len(rows)}건", file=sys.stderr)
-    train, val, train_ids, val_ids = split_train_val(rows)
-    print(f"Train 세션: {len(train_ids)} / Val 세션: {len(val_ids)}", file=sys.stderr)
+    train, val, test, train_ids, val_ids, test_ids = split_train_val_test(rows)
+    print(f"Train 세션: {len(train_ids)} / Val 세션: {len(val_ids)} / Test 세션: {len(test_ids)}",
+          file=sys.stderr)
 
-    report = build_report(rows, train, val, args.results_dir)
+    report = build_report(rows, train, val, test, args.results_dir)
     txt_path = os.path.join(args.results_dir, "report.txt")
     os.makedirs(args.results_dir, exist_ok=True)
     with open(txt_path, "w", encoding="utf-8") as f:
