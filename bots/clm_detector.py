@@ -72,7 +72,9 @@ def fetch_candles(
         raw = resp.json()
         if not isinstance(raw, list) or not raw:
             raise ValueError("empty candle response")
-        candles = list(reversed(raw))
+        # [M2 fix] raw[0] = 진행중(미완성) 봉일 수 있음 → 마지막 제거.
+        #   원본 count 는 미완성봉 포함 개수라 호출부에서 count+1 로 요청함.
+        candles = list(reversed(raw))[:-1]
         _candle_cache[key] = (now, candles)
         return candles
     except Exception as e:
@@ -141,8 +143,9 @@ def detect_overheat(
     Note: rsi_5m > rsi_15m (가속도) — Phase 2/3 후보, 현재 OFF
     Note: 코호트 A 예측기 — Phase 3 deferred
     """
-    c5 = fetch_candles(market, unit=5, count=30)
-    c15 = fetch_candles(market, unit=15, count=30)
+    # [M2 fix] count+1: 미완성봉을 fetch_candles 가 잘라내므로 완성봉 30개 유지.
+    c5 = fetch_candles(market, unit=5, count=31)
+    c15 = fetch_candles(market, unit=15, count=31)
     if not c5 or not c15:
         return None
 
@@ -228,8 +231,8 @@ def _test_live() -> None:
     print("  " + "-" * 72)
     for m in markets:
         sig = detect_overheat(m)
-        c5 = fetch_candles(m, 5, 30)
-        c15 = fetch_candles(m, 15, 30)
+        c5 = fetch_candles(m, 5, 31)
+        c15 = fetch_candles(m, 15, 31)
         if not c5 or not c15:
             print(f"  {m:<10}  -- candle fetch failed --")
             continue
