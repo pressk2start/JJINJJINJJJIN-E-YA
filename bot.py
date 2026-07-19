@@ -11153,30 +11153,6 @@ def _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=None):
     return sig
 
 
-def _v0_check_climax_cs40_vr3(c1, c5, c15, c30, c60, gate_info=None):
-    """CS40 + VR3(vr5>=3.0) 실 진입 강제 — 이름/ind_filters와 LIVE 진입 정합.
-    ind_filters의 vr5>=3.0은 shadow 경로에서만 소비 → LIVE는 base check_fn(vr2)만 게이팅.
-    이 wrapper는 enabled LIVE 라우트에만 붙여 vr3를 실제 강제. 공유 base 무변경.
-    관측 분리: missing / invalid / fail — 게이트 원인 구분 가능."""
-    sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
-    if not sig:
-        return None
-    indicators = sig.get("indicators") or {}
-    vr5_raw = indicators.get("vr5")
-    if vr5_raw is None:
-        _pipeline_inc("climax_vr3_missing", value="none", threshold=3.0, direction="gte")
-        return None
-    try:
-        vr5 = float(vr5_raw)
-    except (TypeError, ValueError):
-        _pipeline_inc("climax_vr3_invalid", value=str(vr5_raw)[:20], threshold=3.0, direction="gte")
-        return None
-    if vr5 < 3.0:
-        _pipeline_inc("climax_vr3_fail", value=round(vr5, 2), threshold=3.0, direction="gte")
-        return None
-    return sig
-
-
 # === v20 신규 시나리오 check_fn (5개) ===
 
 def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
@@ -11915,7 +11891,7 @@ _STRATEGY_REGISTRY = {
     # AUTO_TRADE=1 필요 (환경변수)
     # 3단계 증액 계획: 100k → (실체결 3건 정상) → 300k → (10건 정상) → 500k
     "과열감지_CS40_VR3_TR180_bp30_240": {
-        "check_fn": _v0_check_climax_cs40_vr3,  # 🔧 FIX: 라이브 vr5>=3.0 강제 (이름/ind_filters 정합)
+        "check_fn": _v0_check_climax_cs40,
         "exit_params": _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240,
         "priority": 8, "enabled": True,
         "pipeline_key": "climax", "route": "CS40_VR3_TR180_bp30_240", "mae_threshold": 0.35,
