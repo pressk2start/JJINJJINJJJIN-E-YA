@@ -205,6 +205,12 @@ def main():
     for i, r in enumerate(rows):
         pump = None
         try:
+            # ⚠ 자정 롤오버 상태 보존을 위해 resolve_ms 는 항상 호출.
+            #   구/신 세션이 한 파일에 섞였을 때(봇이 세션 중간에 pump_1m 로깅
+            #   시작한 경우) 재사용 행이 시간 상태를 건너뛰면 이후 API 행의
+            #   날짜가 어긋남. 결과는 재조회 필요 시에만 사용.
+            ems_close = resolve_ms(r[ts_col], state) - off_ms
+
             # 우선순위 (1): CSV에 이미 pump_1m 있으면 그대로
             if has_pump_col:
                 v = r.get("pump_1m", "")
@@ -215,7 +221,6 @@ def main():
                         pump = None
             # 우선순위 (2): API 재조회 (진입시각 = 청산시각 - hold_sec)
             if pump is None:
-                ems_close = resolve_ms(r[ts_col], state) - off_ms   # 로컬→UTC
                 hold_ms = 0
                 if has_hold_col:
                     try:
