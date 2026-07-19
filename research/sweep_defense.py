@@ -56,13 +56,20 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                             sl_pct=1.29, arm_sec=180, trail_pct=0.003,
                             trail_mode="price", max_hold_sec=240,
                             ec_sec=0, ec_pnl_thr=None,
-                            slippage_bps=5.0):
+                            slippage_bps=5.0, fee_bps=5.0):
     """
     상세 exit 시뮬레이션 — 매 캔들 MFE/MAE/PnL 기록.
+
+    [H2 fix] 비용 처리 통일 — cohort.py / backtest_exit.py 와 동일한 %p 뺄셈.
+      기존: pnl * (1 - 5/10000) = pnl * 0.9995 → 사실상 비용 0 + 수수료 누락
+      수정: pnl - (수수료 왕복 + 슬리피지 왕복) [단위 %p]
+      기본값: fee_bps=5 (편도, 왕복 0.10%) + slippage_bps=5 (편도, 왕복 0.10%)
+              → cost_pct = 0.20%p (cohort.py 의 COST=0.20% 와 동일)
     """
     n = len(h)
     max_candles = max_hold_sec // 60
-    slippage_mult = 1.0 - slippage_bps / 10000
+    # [H2] 왕복 비용 %p (수수료 왕복 + 슬리피지 왕복). bps → %p 환산: bps/10000*100 = bps/100
+    cost_pct = (fee_bps * 2 + slippage_bps * 2) / 100.0
 
     peak_price = entry_price
     peak_mfe = 0.0
@@ -90,7 +97,7 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
         # SL
         if pnl_low <= -sl_pct:
             return {
-                "pnl": -sl_pct * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+                "pnl": -sl_pct - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                 "reason": "SL", "exit_sec": sec, "pnl_at": pnl_at,
             }
 
@@ -98,7 +105,7 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
         if ec_sec > 0 and sec == ec_sec and ec_pnl_thr is not None:
             if pnl_close < ec_pnl_thr:
                 return {
-                    "pnl": pnl_close * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+                    "pnl": pnl_close - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                     "reason": f"EC{ec_sec}s", "exit_sec": sec, "pnl_at": pnl_at,
                 }
 
@@ -109,7 +116,7 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                 if lo[j] <= trail_stop:
                     exit_pnl = (trail_stop - entry_price) / entry_price * 100
                     return {
-                        "pnl": exit_pnl * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+                        "pnl": exit_pnl - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                         "reason": "AT익절", "exit_sec": sec, "pnl_at": pnl_at,
                     }
             elif trail_mode == "retrace":
@@ -118,21 +125,21 @@ def simulate_exit_detailed(h, lo, c, entry_idx, entry_price,
                     if dd >= peak_mfe * trail_pct:
                         exit_pnl = peak_mfe * (1 - trail_pct)
                         return {
-                            "pnl": exit_pnl * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+                            "pnl": exit_pnl - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                             "reason": "AT익절", "exit_sec": sec, "pnl_at": pnl_at,
                         }
 
         # Timeout
         if sec >= max_hold_sec:
             return {
-                "pnl": pnl_close * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+                "pnl": pnl_close - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
                 "reason": "타임아웃", "exit_sec": sec, "pnl_at": pnl_at,
             }
 
     j_last = min(entry_idx + max_candles, n - 1)
     final = (c[j_last] - entry_price) / entry_price * 100
     return {
-        "pnl": final * slippage_mult, "mfe": peak_mfe, "mae": worst_mae,
+        "pnl": final - cost_pct, "mfe": peak_mfe, "mae": worst_mae,
         "reason": "데이터부족", "exit_sec": max_candles * 60, "pnl_at": pnl_at,
     }
 
