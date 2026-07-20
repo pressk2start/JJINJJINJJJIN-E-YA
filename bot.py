@@ -1156,8 +1156,27 @@ _DETECT_GATE_LAST_CLEANUP = 0.0
 # burst 30, 초당 0.5 충전 → 평균 ~30/분
 _DETECT_LOG_TOKENS = 30.0
 _DETECT_LOG_LAST = time.time()
-# post_signal_enter/blocked/pass 보존식 delta 계산 snapshot
-_POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0}
+# post_signal_enter/blocked/pass/error 보존식 delta 계산 snapshot
+# error = POST 평가 중 예외 발생 (미분류 return 방지, unclassified 원인 특정)
+_POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0}
+
+# observe_epoch — 배포 SHA 태깅 (구버전 누적 오염과 신규 관측 구분)
+# 배포 시 이 값이 바뀌면 리포트에도 새 태그 표시 → total mismatch가 구버전 잔재인지 즉시 판별
+def _resolve_observe_epoch():
+    """git HEAD SHA(7) 로 epoch 태그 · 실패 시 프로세스 시작 ts 로 fallback."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            capture_output=True, text=True, timeout=2, cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return f"ts{int(time.time())}"
+
+_OBSERVE_EPOCH = _resolve_observe_epoch()
 
 # PR1: LIVE 라우트 실효 설정 프로세스당 1회 로그 (문서-런타임 정합 증명용)
 # 값은 실제 런타임 객체에서 파생 (리터럴 하드코딩 X)
@@ -1658,32 +1677,41 @@ def _detect_stats_delta(stats_dict, last_report):
 
 
 def _post_signal_flow_summary():
-    """post_signal_enter = blocked + pass 보존식 (total + delta) + coverage.
+    """post_signal_enter = blocked + pass + error 보존식 (total + delta) + coverage + unclassified.
     debounce 무관 실호출 카운터라 배선 정합 자가진단 기준값.
     관측 누락 판정: observed_reason_total ≤ blocked (debounce 때문에 등호 아닐 수 있음).
+    unclassified = enter - blocked - pass - error > 0 이면 미계측 종료 경로 존재.
+    observe_epoch 태그로 구버전 잔재 vs 현 배포 이벤트 구분 가능.
     """
     try:
         with _PIPELINE_COUNTERS_LOCK:
             enter = _PIPELINE_COUNTERS.get("post_signal_enter", 0)
             blocked = _PIPELINE_COUNTERS.get("post_signal_blocked", 0)
             passed = _PIPELINE_COUNTERS.get("post_signal_pass", 0)
+            errored = _PIPELINE_COUNTERS.get("post_signal_error", 0)
         with _GATE_FAIL_LOCK:
             d_enter = enter - _POST_FLOW_LAST_REPORT["enter"]
             d_blocked = blocked - _POST_FLOW_LAST_REPORT["blocked"]
             d_passed = passed - _POST_FLOW_LAST_REPORT["pass"]
+            d_errored = errored - _POST_FLOW_LAST_REPORT["error"]
             _POST_FLOW_LAST_REPORT["enter"] = enter
             _POST_FLOW_LAST_REPORT["blocked"] = blocked
             _POST_FLOW_LAST_REPORT["pass"] = passed
+            _POST_FLOW_LAST_REPORT["error"] = errored
             observed_total = sum(_POST_SIGNAL_GATE_FAIL_STATS.values())
-        total_ok = (enter == blocked + passed)
-        delta_ok = (d_enter == d_blocked + d_passed)
+        total_ok = (enter == blocked + passed + errored)
+        delta_ok = (d_enter == d_blocked + d_passed + d_errored)
         coverage = (observed_total / blocked * 100.0) if blocked > 0 else 0.0
+        unclassified = max(0, enter - blocked - passed - errored)
+        d_unclassified = max(0, d_enter - d_blocked - d_passed - d_errored)
         return (
-            "POST_SIGNAL FLOW: "
-            f"total enter={enter} blocked={blocked} pass={passed} "
+            f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}): "
+            f"total enter={enter} blocked={blocked} pass={passed} error={errored} "
+            f"unclassified={unclassified} "
             f"check={'OK' if total_ok else 'MISMATCH'} "
             f"observed={observed_total} coverage={coverage:.1f}% | "
-            f"delta enter={d_enter} blocked={d_blocked} pass={d_passed} "
+            f"delta enter={d_enter} blocked={d_blocked} pass={d_passed} error={d_errored} "
+            f"unclassified={d_unclassified} "
             f"check={'OK' if delta_ok else 'MISMATCH'}"
         )
     except Exception as exc:
