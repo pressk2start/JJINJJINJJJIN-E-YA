@@ -1400,6 +1400,8 @@ def _log_live_effective_config_once():
             )
             fields = [
                 ("route", name),
+                ("code_build_id", _OBSERVE_EPOCH),  # 배포 SHA — 실행 프로세스 SHA 3중 확인용
+                ("process_start_ts", int(_LIVE_LOG_LAST_CLEANUP or time.time())),
                 ("entry_check_fn", check_fn_name),
                 ("route_vr_min_declared", declared_vr_min),
                 ("route_ind_filters_applied_to_live", str(ind_filters_live_applied).lower()),
@@ -1718,6 +1720,62 @@ def _post_signal_flow_summary():
         return f"POST_SIGNAL FLOW: ERROR {exc}"
 
 
+_SHADOW_ROUTE_FLOW_LAST_REPORT = {}  # (route, kind) -> last_count snapshot
+
+
+def _shadow_route_flow_summary(top_n=10):
+    """SHADOW_ROUTE_FLOW — route 별 candidate/opened delta 표시.
+    shadow n 무증가가 (a) 무신호 vs (b) 파이프 정체 판별용.
+    - candidate=0 : 단순 무신호, 장애 아님
+    - candidate>0, opened=0 : route 조건·매칭 문제
+    - candidate 증가·opened 증가 : 정상
+    """
+    try:
+        with _PIPELINE_COUNTERS_LOCK:
+            keys = [k for k in _PIPELINE_COUNTERS.keys() if k.startswith("shadow_route_")]
+            snapshot = {k: _PIPELINE_COUNTERS.get(k, 0) for k in keys}
+        # route 별 candidate/opened 집계
+        routes = {}  # route -> {candidate, opened, d_candidate, d_opened}
+        for k, cnt in snapshot.items():
+            # 예: shadow_route_CS40_VR3_TR180_bp30_240_candidate
+            if k.endswith("_candidate"):
+                route = k[len("shadow_route_"):-len("_candidate")]
+                routes.setdefault(route, {}).update(candidate=cnt)
+            elif k.endswith("_opened"):
+                route = k[len("shadow_route_"):-len("_opened")]
+                routes.setdefault(route, {}).update(opened=cnt)
+        if not routes:
+            return ""
+        # delta 계산
+        lines = ["SHADOW_ROUTE_FLOW (delta):"]
+        rows = []
+        with _GATE_FAIL_LOCK:
+            for route, d in routes.items():
+                cand = d.get("candidate", 0)
+                opened = d.get("opened", 0)
+                prev_cand = _SHADOW_ROUTE_FLOW_LAST_REPORT.get((route, "candidate"), 0)
+                prev_open = _SHADOW_ROUTE_FLOW_LAST_REPORT.get((route, "opened"), 0)
+                d_cand = cand - prev_cand
+                d_open = opened - prev_open
+                _SHADOW_ROUTE_FLOW_LAST_REPORT[(route, "candidate")] = cand
+                _SHADOW_ROUTE_FLOW_LAST_REPORT[(route, "opened")] = opened
+                # 판정 태그
+                if d_cand == 0:
+                    verdict = "무신호"
+                elif d_open == 0:
+                    verdict = "⚠매칭실패"
+                else:
+                    verdict = f"정상(rate={d_open/max(d_cand,1)*100:.0f}%)"
+                rows.append((d_cand, route, cand, opened, d_cand, d_open, verdict))
+        # 델타 큰 순, 없으면 total 큰 순 top_n
+        rows.sort(key=lambda x: (-x[0], -x[2]))
+        for _, route, cand, opened, d_cand, d_open, verdict in rows[:top_n]:
+            lines.append(f"  {route}: c={cand}(Δ{d_cand:+d}) o={opened}(Δ{d_open:+d}) {verdict}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"SHADOW_ROUTE_FLOW: ERROR {exc}"
+
+
 def _detect_gate_format_summary(only_recent=True):
     """detect_leader 게이트 스테이지별 SUMMARY. POST_SIGNAL을 먼저 표시.
     관측 누락률: observed_reason_total <= post_signal_blocked (debounce 때문).
@@ -2025,7 +2083,21 @@ def _pipeline_report(force=False):
     if _succ == 0 and _raw == 0:
         _act.append("신규진입 중단")
     elif _succ == 0 and _raw > 0:
-        _act.append(f"raw{_raw} 통과못함")
+        # POST accounting 로 정확 표현 (오판 유발 방지)
+        try:
+            _pe = _PIPELINE_COUNTERS.get("post_signal_enter", 0)
+            _pb = _PIPELINE_COUNTERS.get("post_signal_blocked", 0)
+            _pp = _PIPELINE_COUNTERS.get("post_signal_pass", 0)
+            _perr = _PIPELINE_COUNTERS.get("post_signal_error", 0)
+            _pu = max(0, _pe - _pb - _pp - _perr)
+            if _pu > 0:
+                _act.append(f"raw{_raw} POST미분류{_pu}")
+            elif _pb >= _raw:
+                _act.append(f"raw{_raw} gate차단")
+            else:
+                _act.append(f"raw{_raw} 통과못함")
+        except Exception:
+            _act.append(f"raw{_raw} 통과못함")
     if _guard_pct > REPORT_ACTION_GUARD_PCT:
         _act.append(f"가드{_guard_pct:.0f}%초과")
     if _scan_p95_s > REPORT_ACTION_SCAN_P95_S:
@@ -2048,6 +2120,14 @@ def _pipeline_report(force=False):
         if _det_summary:
             for _det_line in _det_summary.split("\n"):
                 lines.append(f"  {_det_line}")
+    except Exception:
+        pass
+    # SHADOW_ROUTE_FLOW — shadow route 별 candidate/opened delta (무신호 vs 매칭실패 판별)
+    try:
+        _srf_summary = _shadow_route_flow_summary(top_n=10)
+        if _srf_summary:
+            for _srf_line in _srf_summary.split("\n"):
+                lines.append(f"  {_srf_line}")
     except Exception:
         pass
     lines.append(
@@ -2232,7 +2312,24 @@ def _pipeline_report(force=False):
     if _det > 0:
         _rl.append(f"🔀 퍼널: {' | '.join(_funnel_parts)}")
         if _raw > 0 and _gp == 0:
-            _rl.append(f"  ⚠ raw{_raw}건 전부 gate탈락")
+            # POST_SIGNAL accounting 상태로 문구 분기 (오판 유발 방지)
+            # unclassified > 0 이면 "gate탈락" 확정 아님, "POST 미분류" 로 표현
+            try:
+                _post_enter = _PIPELINE_COUNTERS.get("post_signal_enter", 0)
+                _post_blocked = _PIPELINE_COUNTERS.get("post_signal_blocked", 0)
+                _post_pass = _PIPELINE_COUNTERS.get("post_signal_pass", 0)
+                _post_error = _PIPELINE_COUNTERS.get("post_signal_error", 0)
+                _post_unclass = max(0, _post_enter - _post_blocked - _post_pass - _post_error)
+                if _post_unclass > 0:
+                    _rl.append(f"  ⚠ raw{_raw}건 POST 미분류 (unclassified={_post_unclass}) — gate 판독 불가")
+                elif _post_blocked >= _raw:
+                    _rl.append(f"  ⚠ raw{_raw}건 전부 gate 차단 (blocked={_post_blocked})")
+                elif _post_pass > 0:
+                    _rl.append(f"  ⚠ raw{_raw}건 중 gate 통과 {_post_pass}건")
+                else:
+                    _rl.append(f"  ⚠ raw{_raw}건 gate 결과 미확정")
+            except Exception:
+                _rl.append(f"  ⚠ raw{_raw}건 전부 gate탈락")  # fallback: 기존 문구
 
     # ── A2: check_fn 필터 상세 (시나리오별 탈락 분해) ──
     _cfn_sections = []
@@ -2602,7 +2699,20 @@ _SHADOW_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
 def _shadow_log_write(timestamp, market, strategy, raw_signal, block_reason, final_alert,
                       extra_info=""):
-    """섀도우 모드 CSV 로그 1줄 기록"""
+    """섀도우 모드 CSV 로그 1줄 기록.
+    부수 효과: route-level 퍼널 카운터 (candidate/opened) 자동 증가.
+    - raw_signal=1 → shadow_route_{strategy}_candidate ++
+    - raw_signal=1 & no block_reason & final_alert>0 → shadow_route_{strategy}_opened ++
+    → shadow 무증가 원인 분해용 (그쪽 조언자 스펙)
+    """
+    # route-level 관측 카운터 (전략 무변경, log-only, 예외 격리)
+    try:
+        if strategy and raw_signal:
+            _pipeline_inc(f"shadow_route_{strategy}_candidate")
+            if not block_reason and final_alert:
+                _pipeline_inc(f"shadow_route_{strategy}_opened")
+    except Exception:
+        pass
     global _SHADOW_LOG_INITIALIZED
     with _SHADOW_LOG_LOCK:
         write_header = not _SHADOW_LOG_INITIALIZED
