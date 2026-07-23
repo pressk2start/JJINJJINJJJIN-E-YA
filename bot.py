@@ -1160,6 +1160,31 @@ _DETECT_LOG_LAST = time.time()
 # error = POST 평가 중 예외 발생 (미분류 return 방지, unclassified 원인 특정)
 _POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0}
 
+# POST unclassified 원인 세분화 (last_stage/finally 스펙, 조언자 세션 승인)
+# 종류 : gate_not_called · gate_return_none · unknown_gate_result
+#        · classification_exception · event_key_mismatch · duplicate_suppressed
+_POST_UNCLASSIFIED_REASON_STATS = {}  # reason -> count
+_POST_UNCLASSIFIED_LAST_REPORT = {}   # delta snapshot
+
+
+def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=None):
+    """POST 이벤트가 blocked/pass/error 어디로도 귀속 안 됐을 때 원인 분류·기록.
+    - 관측 전용, 매매 로직 무영향
+    - 예외 격리
+    - 원인 분포 카운터 + [POST_UNCLASSIFIED] 로그 (rate-limit 대상 아님, 희귀 이벤트라)
+    """
+    try:
+        with _GATE_FAIL_LOCK:
+            _POST_UNCLASSIFIED_REASON_STATS[reason] = _POST_UNCLASSIFIED_REASON_STATS.get(reason, 0) + 1
+        parts = [f"[POST_UNCLASSIFIED] reason={reason}"]
+        if market: parts.append(f"market={market}")
+        if signal_id: parts.append(f"signal_id={signal_id}")
+        if stage: parts.append(f"last_stage={stage}")
+        parts.append(f"epoch={_OBSERVE_EPOCH}")
+        print(" ".join(parts))
+    except Exception:
+        pass
+
 # observe_epoch — 배포 SHA 태깅 (구버전 누적 오염과 신규 관측 구분)
 # 배포 시 이 값이 바뀌면 리포트에도 새 태그 표시 → total mismatch가 구버전 잔재인지 즉시 판별
 def _resolve_observe_epoch():
@@ -1706,12 +1731,24 @@ def _post_signal_flow_summary():
         coverage = (observed_total / blocked * 100.0) if blocked > 0 else 0.0
         unclassified = max(0, enter - blocked - passed - errored)
         d_unclassified = max(0, d_enter - d_blocked - d_passed - d_errored)
+        # unclassified 원인 분포 (total + delta)
+        with _GATE_FAIL_LOCK:
+            reason_snapshot = dict(_POST_UNCLASSIFIED_REASON_STATS)
+            reason_delta = {k: v - _POST_UNCLASSIFIED_LAST_REPORT.get(k, 0)
+                            for k, v in reason_snapshot.items()}
+            for k, v in reason_snapshot.items():
+                _POST_UNCLASSIFIED_LAST_REPORT[k] = v
+        reason_str = ""
+        if unclassified > 0 and reason_snapshot:
+            top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:3]
+            reason_str = " | reasons: " + ", ".join(
+                f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
         return (
             f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}): "
             f"total enter={enter} blocked={blocked} pass={passed} error={errored} "
             f"unclassified={unclassified} "
             f"check={'OK' if total_ok else 'MISMATCH'} "
-            f"observed={observed_total} coverage={coverage:.1f}% | "
+            f"observed={observed_total} coverage={coverage:.1f}%{reason_str} | "
             f"delta enter={d_enter} blocked={d_blocked} pass={d_passed} error={d_errored} "
             f"unclassified={d_unclassified} "
             f"check={'OK' if delta_ok else 'MISMATCH'}"
