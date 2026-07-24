@@ -1163,8 +1163,11 @@ _POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0}
 # POST unclassified 원인 세분화 (last_stage/finally 스펙, 조언자 세션 승인)
 # 종류 : gate_not_called · gate_return_none · unknown_gate_result
 #        · classification_exception · event_key_mismatch · duplicate_suppressed
+#        · shadow_only (AUTO_TRADE=False 분기, 정상 terminal state)
 _POST_UNCLASSIFIED_REASON_STATS = {}  # reason -> count
 _POST_UNCLASSIFIED_LAST_REPORT = {}   # delta snapshot
+# 새 epoch 첫 리포트 판별 (BASELINE_INITIALIZED marker 노출)
+_POST_FLOW_FIRST_REPORT_FLAG = True
 
 
 def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=None):
@@ -1743,8 +1746,15 @@ def _post_signal_flow_summary():
             top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:3]
             reason_str = " | reasons: " + ", ".join(
                 f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
+        # BASELINE_INITIALIZED marker : 새 epoch 첫 리포트에서만 표시
+        # 지난 창들 "delta=0=무이벤트" 오독 방지 (신 baseline vs 무이벤트 구분)
+        global _POST_FLOW_FIRST_REPORT_FLAG
+        baseline_tag = ""
+        if _POST_FLOW_FIRST_REPORT_FLAG:
+            baseline_tag = " [BASELINE_INITIALIZED]"
+            _POST_FLOW_FIRST_REPORT_FLAG = False
         return (
-            f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}): "
+            f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}){baseline_tag}: "
             f"total enter={enter} blocked={blocked} pass={passed} error={errored} "
             f"unclassified={unclassified} "
             f"check={'OK' if total_ok else 'MISMATCH'} "

@@ -3,17 +3,21 @@
 라이브 shadow 코호트 오프라인 매칭 재시뮬 — 배포 없이 레버 A '중간검증'.
 (최종 승격은 wired-shadow 몫. 이건 실 라이브 코호트에서 엣지 생존 여부 신속확인.)
 
-입력 CSV: market, entry_ts_utc [, entry_price] [, control_net]
-  - entry_price 없으면 진입 직후 첫 초봉 close 로 유도(주의: CONTROL과 basis 불일치 가능 → 플래그)
-  - control_net 있으면 paired delta + day-block bootstrap 수행
+입력 CSV 컬럼 (확장 스펙, 조언자 세션 지적 수용):
+  필수 : market, entry_ts_utc
+  권장 : signal_id (동일 초 중복 신호 구분), entry_price (basis 정합)
+        route (shadow route 확인), data_available_until (초봉 재수집 기준)
+  선택 : control_net (있으면 paired delta + day-block bootstrap)
 
 가드레일(advisor A~E 반영):
   A. 파라미터 잠금: arm180/bp30/hold240, 본절·조기SL OFF — 결과 보고 바꾸지 말 것
   B. 초봉 순서 사용, 누락구간 별도 제외 카운트
   C. entry_price basis: control_net과 같은 basis일 때만 paired 인정
+     signal_id 있으면 (market, signal_id) 로 매칭 (동일 초 중복 안전)
   D. 비용 이중차감 금지 + base/stress 두 모델
   E. 3초 monitor 지연: ideal_clean(즉시) vs delayed_clean(3초 cadence 관측가 체결)
   + 독립성: 409 백테스트(long_cache)와 겹치는 진입 플래그, 비겹침 부분집합 별도 보고
+  + 매칭 정합: signal_id 우선 · 없으면 (market, entry_ts) · 중복 시 warn
 
 사용: python research/live_cohort_resim.py entries.csv [--seed 7]
 """
@@ -101,9 +105,23 @@ def main():
     with open(sys.argv[1]) as f:
         for r in csv.DictReader(f):
             edt = datetime.strptime(r["entry_ts_utc"].strip()[:19], FMT)
-            rows.append({"market": r["market"].strip(), "entry_dt": edt,
-                         "entry_price": float(r["entry_price"]) if r.get("entry_price") else None,
-                         "control_net": float(r["control_net"]) if r.get("control_net") else None})
+            rows.append({
+                "market": r["market"].strip(),
+                "entry_dt": edt,
+                "entry_price": float(r["entry_price"]) if r.get("entry_price") else None,
+                "control_net": float(r["control_net"]) if r.get("control_net") else None,
+                "signal_id": r.get("signal_id", "").strip() or None,
+                "route": r.get("route", "").strip() or None,
+                "data_available_until": r.get("data_available_until", "").strip() or None,
+            })
+    # 중복 매칭 감지 (signal_id 우선 · 없으면 market+entry_ts)
+    dup_keys = {}
+    for x in rows:
+        k = x["signal_id"] or f"{x['market']}|{x['entry_dt'].strftime(FMT)}"
+        dup_keys.setdefault(k, []).append(x)
+    dup_count = sum(1 for k, v in dup_keys.items() if len(v) > 1)
+    if dup_count:
+        print(f"  ⚠ 중복 매칭 키 {dup_count}건 발견 — signal_id 없으면 (market,ts) 재사용 위험")
     metas = [{"market": x["market"], "entry_dt": x["entry_dt"], "entry_price": x["entry_price"] or 0.0} for x in rows]
     sec = collect_events_seconds_threaded(metas, 300, "research/data_sec/live_resim_cache.parquet", workers=8)
     overlap = load_overlap_keys()
