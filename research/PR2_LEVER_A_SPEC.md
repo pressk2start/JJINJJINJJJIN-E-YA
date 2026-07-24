@@ -41,6 +41,16 @@ signal_ts, entry, exit_reason ∈ {TRAIL_HIT, HOLD_CAP, HARD_STOP}, realized_pnl
 - **불변식**: 모든 청산이 정확히 한 exit_reason에 귀속(미분류 0).
 - **오염 방지**: 오염 bp30 vs 클린 bp50 착시 재발 방지 위해 반드시 **동일 signal_id 페어** 기준 비교.
 
+## POST accounting 보존식 (조언자 세션 스펙, 이번 턴 확정)
+`enter = blocked + live_pass + shadow_only + error`
+- **shadow_only** = AUTO_TRADE=False 정상 terminal state (실주문 gate 이전 shadow 분기 return)
+  - unclassified 로 취급 금지 · 별도 카운터
+  - AUTO_TRADE=True 로 전환하면 자연히 0 으로 수렴
+- **live_pass** = 실주문 게이트 통과 (기존 post_signal_pass)
+- **blocked** = 명시적 gate 차단 (기존 post_signal_blocked, 11+1곳)
+- **error** = try/except 로 잡힌 예외 (기존 post_signal_error)
+- **unclassified > 0** 은 실 accounting 누락 신호 (shadow_only 로 재분류하면 해결되는지 확인)
+
 ## 판정 게이트 (전향 shadow, n 충분히 쌓인 뒤)
 1. TREATMENT capture ≥ 25% (CONTROL 4% 대비 유의 상승) — 1차 관문.
 2. TREATMENT net > CONTROL net, 부호 양수.
