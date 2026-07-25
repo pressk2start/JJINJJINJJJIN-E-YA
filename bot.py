@@ -17969,12 +17969,24 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # v4 신호 존재 → POST_SIGNAL 게이트 모집단 진입 (비-debounce 카운터)
     _pipeline_inc("post_signal_enter")
 
-    _15m_signal = _v4_signal["signal_tag"]
-    _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
-    _v4_exit_params = _v4_signal["exit_params"]
+    # PATCH: v4_signal 딕셔너리 접근·프린트 구간을 try/except 로 감싸서
+    #        KeyError/기타 예외 시 post_signal_error 증가하고 정상 return None.
+    #        기존엔 error 카운터가 정의만 있고 어디서도 증가 안 돼서 unclassified 로 표시됨.
+    try:
+        _15m_signal = _v4_signal["signal_tag"]
+        _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
+        _v4_exit_params = _v4_signal["exit_params"]
 
-    print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal['logic_group']}) "
-          f"필터={_v4_signal['filters_hit']} 청산={_v4_exit_params['description']}")
+        print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal['logic_group']}) "
+              f"필터={_v4_signal['filters_hit']} 청산={_v4_exit_params['description']}")
+    except Exception as _v4_meta_err:
+        _pipeline_inc("post_signal_error")
+        _post_signal_track_unclassified(
+            "classification_exception",
+            market=m,
+            stage=f"v4_meta:{type(_v4_meta_err).__name__}:{str(_v4_meta_err)[:40]}",
+        )
+        return None
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     if is_coin_loss_cooldown(m):
@@ -21943,6 +21955,16 @@ def main():
                 # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
                 print(f"[SYMBOL_ERR][{m}] {e}")
                 traceback.print_exc()
+                # PATCH: post_signal_enter++ 이후 예외 시 error 카운터 증가
+                # (기존엔 outer try 가 조용히 삼켜서 unclassified 로 표시됨)
+                try:
+                    _pipeline_inc("post_signal_error")
+                    _post_signal_track_unclassified(
+                        "classification_exception",
+                        market=m, stage=f"symbol_scan:{type(e).__name__}",
+                    )
+                except Exception:
+                    pass
                 # 🔧 FIX: 락 획득한 경우에만 해제 (미획득 시 모니터 스레드 락 삭제 방지)
                 if _lock_held:
                     _release_entry_lock(m)
