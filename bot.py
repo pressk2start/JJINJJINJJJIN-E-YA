@@ -1170,12 +1170,18 @@ _POST_UNCLASSIFIED_LAST_REPORT = {}   # delta snapshot
 _POST_FLOW_FIRST_REPORT_FLAG = True
 
 
+_POST_ERROR_SAMPLE_LOGGED = 0  # 최초 N건 원문 sample 출력 (조언자 지적 · 상세 진단용)
+_POST_ERROR_SAMPLE_MAX = 5     # 5건까지만 원문 출력
+
+
 def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=None):
     """POST 이벤트가 blocked/pass/error 어디로도 귀속 안 됐을 때 원인 분류·기록.
     - 관측 전용, 매매 로직 무영향
     - 예외 격리
     - 원인 분포 카운터 + [POST_UNCLASSIFIED] 로그 (rate-limit 대상 아님, 희귀 이벤트라)
+    - 최초 5건은 [POST_ERROR_SAMPLE] 로 원문 상세 출력 (조언자 지적)
     """
+    global _POST_ERROR_SAMPLE_LOGGED
     try:
         with _GATE_FAIL_LOCK:
             _POST_UNCLASSIFIED_REASON_STATS[reason] = _POST_UNCLASSIFIED_REASON_STATS.get(reason, 0) + 1
@@ -1185,8 +1191,43 @@ def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=N
         if stage: parts.append(f"last_stage={stage}")
         parts.append(f"epoch={_OBSERVE_EPOCH}")
         print(" ".join(parts))
+        # 최초 5건은 SAMPLE 로 상세 출력 (구조적 vs 산발 판별용)
+        if _POST_ERROR_SAMPLE_LOGGED < _POST_ERROR_SAMPLE_MAX:
+            _POST_ERROR_SAMPLE_LOGGED += 1
+            sample_parts = [f"[POST_ERROR_SAMPLE #{_POST_ERROR_SAMPLE_LOGGED}]"]
+            if market: sample_parts.append(f"market={market}")
+            if signal_id: sample_parts.append(f"signal_id={signal_id}")
+            sample_parts.append(f"reason={reason}")
+            if stage: sample_parts.append(f"stage={stage}")
+            print(" ".join(sample_parts))
     except Exception:
         pass
+
+
+def _post_signal_required_fields_check(sig, market=None):
+    """detect_leader_stock 진입 직후 v4_signal 필수 필드 검증 helper.
+    사용 예: _post_signal_required_fields_check(_v4_signal, market=m)
+    - 누락 필드 감지 시 [POST_FIELD_MISSING] 로그 + track_unclassified 호출
+    - defensive 처리 전 데이터 계약 검증 (조언자 지적)
+    - 매매 로직 미변경 · 관측만
+    """
+    try:
+        required = {"signal_tag", "exit_params"}
+        optional_but_used = {"entry_mode", "logic_group", "filters_hit"}
+        if not isinstance(sig, dict):
+            _post_signal_track_unclassified(
+                "field_missing", market=market, stage=f"sig_not_dict:{type(sig).__name__}")
+            return False
+        sig_keys = set(sig.keys())
+        missing = required - sig_keys
+        if missing:
+            _post_signal_track_unclassified(
+                "field_missing", market=market,
+                stage=f"missing:{','.join(sorted(missing))}")
+            return False
+        return True
+    except Exception:
+        return True  # 검증 실패 시 통과 처리 (관측이 매매 흐름 차단 금지)
 
 # observe_epoch — 배포 SHA 태깅 (구버전 누적 오염과 신규 관측 구분)
 # 배포 시 이 값이 바뀌면 리포트에도 새 태그 표시 → total mismatch가 구버전 잔재인지 즉시 판별
@@ -1742,7 +1783,9 @@ def _post_signal_flow_summary():
             for k, v in reason_snapshot.items():
                 _POST_UNCLASSIFIED_LAST_REPORT[k] = v
         reason_str = ""
-        if unclassified > 0 and reason_snapshot:
+        # unclassified > 0 또는 error > 0 → reason 분포 표시 (지난 턴 조언자 지적 반영)
+        # error 사이트도 track_unclassified 로 reason 로깅하므로 원인 특정 즉시 가능
+        if (unclassified > 0 or errored > 0) and reason_snapshot:
             top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:3]
             reason_str = " | reasons: " + ", ".join(
                 f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
