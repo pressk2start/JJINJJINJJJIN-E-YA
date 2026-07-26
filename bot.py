@@ -1156,9 +1156,10 @@ _DETECT_GATE_LAST_CLEANUP = 0.0
 # burst 30, 초당 0.5 충전 → 평균 ~30/분
 _DETECT_LOG_TOKENS = 30.0
 _DETECT_LOG_LAST = time.time()
-# post_signal_enter/blocked/pass/error 보존식 delta 계산 snapshot
-# error = POST 평가 중 예외 발생 (미분류 return 방지, unclassified 원인 특정)
-_POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0}
+# post_signal_enter/blocked/pass/error/shadow_only 보존식 delta 계산 snapshot
+# error = POST 평가 중 예외 발생
+# shadow_only = POST 통과 후 AUTO_TRADE=False 정상 종료 (실 예외와 분리)
+_POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0, "shadow_only": 0}
 
 # POST unclassified 원인 세분화 (last_stage/finally 스펙, 조언자 세션 승인)
 # 종류 : gate_not_called · gate_return_none · unknown_gate_result
@@ -1760,15 +1761,18 @@ def _post_signal_flow_summary():
             blocked = _PIPELINE_COUNTERS.get("post_signal_blocked", 0)
             passed = _PIPELINE_COUNTERS.get("post_signal_pass", 0)
             errored = _PIPELINE_COUNTERS.get("post_signal_error", 0)
+            shadow_only = _PIPELINE_COUNTERS.get("post_signal_shadow_only", 0)
         with _GATE_FAIL_LOCK:
             d_enter = enter - _POST_FLOW_LAST_REPORT["enter"]
             d_blocked = blocked - _POST_FLOW_LAST_REPORT["blocked"]
             d_passed = passed - _POST_FLOW_LAST_REPORT["pass"]
             d_errored = errored - _POST_FLOW_LAST_REPORT["error"]
+            d_shadow = shadow_only - _POST_FLOW_LAST_REPORT["shadow_only"]
             _POST_FLOW_LAST_REPORT["enter"] = enter
             _POST_FLOW_LAST_REPORT["blocked"] = blocked
             _POST_FLOW_LAST_REPORT["pass"] = passed
             _POST_FLOW_LAST_REPORT["error"] = errored
+            _POST_FLOW_LAST_REPORT["shadow_only"] = shadow_only
             observed_total = sum(_POST_SIGNAL_GATE_FAIL_STATS.values())
         total_ok = (enter == blocked + passed + errored)
         delta_ok = (d_enter == d_blocked + d_passed + d_errored)
@@ -1796,10 +1800,13 @@ def _post_signal_flow_summary():
         if _POST_FLOW_FIRST_REPORT_FLAG:
             baseline_tag = " [BASELINE_INITIALIZED]"
             _POST_FLOW_FIRST_REPORT_FLAG = False
+        # shadow_only 는 정보용 (POST 통과 후 downstream, enter 보존식과 별개)
+        # 실 예외(error) 와 정상 shadow(shadow_only) 를 명확히 구분
+        shadow_str = f" shadow_only={shadow_only}(Δ{d_shadow:+d})" if shadow_only > 0 else ""
         return (
             f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}){baseline_tag}: "
             f"total enter={enter} blocked={blocked} pass={passed} error={errored} "
-            f"unclassified={unclassified} "
+            f"unclassified={unclassified}{shadow_str} "
             f"check={'OK' if total_ok else 'MISMATCH'} "
             f"observed={observed_total} coverage={coverage:.1f}%{reason_str} | "
             f"delta enter={d_enter} blocked={d_blocked} pass={d_passed} error={d_errored} "
@@ -4761,6 +4768,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
         tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
+        # 4-state 분리 (조언자 지적) : shadow_only = POST 통과 후 AUTO_TRADE off 정상 종료
+        # 실 예외(error) 와 정상 shadow-only 를 구분하지 않으면 진짜 장애 탐지 무력화
+        try:
+            _pipeline_inc("post_signal_shadow_only")
+        except Exception:
+            pass
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:

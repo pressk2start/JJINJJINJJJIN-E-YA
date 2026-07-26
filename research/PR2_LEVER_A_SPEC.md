@@ -69,6 +69,22 @@ signal_ts, entry, exit_reason ∈ {TRAIL_HIT, HOLD_CAP, HARD_STOP}, realized_pnl
 4. `SHADOW_ROUTE_FLOW`에서 대상 route (vr2 CLM 계열) candidate 증가·opened 증가 확인 (파이프 stuck 아님 검증).
 → 이후 A 단독 wired-shadow 착수.
 
+## 기각 확정 가설 (진입필터 후보 영구 제외, 2026-07-25)
+- **가설 D · kst_hour 시간대 필터** — 라이브 105건 시간대 편차 관찰 (오전 강 · 저녁 약)
+  이 세션 조언자 matched 종료 테스트로 최종 기각:
+  ```
+  409 코호트, 두 청산 (CLEAN + CONTROL), 야간(18~23) 회피 효과:
+    CLEAN net    Δ -0.015%p (손해)
+    CONTROL net  Δ -0.035%p (손해)
+  ```
+  두 청산 구조 모두 야간 회피가 net 을 깎음 → exit 구조 교락 배제
+  → REJECTED_FINAL · 진입필터 후보 영구 제외 · 실무 비활성화
+  → 재현 5회는 같은 누적 코호트 재버킷 (독립 표본 아님, 규율 위반)
+
+- **가설 B · 60초 EarlyCut** — walk-forward 실행형 −0.20%p · 사후 조건 착시
+- **가설 J · mfe_60s 필터** — 룩어헤드 (진입 후 관측값)
+- **폭 확대 bp50/bp70** — 매칭 코호트 반증
+
 ## 명시적 금지
 - 전략값(진입 vr/cs/body/wick) 무변경 — 이 PR은 **청산 배선만**.
 - 폭 확대 금지(bp30 고정), 조기컷(가설 B) 미포함, 호가벽(가설 C) 미포함.
