@@ -43,7 +43,10 @@ from datetime import datetime, timedelta
 import numpy as np, pandas as pd
 from seconds_loader import collect_events_seconds_threaded
 FMT = "%Y-%m-%dT%H:%M:%S"
-BASE_COST = 0.20; STRESS_COST = 0.30; ARM = 180; BP = 30/100.0; HOLD = 240; DELAY = 3
+# BP_PCT = 트레일 폭 (%). 30bps = 0.30% → stop = peak * (1 - BP_PCT/100.0) = peak * 0.997
+# ⚠ 이전 BP = 30/100.0 (= 0.30) 을 stop = peak*(1-BP) 형태로 쓰면 30% 하락 대기 → 트레일 미발동 버그.
+# lever_a_verify.py:38 (`tp=0.3; stop=peak*(1-tp/100.0)`) 규약과 일치화.
+BASE_COST = 0.20; STRESS_COST = 0.30; ARM = 180; BP_PCT = 0.30; HOLD = 240; DELAY = 3
 # 3구간 (최근 N건 · 국면 적응력 검증)
 WINDOWS = [("최근5", 5), ("최근20", 20), ("최근50", 50), ("전체", None)]
 
@@ -56,7 +59,7 @@ def clean_ideal(entry, edt, sdf, cost):
         t = (r["dt"] - edt).total_seconds()
         if t <= 0: continue
         if t > HOLD: break
-        peak = max(peak, float(r["high"])); stop = peak * (1 - BP)
+        peak = max(peak, float(r["high"])); stop = peak * (1 - BP_PCT / 100.0)
         if t >= ARM and float(r["low"]) <= stop:
             return (stop - entry) / entry * 100 - cost
         lc = float(r["close"])
@@ -74,7 +77,7 @@ def clean_delayed(entry, edt, sdf, cost, delay=DELAY):
         peak = max(peak, float(r["high"]))
         if t >= next_check:
             next_check += delay
-            stop = peak * (1 - BP); cl = float(r["close"])
+            stop = peak * (1 - BP_PCT / 100.0); cl = float(r["close"])
             if t >= ARM and cl <= stop:
                 return (cl - entry) / entry * 100 - cost
         lc = float(r["close"])
@@ -155,13 +158,20 @@ def summarize_window(matched, tag, cost, vr5_cutoff, seed):
     a_nets = [clean_delayed(m["entry"], m["edt"], m["sdf"], cost) for m in matched]
     a_ideal = [clean_ideal(m["entry"], m["edt"], m["sdf"], cost) for m in matched]
     # A2 마스크: vr5 <= cutoff 만 진입 (advisor: vr5-cap = 물량 얇은 급등 회피)
-    a2_pass = [m.get("vr5") is not None and m["vr5"] <= vr5_cutoff for m in matched]
+    # vr5_cutoff=None → vr5 미제공 → 전건 차단 (검증 불가)
+    if vr5_cutoff is None:
+        a2_pass = [False] * len(matched)
+    else:
+        a2_pass = [m.get("vr5") is not None and m["vr5"] <= vr5_cutoff for m in matched]
     a2_nets = [a_nets[i] if a2_pass[i] else None for i in range(len(matched))]
     mfes = [m["mfe"] for m in matched if m.get("mfe") is not None]
     mfe_all = np.mean(mfes) if mfes else 0
+    # A2 통과분의 자체 MFE (advisor 지적: cap 분모 통일 · 전체 MFE 사용 시 인위 상향)
+    mfes_a2 = [matched[i]["mfe"] for i in range(len(matched))
+               if a2_pass[i] and matched[i].get("mfe") is not None]
 
     a_stat = summarize_arm(a_nets, mfes, "A")
-    a2_stat = summarize_arm([x for x in a2_nets if x is not None], mfes, "A×A2")
+    a2_stat = summarize_arm([x for x in a2_nets if x is not None], mfes_a2, "A×A2")
     a_ideal_stat = summarize_arm(a_ideal, mfes, "A_ideal")
 
     print(f"  [{tag}] n={len(matched)}  MFE평균={mfe_all:.3f}%")
@@ -170,8 +180,10 @@ def summarize_window(matched, tag, cost, vr5_cutoff, seed):
     print(f"    A (ideal, base)       n={a_ideal_stat['n']} net={a_ideal_stat['net']:+.4f}% "
           f"cap={a_ideal_stat['cap']:.0f}%   ← 즉시체결 상한 참고")
     a2_pass_cnt = sum(a2_pass); a2_block_cnt = len(matched) - a2_pass_cnt
-    print(f"    A × A2 (vr5≤{vr5_cutoff:.3f})  통과={a2_pass_cnt} 차단={a2_block_cnt} "
-          f"net={a2_stat['net']:+.4f}% wr={a2_stat['wr']:.0f}% cap={a2_stat['cap']:.0f}%")
+    cutoff_disp = f"{vr5_cutoff:.3f}" if vr5_cutoff is not None else "N/A"
+    print(f"    A × A2 (vr5≤{cutoff_disp})  통과={a2_pass_cnt} 차단={a2_block_cnt} "
+          f"net={a2_stat['net']:+.4f}% wr={a2_stat['wr']:.0f}% cap={a2_stat['cap']:.0f}%"
+          f" (cap 분모: A2 통과분 MFE)")
 
     # A2 통과/차단별 손실률 (advisor 5조건 판정 재료)
     a2_pass_nets = [a_nets[i] for i in range(len(matched)) if a2_pass[i] and a_nets[i] is not None]
@@ -213,6 +225,9 @@ def summarize_window(matched, tag, cost, vr5_cutoff, seed):
 def a2_five_conditions(matched, results_by_window, vr5_cutoff):
     """A2 5조건 사전등록 판정 (advisor 강한 증거 요건)."""
     print("\n=== A2 5조건 사전등록 판정 ===")
+    if vr5_cutoff is None:
+        print("  vr5 미제공 → A2 5조건 판정 스킵 (CSV에 vr5 필드 추가 후 재실행)")
+        return
     print(f"  cutoff (사전고정): vr5 ≤ {vr5_cutoff:.3f}")
 
     # 조건 1: 최근 손실군 vr5 > 과거군
@@ -289,6 +304,9 @@ def main():
     if "--seed" in sys.argv: seed = int(sys.argv[sys.argv.index("--seed")+1])
     if "--vr5-cutoff-pct" in sys.argv:
         vr5_cutoff_pct = int(sys.argv[sys.argv.index("--vr5-cutoff-pct")+1])
+    # cutoff pct 범위 검증 (advisor 지적: 200 등 잘못 입력 시 np.percentile 예외)
+    if not (0 <= vr5_cutoff_pct <= 100):
+        print(f"⚠ --vr5-cutoff-pct 는 0~100 사이여야 함 (입력: {vr5_cutoff_pct})"); return
     rows = []
     with open(sys.argv[1]) as f:
         for r in csv.DictReader(f):
@@ -303,6 +321,9 @@ def main():
                 "vr5": float(r["vr5"]) if r.get("vr5") else None,
                 "data_available_until": r.get("data_available_until", "").strip() or None,
             })
+    # 시간정렬 강제 (advisor 지적: 최근 5/20/50 인덱싱이 CSV 행 순서 아닌 시간 순서여야 함)
+    # 5조건 조건1 (최근 손실군 vr5 > 과거군) · 조건5 (최근 20 국면 적응력) 무결성
+    rows.sort(key=lambda x: x["entry_dt"])
     # 중복 매칭 감지 (signal_id 우선 · 없으면 market+entry_ts)
     dup_keys = {}
     for x in rows:
@@ -322,7 +343,9 @@ def main():
         key = f"{x['market']}|{x['entry_dt'].strftime(FMT)}"
         sdf = sec.get(key)
         if sdf is None or sdf.empty: excl_missing += 1; continue
-        entry = x["entry_price"]; basis_ok = entry is not None
+        entry = x["entry_price"]
+        # basis_ok: entry_price 원본 (0.0 이면 False — advisor 지적: bool(entry) 로 판정)
+        basis_ok = bool(entry)
         if not entry:
             after = sdf[sdf["dt"] >= x["entry_dt"]]
             if after.empty: excl_missing += 1; continue
@@ -344,8 +367,11 @@ def main():
         print(f"vr5 cutoff (p{vr5_cutoff_pct} 사전고정): {vr5_cutoff:.3f} "
               f"(range {min(vr5_vals):.3f}~{max(vr5_vals):.3f}, n={len(vr5_vals)})")
     else:
-        vr5_cutoff = 999.0
-        print(f"⚠ vr5 컬럼 미제공 → A2 arm 사실상 통과전량 (CSV에 vr5 필드 추가 필요)")
+        # advisor 지적: vr5 미제공 시 a2_pass = (vr5 is not None and vr5<=cutoff) → 차단전량
+        # 코멘트-동작 정합: vr5 없음 → A2 arm 판정 불가 (통과전량 아님)
+        vr5_cutoff = None
+        print(f"⚠ vr5 컬럼 미제공 → A2 arm 검증 불가 (모든 trade 가 A2 차단으로 카운트됨). "
+              f"CSV에 vr5 필드 추가 후 재실행 필요.")
 
     print(f"\n입력 {len(rows)}  매칭 {len(matched)}  제외(데이터누락) {excl_missing}  409겹침 {ov}")
 

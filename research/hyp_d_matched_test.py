@@ -33,11 +33,14 @@ import numpy as np
 from seconds_loader import collect_events_seconds_threaded
 from live_exit_sim import sim_live
 FMT = "%Y-%m-%dT%H:%M:%S"
-COST = 0.20; ARM = 180; BP = 30/100.0; HOLD = 240
+# BP_PCT = 트레일 폭 (%). 30bps = 0.30% → stop = peak*(1-tp/100.0), tp=BP_PCT=0.30
+# ⚠ 이전 BP = 30/100.0 (= 0.30) 을 tp=BP*100=30, stop=peak*(1-tp/100.0)=peak*0.70 로 전개하면
+#   30% 트레일 → 사실상 미발동 (HOLD_CAP 종가 리턴) 버그. lever_a_verify.py 규약과 일치화.
+COST = 0.20; ARM = 180; BP_PCT = 0.30; HOLD = 240
 KST_OFFSET_HOURS = 9  # UTC + 9
 
 
-def clean_trail(entry, edt, sdf, tp=BP*100, arm=ARM, hold=HOLD):
+def clean_trail(entry, edt, sdf, tp=BP_PCT, arm=ARM, hold=HOLD):
     if entry <= 0 or sdf is None or sdf.empty: return None
     peak = entry; lc = entry
     for _, r in sdf.iterrows():

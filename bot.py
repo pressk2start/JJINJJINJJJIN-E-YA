@@ -1193,20 +1193,25 @@ def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=N
         stage_prefix = None
         if stage:
             stage_prefix = stage.split(":", 1)[0].strip() or None
+        # SAMPLE 로그 결정도 락 안에서 (advisor 지적: race condition 방어)
+        should_sample = False
         with _GATE_FAIL_LOCK:
             _POST_UNCLASSIFIED_REASON_STATS[reason] = _POST_UNCLASSIFIED_REASON_STATS.get(reason, 0) + 1
             if stage_prefix:
                 _POST_ERROR_STAGE_STATS[stage_prefix] = _POST_ERROR_STAGE_STATS.get(stage_prefix, 0) + 1
+            # check-and-increment 를 락 안에서 (동시 예외 다발 시 5건 초과 방지)
+            if _POST_ERROR_SAMPLE_LOGGED < _POST_ERROR_SAMPLE_MAX:
+                _POST_ERROR_SAMPLE_LOGGED += 1
+                should_sample = True
+                sample_idx = _POST_ERROR_SAMPLE_LOGGED
         parts = [f"[POST_UNCLASSIFIED] reason={reason}"]
         if market: parts.append(f"market={market}")
         if signal_id: parts.append(f"signal_id={signal_id}")
         if stage: parts.append(f"last_stage={stage}")
         parts.append(f"epoch={_OBSERVE_EPOCH}")
         print(" ".join(parts))
-        # 최초 5건은 SAMPLE 로 상세 출력 (구조적 vs 산발 판별용)
-        if _POST_ERROR_SAMPLE_LOGGED < _POST_ERROR_SAMPLE_MAX:
-            _POST_ERROR_SAMPLE_LOGGED += 1
-            sample_parts = [f"[POST_ERROR_SAMPLE #{_POST_ERROR_SAMPLE_LOGGED}]"]
+        if should_sample:
+            sample_parts = [f"[POST_ERROR_SAMPLE #{sample_idx}]"]
             if market: sample_parts.append(f"market={market}")
             if signal_id: sample_parts.append(f"signal_id={signal_id}")
             sample_parts.append(f"reason={reason}")
@@ -1823,14 +1828,19 @@ def _post_signal_flow_summary():
         reason_str = ""
         # unclassified > 0 또는 error > 0 → reason + stage 분포 표시 (Top5 각각)
         # error 사이트도 track_unclassified 로 reason 로깅하므로 원인 특정 즉시 가능
-        if (unclassified > 0 or errored > 0) and reason_snapshot:
-            top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:5]
-            reason_str = " | reasons: " + ", ".join(
-                f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
-            if stage_snapshot:
-                top_stage = sorted(stage_snapshot.items(), key=lambda x: -x[1])[:5]
-                reason_str += " | stages: " + ", ".join(
-                    f"{k}={v}(Δ{stage_delta.get(k,0):+d})" for k, v in top_stage)
+        if (unclassified > 0 or errored > 0):
+            if reason_snapshot:
+                top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:5]
+                reason_str = " | reasons: " + ", ".join(
+                    f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
+                if stage_snapshot:
+                    top_stage = sorted(stage_snapshot.items(), key=lambda x: -x[1])[:5]
+                    reason_str += " | stages: " + ", ".join(
+                        f"{k}={v}(Δ{stage_delta.get(k,0):+d})" for k, v in top_stage)
+            else:
+                # advisor 지적: errored>0 인데 reason 없으면 track 배선 누락 시그널
+                # 신규 error 사이트에서 track_unclassified 호출을 빠뜨렸을 때 사일런트 방지
+                reason_str = " | reasons: unrecorded (track_unclassified 배선 누락 의심)"
         # BASELINE_INITIALIZED marker : 새 epoch 첫 리포트에서만 표시
         # 지난 창들 "delta=0=무이벤트" 오독 방지 (신 baseline vs 무이벤트 구분)
         global _POST_FLOW_FIRST_REPORT_FLAG
@@ -2087,16 +2097,47 @@ def _exec_quality_summary_lines():
 
 _BLOCKED_THREAD_LOCAL = threading.local()  # 차단 건 가상 추적용 thread-local
 
+# POST_SIGNAL 상태 thread-local (advisor 지적: outer except 오계상 방지)
+# 각 iteration 시작 시 _post_state_reset() 로 초기화, _pipeline_inc 에서 자동 마킹
+# outer except 는 (entered, terminal) 로 pre-enter/mid-enter/post-terminal 예외 구분
+_POST_STATE = threading.local()
+
+
+def _post_state_reset():
+    """market iteration 시작 시 호출 — thread-local POST 상태 초기화."""
+    _POST_STATE.entered = False
+    _POST_STATE.terminal = None
+
+
+def _post_state_current():
+    """(entered, terminal) 튜플. 초기화 안 됐으면 (False, None) fallback."""
+    return (
+        getattr(_POST_STATE, "entered", False),
+        getattr(_POST_STATE, "terminal", None),
+    )
+
 
 def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
     """파이프라인 카운터 증가 + 차단 필터명/값/임계치 thread-local 기록.
     Returns True(=caller should return None) in normal mode,
     False(=caller should continue) in eval_all mode.
-    eval_all mode: 카운터 미증가, all_fails 리스트에 누적 → 실패 필터 전수 추적"""
+    eval_all mode: 카운터 미증가, all_fails 리스트에 누적 → 실패 필터 전수 추적
+
+    POST_SIGNAL 계열 카운터는 thread-local _POST_STATE 에도 자동 마킹 (outer except 판정용).
+    """
     _eval_all = getattr(_BLOCKED_THREAD_LOCAL, '_eval_all_mode', False)
     if not _eval_all:
         with _PIPELINE_COUNTERS_LOCK:
             _PIPELINE_COUNTERS[key] = _PIPELINE_COUNTERS.get(key, 0) + n
+        # POST_SIGNAL 4-state 마킹 (advisor 지적: outer except 정확 판정)
+        # 예외 격리 — try/except 로 매매 흐름 차단 금지
+        try:
+            if key == "post_signal_enter":
+                _POST_STATE.entered = True
+            elif key in ("post_signal_blocked", "post_signal_pass", "post_signal_error"):
+                _POST_STATE.terminal = key.replace("post_signal_", "")
+        except Exception:
+            pass
     if key.endswith("_fail"):
         _BLOCKED_THREAD_LOCAL.last_fail = key
         _BLOCKED_THREAD_LOCAL.last_fail_value = value
@@ -14718,6 +14759,9 @@ def _v4_shadow_report_lines():
                 l_m2 = s.get("loss_ind_m2", {})
                 if w_ind or l_ind:
                     _all_keys = sorted(set(list(w_ind.keys()) + list(l_ind.keys())))
+                    # 룩어헤드 지표는 진입필터 추천 대상 아님 (advisor 지적:
+                    # 리포트 노출도 오추천 유발 → _LOOKAHEAD_INDICATORS 자동 제외)
+                    _all_keys = [k for k in _all_keys if k not in _LOOKAHEAD_INDICATORS]
                     _scored = []
                     for ik in _all_keys:
                         wv = w_ind.get(ik)
@@ -15085,14 +15129,14 @@ def _v4_shadow_report_lines():
                 _d_pairs.sort(reverse=True)
             _bucket_rows = []
             if _d_pairs and route in (_ACTIVE_RESEARCH | _PRODUCTION_ROUTES):
-                _POST_ENTRY = {"mfe_peak_sec", "dd_peak_60s", "mae_60s", "mfe_60s",
-                               "dd_peak_120s", "mae_120s", "mfe_120s"}
+                # 룩어헤드 지표 배제 — _LOOKAHEAD_INDICATORS (13345) 재사용
+                # 이전 로컬 _POST_ENTRY (7개) 는 dd_peak_30s/mfe_30s/mae_peak/hold_sec 등 누락
                 _BUCKET_WATCH = {"CLM": ["close_strength", "wick_asym"]}
                 _trs = s.get("trade_records", [])
                 if len(_trs) >= 12:
                     _bk_keys = []
                     for _dd, ik, *_ in _d_pairs:
-                        if ik not in _POST_ENTRY and _dd >= 0.4 and ik not in _bk_keys:
+                        if ik not in _LOOKAHEAD_INDICATORS and _dd >= 0.4 and ik not in _bk_keys:
                             _bk_keys.append(ik)
                             if len(_bk_keys) >= TOP_BUCKET_KEYS:
                                 break
@@ -18083,6 +18127,9 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # v4 신호 존재 → POST_SIGNAL 게이트 모집단 진입 (비-debounce 카운터)
     _pipeline_inc("post_signal_enter")
 
+    # 필수 필드 사전 검증 (advisor 지적: dead code 활용 · KeyError 이전 field_missing 로 태깅)
+    # 검증 실패 → track_unclassified 로 field_missing 로그, KeyError 는 v4_meta 로 계상
+    _post_signal_required_fields_check(_v4_signal, market=m)
     # PATCH: v4_signal 딕셔너리 접근·프린트 구간을 try/except 로 감싸서
     #        KeyError/기타 예외 시 post_signal_error 증가하고 정상 return None.
     #        기존엔 error 카운터가 정의만 있고 어디서도 증가 안 돼서 unclassified 로 표시됨.
@@ -21538,6 +21585,9 @@ def main():
             for m in shard:
               _lock_held = False  # 🔧 FIX: 락 획득 여부 추적 (미획득 상태에서 해제 방지)
               try:  # 🔧 심볼별 예외 격리 (한 심볼 에러가 전체 스캔 중단 방지)
+                # POST_SIGNAL 상태 리셋 (advisor 지적: outer except 오계상 방지)
+                # _pipeline_inc 가 자동으로 entered/terminal 마킹, outer except 에서 판정
+                _post_state_reset()
                 # v18g lazy c1: detect_leader 내부에서 사전차단 통과 시에만 c1 fetch
                 _pipeline_inc("detect_called")
                 _pipeline_record_market_scan(m)
@@ -22069,14 +22119,35 @@ def main():
                 # 🔧 심볼별 예외 처리: 락/펜딩 정리 후 다음 심볼 진행
                 print(f"[SYMBOL_ERR][{m}] {e}")
                 traceback.print_exc()
-                # PATCH: post_signal_enter++ 이후 예외 시 error 카운터 증가
-                # (기존엔 outer try 가 조용히 삼켜서 unclassified 로 표시됨)
+                # advisor 지적 (HIGH): outer except 이 pre-enter/post-terminal 예외까지
+                # error++ 하면 enter < blocked+pass+error MISMATCH 발생.
+                # thread-local _POST_STATE (entered, terminal) 로 3-way 분기:
+                #   ① entered=False  → pre-enter 예외 (enter 미증가 상태)
+                #   ② entered=True, terminal=None → 정상 mid-POST 예외 → error++ 정확
+                #   ③ terminal 이미 설정 → post-terminal downstream 예외 → 이중계상 방지
                 try:
-                    _pipeline_inc("post_signal_error")
-                    _post_signal_track_unclassified(
-                        "classification_exception",
-                        market=m, stage=f"symbol_scan:{type(e).__name__}",
-                    )
+                    _entered, _terminal = _post_state_current()
+                    if not _entered:
+                        # 케이스 ①: enter 이전 예외 (v4 signal fetch 등)
+                        _post_signal_track_unclassified(
+                            "pre_enter_exception",
+                            market=m, stage=f"pre_enter:{type(e).__name__}",
+                        )
+                    elif _terminal is None:
+                        # 케이스 ②: enter++ 후 terminal 이전 예외 — 정확한 error 상태
+                        _pipeline_inc("post_signal_error")
+                        _post_signal_track_unclassified(
+                            "classification_exception",
+                            market=m, stage=f"symbol_scan:{type(e).__name__}",
+                        )
+                    else:
+                        # 케이스 ③: {blocked,pass,error} 확정 이후 downstream 예외
+                        # 이중계상 방지 (예: pass 후 open_auto_position/postcheck_6s 예외)
+                        _post_signal_track_unclassified(
+                            "post_terminal_exception",
+                            market=m,
+                            stage=f"{_terminal}_downstream:{type(e).__name__}",
+                        )
                 except Exception:
                     pass
                 # 🔧 FIX: 락 획득한 경우에만 해제 (미획득 시 모니터 스레드 락 삭제 방지)
