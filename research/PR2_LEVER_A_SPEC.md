@@ -1,7 +1,12 @@
-# 레버 A — PR2 wired-shadow 스펙 ("본절 OFF 클린 트레일")
+# 레버 A · A2 — PR2 wired-shadow 스펙 ("본절 OFF 클린 트레일 × vr5-cap 진입")
 
 ## 한 문장
-LIVE shadow의 capture 4%가 낮은 건 트레일 폭·진입 문제가 아니라 **트레일 위에 얹힌 본절정지 + 조기SL 레이어**가 원인이다. PR2는 이 레이어를 끈 **순수 peak-trail**이 전향 실행에서 capture를 40%대로 복원하는지 하나만 검증한다.
+LIVE shadow의 capture 4~12% 노이즈 진동은 **트레일 위에 얹힌 본절정지 + 조기SL 레이어(A 표적)** 와 **저품질 진입 (고vr5 급등, A2 표적)** 이 원인이다. PR2는 두 레이어를 각각 끈 **A (순수 peak-trail)** 과 **A × A2 (vr5-cap 진입 + 클린 트레일)** 을 동일 코호트에서 병렬 검증한다.
+
+## A2 지위 (3자 수렴 확정, 정직 라벨)
+- **리서치 코호트(409)**: 5단계 검증 통과, per-trade +0.63%, MDD 절반 **(리서치 결과, 라이브 외부 재현 미완)**
+- **라이브 코호트(113)**: 외부 재현 검증 대기 (본 PR2 목적)
+- ⚠ "5검증 완주" 를 확정처럼 프레이밍 금지 — 리서치 vs 라이브 데이터셋 명확 구분
 
 ## 근거 (매칭 코호트 n=409, `lever_a_verify.py` 재현)
 | 청산구조 | net/건 | WR | MDD | worst | 손실꼬리 ≤-1% |
@@ -24,10 +29,38 @@ LIVE shadow의 capture 4%가 낮은 건 트레일 폭·진입 문제가 아니�
   - 비-VR3 라우트는 실측 증가 (CS40_TR180_bp30_240 +2 등)
   - 라이브 실체와 정합
 
-## 대조군
+## 대조군 (3-arm 병렬)
 - **CONTROL** = 현행 라이브 청산 (본절 ON + -2%/-3% + v7 타임아웃 + 래칫). 라이브 실진입 vr2 코호트.
-- **TREATMENT** = 클린 트레일: arm180 / bp30 / hold240, **본절정지 OFF · 조기 시간티어SL OFF**, 유일 백스톱 = **far -3% 하드스톱만 유지**(꼬리보호용, 거의 미발동).
-- 두 트랙 모두 같은 (market, signal_ts) 진입에 대해 병렬 shadow 청산 → 동일 코호트에서 net/WR/capture/MDD 직접 비교.
+- **A (WIRED_A_CLEAN)** = 클린 트레일: arm180 / bp30 / hold240, **본절정지 OFF · 조기 시간티어SL OFF**, 유일 백스톱 = **far -3% 하드스톱만 유지**(꼬리보호용, 거의 미발동).
+- **A × A2 (WIRED_A_CLEAN + vr5-cap)** = A 청산 + **vr5-cap 진입 필터** (사전등록 vr5 percentile 60 · 실행 전 결정, lookahead 금지).
+- 세 arm 모두 같은 (market, signal_ts) 진입에 대해 병렬 shadow 청산 → 동일 코호트에서 net/WR/capture/MDD 직접 비교.
+
+## A2 5조건 사전등록 (advisor 강한 증거 요건)
+1. 최근 손실군 vr5 > 과거군
+2. cutoff 사전 고정 (실행 전 결정, 결과 보고 변경 금지)
+3. cutoff 적용 시 A2 통과군 WR > 전체 WR (선택적 손실 제거)
+4. 비용·표본 감소 후에도 A2 net > A net
+5. 최근 20건 A2 효과 > 전체 A2 효과 (국면 적응력)
+→ 4/5 이상 통과 · 테스트 가능 4/5 이상 이면 **STRONG_EVIDENCE**
+
+## basis 라벨 규칙 (advisor 정정 확정 · 산술 반사실 금지)
+| 종류 | 표기 | 예시 |
+|---|---|---|
+| 매칭 sim (paired replay) | `+0.37% (매칭 sim, n=409, 동일 진입 paired)` | 본절 OFF 효과 |
+| 관측 shadow | `+0.06% (관측, n=113 라이브)` | 현 shadow cap 9% |
+| counterfactual estimate | `+0.29% (counterfactual estimate, 라이브 MFE 기반 모형)` | 상한 추정 |
+| **금지** | ~~`73 × 0.48%p → +0.15~+0.25%/건 상한`~~ | 순진한 산술 반사실 |
+
+## 3구간 × 3축 검증 매트릭스 (advisor 지적)
+- **3구간 분해**: 최근 5 / 20 / 50 / 전체 → 국면 적응력
+- **3축 분포**: vr5 × MFE × MAE → A2 설계 근거 (고vr5 + 낮은MFE + 높은MAE 조합)
+- A2 통과/차단별 PnL · WR · MFE · MAE · vr5 중앙값 표
+
+## 승격 게이트 (판정 4 + 표본 CI)
+- capture ≥ 25% (**단일 시점 통과만으로 승격 금지 · paired CI 병렬 판단**)
+- net > CONTROL
+- MDD ≤ CONTROL + 2.0%p
+- 최근 20 · 50건 방향 유지
 
 ## 계측(신호 페어링 필수 필드)
 `signal_id`, `entry_ts`, `entry_price_basis`, `market`, `control_exit`, `clean_exit`
@@ -86,5 +119,13 @@ signal_ts, entry, exit_reason ∈ {TRAIL_HIT, HOLD_CAP, HARD_STOP}, realized_pnl
 - **폭 확대 bp50/bp70** — 매칭 코호트 반증
 
 ## 명시적 금지
-- 전략값(진입 vr/cs/body/wick) 무변경 — 이 PR은 **청산 배선만**.
+- 청산 전략값(활성화 threshold/trail width/timeout/BE trigger) — 승격 전 무변경.
+- **cutoff 사후 최적 선택 금지** (사전등록값만 primary 판정)
 - 폭 확대 금지(bp30 고정), 조기컷(가설 B) 미포함, 호가벽(가설 C) 미포함.
+- **A2 진입 필터**는 라이브 진입 로직 변경 없이 shadow-only 배선으로 검증 (승격 후 별도 PR)
+- 산술 반사실 표현 금지 (`73×0.48` 형태) — paired sim 만 사용
+
+## 참조 (advisor 3자 수렴, 2026-07-27)
+- 3-arm 병렬 · 3구간 × 3축 · 5조건 사전등록: `research/live_cohort_resim.py` v3
+- A2 단독 sweep · 국면 적응력: `research/a2_vr5_filter.py` (신규)
+- 관측 트랙 (POST_ERROR_STAGE · shadow_only=0 강제 · lookahead 자동 차단): `bot.py`
