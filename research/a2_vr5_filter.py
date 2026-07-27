@@ -28,7 +28,9 @@ from datetime import datetime
 import numpy as np, pandas as pd
 from seconds_loader import collect_events_seconds_threaded
 FMT = "%Y-%m-%dT%H:%M:%S"
-BASE_COST = 0.20; ARM = 180; BP = 30/100.0; HOLD = 240; DELAY = 3
+# BP_PCT = 트레일 폭 (%). 30bps = 0.30% → stop = peak * (1 - BP_PCT/100.0) = peak * 0.997
+# lever_a_verify.py 규약 정합 (tp=0.3; stop = peak*(1-tp/100.0))
+BASE_COST = 0.20; ARM = 180; BP_PCT = 0.30; HOLD = 240; DELAY = 3
 
 
 def clean_delayed(entry, edt, sdf, cost=BASE_COST, delay=DELAY):
@@ -41,7 +43,7 @@ def clean_delayed(entry, edt, sdf, cost=BASE_COST, delay=DELAY):
         peak = max(peak, float(r["high"]))
         if t >= next_check:
             next_check += delay
-            stop = peak * (1 - BP); cl = float(r["close"])
+            stop = peak * (1 - BP_PCT / 100.0); cl = float(r["close"])
             if t >= ARM and cl <= stop:
                 return (cl - entry) / entry * 100 - cost
         lc = float(r["close"])
@@ -205,7 +207,15 @@ def main():
                     help="리서치 409 코호트 parquet 경로 (외부 재현 대조)")
     args = ap.parse_args()
 
+    # cutoff pct 범위 검증 (advisor 지적: np.percentile 예외 방지)
+    if not (0 <= args.cutoff_pct <= 100):
+        print(f"⚠ --pre-registered-cutoff-pct 는 0~100 사이여야 함 (입력: {args.cutoff_pct})"); return
+    if not (0 <= args.sweep_min < args.sweep_max <= 100):
+        print(f"⚠ sweep 범위 invalid (min<max, 0~100): min={args.sweep_min} max={args.sweep_max}"); return
+
     rows = load_rows(args.csv)
+    # 시간정렬 강제 (advisor 지적: 최근 5/20/50 인덱싱 무결성)
+    rows.sort(key=lambda x: x["entry_dt"])
     metas = [{"market": x["market"], "entry_dt": x["entry_dt"],
               "entry_price": x["entry_price"] or 0.0} for x in rows]
     sec = collect_events_seconds_threaded(
