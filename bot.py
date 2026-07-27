@@ -1167,6 +1167,10 @@ _POST_FLOW_LAST_REPORT = {"enter": 0, "blocked": 0, "pass": 0, "error": 0, "shad
 #        · shadow_only (AUTO_TRADE=False 분기, 정상 terminal state)
 _POST_UNCLASSIFIED_REASON_STATS = {}  # reason -> count
 _POST_UNCLASSIFIED_LAST_REPORT = {}   # delta snapshot
+# stage 별 별도 집계 (advisor 지적: reason 은 "왜", stage 는 "어디서")
+# stage prefix 만 집계 → v4_meta / symbol_scan / gate_eval / helper 등
+_POST_ERROR_STAGE_STATS = {}          # stage_prefix -> count
+_POST_ERROR_STAGE_LAST_REPORT = {}    # delta snapshot
 # 새 epoch 첫 리포트 판별 (BASELINE_INITIALIZED marker 노출)
 _POST_FLOW_FIRST_REPORT_FLAG = True
 
@@ -1181,11 +1185,18 @@ def _post_signal_track_unclassified(reason, market=None, signal_id=None, stage=N
     - 예외 격리
     - 원인 분포 카운터 + [POST_UNCLASSIFIED] 로그 (rate-limit 대상 아님, 희귀 이벤트라)
     - 최초 5건은 [POST_ERROR_SAMPLE] 로 원문 상세 출력 (조언자 지적)
+    - stage prefix 별도 카운터 (v4_meta:KeyError:… → v4_meta 로 집계)
     """
     global _POST_ERROR_SAMPLE_LOGGED
     try:
+        # stage prefix 추출 (콜론 앞 · v4_meta / symbol_scan / gate_eval 등)
+        stage_prefix = None
+        if stage:
+            stage_prefix = stage.split(":", 1)[0].strip() or None
         with _GATE_FAIL_LOCK:
             _POST_UNCLASSIFIED_REASON_STATS[reason] = _POST_UNCLASSIFIED_REASON_STATS.get(reason, 0) + 1
+            if stage_prefix:
+                _POST_ERROR_STAGE_STATS[stage_prefix] = _POST_ERROR_STAGE_STATS.get(stage_prefix, 0) + 1
         parts = [f"[POST_UNCLASSIFIED] reason={reason}"]
         if market: parts.append(f"market={market}")
         if signal_id: parts.append(f"signal_id={signal_id}")
@@ -1247,6 +1258,21 @@ def _resolve_observe_epoch():
     return f"ts{int(time.time())}"
 
 _OBSERVE_EPOCH = _resolve_observe_epoch()
+
+# PROCESS_START — 프로세스 실제 시작 시점 (advisor 지적: 재배포 vs 다른 프로세스 판별용)
+# _LIVE_LOG_LAST_CLEANUP 은 첫 cleanup 전까지 0 이라 process_start_ts 부정확 → 별도 상수 필요
+_PROCESS_START_TS = int(time.time())
+try:
+    # [PROCESS_START] 마커 — stdout 첫 줄에 PID + SHA + TS 3중 표기 (grep 편의)
+    # bc5ceba 미포함 의심 판별: [PROCESS_START] pid=… code_build_id=… → 실행 프로세스 SHA 확정
+    print(
+        f"[PROCESS_START] pid={os.getpid()} "
+        f"code_build_id={_OBSERVE_EPOCH} "
+        f"process_start_ts={_PROCESS_START_TS} "
+        f"cwd={os.getcwd()}"
+    )
+except Exception:
+    pass
 
 # PR1: LIVE 라우트 실효 설정 프로세스당 1회 로그 (문서-런타임 정합 증명용)
 # 값은 실제 런타임 객체에서 파생 (리터럴 하드코딩 X)
@@ -1471,7 +1497,8 @@ def _log_live_effective_config_once():
             fields = [
                 ("route", name),
                 ("code_build_id", _OBSERVE_EPOCH),  # 배포 SHA — 실행 프로세스 SHA 3중 확인용
-                ("process_start_ts", int(_LIVE_LOG_LAST_CLEANUP or time.time())),
+                ("process_start_ts", _PROCESS_START_TS),
+                ("process_pid", os.getpid()),
                 ("entry_check_fn", check_fn_name),
                 ("route_vr_min_declared", declared_vr_min),
                 ("route_ind_filters_applied_to_live", str(ind_filters_live_applied).lower()),
@@ -1786,13 +1813,24 @@ def _post_signal_flow_summary():
                             for k, v in reason_snapshot.items()}
             for k, v in reason_snapshot.items():
                 _POST_UNCLASSIFIED_LAST_REPORT[k] = v
+        # stage snapshot (advisor 지적: reason 은 "왜", stage 는 "어디서" — 두 축 분리)
+        with _GATE_FAIL_LOCK:
+            stage_snapshot = dict(_POST_ERROR_STAGE_STATS)
+            stage_delta = {k: v - _POST_ERROR_STAGE_LAST_REPORT.get(k, 0)
+                           for k, v in stage_snapshot.items()}
+            for k, v in stage_snapshot.items():
+                _POST_ERROR_STAGE_LAST_REPORT[k] = v
         reason_str = ""
-        # unclassified > 0 또는 error > 0 → reason 분포 표시 (지난 턴 조언자 지적 반영)
+        # unclassified > 0 또는 error > 0 → reason + stage 분포 표시 (Top5 각각)
         # error 사이트도 track_unclassified 로 reason 로깅하므로 원인 특정 즉시 가능
         if (unclassified > 0 or errored > 0) and reason_snapshot:
-            top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:3]
+            top = sorted(reason_snapshot.items(), key=lambda x: -x[1])[:5]
             reason_str = " | reasons: " + ", ".join(
                 f"{k}={v}(Δ{reason_delta.get(k,0):+d})" for k, v in top)
+            if stage_snapshot:
+                top_stage = sorted(stage_snapshot.items(), key=lambda x: -x[1])[:5]
+                reason_str += " | stages: " + ", ".join(
+                    f"{k}={v}(Δ{stage_delta.get(k,0):+d})" for k, v in top_stage)
         # BASELINE_INITIALIZED marker : 새 epoch 첫 리포트에서만 표시
         # 지난 창들 "delta=0=무이벤트" 오독 방지 (신 baseline vs 무이벤트 구분)
         global _POST_FLOW_FIRST_REPORT_FLAG
@@ -1802,7 +1840,8 @@ def _post_signal_flow_summary():
             _POST_FLOW_FIRST_REPORT_FLAG = False
         # shadow_only 는 정보용 (POST 통과 후 downstream, enter 보존식과 별개)
         # 실 예외(error) 와 정상 shadow(shadow_only) 를 명확히 구분
-        shadow_str = f" shadow_only={shadow_only}(Δ{d_shadow:+d})" if shadow_only > 0 else ""
+        # advisor 지적: 0 이어도 항상 출력 — "필드 미노출" (배선 미배포) 과 "0건" 구분
+        shadow_str = f" shadow_only={shadow_only}(Δ{d_shadow:+d})"
         return (
             f"POST_SIGNAL FLOW (epoch={_OBSERVE_EPOCH}){baseline_tag}: "
             f"total enter={enter} blocked={blocked} pass={passed} error={errored} "
@@ -13296,12 +13335,29 @@ def _calc_ind_avg(ind_list):
     return avg, counts
 
 
+# 진입필터 후보에서 자동 배제할 look-ahead 지표 (advisor 지적 · 룩어헤드 오추천 재발 차단)
+# 이 값들은 진입 이후 관측되므로 진입 필터로 절대 사용 불가:
+#   - mfe_* : maximum favorable excursion (진입 후 peak)
+#   - dd_* / mae_* : drawdown / maximum adverse excursion (진입 후 low)
+#   - hold_sec / exit_reason : 청산 시점 관측값
+# _POST_ENTRY 집합(15069 근처, 버킷 표시용)과 취지 동일, 필터 추천 엔진에도 적용
+_LOOKAHEAD_INDICATORS = frozenset({
+    "mfe_peak_sec", "mfe_peak", "mfe_30s", "mfe_60s", "mfe_120s",
+    "dd_peak_60s", "dd_peak_30s", "dd_peak_120s",
+    "mae_60s", "mae_120s", "mae_peak",
+    "hold_sec", "exit_reason", "realized_pnl",
+})
+
+
 def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
     """W/L 지표 자동 분석 — 통계적으로 유의미한 차이를 가진 지표 탐지.
 
     Welford M2 기반 분산으로 effect size (Cohen's d) 계산:
       d = |mean_W - mean_L| / pooled_std
     d ≥ threshold이고 양측 샘플 ≥ min_samples일 때 필터 후보로 추천.
+
+    look-ahead 지표(_LOOKAHEAD_INDICATORS)는 자동 배제 — 진입 후 관측값이므로
+    진입 필터로 부적합 (advisor 지적: mfe_peak_sec ≥90 추천 재발 방지).
 
     Returns: { "route:strat": [ {ind, effect, direction, w_avg, l_avg, threshold_suggest}, ... ] }
     """
@@ -13319,6 +13375,8 @@ def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
                 continue
             findings = []
             all_keys = set(w_avg.keys()) & set(l_avg.keys())
+            # 룩어헤드 자동 배제 (진입필터 부적격)
+            all_keys = all_keys - _LOOKAHEAD_INDICATORS
             for ik in sorted(all_keys):
                 nw = w_cnt.get(ik, 0)
                 nl = l_cnt.get(ik, 0)
