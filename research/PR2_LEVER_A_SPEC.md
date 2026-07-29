@@ -91,6 +91,46 @@ signal_ts, entry, exit_reason ∈ {TRAIL_HIT, HOLD_CAP, HARD_STOP}, realized_pnl
 4. 감쇠 감시: 최근 20/50건에서 우위 유지.
 - 4개 통과 → 극소액 LIVE 후보. 하나라도 실패 → 후향-전향 괴리 원인 규명 후 재설계.
 
+## Wired-Shadow 계측 5축 (advisor 3자 수렴, A2 운영 검증)
+A2 의 본질 = "슬롯·일일가드 제약 하 고품질 선별" → 운영 제약에서 실 이득 검증 필수.
+기존 per-trade (net/WR/MDD/capture) 외에 A×A2 배선 시 병행 계측:
+1. **거래 수** — A2 차단 후 실제 진입 수 (드롭률 관측)
+2. **MDD** — 코호트 equal-weight (계좌 실MDD 아님, 방향지표)
+3. **평균 동시 포지션 수** — A2 차단이 포지션 완화에 기여하는지
+4. **슬롯 점유율** — 최대 동시 포지션 / MAX_POSITIONS
+5. **신호 드롭률** — A2 차단 신호 / 전체 신호
+
+## Adaptive Exit — A로 흡수 (별도 후보 삭제, advisor 정정)
+"AT익절 +0.13% vs MFE +0.97% → 익절 부족" 관찰 = **A 가 이미 다루는 청산 병목**.
+클린 트레일 (arm180/bp30, 본절·조기SL OFF) 이 capture 복원 → "승자를 더 오래 태우는" 처방과 동일.
+- ⚠ 이중계상 위험: Adaptive Exit 이 A 의 재발견일 소지, 별도 후보 세우면 이득 중복 계산
+- ⚠ 룩어헤드 위험: "관측 MFE 크니 TP 높이자" = conditioning-on-outcome (진입시각 미확정 특징 사용)
+- 새 청산 아이디어는 "**진입시각 확정 특징만 사용**" 증명 후 재도입
+
+## cap 서사 표현 규율 (advisor 정정)
+- 데이터 규율: **표본 소량 (Δ+9건) 에서 cap 1%p 변동 = 노이즈**
+- ❌ 금지 표현: "cap 12→8→7 계속 감소, 청산이 계속 나빠지고 있다"
+- ✅ 정확 표현: "약한 밴드에서 표류, 추세 판정 불가 (n 부족)"
+- ✅ PnL +0.05% 유지가 더 중요한 신호 (미세 표류는 자연 변동)
+- 감쇠 판정: **wired-shadow 최근 20/50건 게이트로만** 판정 (누적 shadow cap 아님)
+
+## 확정 vs 추론 vs 다음단계 규율 (advisor 정정)
+| 축 | 표현 |
+|---|---|
+| ✅ 확정 (로그 뒷받침) | "v4_meta 단계에서 예외가 반복 발생한다" |
+| 💡 강한 추론 | "동일 예외일 가능성 높음 (하나의 KeyError 인지 여러 종류인지 미확정)" |
+| ▶ 다음 단계 | "POST_ERROR_SAMPLE 로 타입 확인 후 예외 타입별 방어 코드 적용" |
+
+## defensive 방어 처방 (예외 타입별, advisor 정정)
+`.get()` 하나로 성급 확정 금지 — POST_ERROR_SAMPLE 로 타입 확정 후 매칭:
+| 예외 타입 | 처방 |
+|---|---|
+| KeyError | `.get(key, default)` 로 fallback |
+| AttributeError | `if obj is None:` 명시 체크 |
+| TypeError | `isinstance()` 타입 방어 |
+| IndexError | `len(seq) > idx` 길이 체크 |
+| ValueError | `try` 격리 + default 반환 |
+
 ## 착수 선행조건 (강화, 재배포 34시간 정체 반영)
 1. **SHA 3중 확인** (신구 프로세스 이벤트 섞임 방지)
    - `GIT_HEAD` = f976e86 (또는 그 이상)
