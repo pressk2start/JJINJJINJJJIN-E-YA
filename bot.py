@@ -18139,23 +18139,20 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
     _v4_exit_params = _v4_signal.get("exit_params")
     if not _15m_signal or not isinstance(_v4_exit_params, dict):
-        # 진짜 필수 부재 → 매매 불가. garbage 로 진행 금지, error 아닌 clean drop 으로 계상.
+        # 진짜 필수 부재 → 매매 불가.
         #
-        # 두 advisor 코드 검증 결과 (a13996b 원복 · b976e9d 복구):
-        # ① _post_signal_track_unclassified 는 메인 버킷 (enter/blocked/pass/error) 미변경
-        #   → 히스토그램만 증가 · 이중계상 없음
-        # ② check=OK 불변식 (enter == blocked + pass + error) 은 히스토그램 참조 X
-        #   → blocked 카운트해도 check 깨짐 없음
-        # ③ 연속성은 히스토그램 층에서 이미 유지: reason=field_missing + stage=v4_required
-        #   → "gate 필터 blocked (coin_cd 등)" vs "데이터 부재 blocked" 진단 층 구분
-        # ④ 세맨틱: .get() → None 반환은 raise 아님 → 'error' 라벨은 사실이 아님.
-        #   진짜 예외 (classification_exception) 와 데이터 계약 부재를 다시 섞으면
-        #   2주간 분리한 관측 트랙이 무너짐 → blocked + field_missing 유지가 맞음
-        _pipeline_inc("post_signal_blocked")
+        # 【진단 단계 라벨 정책 · advisor 2 최종 판단】
+        # 세맨틱 정확도(blocked+field_missing) vs 시계열 연속성(error+classification_exception)
+        # → 진단 단계에서는 연속성 우선:
+        #    - classification_exception 76→0 변화가 다음 리포트에서 즉시 확인됨
+        #    - error→blocked 로 라벨 바꾸면 "효과 vs 라벨 변경" 해석 혼란
+        # → 원인 규명(다음 리포트) 후 세맨틱 정정 진행
+        # stage 는 v4_required_missing 으로 명시해서 "옛 v4_meta print-KeyError" 와 구분
+        _pipeline_inc("post_signal_error")
         _post_signal_track_unclassified(
-            "field_missing",
+            "classification_exception",
             market=m,
-            stage=(f"v4_required:sig={_15m_signal is not None},"
+            stage=(f"v4_required_missing:sig={_15m_signal is not None},"
                    f"exit={isinstance(_v4_exit_params, dict)}"),
         )
         return None
