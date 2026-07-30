@@ -18128,87 +18128,33 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     _pipeline_inc("post_signal_enter")
 
     # 필수 필드 사전 검증 (advisor 지적: dead code 활용 · KeyError 이전 field_missing 로 태깅)
+    # 검증 실패 → track_unclassified 로 field_missing 로그, KeyError 는 v4_meta 로 계상
     _post_signal_required_fields_check(_v4_signal, market=m)
-
-    # BLIND DEFENSIVE (v4_meta 76/76 예외 병목 해소 시도 · POST_ERROR_SAMPLE grep 없이)
-    #
-    # 이전 코드는 [key] 직접 접근 → KeyError 시 return None → coverage 0% 지속.
-    # 이제 모든 접근을 .get() 으로 방어하고, 누락 필드는 granular 하게 로그하되
-    # downstream 진행 (default 로).
-    #
-    # downstream 의존성 조사 결과:
-    #   - _15m_signal: line 18344 에서 `signal_tag = _15m_signal if _15m_signal else "기본"` 로 이미 방어됨
-    #                  → None 이어도 안전
-    #   - _entry_mode_override: line 18351 에서 `if _entry_mode_override else "confirm"` 방어됨
-    #                          → None 이어도 안전
-    #   - _v4_exit_params: line 18397 에서 pre dict 에 그대로 저장 → downstream 이 소비 시 방어 여부 불명
-    #                     → None 이면 여전히 문제 가능 하지만 outer except (22068) 가 post_terminal_exception 으로 잡음
-    #   - print 필드 (logic_group, filters_hit, description): 순수 관측용, 실패해도 매매 무영향
-    #
-    # 판정: return None 대신 defaults 로 진행 → coverage>0 회복 목표
-    _v4_meta_missing = []
-    _15m_signal = None
-    _entry_mode_override = None
-    _v4_exit_params = None
-    try:
-        if not isinstance(_v4_signal, dict):
-            # 극단 케이스: _v4_signal 이 dict 가 아님
-            _pipeline_inc("post_signal_error")
-            _post_signal_track_unclassified(
-                "field_missing",
-                market=m,
-                stage=f"v4_meta:not_dict:{type(_v4_signal).__name__}",
-            )
-            return None
-
-        _15m_signal = _v4_signal.get("signal_tag")
-        _entry_mode_override = _v4_signal.get("entry_mode")
-        _v4_exit_params = _v4_signal.get("exit_params")
-
-        if _15m_signal is None:
-            _v4_meta_missing.append("signal_tag")
-        if _v4_exit_params is None:
-            _v4_meta_missing.append("exit_params")
-
-        # 옵션 필드 (print 용 · 실패해도 매매 무영향) - 안전 default 로 print
-        _logic_group_safe = _v4_signal.get("logic_group", "?")
-        _filters_hit_safe = _v4_signal.get("filters_hit", [])
-        _description_safe = (
-            _v4_exit_params.get("description", "?")
-            if isinstance(_v4_exit_params, dict)
-            else "?"
-        )
-        try:
-            print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_logic_group_safe}) "
-                  f"필터={_filters_hit_safe} 청산={_description_safe}")
-        except Exception:
-            # print 실패는 완전 무시 (관측 실패가 매매 흐름 차단 금지)
-            pass
-
-        # 누락 필드가 있으면 로그하되 return 안 함 → coverage 회복
-        # (원 코드는 return None 이어서 76/76 다 죽음)
-        if _v4_meta_missing:
-            _post_signal_track_unclassified(
-                "field_missing",
-                market=m,
-                stage=f"v4_meta:missing:{','.join(_v4_meta_missing)}",
-            )
-            # 결정적 필수 필드 (exit_params) 누락 시 진행 위험 → 이 경우만 return None
-            # signal_tag 는 downstream 방어됨 (line 18344 default "기본") → 진행 허용
-            if _v4_exit_params is None:
-                _pipeline_inc("post_signal_error")
-                return None
-            # signal_tag 만 누락 → downstream default 로 진행 (coverage 회복 시도)
-    except Exception as _v4_meta_err:
-        # 예외 격리 (관측 실패가 매매 흐름 차단 금지)
-        # 이건 위 defensive 로직 자체의 예상 못한 예외 (극단 케이스)
-        _pipeline_inc("post_signal_error")
+    # FIX(v4_meta): 정범 = print 문이 '선택' 필드(logic_group/filters_hit/description)를
+    #   하드 [] 로 접근 → 부재 시 KeyError → 76/76 classification_exception 으로 전량 차단.
+    #   signal_tag 은 상위 v4_is_favorable_hour 접근에서 이미 성공(post_signal_enter 증가가 증거)
+    #   → required(signal_tag/exit_params)는 부재 시 clean drop(field_missing, error 아님),
+    #     로그 전용 선택필드는 개별 .get()+예외흡수로 '매매 흐름을 절대 막지 않도록' 분리.
+    _15m_signal = _v4_signal.get("signal_tag")
+    _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
+    _v4_exit_params = _v4_signal.get("exit_params")
+    if not _15m_signal or not isinstance(_v4_exit_params, dict):
+        # 진짜 필수 부재 → 매매 불가. garbage 로 진행 금지, error 아닌 clean drop 으로 계상.
+        _pipeline_inc("post_signal_blocked")
         _post_signal_track_unclassified(
-            "classification_exception",
+            "field_missing",
             market=m,
-            stage=f"v4_meta_defensive:{type(_v4_meta_err).__name__}:{str(_v4_meta_err)[:40]}",
+            stage=(f"v4_required:sig={_15m_signal is not None},"
+                   f"exit={isinstance(_v4_exit_params, dict)}"),
         )
         return None
+    try:
+        # 로그 전용 — 선택필드는 .get() 폴백, 예외는 흡수(관측이 매매 차단 금지).
+        print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal.get('logic_group', '?')}) "
+              f"필터={_v4_signal.get('filters_hit', '?')} "
+              f"청산={_v4_exit_params.get('description', '?')}")
+    except Exception:
+        pass
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     if is_coin_loss_cooldown(m):
