@@ -18139,12 +18139,15 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
     _v4_exit_params = _v4_signal.get("exit_params")
     if not _15m_signal or not isinstance(_v4_exit_params, dict):
-        # 진짜 필수 부재 → 매매 불가. garbage 로 진행 금지, error 아닌 clean drop 으로 계상.
-        _pipeline_inc("post_signal_blocked")
+        # 진짜 필수 부재 → 매매 불가. 관측 연속성 유지 (advisor 2 정정):
+        # 기존 "error=X classification_exception=X" 리포트 시계열과 단절 방지 위해
+        # counter/reason 유지, stage 만 v4_required_missing 으로 정확히 명시.
+        # 세맨틱 정정 (error vs blocked)은 필드 부재 원인 규명 후에 진행.
+        _pipeline_inc("post_signal_error")
         _post_signal_track_unclassified(
-            "field_missing",
+            "classification_exception",
             market=m,
-            stage=(f"v4_required:sig={_15m_signal is not None},"
+            stage=(f"v4_required_missing:sig={_15m_signal is not None},"
                    f"exit={isinstance(_v4_exit_params, dict)}"),
         )
         return None
