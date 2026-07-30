@@ -10724,6 +10724,11 @@ _V0_EXIT_PARAMS_CLM_LIVEEXIT = {
 def _make_clm_pp(retrace_pct):
     ep = {
         "strategy": "TRAIL",
+        # 근본 fix(7/4 회귀): 모든 exit preset 은 description 필수(로그·리포트 공용 계약).
+        "description": (
+            f"CLM_PP retrace{retrace_pct * 100:.0f}%/arm60s/"
+            f"SL_tiered(2.5/1.5/1.0)/no-trail/PPact0.3%"
+        ),
         "sl_pct": 0.020,
         "activation_pct": 1.0,
         "trail_pct": 0.005,
@@ -10753,6 +10758,7 @@ _V0_EXIT_PARAMS_CLM_PP40 = _make_clm_pp(0.40)
 # 51차 분류 분석: 만족 55건 PnL-0.69% wr 0%, 비만족 245건 +0.06%
 _V0_EXIT_PARAMS_CLM_EC_A = {
     "strategy": "TRAIL",
+    "description": "CLM_EC_A earlycut60s(mfe<0.1%&dd>0.2%)/SL_tiered(2.5/1.5/1.0)/no-trail",
     "sl_pct": 0.020,
     "activation_pct": 1.0,
     "trail_pct": 0.005,
@@ -10776,6 +10782,11 @@ _V0_EXIT_PARAMS_CLM_EC_A = {
 def _make_clm_trail(arm_sec, trail_pct, hold_sec):
     return {
         "strategy": "TRAIL",
+        # 근본 fix(7/4 회귀 50f786e): description 누락 → v4_meta print KeyError → LIVE 진입 전량 차단.
+        "description": (
+            f"CLM_trail arm{arm_sec}s/tp{trail_pct * 100:.2f}%/hold{hold_sec}s/"
+            f"SL_tiered(2.5/1.5/1.0)/no-trail"
+        ),
         "sl_pct": 0.020,
         "activation_pct": 1.0,
         "trail_pct": 0.005,  # 미사용 (adaptive_trail 사용)
