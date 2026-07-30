@@ -18130,24 +18130,39 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     # 필수 필드 사전 검증 (advisor 지적: dead code 활용 · KeyError 이전 field_missing 로 태깅)
     # 검증 실패 → track_unclassified 로 field_missing 로그, KeyError 는 v4_meta 로 계상
     _post_signal_required_fields_check(_v4_signal, market=m)
-    # PATCH: v4_signal 딕셔너리 접근·프린트 구간을 try/except 로 감싸서
-    #        KeyError/기타 예외 시 post_signal_error 증가하고 정상 return None.
-    #        기존엔 error 카운터가 정의만 있고 어디서도 증가 안 돼서 unclassified 로 표시됨.
-    try:
-        _15m_signal = _v4_signal["signal_tag"]
-        _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
-        _v4_exit_params = _v4_signal["exit_params"]
-
-        print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal['logic_group']}) "
-              f"필터={_v4_signal['filters_hit']} 청산={_v4_exit_params['description']}")
-    except Exception as _v4_meta_err:
+    # FIX(v4_meta): 정범 = print 문이 '선택' 필드(logic_group/filters_hit/description)를
+    #   하드 [] 로 접근 → 부재 시 KeyError → 76/76 classification_exception 으로 전량 차단.
+    #   signal_tag 은 상위 v4_is_favorable_hour 접근에서 이미 성공(post_signal_enter 증가가 증거)
+    #   → required(signal_tag/exit_params)는 부재 시 clean drop(field_missing, error 아님),
+    #     로그 전용 선택필드는 개별 .get()+예외흡수로 '매매 흐름을 절대 막지 않도록' 분리.
+    _15m_signal = _v4_signal.get("signal_tag")
+    _entry_mode_override = _v4_signal.get("entry_mode")  # "confirm" or "half"
+    _v4_exit_params = _v4_signal.get("exit_params")
+    if not _15m_signal or not isinstance(_v4_exit_params, dict):
+        # 진짜 필수 부재 → 매매 불가.
+        #
+        # 【진단 단계 라벨 정책 · advisor 2 최종 판단】
+        # 세맨틱 정확도(blocked+field_missing) vs 시계열 연속성(error+classification_exception)
+        # → 진단 단계에서는 연속성 우선:
+        #    - classification_exception 76→0 변화가 다음 리포트에서 즉시 확인됨
+        #    - error→blocked 로 라벨 바꾸면 "효과 vs 라벨 변경" 해석 혼란
+        # → 원인 규명(다음 리포트) 후 세맨틱 정정 진행
+        # stage 는 v4_required_missing 으로 명시해서 "옛 v4_meta print-KeyError" 와 구분
         _pipeline_inc("post_signal_error")
         _post_signal_track_unclassified(
             "classification_exception",
             market=m,
-            stage=f"v4_meta:{type(_v4_meta_err).__name__}:{str(_v4_meta_err)[:40]}",
+            stage=(f"v4_required_missing:sig={_15m_signal is not None},"
+                   f"exit={isinstance(_v4_exit_params, dict)}"),
         )
         return None
+    try:
+        # 로그 전용 — 선택필드는 .get() 폴백, 예외는 흡수(관측이 매매 차단 금지).
+        print(f"[V4_SIGNAL] {m} {_15m_signal} (그룹={_v4_signal.get('logic_group', '?')}) "
+              f"필터={_v4_signal.get('filters_hit', '?')} "
+              f"청산={_v4_exit_params.get('description', '?')}")
+    except Exception:
+        pass
 
     # === 🔧 승률개선: 코인별 연패 쿨다운 ===
     if is_coin_loss_cooldown(m):
