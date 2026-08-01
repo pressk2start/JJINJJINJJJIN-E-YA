@@ -6827,7 +6827,13 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                     # - ret_net에 slip 없으니 cp에서도 slip 제거 → 일관된 비교
                     # 🔧 본절 = entry_price + 수수료 + 여유 (수수료 미포함 시 net 손실 발생)
                     # 🔧 FIX: 본절 + 트레일 합성 스탑 (큰 수익 꼬리 살리기)
-                    if net_ret_pct > 0 and not pos2.get("breakeven_set"):  # 🔧 FIX: gross→net (수수료 차감 후 실제 수익 기준)
+                    # 2026-08-01 advisor 정정: exit_params.disable_breakeven=True 면 본절 비활성화
+                    # A_CLEAN Lever A 스펙 · 실 partial exit 경로에서도 인식 (shadow 는 이미
+                    # disable_trail=True 로 본절SL 자동 우회, 이건 실 monitor 안전 배선)
+                    _disable_be = pos2.get("exit_params", {}).get("disable_breakeven", False)
+                    if _disable_be:
+                        pass  # A_CLEAN: 본절 완전 비활성화 · 클린 트레일만
+                    elif net_ret_pct > 0 and not pos2.get("breakeven_set"):  # 🔧 FIX: gross→net (수수료 차감 후 실제 수익 기준)
                         old_stop = pos2.get("stop", 0)
                         be_price = entry_price * (1 + FEE_RATE_ROUNDTRIP + 0.0005)  # 수수료(0.1%) + 여유(0.05%) = +0.15%
                         # 🔧 FIX: 현재가 기준 트레일 최소폭과 합성 (상승 중엔 트레일 유지)
@@ -14027,7 +14033,10 @@ def _shadow_sim_exit(vp, cur_price):
             return True, "트레일본절"
 
     # 3) 본절 스톱 (G는 120초 이후에만)
-    if _trail_allowed and mfe >= checkpoint and pnl <= 0:
+    # 2026-08-01 advisor 정정: disable_breakeven=True 시 shadow 에서도 명시적 우회
+    # (기존 disable_trail=True 로 _trail_allowed=False → 이미 우회되지만 belt-and-suspenders)
+    _disable_be_shadow = ep.get("disable_breakeven", False)
+    if _trail_allowed and mfe >= checkpoint and pnl <= 0 and not _disable_be_shadow:
         return True, "본절SL"
 
     # 3.4) Profit Protect — MFE 도달 후 retrace 비율 기반 수익 보호
