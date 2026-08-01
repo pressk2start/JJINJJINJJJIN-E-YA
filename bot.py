@@ -2009,15 +2009,24 @@ def _detect_gate_format_summary(only_recent=True):
 
 
 def _loss_prevention_diagnostics():
-    """누적 shadow/LIVE 데이터에서 손실 방지 액션 후보를 자동 노출.
+    """누적 shadow/LIVE 데이터에서 손실 방지 관찰 자동 노출.
     사용자 지시 (2026-08-01): 관측만 · 자동 차단 없음 · 진입 흐름 유지.
 
-    후보 3축 (trade_records 기반 · 실시간 재계산):
-    1. 손실 반복 코인 (0W3L+ 유형) — 진입 필터 후보
-    2. AT본절 파괴 지분 — Lever A(본절 OFF) 잠재 회수액 상한
-    3. SL/MFE 낭비 — Lever A 클린 트레일 잠재 회수 (SL 거래 중 MFE≥trail_pct 였던 것)
+    ⚠ 등급 규율 (advisor 3자 수렴 정정):
+      OBSERVED  (여기)  : 패턴 관찰만 · 아직 후보 아님
+      CANDIDATE         : 사전 정의 실행 규칙 · 최소 표본 충족
+      SHADOW            : 임계값 고정 · 전향 병렬 관측
+      ELIGIBLE          : 사전 게이트 전체 통과 · 극소액 LIVE 검토
 
-    LIVE route 만 대상 (production route). 매매 로직 무영향 · 진입 차단 X.
+    자동 발굴이 곧 자동 액션이 되면 과적합 엔진화 위험.
+    이 함수는 OBSERVED 등급만 노출 · 실제 승격은 사람 승인 필요.
+
+    3축 관찰 (trade_records 기반):
+    1. 손실 반복 코인 (0W3L+ 유형) — OBSERVED · 승격 조건 n≥8 미달
+    2. AT본절 파괴 지분 — OBSERVED · 실 회수액은 counterfactual 필요
+    3. SL/MFE 낭비 — OBSERVED · A 트레일 arm 이전 종료 시 못 잡을 수 있음
+
+    LIVE route 만 대상 (production route). 매매 로직 무영향.
     """
     try:
         try:
@@ -2034,7 +2043,9 @@ def _loss_prevention_diagnostics():
                 if n < 20:  # 표본 부족
                     continue
                 _rows = []
-                # ── 1. 손실 반복 코인 (진입 필터 후보) ──
+                # ── 1. 손실 반복 코인 (OBSERVED · 제외 후보 아님) ──
+                # advisor 정정: n=3 은 과적합 위험 · 승격 조건 n≥8 미달
+                # 종목 제외보다 공통 속성 (호가잔량/spread/유동성) 탐색이 정답
                 coin_wl = s.get("coin_wl", {})
                 bad_coins = []
                 for c_name, (cw, cl) in coin_wl.items():
@@ -2044,36 +2055,44 @@ def _loss_prevention_diagnostics():
                 if bad_coins:
                     bad_coins.sort(key=lambda x: -x[1])
                     _bad_str = " ".join(f"{c}({t}L)" for c, t in bad_coins[:5])
-                    _rows.append(f"    🚫 손실 반복 (3L+, 승 0): {_bad_str} — 진입 필터 후보")
+                    _rows.append(
+                        f"    🚫 OBSERVED 손실 반복 (n≥3, 승 0): {_bad_str} "
+                        f"— 종목 제외 승격 조건 n≥8 미달 · 공통 속성 탐색 필요"
+                    )
                 # ── 2/3. trade_records 순회로 AT본절 파괴 · SL/MFE 낭비 계산 ──
                 _trs = s.get("trade_records", [])
                 if _trs:
                     _be_trades = [t for t in _trs if t.get("exit_reason") == "AT본절"]
                     _sl_trades = [t for t in _trs if t.get("exit_reason") == "손절SL"]
-                    # 2. AT본절 파괴 지분
+                    # 2. AT본절 파괴 지분 (OBSERVED · 회수 상한은 counterfactual 필요)
                     if _be_trades:
                         be_pnls = [t.get("pnl", 0) for t in _be_trades]
                         be_avg = sum(be_pnls) / len(be_pnls) * 100  # decimal → %
                         if be_avg < 0:
                             be_impact = len(_be_trades) * be_avg
                             _rows.append(
-                                f"    💣 AT본절 파괴: {len(_be_trades)}건 × {be_avg:+.2f}% "
-                                f"= {be_impact:+.1f}%p (Lever A 본절 OFF 잠재 회수 상한)"
+                                f"    💣 OBSERVED AT본절 파괴: {len(_be_trades)}건 × {be_avg:+.2f}% "
+                                f"= {be_impact:+.1f}%p (Lever A 없앰 시 상한 · 실 회수는 counterfactual)"
                             )
-                    # 3. SL/MFE 낭비 — SL 거래 중 mfe ≥ 0.30% (트레일 bp30 폭 이상)
+                    # 3. SL/MFE 낭비 (OBSERVED · A arm180 이전 종료면 못 잡음)
+                    # advisor 정정: SL 평균 96초 · A arm 180초 → 무장 전 종료 시 A 미개입
                     if _sl_trades:
                         sl_pnls = [t.get("pnl", 0) for t in _sl_trades]
                         sl_mfes = [t.get("mfe", 0) for t in _sl_trades]
+                        sl_holds = [t.get("hold", 0) for t in _sl_trades]
                         sl_avg_pnl = sum(sl_pnls) / len(sl_pnls) * 100
                         sl_avg_mfe = sum(sl_mfes) / len(sl_mfes) * 100
-                        # trail bp30 = 0.30% 이상 MFE 도달한 SL 건수
-                        _sl_recover = [t for t in _sl_trades if t.get("mfe", 0) >= 0.003]
-                        if _sl_recover:
+                        sl_avg_hold = sum(sl_holds) / len(sl_holds) if sl_holds else 0
+                        # trail bp30 = 0.30% 이상 MFE 도달 + arm 180초 이후 종료 (A 개입 가능 조건)
+                        _sl_a_eligible = [t for t in _sl_trades
+                                          if t.get("mfe", 0) >= 0.003 and t.get("hold", 0) >= 180]
+                        _sl_before_arm = [t for t in _sl_trades if t.get("hold", 0) < 180]
+                        if _sl_recover := [t for t in _sl_trades if t.get("mfe", 0) >= 0.003]:
                             _rows.append(
-                                f"    🎯 SL/MFE 낭비: {len(_sl_trades)}건 "
-                                f"(avg pnl {sl_avg_pnl:+.2f}%, mfe +{sl_avg_mfe:.2f}%) "
-                                f"→ {len(_sl_recover)}건은 MFE≥0.3% 도달 "
-                                f"(Lever A bp30 클린트레일이 잡을 패턴)"
+                                f"    🎯 OBSERVED SL/MFE 관찰: {len(_sl_trades)}건 "
+                                f"(avg pnl {sl_avg_pnl:+.2f}%, mfe +{sl_avg_mfe:.2f}%, hold {sl_avg_hold:.0f}s) "
+                                f"→ MFE≥0.3% {len(_sl_recover)}건 · A eligible (hold≥180s) {len(_sl_a_eligible)}건 · "
+                                f"arm 이전 종료 {len(_sl_before_arm)}건 (A 미개입)"
                             )
                 if _rows:
                     lines.append(f"🛡 LOSS_PREVENTION [{route}] (n={n}):")
@@ -2081,7 +2100,8 @@ def _loss_prevention_diagnostics():
         if not lines:
             return ""
         lines.append(
-            "    ※ 자동 액션 없음 · 사용자 판단 근거 · Lever A wired-shadow 검증 후 승격"
+            "    ※ 등급: OBSERVED (관찰만) · 승격은 CANDIDATE→SHADOW→ELIGIBLE 단계 · "
+            "counterfactual (live_cohort_resim + A wired-shadow) 로만 실 회수 확정"
         )
         return "\n".join(lines)
     except Exception as exc:
