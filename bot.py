@@ -1866,6 +1866,56 @@ def _post_signal_flow_summary():
         return f"POST_SIGNAL FLOW: ERROR {exc}"
 
 
+_PASS_ENTRY_LAST_REPORT = {}  # 카운터별 last snapshot
+
+
+def _pass_entry_funnel_summary():
+    """PASS→ENTRY 퍼널 세분화 (advisor 정정 반영):
+    pass 5 → entry 3 의 skip 2건이 "주문 실패" 인지 "정상 리스크컨트롤" 인지 구분.
+    - entry_skip_position: 이미 포지션 보유 (정상)
+    - entry_skip_max_positions: 최대 포지션 도달 (정상)
+    - entry_skip_lock: entry_lock 획득 실패 (정상 동시성)
+    - entry_skip_auto_off: AUTO_TRADE off (정상)
+    - entry_skip_api_key: API 키 없음 (설정)
+    - send_attempt / send_success: 기존 카운터 (open_auto_position 진입/성공)
+    """
+    try:
+        with _PIPELINE_COUNTERS_LOCK:
+            keys_of_interest = [
+                "post_signal_pass", "send_attempt", "send_success",
+                "entry_skip_position", "entry_skip_max_positions",
+                "entry_skip_lock", "entry_skip_auto_off", "entry_skip_api_key",
+            ]
+            snap = {k: _PIPELINE_COUNTERS.get(k, 0) for k in keys_of_interest}
+        delta = {k: snap[k] - _PASS_ENTRY_LAST_REPORT.get(k, 0) for k in snap}
+        for k, v in snap.items():
+            _PASS_ENTRY_LAST_REPORT[k] = v
+        # skip 총합 (정상 리스크컨트롤 카운트)
+        skip_total = sum(v for k, v in snap.items() if k.startswith("entry_skip_"))
+        # 파쓸이 없으면 리포트 생략
+        if snap["post_signal_pass"] == 0 and skip_total == 0:
+            return ""
+        parts = [
+            f"PASS→ENTRY funnel: pass={snap['post_signal_pass']}",
+            f"send_attempt={snap['send_attempt']}(Δ{delta['send_attempt']:+d})",
+            f"send_success={snap['send_success']}(Δ{delta['send_success']:+d})",
+        ]
+        if skip_total > 0:
+            skip_parts = []
+            for k in ("entry_skip_position", "entry_skip_max_positions",
+                     "entry_skip_lock", "entry_skip_auto_off", "entry_skip_api_key"):
+                if snap[k] > 0:
+                    skip_parts.append(f"{k[len('entry_skip_'):]}={snap[k]}(Δ{delta[k]:+d})")
+            if skip_parts:
+                parts.append("skips[" + ", ".join(skip_parts) + "]")
+        # advisor 지적: 정상 안전장치 vs 이상 판단
+        # send_attempt < pass 면 pre_entry 차단 (killswitch/cooldown/daily_guard 등)
+        # send_success < send_attempt 면 open_auto_position 내부 skip
+        return " | ".join(parts)
+    except Exception as exc:
+        return f"PASS→ENTRY funnel: ERROR {exc}"
+
+
 _SHADOW_ROUTE_FLOW_LAST_REPORT = {}  # (route, kind) -> last_count snapshot
 
 
@@ -1947,7 +1997,95 @@ def _detect_gate_format_summary(only_recent=True):
         parts.append("\n".join(lines))
     # 보존식 라인 (항상 표시 — MISMATCH 조기 감지)
     parts.append(_post_signal_flow_summary())
+    # PASS→ENTRY funnel (advisor: 정상 리스크컨트롤 vs 주문실패 구분)
+    _pe = _pass_entry_funnel_summary()
+    if _pe:
+        parts.append(_pe)
+    # 손실 방지 진단 (사용자 지시: 누적 데이터로 손실 방지 액션 도출, 자동 차단 X)
+    _lp = _loss_prevention_diagnostics()
+    if _lp:
+        parts.append(_lp)
     return "\n".join(parts) if parts else ""
+
+
+def _loss_prevention_diagnostics():
+    """누적 shadow/LIVE 데이터에서 손실 방지 액션 후보를 자동 노출.
+    사용자 지시 (2026-08-01): 관측만 · 자동 차단 없음 · 진입 흐름 유지.
+
+    후보 3축 (trade_records 기반 · 실시간 재계산):
+    1. 손실 반복 코인 (0W3L+ 유형) — 진입 필터 후보
+    2. AT본절 파괴 지분 — Lever A(본절 OFF) 잠재 회수액 상한
+    3. SL/MFE 낭비 — Lever A 클린 트레일 잠재 회수 (SL 거래 중 MFE≥trail_pct 였던 것)
+
+    LIVE route 만 대상 (production route). 매매 로직 무영향 · 진입 차단 X.
+    """
+    try:
+        try:
+            _prod, _ = _get_route_sets()
+        except Exception:
+            return ""
+        lines = []
+        with _SHADOW_PERF_LOCK:
+            for key, s in _SHADOW_PERF_STATS.items():
+                route = s.get("route", "")
+                if route not in _prod:
+                    continue
+                n = s.get("signals", 0)
+                if n < 20:  # 표본 부족
+                    continue
+                _rows = []
+                # ── 1. 손실 반복 코인 (진입 필터 후보) ──
+                coin_wl = s.get("coin_wl", {})
+                bad_coins = []
+                for c_name, (cw, cl) in coin_wl.items():
+                    total = cw + cl
+                    if total >= 3 and cw == 0:  # 0W N L (N≥3)
+                        bad_coins.append((c_name, total))
+                if bad_coins:
+                    bad_coins.sort(key=lambda x: -x[1])
+                    _bad_str = " ".join(f"{c}({t}L)" for c, t in bad_coins[:5])
+                    _rows.append(f"    🚫 손실 반복 (3L+, 승 0): {_bad_str} — 진입 필터 후보")
+                # ── 2/3. trade_records 순회로 AT본절 파괴 · SL/MFE 낭비 계산 ──
+                _trs = s.get("trade_records", [])
+                if _trs:
+                    _be_trades = [t for t in _trs if t.get("exit_reason") == "AT본절"]
+                    _sl_trades = [t for t in _trs if t.get("exit_reason") == "손절SL"]
+                    # 2. AT본절 파괴 지분
+                    if _be_trades:
+                        be_pnls = [t.get("pnl", 0) for t in _be_trades]
+                        be_avg = sum(be_pnls) / len(be_pnls) * 100  # decimal → %
+                        if be_avg < 0:
+                            be_impact = len(_be_trades) * be_avg
+                            _rows.append(
+                                f"    💣 AT본절 파괴: {len(_be_trades)}건 × {be_avg:+.2f}% "
+                                f"= {be_impact:+.1f}%p (Lever A 본절 OFF 잠재 회수 상한)"
+                            )
+                    # 3. SL/MFE 낭비 — SL 거래 중 mfe ≥ 0.30% (트레일 bp30 폭 이상)
+                    if _sl_trades:
+                        sl_pnls = [t.get("pnl", 0) for t in _sl_trades]
+                        sl_mfes = [t.get("mfe", 0) for t in _sl_trades]
+                        sl_avg_pnl = sum(sl_pnls) / len(sl_pnls) * 100
+                        sl_avg_mfe = sum(sl_mfes) / len(sl_mfes) * 100
+                        # trail bp30 = 0.30% 이상 MFE 도달한 SL 건수
+                        _sl_recover = [t for t in _sl_trades if t.get("mfe", 0) >= 0.003]
+                        if _sl_recover:
+                            _rows.append(
+                                f"    🎯 SL/MFE 낭비: {len(_sl_trades)}건 "
+                                f"(avg pnl {sl_avg_pnl:+.2f}%, mfe +{sl_avg_mfe:.2f}%) "
+                                f"→ {len(_sl_recover)}건은 MFE≥0.3% 도달 "
+                                f"(Lever A bp30 클린트레일이 잡을 패턴)"
+                            )
+                if _rows:
+                    lines.append(f"🛡 LOSS_PREVENTION [{route}] (n={n}):")
+                    lines.extend(_rows)
+        if not lines:
+            return ""
+        lines.append(
+            "    ※ 자동 액션 없음 · 사용자 판단 근거 · Lever A wired-shadow 검증 후 승격"
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"LOSS_PREVENTION: ERROR {exc}"
 
 
 # 실행품질 로그 — 시드 결정용 호가창 깊이 데이터 수집
@@ -4832,9 +4970,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # PR1: LIVE 진입 실효 조건 로그 (signal_id TTL 10분 dedup, 실 실행 vr/cs 파생)
     _log_live_entry_config_once(m, pre)
 
-    def signal_skip(reason):
+    def signal_skip(reason, skip_bucket=None):
         """초입신호 후 매수 스킵 로그 (near_miss 출력용).
         2026-07-13: Gate 탈락 사유 계측 훅 추가 (조언자 스펙, 로깅만).
+        2026-08-01: pass→entry funnel 세분화 (advisor: 정상 리스크컨트롤 vs 주문실패 구분).
+        skip_bucket: entry_skip_position / entry_skip_max / entry_skip_lock /
+                     entry_skip_price / entry_skip_dedup / entry_skip_prebreak /
+                     entry_skip_auto_off / entry_skip_api_key
         """
         if DEBUG_NEAR_MISS:
             now_str = now_kst().strftime("%H:%M:%S")
@@ -4844,9 +4986,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             _gate_fail_record(m, reason)
         except Exception:
             pass
+        # pass→entry funnel 세분화 (관측만, 매매 무영향)
+        # advisor 지적: 손실 직후 정상 리스크컨트롤이 진입 막을 수 있음
+        # → skip 이 "버그" 인지 "안전장치 작동" 인지 stage 별 계측
+        try:
+            if skip_bucket:
+                _pipeline_inc(skip_bucket)
+        except Exception:
+            pass
 
     if not AUTO_TRADE:
-        signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
+        signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)", skip_bucket="entry_skip_auto_off")
         tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
         # 4-state 분리 (조언자 지적) : shadow_only = POST 통과 후 AUTO_TRADE off 정상 종료
         # 실 예외(error) 와 정상 shadow-only 를 구분하지 않으면 진짜 장애 탐지 무력화
@@ -4857,7 +5007,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        signal_skip("API 키 미설정")
+        signal_skip("API 키 미설정", skip_bucket="entry_skip_api_key")
         return
 
     # 🔧 FIX: pending 고착 방지 — open 전환 실패 시 pending 강제 제거
@@ -4867,7 +5017,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # 🔧 FIX: reentrant=True (스캔 루프가 이미 락 보유 → TTL 갱신만, 해제는 모니터 finally에서)
     with entry_lock(m, ttl_sec=90, reentrant=True) as got_lock:
         if not got_lock:
-            signal_skip("entry_lock 획득 실패")
+            signal_skip("entry_lock 획득 실패", skip_bucket="entry_skip_lock")
             return
 
         # 🔧 pending 상태 원자화 (락 안에서만 조작)
@@ -4876,11 +5026,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             existing = OPEN_POSITIONS.get(m)
             if existing:
                 if not existing.get("pre_signal"):
-                    signal_skip("이미 포지션 보유중")
+                    signal_skip("이미 포지션 보유중", skip_bucket="entry_skip_position")
                     return
             active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
             if active_count >= MAX_POSITIONS:
-                signal_skip(f"최대 포지션 {MAX_POSITIONS}개 도달")
+                signal_skip(f"최대 포지션 {MAX_POSITIONS}개 도달", skip_bucket="entry_skip_max_positions")
                 # 🔧 FIX: pending 상태인 경우에만 제거 (다른 상태 보호)
                 if existing and existing.get("state") == "pending":
                     OPEN_POSITIONS.pop(m, None)
