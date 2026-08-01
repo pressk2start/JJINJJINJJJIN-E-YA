@@ -10929,6 +10929,41 @@ _V0_EXIT_PARAMS_CLM_EC_A = {
 # ── Trail Shadow Routes (Stage1/2 backtest 결과 기반: arm180+pct15) ──
 # 목적: Stage1(+0.19%), Stage2(+0.22%) 백테스트 결과의 실전 재현성 검증
 # adaptive_trail 재사용: feature는 사용 안 함, 단일 tier로 arm/pct/hold 정의
+def _make_clm_trail_clean(arm_sec, trail_pct, hold_sec, hard_stop_pct=0.03):
+    """Lever A 클린 트레일 (PR2 스펙 · 손실 방지 처방 #2).
+
+    본절정지 OFF · 조기 시간티어 SL OFF · far 하드스톱만.
+    데이터 근거: 승자 mfe_peak 130s (늦게 발달), 1~2% MFE 버킷 r/m +32%.
+    현행 청산 (본절+SL 티어드) 이 이 늦게 발달하는 승자를 못 지킨다.
+
+    ⚠ 주의: A(arm180) 는 57s 조기피크 패자 못 잡음 → A2 (진입 필터) 병행 필요.
+    """
+    return {
+        "strategy": "TRAIL",
+        "description": (
+            f"CLM_trail_A arm{arm_sec}s/bp{int(trail_pct*10000)}/hold{hold_sec}s/"
+            f"BE_OFF/SL_OFF/hardstop{int(hard_stop_pct*100)}%"
+        ),
+        "sl_pct": hard_stop_pct,       # far 하드스톱만 (거의 미발동, 백스톱)
+        "activation_pct": 1.0,
+        "trail_pct": 0.005,             # 미사용
+        "hold_bars": 0,
+        "max_bars": int(hold_sec / 3) + 1,
+        "disable_trail": True,          # standard trail OFF
+        "sl_tiers": [],                 # 티어드 SL 제거 (본절 파괴자 원흉)
+        "adaptive_trail": {
+            "feature": "ob_slip_sell_10000k",  # 미사용
+            "arm_after_sec": arm_sec,
+            "tiers": [(9.99, trail_pct, hold_sec)],
+            "relax_after_sec": 9999,
+            "relax_mult": 1.0,
+        },
+        # Lever A 특유: BE (본절정지) 트리거 명시적 비활성화
+        # 실 exit 엔진이 이 플래그 인식하도록 배선 필요 (다음 커밋에서)
+        "disable_breakeven": True,
+    }
+
+
 def _make_clm_trail(arm_sec, trail_pct, hold_sec):
     return {
         "strategy": "TRAIL",
@@ -10966,6 +11001,10 @@ _V0_EXIT_PARAMS_CLM_TRAIL120_15_180 = _make_clm_trail(120, 0.15, 180)  # bot300 
 #   bp100  (1%)   → -0.082%
 #   bp50   (0.5%) → +0.034% (유일한 양수)
 # 병렬 스위프로 실전 최적 파라미터 탐색 (bp30/50/70/100 shadow only)
+# Lever A 클린 트레일 (본절 OFF · 조기 SL OFF · far -3% 하드스톱만)
+# 손실 방지 처방: 늦게 발달하는 승자 보존 (현행 대비 capture 회복 목표)
+_V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240 = _make_clm_trail_clean(180, 0.003, 240)  # A 표준
+
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240 = _make_clm_trail(180, 0.003, 240)   # 0.3% 하락
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240 = _make_clm_trail(180, 0.005, 240)   # 0.5% 하락 (backtest bp50 양수)
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240 = _make_clm_trail(180, 0.007, 240)   # 0.7% 하락
@@ -11971,6 +12010,29 @@ def _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=None):
     return sig
 
 
+def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
+                                  vr5_cap=3.5):
+    """A2 (Lever A×A2): CLM + cs≤0.40 + vr5 상한 (덤프형 climax 진입 회피).
+
+    데이터 근거 (손실 방지 처방 #1 · advisor 정리):
+    - 손절 거래 mfe_peak_sec 57s (일찍 튀고 죽는 climax) vs 승자 130s (늦게 발달)
+    - climax_vr3_fail 28건 wr46% +0.17% → 저vr(덜 극단적) climax 가 route보다 우수
+    - 즉 고vr(≥3.5) climax = 덤프형 손실군 → A2 로 진입 자체 회피
+
+    vr5_cap 기본값 3.5 = 사전등록 (실행 전 결정, lookahead 금지).
+    A (arm180) 는 57s 조기피크 못 잡음 → A2 로 진입 필터가 담당.
+    """
+    sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
+    if not sig:
+        return None
+    vr5 = sig.get("indicators", {}).get("vr5", 0.0)
+    if vr5 is not None and vr5 > vr5_cap:
+        _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
+                      threshold=vr5_cap, direction="lte")
+        return None
+    return sig
+
+
 # === v20 신규 시나리오 check_fn (5개) ===
 
 def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
@@ -12716,6 +12778,34 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("vr5", ">=", 3.0)],
         "max_seed_krw": 100_000,
         "description": "LIVE 극소액 실주문 검증 (CS40+VR3+bp30, shadow n=24 +0.30%, 티어드SL, seed 100k)",
+    },
+    # ━━━ Lever A · A×A2 wired-shadow (2026-08-01 · 손실 방지 검증 · advisor 3자 수렴) ━━━
+    # 목적: 현행 LIVE 청산 (본절+SL티어드) vs Lever A 클린 트레일 실 코호트 비교
+    # 데이터 근거:
+    #   - AT본절 파괴 지분 확인됨 (본절 레이어 = capture 킬러)
+    #   - 손절SL 거래 mfe+0.60 → -1.70 (수익권 후 손실전환, A 로 잡을 패턴)
+    #   - 승자 mfe_peak 130s (늦게 발달) vs 패자 57s (일찍 튀고 죽음)
+    # 스펙: PR2_LEVER_A_SPEC.md · live_cohort_resim.py 병행
+    # AUTO_TRADE 무관 (shadow_enabled 만 활성 · 매매 무영향)
+    "과열감지_CLM_A_CLEAN_bp30": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240,
+        "priority": 10, "enabled": False,
+        "shadow_enabled": True,
+        "pipeline_key": "climax", "route": "CLM_A_CLEAN_bp30",
+        "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "Lever A 클린 트레일 (arm180/bp30/hold240, BE OFF, SL OFF, hard-3%) — shadow only · CONTROL 대비 청산개선 검증",
+    },
+    "과열감지_CLM_A_x_A2_bp30": {
+        "check_fn": _v0_check_climax_cs40_vr5cap,  # A2: cs≤0.40 + vr5≤3.5
+        "exit_params": _V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240,
+        "priority": 10, "enabled": False,
+        "shadow_enabled": True,
+        "pipeline_key": "climax", "route": "CLM_A_x_A2_bp30",
+        "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0), ("vr5", "<=", 3.5)],
+        "description": "Lever A × A2 (cs≤0.40 + vr5≤3.5 + 클린 트레일) — 덤프형 climax 제거 + 청산개선 · shadow only",
     },
     "과열감지_CS40_VR3_TR180_bp50_240": {
         "check_fn": _v0_check_climax_cs40,
