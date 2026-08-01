@@ -1866,6 +1866,56 @@ def _post_signal_flow_summary():
         return f"POST_SIGNAL FLOW: ERROR {exc}"
 
 
+_PASS_ENTRY_LAST_REPORT = {}  # 카운터별 last snapshot
+
+
+def _pass_entry_funnel_summary():
+    """PASS→ENTRY 퍼널 세분화 (advisor 정정 반영):
+    pass 5 → entry 3 의 skip 2건이 "주문 실패" 인지 "정상 리스크컨트롤" 인지 구분.
+    - entry_skip_position: 이미 포지션 보유 (정상)
+    - entry_skip_max_positions: 최대 포지션 도달 (정상)
+    - entry_skip_lock: entry_lock 획득 실패 (정상 동시성)
+    - entry_skip_auto_off: AUTO_TRADE off (정상)
+    - entry_skip_api_key: API 키 없음 (설정)
+    - send_attempt / send_success: 기존 카운터 (open_auto_position 진입/성공)
+    """
+    try:
+        with _PIPELINE_COUNTERS_LOCK:
+            keys_of_interest = [
+                "post_signal_pass", "send_attempt", "send_success",
+                "entry_skip_position", "entry_skip_max_positions",
+                "entry_skip_lock", "entry_skip_auto_off", "entry_skip_api_key",
+            ]
+            snap = {k: _PIPELINE_COUNTERS.get(k, 0) for k in keys_of_interest}
+        delta = {k: snap[k] - _PASS_ENTRY_LAST_REPORT.get(k, 0) for k in snap}
+        for k, v in snap.items():
+            _PASS_ENTRY_LAST_REPORT[k] = v
+        # skip 총합 (정상 리스크컨트롤 카운트)
+        skip_total = sum(v for k, v in snap.items() if k.startswith("entry_skip_"))
+        # 파쓸이 없으면 리포트 생략
+        if snap["post_signal_pass"] == 0 and skip_total == 0:
+            return ""
+        parts = [
+            f"PASS→ENTRY funnel: pass={snap['post_signal_pass']}",
+            f"send_attempt={snap['send_attempt']}(Δ{delta['send_attempt']:+d})",
+            f"send_success={snap['send_success']}(Δ{delta['send_success']:+d})",
+        ]
+        if skip_total > 0:
+            skip_parts = []
+            for k in ("entry_skip_position", "entry_skip_max_positions",
+                     "entry_skip_lock", "entry_skip_auto_off", "entry_skip_api_key"):
+                if snap[k] > 0:
+                    skip_parts.append(f"{k[len('entry_skip_'):]}={snap[k]}(Δ{delta[k]:+d})")
+            if skip_parts:
+                parts.append("skips[" + ", ".join(skip_parts) + "]")
+        # advisor 지적: 정상 안전장치 vs 이상 판단
+        # send_attempt < pass 면 pre_entry 차단 (killswitch/cooldown/daily_guard 등)
+        # send_success < send_attempt 면 open_auto_position 내부 skip
+        return " | ".join(parts)
+    except Exception as exc:
+        return f"PASS→ENTRY funnel: ERROR {exc}"
+
+
 _SHADOW_ROUTE_FLOW_LAST_REPORT = {}  # (route, kind) -> last_count snapshot
 
 
@@ -1947,7 +1997,115 @@ def _detect_gate_format_summary(only_recent=True):
         parts.append("\n".join(lines))
     # 보존식 라인 (항상 표시 — MISMATCH 조기 감지)
     parts.append(_post_signal_flow_summary())
+    # PASS→ENTRY funnel (advisor: 정상 리스크컨트롤 vs 주문실패 구분)
+    _pe = _pass_entry_funnel_summary()
+    if _pe:
+        parts.append(_pe)
+    # 손실 방지 진단 (사용자 지시: 누적 데이터로 손실 방지 액션 도출, 자동 차단 X)
+    _lp = _loss_prevention_diagnostics()
+    if _lp:
+        parts.append(_lp)
     return "\n".join(parts) if parts else ""
+
+
+def _loss_prevention_diagnostics():
+    """누적 shadow/LIVE 데이터에서 손실 방지 관찰 자동 노출.
+    사용자 지시 (2026-08-01): 관측만 · 자동 차단 없음 · 진입 흐름 유지.
+
+    ⚠ 등급 규율 (advisor 3자 수렴 정정):
+      OBSERVED  (여기)  : 패턴 관찰만 · 아직 후보 아님
+      CANDIDATE         : 사전 정의 실행 규칙 · 최소 표본 충족
+      SHADOW            : 임계값 고정 · 전향 병렬 관측
+      ELIGIBLE          : 사전 게이트 전체 통과 · 극소액 LIVE 검토
+
+    자동 발굴이 곧 자동 액션이 되면 과적합 엔진화 위험.
+    이 함수는 OBSERVED 등급만 노출 · 실제 승격은 사람 승인 필요.
+
+    3축 관찰 (trade_records 기반):
+    1. 손실 반복 코인 (0W3L+ 유형) — OBSERVED · 승격 조건 n≥8 미달
+    2. AT본절 파괴 지분 — OBSERVED · 실 회수액은 counterfactual 필요
+    3. SL/MFE 낭비 — OBSERVED · A 트레일 arm 이전 종료 시 못 잡을 수 있음
+
+    LIVE route 만 대상 (production route). 매매 로직 무영향.
+    """
+    try:
+        try:
+            _prod, _ = _get_route_sets()
+        except Exception:
+            return ""
+        lines = []
+        with _SHADOW_PERF_LOCK:
+            for key, s in _SHADOW_PERF_STATS.items():
+                route = s.get("route", "")
+                if route not in _prod:
+                    continue
+                n = s.get("signals", 0)
+                if n < 20:  # 표본 부족
+                    continue
+                _rows = []
+                # ── 1. 손실 반복 코인 (OBSERVED · 제외 후보 아님) ──
+                # advisor 정정: n=3 은 과적합 위험 · 승격 조건 n≥8 미달
+                # 종목 제외보다 공통 속성 (호가잔량/spread/유동성) 탐색이 정답
+                coin_wl = s.get("coin_wl", {})
+                bad_coins = []
+                for c_name, (cw, cl) in coin_wl.items():
+                    total = cw + cl
+                    if total >= 3 and cw == 0:  # 0W N L (N≥3)
+                        bad_coins.append((c_name, total))
+                if bad_coins:
+                    bad_coins.sort(key=lambda x: -x[1])
+                    _bad_str = " ".join(f"{c}({t}L)" for c, t in bad_coins[:5])
+                    _rows.append(
+                        f"    🚫 OBSERVED 손실 반복 (n≥3, 승 0): {_bad_str} "
+                        f"— 종목 제외 승격 조건 n≥8 미달 · 공통 속성 탐색 필요"
+                    )
+                # ── 2/3. trade_records 순회로 AT본절 파괴 · SL/MFE 낭비 계산 ──
+                _trs = s.get("trade_records", [])
+                if _trs:
+                    _be_trades = [t for t in _trs if t.get("exit_reason") == "AT본절"]
+                    _sl_trades = [t for t in _trs if t.get("exit_reason") == "손절SL"]
+                    # 2. AT본절 파괴 지분 (OBSERVED · 회수 상한은 counterfactual 필요)
+                    if _be_trades:
+                        be_pnls = [t.get("pnl", 0) for t in _be_trades]
+                        be_avg = sum(be_pnls) / len(be_pnls) * 100  # decimal → %
+                        if be_avg < 0:
+                            be_impact = len(_be_trades) * be_avg
+                            _rows.append(
+                                f"    💣 OBSERVED AT본절 파괴: {len(_be_trades)}건 × {be_avg:+.2f}% "
+                                f"= {be_impact:+.1f}%p (Lever A 없앰 시 상한 · 실 회수는 counterfactual)"
+                            )
+                    # 3. SL/MFE 낭비 (OBSERVED · A arm180 이전 종료면 못 잡음)
+                    # advisor 정정: SL 평균 96초 · A arm 180초 → 무장 전 종료 시 A 미개입
+                    if _sl_trades:
+                        sl_pnls = [t.get("pnl", 0) for t in _sl_trades]
+                        sl_mfes = [t.get("mfe", 0) for t in _sl_trades]
+                        sl_holds = [t.get("hold", 0) for t in _sl_trades]
+                        sl_avg_pnl = sum(sl_pnls) / len(sl_pnls) * 100
+                        sl_avg_mfe = sum(sl_mfes) / len(sl_mfes) * 100
+                        sl_avg_hold = sum(sl_holds) / len(sl_holds) if sl_holds else 0
+                        # trail bp30 = 0.30% 이상 MFE 도달 + arm 180초 이후 종료 (A 개입 가능 조건)
+                        _sl_a_eligible = [t for t in _sl_trades
+                                          if t.get("mfe", 0) >= 0.003 and t.get("hold", 0) >= 180]
+                        _sl_before_arm = [t for t in _sl_trades if t.get("hold", 0) < 180]
+                        if _sl_recover := [t for t in _sl_trades if t.get("mfe", 0) >= 0.003]:
+                            _rows.append(
+                                f"    🎯 OBSERVED SL/MFE 관찰: {len(_sl_trades)}건 "
+                                f"(avg pnl {sl_avg_pnl:+.2f}%, mfe +{sl_avg_mfe:.2f}%, hold {sl_avg_hold:.0f}s) "
+                                f"→ MFE≥0.3% {len(_sl_recover)}건 · A eligible (hold≥180s) {len(_sl_a_eligible)}건 · "
+                                f"arm 이전 종료 {len(_sl_before_arm)}건 (A 미개입)"
+                            )
+                if _rows:
+                    lines.append(f"🛡 LOSS_PREVENTION [{route}] (n={n}):")
+                    lines.extend(_rows)
+        if not lines:
+            return ""
+        lines.append(
+            "    ※ 등급: OBSERVED (관찰만) · 승격은 CANDIDATE→SHADOW→ELIGIBLE 단계 · "
+            "counterfactual (live_cohort_resim + A wired-shadow) 로만 실 회수 확정"
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"LOSS_PREVENTION: ERROR {exc}"
 
 
 # 실행품질 로그 — 시드 결정용 호가창 깊이 데이터 수집
@@ -4832,9 +4990,13 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # PR1: LIVE 진입 실효 조건 로그 (signal_id TTL 10분 dedup, 실 실행 vr/cs 파생)
     _log_live_entry_config_once(m, pre)
 
-    def signal_skip(reason):
+    def signal_skip(reason, skip_bucket=None):
         """초입신호 후 매수 스킵 로그 (near_miss 출력용).
         2026-07-13: Gate 탈락 사유 계측 훅 추가 (조언자 스펙, 로깅만).
+        2026-08-01: pass→entry funnel 세분화 (advisor: 정상 리스크컨트롤 vs 주문실패 구분).
+        skip_bucket: entry_skip_position / entry_skip_max / entry_skip_lock /
+                     entry_skip_price / entry_skip_dedup / entry_skip_prebreak /
+                     entry_skip_auto_off / entry_skip_api_key
         """
         if DEBUG_NEAR_MISS:
             now_str = now_kst().strftime("%H:%M:%S")
@@ -4844,9 +5006,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             _gate_fail_record(m, reason)
         except Exception:
             pass
+        # pass→entry funnel 세분화 (관측만, 매매 무영향)
+        # advisor 지적: 손실 직후 정상 리스크컨트롤이 진입 막을 수 있음
+        # → skip 이 "버그" 인지 "안전장치 작동" 인지 stage 별 계측
+        try:
+            if skip_bucket:
+                _pipeline_inc(skip_bucket)
+        except Exception:
+            pass
 
     if not AUTO_TRADE:
-        signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)")
+        signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)", skip_bucket="entry_skip_auto_off")
         tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
         # 4-state 분리 (조언자 지적) : shadow_only = POST 통과 후 AUTO_TRADE off 정상 종료
         # 실 예외(error) 와 정상 shadow-only 를 구분하지 않으면 진짜 장애 탐지 무력화
@@ -4857,7 +5027,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         return
 
     if not UPBIT_ACCESS_KEY or not UPBIT_SECRET_KEY:
-        signal_skip("API 키 미설정")
+        signal_skip("API 키 미설정", skip_bucket="entry_skip_api_key")
         return
 
     # 🔧 FIX: pending 고착 방지 — open 전환 실패 시 pending 강제 제거
@@ -4867,7 +5037,7 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     # 🔧 FIX: reentrant=True (스캔 루프가 이미 락 보유 → TTL 갱신만, 해제는 모니터 finally에서)
     with entry_lock(m, ttl_sec=90, reentrant=True) as got_lock:
         if not got_lock:
-            signal_skip("entry_lock 획득 실패")
+            signal_skip("entry_lock 획득 실패", skip_bucket="entry_skip_lock")
             return
 
         # 🔧 pending 상태 원자화 (락 안에서만 조작)
@@ -4876,11 +5046,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             existing = OPEN_POSITIONS.get(m)
             if existing:
                 if not existing.get("pre_signal"):
-                    signal_skip("이미 포지션 보유중")
+                    signal_skip("이미 포지션 보유중", skip_bucket="entry_skip_position")
                     return
             active_count = sum(1 for p in OPEN_POSITIONS.values() if p.get("state") == "open")
             if active_count >= MAX_POSITIONS:
-                signal_skip(f"최대 포지션 {MAX_POSITIONS}개 도달")
+                signal_skip(f"최대 포지션 {MAX_POSITIONS}개 도달", skip_bucket="entry_skip_max_positions")
                 # 🔧 FIX: pending 상태인 경우에만 제거 (다른 상태 보호)
                 if existing and existing.get("state") == "pending":
                     OPEN_POSITIONS.pop(m, None)
@@ -10779,6 +10949,41 @@ _V0_EXIT_PARAMS_CLM_EC_A = {
 # ── Trail Shadow Routes (Stage1/2 backtest 결과 기반: arm180+pct15) ──
 # 목적: Stage1(+0.19%), Stage2(+0.22%) 백테스트 결과의 실전 재현성 검증
 # adaptive_trail 재사용: feature는 사용 안 함, 단일 tier로 arm/pct/hold 정의
+def _make_clm_trail_clean(arm_sec, trail_pct, hold_sec, hard_stop_pct=0.03):
+    """Lever A 클린 트레일 (PR2 스펙 · 손실 방지 처방 #2).
+
+    본절정지 OFF · 조기 시간티어 SL OFF · far 하드스톱만.
+    데이터 근거: 승자 mfe_peak 130s (늦게 발달), 1~2% MFE 버킷 r/m +32%.
+    현행 청산 (본절+SL 티어드) 이 이 늦게 발달하는 승자를 못 지킨다.
+
+    ⚠ 주의: A(arm180) 는 57s 조기피크 패자 못 잡음 → A2 (진입 필터) 병행 필요.
+    """
+    return {
+        "strategy": "TRAIL",
+        "description": (
+            f"CLM_trail_A arm{arm_sec}s/bp{int(trail_pct*10000)}/hold{hold_sec}s/"
+            f"BE_OFF/SL_OFF/hardstop{int(hard_stop_pct*100)}%"
+        ),
+        "sl_pct": hard_stop_pct,       # far 하드스톱만 (거의 미발동, 백스톱)
+        "activation_pct": 1.0,
+        "trail_pct": 0.005,             # 미사용
+        "hold_bars": 0,
+        "max_bars": int(hold_sec / 3) + 1,
+        "disable_trail": True,          # standard trail OFF
+        "sl_tiers": [],                 # 티어드 SL 제거 (본절 파괴자 원흉)
+        "adaptive_trail": {
+            "feature": "ob_slip_sell_10000k",  # 미사용
+            "arm_after_sec": arm_sec,
+            "tiers": [(9.99, trail_pct, hold_sec)],
+            "relax_after_sec": 9999,
+            "relax_mult": 1.0,
+        },
+        # Lever A 특유: BE (본절정지) 트리거 명시적 비활성화
+        # 실 exit 엔진이 이 플래그 인식하도록 배선 필요 (다음 커밋에서)
+        "disable_breakeven": True,
+    }
+
+
 def _make_clm_trail(arm_sec, trail_pct, hold_sec):
     return {
         "strategy": "TRAIL",
@@ -10816,6 +11021,10 @@ _V0_EXIT_PARAMS_CLM_TRAIL120_15_180 = _make_clm_trail(120, 0.15, 180)  # bot300 
 #   bp100  (1%)   → -0.082%
 #   bp50   (0.5%) → +0.034% (유일한 양수)
 # 병렬 스위프로 실전 최적 파라미터 탐색 (bp30/50/70/100 shadow only)
+# Lever A 클린 트레일 (본절 OFF · 조기 SL OFF · far -3% 하드스톱만)
+# 손실 방지 처방: 늦게 발달하는 승자 보존 (현행 대비 capture 회복 목표)
+_V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240 = _make_clm_trail_clean(180, 0.003, 240)  # A 표준
+
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp30_240 = _make_clm_trail(180, 0.003, 240)   # 0.3% 하락
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp50_240 = _make_clm_trail(180, 0.005, 240)   # 0.5% 하락 (backtest bp50 양수)
 _V0_EXIT_PARAMS_CLM_TRAIL180_bp70_240 = _make_clm_trail(180, 0.007, 240)   # 0.7% 하락
@@ -11821,6 +12030,29 @@ def _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=None):
     return sig
 
 
+def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
+                                  vr5_cap=3.5):
+    """A2 (Lever A×A2): CLM + cs≤0.40 + vr5 상한 (덤프형 climax 진입 회피).
+
+    데이터 근거 (손실 방지 처방 #1 · advisor 정리):
+    - 손절 거래 mfe_peak_sec 57s (일찍 튀고 죽는 climax) vs 승자 130s (늦게 발달)
+    - climax_vr3_fail 28건 wr46% +0.17% → 저vr(덜 극단적) climax 가 route보다 우수
+    - 즉 고vr(≥3.5) climax = 덤프형 손실군 → A2 로 진입 자체 회피
+
+    vr5_cap 기본값 3.5 = 사전등록 (실행 전 결정, lookahead 금지).
+    A (arm180) 는 57s 조기피크 못 잡음 → A2 로 진입 필터가 담당.
+    """
+    sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
+    if not sig:
+        return None
+    vr5 = sig.get("indicators", {}).get("vr5", 0.0)
+    if vr5 is not None and vr5 > vr5_cap:
+        _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
+                      threshold=vr5_cap, direction="lte")
+        return None
+    return sig
+
+
 # === v20 신규 시나리오 check_fn (5개) ===
 
 def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
@@ -12566,6 +12798,34 @@ _STRATEGY_REGISTRY = {
         "ind_filters": [("vr5", ">=", 3.0)],
         "max_seed_krw": 100_000,
         "description": "LIVE 극소액 실주문 검증 (CS40+VR3+bp30, shadow n=24 +0.30%, 티어드SL, seed 100k)",
+    },
+    # ━━━ Lever A · A×A2 wired-shadow (2026-08-01 · 손실 방지 검증 · advisor 3자 수렴) ━━━
+    # 목적: 현행 LIVE 청산 (본절+SL티어드) vs Lever A 클린 트레일 실 코호트 비교
+    # 데이터 근거:
+    #   - AT본절 파괴 지분 확인됨 (본절 레이어 = capture 킬러)
+    #   - 손절SL 거래 mfe+0.60 → -1.70 (수익권 후 손실전환, A 로 잡을 패턴)
+    #   - 승자 mfe_peak 130s (늦게 발달) vs 패자 57s (일찍 튀고 죽음)
+    # 스펙: PR2_LEVER_A_SPEC.md · live_cohort_resim.py 병행
+    # AUTO_TRADE 무관 (shadow_enabled 만 활성 · 매매 무영향)
+    "과열감지_CLM_A_CLEAN_bp30": {
+        "check_fn": _v0_check_climax_cs40,
+        "exit_params": _V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240,
+        "priority": 10, "enabled": False,
+        "shadow_enabled": True,
+        "pipeline_key": "climax", "route": "CLM_A_CLEAN_bp30",
+        "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0)],
+        "description": "Lever A 클린 트레일 (arm180/bp30/hold240, BE OFF, SL OFF, hard-3%) — shadow only · CONTROL 대비 청산개선 검증",
+    },
+    "과열감지_CLM_A_x_A2_bp30": {
+        "check_fn": _v0_check_climax_cs40_vr5cap,  # A2: cs≤0.40 + vr5≤3.5
+        "exit_params": _V0_EXIT_PARAMS_CLM_A_CLEAN_180_bp30_240,
+        "priority": 10, "enabled": False,
+        "shadow_enabled": True,
+        "pipeline_key": "climax", "route": "CLM_A_x_A2_bp30",
+        "mae_threshold": 0.35,
+        "ind_filters": [("vr5", ">=", 3.0), ("vr5", "<=", 3.5)],
+        "description": "Lever A × A2 (cs≤0.40 + vr5≤3.5 + 클린 트레일) — 덤프형 climax 제거 + 청산개선 · shadow only",
     },
     "과열감지_CS40_VR3_TR180_bp50_240": {
         "check_fn": _v0_check_climax_cs40,
