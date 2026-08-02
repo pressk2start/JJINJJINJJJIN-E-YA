@@ -2030,7 +2030,11 @@ def _shadow_contamination_check():
     ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
     허용 exit_reason: AT익절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
-    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL) · AT본절/AT소손절
+    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL) · AT본절
+
+    ⚠ AT소손절 (advisor 2 확인 유보 해소): "AT소손절" 은 별도 exit_reason 아니라
+    "AT본절" 의 display alias (bot.py:15334 `_display = {"AT본절": "AT소손절"}`).
+    내부 exit_reason 은 "AT본절" 하나 · at_be 카운트가 이미 둘 다 커버.
 
     AT본절 포함 이유 (2026-08-02 advisor 양세션 버그 수정):
     - 이전 검증기: 본절SL·early_SL 만 체크 → AT본절=2 인데 VALID 오판
