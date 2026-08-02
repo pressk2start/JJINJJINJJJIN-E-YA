@@ -2019,9 +2019,16 @@ def _shadow_exit_engine_config_summary():
 
 
 def _shadow_contamination_check():
-    """A_CLEAN 오염 불변식 (advisor 지시):
-    A_CLEAN 라우트에서 본절SL 이나 초기 SL (hold<180s SL) 발생 시 오염 표본.
-    trade_records 순회 · exit_reason 카운트.
+    """A_CLEAN 순도 이중 검증 (advisor 2 정정 수용):
+    설정 OFF + 실제 exit_reason 0건 이중 확인.
+
+    허용 exit_reason: TRAIL_HIT (AT익절) · HOLD_CAP (AT타임아웃) · HARD_STOP (손절SL)
+    금지 exit_reason: 본절SL · AT본절 · early_SL (hold<180s 손절SL)
+
+    금지 이유:
+    - 본절SL: disable_trail=True 로 우회되어야 함 (shadow simulator)
+    - AT본절: 트레일 stop 이 entry 아래로 갔음 (본절 로직 아니지만 참고)
+    - early_SL: A arm 이전 SL = A 트레일 무장 전 종료 · A 클린 아님
     """
     try:
         contam_routes = {"CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
@@ -2034,24 +2041,94 @@ def _shadow_contamination_check():
                 n = s.get("signals", 0)
                 if n == 0:
                     continue
+                # 설정 확인 (advisor 2: 이중검증)
+                cfg = None
+                for name, sc in _STRATEGY_REGISTRY.items():
+                    if sc.get("route") == route:
+                        cfg = sc.get("exit_params", {})
+                        break
+                config_be_off = cfg.get("disable_breakeven", False) if cfg else False
+                config_tiered_off = not bool(cfg.get("sl_tiers")) if cfg else False
                 _trs = s.get("trade_records", [])
-                # 오염 카운트: 본절SL · AT본절 (실 청산 이유) · hold<180s SL
+                # 청산 이유 카운트
                 be_sl = sum(1 for t in _trs if t.get("exit_reason") == "본절SL")
                 at_be = sum(1 for t in _trs if t.get("exit_reason") == "AT본절")
                 early_sl = sum(1 for t in _trs
                                if t.get("exit_reason") == "손절SL" and t.get("hold", 0) < 180)
-                total_contam = be_sl + early_sl  # AT본절 은 shadow 라벨 이슈, contam 별도 표시
-                if n > 0:
-                    verdict = "✅ CLEAN" if total_contam == 0 else f"⚠ CONTAMINATED ({total_contam}건)"
-                    lines.append(
-                        f"  {route} n={n}: 본절SL={be_sl} · early_SL(hold<180s)={early_sl} · "
-                        f"AT본절(참고)={at_be} → {verdict}"
-                    )
+                # 허용 청산
+                trail_hit = sum(1 for t in _trs if t.get("exit_reason") == "AT익절")
+                hold_cap = sum(1 for t in _trs if t.get("exit_reason") == "AT타임아웃")
+                far_stop = sum(1 for t in _trs
+                               if t.get("exit_reason") == "손절SL" and t.get("hold", 0) >= 180)
+                # 이중 검증 판정
+                config_ok = config_be_off and config_tiered_off
+                exit_ok = (be_sl == 0 and early_sl == 0)
+                if config_ok and exit_ok:
+                    verdict = "✅ CLEAN (설정+실측 이중검증)"
+                elif not config_ok:
+                    verdict = f"⚠ CONFIG_FAIL (be_off={config_be_off} tiered_off={config_tiered_off})"
+                elif not exit_ok:
+                    verdict = f"⚠ CONTAMINATED (실측: 본절SL={be_sl} early_SL={early_sl})"
+                else:
+                    verdict = "⚠ UNKNOWN"
+                lines.append(
+                    f"  {route} n={n}: 설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}] "
+                    f"실측[본절SL={be_sl} early_SL={early_sl} AT본절={at_be}] "
+                    f"허용[AT익절={trail_hit} AT타임아웃={hold_cap} far_SL={far_stop}] → {verdict}"
+                )
         if not lines:
             return ""
-        return "A_CLEAN 오염 불변식:\n" + "\n".join(lines)
+        return "A_CLEAN 순도 이중검증 (설정 OFF + 금지 exit_reason 0건):\n" + "\n".join(lines)
     except Exception as exc:
-        return f"A_CLEAN 오염 불변식: ERROR {exc}"
+        return f"A_CLEAN 순도: ERROR {exc}"
+
+
+def _a2_audit_summary():
+    """A2 필터 감사 (advisor 2 개선 2 · A2 성급 강등 방지):
+    - eligible_n: 라우트 진입한 총 signal 수
+    - pass_n / reject_n: cutoff 통과·차단
+    - vr5 결측 처리 (통과 · 사전등록)
+    - 통과군 vs 차단군 성과 (같은 CLEAN exit 로 비교하려면 counterfactual 필요)
+
+    현재는 카운터만 노출 · counterfactual 은 offline (live_cohort_resim + a2_vr5_filter).
+    """
+    try:
+        # A2 cutoff (사전등록)
+        vr5_cap = 3.5  # _v0_check_climax_cs40_vr5cap 기본값
+        with _PIPELINE_COUNTERS_LOCK:
+            # a2_vr5cap_fail 은 climax_a2_vr5cap_fail 인지 확인
+            pass_cnt = 0
+            reject_cnt = 0
+            for k, v in _PIPELINE_COUNTERS.items():
+                if "a2_vr5cap_fail" in k:
+                    reject_cnt += v
+            # A2 라우트 candidate = 통과 후보
+            a2_cand = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_candidate", 0)
+            a2_open = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_opened", 0)
+        # A2 shadow perf
+        a2_route = "CLM_A_x_A2_bp30"
+        a2_n = 0
+        with _SHADOW_PERF_LOCK:
+            for key, s in _SHADOW_PERF_STATS.items():
+                if s.get("route") == a2_route:
+                    a2_n = s.get("signals", 0)
+                    break
+        # eligible = candidate + rejected (A2 필터 이전 신호)
+        eligible = a2_cand + reject_cnt
+        if eligible == 0:
+            return ""
+        reject_ratio = reject_cnt / eligible * 100
+        lines = [
+            f"A2_AUDIT (cutoff vr5≤{vr5_cap} 사전등록, 결측=통과):",
+            f"  eligible_n={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap})={reject_cnt} · "
+            f"reject_ratio={reject_ratio:.0f}%",
+            f"  shadow n={a2_n} (통과분만) · A×A2 paired 판정 대기 (common_n≥30 참고, 50 첫 판정)",
+            f"  ⚠ 통과 vs 차단 성과 직접 비교는 counterfactual (a2_vr5_filter.py) 로만 유효",
+            f"  ⚠ 필터검증 줄의 a2_vr5cap_fail wr% 는 base-rate 노이즈 (모든 fail 군 공통 ~46%)",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"A2_AUDIT: ERROR {exc}"
 
 
 def _common_cohort_paired_summary():
@@ -2163,10 +2240,14 @@ def _detect_gate_format_summary(only_recent=True):
     _see = _shadow_exit_engine_config_summary()
     if _see:
         parts.append(_see)
-    # A_CLEAN 오염 불변식 (advisor: 본절SL/early_SL 발생 시 표본 무효)
+    # A_CLEAN 순도 이중검증 (advisor 2: 설정 + 실측 exit_reason)
     _cc = _shadow_contamination_check()
     if _cc:
         parts.append(_cc)
+    # A2_AUDIT (advisor 2: 통과/차단 · vr5 결측 · 모집단 · base-rate 오독 방지 명시)
+    _a2 = _a2_audit_summary()
+    if _a2:
+        parts.append(_a2)
     # COMMON_COHORT paired 집계 (advisor: 동일 signal_id 세 경로 비교)
     _ch = _common_cohort_paired_summary()
     if _ch:
