@@ -1972,6 +1972,160 @@ def _shadow_route_flow_summary(top_n=10):
         return f"SHADOW_ROUTE_FLOW: ERROR {exc}"
 
 
+def _shadow_exit_engine_config_summary():
+    """SHADOW_EXIT_ENGINE — 각 shadow 라우트의 실효 청산 설정 자동 노출.
+    advisor 지시 (2026-08-01): A_CLEAN 이 진짜 클린인지 리포트로 즉시 확인.
+    breakeven / early_sl / arm / trail / hold / hard_stop 을 한 줄로.
+    """
+    try:
+        try:
+            _prod, _research = _get_route_sets()
+        except Exception:
+            _prod, _research = set(), set()
+        lines = []
+        for name, cfg in _STRATEGY_REGISTRY.items():
+            if not (cfg.get("enabled") or cfg.get("shadow_enabled")):
+                continue
+            route = cfg.get("route", name)
+            # A · A×A2 · LIVE 만 노출 (전체 shadow 는 너무 많음)
+            _key_routes = {"CS40_VR3_TR180_bp30_240",
+                          "CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
+            if route not in _key_routes:
+                continue
+            ep = cfg.get("exit_params", {}) or {}
+            at = ep.get("adaptive_trail") or {}
+            sl_tiers = ep.get("sl_tiers", []) or []
+            disable_be = ep.get("disable_breakeven", False)
+            disable_trail = ep.get("disable_trail", False)
+            sl_pct = ep.get("sl_pct", 0)
+            arm_sec = at.get("arm_after_sec", "?")
+            trail_pct = at.get("tiers", [(None, 0, None)])[0][1] if at.get("tiers") else 0
+            hold_sec = at.get("tiers", [(None, 0, None)])[0][2] if at.get("tiers") else "?"
+            # 실효 청산 조건 요약
+            _be_str = "OFF" if disable_be else "ON"
+            _tiered_sl_str = f"tiered{len(sl_tiers)}" if sl_tiers else "OFF"
+            _hard_stop_str = f"{sl_pct*100:.1f}%"
+            _trail_str = f"arm{arm_sec}s/bp{int(trail_pct*10000)}/hold{hold_sec}s"
+            _live_tag = " LIVE" if cfg.get("enabled") else ""
+            lines.append(
+                f"  {route}{_live_tag}: BE={_be_str} early_SL={_tiered_sl_str} "
+                f"hard_stop={_hard_stop_str} trail={_trail_str}"
+            )
+        if not lines:
+            return ""
+        return "SHADOW_EXIT_ENGINE (실효 청산 설정 · 오염 확인):\n" + "\n".join(lines)
+    except Exception as exc:
+        return f"SHADOW_EXIT_ENGINE: ERROR {exc}"
+
+
+def _shadow_contamination_check():
+    """A_CLEAN 오염 불변식 (advisor 지시):
+    A_CLEAN 라우트에서 본절SL 이나 초기 SL (hold<180s SL) 발생 시 오염 표본.
+    trade_records 순회 · exit_reason 카운트.
+    """
+    try:
+        contam_routes = {"CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
+        lines = []
+        with _SHADOW_PERF_LOCK:
+            for key, s in _SHADOW_PERF_STATS.items():
+                route = s.get("route", "")
+                if route not in contam_routes:
+                    continue
+                n = s.get("signals", 0)
+                if n == 0:
+                    continue
+                _trs = s.get("trade_records", [])
+                # 오염 카운트: 본절SL · AT본절 (실 청산 이유) · hold<180s SL
+                be_sl = sum(1 for t in _trs if t.get("exit_reason") == "본절SL")
+                at_be = sum(1 for t in _trs if t.get("exit_reason") == "AT본절")
+                early_sl = sum(1 for t in _trs
+                               if t.get("exit_reason") == "손절SL" and t.get("hold", 0) < 180)
+                total_contam = be_sl + early_sl  # AT본절 은 shadow 라벨 이슈, contam 별도 표시
+                if n > 0:
+                    verdict = "✅ CLEAN" if total_contam == 0 else f"⚠ CONTAMINATED ({total_contam}건)"
+                    lines.append(
+                        f"  {route} n={n}: 본절SL={be_sl} · early_SL(hold<180s)={early_sl} · "
+                        f"AT본절(참고)={at_be} → {verdict}"
+                    )
+        if not lines:
+            return ""
+        return "A_CLEAN 오염 불변식:\n" + "\n".join(lines)
+    except Exception as exc:
+        return f"A_CLEAN 오염 불변식: ERROR {exc}"
+
+
+def _common_cohort_paired_summary():
+    """CONTROL/A/A×A2 common cohort paired 집계 (advisor 지시).
+    동일 signal_id 가 세 경로에 모두 있는 페어만 비교.
+    common_n · CONTROL/A/A×A2 각 net/WR · delta 노출.
+    """
+    try:
+        target_routes = {
+            "CONTROL": "CS40_VR3_TR180_bp30_240",
+            "A": "CLM_A_CLEAN_bp30",
+            "A×A2": "CLM_A_x_A2_bp30",
+        }
+        route_trades = {}  # route_label → {signal_id → trade_dict}
+        with _SHADOW_PERF_LOCK:
+            for key, s in _SHADOW_PERF_STATS.items():
+                route = s.get("route", "")
+                for label, r in target_routes.items():
+                    if route == r:
+                        _trs = s.get("trade_records", []) or []
+                        by_id = {}
+                        for t in _trs:
+                            sid = t.get("signal_id") or t.get("entry_ts")
+                            if sid is not None:
+                                by_id[sid] = t
+                        route_trades[label] = by_id
+        # 공통 signal_id 만
+        if len(route_trades) < 2:
+            return ""
+        _ids = set.intersection(*(set(rt.keys()) for rt in route_trades.values())) if route_trades else set()
+        if len(_ids) < 3:
+            # 표본 부족 · 개별 route n 만 노출
+            _parts = []
+            for label, r in target_routes.items():
+                n = len(route_trades.get(label, {}))
+                _parts.append(f"{label}({r})={n}")
+            return f"COMMON_COHORT (paired 대기): {' · '.join(_parts)} · common_n={len(_ids)} (30 참고 · 50 첫 판정)"
+        # 공통 페어 집계
+        lines = [f"COMMON_COHORT paired common_n={len(_ids)}:"]
+        for label in ("CONTROL", "A", "A×A2"):
+            if label not in route_trades:
+                continue
+            trades = [route_trades[label][sid] for sid in _ids if sid in route_trades[label]]
+            if not trades:
+                continue
+            pnls = [t.get("pnl", 0) for t in trades]
+            wins = sum(1 for p in pnls if p > 0)
+            net = sum(pnls) / len(pnls) * 100 if pnls else 0
+            wr = wins / len(pnls) * 100 if pnls else 0
+            lines.append(f"  {label}: net={net:+.3f}% WR={wr:.0f}% n={len(trades)}")
+        # delta vs CONTROL
+        if "CONTROL" in route_trades:
+            ctrl_pnls = {sid: route_trades["CONTROL"][sid].get("pnl", 0)
+                        for sid in _ids if sid in route_trades["CONTROL"]}
+            for label in ("A", "A×A2"):
+                if label not in route_trades:
+                    continue
+                deltas = []
+                for sid in _ids:
+                    if sid in ctrl_pnls and sid in route_trades[label]:
+                        deltas.append(route_trades[label][sid].get("pnl", 0) - ctrl_pnls[sid])
+                if deltas:
+                    mean_delta = sum(deltas) / len(deltas) * 100
+                    lines.append(f"  Δ{label} vs CONTROL: {mean_delta:+.3f}%p (n={len(deltas)})")
+        # 승격 기준 안내
+        if len(_ids) < 30:
+            lines.append(f"  ※ common_n<30: 참고만 · 판정 대기 (50 첫 · 100 승격)")
+        elif len(_ids) < 50:
+            lines.append(f"  ※ common_n<50: 참고 판정 · 100 승격 대기")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"COMMON_COHORT: ERROR {exc}"
+
+
 def _detect_gate_format_summary(only_recent=True):
     """detect_leader 게이트 스테이지별 SUMMARY. POST_SIGNAL을 먼저 표시.
     관측 누락률: observed_reason_total <= post_signal_blocked (debounce 때문).
@@ -2005,6 +2159,18 @@ def _detect_gate_format_summary(only_recent=True):
     _lp = _loss_prevention_diagnostics()
     if _lp:
         parts.append(_lp)
+    # SHADOW_EXIT_ENGINE 실효 청산 설정 (advisor: A_CLEAN 오염 확인)
+    _see = _shadow_exit_engine_config_summary()
+    if _see:
+        parts.append(_see)
+    # A_CLEAN 오염 불변식 (advisor: 본절SL/early_SL 발생 시 표본 무효)
+    _cc = _shadow_contamination_check()
+    if _cc:
+        parts.append(_cc)
+    # COMMON_COHORT paired 집계 (advisor: 동일 signal_id 세 경로 비교)
+    _ch = _common_cohort_paired_summary()
+    if _ch:
+        parts.append(_ch)
     return "\n".join(parts) if parts else ""
 
 
