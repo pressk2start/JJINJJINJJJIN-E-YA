@@ -2084,47 +2084,58 @@ def _shadow_contamination_check():
 
 
 def _a2_audit_summary():
-    """A2 필터 감사 (advisor 2 개선 2 · A2 성급 강등 방지):
-    - eligible_n: 라우트 진입한 총 signal 수
-    - pass_n / reject_n: cutoff 통과·차단
-    - vr5 결측 처리 (통과 · 사전등록)
-    - 통과군 vs 차단군 성과 (같은 CLEAN exit 로 비교하려면 counterfactual 필요)
-
-    현재는 카운터만 노출 · counterfactual 은 offline (live_cohort_resim + a2_vr5_filter).
+    """A2 필터 감사 (advisor 2 개선 · 3회 수렴):
+    - eligible: 라우트 진입한 총 signal (pass + reject + missing)
+    - pass_low_vr5: vr5≤3.5 통과 (실제 A×A2 진입 표본)
+    - reject_high_vr5: vr5>3.5 차단
+    - vr5 missing: vr5 결측 → 사전등록 규칙으로 통과 (구현 확인됨)
+      → 결측군이 무작위 아니면 A×A2 성과 왜곡 가능 · 별도 감사
+    - 필터검증 줄 fail-WR 은 A2 효과 식별 불가 (모집단·중복·청산기준 미매칭)
     """
     try:
-        # A2 cutoff (사전등록)
-        vr5_cap = 3.5  # _v0_check_climax_cs40_vr5cap 기본값
+        vr5_cap = 3.5  # _v0_check_climax_cs40_vr5cap 기본값 · 사전등록
         with _PIPELINE_COUNTERS_LOCK:
-            # a2_vr5cap_fail 은 climax_a2_vr5cap_fail 인지 확인
-            pass_cnt = 0
             reject_cnt = 0
             for k, v in _PIPELINE_COUNTERS.items():
                 if "a2_vr5cap_fail" in k:
                     reject_cnt += v
-            # A2 라우트 candidate = 통과 후보
             a2_cand = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_candidate", 0)
-            a2_open = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_opened", 0)
-        # A2 shadow perf
+        # A2 shadow perf 로부터 vr5 분포 집계
         a2_route = "CLM_A_x_A2_bp30"
         a2_n = 0
+        vr5_present = 0
+        vr5_missing = 0
+        vr5_pass_low = 0
         with _SHADOW_PERF_LOCK:
             for key, s in _SHADOW_PERF_STATS.items():
-                if s.get("route") == a2_route:
-                    a2_n = s.get("signals", 0)
-                    break
-        # eligible = candidate + rejected (A2 필터 이전 신호)
+                if s.get("route") != a2_route:
+                    continue
+                a2_n = s.get("signals", 0)
+                _trs = s.get("trade_records", []) or []
+                for t in _trs:
+                    inds = t.get("indicators", {}) or {}
+                    vr5 = inds.get("vr5") if isinstance(inds, dict) else None
+                    if vr5 is None:
+                        vr5_missing += 1
+                    else:
+                        vr5_present += 1
+                        if vr5 <= vr5_cap:
+                            vr5_pass_low += 1
+                break
         eligible = a2_cand + reject_cnt
         if eligible == 0:
             return ""
         reject_ratio = reject_cnt / eligible * 100
+        missing_rate = (vr5_missing / a2_n * 100) if a2_n > 0 else 0
         lines = [
-            f"A2_AUDIT (cutoff vr5≤{vr5_cap} 사전등록, 결측=통과):",
-            f"  eligible_n={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap})={reject_cnt} · "
+            f"A2_AUDIT (cutoff vr5≤{vr5_cap} 사전등록·동결 · 결측=통과):",
+            f"  eligible={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap})={reject_cnt} · "
             f"reject_ratio={reject_ratio:.0f}%",
-            f"  shadow n={a2_n} (통과분만) · A×A2 paired 판정 대기 (common_n≥30 참고, 50 첫 판정)",
-            f"  ⚠ 통과 vs 차단 성과 직접 비교는 counterfactual (a2_vr5_filter.py) 로만 유효",
-            f"  ⚠ 필터검증 줄의 a2_vr5cap_fail wr% 는 base-rate 노이즈 (모든 fail 군 공통 ~46%)",
+            f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
+            f"(결측률 {missing_rate:.0f}%)",
+            f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
+            f"  ⚠ 결측군 성과가 유독 나쁘면 A2 효과 아닌 데이터 가용성 효과 · common_n 축적 시 3구간 분해 필요",
+            f"  ⚠ 필터검증 fail-WR = 효과 식별 불가 (모집단·중복·청산기준 미매칭) · paired shadow 만 유효",
         ]
         return "\n".join(lines)
     except Exception as exc:
@@ -2166,8 +2177,9 @@ def _common_cohort_paired_summary():
                 n = len(route_trades.get(label, {}))
                 _parts.append(f"{label}({r})={n}")
             return f"COMMON_COHORT (paired 대기): {' · '.join(_parts)} · common_n={len(_ids)} (30 참고 · 50 첫 판정)"
-        # 공통 페어 집계
+        # 공통 페어 집계 · 위험조정 지표 포함 (advisor 2 개선)
         lines = [f"COMMON_COHORT paired common_n={len(_ids)}:"]
+        arm_summaries = {}
         for label in ("CONTROL", "A", "A×A2"):
             if label not in route_trades:
                 continue
@@ -2176,10 +2188,42 @@ def _common_cohort_paired_summary():
                 continue
             pnls = [t.get("pnl", 0) for t in trades]
             wins = sum(1 for p in pnls if p > 0)
-            net = sum(pnls) / len(pnls) * 100 if pnls else 0
+            net_per = sum(pnls) / len(pnls) * 100 if pnls else 0
+            net_total = sum(pnls) * 100  # 총 수익 (기간 누적)
             wr = wins / len(pnls) * 100 if pnls else 0
-            lines.append(f"  {label}: net={net:+.3f}% WR={wr:.0f}% n={len(trades)}")
-        # delta vs CONTROL
+            # MDD (equal-weight 누적)
+            eq = 0
+            peak = 0
+            mdd = 0
+            for p in pnls:
+                eq += p
+                if eq > peak:
+                    peak = eq
+                _dd = peak - eq
+                if _dd > mdd:
+                    mdd = _dd
+            arm_summaries[label] = {
+                "n": len(trades), "net_per": net_per, "net_total": net_total,
+                "wr": wr, "mdd": mdd * 100
+            }
+            lines.append(
+                f"  {label}: n={len(trades)} net/건={net_per:+.3f}% 총net={net_total:+.2f}%p "
+                f"WR={wr:.0f}% MDD={mdd*100:.2f}%p"
+            )
+        # A2 기회비용: A 는 진입, A×A2 는 차단한 signal 의 A net 합계
+        if "A" in route_trades and "A×A2" in route_trades:
+            a_ids = set(route_trades["A"].keys())
+            a2_ids = set(route_trades["A×A2"].keys())
+            _dropped_by_a2 = a_ids - a2_ids  # A 는 진입, A×A2 는 차단
+            if _dropped_by_a2:
+                _dropped_pnls = [route_trades["A"][sid].get("pnl", 0) for sid in _dropped_by_a2]
+                _opp_cost = sum(_dropped_pnls) * 100
+                _opp_avg = _opp_cost / len(_dropped_pnls) if _dropped_pnls else 0
+                lines.append(
+                    f"  A2 기회비용: A 진입·A2 차단 {len(_dropped_by_a2)}건 → "
+                    f"총 net {_opp_cost:+.2f}%p (평균 {_opp_avg:+.3f}%/건)"
+                )
+        # delta vs CONTROL (paired 순수 효과)
         if "CONTROL" in route_trades:
             ctrl_pnls = {sid: route_trades["CONTROL"][sid].get("pnl", 0)
                         for sid in _ids if sid in route_trades["CONTROL"]}
@@ -16196,8 +16240,8 @@ def _v4_shadow_report_lines():
                     # 46-54% = base-rate 노이즈 밴드 (advisor: 모든 fail 군 공통 ~46%)
                     # A2 오독 방지: 47% 같은 값을 필터 신호로 해석 금지
                     _review_lines.append(
-                        f"  🔸 {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}% [base-rate 노이즈]")
-            _blk_summary = f"🚫 필터검증 (base-rate ~46% · 이상치만 신호): ✅유효{_valid_cnt}개"
+                        f"  🔸 {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}% [효과 식별 불가]")
+            _blk_summary = f"🚫 필터검증 (46-54%=효과 식별 불가 · 비매칭 fail군 · 이상치만 신호): ✅유효{_valid_cnt}개"
             if _review_lines:
                 _blk_summary += f" ⚠재검토{len(_review_lines)}개"
             if _blocked_pending > 0:
