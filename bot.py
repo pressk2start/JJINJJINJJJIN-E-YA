@@ -2019,16 +2019,15 @@ def _shadow_exit_engine_config_summary():
 
 
 def _shadow_contamination_check():
-    """A_CLEAN 순도 이중 검증 (advisor 2 정정 수용):
-    설정 OFF + 실제 exit_reason 0건 이중 확인.
+    """A_CLEAN VALIDATION 게이트 (advisor 2 3회 수렴 · PASS/FAIL 승격).
 
-    허용 exit_reason: TRAIL_HIT (AT익절) · HOLD_CAP (AT타임아웃) · HARD_STOP (손절SL)
-    금지 exit_reason: 본절SL · AT본절 · early_SL (hold<180s 손절SL)
+    설정 OFF + 실측 금지 exit_reason 0건 이중 확인 → VALID / CONTAMINATED / CONFIG_FAIL
 
-    금지 이유:
-    - 본절SL: disable_trail=True 로 우회되어야 함 (shadow simulator)
-    - AT본절: 트레일 stop 이 entry 아래로 갔음 (본절 로직 아니지만 참고)
-    - early_SL: A arm 이전 SL = A 트레일 무장 전 종료 · A 클린 아님
+    ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단 (advisor 2 게이트 스펙).
+
+    허용 exit_reason: TRAIL_HIT (AT익절) · HOLD_CAP (AT타임아웃) · HARD_STOP (손절SL 180s+)
+    금지 exit_reason: 본절SL · early_SL (hold<180s 손절SL)
+    참고 exit_reason: AT본절 (shadow 라벨 · 실 본절 아님)
     """
     try:
         contam_routes = {"CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
@@ -2060,27 +2059,33 @@ def _shadow_contamination_check():
                 hold_cap = sum(1 for t in _trs if t.get("exit_reason") == "AT타임아웃")
                 far_stop = sum(1 for t in _trs
                                if t.get("exit_reason") == "손절SL" and t.get("hold", 0) >= 180)
-                # 이중 검증 판정
+                # VALIDATION 게이트 판정 (advisor 2: PASS/FAIL 승격)
                 config_ok = config_be_off and config_tiered_off
                 exit_ok = (be_sl == 0 and early_sl == 0)
                 if config_ok and exit_ok:
-                    verdict = "✅ CLEAN (설정+실측 이중검증)"
+                    verdict = "✅ VALID"
+                    status_note = "(성과 해석 가능)"
                 elif not config_ok:
-                    verdict = f"⚠ CONFIG_FAIL (be_off={config_be_off} tiered_off={config_tiered_off})"
+                    verdict = "❌ CONFIG_FAIL"
+                    status_note = f"(be_off={config_be_off} tiered_off={config_tiered_off} · 성과 해석 금지)"
                 elif not exit_ok:
-                    verdict = f"⚠ CONTAMINATED (실측: 본절SL={be_sl} early_SL={early_sl})"
+                    verdict = "❌ CONTAMINATED"
+                    status_note = f"(본절SL={be_sl} early_SL={early_sl} · 성과 해석 금지)"
                 else:
-                    verdict = "⚠ UNKNOWN"
+                    verdict = "❌ UNKNOWN"
+                    status_note = "(성과 해석 금지)"
                 lines.append(
                     f"  {route} n={n}: 설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}] "
                     f"실측[본절SL={be_sl} early_SL={early_sl} AT본절={at_be}] "
-                    f"허용[AT익절={trail_hit} AT타임아웃={hold_cap} far_SL={far_stop}] → {verdict}"
+                    f"허용[AT익절={trail_hit} AT타임아웃={hold_cap} far_SL={far_stop}]"
                 )
+                lines.append(f"    → {verdict} {status_note}")
         if not lines:
             return ""
-        return "A_CLEAN 순도 이중검증 (설정 OFF + 금지 exit_reason 0건):\n" + "\n".join(lines)
+        return ("A_CLEAN_VALIDATION 게이트 (VALID 아니면 성과 회색처리):\n" +
+                "\n".join(lines))
     except Exception as exc:
-        return f"A_CLEAN 순도: ERROR {exc}"
+        return f"A_CLEAN_VALIDATION: ERROR {exc}"
 
 
 def _a2_audit_summary():
@@ -2128,14 +2133,19 @@ def _a2_audit_summary():
         reject_ratio = reject_cnt / eligible * 100
         missing_rate = (vr5_missing / a2_n * 100) if a2_n > 0 else 0
         lines = [
-            f"A2_AUDIT (cutoff vr5≤{vr5_cap} 사전등록·동결 · 결측=통과):",
+            f"A2_STATUS: cutoff=vr5≤{vr5_cap} · state=🔒 FROZEN (재튜닝 = 전향검증 무효)",
+            f"  변경 조건 (3중 · 모두 필요):",
+            f"    □ common_n ≥ 50",
+            f"    □ paired A×A2 shadow 결과 확정",
+            f"    □ reviewer 승인",
+            f"A2_AUDIT (결측=통과):",
             f"  eligible={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap})={reject_cnt} · "
             f"reject_ratio={reject_ratio:.0f}%",
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
-            f"  ⚠ 결측군 성과가 유독 나쁘면 A2 효과 아닌 데이터 가용성 효과 · common_n 축적 시 3구간 분해 필요",
-            f"  ⚠ 필터검증 fail-WR = 효과 식별 불가 (모집단·중복·청산기준 미매칭) · paired shadow 만 유효",
+            f"  ⚠ 결측군 성과 유독 나쁘면 A2 효과 아닌 데이터 가용성 효과 · common_n 축적 시 3구간 분해",
+            f"  ⚠ 필터검증 fail-WR = 효과 식별 불가 · paired shadow 만 유효",
         ]
         return "\n".join(lines)
     except Exception as exc:
@@ -2170,15 +2180,24 @@ def _common_cohort_paired_summary():
         if len(route_trades) < 2:
             return ""
         _ids = set.intersection(*(set(rt.keys()) for rt in route_trades.values())) if route_trades else set()
+        # progress bar (target 30 = 방향 참고 시작)
+        _target = 30
+        _pct = min(100, len(_ids) / _target * 100)
+        _filled = int(_pct / 5)  # 20 blocks total
+        _bar = "█" * _filled + "░" * (20 - _filled)
+        _bar_line = f"  progress: {_bar} {_pct:.0f}% (target={_target})"
         if len(_ids) < 3:
             # 표본 부족 · 개별 route n 만 노출
-            _parts = []
+            lines = ["COMMON_COHORT (paired 대기):"]
             for label, r in target_routes.items():
                 n = len(route_trades.get(label, {}))
-                _parts.append(f"{label}({r})={n}")
-            return f"COMMON_COHORT (paired 대기): {' · '.join(_parts)} · common_n={len(_ids)} (30 참고 · 50 첫 판정)"
+                lines.append(f"  {label} ({r}): {n}")
+            lines.append(f"  paired_common: {len(_ids)}")
+            lines.append(_bar_line)
+            lines.append(f"  판정 단계: <30 수집만 · 30-49 참고 · 50-99 첫판정 · 100+ 승격")
+            return "\n".join(lines)
         # 공통 페어 집계 · 위험조정 지표 포함 (advisor 2 개선)
-        lines = [f"COMMON_COHORT paired common_n={len(_ids)}:"]
+        lines = [f"COMMON_COHORT paired common_n={len(_ids)}:", _bar_line]
         arm_summaries = {}
         for label in ("CONTROL", "A", "A×A2"):
             if label not in route_trades:

@@ -160,14 +160,70 @@ climax_vr3_fail: 46%  climax_a2_vr5cap_fail: 47%
 - 필터검증 줄: **A2 지지도 반증도 안 됨** (base-rate 노이즈)
 - **유일한 라이브 판정 = 동일 signal_id paired A×A2 shadow (n=1→30)**
 
-### 필터검증 해석 규율
-- ✅ 유효 (필터 정상): wr ≤ 45% (손실군 자름 명확)
-- ⚠ 이상치 (재검토): wr ≥ 55% (승자 자를 위험 명확)
-- 🔸 base-rate 노이즈 (해석 금지): 46~54% (A2 오독 방지 · 필터 신호 아님)
+### 필터검증 해석 규율 (advisor 2 3회 수렴 · 최종)
+- ✅ 유효 (필터 정상): wr ≤ 45%
+- ⚠ 이상치 (재검토): wr ≥ 55%
+- 🔸 **효과 식별 불가**: 46-54% (advisor 2 정확 라벨 · A2 오독 방지)
 
-### 리포트에도 이 규율 배선 (bot.py:16116)
-`"🚫 필터검증 (base-rate ~46% · 이상치만 신호)"` 헤더 명시.
-46-54% 항목에 `[base-rate 노이즈]` 태그 자동 표시.
+### 리포트 배선 (bot.py:16116)
+`"🚫 필터검증 (46-54%=효과 식별 불가 · 비매칭 fail군 · 이상치만 신호)"` 헤더.
+46-54% 항목에 `[효과 식별 불가]` 태그 자동 표시.
+
+## 등급 5단계 규율 (advisor 2 최종 스펙)
+
+```
+OBSERVED    → 패턴 관찰만 · 아직 후보 아님
+   ↓
+HYPOTHESIS  → feature_screen 등이 내놓은 후보 · Shadow 이전 (advisor 2 신규)
+   ↓
+SHADOW      → 임계값 사전등록 · 전향 병렬 관측
+   ↓
+ELIGIBLE    → 사전 게이트 전체 통과 · 극소액 LIVE 검토
+   ↓
+LIVE        → 실주문 (사람 승인 필요)
+```
+
+**HYPOTHESIS 등급 신설 이유** (advisor 2):
+- feature_screen 결과는 아직 Shadow 아님 · "이런 현상이 보인다" 수준
+- OBSERVED → SHADOW 직행하면 feature_screen 결과가 전략처럼 읽힘
+- HYPOTHESIS 등급 = "코드로 배선 가능한 형태로 정리되었으나 아직 shadow 미착수"
+
+## A_CLEAN VALIDATION 게이트 (advisor 2 3회 수렴)
+
+**VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.**
+```
+A_CLEAN_VALIDATION 게이트 (VALID 아니면 성과 회색처리):
+  CLM_A_CLEAN_bp30 n=N: 설정[BE=OFF=X, tiered=OFF=Y] 실측[본절SL=A early_SL=B AT본절=C] 허용[AT익절=X AT타임아웃=Y far_SL=Z]
+    → ✅ VALID (성과 해석 가능)
+```
+또는:
+```
+    → ❌ CONTAMINATED (본절SL=X early_SL=Y · 성과 해석 금지)
+    → ❌ CONFIG_FAIL (be_off=X tiered_off=Y · 성과 해석 금지)
+```
+
+## A2 STATUS FROZEN (advisor 2 · 재튜닝 방지)
+
+**cutoff 3.5 동결** · 재튜닝 = 전향검증 무효.
+변경 3중 조건 (모두 필요):
+- common_n ≥ 50
+- paired A×A2 shadow 결과 확정
+- reviewer 승인
+
+리포트가 스스로 재튜닝 시도 (3.3, 3.8 등) 를 규율로 차단.
+
+## COMMON_COHORT progress bar (advisor 2)
+
+paired_common_n 진행률 · target 30 (방향 참고 시작):
+```
+COMMON_COHORT (paired 대기):
+  CONTROL: 148
+  A: 6
+  A×A2: 1
+  paired_common: 6
+  progress: ████░░░░░░░░░░░░░░░░ 20% (target=30)
+  판정 단계: <30 수집만 · 30-49 참고 · 50-99 첫판정 · 100+ 승격
+```
 
 ## 착수 선행조건 (강화, 재배포 34시간 정체 반영)
 1. **SHA 3중 확인** (신구 프로세스 이벤트 섞임 방지)
