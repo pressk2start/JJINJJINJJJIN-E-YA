@@ -2019,11 +2019,15 @@ def _shadow_exit_engine_config_summary():
 
 
 def _shadow_contamination_check():
-    """A_CLEAN VALIDATION 게이트 (advisor 2 3회 수렴 · PASS/FAIL 승격).
+    """A_CLEAN VALIDATION 게이트 (advisor 2 최종 · 4-state PASS/FAIL/PENDING).
 
-    설정 OFF + 실측 금지 exit_reason 0건 이중 확인 → VALID / CONTAMINATED / CONFIG_FAIL
+    4-state 판정 (advisor 2 마지막 조임 · "청산 0건인데 VALID 오인" 방지):
+      ✅ VALID              : 설정 OFF + 실측 청산 발생 + 금지 exit 0건
+      ⏳ PENDING_NO_EXIT    : 청산 이벤트 0건 (미확정 · 표본 부족)
+      ❌ CONTAMINATED       : 실측 본절SL/early_SL 발생 · 표본 무효
+      ❌ CONFIG_FAIL        : 설정 자체 실패 (be_off/tiered_off 없음)
 
-    ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단 (advisor 2 게이트 스펙).
+    ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
     허용 exit_reason: TRAIL_HIT (AT익절) · HOLD_CAP (AT타임아웃) · HARD_STOP (손절SL 180s+)
     금지 exit_reason: 본절SL · early_SL (hold<180s 손절SL)
