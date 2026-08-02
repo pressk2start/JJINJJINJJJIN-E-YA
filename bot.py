@@ -2019,19 +2019,26 @@ def _shadow_exit_engine_config_summary():
 
 
 def _shadow_contamination_check():
-    """A_CLEAN VALIDATION 게이트 (advisor 2 최종 · 4-state PASS/FAIL/PENDING).
+    """A_CLEAN VALIDATION 게이트 (advisor 3회 수렴 · 4-state · AT본절 금지 추가 버그수정).
 
-    4-state 판정 (advisor 2 마지막 조임 · "청산 0건인데 VALID 오인" 방지):
-      ✅ VALID              : 설정 OFF + 실측 청산 발생 + 금지 exit 0건
+    4-state 판정:
+      ✅ VALID              : 설정 OFF + 실측 청산 발생 + 모든 금지 exit 0건
       ⏳ PENDING_NO_EXIT    : 청산 이벤트 0건 (미확정 · 표본 부족)
-      ❌ CONTAMINATED       : 실측 본절SL/early_SL 발생 · 표본 무효
+      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/early_SL/AT본절) 발생
       ❌ CONFIG_FAIL        : 설정 자체 실패 (be_off/tiered_off 없음)
 
     ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
-    허용 exit_reason: TRAIL_HIT (AT익절) · HOLD_CAP (AT타임아웃) · HARD_STOP (손절SL 180s+)
-    금지 exit_reason: 본절SL · early_SL (hold<180s 손절SL)
-    참고 exit_reason: AT본절 (shadow 라벨 · 실 본절 아님)
+    허용 exit_reason: AT익절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
+    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL) · AT본절/AT소손절
+
+    AT본절 포함 이유 (2026-08-02 advisor 양세션 버그 수정):
+    - 이전 검증기: 본절SL·early_SL 만 체크 → AT본절=2 인데 VALID 오판
+    - A 스펙: BE=OFF 이면 본절성 청산 (AT본절 = trail stop 이 entry 이하 hit) 0건이어야
+    - AT본절 > 0 원인 후보: (1)legacy 데이터 혼입 (2)disable_breakeven 배선 미완
+    - 어느 쪽이든 표본 오염 → CONTAMINATED
+    - baseline 리셋 이후 새 거래에서 AT본절=0 이면 (1) legacy 확정
+      계속 >0 이면 (2) 배선 미완 · exit 엔진 재감사 필요
     """
     try:
         contam_routes = {"CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
@@ -2063,10 +2070,11 @@ def _shadow_contamination_check():
                 hold_cap = sum(1 for t in _trs if t.get("exit_reason") == "AT타임아웃")
                 far_stop = sum(1 for t in _trs
                                if t.get("exit_reason") == "손절SL" and t.get("hold", 0) >= 180)
-                # VALIDATION 게이트 판정 (advisor 2 3회 수렴 · PENDING_NO_EXIT 추가)
+                # VALIDATION 게이트 판정 (2026-08-02 AT본절 금지 추가 버그수정)
                 config_ok = config_be_off and config_tiered_off
-                exit_ok = (be_sl == 0 and early_sl == 0)
-                # 실측 청산 이벤트 총합 (advisor 2 정정: 청산 0건이면 check=OK 오도)
+                # 금지 exit: 본절SL + early_SL + AT본절/AT소손절 (advisor 양세션 확정)
+                # AT본절 = adaptive trail stop 이 entry 이하 hit · A 스펙 위반
+                exit_ok = (be_sl == 0 and early_sl == 0 and at_be == 0)
                 total_exits = trail_hit + hold_cap + far_stop + be_sl + at_be + early_sl
                 if not config_ok:
                     verdict = "❌ CONFIG_FAIL"
@@ -2075,8 +2083,13 @@ def _shadow_contamination_check():
                     verdict = "⏳ PENDING_NO_EXIT"
                     status_note = "(청산 이벤트 0건 · 실측 미확정 · 성과 해석 금지)"
                 elif not exit_ok:
+                    _forbidden_parts = []
+                    if be_sl > 0: _forbidden_parts.append(f"본절SL={be_sl}")
+                    if early_sl > 0: _forbidden_parts.append(f"early_SL={early_sl}")
+                    if at_be > 0: _forbidden_parts.append(f"AT본절={at_be}")
                     verdict = "❌ CONTAMINATED"
-                    status_note = f"(본절SL={be_sl} early_SL={early_sl} · 성과 해석 금지)"
+                    status_note = (f"({' '.join(_forbidden_parts)} · 성과 해석 금지 · "
+                                   f"legacy 혼입 or 배선미완 감사 필요)")
                 else:
                     verdict = "✅ VALID"
                     status_note = f"(설정+실측 이중검증 · 청산 {total_exits}건 · 성과 해석 가능)"
