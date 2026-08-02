@@ -2060,44 +2060,80 @@ def _shadow_contamination_check():
                 config_be_off = cfg.get("disable_breakeven", False) if cfg else False
                 config_tiered_off = not bool(cfg.get("sl_tiers")) if cfg else False
                 _trs = s.get("trade_records", [])
-                # 청산 이유 카운트
-                be_sl = sum(1 for t in _trs if t.get("exit_reason") == "본절SL")
-                at_be = sum(1 for t in _trs if t.get("exit_reason") == "AT본절")
-                early_sl = sum(1 for t in _trs
-                               if t.get("exit_reason") == "손절SL" and t.get("hold", 0) < 180)
-                # 허용 청산
-                trail_hit = sum(1 for t in _trs if t.get("exit_reason") == "AT익절")
-                hold_cap = sum(1 for t in _trs if t.get("exit_reason") == "AT타임아웃")
-                far_stop = sum(1 for t in _trs
-                               if t.get("exit_reason") == "손절SL" and t.get("hold", 0) >= 180)
-                # VALIDATION 게이트 판정 (2026-08-02 AT본절 금지 추가 버그수정)
+                # epoch 분리 (advisor 2 개선 1): 현 epoch 이후 청산만으로 재계산
+                # legacy (배선 전) vs 현 epoch (배선 후) 명확 분리
+                # trade_record 에 route_epoch 필드 없으면 exit_ts 로 필터 (best effort)
+                def _in_epoch(t):
+                    _ep = t.get("route_epoch") or t.get("epoch")
+                    if _ep is not None:
+                        return _ep == _OBSERVE_EPOCH
+                    # fallback: exit_ts 가 process_start_ts 이후이면 현 epoch
+                    _ets = t.get("exit_ts", 0) or 0
+                    return _ets >= _PROCESS_START_TS
+                _epoch_trs = [t for t in _trs if _in_epoch(t)]
+                _legacy_trs = [t for t in _trs if not _in_epoch(t)]
+                # 청산 이유 카운트 (epoch 분리)
+                def _count_by_reason(trades, reason, hold_cond=None):
+                    cnt = 0
+                    for t in trades:
+                        if t.get("exit_reason") == reason:
+                            if hold_cond is None or hold_cond(t.get("hold", 0)):
+                                cnt += 1
+                    return cnt
+                # 현 epoch 카운트
+                be_sl_e = _count_by_reason(_epoch_trs, "본절SL")
+                at_be_e = _count_by_reason(_epoch_trs, "AT본절")
+                early_sl_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h < 180)
+                trail_hit_e = _count_by_reason(_epoch_trs, "AT익절")
+                hold_cap_e = _count_by_reason(_epoch_trs, "AT타임아웃")
+                far_stop_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h >= 180)
+                total_exits_e = trail_hit_e + hold_cap_e + far_stop_e + be_sl_e + at_be_e + early_sl_e
+                # legacy 카운트 (표시용)
+                be_sl_l = _count_by_reason(_legacy_trs, "본절SL")
+                at_be_l = _count_by_reason(_legacy_trs, "AT본절")
+                early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
+                legacy_forbidden = be_sl_l + at_be_l + early_sl_l
+                # VALIDATION 게이트 판정 (advisor 2 개선 1 · epoch-aware)
                 config_ok = config_be_off and config_tiered_off
-                # 금지 exit: 본절SL + early_SL + AT본절/AT소손절 (advisor 양세션 확정)
-                # AT본절 = adaptive trail stop 이 entry 이하 hit · A 스펙 위반
-                exit_ok = (be_sl == 0 and early_sl == 0 and at_be == 0)
-                total_exits = trail_hit + hold_cap + far_stop + be_sl + at_be + early_sl
+                exit_ok = (be_sl_e == 0 and early_sl_e == 0 and at_be_e == 0)
+                # 신규 상태: PENDING_EPOCH_ISOLATION (legacy 표본만 있고 현 epoch 청산 0)
                 if not config_ok:
                     verdict = "❌ CONFIG_FAIL"
                     status_note = f"(be_off={config_be_off} tiered_off={config_tiered_off} · 성과 해석 금지)"
-                elif total_exits == 0:
+                elif total_exits_e == 0 and len(_legacy_trs) > 0:
+                    verdict = "⏳ PENDING_EPOCH_ISOLATION"
+                    status_note = (
+                        f"(legacy {len(_legacy_trs)}건만 있음 · 현 epoch 청산 0 · "
+                        f"legacy vs 배선미완 판별 대기 · 성과 해석 금지)"
+                    )
+                elif total_exits_e == 0:
                     verdict = "⏳ PENDING_NO_EXIT"
                     status_note = "(청산 이벤트 0건 · 실측 미확정 · 성과 해석 금지)"
                 elif not exit_ok:
                     _forbidden_parts = []
-                    if be_sl > 0: _forbidden_parts.append(f"본절SL={be_sl}")
-                    if early_sl > 0: _forbidden_parts.append(f"early_SL={early_sl}")
-                    if at_be > 0: _forbidden_parts.append(f"AT본절={at_be}")
+                    if be_sl_e > 0: _forbidden_parts.append(f"본절SL={be_sl_e}")
+                    if early_sl_e > 0: _forbidden_parts.append(f"early_SL={early_sl_e}")
+                    if at_be_e > 0: _forbidden_parts.append(f"AT본절={at_be_e}")
                     verdict = "❌ CONTAMINATED"
-                    status_note = (f"({' '.join(_forbidden_parts)} · 성과 해석 금지 · "
-                                   f"legacy 혼입 or 배선미완 감사 필요)")
+                    status_note = (f"({' '.join(_forbidden_parts)} · 현 epoch · "
+                                   f"배선 미완 확정 · exit 엔진 재감사 필요 · 성과 해석 금지)")
                 else:
                     verdict = "✅ VALID"
-                    status_note = f"(설정+실측 이중검증 · 청산 {total_exits}건 · 성과 해석 가능)"
+                    status_note = f"(현 epoch 청산 {total_exits_e}건 · 금지 exit 0 · 성과 해석 가능)"
+                # 상세 라인
                 lines.append(
-                    f"  {route} n={n}: 설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}] "
-                    f"실측[본절SL={be_sl} early_SL={early_sl} AT본절={at_be}] "
-                    f"허용[AT익절={trail_hit} AT타임아웃={hold_cap} far_SL={far_stop}]"
+                    f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건): "
+                    f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
+                lines.append(
+                    f"    epoch 실측: 본절SL={be_sl_e} early_SL={early_sl_e} AT본절={at_be_e} · "
+                    f"허용[AT익절={trail_hit_e} AT타임아웃={hold_cap_e} far_SL={far_stop_e}]"
+                )
+                if legacy_forbidden > 0:
+                    lines.append(
+                        f"    legacy 참고: 본절SL={be_sl_l} early_SL={early_sl_l} AT본절={at_be_l} "
+                        f"(배선 전 표본 · 판정 제외)"
+                    )
                 lines.append(f"    → {verdict} {status_note}")
         if not lines:
             return ""
@@ -2793,9 +2829,10 @@ def _pipeline_report(force=False):
         f" PnL{_live_pnl*100:+.2f}%/{_limit_str}{_guard_warn}",
     ]
     # ACTION 라인 — 운영 판단 자동 요약
+    # advisor 2 개선: "신규진입 중단" (능동 차단으로 오해) → "신규진입 없음(raw=0)" 명확화
     _act = []
     if _succ == 0 and _raw == 0:
-        _act.append("신규진입 중단")
+        _act.append("신규진입 없음(raw=0 · 능동차단 아님)")
     elif _succ == 0 and _raw > 0:
         # POST accounting 로 정확 표현 (오판 유발 방지)
         try:
