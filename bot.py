@@ -16108,12 +16108,15 @@ def _v4_shadow_report_lines():
                 if bwr <= 45:
                     _valid_cnt += 1
                 elif bwr >= 55:
+                    # 진짜 이상치: base-rate (46%) 대비 +9%p 이상
                     _review_lines.append(
-                        f"  ⚠ {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}%")
+                        f"  ⚠ {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}% (이상치)")
                 else:
+                    # 46-54% = base-rate 노이즈 밴드 (advisor: 모든 fail 군 공통 ~46%)
+                    # A2 오독 방지: 47% 같은 값을 필터 신호로 해석 금지
                     _review_lines.append(
-                        f"  🔸 {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}%")
-            _blk_summary = f"🚫 필터검증: ✅유효{_valid_cnt}개"
+                        f"  🔸 {broute}:{bfilter} {bn}건 승률{bwr:.0f}% {bavg:+.2f}% [base-rate 노이즈]")
+            _blk_summary = f"🚫 필터검증 (base-rate ~46% · 이상치만 신호): ✅유효{_valid_cnt}개"
             if _review_lines:
                 _blk_summary += f" ⚠재검토{len(_review_lines)}개"
             if _blocked_pending > 0:
