@@ -2059,21 +2059,23 @@ def _shadow_contamination_check():
                 hold_cap = sum(1 for t in _trs if t.get("exit_reason") == "AT타임아웃")
                 far_stop = sum(1 for t in _trs
                                if t.get("exit_reason") == "손절SL" and t.get("hold", 0) >= 180)
-                # VALIDATION 게이트 판정 (advisor 2: PASS/FAIL 승격)
+                # VALIDATION 게이트 판정 (advisor 2 3회 수렴 · PENDING_NO_EXIT 추가)
                 config_ok = config_be_off and config_tiered_off
                 exit_ok = (be_sl == 0 and early_sl == 0)
-                if config_ok and exit_ok:
-                    verdict = "✅ VALID"
-                    status_note = "(성과 해석 가능)"
-                elif not config_ok:
+                # 실측 청산 이벤트 총합 (advisor 2 정정: 청산 0건이면 check=OK 오도)
+                total_exits = trail_hit + hold_cap + far_stop + be_sl + at_be + early_sl
+                if not config_ok:
                     verdict = "❌ CONFIG_FAIL"
                     status_note = f"(be_off={config_be_off} tiered_off={config_tiered_off} · 성과 해석 금지)"
+                elif total_exits == 0:
+                    verdict = "⏳ PENDING_NO_EXIT"
+                    status_note = "(청산 이벤트 0건 · 실측 미확정 · 성과 해석 금지)"
                 elif not exit_ok:
                     verdict = "❌ CONTAMINATED"
                     status_note = f"(본절SL={be_sl} early_SL={early_sl} · 성과 해석 금지)"
                 else:
-                    verdict = "❌ UNKNOWN"
-                    status_note = "(성과 해석 금지)"
+                    verdict = "✅ VALID"
+                    status_note = f"(설정+실측 이중검증 · 청산 {total_exits}건 · 성과 해석 가능)"
                 lines.append(
                     f"  {route} n={n}: 설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}] "
                     f"실측[본절SL={be_sl} early_SL={early_sl} AT본절={at_be}] "
@@ -2105,12 +2107,17 @@ def _a2_audit_summary():
                 if "a2_vr5cap_fail" in k:
                     reject_cnt += v
             a2_cand = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_candidate", 0)
-        # A2 shadow perf 로부터 vr5 분포 집계
+        # A2 shadow perf 로부터 vr5 분포 집계 · 결측군 편중 감사 (advisor 2)
         a2_route = "CLM_A_x_A2_bp30"
         a2_n = 0
         vr5_present = 0
         vr5_missing = 0
         vr5_pass_low = 0
+        # 결측군 편중 감사: 코인·시간대 분포
+        missing_by_market = {}
+        missing_by_hour = {}
+        present_pnls = []
+        missing_pnls = []
         with _SHADOW_PERF_LOCK:
             for key, s in _SHADOW_PERF_STATS.items():
                 if s.get("route") != a2_route:
@@ -2120,10 +2127,18 @@ def _a2_audit_summary():
                 for t in _trs:
                     inds = t.get("indicators", {}) or {}
                     vr5 = inds.get("vr5") if isinstance(inds, dict) else None
+                    pnl = t.get("pnl", 0)
                     if vr5 is None:
                         vr5_missing += 1
+                        missing_pnls.append(pnl)
+                        _mkt = t.get("market", "?")
+                        missing_by_market[_mkt] = missing_by_market.get(_mkt, 0) + 1
+                        _hr = t.get("kst_hour")
+                        if _hr is not None:
+                            missing_by_hour[_hr] = missing_by_hour.get(_hr, 0) + 1
                     else:
                         vr5_present += 1
+                        present_pnls.append(pnl)
                         if vr5 <= vr5_cap:
                             vr5_pass_low += 1
                 break
@@ -2144,9 +2159,26 @@ def _a2_audit_summary():
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
+        ]
+        # 결측군 편중 감사 (advisor 2)
+        if vr5_missing >= 3:
+            _mp_avg = (sum(missing_pnls) / len(missing_pnls) * 100) if missing_pnls else 0
+            _pp_avg = (sum(present_pnls) / len(present_pnls) * 100) if present_pnls else 0
+            _diff = _mp_avg - _pp_avg
+            lines.append(
+                f"  결측군 감사: present net={_pp_avg:+.3f}% vs missing net={_mp_avg:+.3f}% "
+                f"(Δ {_diff:+.3f}%p)"
+            )
+            if missing_by_market:
+                _top_mkt = sorted(missing_by_market.items(), key=lambda x: -x[1])[:3]
+                _mkt_str = " ".join(f"{m}({c})" for m, c in _top_mkt)
+                lines.append(f"    결측 top 코인: {_mkt_str}")
+            if abs(_diff) >= 0.20:
+                lines.append(f"    ⚠ 결측군 성과 차이 |Δ|≥0.20%p · A2 효과 vs 데이터 가용성 효과 감사 필요")
+        lines.extend([
             f"  ⚠ 결측군 성과 유독 나쁘면 A2 효과 아닌 데이터 가용성 효과 · common_n 축적 시 3구간 분해",
             f"  ⚠ 필터검증 fail-WR = 효과 식별 불가 · paired shadow 만 유효",
-        ]
+        ])
         return "\n".join(lines)
     except Exception as exc:
         return f"A2_AUDIT: ERROR {exc}"
@@ -2242,6 +2274,26 @@ def _common_cohort_paired_summary():
                     f"  A2 기회비용: A 진입·A2 차단 {len(_dropped_by_a2)}건 → "
                     f"총 net {_opp_cost:+.2f}%p (평균 {_opp_avg:+.3f}%/건)"
                 )
+        # 매칭 불변식 (advisor 2: paired 무결성 확인)
+        # duplicate_signal_id / missing_arm / entry timestamp mismatch
+        _dup_check = {}
+        for label in route_trades:
+            _dup_check[label] = len(route_trades[label]) - len(set(route_trades[label].keys()))
+        _has_dup = any(v > 0 for v in _dup_check.values())
+        _missing_arm = {}
+        for label in target_routes:
+            if label in route_trades:
+                _missing_arm[label] = len(_ids) - sum(1 for sid in _ids if sid in route_trades[label])
+        _has_missing = any(v > 0 for v in _missing_arm.values())
+        if _has_dup or _has_missing:
+            _inv_parts = []
+            if _has_dup:
+                _inv_parts.append(f"duplicate_signal_id={_dup_check}")
+            if _has_missing:
+                _inv_parts.append(f"missing_arm={_missing_arm}")
+            lines.append(f"  ⚠ 매칭 불변식 위반: {' · '.join(_inv_parts)}")
+        else:
+            lines.append(f"  ✅ 매칭 불변식: duplicate=0 · missing_arm=0")
         # delta vs CONTROL (paired 순수 효과)
         if "CONTROL" in route_trades:
             ctrl_pnls = {sid: route_trades["CONTROL"][sid].get("pnl", 0)
