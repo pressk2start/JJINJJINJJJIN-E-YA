@@ -2217,6 +2217,18 @@ def _a2_audit_summary():
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
         ]
+        # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
+        if eligible >= 100 and vr5_pass_low < 5:
+            lines.append(
+                f"  🚫 A2 EXPERIMENT_INFEASIBLE: eligible={eligible}≥100 · vr5≤{vr5_cap} 통과 "
+                f"{vr5_pass_low}<5 · 현 라이브 신호 분포에서 표본 생성 불가 · cutoff 재튜닝 X · "
+                f"'A×A2 전향검증 불능' 종료 후보"
+            )
+        elif eligible >= 30 and reject_ratio >= 90:
+            lines.append(
+                f"  ⚠ A2 표본 생성률 낮음: eligible={eligible} reject_ratio={reject_ratio:.0f}% "
+                f"· 100건까지 관찰 후 EXPERIMENT_INFEASIBLE 판정"
+            )
         # 결측군 편중 감사 (advisor 2)
         if vr5_missing >= 3:
             _mp_avg = (sum(missing_pnls) / len(missing_pnls) * 100) if missing_pnls else 0
@@ -2268,22 +2280,39 @@ def _common_cohort_paired_summary():
         # 공통 signal_id 만
         if len(route_trades) < 2:
             return ""
-        _ids = set.intersection(*(set(rt.keys()) for rt in route_trades.values())) if route_trades else set()
-        # progress bar (target 30 = 방향 참고 시작)
+        # advisor 2 정정 1: 2-arm cohort 분리 (triple 만 보면 A2 100% reject 시 원인 판별 불가)
+        # CONTROL_A: CONTROL ∩ A (A2 무관, A 검증 가능)
+        # A_A2: A ∩ A×A2 (A2 효과)
+        # triple: CONTROL ∩ A ∩ A×A2 (3-arm 최종)
+        ctrl_ids = set(route_trades.get("CONTROL", {}).keys())
+        a_ids = set(route_trades.get("A", {}).keys())
+        a2_ids = set(route_trades.get("A×A2", {}).keys())
+        control_a_common = ctrl_ids & a_ids
+        a_a2_common = a_ids & a2_ids
+        triple_common = ctrl_ids & a_ids & a2_ids
+        _ids = triple_common  # 기존 로직 호환
+        # progress bar (target 30 = 방향 참고 시작 · CONTROL_A 기준)
         _target = 30
-        _pct = min(100, len(_ids) / _target * 100)
-        _filled = int(_pct / 5)  # 20 blocks total
+        _pct = min(100, len(control_a_common) / _target * 100)
+        _filled = int(_pct / 5)
         _bar = "█" * _filled + "░" * (20 - _filled)
-        _bar_line = f"  progress: {_bar} {_pct:.0f}% (target={_target})"
-        if len(_ids) < 3:
-            # 표본 부족 · 개별 route n 만 노출
-            lines = ["COMMON_COHORT (paired 대기):"]
+        _bar_line = f"  progress (CONTROL_A): {_bar} {_pct:.0f}% (target={_target})"
+        if len(triple_common) < 3:
+            # 표본 부족 · 2-arm 분리 노출 (advisor 2: 원인 판별)
+            lines = ["COMMON_COHORT (paired 대기 · 2-arm 분리):"]
             for label, r in target_routes.items():
                 n = len(route_trades.get(label, {}))
                 lines.append(f"  {label} ({r}): {n}")
-            lines.append(f"  paired_common: {len(_ids)}")
+            lines.append(f"  CONTROL_A_common: {len(control_a_common)}  ← A 검증 가능 (A2 무관)")
+            lines.append(f"  A_A2_common: {len(a_a2_common)}  ← A2 효과 검증")
+            lines.append(f"  triple_common: {len(triple_common)}  ← 3-arm 최종")
             lines.append(_bar_line)
             lines.append(f"  판정 단계: <30 수집만 · 30-49 참고 · 50-99 첫판정 · 100+ 승격")
+            # advisor 2: 원인 판별 규율
+            if len(control_a_common) > 0 and len(triple_common) == 0:
+                lines.append(f"  진단: CONTROL_A>0 · triple=0 → A2 100% reject 원인 (매칭 정상)")
+            elif len(control_a_common) == 0 and len(ctrl_ids) > 0 and len(a_ids) > 0:
+                lines.append(f"  ⚠ 진단: CONTROL={len(ctrl_ids)} A={len(a_ids)} 모두 있으나 교집합 0 · signal_id 매칭 로직 감사 필요")
             return "\n".join(lines)
         # 공통 페어 집계 · 위험조정 지표 포함 (advisor 2 개선)
         lines = [f"COMMON_COHORT paired common_n={len(_ids)}:", _bar_line]
