@@ -14265,6 +14265,10 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 "mfe": round(mfe_pct, 5),
                 "hold": round(hold_sec, 1),
                 "exit_reason": exit_reason,
+                # advisor 1 지적 (2026-08-04): PURITY epoch 분리에 필요한 timestamp/epoch 태그
+                # 이전엔 없어서 _in_epoch() 항상 False → 모든 trade 가 legacy 로 오분류
+                "exit_ts": time.time(),
+                "route_epoch": _OBSERVE_EPOCH,
                 "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
             }
             # v18e: 개별 건 pnl_curve 저장 → 조기 탈출 분석용
