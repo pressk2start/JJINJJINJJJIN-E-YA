@@ -14189,8 +14189,10 @@ def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
 
 
 def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec,
-                          indicators=None, mae=None, pnl_curve=None):
-    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 + Welford 분산)"""
+                          indicators=None, mae=None, pnl_curve=None, signal_id=None):
+    """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 + Welford 분산).
+
+    signal_id: COMMON_COHORT paired 매칭 키 · VP 에서 전달 · 없으면 매칭 불가."""
     global _SHADOW_TRADE_COUNT
     key = f"{route}:{strat_name}"
     is_win = pnl_pct > 0
@@ -14298,6 +14300,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 # 이전엔 없어서 _in_epoch() 항상 False → 모든 trade 가 legacy 로 오분류
                 "exit_ts": time.time(),
                 "route_epoch": _OBSERVE_EPOCH,
+                # advisor 2 진단 (2026-08-06): COMMON_COHORT CONTROL_A_common=0 원인
+                # signal_id 없으면 _common_cohort_paired_summary 에서 arm 간 매칭 불가
+                "signal_id": signal_id,
                 "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
             }
             # v18e: 개별 건 pnl_curve 저장 → 조기 탈출 분석용
@@ -14609,6 +14614,9 @@ def _shadow_evaluate_positions():
                         "_pullback_delay_sec": 0,
                         "_pullback_best_price": cur_price,
                         "_pullback_orig_price": cur_price,
+                        # COMMON_COHORT paired 매칭 · gate 승격은 원신호 시점(ps.signal_ts) 기준
+                        # (VP entry_ts 는 gate_sec 만큼 지연되어 arm 간 mismatch 발생 가능)
+                        "signal_id": f"{ps['market']}:{int(ps['signal_ts'])}",
                     })
             # dd_peak > gate_max → 폐기 (로그 없이 drop)
         _SHADOW_PENDING_SIGNALS[:] = pending_remaining
@@ -14754,7 +14762,8 @@ def _shadow_evaluate_positions():
     for vp, pnl, mfe, mae, reason, hold, indicators, pnl_curve in closed_results:
         _shadow_record_result(vp["route"], vp["strat"], vp["market"],
                               pnl, mfe, reason, hold, indicators,
-                              mae=mae, pnl_curve=pnl_curve)
+                              mae=mae, pnl_curve=pnl_curve,
+                              signal_id=vp.get("signal_id"))
 
     # 차단 건 결과 기록
     for vp, pnl, mfe, mae, reason, hold in blocked_closed:
@@ -14982,6 +14991,10 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     "_pullback_delay_sec": _pb_delay,
                     "_pullback_best_price": entry_price,
                     "_pullback_orig_price": entry_price,
+                    # COMMON_COHORT paired 매칭용 (advisor 2 진단):
+                    # now_ts 는 스캔 시작 시점(line 14797) 한 번만 캡처되어
+                    # 같은 스캔의 모든 route 가 동일 값 공유 → int() 로 arm 간 매칭
+                    "signal_id": f"{market}:{int(now_ts)}",
                 })
                 if _ob_units:
                     try:
