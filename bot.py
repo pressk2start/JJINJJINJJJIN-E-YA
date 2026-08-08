@@ -14649,15 +14649,21 @@ def _shadow_evaluate_positions():
             if cur_price <= 0:
                 _hard_max = vp["exit_params"].get("max_bars", 60) * RECHECK_SEC + 300
                 if (now - vp["entry_ts"]) >= _hard_max:
+                    # HIGH crash fix (advisor 3자 수렴 · 2026-08-08):
+                    #   이전엔 dict 로 append · 소비부(14760 t[0]["market"], 14766 tup[0][...],
+                    #   14780 for vp,pnl,... 8-tuple unpack) 는 전부 tuple 가정.
+                    #   → 가격 API 가 특정 코인 _hard_max(~300-600s) 지속 실패 시 dict 도달 →
+                    #   14766 dict[0] → KeyError · 14780 키 8개 언패킹 → ValueError.
+                    #   → shadow 평가 루프 crash → 수주간 축적된 관측 파이프 정지.
+                    #   fix: 정상 branch(14713)와 동일한 8-tuple 포맷으로 통일.
                     _fp = vp.get("best_price", vp["entry_price"])
                     _fpnl = (_fp - vp["entry_price"]) / vp["entry_price"] if vp["entry_price"] > 0 else 0
-                    closed_results.append({"route": vp["route"], "strat": vp["strat"],
-                        "market": vp["market"], "pnl": round(_fpnl, 6),
-                        "mfe": round((_fp - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
-                        "mae": round((vp.get("worst_price", vp["entry_price"]) - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
-                        "hold": now - vp["entry_ts"], "exit_reason": "가격없음",
-                        "indicators": dict(vp.get("indicators", {})),
-                        "pnl_curve": vp.get("pnl_curve", {})})
+                    _fmfe = round((_fp - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0
+                    _fmae = round((vp.get("worst_price", vp["entry_price"]) - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0
+                    _findicators = dict(vp.get("indicators", {}))
+                    closed_results.append((vp, round(_fpnl, 6), _fmfe, _fmae,
+                                           "가격없음", now - vp["entry_ts"],
+                                           _findicators, vp.get("pnl_curve", {})))
                     continue
                 remaining.append(vp)
                 continue
