@@ -12500,23 +12500,39 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
     if not sig:
         return None
-    # A2 데이터 위생 fix (advisor 3자 수렴 · 2026-08-08):
+    # A2 데이터 위생 fix (advisor 3자 수렴 · 2026-08-08 · v2):
     #   이전 default 0.0 → "저vr 인 척 통과" → A×A2 코호트가 비-A2(결측) 신호로 오염
-    #   (advisor 2 지적한 결측 편중 함정의 코드 원천 · vr5_missing=100%)
+    #   (advisor 2 지적한 결측 편중 함정의 코드 원천 · vr5_missing=100%).
     #
-    #   fix 원칙: 결측 시 c1 에서 즉석 계산 (진입시각 확정값 · lookahead 아님) ·
-    #   여전히 계산 불가면 A2 판정 불가 → 코호트에서 제외 (통과 아님 · 결측 우회 차단)
+    #   fix 원칙 (advisor v2 recommendation 순서):
+    #     1) sig.indicators.vr5 확인 · 존재하면 그대로 사용
+    #     2) 없으면 c1 데이터 충분성 검사 (len>=6) → 부족하면 unavailable · 제외
+    #     3) 충분하면 즉석 계산 (base CLM 신호 생성부 11742 와 동일한 함수·입력)
+    #     4) 결과값 유효성 검사 (None or non-finite → unavailable · 제외)
+    #     5) frozen cutoff 3.5 적용
     #
-    #   ⚠ 방어 추가: _v4_volume_ratio_5 는 len(candles)<6 시 None 이 아니라 0.0 반환.
-    #   0.0 이 통과되면 결측 우회 재발 → len(c1)>=6 사전 가드 필수.
+    #   중요 (advisor 2 정정): 0.0 자체는 reject 하지 않음. len 충분 상태의 실계산 0 은
+    #   유효한 저vr 값 (avg-baseline 이 극단적으로 낮은 경우 · 진짜 pass 대상).
+    #   0.0 을 unavailable 로 취급하면 진짜 저vr 신호까지 제외되어 재차 오염.
+    #
+    #   방어 근거: _v4_volume_ratio_5 는 len<6 시 None 아니라 0.0 반환 (bot.py:10458).
+    #   len 사전 가드 없으면 결측 우회 재발.
+    #
+    #   정의 동일성 확인 (covert 전략변경 아님 · 데이터 복원):
+    #   base CLM 신호 생성부 bot.py:11742 도 vr5 = _v4_volume_ratio_5(c1) 사용 ·
+    #   universal indicators bot.py:10510 도 ui["vr5"] = round(_v4_volume_ratio_5(c1), 2).
+    #   즉 fallback 이 base 와 동일 함수·동일 입력 → window/denominator/현재봉 포함
+    #   전부 일치. covert 전략변경 아니고 결측 복원 확정.
     vr5 = sig.get("indicators", {}).get("vr5")
     if vr5 is None:
-        if c1 and len(c1) >= 6:
-            try:
-                vr5 = _v4_volume_ratio_5(c1)
-            except Exception:
-                vr5 = None
-    if vr5 is None:
+        if c1 is None or len(c1) < 6:
+            _pipeline_inc("climax_a2_vr5_unavailable")
+            return None
+        try:
+            vr5 = _v4_volume_ratio_5(c1)
+        except Exception:
+            vr5 = None
+    if vr5 is None or not math.isfinite(vr5):
         _pipeline_inc("climax_a2_vr5_unavailable")
         return None
     if vr5 > vr5_cap:
