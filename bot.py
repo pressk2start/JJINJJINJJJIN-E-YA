@@ -1267,6 +1267,35 @@ _OBSERVE_EPOCH = _resolve_observe_epoch()
 # PROCESS_START — 프로세스 실제 시작 시점 (advisor 지적: 재배포 vs 다른 프로세스 판별용)
 # _LIVE_LOG_LAST_CLEANUP 은 첫 cleanup 전까지 0 이라 process_start_ts 부정확 → 별도 상수 필요
 _PROCESS_START_TS = int(time.time())
+
+# ── EXPERIMENT_EPOCH (advisor 2 아키텍처 개선 · 2026-08-08) ──────────────────
+# 배경: _OBSERVE_EPOCH = git HEAD SHA(7) 이므로 매 commit 마다 CONTROL/A/A×A2
+# paired 축적이 전량 리셋. 관측 코드 하나(예: closed_results crash fix) 만 고쳐도
+# CONTROL_A_common 이 0 으로 초기화 되어 축적 시스템이 배포 빈도에 잠식됨.
+#
+# 해결: DEPLOY_EPOCH (git SHA · 표시/회귀 감지) 와 EXPERIMENT_EPOCH (per-route
+# 실험 계약 버전) 을 분리. 관측/문구/crash fix 배포에도 EXPERIMENT_EPOCH 은
+# 유지 → paired 축적 보존.
+#
+# 규율:
+# - route 의 arm/bp/hold/BE/SL/gate/cutoff 등 실험 계약 값이 실제로 바뀔 때만 bump
+# - 관측 로그·리포트 문구·데이터 위생 fix 등은 EXPERIMENT_EPOCH 무변경
+# - v2 bump 사유 는 반드시 commit 메시지·docstring 에 명시
+#
+# 현 시점 계약 버전:
+# - CONTROL (CS40_VR3_TR180_bp30_240): v1 · arm180/bp30/hold240 · BE=ON · sl_tiered · hard=2%
+# - A (CLM_A_CLEAN_bp30): v1 · arm180/bp30/hold240 · BE=OFF · SL=OFF · hard=3%
+# - A×A2 (CLM_A_x_A2_bp30): v2 · v1(default 0.0 결측 우회) 폐기 · v2 는 vr5 결측 우회 차단
+_ROUTE_EXPERIMENT_EPOCH = {
+    "CS40_VR3_TR180_bp30_240": "CONTROL_v1",
+    "CLM_A_CLEAN_bp30": "A_CLEAN_v1",
+    "CLM_A_x_A2_bp30": "A2_VR5CAP35_v2",  # ⚠ 7d562e1 vr5 결측 fix 로 v1→v2
+}
+
+
+def _route_experiment_epoch(route):
+    """route 의 실험 계약 버전 반환 · 미등록 route 는 DEPLOY_EPOCH 로 fallback (기존 동작 유지)."""
+    return _ROUTE_EXPERIMENT_EPOCH.get(route, _OBSERVE_EPOCH)
 try:
     # [PROCESS_START] 마커 — stdout 첫 줄에 PID + SHA + TS 3중 표기 (grep 편의)
     # bc5ceba 미포함 의심 판별: [PROCESS_START] pid=… code_build_id=… → 실행 프로세스 SHA 확정
@@ -2064,13 +2093,15 @@ def _shadow_contamination_check():
                 config_be_off = cfg.get("disable_breakeven", False) if cfg else False
                 config_tiered_off = not bool(cfg.get("sl_tiers")) if cfg else False
                 _trs = s.get("trade_records", [])
-                # epoch 분리 (advisor 2 개선 1): 현 epoch 이후 청산만으로 재계산
-                # legacy (배선 전) vs 현 epoch (배선 후) 명확 분리
-                # trade_record 에 route_epoch 필드 없으면 exit_ts 로 필터 (best effort)
+                # epoch 분리 (advisor 2 개선 1 · 2026-08-08 v2 아키텍처 개선):
+                # legacy (배선 전) vs 현 epoch (배선 후) 명확 분리 ·
+                # route_epoch 는 이제 per-route 실험 계약 버전 (git SHA 아님).
+                # 배포 빈도 (관측/문구 fix) 가 실험 축적을 리셋하지 않도록 route 기준 매칭.
+                _current_experiment = _route_experiment_epoch(route)
                 def _in_epoch(t):
                     _ep = t.get("route_epoch") or t.get("epoch")
                     if _ep is not None:
-                        return _ep == _OBSERVE_EPOCH
+                        return _ep == _current_experiment
                     # fallback: exit_ts 가 process_start_ts 이후이면 현 epoch
                     _ets = t.get("exit_ts", 0) or 0
                     return _ets >= _PROCESS_START_TS
@@ -2124,9 +2155,10 @@ def _shadow_contamination_check():
                 else:
                     verdict = "✅ VALID"
                     status_note = f"(현 epoch 청산 {total_exits_e}건 · 금지 exit 0 · 성과 해석 가능)"
-                # 상세 라인
+                # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
                 lines.append(
-                    f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건): "
+                    f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건) "
+                    f"[experiment={_current_experiment}]: "
                     f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
                 lines.append(
@@ -12500,8 +12532,42 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
     if not sig:
         return None
-    vr5 = sig.get("indicators", {}).get("vr5", 0.0)
-    if vr5 is not None and vr5 > vr5_cap:
+    # A2 데이터 위생 fix (advisor 3자 수렴 · 2026-08-08 · v2):
+    #   이전 default 0.0 → "저vr 인 척 통과" → A×A2 코호트가 비-A2(결측) 신호로 오염
+    #   (advisor 2 지적한 결측 편중 함정의 코드 원천 · vr5_missing=100%).
+    #
+    #   fix 원칙 (advisor v2 recommendation 순서):
+    #     1) sig.indicators.vr5 확인 · 존재하면 그대로 사용
+    #     2) 없으면 c1 데이터 충분성 검사 (len>=6) → 부족하면 unavailable · 제외
+    #     3) 충분하면 즉석 계산 (base CLM 신호 생성부 11742 와 동일한 함수·입력)
+    #     4) 결과값 유효성 검사 (None or non-finite → unavailable · 제외)
+    #     5) frozen cutoff 3.5 적용
+    #
+    #   중요 (advisor 2 정정): 0.0 자체는 reject 하지 않음. len 충분 상태의 실계산 0 은
+    #   유효한 저vr 값 (avg-baseline 이 극단적으로 낮은 경우 · 진짜 pass 대상).
+    #   0.0 을 unavailable 로 취급하면 진짜 저vr 신호까지 제외되어 재차 오염.
+    #
+    #   방어 근거: _v4_volume_ratio_5 는 len<6 시 None 아니라 0.0 반환 (bot.py:10458).
+    #   len 사전 가드 없으면 결측 우회 재발.
+    #
+    #   정의 동일성 확인 (covert 전략변경 아님 · 데이터 복원):
+    #   base CLM 신호 생성부 bot.py:11742 도 vr5 = _v4_volume_ratio_5(c1) 사용 ·
+    #   universal indicators bot.py:10510 도 ui["vr5"] = round(_v4_volume_ratio_5(c1), 2).
+    #   즉 fallback 이 base 와 동일 함수·동일 입력 → window/denominator/현재봉 포함
+    #   전부 일치. covert 전략변경 아니고 결측 복원 확정.
+    vr5 = sig.get("indicators", {}).get("vr5")
+    if vr5 is None:
+        if c1 is None or len(c1) < 6:
+            _pipeline_inc("climax_a2_vr5_unavailable")
+            return None
+        try:
+            vr5 = _v4_volume_ratio_5(c1)
+        except Exception:
+            vr5 = None
+    if vr5 is None or not math.isfinite(vr5):
+        _pipeline_inc("climax_a2_vr5_unavailable")
+        return None
+    if vr5 > vr5_cap:
         _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
                       threshold=vr5_cap, direction="lte")
         return None
@@ -14299,7 +14365,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 # advisor 1 지적 (2026-08-04): PURITY epoch 분리에 필요한 timestamp/epoch 태그
                 # 이전엔 없어서 _in_epoch() 항상 False → 모든 trade 가 legacy 로 오분류
                 "exit_ts": time.time(),
-                "route_epoch": _OBSERVE_EPOCH,
+                # advisor 2 아키텍처 개선 (2026-08-08): route_epoch 는 배포 SHA 가 아니라
+                # per-route 실험 계약 버전. 배포 빈도가 실험 축적을 리셋하지 않도록 분리.
+                "route_epoch": _route_experiment_epoch(route),
                 # advisor 2 진단 (2026-08-06): COMMON_COHORT CONTROL_A_common=0 원인
                 # signal_id 없으면 _common_cohort_paired_summary 에서 arm 간 매칭 불가
                 "signal_id": signal_id,
@@ -14631,15 +14699,21 @@ def _shadow_evaluate_positions():
             if cur_price <= 0:
                 _hard_max = vp["exit_params"].get("max_bars", 60) * RECHECK_SEC + 300
                 if (now - vp["entry_ts"]) >= _hard_max:
+                    # HIGH crash fix (advisor 3자 수렴 · 2026-08-08):
+                    #   이전엔 dict 로 append · 소비부(14760 t[0]["market"], 14766 tup[0][...],
+                    #   14780 for vp,pnl,... 8-tuple unpack) 는 전부 tuple 가정.
+                    #   → 가격 API 가 특정 코인 _hard_max(~300-600s) 지속 실패 시 dict 도달 →
+                    #   14766 dict[0] → KeyError · 14780 키 8개 언패킹 → ValueError.
+                    #   → shadow 평가 루프 crash → 수주간 축적된 관측 파이프 정지.
+                    #   fix: 정상 branch(14713)와 동일한 8-tuple 포맷으로 통일.
                     _fp = vp.get("best_price", vp["entry_price"])
                     _fpnl = (_fp - vp["entry_price"]) / vp["entry_price"] if vp["entry_price"] > 0 else 0
-                    closed_results.append({"route": vp["route"], "strat": vp["strat"],
-                        "market": vp["market"], "pnl": round(_fpnl, 6),
-                        "mfe": round((_fp - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
-                        "mae": round((vp.get("worst_price", vp["entry_price"]) - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0,
-                        "hold": now - vp["entry_ts"], "exit_reason": "가격없음",
-                        "indicators": dict(vp.get("indicators", {})),
-                        "pnl_curve": vp.get("pnl_curve", {})})
+                    _fmfe = round((_fp - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0
+                    _fmae = round((vp.get("worst_price", vp["entry_price"]) - vp["entry_price"]) / vp["entry_price"], 6) if vp["entry_price"] > 0 else 0
+                    _findicators = dict(vp.get("indicators", {}))
+                    closed_results.append((vp, round(_fpnl, 6), _fmfe, _fmae,
+                                           "가격없음", now - vp["entry_ts"],
+                                           _findicators, vp.get("pnl_curve", {})))
                     continue
                 remaining.append(vp)
                 continue
