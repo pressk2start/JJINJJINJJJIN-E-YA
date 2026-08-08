@@ -12500,8 +12500,26 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     sig = _v0_check_climax_cs40(c1, c5, c15, c30, c60, gate_info=gate_info)
     if not sig:
         return None
-    vr5 = sig.get("indicators", {}).get("vr5", 0.0)
-    if vr5 is not None and vr5 > vr5_cap:
+    # A2 데이터 위생 fix (advisor 3자 수렴 · 2026-08-08):
+    #   이전 default 0.0 → "저vr 인 척 통과" → A×A2 코호트가 비-A2(결측) 신호로 오염
+    #   (advisor 2 지적한 결측 편중 함정의 코드 원천 · vr5_missing=100%)
+    #
+    #   fix 원칙: 결측 시 c1 에서 즉석 계산 (진입시각 확정값 · lookahead 아님) ·
+    #   여전히 계산 불가면 A2 판정 불가 → 코호트에서 제외 (통과 아님 · 결측 우회 차단)
+    #
+    #   ⚠ 방어 추가: _v4_volume_ratio_5 는 len(candles)<6 시 None 이 아니라 0.0 반환.
+    #   0.0 이 통과되면 결측 우회 재발 → len(c1)>=6 사전 가드 필수.
+    vr5 = sig.get("indicators", {}).get("vr5")
+    if vr5 is None:
+        if c1 and len(c1) >= 6:
+            try:
+                vr5 = _v4_volume_ratio_5(c1)
+            except Exception:
+                vr5 = None
+    if vr5 is None:
+        _pipeline_inc("climax_a2_vr5_unavailable")
+        return None
+    if vr5 > vr5_cap:
         _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
                       threshold=vr5_cap, direction="lte")
         return None
