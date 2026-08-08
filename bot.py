@@ -1267,6 +1267,35 @@ _OBSERVE_EPOCH = _resolve_observe_epoch()
 # PROCESS_START — 프로세스 실제 시작 시점 (advisor 지적: 재배포 vs 다른 프로세스 판별용)
 # _LIVE_LOG_LAST_CLEANUP 은 첫 cleanup 전까지 0 이라 process_start_ts 부정확 → 별도 상수 필요
 _PROCESS_START_TS = int(time.time())
+
+# ── EXPERIMENT_EPOCH (advisor 2 아키텍처 개선 · 2026-08-08) ──────────────────
+# 배경: _OBSERVE_EPOCH = git HEAD SHA(7) 이므로 매 commit 마다 CONTROL/A/A×A2
+# paired 축적이 전량 리셋. 관측 코드 하나(예: closed_results crash fix) 만 고쳐도
+# CONTROL_A_common 이 0 으로 초기화 되어 축적 시스템이 배포 빈도에 잠식됨.
+#
+# 해결: DEPLOY_EPOCH (git SHA · 표시/회귀 감지) 와 EXPERIMENT_EPOCH (per-route
+# 실험 계약 버전) 을 분리. 관측/문구/crash fix 배포에도 EXPERIMENT_EPOCH 은
+# 유지 → paired 축적 보존.
+#
+# 규율:
+# - route 의 arm/bp/hold/BE/SL/gate/cutoff 등 실험 계약 값이 실제로 바뀔 때만 bump
+# - 관측 로그·리포트 문구·데이터 위생 fix 등은 EXPERIMENT_EPOCH 무변경
+# - v2 bump 사유 는 반드시 commit 메시지·docstring 에 명시
+#
+# 현 시점 계약 버전:
+# - CONTROL (CS40_VR3_TR180_bp30_240): v1 · arm180/bp30/hold240 · BE=ON · sl_tiered · hard=2%
+# - A (CLM_A_CLEAN_bp30): v1 · arm180/bp30/hold240 · BE=OFF · SL=OFF · hard=3%
+# - A×A2 (CLM_A_x_A2_bp30): v2 · v1(default 0.0 결측 우회) 폐기 · v2 는 vr5 결측 우회 차단
+_ROUTE_EXPERIMENT_EPOCH = {
+    "CS40_VR3_TR180_bp30_240": "CONTROL_v1",
+    "CLM_A_CLEAN_bp30": "A_CLEAN_v1",
+    "CLM_A_x_A2_bp30": "A2_VR5CAP35_v2",  # ⚠ 7d562e1 vr5 결측 fix 로 v1→v2
+}
+
+
+def _route_experiment_epoch(route):
+    """route 의 실험 계약 버전 반환 · 미등록 route 는 DEPLOY_EPOCH 로 fallback (기존 동작 유지)."""
+    return _ROUTE_EXPERIMENT_EPOCH.get(route, _OBSERVE_EPOCH)
 try:
     # [PROCESS_START] 마커 — stdout 첫 줄에 PID + SHA + TS 3중 표기 (grep 편의)
     # bc5ceba 미포함 의심 판별: [PROCESS_START] pid=… code_build_id=… → 실행 프로세스 SHA 확정
@@ -2064,13 +2093,15 @@ def _shadow_contamination_check():
                 config_be_off = cfg.get("disable_breakeven", False) if cfg else False
                 config_tiered_off = not bool(cfg.get("sl_tiers")) if cfg else False
                 _trs = s.get("trade_records", [])
-                # epoch 분리 (advisor 2 개선 1): 현 epoch 이후 청산만으로 재계산
-                # legacy (배선 전) vs 현 epoch (배선 후) 명확 분리
-                # trade_record 에 route_epoch 필드 없으면 exit_ts 로 필터 (best effort)
+                # epoch 분리 (advisor 2 개선 1 · 2026-08-08 v2 아키텍처 개선):
+                # legacy (배선 전) vs 현 epoch (배선 후) 명확 분리 ·
+                # route_epoch 는 이제 per-route 실험 계약 버전 (git SHA 아님).
+                # 배포 빈도 (관측/문구 fix) 가 실험 축적을 리셋하지 않도록 route 기준 매칭.
+                _current_experiment = _route_experiment_epoch(route)
                 def _in_epoch(t):
                     _ep = t.get("route_epoch") or t.get("epoch")
                     if _ep is not None:
-                        return _ep == _OBSERVE_EPOCH
+                        return _ep == _current_experiment
                     # fallback: exit_ts 가 process_start_ts 이후이면 현 epoch
                     _ets = t.get("exit_ts", 0) or 0
                     return _ets >= _PROCESS_START_TS
@@ -2124,9 +2155,10 @@ def _shadow_contamination_check():
                 else:
                     verdict = "✅ VALID"
                     status_note = f"(현 epoch 청산 {total_exits_e}건 · 금지 exit 0 · 성과 해석 가능)"
-                # 상세 라인
+                # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
                 lines.append(
-                    f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건): "
+                    f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건) "
+                    f"[experiment={_current_experiment}]: "
                     f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
                 lines.append(
@@ -14333,7 +14365,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 # advisor 1 지적 (2026-08-04): PURITY epoch 분리에 필요한 timestamp/epoch 태그
                 # 이전엔 없어서 _in_epoch() 항상 False → 모든 trade 가 legacy 로 오분류
                 "exit_ts": time.time(),
-                "route_epoch": _OBSERVE_EPOCH,
+                # advisor 2 아키텍처 개선 (2026-08-08): route_epoch 는 배포 SHA 가 아니라
+                # per-route 실험 계약 버전. 배포 빈도가 실험 축적을 리셋하지 않도록 분리.
+                "route_epoch": _route_experiment_epoch(route),
                 # advisor 2 진단 (2026-08-06): COMMON_COHORT CONTROL_A_common=0 원인
                 # signal_id 없으면 _common_cohort_paired_summary 에서 arm 간 매칭 불가
                 "signal_id": signal_id,
