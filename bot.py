@@ -2048,30 +2048,51 @@ def _shadow_exit_engine_config_summary():
 
 
 def _shadow_contamination_check():
-    """A_CLEAN VALIDATION 게이트 (advisor 3회 수렴 · 4-state · AT본절 금지 추가 버그수정).
+    """A_CLEAN VALIDATION 게이트 (advisor 3자 수렴 · 4-state).
 
     4-state 판정:
       ✅ VALID              : 설정 OFF + 실측 청산 발생 + 모든 금지 exit 0건
       ⏳ PENDING_NO_EXIT    : 청산 이벤트 0건 (미확정 · 표본 부족)
-      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/early_SL/AT본절) 발생
+      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/early_SL) 발생
       ❌ CONFIG_FAIL        : 설정 자체 실패 (be_off/tiered_off 없음)
 
     ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
-    허용 exit_reason: AT익절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
-    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL) · AT본절
+    허용 exit_reason: AT익절 · AT본절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
+    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL)
+
+    AT본절 재분류 이유 (2026-08-10 · advisor 3자 수렴 코드 감사 결과):
+    -----------------------------------------------------------------
+    이전 a5845cf 규율: "AT본절 은 disable_breakeven 배선 미완 or legacy" 로
+    가정하여 금지 목록에 포함. 하지만 이 가정은 3겹 코드 감사 결과 오류였음.
+
+    코드 감사 3겹 증거:
+    1) PR2_LEVER_A_SPEC.md line 71-72:
+       A_CLEAN exit_reason ∈ {TRAIL_HIT, HOLD_CAP, HARD_STOP} ·
+       TRAIL_HIT 손실/이익 무관 · 즉 스펙 자체가 트레일 손실 출구 정당 청산
+    2) _make_clm_trail_clean factory (bot.py:11448):
+       adaptive_trail 활성 · disable_breakeven 은 checkpoint BE
+       (bot.py:14564-14566) 만 차단 · adaptive_trail 의 "AT본절" 라벨과 무관
+    3) research/live_cohort_resim.py:64 백테스트 시뮬:
+       `return (stop - entry) / entry * 100 - cost` ·
+       트레일 stop hit 시 손실/이익 무관 정당 청산 처리 · +0.37% n=409 는
+       트레일 손실 출구 포함 산정
+
+    실제 "AT본절" 발생 메커니즘 (bot.py:14604-14606):
+    - adaptive_trail arm 후 stop = best × (1 - bp/10000)
+    - best 가 entry 근처 (예: entry × 1.001) 면 stop = entry × 0.998 (entry 이하)
+    - 자연 stop hit → pnl<0 → 라벨 "AT본절" (adaptive trail near-breakeven)
+    - 이건 A_CLEAN 스펙의 정상 동작 · disable_breakeven flag 우회 아님
+
+    수정:
+    - AT본절 을 허용 목록으로 재분류 (트레일 정상 청산)
+    - 본절SL (checkpoint BE) · early_SL (tiered SL) 만 금지 (진짜 배선 오염 지표)
+    - LIVE = CONTROL 청산 세분화 (AT본절 = 본절 근처 트레일 · 별도 의미)
+      A_CLEAN = TRAIL_HIT 통합 개념 (스펙 line 71 · 손실/이익 무관)
 
     ⚠ AT소손절 (advisor 2 확인 유보 해소): "AT소손절" 은 별도 exit_reason 아니라
     "AT본절" 의 display alias (bot.py:15334 `_display = {"AT본절": "AT소손절"}`).
-    내부 exit_reason 은 "AT본절" 하나 · at_be 카운트가 이미 둘 다 커버.
-
-    AT본절 포함 이유 (2026-08-02 advisor 양세션 버그 수정):
-    - 이전 검증기: 본절SL·early_SL 만 체크 → AT본절=2 인데 VALID 오판
-    - A 스펙: BE=OFF 이면 본절성 청산 (AT본절 = trail stop 이 entry 이하 hit) 0건이어야
-    - AT본절 > 0 원인 후보: (1)legacy 데이터 혼입 (2)disable_breakeven 배선 미완
-    - 어느 쪽이든 표본 오염 → CONTAMINATED
-    - baseline 리셋 이후 새 거래에서 AT본절=0 이면 (1) legacy 확정
-      계속 >0 이면 (2) 배선 미완 · exit 엔진 재감사 필요
+    내부 exit_reason 은 "AT본절" 하나 · at_be 카운트가 둘 다 커버.
     """
     try:
         contam_routes = {"CLM_A_CLEAN_bp30", "CLM_A_x_A2_bp30"}
@@ -2127,10 +2148,12 @@ def _shadow_contamination_check():
                 be_sl_l = _count_by_reason(_legacy_trs, "본절SL")
                 at_be_l = _count_by_reason(_legacy_trs, "AT본절")
                 early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
-                legacy_forbidden = be_sl_l + at_be_l + early_sl_l
+                legacy_forbidden = be_sl_l + early_sl_l
                 # VALIDATION 게이트 판정 (advisor 2 개선 1 · epoch-aware)
+                # 2026-08-10 정정: AT본절 은 forbidden 에서 제거 (docstring 3겹 감사 참조)
+                # adaptive_trail 정상 stop 이 라벨 "AT본절" 로 잡히는 것 · disable_breakeven 무관
                 config_ok = config_be_off and config_tiered_off
-                exit_ok = (be_sl_e == 0 and early_sl_e == 0 and at_be_e == 0)
+                exit_ok = (be_sl_e == 0 and early_sl_e == 0)
                 # 신규 상태: PENDING_EPOCH_ISOLATION (legacy 표본만 있고 현 epoch 청산 0)
                 if not config_ok:
                     verdict = "❌ CONFIG_FAIL"
@@ -2148,7 +2171,6 @@ def _shadow_contamination_check():
                     _forbidden_parts = []
                     if be_sl_e > 0: _forbidden_parts.append(f"본절SL={be_sl_e}")
                     if early_sl_e > 0: _forbidden_parts.append(f"early_SL={early_sl_e}")
-                    if at_be_e > 0: _forbidden_parts.append(f"AT본절={at_be_e}")
                     verdict = "❌ CONTAMINATED"
                     status_note = (f"({' '.join(_forbidden_parts)} · 현 epoch · "
                                    f"배선 미완 확정 · exit 엔진 재감사 필요 · 성과 해석 금지)")
@@ -2162,8 +2184,8 @@ def _shadow_contamination_check():
                     f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
                 lines.append(
-                    f"    epoch 실측: 본절SL={be_sl_e} early_SL={early_sl_e} AT본절={at_be_e} · "
-                    f"허용[AT익절={trail_hit_e} AT타임아웃={hold_cap_e} far_SL={far_stop_e}]"
+                    f"    epoch 실측: 본절SL={be_sl_e} early_SL={early_sl_e} · "
+                    f"허용[AT익절={trail_hit_e} AT본절={at_be_e} AT타임아웃={hold_cap_e} far_SL={far_stop_e}]"
                 )
                 if legacy_forbidden > 0:
                     lines.append(
@@ -14254,6 +14276,61 @@ def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
     return results
 
 
+# ── EXIT_ORIGIN 매핑 (advisor 3자 수렴 · 2026-08-10 · c 개선 · mechanism 기반 PURITY 대비) ──
+#
+# 배경: 9782331 fix 로 "AT본절" 을 forbidden 에서 제거 · 하지만 name-based 검증은
+# 여전히 취약. 향후 다른 코드가 "AT본절" 문자열을 진짜 BE 청산에 재사용 하면
+# false-VALID 위험. exit_origin (mechanism 태그) 을 trade_records 에 추가하여
+# 나중에 origin-based PURITY 로 전환 가능하도록 준비.
+#
+# 규율 (advisor 1 불변조항 · 2026-08-10):
+#   "AT본절" · "AT익절" · "AT타임아웃" 라벨은 오직 adaptive_trail 블록
+#   (bot.py:14626-14630) 에서만 emit. 다른 코드가 이 문자열을 재사용하면
+#   PURITY origin 태그가 즉시 mismatch 알림. 이 불변조항은 코드 리뷰 시
+#   반드시 확인.
+#
+# origin 카테고리 (mechanism 기반):
+#   - breakeven_checkpoint  : checkpoint BE (bot.py:14588) · A_CLEAN FORBIDDEN
+#   - early_cut             : EarlyCut 60s (bot.py:14553) · A_CLEAN FORBIDDEN (설정 시)
+#   - checkpoint_trail      : 정통 트레일 (bot.py:14579-14581) · A_CLEAN 은 disable_trail
+#   - profit_protect        : PP retrace 청산 (bot.py:14595)
+#   - adaptive_trail        : ← A_CLEAN 유일 청산 · 정상 mechanism
+#   - hold_cap              : max_bars 타임아웃 (bot.py:14634)
+#   - hard_stop             : far -3% SL 백스톱
+#   - early_sl              : tiered SL 조기 발동 (hold<arm_sec · 별도 카운트)
+#   - price_unavailable     : 가격 API 장기 실패 (37e4de0 fix)
+_EXIT_REASON_ORIGIN = {
+    # Checkpoint mechanisms
+    "본절SL":       "breakeven_checkpoint",
+    "EC조기절단":   "early_cut",
+    "트레일익절":   "checkpoint_trail",
+    "트레일본절":   "checkpoint_trail",
+    # Profit Protect
+    "PP익절":       "profit_protect",
+    "PP본절":       "profit_protect",
+    # Adaptive Trail — A_CLEAN 정상 청산
+    "AT익절":       "adaptive_trail",
+    "AT본절":       "adaptive_trail",
+    "AT타임아웃":   "adaptive_trail",
+    "AT소손절":     "adaptive_trail",  # display alias for AT본절
+    # Timeout
+    "타임아웃":     "hold_cap",
+    # Hard stop
+    "손절SL":       "hard_stop",  # hold<arm_sec 시 early_sl 로 별도 카운트 (기존 로직)
+    # Price API failure (37e4de0)
+    "가격없음":     "price_unavailable",
+}
+
+
+def _exit_origin_of(exit_reason):
+    """exit_reason → mechanism origin 매핑 · 미등록 라벨은 'unknown' (신규 라벨 감지용).
+
+    origin 이 'unknown' 이면 advisor 규율 위반 (라벨 재사용 or 신규 exit path 추가) ·
+    코드 리뷰 필요.
+    """
+    return _EXIT_REASON_ORIGIN.get(exit_reason, "unknown")
+
+
 def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec,
                           indicators=None, mae=None, pnl_curve=None, signal_id=None):
     """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 + Welford 분산).
@@ -14371,6 +14448,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 # advisor 2 진단 (2026-08-06): COMMON_COHORT CONTROL_A_common=0 원인
                 # signal_id 없으면 _common_cohort_paired_summary 에서 arm 간 매칭 불가
                 "signal_id": signal_id,
+                # advisor 1/2 (2026-08-10 · c 개선): mechanism 태그 · name-based PURITY
+                # 취약성 해소용 데이터 준비. 향후 origin-based PURITY 전환 시 즉시 사용.
+                "exit_origin": _exit_origin_of(exit_reason),
                 "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
             }
             # v18e: 개별 건 pnl_curve 저장 → 조기 탈출 분석용
