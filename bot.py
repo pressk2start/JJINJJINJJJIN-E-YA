@@ -14276,6 +14276,61 @@ def _shadow_auto_analyze_indicators(min_samples=10, effect_threshold=0.8):
     return results
 
 
+# ── EXIT_ORIGIN 매핑 (advisor 3자 수렴 · 2026-08-10 · c 개선 · mechanism 기반 PURITY 대비) ──
+#
+# 배경: 9782331 fix 로 "AT본절" 을 forbidden 에서 제거 · 하지만 name-based 검증은
+# 여전히 취약. 향후 다른 코드가 "AT본절" 문자열을 진짜 BE 청산에 재사용 하면
+# false-VALID 위험. exit_origin (mechanism 태그) 을 trade_records 에 추가하여
+# 나중에 origin-based PURITY 로 전환 가능하도록 준비.
+#
+# 규율 (advisor 1 불변조항 · 2026-08-10):
+#   "AT본절" · "AT익절" · "AT타임아웃" 라벨은 오직 adaptive_trail 블록
+#   (bot.py:14626-14630) 에서만 emit. 다른 코드가 이 문자열을 재사용하면
+#   PURITY origin 태그가 즉시 mismatch 알림. 이 불변조항은 코드 리뷰 시
+#   반드시 확인.
+#
+# origin 카테고리 (mechanism 기반):
+#   - breakeven_checkpoint  : checkpoint BE (bot.py:14588) · A_CLEAN FORBIDDEN
+#   - early_cut             : EarlyCut 60s (bot.py:14553) · A_CLEAN FORBIDDEN (설정 시)
+#   - checkpoint_trail      : 정통 트레일 (bot.py:14579-14581) · A_CLEAN 은 disable_trail
+#   - profit_protect        : PP retrace 청산 (bot.py:14595)
+#   - adaptive_trail        : ← A_CLEAN 유일 청산 · 정상 mechanism
+#   - hold_cap              : max_bars 타임아웃 (bot.py:14634)
+#   - hard_stop             : far -3% SL 백스톱
+#   - early_sl              : tiered SL 조기 발동 (hold<arm_sec · 별도 카운트)
+#   - price_unavailable     : 가격 API 장기 실패 (37e4de0 fix)
+_EXIT_REASON_ORIGIN = {
+    # Checkpoint mechanisms
+    "본절SL":       "breakeven_checkpoint",
+    "EC조기절단":   "early_cut",
+    "트레일익절":   "checkpoint_trail",
+    "트레일본절":   "checkpoint_trail",
+    # Profit Protect
+    "PP익절":       "profit_protect",
+    "PP본절":       "profit_protect",
+    # Adaptive Trail — A_CLEAN 정상 청산
+    "AT익절":       "adaptive_trail",
+    "AT본절":       "adaptive_trail",
+    "AT타임아웃":   "adaptive_trail",
+    "AT소손절":     "adaptive_trail",  # display alias for AT본절
+    # Timeout
+    "타임아웃":     "hold_cap",
+    # Hard stop
+    "손절SL":       "hard_stop",  # hold<arm_sec 시 early_sl 로 별도 카운트 (기존 로직)
+    # Price API failure (37e4de0)
+    "가격없음":     "price_unavailable",
+}
+
+
+def _exit_origin_of(exit_reason):
+    """exit_reason → mechanism origin 매핑 · 미등록 라벨은 'unknown' (신규 라벨 감지용).
+
+    origin 이 'unknown' 이면 advisor 규율 위반 (라벨 재사용 or 신규 exit path 추가) ·
+    코드 리뷰 필요.
+    """
+    return _EXIT_REASON_ORIGIN.get(exit_reason, "unknown")
+
+
 def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reason, hold_sec,
                           indicators=None, mae=None, pnl_curve=None, signal_id=None):
     """섀도우 가상매매 결과를 누적 통계에 기록 (점진적 평균 + Welford 분산).
@@ -14393,6 +14448,9 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
                 # advisor 2 진단 (2026-08-06): COMMON_COHORT CONTROL_A_common=0 원인
                 # signal_id 없으면 _common_cohort_paired_summary 에서 arm 간 매칭 불가
                 "signal_id": signal_id,
+                # advisor 1/2 (2026-08-10 · c 개선): mechanism 태그 · name-based PURITY
+                # 취약성 해소용 데이터 준비. 향후 origin-based PURITY 전환 시 즉시 사용.
+                "exit_origin": _exit_origin_of(exit_reason),
                 "inds": {k: round(v, 4) for k, v in indicators.items() if isinstance(v, (int, float))}
             }
             # v18e: 개별 건 pnl_curve 저장 → 조기 탈출 분석용
