@@ -2267,6 +2267,24 @@ def _a2_audit_summary():
             f"present P/R={_src_pp}/{_src_pr} · fallback P/R={_src_fp}/{_src_fr} · "
             f"unavailable={_src_un}",
         ]
+        # advisor 2 불변식 체크 (task #58): source × outcome 합이 흐름 카운터와 정합해야
+        # 미스매치 = 계측 누락 or 드리프트 → ⚠ 경고 (관측 파이프 자기검증)
+        _src_pass_sum = _src_pp + _src_fp
+        _src_reject_sum = _src_pr + _src_fr
+        _src_total = _src_pass_sum + _src_reject_sum + _src_un
+        _flow_total = a2_cand + reject_cnt + _src_un
+        if _src_pass_sum != a2_cand or _src_reject_sum != reject_cnt:
+            lines.append(
+                f"  ⚠ A2_SOURCE 불변식 위반: "
+                f"pass(src={_src_pass_sum} vs cand={a2_cand}) · "
+                f"reject(src={_src_reject_sum} vs cap_fail={reject_cnt}) · "
+                f"계측 누락 or 드리프트 감사 필요"
+            )
+        elif _src_total != _flow_total:
+            # 이론상 도달 불가 (앞 조건에서 잡힘) · 안전 방어
+            lines.append(
+                f"  ⚠ A2_SOURCE 총합 불일치: src={_src_total} vs flow={_flow_total}"
+            )
         # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
         if eligible >= 100 and vr5_pass_low < 5:
             lines.append(
