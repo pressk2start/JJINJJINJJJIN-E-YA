@@ -12563,22 +12563,44 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     #   universal indicators bot.py:10510 도 ui["vr5"] = round(_v4_volume_ratio_5(c1), 2).
     #   즉 fallback 이 base 와 동일 함수·동일 입력 → window/denominator/현재봉 포함
     #   전부 일치. covert 전략변경 아니고 결측 복원 확정.
+    # advisor 2 지목 #1 (2026-08-11 · task #57): A2 source-tagging
+    #   vr5 획득 경로 (present/fallback_computed/unavailable) 를 pass/reject
+    #   양쪽에 카운트 · 첫 low-vr5 PASS 이벤트 발생 시 vr5 획득 경로 즉시 판별.
+    #   sig.indicators 에 a2_vr5_source · a2_vr5_used write-back → trade_records
+    #   inds 에 자동 축적 · 재분석 가능.
+    _vr5_src = None
     vr5 = sig.get("indicators", {}).get("vr5")
-    if vr5 is None:
+    if vr5 is not None:
+        _vr5_src = "present"
+    else:
         if c1 is None or len(c1) < 6:
-            _pipeline_inc("climax_a2_vr5_unavailable")
-            return None
-        try:
-            vr5 = _v4_volume_ratio_5(c1)
-        except Exception:
-            vr5 = None
+            _vr5_src = "unavailable"
+        else:
+            try:
+                vr5 = _v4_volume_ratio_5(c1)
+                _vr5_src = "fallback_computed"
+            except Exception:
+                vr5 = None
+                _vr5_src = "unavailable"
     if vr5 is None or not math.isfinite(vr5):
+        # 유효성 실패 · source 별 unavailable/invalid reject 태깅
         _pipeline_inc("climax_a2_vr5_unavailable")
+        if _vr5_src == "present":
+            # present dict 였는데 inf/nan · 희귀 · 별도 태깅
+            _pipeline_inc("climax_a2_src_present_invalid_reject")
+        else:
+            _pipeline_inc(f"climax_a2_src_{_vr5_src}_reject")
         return None
     if vr5 > vr5_cap:
         _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
                       threshold=vr5_cap, direction="lte")
+        _pipeline_inc(f"climax_a2_src_{_vr5_src}_reject")
         return None
+    # PASS 경로 · source 별 pass 카운트 + indicators write-back
+    _pipeline_inc(f"climax_a2_src_{_vr5_src}_pass")
+    _inds = sig.setdefault("indicators", {})
+    _inds["a2_vr5_source"] = _vr5_src
+    _inds["a2_vr5_used"] = round(vr5, 4)
     return sig
 
 
