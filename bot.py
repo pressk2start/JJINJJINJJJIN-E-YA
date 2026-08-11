@@ -14,6 +14,10 @@ import uuid
 import hashlib
 import jwt
 
+# advisor 3자 수렴 (2026-08-10 · task #56): A_CLEAN PURITY 판정 순수 함수 분리 ·
+# 9782331 계약 (AT본절 허용 · 본절SL/early_SL 금지) 을 pytest 로 회귀 방지.
+from _a_clean_purity import judge_a_clean_purity
+
 # 🔧 WF 데이터 기반 전략 모듈 (bot.py에 인라인 통합)
 # strategy_v4 함수들은 아래 "# ============ strategy_v4 통합 ============" 섹션에 정의
 
@@ -2149,34 +2153,16 @@ def _shadow_contamination_check():
                 at_be_l = _count_by_reason(_legacy_trs, "AT본절")
                 early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
                 legacy_forbidden = be_sl_l + early_sl_l
-                # VALIDATION 게이트 판정 (advisor 2 개선 1 · epoch-aware)
-                # 2026-08-10 정정: AT본절 은 forbidden 에서 제거 (docstring 3겹 감사 참조)
-                # adaptive_trail 정상 stop 이 라벨 "AT본절" 로 잡히는 것 · disable_breakeven 무관
+                # VALIDATION 게이트 판정 (advisor 3자 수렴 · pure function 위임 · 2026-08-10 task #56)
+                # 판정 로직은 _a_clean_purity.judge_a_clean_purity 에 · pytest 로 회귀 방지.
+                # AT본절 은 forbidden 에서 제거 (9782331 · docstring 3겹 감사 참조).
                 config_ok = config_be_off and config_tiered_off
-                exit_ok = (be_sl_e == 0 and early_sl_e == 0)
-                # 신규 상태: PENDING_EPOCH_ISOLATION (legacy 표본만 있고 현 epoch 청산 0)
-                if not config_ok:
-                    verdict = "❌ CONFIG_FAIL"
-                    status_note = f"(be_off={config_be_off} tiered_off={config_tiered_off} · 성과 해석 금지)"
-                elif total_exits_e == 0 and len(_legacy_trs) > 0:
-                    verdict = "⏳ PENDING_EPOCH_ISOLATION"
-                    status_note = (
-                        f"(legacy {len(_legacy_trs)}건만 있음 · 현 epoch 청산 0 · "
-                        f"legacy vs 배선미완 판별 대기 · 성과 해석 금지)"
-                    )
-                elif total_exits_e == 0:
-                    verdict = "⏳ PENDING_NO_EXIT"
-                    status_note = "(청산 이벤트 0건 · 실측 미확정 · 성과 해석 금지)"
-                elif not exit_ok:
-                    _forbidden_parts = []
-                    if be_sl_e > 0: _forbidden_parts.append(f"본절SL={be_sl_e}")
-                    if early_sl_e > 0: _forbidden_parts.append(f"early_SL={early_sl_e}")
-                    verdict = "❌ CONTAMINATED"
-                    status_note = (f"({' '.join(_forbidden_parts)} · 현 epoch · "
-                                   f"배선 미완 확정 · exit 엔진 재감사 필요 · 성과 해석 금지)")
-                else:
-                    verdict = "✅ VALID"
-                    status_note = f"(현 epoch 청산 {total_exits_e}건 · 금지 exit 0 · 성과 해석 가능)"
+                # 판정 위임 (pure function · pytest 회귀 방지 · task #56)
+                verdict, status_note = judge_a_clean_purity(
+                    config_be_off, config_tiered_off,
+                    total_exits_e, be_sl_e, early_sl_e,
+                    len(_legacy_trs),
+                )
                 # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
                 lines.append(
                     f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건) "
