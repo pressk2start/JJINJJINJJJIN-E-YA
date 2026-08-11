@@ -14,6 +14,10 @@ import uuid
 import hashlib
 import jwt
 
+# advisor 3자 수렴 (2026-08-10 · task #56): A_CLEAN PURITY 판정 순수 함수 분리 ·
+# 9782331 계약 (AT본절 허용 · 본절SL/early_SL 금지) 을 pytest 로 회귀 방지.
+from _a_clean_purity import judge_a_clean_purity
+
 # 🔧 WF 데이터 기반 전략 모듈 (bot.py에 인라인 통합)
 # strategy_v4 함수들은 아래 "# ============ strategy_v4 통합 ============" 섹션에 정의
 
@@ -2149,34 +2153,16 @@ def _shadow_contamination_check():
                 at_be_l = _count_by_reason(_legacy_trs, "AT본절")
                 early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
                 legacy_forbidden = be_sl_l + early_sl_l
-                # VALIDATION 게이트 판정 (advisor 2 개선 1 · epoch-aware)
-                # 2026-08-10 정정: AT본절 은 forbidden 에서 제거 (docstring 3겹 감사 참조)
-                # adaptive_trail 정상 stop 이 라벨 "AT본절" 로 잡히는 것 · disable_breakeven 무관
+                # VALIDATION 게이트 판정 (advisor 3자 수렴 · pure function 위임 · 2026-08-10 task #56)
+                # 판정 로직은 _a_clean_purity.judge_a_clean_purity 에 · pytest 로 회귀 방지.
+                # AT본절 은 forbidden 에서 제거 (9782331 · docstring 3겹 감사 참조).
                 config_ok = config_be_off and config_tiered_off
-                exit_ok = (be_sl_e == 0 and early_sl_e == 0)
-                # 신규 상태: PENDING_EPOCH_ISOLATION (legacy 표본만 있고 현 epoch 청산 0)
-                if not config_ok:
-                    verdict = "❌ CONFIG_FAIL"
-                    status_note = f"(be_off={config_be_off} tiered_off={config_tiered_off} · 성과 해석 금지)"
-                elif total_exits_e == 0 and len(_legacy_trs) > 0:
-                    verdict = "⏳ PENDING_EPOCH_ISOLATION"
-                    status_note = (
-                        f"(legacy {len(_legacy_trs)}건만 있음 · 현 epoch 청산 0 · "
-                        f"legacy vs 배선미완 판별 대기 · 성과 해석 금지)"
-                    )
-                elif total_exits_e == 0:
-                    verdict = "⏳ PENDING_NO_EXIT"
-                    status_note = "(청산 이벤트 0건 · 실측 미확정 · 성과 해석 금지)"
-                elif not exit_ok:
-                    _forbidden_parts = []
-                    if be_sl_e > 0: _forbidden_parts.append(f"본절SL={be_sl_e}")
-                    if early_sl_e > 0: _forbidden_parts.append(f"early_SL={early_sl_e}")
-                    verdict = "❌ CONTAMINATED"
-                    status_note = (f"({' '.join(_forbidden_parts)} · 현 epoch · "
-                                   f"배선 미완 확정 · exit 엔진 재감사 필요 · 성과 해석 금지)")
-                else:
-                    verdict = "✅ VALID"
-                    status_note = f"(현 epoch 청산 {total_exits_e}건 · 금지 exit 0 · 성과 해석 가능)"
+                # 판정 위임 (pure function · pytest 회귀 방지 · task #56)
+                verdict, status_note = judge_a_clean_purity(
+                    config_be_off, config_tiered_off,
+                    total_exits_e, be_sl_e, early_sl_e,
+                    len(_legacy_trs),
+                )
                 # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
                 lines.append(
                     f"  {route} n={n} (epoch={total_exits_e}건, legacy={len(_legacy_trs)}건) "
@@ -2218,6 +2204,12 @@ def _a2_audit_summary():
                 if "a2_vr5cap_fail" in k:
                     reject_cnt += v
             a2_cand = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_candidate", 0)
+            # source-tagging 카운터 (task #57 v2 · advisor 2 지목 #1)
+            _src_pp = _PIPELINE_COUNTERS.get("climax_a2_vr5_present_pass", 0)
+            _src_pr = _PIPELINE_COUNTERS.get("climax_a2_vr5_present_reject", 0)
+            _src_fp = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_pass", 0)
+            _src_fr = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_reject", 0)
+            _src_un = _PIPELINE_COUNTERS.get("climax_a2_vr5_unavailable", 0)
         # A2 shadow perf 로부터 vr5 분포 집계 · 결측군 편중 감사 (advisor 2)
         a2_route = "CLM_A_x_A2_bp30"
         a2_n = 0
@@ -2270,7 +2262,29 @@ def _a2_audit_summary():
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
+            # source-tagging 라인 (task #57 v2 · advisor 2 지목 #1 · 첫 low-vr5 PASS 판별)
+            f"  A2_SOURCE (decision-time): "
+            f"present P/R={_src_pp}/{_src_pr} · fallback P/R={_src_fp}/{_src_fr} · "
+            f"unavailable={_src_un}",
         ]
+        # advisor 2 불변식 체크 (task #58): source × outcome 합이 흐름 카운터와 정합해야
+        # 미스매치 = 계측 누락 or 드리프트 → ⚠ 경고 (관측 파이프 자기검증)
+        _src_pass_sum = _src_pp + _src_fp
+        _src_reject_sum = _src_pr + _src_fr
+        _src_total = _src_pass_sum + _src_reject_sum + _src_un
+        _flow_total = a2_cand + reject_cnt + _src_un
+        if _src_pass_sum != a2_cand or _src_reject_sum != reject_cnt:
+            lines.append(
+                f"  ⚠ A2_SOURCE 불변식 위반: "
+                f"pass(src={_src_pass_sum} vs cand={a2_cand}) · "
+                f"reject(src={_src_reject_sum} vs cap_fail={reject_cnt}) · "
+                f"계측 누락 or 드리프트 감사 필요"
+            )
+        elif _src_total != _flow_total:
+            # 이론상 도달 불가 (앞 조건에서 잡힘) · 안전 방어
+            lines.append(
+                f"  ⚠ A2_SOURCE 총합 불일치: src={_src_total} vs flow={_flow_total}"
+            )
         # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
         if eligible >= 100 and vr5_pass_low < 5:
             lines.append(
@@ -12577,22 +12591,53 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     #   universal indicators bot.py:10510 도 ui["vr5"] = round(_v4_volume_ratio_5(c1), 2).
     #   즉 fallback 이 base 와 동일 함수·동일 입력 → window/denominator/현재봉 포함
     #   전부 일치. covert 전략변경 아니고 결측 복원 확정.
-    vr5 = sig.get("indicators", {}).get("vr5")
-    if vr5 is None:
-        if c1 is None or len(c1) < 6:
-            _pipeline_inc("climax_a2_vr5_unavailable")
-            return None
+    # advisor 2 지목 #1 (2026-08-11 · task #57 v2 · advisor 최종 스펙 반영):
+    #   vr5 획득 경로 (present/fallback_computed/unavailable) 를 pass/reject
+    #   양쪽에 카운트 · 첫 low-vr5 PASS 이벤트 발생 시 즉시 판별.
+    #
+    #   ⚠ v2 amendment (2026-08-11 · advisor 크로스체크):
+    #   b372b6c v1 은 별도 필드 a2_vr5_used 저장 → vr5_missing 지표 미종결.
+    #   v2 는 sig["indicators"]["vr5"] 자체를 덮어써서 vr5_missing 지표 정합.
+    #   pass 시 A×A2 shadow record 의 vr5 는 실제 사용된 값 (present or 계산).
+    #   base·CONTROL/A route 는 다른 check_fn 사용 · 이 write-back 무영향.
+    #
+    #   safety: math.isfinite 를 present/fallback 모두 검사 · nan/inf 시 fallback
+    #   또는 unavailable 로 자동 격하 (advisor 스펙 fallback 만 검사하는 미비 보완).
+    _src = None
+    _vr5_raw = sig.get("indicators", {}).get("vr5")
+    if _vr5_raw is not None and math.isfinite(_vr5_raw):
+        vr5 = _vr5_raw
+        _src = "present"
+    elif c1 is not None and len(c1) >= 6:
         try:
-            vr5 = _v4_volume_ratio_5(c1)
+            _c = _v4_volume_ratio_5(c1)
+            if _c is not None and math.isfinite(_c):
+                vr5 = _c
+                _src = "fallback_computed"
+            else:
+                _src = "unavailable"
+                vr5 = None
         except Exception:
+            _src = "unavailable"
             vr5 = None
-    if vr5 is None or not math.isfinite(vr5):
+    else:
+        _src = "unavailable"
+        vr5 = None
+    # unavailable 종단 (필터 제외 · pass/reject 아님)
+    if _src == "unavailable":
         _pipeline_inc("climax_a2_vr5_unavailable")
         return None
-    if vr5 > vr5_cap:
+    # cap 판정 · source × outcome 카운터
+    _outcome = "reject" if vr5 > vr5_cap else "pass"
+    _pipeline_inc(f"climax_a2_vr5_{_src}_{_outcome}")
+    if _outcome == "reject":
         _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
                       threshold=vr5_cap, direction="lte")
         return None
+    # PASS 경로 · vr5 자체를 사용된 값으로 덮어써서 vr5_missing 지표 종결
+    _ind = sig.setdefault("indicators", {})
+    _ind["vr5"] = round(vr5, 2)
+    _ind["vr5_source"] = _src
     return sig
 
 
