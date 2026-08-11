@@ -2204,6 +2204,12 @@ def _a2_audit_summary():
                 if "a2_vr5cap_fail" in k:
                     reject_cnt += v
             a2_cand = _PIPELINE_COUNTERS.get("shadow_route_CLM_A_x_A2_bp30_candidate", 0)
+            # source-tagging 카운터 (task #57 v2 · advisor 2 지목 #1)
+            _src_pp = _PIPELINE_COUNTERS.get("climax_a2_vr5_present_pass", 0)
+            _src_pr = _PIPELINE_COUNTERS.get("climax_a2_vr5_present_reject", 0)
+            _src_fp = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_pass", 0)
+            _src_fr = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_reject", 0)
+            _src_un = _PIPELINE_COUNTERS.get("climax_a2_vr5_unavailable", 0)
         # A2 shadow perf 로부터 vr5 분포 집계 · 결측군 편중 감사 (advisor 2)
         a2_route = "CLM_A_x_A2_bp30"
         a2_n = 0
@@ -2256,6 +2262,10 @@ def _a2_audit_summary():
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
+            # source-tagging 라인 (task #57 v2 · advisor 2 지목 #1 · 첫 low-vr5 PASS 판별)
+            f"  A2_SOURCE (decision-time): "
+            f"present P/R={_src_pp}/{_src_pr} · fallback P/R={_src_fp}/{_src_fr} · "
+            f"unavailable={_src_un}",
         ]
         # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
         if eligible >= 100 and vr5_pass_low < 5:
@@ -12563,44 +12573,53 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
     #   universal indicators bot.py:10510 도 ui["vr5"] = round(_v4_volume_ratio_5(c1), 2).
     #   즉 fallback 이 base 와 동일 함수·동일 입력 → window/denominator/현재봉 포함
     #   전부 일치. covert 전략변경 아니고 결측 복원 확정.
-    # advisor 2 지목 #1 (2026-08-11 · task #57): A2 source-tagging
+    # advisor 2 지목 #1 (2026-08-11 · task #57 v2 · advisor 최종 스펙 반영):
     #   vr5 획득 경로 (present/fallback_computed/unavailable) 를 pass/reject
-    #   양쪽에 카운트 · 첫 low-vr5 PASS 이벤트 발생 시 vr5 획득 경로 즉시 판별.
-    #   sig.indicators 에 a2_vr5_source · a2_vr5_used write-back → trade_records
-    #   inds 에 자동 축적 · 재분석 가능.
-    _vr5_src = None
-    vr5 = sig.get("indicators", {}).get("vr5")
-    if vr5 is not None:
-        _vr5_src = "present"
-    else:
-        if c1 is None or len(c1) < 6:
-            _vr5_src = "unavailable"
-        else:
-            try:
-                vr5 = _v4_volume_ratio_5(c1)
-                _vr5_src = "fallback_computed"
-            except Exception:
+    #   양쪽에 카운트 · 첫 low-vr5 PASS 이벤트 발생 시 즉시 판별.
+    #
+    #   ⚠ v2 amendment (2026-08-11 · advisor 크로스체크):
+    #   b372b6c v1 은 별도 필드 a2_vr5_used 저장 → vr5_missing 지표 미종결.
+    #   v2 는 sig["indicators"]["vr5"] 자체를 덮어써서 vr5_missing 지표 정합.
+    #   pass 시 A×A2 shadow record 의 vr5 는 실제 사용된 값 (present or 계산).
+    #   base·CONTROL/A route 는 다른 check_fn 사용 · 이 write-back 무영향.
+    #
+    #   safety: math.isfinite 를 present/fallback 모두 검사 · nan/inf 시 fallback
+    #   또는 unavailable 로 자동 격하 (advisor 스펙 fallback 만 검사하는 미비 보완).
+    _src = None
+    _vr5_raw = sig.get("indicators", {}).get("vr5")
+    if _vr5_raw is not None and math.isfinite(_vr5_raw):
+        vr5 = _vr5_raw
+        _src = "present"
+    elif c1 is not None and len(c1) >= 6:
+        try:
+            _c = _v4_volume_ratio_5(c1)
+            if _c is not None and math.isfinite(_c):
+                vr5 = _c
+                _src = "fallback_computed"
+            else:
+                _src = "unavailable"
                 vr5 = None
-                _vr5_src = "unavailable"
-    if vr5 is None or not math.isfinite(vr5):
-        # 유효성 실패 · source 별 unavailable/invalid reject 태깅
+        except Exception:
+            _src = "unavailable"
+            vr5 = None
+    else:
+        _src = "unavailable"
+        vr5 = None
+    # unavailable 종단 (필터 제외 · pass/reject 아님)
+    if _src == "unavailable":
         _pipeline_inc("climax_a2_vr5_unavailable")
-        if _vr5_src == "present":
-            # present dict 였는데 inf/nan · 희귀 · 별도 태깅
-            _pipeline_inc("climax_a2_src_present_invalid_reject")
-        else:
-            _pipeline_inc(f"climax_a2_src_{_vr5_src}_reject")
         return None
-    if vr5 > vr5_cap:
+    # cap 판정 · source × outcome 카운터
+    _outcome = "reject" if vr5 > vr5_cap else "pass"
+    _pipeline_inc(f"climax_a2_vr5_{_src}_{_outcome}")
+    if _outcome == "reject":
         _pipeline_inc("climax_a2_vr5cap_fail", value=round(vr5, 2),
                       threshold=vr5_cap, direction="lte")
-        _pipeline_inc(f"climax_a2_src_{_vr5_src}_reject")
         return None
-    # PASS 경로 · source 별 pass 카운트 + indicators write-back
-    _pipeline_inc(f"climax_a2_src_{_vr5_src}_pass")
-    _inds = sig.setdefault("indicators", {})
-    _inds["a2_vr5_source"] = _vr5_src
-    _inds["a2_vr5_used"] = round(vr5, 4)
+    # PASS 경로 · vr5 자체를 사용된 값으로 덮어써서 vr5_missing 지표 종결
+    _ind = sig.setdefault("indicators", {})
+    _ind["vr5"] = round(vr5, 2)
+    _ind["vr5_source"] = _src
     return sig
 
 
