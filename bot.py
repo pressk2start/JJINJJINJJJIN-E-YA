@@ -2197,7 +2197,13 @@ def _a2_audit_summary():
     - 필터검증 줄 fail-WR 은 A2 효과 식별 불가 (모집단·중복·청산기준 미매칭)
     """
     try:
-        vr5_cap = 3.5  # _v0_check_climax_cs40_vr5cap 기본값 · 사전등록
+        # A×A2 실 계약 (advisor 3자 확정 · 2026-08-12 · task #59):
+        #   check_fn (_v0_check_climax_cs40_vr5cap) 상한: vr5 ≤ 3.5
+        #   ind_filters 하한: vr5 ≥ 3.0 (base climax 요건 · 모든 CS40_VR3 계열 공통)
+        #   → 실 A×A2 밴드: 3.0 ≤ vr5 ≤ 3.5
+        vr5_cap_hi = 3.5      # A2 상한 · check_fn
+        vr5_cap_lo = 3.0      # base climax 하한 · ind_filters
+        vr5_cap = vr5_cap_hi  # 하위 호환 (기존 서식)
         with _PIPELINE_COUNTERS_LOCK:
             reject_cnt = 0
             for k, v in _PIPELINE_COUNTERS.items():
@@ -2210,6 +2216,8 @@ def _a2_audit_summary():
             _src_fp = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_pass", 0)
             _src_fr = _PIPELINE_COUNTERS.get("climax_a2_vr5_fallback_computed_reject", 0)
             _src_un = _PIPELINE_COUNTERS.get("climax_a2_vr5_unavailable", 0)
+            # ind_filter drop 카운터 (task #59 · vr5 하한 [3.0] 통과 못함)
+            _ind_drop_total = _PIPELINE_COUNTERS.get("climax_a2_ind_filter_drop_total", 0)
         # A2 shadow perf 로부터 vr5 분포 집계 · 결측군 편중 감사 (advisor 2)
         a2_route = "CLM_A_x_A2_bp30"
         a2_n = 0
@@ -2251,13 +2259,15 @@ def _a2_audit_summary():
         reject_ratio = reject_cnt / eligible * 100
         missing_rate = (vr5_missing / a2_n * 100) if a2_n > 0 else 0
         lines = [
-            f"A2_STATUS: cutoff=vr5≤{vr5_cap} · state=🔒 FROZEN (재튜닝 = 전향검증 무효)",
+            # advisor 3자 확정 (task #59): 실 A×A2 계약은 밴드 [3.0, 3.5]
+            # check_fn 상한 (vr5≤3.5) + ind_filters 하한 (vr5≥3.0 · base climax 요건) 조합
+            f"A2_STATUS: band={vr5_cap_lo:.1f}≤vr5≤{vr5_cap_hi:.1f} · state=🔒 FROZEN (재튜닝 = 전향검증 무효)",
             f"  변경 조건 (3중 · 모두 필요):",
             f"    □ common_n ≥ 50",
             f"    □ paired A×A2 shadow 결과 확정",
             f"    □ reviewer 승인",
             f"A2_AUDIT (결측=통과):",
-            f"  eligible={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap})={reject_cnt} · "
+            f"  eligible={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap_hi})={reject_cnt} · "
             f"reject_ratio={reject_ratio:.0f}%",
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
@@ -2266,24 +2276,37 @@ def _a2_audit_summary():
             f"  A2_SOURCE (decision-time): "
             f"present P/R={_src_pp}/{_src_pr} · fallback P/R={_src_fp}/{_src_fr} · "
             f"unavailable={_src_un}",
+            # ind_filter drop 라인 (task #59): 하한 [3.0] 에서 걸린 신호 명시
+            f"  A2_IND_FILTER (post check_fn · 하한 vr5<{vr5_cap_lo}): "
+            f"dropped={_ind_drop_total} (silent drop 노출 · advisor 3자 · line 15130)",
         ]
-        # advisor 2 불변식 체크 (task #58): source × outcome 합이 흐름 카운터와 정합해야
-        # 미스매치 = 계측 누락 or 드리프트 → ⚠ 경고 (관측 파이프 자기검증)
+        # 불변식 체크 (task #58 v2 재정의 · task #59):
+        #   reject side: source_reject == cap_fail (proven correct · hard alarm 유지)
+        #   pass side: source_pass = ind_filter_drop + shadow_vp_created
+        #     (a2_cand=0 은 shadow-only route 구조상 정상 · 비교 대상 아님)
+        #     shadow_vp_created 직접 카운터 없어서 대신: source_pass >= ind_filter_drop 확인
+        #     즉 source_pass 는 최소한 ind_filter_drop 이상이어야 (drop 은 source_pass 부분집합)
         _src_pass_sum = _src_pp + _src_fp
         _src_reject_sum = _src_pr + _src_fr
-        _src_total = _src_pass_sum + _src_reject_sum + _src_un
-        _flow_total = a2_cand + reject_cnt + _src_un
-        if _src_pass_sum != a2_cand or _src_reject_sum != reject_cnt:
+        # 강한 alarm: reject side 정합 (proven)
+        if _src_reject_sum != reject_cnt:
             lines.append(
-                f"  ⚠ A2_SOURCE 불변식 위반: "
-                f"pass(src={_src_pass_sum} vs cand={a2_cand}) · "
-                f"reject(src={_src_reject_sum} vs cap_fail={reject_cnt}) · "
-                f"계측 누락 or 드리프트 감사 필요"
+                f"  ⚠ A2_SOURCE reject 불변식 위반: "
+                f"source_reject={_src_reject_sum} vs cap_fail={reject_cnt} · 계측 누락 감사 필요"
             )
-        elif _src_total != _flow_total:
-            # 이론상 도달 불가 (앞 조건에서 잡힘) · 안전 방어
+        # 약한 alarm: pass side · ind_filter_drop 이 source_pass 초과 불가
+        if _ind_drop_total > _src_pass_sum:
             lines.append(
-                f"  ⚠ A2_SOURCE 총합 불일치: src={_src_total} vs flow={_flow_total}"
+                f"  ⚠ A2_SOURCE pass 계측 이상: "
+                f"ind_filter_drop={_ind_drop_total} > source_pass={_src_pass_sum} "
+                f"(drop 은 pass 부분집합이어야) · 계측 순서 감사 필요"
+            )
+        # 정보: pass 정합 요약 (source_pass = ind_filter_drop + shadow_vp_생성 예상)
+        _est_vp_created = max(0, _src_pass_sum - _ind_drop_total)
+        if _src_pass_sum > 0:
+            lines.append(
+                f"  ℹ A2 pass 회계: source_pass={_src_pass_sum} = "
+                f"ind_filter_drop={_ind_drop_total} + shadow_vp_created≈{_est_vp_created}"
             )
         # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
         if eligible >= 100 and vr5_pass_low < 5:
@@ -15129,6 +15152,19 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
                     _fv = _sig_ind.get(_fk)
                 if _fv is None or (_fop == "<=" and _fv > _fth) or (_fop == ">=" and _fv < _fth):
                     hit = False
+                    # advisor 3자 (2026-08-12 · task #59): A×A2 ind_filter drop 카운터
+                    # 파이프에 원래 존재하던 silent drop 을 명시 노출 · vr5 밴드 [3.0, 3.5]
+                    # 아래 하한 (vr5<3.0) 에서 걸리는 신호 계상 · invariant 완전 close 용
+                    if route == "CLM_A_x_A2_bp30":
+                        try:
+                            _pipeline_inc(
+                                f"climax_a2_ind_drop_{_fk}_{_fop.replace('=', '')}{_fth}",
+                                value=round(_fv, 3) if isinstance(_fv, (int, float)) else None,
+                                threshold=_fth, direction=_fop,
+                            )
+                            _pipeline_inc("climax_a2_ind_filter_drop_total")
+                        except Exception:
+                            pass
                     break
         results[route] = hit
 
