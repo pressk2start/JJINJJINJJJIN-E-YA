@@ -23026,16 +23026,33 @@ def main():
                         _C_ENTRY_TIMESTAMPS.append(time.time())
                     _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
                                       "", 1, f"ENTRY_ATTEMPT|mode={pre.get('entry_mode')}")
-                    # advisor 3자 (2026-08-14 · task #61): send_attempt → send_success 실패 사유 분류
+                    # advisor 3자 (2026-08-14 · task #61 v2): send_attempt → send_success 실패 사유 분류
                     # 17건 시도 중 6건 성공 (35%) · 실행층 실패 원인 계측 필수
-                    _send_fail_reason = None  # 실패 시 카운터에 사유 기록
+                    # advisor 정정 반영: exception 을 keyword 로 세분화
+                    #   exchange_reject / timeout_or_network / stale_or_price / balance /
+                    #   min_order / exception_other · 후처리 state 도 남김
+                    _send_fail_reason = None
                     _send_exc = None
+                    _send_attempt_ts = time.time()
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
                         _send_exc = e
-                        _send_fail_reason = "exception"
-                        print("[AUTO_OPEN_ERR]", e)
+                        # exception 메시지 기반 분류 (advisor 3자 spec)
+                        _err_lower = str(e).lower()
+                        if any(k in _err_lower for k in ("insufficient", "balance", "잔고", "kobo")):
+                            _send_fail_reason = "balance"
+                        elif "min" in _err_lower and any(k in _err_lower for k in ("order", "amount", "notional", "krw", "최소")):
+                            _send_fail_reason = "min_order"
+                        elif any(k in _err_lower for k in ("timeout", "network", "connection", "connect", "resolve", "unreachable")):
+                            _send_fail_reason = "timeout_or_network"
+                        elif any(k in _err_lower for k in ("reject", "invalid", "not allowed", "denied", "forbidden", "not_allowed")):
+                            _send_fail_reason = "exchange_reject"
+                        elif any(k in _err_lower for k in ("price", "가격", "stale", "slippage", "outdated")):
+                            _send_fail_reason = "stale_or_price"
+                        else:
+                            _send_fail_reason = "exception_other"
+                        print(f"[AUTO_OPEN_ERR] reason={_send_fail_reason} · {e}")
                         # 🔧 FIX: 자동매수 실패 시 pre_signal pending 정리
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
