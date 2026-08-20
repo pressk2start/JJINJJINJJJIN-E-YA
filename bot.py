@@ -2331,17 +2331,28 @@ def _a2_audit_summary():
                 f"  ℹ A2 pass 회계: source_pass={_src_pass_sum} = "
                 f"ind_filter_drop={_ind_drop_total} + shadow_vp_created≈{_est_vp_created}"
             )
-        # advisor 2 정정 2: A2 실험 불능 판정 (cutoff 재튜닝 금지 · 표본 생성 불가 판별)
-        if eligible >= 100 and vr5_pass_low < 5:
+        # ── A2 EXPERIMENT_INFEASIBLE 판정 (advisor 3자 · Edge discovery mode) ──
+        # 이전: vr5_pass_low<5 기준 (audit key 버그로 항상 0 이었음 · task #60 fix 후 정상화)
+        # 강화: band [3.0, 3.5] 실 VP 생산률 (_est_vp_created) 기반 · 명확한 종료 기준
+        #   eligible ≥ 100 · _est_vp_created < 5 → 구조적 불가 (종료 후보 확정)
+        #   eligible ≥ 50 · _est_vp_created < 3 → 조기 경보 (feasibility 위험)
+        #   그 외 · reject_ratio ≥ 90 → 관찰 지속 라벨
+        if eligible >= 100 and _est_vp_created < 5:
             lines.append(
-                f"  🚫 A2 EXPERIMENT_INFEASIBLE: eligible={eligible}≥100 · vr5≤{vr5_cap} 통과 "
-                f"{vr5_pass_low}<5 · 현 라이브 신호 분포에서 표본 생성 불가 · cutoff 재튜닝 X · "
-                f"'A×A2 전향검증 불능' 종료 후보"
+                f"  🚫 A2 EXPERIMENT_INFEASIBLE 확정: eligible={eligible}≥100 · "
+                f"band[{vr5_cap_lo},{vr5_cap_hi}] 실 VP={_est_vp_created}<5 · "
+                f"현 라이브 신호 분포에서 A2 표본 생성 구조적 불가 · "
+                f"cutoff/band 재튜닝 절대 금지 · A×A2 route 종료 검토"
+            )
+        elif eligible >= 50 and _est_vp_created < 3:
+            lines.append(
+                f"  ⚠ A2 feasibility 경보: eligible={eligible}≥50 · 실 VP={_est_vp_created}<3 · "
+                f"100 도달 시 EXPERIMENT_INFEASIBLE 자동 판정 예상 · 새 후보 준비 권장"
             )
         elif eligible >= 30 and reject_ratio >= 90:
             lines.append(
                 f"  ⚠ A2 표본 생성률 낮음: eligible={eligible} reject_ratio={reject_ratio:.0f}% "
-                f"· 100건까지 관찰 후 EXPERIMENT_INFEASIBLE 판정"
+                f"· band 하한 drop 도 함께 관찰 (100 도달 시 INFEASIBLE 판정)"
             )
         # 결측군 편중 감사 (advisor 2)
         if vr5_missing >= 3:
@@ -2495,6 +2506,8 @@ def _common_cohort_paired_summary():
         else:
             lines.append(f"  ✅ 매칭 불변식: duplicate=0 · missing_arm=0")
         # delta vs CONTROL (paired 순수 효과)
+        _a_delta_pct = None
+        _a_a2_delta_pct = None
         if "CONTROL" in route_trades:
             ctrl_pnls = {sid: route_trades["CONTROL"][sid].get("pnl", 0)
                         for sid in _ids if sid in route_trades["CONTROL"]}
@@ -2508,11 +2521,49 @@ def _common_cohort_paired_summary():
                 if deltas:
                     mean_delta = sum(deltas) / len(deltas) * 100
                     lines.append(f"  Δ{label} vs CONTROL: {mean_delta:+.3f}%p (n={len(deltas)})")
-        # 승격 기준 안내
+                    if label == "A":
+                        _a_delta_pct = mean_delta
+                    elif label == "A×A2":
+                        _a_a2_delta_pct = mean_delta
+        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20 · task #63) ──
+        # 이전: "50 첫 판정" · 사용자 답답함 정당 (무한 대기)
+        # 정정: common_n=30 강제 첫 판정 · 폐기/연장/경계 자동 라벨
+        #   |ΔA| < 0.05%p     → 🚫 폐기 후보 (엣지 미확인 · 자원 새 후보로)
+        #   ΔA ≥ +0.10%p      → ✅ 연장 (50까지 검증 · MDD/꼬리 병행)
+        #   -0.05 ≤ ΔA < 0.10 → ⚠ 경계 (n=50까지 방향 확정 대기)
         if len(_ids) < 30:
-            lines.append(f"  ※ common_n<30: 참고만 · 판정 대기 (50 첫 · 100 승격)")
-        elif len(_ids) < 50:
-            lines.append(f"  ※ common_n<50: 참고 판정 · 100 승격 대기")
+            lines.append(f"  ※ common_n<30: 참고만 · 판정 대기 (30 첫판정 · 50 확인 · 100 승격)")
+        else:
+            _deadline = []
+            if _a_delta_pct is not None:
+                if abs(_a_delta_pct) < 0.05:
+                    _deadline.append(
+                        f"  🚫 A 실험 폐기 후보 (common_n={len(_ids)}≥30): "
+                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p ≈ 0 · 엣지 미확인 · "
+                        f"50까지 무작정 X · 자원 새 후보(feature_screen)로 전환 검토"
+                    )
+                elif _a_delta_pct >= 0.10:
+                    _deadline.append(
+                        f"  ✅ A 실험 연장 (common_n={len(_ids)}≥30 · "
+                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p 유의미한 양수): "
+                        f"50까지 검증 지속 · MDD/꼬리 개선 병행 확인"
+                    )
+                else:
+                    _deadline.append(
+                        f"  ⚠ A 실험 경계 판정 (common_n={len(_ids)}≥30 · "
+                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p 경계 [-0.05, +0.10]): "
+                        f"n=50까지 방향 확정 대기"
+                    )
+            if _a_a2_delta_pct is not None and abs(_a_a2_delta_pct) < 0.05:
+                _deadline.append(
+                    f"  ℹ A×A2 vs CONTROL 도 ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
+                    f"A2 손실제거 가설 미지지 · cutoff 재튜닝 금지 유지"
+                )
+            lines.extend(_deadline)
+            if len(_ids) < 50:
+                lines.append(f"  ※ common_n=30~49: 첫판정 단계 · 50 확인 · 100 승격 대기")
+            else:
+                lines.append(f"  ※ common_n≥50: 확인 판정 도달 · 100 승격 대기")
         return "\n".join(lines)
     except Exception as exc:
         return f"COMMON_COHORT: ERROR {exc}"
