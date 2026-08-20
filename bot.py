@@ -1941,6 +1941,20 @@ def _pass_entry_funnel_summary():
                     skip_parts.append(f"{k[len('entry_skip_'):]}={snap[k]}(Δ{delta[k]:+d})")
             if skip_parts:
                 parts.append("skips[" + ", ".join(skip_parts) + "]")
+        # advisor 3자 (2026-08-14 · task #61): send_fail 사유 분류 노출
+        # attempt→success 실패 사유 계측 · 실행품질 진단
+        try:
+            with _PIPELINE_COUNTERS_LOCK:
+                fail_reasons = {
+                    k[len("send_fail_"):]: v
+                    for k, v in _PIPELINE_COUNTERS.items()
+                    if k.startswith("send_fail_") and v > 0
+                }
+            if fail_reasons:
+                _fail_parts = " ".join(f"{r}={n}" for r, n in sorted(fail_reasons.items(), key=lambda x: -x[1]))
+                parts.append(f"send_fail[{_fail_parts}]")
+        except Exception:
+            pass
         # advisor 지적: 정상 안전장치 vs 이상 판단
         # send_attempt < pass 면 pre_entry 차단 (killswitch/cooldown/daily_guard 등)
         # send_success < send_attempt 면 open_auto_position 내부 skip
@@ -2236,7 +2250,10 @@ def _a2_audit_summary():
                 a2_n = s.get("signals", 0)
                 _trs = s.get("trade_records", []) or []
                 for t in _trs:
-                    inds = t.get("indicators", {}) or {}
+                    # advisor 3자 (2026-08-14 · task #60): 실 저장 필드는 "inds" (line 14304)
+                    # 이전 "indicators" key 는 잘못 · 결과적으로 vr5_present 항상 0
+                    # 배선/데이터와 무관하게 표시 metric 이 죽어있었음
+                    inds = t.get("inds", {}) or {}
                     vr5 = inds.get("vr5") if isinstance(inds, dict) else None
                     pnl = t.get("pnl", 0)
                     if vr5 is None:
@@ -2266,9 +2283,15 @@ def _a2_audit_summary():
             f"    □ common_n ≥ 50",
             f"    □ paired A×A2 shadow 결과 확정",
             f"    □ reviewer 승인",
-            f"A2_AUDIT (결측=통과):",
-            f"  eligible={eligible} · pass={a2_cand} · reject(vr5>{vr5_cap_hi})={reject_cnt} · "
-            f"reject_ratio={reject_ratio:.0f}%",
+            # advisor 3자 (2026-08-14 · task #62): 층별 명명 분리 · 이전 "pass" 용어
+            # 이 audit/source 두 층에서 다른 의미로 재사용되어 혼선 (audit pass=0 vs source pass=X)
+            # 재정의:
+            #   upper_cap_eval  = check_fn 도달 총 (a2_cand + reject_cnt)
+            #   high_vr5_reject = check_fn 상한 (vr5>3.5) 에서 걸림
+            #   final_vp_cand   = 최종 A×A2 shadow candidate 생성 (a2_cand · 하한 통과 후)
+            f"A2_AUDIT (계층별 회계):",
+            f"  upper_cap_eval={eligible} · high_vr5_reject={reject_cnt} · "
+            f"final_vp_cand={a2_cand} · reject_ratio={reject_ratio:.0f}%",
             f"  통과분 shadow n={a2_n}: vr5_present={vr5_present} · vr5_missing={vr5_missing} "
             f"(결측률 {missing_rate:.0f}%)",
             f"  pass_low_vr5={vr5_pass_low} · pass_missing={vr5_missing}",
@@ -23003,10 +23026,33 @@ def main():
                         _C_ENTRY_TIMESTAMPS.append(time.time())
                     _shadow_log_write(now_kst_str(), m, pre.get("signal_tag", "?"), 1,
                                       "", 1, f"ENTRY_ATTEMPT|mode={pre.get('entry_mode')}")
+                    # advisor 3자 (2026-08-14 · task #61 v2): send_attempt → send_success 실패 사유 분류
+                    # 17건 시도 중 6건 성공 (35%) · 실행층 실패 원인 계측 필수
+                    # advisor 정정 반영: exception 을 keyword 로 세분화
+                    #   exchange_reject / timeout_or_network / stale_or_price / balance /
+                    #   min_order / exception_other · 후처리 state 도 남김
+                    _send_fail_reason = None
+                    _send_exc = None
+                    _send_attempt_ts = time.time()
                     try:
                         open_auto_position(m, pre, dyn_stop, eff_sl_pct)
                     except Exception as e:
-                        print("[AUTO_OPEN_ERR]", e)
+                        _send_exc = e
+                        # exception 메시지 기반 분류 (advisor 3자 spec)
+                        _err_lower = str(e).lower()
+                        if any(k in _err_lower for k in ("insufficient", "balance", "잔고", "kobo")):
+                            _send_fail_reason = "balance"
+                        elif "min" in _err_lower and any(k in _err_lower for k in ("order", "amount", "notional", "krw", "최소")):
+                            _send_fail_reason = "min_order"
+                        elif any(k in _err_lower for k in ("timeout", "network", "connection", "connect", "resolve", "unreachable")):
+                            _send_fail_reason = "timeout_or_network"
+                        elif any(k in _err_lower for k in ("reject", "invalid", "not allowed", "denied", "forbidden", "not_allowed")):
+                            _send_fail_reason = "exchange_reject"
+                        elif any(k in _err_lower for k in ("price", "가격", "stale", "slippage", "outdated")):
+                            _send_fail_reason = "stale_or_price"
+                        else:
+                            _send_fail_reason = "exception_other"
+                        print(f"[AUTO_OPEN_ERR] reason={_send_fail_reason} · {e}")
                         # 🔧 FIX: 자동매수 실패 시 pre_signal pending 정리
                         with _POSITION_LOCK:
                             pos = OPEN_POSITIONS.get(m)
@@ -23015,16 +23061,41 @@ def main():
                         # 🔧 FIX: 모니터 미생성이므로 락 직접 해제 (안 풀면 90초간 진입 차단)
                         _release_entry_lock(m)
                         _lock_held = False
+                        try:
+                            _pipeline_inc(f"send_fail_{_send_fail_reason}")
+                        except Exception:
+                            pass
                         continue  # 🔧 FIX: 매수 실패 시 모니터 생성 방지 (fall-through → 유령 모니터 방지)
 
                     # --- 포지션 모니터링 (손절/청산 시 자동청산까지 이어짐) ---
                     # 🔧 FIX: 신호가가 아닌 실제 체결가 사용
                     with _POSITION_LOCK:
-                        actual_entry = OPEN_POSITIONS.get(m, {}).get("entry_price", pre["price"])
-                        _entry_opened = OPEN_POSITIONS.get(m, {}).get("state") == "open"
+                        _pos_now = OPEN_POSITIONS.get(m, {})
+                        actual_entry = _pos_now.get("entry_price", pre["price"])
+                        _entry_opened = _pos_now.get("state") == "open"
+                        _pos_state = _pos_now.get("state")
+                        _pos_exists = m in OPEN_POSITIONS
                     if _entry_opened:
                         _pipeline_inc("send_success")
                         _pipeline_hourly_inc("success")
+                    else:
+                        # attempt 후 state != "open" · 사유 분류 (advisor 3자 task #61)
+                        # 매매 로직 무영향 · 순수 관측
+                        try:
+                            if not _pos_exists:
+                                # OPEN_POSITIONS 에 없음 = 주문 실패 or 정리됨
+                                _send_fail_reason = "no_position"
+                            elif _pos_state == "pending":
+                                _send_fail_reason = "pending_no_fill"
+                            elif _pos_state == "cancelled":
+                                _send_fail_reason = "cancelled"
+                            elif _pos_state is None:
+                                _send_fail_reason = "state_missing"
+                            else:
+                                _send_fail_reason = f"state_{_pos_state}"
+                            _pipeline_inc(f"send_fail_{_send_fail_reason}")
+                        except Exception:
+                            pass
 
                     # 🔧 FIX: 별도 스레드에서 모니터링 실행 (메인 스캔 루프 블로킹 방지)
                     # 🔧 FIX: 모니터링 스레드 중복 방지 + 죽은 스레드 감지
