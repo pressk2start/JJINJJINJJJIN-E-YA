@@ -2505,12 +2505,15 @@ def _common_cohort_paired_summary():
             lines.append(f"  ⚠ 매칭 불변식 위반: {' · '.join(_inv_parts)}")
         else:
             lines.append(f"  ✅ 매칭 불변식: duplicate=0 · missing_arm=0")
-        # delta vs CONTROL (paired 순수 효과)
+        # delta vs CONTROL (paired 순수 효과) + exit divergence (advisor 3자 정밀화)
         _a_delta_pct = None
         _a_a2_delta_pct = None
+        _a_divergence = None  # A exit_reason ≠ CONTROL exit_reason 매칭쌍 수
         if "CONTROL" in route_trades:
             ctrl_pnls = {sid: route_trades["CONTROL"][sid].get("pnl", 0)
                         for sid in _ids if sid in route_trades["CONTROL"]}
+            ctrl_reasons = {sid: route_trades["CONTROL"][sid].get("exit_reason")
+                           for sid in _ids if sid in route_trades["CONTROL"]}
             for label in ("A", "A×A2"):
                 if label not in route_trades:
                     continue
@@ -2525,39 +2528,75 @@ def _common_cohort_paired_summary():
                         _a_delta_pct = mean_delta
                     elif label == "A×A2":
                         _a_a2_delta_pct = mean_delta
-        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20 · task #63) ──
+            # A divergence: A exit_reason ≠ CONTROL exit_reason 매칭쌍 수
+            # advisor 3자 (2026-08-21): ΔA≈0 원인 판별용 · 구조적 무력 vs 개선 없음 구분
+            if "A" in route_trades:
+                _div = 0
+                _paired = 0
+                for sid in _ids:
+                    if sid in ctrl_reasons and sid in route_trades["A"]:
+                        _paired += 1
+                        _a_reason = route_trades["A"][sid].get("exit_reason")
+                        if ctrl_reasons[sid] and _a_reason and ctrl_reasons[sid] != _a_reason:
+                            _div += 1
+                if _paired > 0:
+                    _a_divergence = _div
+                    lines.append(
+                        f"  A exit divergence vs CONTROL: {_div}/{_paired} "
+                        f"(A 고유 메커니즘 발동 카운트 · BE/early_SL/hard_stop 물린 pair)"
+                    )
+        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20/21 · task #63 + 정밀화) ──
         # 이전: "50 첫 판정" · 사용자 답답함 정당 (무한 대기)
-        # 정정: common_n=30 강제 첫 판정 · 폐기/연장/경계 자동 라벨
-        #   |ΔA| < 0.05%p     → 🚫 폐기 후보 (엣지 미확인 · 자원 새 후보로)
-        #   ΔA ≥ +0.10%p      → ✅ 연장 (50까지 검증 · MDD/꼬리 병행)
-        #   -0.05 ≤ ΔA < 0.10 → ⚠ 경계 (n=50까지 방향 확정 대기)
+        # 정정 v1: common_n=30 강제 첫 판정 · 폐기/연장/경계 자동 라벨
+        # 정정 v2 (advisor 3자 · 2026-08-21): divergence count 병행
+        #   - divergence=0 → 🚫 STRUCTURAL_KILL (A 메커니즘 아예 안 발동 · 표본 더 모아도 무의미)
+        #   - divergence>0 · |ΔA|<0.05 → 🚫 폐기 (갈리는데 개선 없음)
+        #   - divergence>0 · ΔA≥+0.10 → ✅ 연장 (50까지 검증)
+        #   - divergence>0 · 경계 → ⚠ n=50 대기
+        # advisor 3자 명시: divergence=0 인 감정적 연장 원천 차단 (구조적 무력 확정)
         if len(_ids) < 30:
             lines.append(f"  ※ common_n<30: 참고만 · 판정 대기 (30 첫판정 · 50 확인 · 100 승격)")
         else:
             _deadline = []
             if _a_delta_pct is not None:
-                if abs(_a_delta_pct) < 0.05:
+                if _a_divergence == 0:
                     _deadline.append(
-                        f"  🚫 A 실험 폐기 후보 (common_n={len(_ids)}≥30): "
-                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p ≈ 0 · 엣지 미확인 · "
-                        f"50까지 무작정 X · 자원 새 후보(feature_screen)로 전환 검토"
+                        f"  🚫 A 실험 STRUCTURAL_KILL (common_n={len(_ids)}≥30 · divergence=0): "
+                        f"A 고유 메커니즘 (BE/early_SL/hard_stop) 이 매칭쌍 어디에도 안 물림 · "
+                        f"이 신호 모집단에서 A 는 구조적 무력 · 표본 더 모아도 안 갈림 · "
+                        f"강한 KILL 근거 · 자원 새 후보(feature_screen)로 즉시 전환"
+                    )
+                elif abs(_a_delta_pct) < 0.05:
+                    _deadline.append(
+                        f"  🚫 A 실험 폐기 후보 (common_n={len(_ids)}≥30 · divergence={_a_divergence}>0 · "
+                        f"ΔA={_a_delta_pct:+.3f}%p ≈ 0): "
+                        f"갈리는데 개선 없음 · 50까지 무작정 X · 새 후보로 전환 검토"
                     )
                 elif _a_delta_pct >= 0.10:
                     _deadline.append(
-                        f"  ✅ A 실험 연장 (common_n={len(_ids)}≥30 · "
-                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p 유의미한 양수): "
+                        f"  ✅ A 실험 연장 (common_n={len(_ids)}≥30 · divergence={_a_divergence} · "
+                        f"ΔA={_a_delta_pct:+.3f}%p 유의미한 양수): "
                         f"50까지 검증 지속 · MDD/꼬리 개선 병행 확인"
                     )
                 else:
                     _deadline.append(
-                        f"  ⚠ A 실험 경계 판정 (common_n={len(_ids)}≥30 · "
-                        f"ΔA vs CONTROL={_a_delta_pct:+.3f}%p 경계 [-0.05, +0.10]): "
+                        f"  ⚠ A 실험 경계 판정 (common_n={len(_ids)}≥30 · divergence={_a_divergence} · "
+                        f"ΔA={_a_delta_pct:+.3f}%p 경계 [-0.05, +0.10]): "
                         f"n=50까지 방향 확정 대기"
                     )
             if _a_a2_delta_pct is not None and abs(_a_a2_delta_pct) < 0.05:
                 _deadline.append(
                     f"  ℹ A×A2 vs CONTROL 도 ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
                     f"A2 손실제거 가설 미지지 · cutoff 재튜닝 금지 유지"
+                )
+            # A_A2_common<10 · A 판정 시점 동시 A2 INFEASIBLE 종료 라벨 (advisor 3자 사전등록)
+            _a_a2_n = len(a_a2_common)
+            if _a_a2_n < 10:
+                _deadline.append(
+                    f"  🚫 A2 실험 동시 종료 후보 (A_A2_common={_a_a2_n}<10 · "
+                    f"A 판정 시점 실 검증 표본 부족): "
+                    f"band[3.0, 3.5] 표본 생산 구조적 불가 · cutoff/band 재튜닝 절대 금지 · "
+                    f"A2 route 종료 검토 (feasibility failure)"
                 )
             lines.extend(_deadline)
             if len(_ids) < 50:
