@@ -1,7 +1,8 @@
-# Swing Research (Protocol v1.7) — WIP
+# Swing Research (Protocol v1.7) — hash-ready 후보
 
-> ⚠ **HASH READY = NO.** 이 폴더는 개발 진행 상태(WIP)로 vsfec 브랜치에 배치됨.
-> hash 봉인은 아래 blocker 5개 + entry-gap unit test 해결 후 별도 timing에 사용자 손으로.
+> ✅ **6개 audit fix 반영 완료 · 유닛 테스트 ALL PASS.**
+> hash 봉인은 (1) pre-hash snapshot 생성 (2) 사용자 손 commit + tag 순서로.
+> 이 폴더는 vsfec 브랜치에 additive-only 배치 (bot.py 등 기존 파일 무접촉).
 
 ## 파일 구성
 
@@ -31,39 +32,50 @@ python3 live_swing.py
 TELEGRAM_TOKEN=xxx TELEGRAM_CHAT_ID=yyy python3 telegram_notify.py "테스트"
 ```
 
-## Outstanding audit blockers (hash 전 필수 해결)
+## Audit fix 반영 상태 (전부 ✅)
 
-### 1. open sizing map ↔ close MTM map 분리 ❌
-현재 `simulate()`의 `eq_now = book.equity(price_of)`와 `Book.open()`의 `room_gross` 모두
-`price_of`가 today's close 반환 → t+1 open 체결 시점에 today's close 참조 = look-ahead 1 bar.
-**Fix:** `sizing_price_of(open)` / `mtm_price_of(close)` 두 함수 분리.
+### 1. open sizing map ↔ close MTM map 분리 ✅
+`simulate()`에서 `open_px` / `close_px` 두 함수 분리:
+- 사이징·room_gross: `book.equity(open_px)` — t+1 open 체결 시점 known 가격
+- 일말 MTM: `book.equity(close_px)`
+- look-ahead 1 bar 제거. `[E:sizing=open cap]` unit test PASS.
 
-### 2. full calendar timeline ❌
-현재 `run_robustness.master_dates()`가 coin dates union.
-전체 coin이 결측인 날 = dates에서 누락 → simulate loop 미방문 → held position stealth carry-forward.
-**Fix:** `SW.full_calendar(start, end)` 로 START~END 전체 달력일 방문.
+### 2. full calendar timeline ✅
+`SW.full_calendar(start, end)` 함수 신규. `run_robustness.py`에서 `master_dates` 대신 사용.
+START~END 전체 달력일 방문 → 결측일도 방문 → held-position stealth carry-forward 차단.
+`[E:full_calendar]` unit test PASS.
 
-### 3. dynamic point-in-time eligibility + §5 30d turnover + halt ❌
-현재 `build_universe()`는 static filter (전체 기간 in/out).
-Protocol §5는 각 날짜 t에서 `listing_age(t) ≥ 180 AND 30d turnover ≥ threshold AND not halted`.
-**Fix:** 매일 재계산. 30d turnover threshold 값은 사용자 결정 필요.
+### 3. dynamic point-in-time eligibility ✅
+`build_universe()` 재작성: 각 coin에 `eligible_from = first_valid_candle + 180 days` 부여.
+Signal generator에 `_is_eligible(cd, d)` 체크 추가 (`d < eligible_from` → skip).
+`min_coverage` 창을 `[max(eligible_from, start), end]`로 재정의.
+`[P:상장<180 dynamic 제외] [P:eligible_from set] [P:KRW-OK0 eligible_from]` PASS.
 
-### 4. skew/kurt central-moment 정확 고정 ⚠
-현재 hybrid (z분모 ddof=1 + 집계 /n).
-**Fix:** pure Fisher-Pearson `m_k = Σ(x-μ)^k / n`, `skew = m3/m2^1.5`, `kurt = m4/m2²`.
-Protocol §4.2 문구도 정확 공식으로 명시.
+**§5 30d turnover:** 확정 = universe cutoff 아님. participation feasibility report field로만 사용.
+run_robustness output JSON에 `participation_feasibility` 필드 포함 (진단값).
 
-### 5. snapshot pre-hash vs post-hash provenance ❌
-현재 snapshot이 `run_robustness.py` 실행 시 생성 = post-hash artifact.
-Protocol "hash commit에 동봉" 문구와 불일치.
-**Fix (A):** pre-hash fetch 별도 명령, snapshot을 봉인 commit에 포함.
-**Fix (B):** protocol 문구 수정하여 post-hash artifact 인정.
+**§5 halt:** 확정 = candle 부재 = 신규 signal/entry eligibility 없음 (기존 InvalidRun 규칙으로 covered).
 
-### + entry-gap unit test
-`InvalidRun`이 held-coin gap에 대해 raise되는지 검증하는 unit test가 아직 tests.py에 없음.
-현재 코드는 `for m in book.pos: if coins[m]["idx"].get(d) is None: raise InvalidRun` 있으나
-entry-pending 결측(silent skip)에 대해서는 raise 안 함.
-**Fix:** entry-pending 결측도 raise + unit test 추가.
+### 4. skew/kurt central-moment ✅
+Pure Fisher-Pearson으로 재작성:
+```
+m_k = Σ(x−μ)^k / n
+skew = m3 / m2^1.5
+kurt = m4 / m2² (non-excess, 정규=3)
+```
+Bailey-LdP PSR denom과 일관. 통계 shape 검증됨.
+
+### 5. snapshot pre-hash provenance ✅
+`swing/fetch_snapshot.py` 신규 (pre-hash fetch CLI).
+`swing/data/snapshot.json.gz` 생성 → 봉인 commit에 포함.
+`run_robustness.py`는 snapshot만 읽음 (네트워크 fetch 코드 제거).
+snapshot 없이 실행 시 명확한 에러.
+
+### entry-pending gap → InvalidRun ✅
+`simulate()`에 카테고리 ② 추가:
+- pending exit + target open 결측 → `raise InvalidRun("pending-exit open gap")`
+- pending entry + target open 결측 → `raise InvalidRun("pending-entry open gap")`
+`[E:entry-gap→InvalidRun]` unit test PASS.
 
 ## Live 실주문 하드락 (4중 게이트)
 

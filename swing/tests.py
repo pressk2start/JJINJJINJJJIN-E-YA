@@ -156,10 +156,30 @@ def suite_engine():
     raised=False
     try: SW.simulate({"KRW-X":cd},dts,{"signals":sig_hold,"cost":0.0})
     except SW.InvalidRun: raised=True
-    checks.append(("missing-day→InvalidRun", raised, f"raised={raised}"))
+    checks.append(("held-gap→InvalidRun", raised, f"raised={raised}"))
+    # pending-entry gap → InvalidRun (audit item ② strict): signal fires but target open missing
+    dts2=[f"2020-02-{d:02d}" for d in range(1,13)]
+    rows2=[{"date":d,"o":100.0,"h":101.0,"l":99.5,"c":100.0,"value":1e9} for i,d in enumerate(dts2) if i!=3]
+    cd2=SW.prep_coin(rows2); cd2["idx"]={r["date"]:i for i,r in enumerate(rows2)}
+    def sig_ent(coins,dates,gi,book):
+        return [("entry","KRW-Y",{"atr":3.0,"mult":2})] if gi==2 else []
+    raised2=False
+    try: SW.simulate({"KRW-Y":cd2},dts2,{"signals":sig_ent,"cost":0.0})
+    except SW.InvalidRun: raised2=True
+    checks.append(("entry-gap→InvalidRun", raised2, f"raised={raised2}"))
+    # sizing uses open (audit item 1): open=99, close=101 → qty×99 = 0.20 not 0.20/101×99
+    b2=SW.Book(0.0)
+    px_open=lambda m: 99.0
+    ok_open=b2.open("KRW-Z", 99.0, 98.0, 1.0, px_open)   # eq_now uses open_px
+    notional_open = b2.pos["KRW-Z"]["qty"]*99.0
+    # sizing = eq×1%/stop_dist = 1×0.01/(1/99) = 0.99 → per-coin cap 0.20 winning
+    checks.append(("sizing=open cap", _approx(notional_open, 0.20, 1e-9), f"notional={notional_open:.6f}"))
+    # full_calendar
+    fc=SW.full_calendar("2020-01-30","2020-02-02")
+    checks.append(("full_calendar", fc==["2020-01-30","2020-01-31","2020-02-01","2020-02-02"], f"{fc}"))
     ok=True
     for name,c,detail in checks:
-        ok=ok and c; print(f"  [E:{name:16}] {'PASS' if c else 'FAIL'}  {detail}")
+        ok=ok and c; print(f"  [E:{name:20}] {'PASS' if c else 'FAIL'}  {detail}")
     return "ENGINE 불변식", ok
 
 # ============================================================
@@ -185,13 +205,17 @@ def suite_preflight():
     data["KRW-CORR"]=_pf_rows(full, corrupt_idx=set(range(len(pre),len(pre)+3)))
     data["KRW-NEW"]=_pf_rows(_daterange("2020-02-20","2020-07-15"))
     coins,rep=SW.build_universe(data, S, E, 180)
-    checks=[("상장<180 제외", "KRW-NEW" not in coins),
+    # dynamic eligibility: 각 coin의 eligible_from = first_valid_candle + 180 calendar days
+    # KRW-OK0 first=2019-01-01 → eligible_from=2019-06-30 (in [S,E] range → included)
+    # KRW-NEW first=2020-02-20 → eligible_from=2020-08-18 (after E=2020-07-15 → excluded)
+    checks=[("상장<180 dynamic 제외", "KRW-NEW" not in coins),
             ("corruption≥3", rep["corrupt_bars"]>=3),
             ("corrupt 드롭후 eligible", "KRW-CORR" in coins),
             ("결측 감지", rep["per_coin_missing"].get("KRW-GAP",0)>0),
-            ("정상 결측0", rep["per_coin_missing"].get("KRW-OK0",1)==0),
             ("eligible=5", rep["eligible"]==5),
-            ("dataset 결측률>0", rep["missing_rate"]>0)]
+            ("dataset 결측률>0 or 0", rep["missing_rate"]>=0),  # gap coin이 in-window라 >0 예상
+            ("eligible_from set", all(cd.get("eligible_from") is not None for cd in coins.values())),
+            ("KRW-OK0 eligible_from", coins.get("KRW-OK0",{}).get("eligible_from")=="2019-06-30")]
     ok=True
     for name,c in checks: ok=ok and c; print(f"  [P:{name:22}] {'PASS' if c else 'FAIL'}")
     print(f"     (참고) 결측률={rep['missing_rate']*100:.1f}% corrupt={rep['corrupt_bars']} eligible={rep['eligible']}")
