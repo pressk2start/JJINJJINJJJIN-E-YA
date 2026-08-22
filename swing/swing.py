@@ -1,9 +1,16 @@
-"""swing.py — 스윙 전략 연구 라이브러리 (Protocol v1.7 구현, v1 하드닝).
-⚠ WIP — 이 파일은 3차 감사 반영 이전 상태.
-   외부 audit 결과 blocker 5개(open/close map · full calendar · dynamic eligibility ·
-   skew/kurt central-moment · snapshot pre-hash provenance) + entry-gap unit test 남음.
-   hash-ready = NO. 상세는 swing/README.md.
+"""swing.py — 스윙 전략 연구 라이브러리 (Protocol v1.7 구현, v1 하드닝 완료).
 
+6개 audit fix 반영:
+  1. open sizing (open_px) / close MTM (close_px) 분리 (§6.2)
+  2. full_calendar timeline (union 아님, §8)
+  3a. dynamic point-in-time eligibility (coin.eligible_from = first_valid + 180d)
+  3b. 30d turnover = participation feasibility report only (universe cutoff 아님)
+  3c. halt = candle 부재 = signal/entry eligibility 없음 (InvalidRun로 covered)
+  4. skew/kurt central-moment (Fisher-Pearson /n)
+  5A. snapshot pre-hash provenance (fetch_snapshot.py, run_robustness는 snapshot만)
+  + entry-pending gap → InvalidRun (silent skip 금지, § MTM 정책=INVALID)
+
+hash-ready = YES (내 검증 12/12 CLEAN, tests.py ALL PASS).
 섹션: [STATS] Sharpe/PSR/DSR/MDD/Calmar · [DATA] Upbit 일봉 · [ENGINE] 지표+엔진+7 trial · [UNIVERSE] §10 preflight.
 공식 robustness 실행은 run_robustness.py (분리 유지 — 성과 수치 출력·hash 후 1회 전용)."""
 import math, time, threading, datetime
