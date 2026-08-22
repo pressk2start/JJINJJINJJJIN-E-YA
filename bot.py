@@ -2439,8 +2439,67 @@ def _common_cohort_paired_summary():
             elif len(control_a_common) == 0 and len(ctrl_ids) > 0 and len(a_ids) > 0:
                 lines.append(f"  ⚠ 진단: CONTROL={len(ctrl_ids)} A={len(a_ids)} 모두 있으나 교집합 0 · signal_id 매칭 로직 감사 필요")
             return "\n".join(lines)
+        # ── advisor 2 최우선 · COMMON_COHORT audit (2026-08-21 · task #64) ──
+        # 진단 목적: 이전 리포트 대비 사라진 pair_id 감지 · 진동 원인 규명
+        # 배선: /tmp/paired_cohort_snapshot.json 에 pair_id set 저장 · 다음 실행 시 diff
+        # 관측 전용 · 정의 변경 없음 · monotonic invariant 는 원인 확인 후 결정
+        _snapshot_file = "/tmp/paired_cohort_snapshot.json"
+        _audit_lines = []
+        try:
+            _prev = {}
+            if os.path.exists(_snapshot_file):
+                with open(_snapshot_file, "r", encoding="utf-8") as _f:
+                    _prev = json.load(_f)
+            _prev_ctrla = set(_prev.get("control_a", []) or [])
+            _prev_triple = set(_prev.get("triple", []) or [])
+            _prev_ctrl = set(_prev.get("ctrl_ids", []) or [])
+            _prev_a = set(_prev.get("a_ids", []) or [])
+            _lost_ctrla = _prev_ctrla - control_a_common
+            _lost_triple = _prev_triple - triple_common
+            _lost_ctrl = _prev_ctrl - ctrl_ids
+            _lost_a = _prev_a - a_ids
+            if _lost_ctrla or _lost_triple or _lost_ctrl or _lost_a:
+                _audit_lines.append(
+                    f"  ⚠ PAIRED AUDIT · 사라진 pair/id 감지 (직전 대비): "
+                    f"CONTROL_A={len(_lost_ctrla)} triple={len(_lost_triple)} "
+                    f"CONTROL_route={len(_lost_ctrl)} A_route={len(_lost_a)}"
+                )
+                # 샘플 up to 3
+                for _label, _lost in (("CONTROL_A", _lost_ctrla), ("triple", _lost_triple),
+                                       ("CONTROL_route", _lost_ctrl), ("A_route", _lost_a)):
+                    if _lost:
+                        _sample = list(sorted(_lost))[:3]
+                        _audit_lines.append(f"    {_label} 유실 sample: {_sample}")
+                _audit_lines.append(
+                    f"    원인 후보: (a) trade_records cap pop (4713a6c 300 확대 반영 대기) "
+                    f"(b) route 재초기화 (c) signal_id 재계산 (d) 자연 재분류"
+                )
+            # 현 스냅샷 저장 (append-only 는 원인 확인 후 결정)
+            _snap = {
+                "ts": int(time.time()),
+                "deploy": _OBSERVE_EPOCH,
+                "control_a": sorted(list(control_a_common)),
+                "triple": sorted(list(triple_common)),
+                "a_a2": sorted(list(a_a2_common)),
+                "ctrl_ids": sorted(list(ctrl_ids)),
+                "a_ids": sorted(list(a_ids)),
+                "a2_ids": sorted(list(a2_ids)),
+            }
+            with open(_snapshot_file, "w", encoding="utf-8") as _f:
+                json.dump(_snap, _f, ensure_ascii=False)
+        except Exception as _e:
+            _audit_lines.append(f"  ⚠ PAIRED AUDIT snapshot ERROR: {_e}")
         # 공통 페어 집계 · 위험조정 지표 포함 (advisor 2 개선)
-        lines = [f"COMMON_COHORT paired common_n={len(_ids)}:", _bar_line]
+        # advisor 3자 (2026-08-21): progress (넓은 CONTROL_A) vs paired_closed_n (실 확정) 분리 표기
+        # 이전: paired common_n=X · progress Y% 를 한 줄에 · X != Y*30/100 이면 오독 가능
+        # 정정: 두 지표 명시적 분리 · KILL 판정은 paired_closed_n=triple_common 기준
+        lines = [
+            f"COMMON_COHORT paired_closed_n={len(_ids)} (triple · 3-arm 확정) · "
+            f"CONTROL_A_matched={len(control_a_common)}/{_target} (넓은 매칭 · progress 기준):",
+            _bar_line,
+        ]
+        # advisor 2 우선 audit 라인 (사라진 pair 감지 · task #64)
+        lines.extend(_audit_lines)
         arm_summaries = {}
         for label in ("CONTROL", "A", "A×A2"):
             if label not in route_trades:
@@ -14638,7 +14697,16 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM") else 50
+            # advisor 3자 (2026-08-21): CONTROL_A_common 진동 근본 원인 fix
+            #   이전: cap 50 · CS40_VR3/A_CLEAN/A×A2 는 매칭 안 되어 cap 50 → 오래된
+            #   signal_id pop 되면서 CONTROL_A_common 재scoping · 30 데드라인 무력화
+            #   정정: 우리 실험 route 3개 (paired 판정 대상) 도 300 cap 대상 추가
+            _paired_routes = (
+                "CS40_VR3_TR180_bp30_240",   # CONTROL (LIVE 대응)
+                "CLM_A_CLEAN_bp30",          # A
+                "CLM_A_x_A2_bp30",           # A×A2
+            )
+            _tr_cap = 300 if (route in ("SVE1", "GT", "LTRP", "CLM") or route in _paired_routes) else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
