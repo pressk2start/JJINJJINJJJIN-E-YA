@@ -55,8 +55,9 @@
 
 ### Phase B — hash 봉인 (사용자 손)
 - 서버 봇 5개 안전확인 + `systemctl mask momentum-*` 완료
-- audit blocker 5개 + entry-gap test 해결 확인
-- 별도 새 repo (또는 이 vsfec 브랜치) 봉인 commit + `git tag v1.7`
+- 6개 audit fix 반영 확인 (완료됨, README 참조) + `tests.py` ALL PASS
+- 연구 artifact 7개만 별도 새 repo에 배치 (live/telegram/deploy 제외 = 감사범위 축소)
+- 봉인 commit + `git tag -a v1.7-sealed`
 
 ### Phase C — historical robustness 1회 (사용자 손)
 - tag된 커밋에서 `python3 swing/run_robustness.py` 단 1회

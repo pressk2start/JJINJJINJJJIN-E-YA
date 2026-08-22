@@ -91,9 +91,14 @@ snapshot 없이 실행 시 명확한 에러.
 
 ## Protocol v1.7 순서 요약
 
-1. 서버 봇 5개 안전확인 + `systemctl mask momentum-*` (사용자 손)
-2. 위 blocker 5개 + entry-gap test 해결 → `python3 tests.py` PASS 확인
-3. hash 봉인 (사용자 손, 별도 새 repo 권장)
-4. `python3 run_robustness.py` 단 1회 (tag된 커밋에서)
-5. PASS → prospective shadow (paper, 12/24/36 look α-spending PSR ≥ 0.9833)
-6. prospective PASS → live arm 별도 결정
+1. 서버 봇 5개 안전확인 + `systemctl mask momentum-*` (사용자 손, 연구와 별개 최우선)
+2. `python3 fetch_snapshot.py` (네 환경, snapshot.json.gz 생성 · SHA 확인)
+3. `python3 tests.py` ALL PASS 확인
+4. 별도 새 repo에 연구 artifact 7개만 배치:
+   - swing.py · tests.py · run_robustness.py · fetch_snapshot.py
+   - strategy_protocol_v1.md · README.md · data/snapshot.json.gz
+   (live_swing.py · telegram_notify.py · swing.service · swing_deploy.sh 등 제외 = hash 감사범위 축소)
+5. hash 봉인 (사용자 손·네 시각): git commit + `git tag -a v1.7-sealed`
+6. tag된 commit에서 `python3 run_robustness.py` 단 1회
+7. PASS → prospective shadow (paper, 12/24/36 look α-spending PSR ≥ 0.9833)
+8. prospective PASS → live arm 별도 결정

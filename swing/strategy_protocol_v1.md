@@ -1,7 +1,9 @@
-# 스윙 전략 연구 프로토콜 (Strategy Research Protocol) v1.7 — 봉인 대기
+# 스윙 전략 연구 프로토콜 (Strategy Research Protocol) v1.7 — hash-ready 후보
 
-> **상태: 값·코드사양·연장규칙·α-spending까지 확정. hash 봉인 전 audit blocker 5개 + entry-gap test 해결 필요 (swing/README.md 참조).**
+> **상태: 값·코드사양·연장규칙·α-spending 확정 + 6개 audit fix 반영 완료.**
+> **hash 봉인 = 사용자 손 (별도 새 repo에 이 문서 + swing.py + tests.py + run_robustness.py + fetch_snapshot.py + snapshot.json.gz + README.md 배치 → commit + annotated tag).**
 > v1.6→v1.7 substantive: MinTRL 종료조건 삭제(prospective는 PSR이 통계 gate) / §12 재구조 / stop=fill 기준 / §9 옵션(i) α-spending / DSR·PSR 역할 분리·코드사양 봉인.
+> v1.7 audit fixes: open/close map 분리 · full_calendar · dynamic eligibility · skew/kurt central-moment · snapshot pre-hash provenance · entry-pending gap → InvalidRun.
 > **⚠ 서버 봇 5개 안전확인 + `systemctl mask momentum-*`은 연구와 별개 최우선.**
 > **앵커링 고지:** 작성자는 추세추종 discovery(+6% MFE)를 봤다 → A는 절차상 후보 중 하나, 규칙=문헌 표준, 게이트=일반 관행.
 > `[확정]`/`[✓승인]` = 봉인값.
