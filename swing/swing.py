@@ -34,16 +34,19 @@ def ann_sharpe(returns):             # 표시용 연환산
     return daily_sharpe(returns)*SQRT_YEAR
 
 def skew_kurt(returns):
-    """sample skewness, non-excess kurtosis(정규=3).
-    ⚠ audit item 4: 현재 hybrid (z분모 ddof=1 + 집계 /n). pure Fisher-Pearson central-moment로
-       재작성 필요 (m_k=Σ(x-μ)^k/n, skew=m3/m2^1.5, kurt=m4/m2²)."""
+    """Central-moment skewness γ3 = m3/m2^1.5, non-excess kurtosis γ4 = m4/m2².
+    m_k = Σ(x-μ)^k / n (분모 n). 정규분포에서 skew=0, kurt=3.
+    Bailey-LdP PSR denom = √(1 - γ3·SR + ((γ4-1)/4)·SR²)에 사용."""
     n=len(returns)
     if n<3: return 0.0, 3.0
-    m=_mean(returns); sd=_std(returns)
-    if sd==0: return 0.0, 3.0
-    z=[(r-m)/sd for r in returns]
-    skew=sum(v**3 for v in z)/n
-    kurt=sum(v**4 for v in z)/n
+    m=_mean(returns)
+    d=[r-m for r in returns]
+    m2=sum(x*x for x in d)/n
+    if m2<=0: return 0.0, 3.0
+    m3=sum(x*x*x for x in d)/n
+    m4=sum(x*x*x*x for x in d)/n
+    skew=m3/(m2**1.5)
+    kurt=m4/(m2*m2)
     return skew, kurt
 
 def psr(sr_hat, sr_star, n, skew, kurt):
@@ -217,8 +220,8 @@ class Book:
             if px is not None: g+=p["qty"]*px
         return g
     def open(self,m,fill,stop,eq_now,price_of):
-        """⚠ audit item 1: eq_now·room_gross가 close 기반 → t+1 open 체결 시점 look-ahead.
-           sizing_price_of(open) / mtm_price_of(close) 분리 필요."""
+        """Fixed audit item 1: 호출측에서 open-based eq_now/price_of 전달 (§6.2).
+        room_gross도 open 기반 = t+1 open 체결 시점에 알 수 있는 가격만 사용, look-ahead 없음."""
         if fill<=stop or fill<=0: return False
         risk_notional=eq_now*RISK/((fill-stop)/fill)      # = eq*1%/stop_dist_frac
         cap_notional=eq_now*PERCOIN_CAP
@@ -236,58 +239,77 @@ class Book:
         self.realized[m]=self.realized.get(m,0.0)+(net-p["basis"])
 
 class InvalidRun(Exception):
-    """보유 종목의 당일 MTM 가격 부재 = §10 데이터 결측이 포지션 가치평가에 직접 영향 → run/dataset INVALID.
-    carry-forward/0충전으로 소실·조작하지 않고 결과를 신뢰 불가로 간주(§4.2 '결측일 0수익 미충전' 준수). 정책=사용자 확정(INVALID).
-    ⚠ audit item ②: entry pending의 t+1 open 결측 케이스도 raise 필요 (silent skip 금지)."""
+    """§10 execution-critical gap → run/dataset INVALID (사용자 확정).
+    ① 보유 종목의 당일 봉 결측 (MTM 불가)
+    ② pending entry/exit의 t+1 open 결측 (fill 불가, silent skip 금지)
+    carry-forward/0충전 안 함 = §4.2 '결측일 0수익 미충전' 준수."""
     pass
 
 def simulate(coins, dates, cfg):
     """cfg: dict with 'signals' + 'cost'. return (equity_series, daily_returns, trades, book).
-    MTM 정책(§6.2, 사용자 확정=INVALID): 전일부터 보유 중인 종목의 당일 봉이 결측이면 InvalidRun.
-    ⚠ audit 미반영: (1) open/close map 미분리 look-ahead (2) master_dates union → full_calendar (3) dynamic eligibility."""
+
+    가격 map 분리 (§6.2, audit item 1 fixed, look-ahead 제거):
+      - open_price_of(m,d)  : 오늘 open — entry 사이징·room_gross 계산 시점의 known 가격
+      - close_price_of(m,d) : 오늘 close — 일말 MTM equity 기록용
+
+    execution-critical gap → InvalidRun (§10, audit item ② strict):
+      ① held-coin 당일 봉 결측 → raise (MTM 불가)
+      ② pending entry의 target open 결측 → raise (fill 불가)
+      ③ pending exit의 target open은 held-coin이라 ①이 먼저 잡음
+
+    Timeline: 호출측에서 full_calendar(START, END) 전달 권장 (union 아님, audit item 2 fixed)."""
     book=Book(cfg["cost"])
     eq_series=[]; trades=[]
-    pending=[]   # actions to execute at next date's open: (kind,market,extra)
+    pending=[]
     def li(m,d): return coins[m]["idx"].get(d)
     for gi,d in enumerate(dates):
-        # 전일부터 보유 중인 종목의 당일 봉 결측 = MTM 불가 → run INVALID (정책=INVALID).
+        # ① held-coin 당일 봉 결측 검사
         for m in book.pos:
             if coins[m]["idx"].get(d) is None:
                 raise InvalidRun(f"held-coin MTM gap: {m} @ {d}")
-        def price_of(m,_d=d):
+        def open_px(m,_d=d):
+            i=coins[m]["idx"].get(_d)
+            return coins[m]["o"][i] if i is not None else None
+        def close_px(m,_d=d):
             i=coins[m]["idx"].get(_d)
             return coins[m]["c"][i] if i is not None else None
-        # A) execute pending open-fill actions (exits first, then entries) at today's OPEN
+        # A) execute pending open-fill actions at today's OPEN
         exits=[a for a in pending if a[0]=="exit"]; ents=[a for a in pending if a[0]=="entry"]
         for _,m,_x in exits:
             i=li(m,d)
-            if m in book.pos and i is not None:
+            if m in book.pos:
+                if i is None:
+                    raise InvalidRun(f"pending-exit open gap: {m} @ {d}")
                 book.close(m, coins[m]["o"][i]); trades.append((d,m,"exit_open"))
-        eq_now=book.equity(price_of)
-        for _,m,ex in sorted(ents,key=lambda a:a[1]):    # lexical tie-break
+        # ② pending entry의 target open 검사 (silent skip 금지)
+        for _,m,_ex in ents:
+            if coins[m]["idx"].get(d) is None:
+                raise InvalidRun(f"pending-entry open gap: {m} @ {d}")
+        eq_now=book.equity(open_px)                             # 사이징 시 open 기반 (look-ahead 없음)
+        for _,m,ex in sorted(ents,key=lambda a:a[1]):
             if len(book.pos)>=NMAX: break
+            if m in book.pos: continue
             i=li(m,d)
-            if i is None or m in book.pos: continue      # ⚠ audit ②: i is None → InvalidRun 필요
             fill=coins[m]["o"][i]; atrv=ex["atr"]; mult=ex["mult"]
             stop=fill-mult*atrv
-            if book.open(m,fill,stop,eq_now,price_of):
-                book.pos[m]["entry_gi"]=gi                    # time-cap용 진입 글로벌 인덱스
+            if book.open(m,fill,stop,eq_now,open_px):           # room_gross도 open
+                book.pos[m]["entry_gi"]=gi
                 trades.append((d,m,"entry"))
         pending=[]
-        # B) intraday stop (stop-first) using today's low
+        # B) intraday stop (stop-first)
         for m in list(book.pos):
             i=li(m,d)
             if i is None: continue
             lo=coins[m]["l"][i]; op=coins[m]["o"][i]; st=book.pos[m]["stop"]
             if lo<=st:
-                fill=min(st,op)                              # gap-adverse
+                fill=min(st,op)
                 book.close(m,fill); trades.append((d,m,"stop"))
-        # C) compute signals on COMPLETED bar today -> schedule for tomorrow open
+        # C) compute signals on COMPLETED bar today
         acts=cfg["signals"](coins,dates,gi,book)
         pending=acts
-        # D) MTM equity at close
-        eq_series.append(book.equity(price_of))
-    # 종말 미실현 → 종목별 PnL에 반영(concentration 근사). 마지막 날 보유 종목은 위 루프에서 봉 존재 보장됨.
+        # D) MTM at close (close_px 사용, audit item 1 fixed)
+        eq_series.append(book.equity(close_px))
+    # 종말 미실현 → concentration 근사
     last=dates[-1] if dates else None
     for m,p in list(book.pos.items()):
         i=coins[m]["idx"].get(last)
@@ -300,12 +322,18 @@ def simulate(coins, dates, cfg):
     return eq_series, rets, trades, book
 
 # ---------- signal generators (return list of ('entry'/'exit', market, extra) for NEXT open) ----------
+def _is_eligible(cd, d):
+    """dynamic point-in-time eligibility (audit item 3a): d >= coin.eligible_from AND candle(d) exists."""
+    ef=cd.get("eligible_from")
+    if ef is not None and d < ef: return False
+    return cd["idx"].get(d) is not None
+
 def make_percoin_signals(entry_field_hi, exit_field_lo, atr_field, mult):
     def sig(coins,dates,gi,book):
         d=dates[gi]; acts=[]
         for m,cd in coins.items():
-            i=cd["idx"].get(d)
-            if i is None: continue
+            if not _is_eligible(cd, d): continue
+            i=cd["idx"][d]
             if m in book.pos:
                 lo=cd[exit_field_lo][i]
                 if lo is not None and cd["c"][i]<lo:
@@ -321,14 +349,13 @@ def make_connors_signals(rsi_thresh, mult, time_cap=10):
     def sig(coins,dates,gi,book):
         d=dates[gi]; acts=[]
         for m,cd in coins.items():
-            i=cd["idx"].get(d)
-            if i is None: continue
+            if not _is_eligible(cd, d): continue
+            i=cd["idx"][d]
             if m in book.pos:
                 s5=cd["sma5"][i]
                 held=gi-book.pos[m].get("entry_gi",gi)
-                if s5 is not None and cd["c"][i]>s5: acts.append(("exit",m,{}))   # SMA5 회복 청산
-                elif held>=time_cap: acts.append(("exit",m,{}))                   # 10일 time-cap 청산
-                # stop(장중)은 engine이 signal 전에 처리 = stop 우선
+                if s5 is not None and cd["c"][i]>s5: acts.append(("exit",m,{}))
+                elif held>=time_cap: acts.append(("exit",m,{}))
             else:
                 s200=cd["sma200"][i]; r=cd["rsi2"][i]; a=cd["atr14"][i]
                 if (s200 is not None and r is not None and a is not None and a>0
@@ -338,20 +365,21 @@ def make_connors_signals(rsi_thresh, mult, time_cap=10):
     return sig
 
 def make_xs_signals(formation_days, mult, top_n=NMAX):
-    """월간 리밸런싱: 월말 완성봉 formation 수익 랭크 top_n(= min(E,N)) 목표. + ATR stop overlay."""
+    """월간 리밸런싱 + dynamic eligibility. E<top_n이면 min(E,N)."""
     def sig(coins,dates,gi,book):
         d=dates[gi]; acts=[]
         is_month_end = (gi+1>=len(dates)) or (dates[gi+1][:7]!=d[:7])
         if not is_month_end: return acts
         ranked=[]
         for m,cd in coins.items():
-            i=cd["idx"].get(d)
-            if i is None or i<formation_days: continue
+            if not _is_eligible(cd, d): continue
+            i=cd["idx"][d]
+            if i<formation_days: continue
             base=cd["c"][i-formation_days]
             if base<=0: continue
             ranked.append((cd["c"][i]/base-1.0, m, cd["atr14"][i]))
         ranked.sort(reverse=True)
-        target=set(m for _,m,_ in ranked[:top_n])       # E<top_n이면 존재분 전부 = min(E,N)
+        target=set(m for _,m,_ in ranked[:top_n])
         for m in list(book.pos):
             if m not in target: acts.append(("exit",m,{}))
         for r,m,a in ranked[:top_n]:
@@ -379,6 +407,13 @@ def _span_days(a,b):
     """구간 달력일 수(양끝 포함). 일봉은 24/7 = 매 달력일 1캔들 기대."""
     return (datetime.date.fromisoformat(b)-datetime.date.fromisoformat(a)).days+1
 
+def full_calendar(start, end):
+    """START~END 전체 달력일 리스트 (audit item 2 fixed: union 아님).
+    coin dates union으로 하면 전체 결측일 방문 누락 → stealth carry-forward. 이 함수 사용 강제."""
+    d=datetime.date.fromisoformat(start); e=datetime.date.fromisoformat(end); out=[]
+    while d<=e: out.append(d.isoformat()); d+=datetime.timedelta(days=1)
+    return out
+
 def clean_rows(rows):
     """§10(c) 구조적 corruption 봉 드롭: 가격>0 · h≥max(o,c,l) · l≤min(o,c,h) · value≥0 · 전부 finite.
     손상봉 = 사용불가 → 제거(이후 결측일로 집계). 드롭 수 반환(로깅용)."""
@@ -393,24 +428,38 @@ def clean_rows(rows):
     return out, bad
 
 def build_universe(data, start, end, min_listing=180, min_coverage=30):
-    """eligible(§5): 시작 전 상장 ≥min_listing + 구간 내 캔들 ≥min_coverage.
-    ⚠ audit item 3: 이 함수는 static filter. protocol §5 dynamic point-in-time 재작성 필요:
-       각 t에서 listing_age(t)≥180 AND 30d turnover ≥ threshold AND not halted.
-    반환 (coins, report). INVALID 판정은 호출 측(run_robustness) 정책."""
+    """Dynamic point-in-time eligible universe (§5 · audit item 3a fixed):
+      각 코인의 eligible_from = first_valid_candle_date + min_listing calendar days.
+      실제 사용 = 각 signal 생성 시 d >= coin.eligible_from AND candle(d) exists.
+      static "전체 기간 in/out" 아님.
+
+    §5 30d turnover: audit item 3b 확정 = universe cutoff 아님, participation feasibility report only.
+    §10(c) corruption 봉 드롭 후 결측 집계. dataset missing_rate = eligible 창 [max(eligible_from, start), end] 기준.
+
+    반환 (coins, report). 각 coin dict에 eligible_from 필드 추가.
+    INVALID 판정은 호출 측(run_robustness) 정책."""
     coins={}; report={"total":len(data),"eligible":0,"corrupt_bars":0,"missing_rate":0.0,"per_coin_missing":{}}
-    span=_span_days(start,end); tot_missing=0; tot_expected=0
-    for m in sorted(data):                                 # 결정론적 순서
+    tot_missing=0; tot_expected=0
+    end_d=datetime.date.fromisoformat(end)
+    for m in sorted(data):
         rows=data[m]
         if not rows: continue
         rows,bad=clean_rows(rows); report["corrupt_bars"]+=bad
-        dates=[r["date"] for r in rows]
-        pre=[d for d in dates if d<start]
-        indate=sorted({d for d in dates if start<=d<=end})
-        if len(pre)<min_listing or len(indate)<min_coverage: continue
-        missing=max(0,span-len(indate))                    # halt/데이터 gap = 결측일
-        tot_missing+=missing; tot_expected+=span
-        report["per_coin_missing"][m]=missing/span
+        if not rows: continue
+        first_valid=rows[0]["date"]
+        eligible_from_d=datetime.date.fromisoformat(first_valid)+datetime.timedelta(days=min_listing)
+        eligible_from=eligible_from_d.isoformat()
+        if eligible_from_d > end_d:                          # 아예 구간 내 eligible 창 없음
+            continue
+        window_start=max(eligible_from, start)
+        indate=sorted({r["date"] for r in rows if window_start<=r["date"]<=end})
+        if len(indate)<min_coverage: continue
+        span_win=(end_d-datetime.date.fromisoformat(window_start)).days+1
+        missing=max(0, span_win-len(indate))
+        tot_missing+=missing; tot_expected+=span_win
+        report["per_coin_missing"][m]=missing/span_win
         cd=prep_coin(rows); cd["idx"]={r["date"]:i for i,r in enumerate(rows)}
+        cd["eligible_from"]=eligible_from                    # dynamic point-in-time anchor
         coins[m]=cd
     report["eligible"]=len(coins)
     report["missing_rate"]=(tot_missing/tot_expected) if tot_expected>0 else 0.0
