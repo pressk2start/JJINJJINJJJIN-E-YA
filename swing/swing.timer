@@ -1,0 +1,14 @@
+# swing.timer — 반복 실행 트리거 (템플릿, 미설치).
+# 스윙 = 일봉 전략이라 UTC 00:05 (KRW 마켓 새 캔들 확정 후) 1회/일 실행.
+
+[Unit]
+Description=Swing Bot Daily Timer
+Requires=swing.service
+
+[Timer]
+OnCalendar=*-*-* 00:05:00 UTC
+Persistent=true
+Unit=swing.service
+
+[Install]
+WantedBy=timers.target
