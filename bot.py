@@ -2440,7 +2440,14 @@ def _common_cohort_paired_summary():
                 lines.append(f"  ⚠ 진단: CONTROL={len(ctrl_ids)} A={len(a_ids)} 모두 있으나 교집합 0 · signal_id 매칭 로직 감사 필요")
             return "\n".join(lines)
         # 공통 페어 집계 · 위험조정 지표 포함 (advisor 2 개선)
-        lines = [f"COMMON_COHORT paired common_n={len(_ids)}:", _bar_line]
+        # advisor 3자 (2026-08-21): progress (넓은 CONTROL_A) vs paired_closed_n (실 확정) 분리 표기
+        # 이전: paired common_n=X · progress Y% 를 한 줄에 · X != Y*30/100 이면 오독 가능
+        # 정정: 두 지표 명시적 분리 · KILL 판정은 paired_closed_n=triple_common 기준
+        lines = [
+            f"COMMON_COHORT paired_closed_n={len(_ids)} (triple · 3-arm 확정) · "
+            f"CONTROL_A_matched={len(control_a_common)}/{_target} (넓은 매칭 · progress 기준):",
+            _bar_line,
+        ]
         arm_summaries = {}
         for label in ("CONTROL", "A", "A×A2"):
             if label not in route_trades:
@@ -14638,7 +14645,16 @@ def _shadow_record_result(route, strat_name, market, pnl_pct, mfe_pct, exit_reas
             if pnl_curve:
                 _tr["curve"] = {k: round(v, 5) for k, v in pnl_curve.items()}
             s["trade_records"].append(_tr)
-            _tr_cap = 300 if route in ("SVE1", "GT", "LTRP", "CLM") else 50
+            # advisor 3자 (2026-08-21): CONTROL_A_common 진동 근본 원인 fix
+            #   이전: cap 50 · CS40_VR3/A_CLEAN/A×A2 는 매칭 안 되어 cap 50 → 오래된
+            #   signal_id pop 되면서 CONTROL_A_common 재scoping · 30 데드라인 무력화
+            #   정정: 우리 실험 route 3개 (paired 판정 대상) 도 300 cap 대상 추가
+            _paired_routes = (
+                "CS40_VR3_TR180_bp30_240",   # CONTROL (LIVE 대응)
+                "CLM_A_CLEAN_bp30",          # A
+                "CLM_A_x_A2_bp30",           # A×A2
+            )
+            _tr_cap = 300 if (route in ("SVE1", "GT", "LTRP", "CLM") or route in _paired_routes) else 50
             if len(s["trade_records"]) > _tr_cap:
                 s["trade_records"] = s["trade_records"][-_tr_cap:]
         # MAE 누적
