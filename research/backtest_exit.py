@@ -1,0 +1,903 @@
+#!/usr/bin/env python3
+"""
+Backtest Exit Rules — 청산 규칙 대량 백테스트.
+
+이벤트 데이터 (label_events 출력)에 대해 여러 청산 규칙을 시뮬레이션.
+각 이벤트에는 60/120/180/240/300s 시점의 pnl/mfe/mae가 있으므로
+그 정보만으로 규칙 적용 결과를 재현 가능.
+
+규칙 타입:
+  1. FixedTime: N초 시점에 무조건 청산
+  2. EarlyCut: 특정 시점까지 MFE 미달 시 컷
+  3. Trailing: 고점 대비 X% 하락 시 청산
+  4. TargetProfit: MFE X% 도달 시 익절
+  5. StopLoss: MAE X% 도달 시 손절
+  6. Combo: 여러 규칙 조합
+
+사용:
+    # trade_records 기반
+    python3 research/backtest_exit.py /tmp/clm_trades.json CLM
+
+    # 백테스트 결과 기반
+    python3 research/backtest_exit.py research/clm_events.parquet
+"""
+import argparse
+import os
+import sys
+import json
+from itertools import product
+
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from tg_notify import send as tg_send
+except Exception:
+    tg_send = None
+
+
+# ── 시뮬레이션 시점 (label_events가 저장한 시점) ──
+SNAP_TIMES = [60, 120, 180, 240, 300]
+
+
+def _get(row, col, default=None):
+    """DataFrame row에서 값 안전 조회"""
+    v = row.get(col, default)
+    if pd.isna(v):
+        return default
+    return v
+
+
+def simulate_fixed_time(row, cut_sec):
+    """N초 시점에 무조건 청산"""
+    return _get(row, f"pnl_{cut_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_early_cut(row, mfe_thr_sec, mfe_thr, hold_sec):
+    """mfe_thr_sec 시점에 MFE < mfe_thr이면 그 시점 pnl로 청산, 아니면 hold_sec까지 보유"""
+    mfe_at = _get(row, f"mfe_{mfe_thr_sec}", 0)
+    if mfe_at is None or mfe_at < mfe_thr:
+        return _get(row, f"pnl_{mfe_thr_sec}", _get(row, "final_pnl", 0))
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_target_profit(row, target_pct, hold_sec):
+    """MFE >= target_pct 도달 시 target_pct 근처에서 청산, 아니면 hold_sec까지"""
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe_at = _get(row, f"mfe_{sec}", 0)
+        if mfe_at is not None and mfe_at >= target_pct:
+            # 익절 성공 — target_pct에서 청산 가정 (보수적)
+            return target_pct * 0.9  # 실전 슬리피지 반영 (10%)
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_stop_loss(row, stop_pct, hold_sec):
+    """MAE <= stop_pct 도달 시 stop_pct에서 청산, 아니면 hold_sec까지"""
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mae_at = _get(row, f"mae_{sec}", 0)
+        if mae_at is not None and mae_at >= stop_pct:
+            return -stop_pct  # 손절
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_target_stop(row, target_pct, stop_pct, hold_sec):
+    """익절/손절 병행 — 먼저 도달하는 것 청산"""
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe_at = _get(row, f"mfe_{sec}", 0)
+        mae_at = _get(row, f"mae_{sec}", 0)
+        if mfe_at is not None and mfe_at >= target_pct:
+            return target_pct * 0.9
+        if mae_at is not None and mae_at >= stop_pct:
+            return -stop_pct
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_trailing_shadow(row, arm_sec, trail_pct, hold_sec,
+                             sl_tiers=((60, 0.025), (120, 0.015), (9999, 0.010))):
+    """
+    Shadow(bot.py adaptive_trail + sl_tiers) 로직과 동일한 시뮬레이션.
+
+    봇 로직 매핑 (bot.py:12280-12482):
+      1. SL 티어드 (sl_tiers 기본값 = 봇 CS40 config)
+         0~60s:   2.5%
+         60~120s: 1.5%
+         120s+:   1.0%
+      2. Trail arm: hold_sec >= arm_after_sec
+      3. Trail stop = best_price * (1 - trail_pct)
+      4. cur_price <= trail_stop → 청산 at trail_stop
+      5. hold_sec >= max_hold → AT타임아웃, cur_price
+    """
+    entry_price = 100.0
+    best_price = 100.0
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe = _get(row, f"mfe_{sec}", 0) or 0
+        pnl = _get(row, f"pnl_{sec}", 0) or 0
+        mae = _get(row, f"mae_{sec}", 0) or 0  # 양수 = 손실 크기 (%)
+        current_high = entry_price * (1 + mfe / 100)
+        cur_price = entry_price * (1 + pnl / 100)
+        if current_high > best_price:
+            best_price = current_high
+
+        # ── 1. SL 티어드 체크 (봇 line 12329-12331 동일) ──
+        _eff_sl_pct = None
+        for _tier_sec, _tier_pct in sl_tiers:
+            if sec <= _tier_sec:
+                _eff_sl_pct = _tier_pct * 100  # % 단위로
+                break
+        if _eff_sl_pct is not None and mae >= _eff_sl_pct:
+            # 이 스냅샷까지 mae가 SL 임계 넘음 → SL 발동
+            return -_eff_sl_pct
+
+        # ── 2. Trail 체크 (봇 line 12446-12478 동일) ──
+        if sec >= arm_sec and best_price > entry_price:
+            trail_stop = best_price * (1 - trail_pct)
+            if cur_price <= trail_stop:
+                # AT익절 or AT본절 (봇은 trail_stop 가격 참고)
+                return (trail_stop - entry_price) / entry_price * 100
+
+    # ── 3. Timeout (봇 line 12477 AT타임아웃 동일) ──
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0)) or 0
+
+
+def simulate_trailing(row, arm_sec, trail_pct, hold_sec):
+    """
+    [원본] arm_sec 이후 trailing — MFE 대비 trail_pct% 되돌림 시 청산.
+    Peak MFE의 15% 되돌리면 발동 (Profit Protect 스타일).
+
+    ⚠ Shadow(bot.py)와 다른 로직임. shadow는 가격 기반, 이 함수는 수익률 기반.
+    실전과 비교하려면 simulate_trailing_shadow() 사용.
+    """
+    peak_mfe = 0.0
+    for sec in SNAP_TIMES:
+        if sec > hold_sec:
+            break
+        mfe = _get(row, f"mfe_{sec}", 0)
+        pnl = _get(row, f"pnl_{sec}", 0)
+        if mfe is not None and mfe > peak_mfe:
+            peak_mfe = mfe
+        # arm 이후에만 trail 체크
+        if sec >= arm_sec and peak_mfe > 0:
+            # 고점 대비 하락폭 = peak - 현재 pnl
+            if pnl is not None:
+                dd_from_peak = peak_mfe - pnl
+                if dd_from_peak >= peak_mfe * trail_pct:
+                    # trail 발동 — peak_mfe × (1 - trail_pct)로 청산
+                    return peak_mfe * (1 - trail_pct) * 0.95  # 슬리피지 5%
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def simulate_ec_then_hold(row, ec_sec, ec_mfe_thr, hold_sec, target_pct=None, stop_pct=None):
+    """EC 조합: 초기 컷 후 남은 거래는 target/stop 병행"""
+    # 1) Early Cut
+    mfe_at_ec = _get(row, f"mfe_{ec_sec}", 0)
+    if mfe_at_ec is None or mfe_at_ec < ec_mfe_thr:
+        return _get(row, f"pnl_{ec_sec}", _get(row, "final_pnl", 0))
+    # 2) 살아남은 거래 — target/stop 병행 or hold
+    if target_pct is not None or stop_pct is not None:
+        for sec in SNAP_TIMES:
+            if sec <= ec_sec or sec > hold_sec:
+                continue
+            mfe = _get(row, f"mfe_{sec}", 0)
+            mae = _get(row, f"mae_{sec}", 0)
+            if target_pct is not None and mfe is not None and mfe >= target_pct:
+                return target_pct * 0.9
+            if stop_pct is not None and mae is not None and mae >= stop_pct:
+                return -stop_pct
+    return _get(row, f"pnl_{hold_sec}", _get(row, "final_pnl", 0))
+
+
+def build_rules():
+    """테스트할 규칙 생성"""
+    rules = []
+
+    # Baseline: 원본 (300s 청산)
+    rules.append(("Baseline_300s", lambda r: _get(r, "final_pnl", _get(r, "pnl_300", 0))))
+
+    # 1. FixedTime — 청산 시점만 변경
+    for t in SNAP_TIMES:
+        rules.append((f"FixedTime_{t}s", lambda r, t=t: simulate_fixed_time(r, t)))
+
+    # 2. EarlyCut — MFE 미달 시 컷
+    for ec_sec, mfe_thr, hold in product([60], [0.10, 0.15, 0.20], [180, 240, 300]):
+        name = f"EC_{ec_sec}s_mfe{mfe_thr}_hold{hold}"
+        rules.append((name, lambda r, e=ec_sec, m=mfe_thr, h=hold: simulate_early_cut(r, e, m, h)))
+
+    # 3. TargetProfit — 목표수익 도달 시 익절
+    for tgt, hold in product([0.3, 0.5, 0.7, 1.0], [180, 240, 300]):
+        name = f"Target_{tgt}%_hold{hold}"
+        rules.append((name, lambda r, t=tgt, h=hold: simulate_target_profit(r, t, h)))
+
+    # 4. StopLoss — 손실 제한
+    for stop, hold in product([0.3, 0.5, 0.7, 1.0], [180, 240, 300]):
+        name = f"Stop_{stop}%_hold{hold}"
+        rules.append((name, lambda r, s=stop, h=hold: simulate_stop_loss(r, s, h)))
+
+    # 5. TargetStop 조합
+    for tgt, stop, hold in product([0.3, 0.5, 0.7], [0.3, 0.5], [180, 240]):
+        name = f"TS_tgt{tgt}_stop{stop}_hold{hold}"
+        rules.append((name, lambda r, t=tgt, s=stop, h=hold: simulate_target_stop(r, t, s, h)))
+
+    # 6. EC + Target/Stop
+    for mfe_thr, tgt, stop, hold in product([0.10, 0.15], [0.5, 0.7], [0.3, 0.5], [180, 240]):
+        name = f"EC60_{mfe_thr}_tgt{tgt}_stop{stop}_hold{hold}"
+        rules.append((
+            name,
+            lambda r, m=mfe_thr, t=tgt, s=stop, h=hold: simulate_ec_then_hold(r, 60, m, h, t, s),
+        ))
+
+    # 7. Trailing — arm 후 고점 대비 X% 하락 시 청산 (원본 Profit Protect 로직)
+    for arm, trail, hold in product([60, 120, 180], [0.15, 0.20, 0.30, 0.40], [180, 240, 300]):
+        if arm >= hold:
+            continue
+        name = f"Trail_arm{arm}_pct{int(trail*100)}_hold{hold}"
+        rules.append((name, lambda r, a=arm, t=trail, h=hold: simulate_trailing(r, a, t, h)))
+
+    # 8. Trailing (Shadow 로직) — bot.py adaptive_trail과 동일한 가격 기반
+    # trail_pct 다양화 (basis point 표기): 50bp/100bp/200bp/500bp/1500bp
+    for arm, trail, hold in product([60, 120, 180], [0.005, 0.01, 0.02, 0.05, 0.15], [180, 240, 300]):
+        if arm >= hold:
+            continue
+        _bp = int(round(trail * 10000))  # 0.005=50, 0.15=1500
+        name = f"TrailSh_arm{arm}_bp{_bp}_hold{hold}"
+        rules.append((name, lambda r, a=arm, t=trail, h=hold: simulate_trailing_shadow(r, a, t, h)))
+
+    return rules
+
+
+def run_backtest(events_df, rules, fee=0.001):
+    """모든 규칙에 대해 백테스트. 수수료 왕복 0.2% 반영"""
+    results = []
+    fee_pct = fee * 100 * 2  # 왕복
+
+    for name, fn in rules:
+        pnls = events_df.apply(fn, axis=1).values.astype(float)
+        pnls = pnls - fee_pct  # 수수료 차감
+        n = len(pnls)
+        avg = float(np.mean(pnls))
+        # Sortino: 하방편차만 반영 (avg / std(negative returns))
+        neg = pnls[pnls < 0]
+        downside_std = float(np.std(neg)) if len(neg) > 0 else 1e-9
+        sortino = avg / (downside_std + 1e-9)
+        # Profit Factor: (총 이익) / (총 손실)
+        pos_sum = float(pnls[pnls > 0].sum())
+        neg_sum = float(-pnls[pnls < 0].sum())
+        pf = pos_sum / (neg_sum + 1e-9)
+        # Expectancy: wr × avg_win + (1-wr) × avg_loss
+        wr = float((pnls > 0).mean())
+        avg_win = float(pnls[pnls > 0].mean()) if (pnls > 0).any() else 0
+        avg_loss = float(pnls[pnls <= 0].mean()) if (pnls <= 0).any() else 0
+        expectancy = wr * avg_win + (1 - wr) * avg_loss
+        results.append({
+            "rule": name,
+            "n": n,
+            "avg_pnl": avg,
+            "median": float(np.median(pnls)),
+            "winrate": wr * 100,
+            "std": float(np.std(pnls)),
+            "sharpe_like": avg / (float(np.std(pnls)) + 1e-9),
+            "sortino": sortino,
+            "profit_factor": pf,
+            "expectancy": expectancy,
+            "total_pnl": float(np.sum(pnls)),
+            "max_dd": float(np.min(np.cumsum(pnls))),
+            "p25": float(np.percentile(pnls, 25)),
+            "p75": float(np.percentile(pnls, 75)),
+        })
+    return pd.DataFrame(results)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Entry Filter Grid — CLM 진입 시점 지표별 필터
+# ══════════════════════════════════════════════════════════════════════
+
+def build_entry_filters():
+    """
+    1차원 slice — CLM 시그널의 각 지표를 개별적으로 좁혀 top exit 변화 관찰.
+    filter_fn: events DataFrame → 필터된 subset
+    (None = BASELINE, 필터 없음)
+    """
+    filters = [
+        ("BASELINE", None),
+        # ── vr5 (거래량 폭발 강도) 상향 ──
+        ("vr5_ge_2.5", lambda e: e[e["vr5"] >= 2.5]),
+        ("vr5_ge_3.0", lambda e: e[e["vr5"] >= 3.0]),
+        ("vr5_ge_4.0", lambda e: e[e["vr5"] >= 4.0]),
+        ("vr5_ge_5.0", lambda e: e[e["vr5"] >= 5.0]),
+        # ── wick_ratio (윗꼬리 비중) 상향 ──
+        ("wick_ge_0.35", lambda e: e[e["wick_ratio"] >= 0.35]),
+        ("wick_ge_0.40", lambda e: e[e["wick_ratio"] >= 0.40]),
+        ("wick_ge_0.50", lambda e: e[e["wick_ratio"] >= 0.50]),
+        # ── body_pct (몸통 크기) 상한 ──
+        ("body_le_0.60", lambda e: e[e["body_pct"] <= 0.60]),
+        ("body_le_0.55", lambda e: e[e["body_pct"] <= 0.55]),
+        ("body_le_0.50", lambda e: e[e["body_pct"] <= 0.50]),
+        ("body_le_0.45", lambda e: e[e["body_pct"] <= 0.45]),
+        # ── close_strength (종가 위치) 상한 ──
+        ("cs_le_0.40", lambda e: e[e["close_strength"] <= 0.40]),
+        ("cs_le_0.30", lambda e: e[e["close_strength"] <= 0.30]),
+        ("cs_le_0.20", lambda e: e[e["close_strength"] <= 0.20]),
+        # ── wick_asym (윗꼬리 우세) 하한 — shadow에서 발견 강력 필터 ──
+        ("wick_asym_ge_0.60", lambda e: e[e.get("wick_asym", 0) >= 0.60] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.65", lambda e: e[e.get("wick_asym", 0) >= 0.65] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.67", lambda e: e[e.get("wick_asym", 0) >= 0.67] if "wick_asym" in e.columns else e.iloc[0:0]),
+        ("wick_asym_ge_0.70", lambda e: e[e.get("wick_asym", 0) >= 0.70] if "wick_asym" in e.columns else e.iloc[0:0]),
+    ]
+    return filters
+
+
+def build_combo_filters():
+    """
+    2~3차원 combo — cs_le_0.40을 기준으로 다른 필터와 조합.
+    사용자 요청 (concern #4): cs 단독 효과 vs cs+X 효과 분리 검증.
+
+    cs≤0.40이 진짜 알파의 원천인지, 아니면 다른 지표가 겹쳐서 나오는지 확인.
+    """
+    # 기본 dim (2개 임계값씩)
+    cs = [("cs_le_0.40", lambda e: e[e["close_strength"] <= 0.40])]
+    vr = [("vr5_ge_3.0", lambda e: e[e["vr5"] >= 3.0]),
+          ("vr5_ge_4.0", lambda e: e[e["vr5"] >= 4.0])]
+    bd = [("body_le_0.50", lambda e: e[e["body_pct"] <= 0.50]),
+          ("body_le_0.45", lambda e: e[e["body_pct"] <= 0.45])]
+    wk = [("wick_ge_0.40", lambda e: e[e["wick_ratio"] >= 0.40]),
+          ("wick_ge_0.50", lambda e: e[e["wick_ratio"] >= 0.50])]
+
+    combos = [("BASELINE", None)]
+    # cs 단독 (비교 기준)
+    for cn, cf in cs:
+        combos.append((cn, cf))
+    # cs × X (2-way)
+    for cn, cf in cs:
+        for grp in [vr, bd, wk]:
+            for on, of in grp:
+                name = f"{cn}+{on}"
+                combos.append((name, lambda e, f1=cf, f2=of: f2(f1(e))))
+    # cs × body × vr (3-way, 대표 조합만)
+    for cn, cf in cs:
+        for bn, bf in bd:
+            for vn, vf in vr:
+                name = f"{cn}+{bn}+{vn}"
+                combos.append((name, lambda e, f1=cf, f2=bf, f3=vf: f3(f2(f1(e)))))
+    return combos
+
+
+def run_oos_split(events, ratio=0.6):
+    """
+    time-based train/test split.
+    Returns: (train_df, test_df, split_date)
+    """
+    if "entry_time" not in events.columns:
+        raise ValueError("entry_time 컬럼 필요 (OOS split)")
+    df = events.sort_values("entry_time").reset_index(drop=True)
+    idx = int(len(df) * ratio)
+    if idx <= 0 or idx >= len(df):
+        raise ValueError(f"split ratio {ratio} → idx {idx}가 유효 범위 밖")
+    train = df.iloc[:idx].reset_index(drop=True)
+    test = df.iloc[idx:].reset_index(drop=True)
+    split_date = str(df["entry_time"].iloc[idx])[:10]
+    return train, test, split_date
+
+
+def format_oos_report(train_results, test_results, split_date, judged_rules):
+    """
+    OOS 리포트: judged 통과 조합을 train/test 각각에서 재평가.
+    train에서만 좋고 test에서 나쁘면 overfitting.
+    """
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Out-of-Sample 검증 (train:test = 60:40, split_date={split_date})")
+    lines.append("=" * 105)
+    lines.append(f"\n{'Entry × Exit':<55} {'trainAvg':>9} {'testAvg':>9} {'Δ':>7} {'재현':>5}")
+    lines.append("-" * 105)
+    for r in judged_rules:
+        train_avg = train_results.get(r['combo_key'], {}).get('avg_pnl')
+        test_avg = test_results.get(r['combo_key'], {}).get('avg_pnl')
+        if train_avg is None or test_avg is None:
+            continue
+        delta = test_avg - train_avg
+        # 재현 판정: test avg > 0 && train과 부호 일치 && |delta|<0.30%p
+        replicate = (test_avg > 0) and (train_avg > 0) and (abs(delta) < 0.30)
+        mark = "✅" if replicate else "❌"
+        lines.append(f"{r['combo_key']:<55} {train_avg:>+9.3f} {test_avg:>+9.3f} {delta:>+7.3f} {mark:>5}")
+    lines.append("=" * 105)
+    return "\n".join(lines)
+
+
+def run_entry_grid(events, exit_rules, entry_filters, fee=0.001, min_n=30):
+    """각 entry filter에 대해 exit rule 전량 백테스트.
+    Returns: dict {filter_name: (n, results_df)}"""
+    grid = {}
+    for fname, ffn in entry_filters:
+        filtered = events if ffn is None else ffn(events)
+        n = len(filtered)
+        if n < min_n:
+            print(f"  [{fname}] n={n} < {min_n}, skip")
+            continue
+        results = run_backtest(filtered, exit_rules, fee=fee)
+        top = results.sort_values("avg_pnl", ascending=False).iloc[0]
+        print(f"  [{fname:<15}] n={n:>4}  best: {top['rule']:<35} avg={top['avg_pnl']:>+.3f}%  PF={top['profit_factor']:.2f}")
+        grid[fname] = (n, results)
+    return grid
+
+
+def format_entry_grid_report(grid, top_exit_per_filter=3):
+    """Filter × top-N exit 리포트"""
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Entry Filter Grid — {len(grid)}개 필터, 필터당 top-{top_exit_per_filter} exit")
+    lines.append("=" * 105)
+
+    baseline_top = None
+    if "BASELINE" in grid:
+        _, br = grid["BASELINE"]
+        baseline_top = br.sort_values("avg_pnl", ascending=False).iloc[0]
+
+    lines.append(f"\n{'Filter':<16} {'n':>4} {'BestExit':<36} {'avg':>7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>7}")
+    lines.append("-" * 105)
+
+    filter_scores = []  # for later ranking
+    for fname, (n, results) in grid.items():
+        top = results.sort_values("avg_pnl", ascending=False).head(top_exit_per_filter)
+        for i, (_, r) in enumerate(top.iterrows()):
+            delta = (r['avg_pnl'] - baseline_top['avg_pnl']) if baseline_top is not None and fname != "BASELINE" else 0
+            row_prefix = f"{fname:<16} {n:>4}" if i == 0 else f"{'':<16} {'':>4}"
+            lines.append(
+                f"{row_prefix} {r['rule']:<36} "
+                f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+                f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f} "
+                f"{delta:>+7.3f}"
+            )
+            if i == 0:
+                filter_scores.append({
+                    "filter": fname, "n": n,
+                    "best_exit": r['rule'], "avg_pnl": r['avg_pnl'],
+                    "winrate": r['winrate'], "pf": r['profit_factor'],
+                    "delta_base": delta,
+                })
+
+    # 개선폭 정렬 요약
+    lines.append(f"\n[개선폭 상위 (Baseline 대비 avg_pnl 증가)]")
+    ranked = sorted(filter_scores, key=lambda x: -x['delta_base'])
+    for r in ranked[:8]:
+        if r['filter'] == "BASELINE":
+            continue
+        marker = ""
+        if r['delta_base'] >= 0.10:
+            marker = " ✅ 판정통과 (+0.10%p)"
+        elif r['delta_base'] > 0:
+            marker = " ⚠ 미달"
+        else:
+            marker = " ❌ 악화"
+        lines.append(
+            f"  {r['filter']:<16} n={r['n']:>4}  avg={r['avg_pnl']:>+.3f}%  "
+            f"Δ={r['delta_base']:>+.3f}%p  exit={r['best_exit']}{marker}"
+        )
+
+    lines.append("=" * 105)
+    return "\n".join(lines), filter_scores
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Cross Grid — Top-N entry × Top-N exit
+# ══════════════════════════════════════════════════════════════════════
+
+def _rules_by_name(exit_rules):
+    return {name: fn for name, fn in exit_rules}
+
+
+def run_cross_grid(events, entry_filters, exit_rules, filter_scores,
+                   baseline_results, top_n_entry=5, top_n_exit=5,
+                   fee=0.001, min_n=30):
+    """
+    Top-N entry × Top-N exit cross grid.
+    - Top-N entry: filter_scores에서 avg_pnl 상위 (BASELINE 제외)
+    - Top-N exit: baseline entry의 avg_pnl 상위 exit 규칙
+    """
+    # 1) Top-N entry (BASELINE 제외, avg_pnl 순)
+    non_base = [f for f in filter_scores if f['filter'] != "BASELINE"]
+    top_entries = sorted(non_base, key=lambda x: -x['avg_pnl'])[:top_n_entry]
+    entry_fn_by_name = {name: fn for name, fn in entry_filters}
+
+    # 2) Top-N exit (baseline entry 기준)
+    top_exit_rows = baseline_results.sort_values("avg_pnl", ascending=False).head(top_n_exit)
+    exit_fn_by_name = _rules_by_name(exit_rules)
+
+    # 3) Cross grid
+    fee_pct = fee * 100 * 2
+    cross = []
+    for e in top_entries:
+        filtered = entry_fn_by_name[e['filter']](events)
+        for _, xr in top_exit_rows.iterrows():
+            exit_name = xr['rule']
+            exit_fn = exit_fn_by_name[exit_name]
+            pnls = filtered.apply(exit_fn, axis=1).values.astype(float) - fee_pct
+            n = len(pnls)
+            if n < min_n:
+                cross.append({"entry": e['filter'], "exit": exit_name, "n": n, "skip": True})
+                continue
+            pos = pnls[pnls > 0]; neg = pnls[pnls < 0]
+            avg = float(np.mean(pnls))
+            wr = float((pnls > 0).mean() * 100)
+            pf = float(pos.sum()) / (float(-neg.sum()) + 1e-9) if len(neg) else float("inf")
+            mdd = float(np.min(np.cumsum(pnls)))
+            cross.append({
+                "entry": e['filter'], "exit": exit_name, "n": n,
+                "avg_pnl": avg, "winrate": wr, "profit_factor": pf, "max_dd": mdd,
+                "skip": False,
+            })
+    return pd.DataFrame(cross), top_entries, top_exit_rows
+
+
+def format_cross_grid_report(cross_df, top_entries, top_exit_rows, baseline_avg):
+    lines = []
+    lines.append("=" * 105)
+    lines.append(f"  Cross Grid — top-{len(top_entries)} entry × top-{len(top_exit_rows)} exit")
+    lines.append("=" * 105)
+    lines.append(f"\n{'Entry':<16} {'Exit':<36} {'n':>4} {'avg':>7} {'WR%':>5} {'PF':>5} {'MDD':>7} {'Δbase':>7}")
+    lines.append("-" * 105)
+    ranked = cross_df[~cross_df.get("skip", False)].sort_values("avg_pnl", ascending=False)
+    for _, r in ranked.iterrows():
+        delta = r['avg_pnl'] - baseline_avg
+        marker = " ✅" if delta >= 0.10 else ""
+        lines.append(
+            f"{r['entry']:<16} {r['exit']:<36} {r['n']:>4.0f} "
+            f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+            f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f} "
+            f"{delta:>+7.3f}{marker}"
+        )
+    lines.append("=" * 105)
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 판정 기준 5개 (사용자 지정)
+# ══════════════════════════════════════════════════════════════════════
+
+def apply_judgment(cross_df, baseline_avg, min_n=100, wr_thr=45.0, pf_thr=1.2, delta_thr=0.10):
+    """5개 판정 기준 적용:
+      1) baseline 대비 +delta_thr%p 이상
+      2) n >= min_n
+      3) WR >= wr_thr% OR PF >= pf_thr
+      4) MDD 유한값
+    (5는 stage 교차검증, 이 함수 밖)
+    Returns: passing rows.
+    """
+    if cross_df.empty:
+        return cross_df
+    df = cross_df[~cross_df.get("skip", False)].copy()
+    df["delta_base"] = df["avg_pnl"] - baseline_avg
+    passed = df[
+        (df["delta_base"] >= delta_thr)
+        & (df["n"] >= min_n)
+        & ((df["winrate"] >= wr_thr) | (df["profit_factor"] >= pf_thr))
+    ].copy()
+    return passed.sort_values("avg_pnl", ascending=False)
+
+
+def load_events(filepath):
+    """이벤트 데이터 로드 (parquet or json)"""
+    if filepath.endswith(".parquet"):
+        return pd.read_parquet(filepath)
+    elif filepath.endswith(".json"):
+        # trade_records 형식 → 변환
+        with open(filepath) as f:
+            records = json.load(f)
+        df = pd.DataFrame(records)
+        # trade_records → events 형식으로 변환
+        events = pd.DataFrame()
+        events["final_pnl"] = df["pnl"].values * 100 if "pnl" in df.columns else 0
+        events["max_mfe"] = df["mfe"].values * 100 if "mfe" in df.columns else 0
+        # pnl_curve 있으면 사용
+        for sec in SNAP_TIMES:
+            key = str(sec)
+            if "pnl_curve" in df.columns:
+                vals = df["pnl_curve"].apply(
+                    lambda x: x.get(key, np.nan) * 100 if isinstance(x, dict) else np.nan
+                )
+                if vals.notna().any():
+                    events[f"pnl_{sec}"] = vals
+        # inds에서 mfe/mae 시점별 (있으면)
+        for sec in [30, 60]:
+            for kind in ["mfe", "mae"]:
+                col = f"ind_{kind}_{sec}s"
+                if col in df.columns:
+                    events[f"{kind}_{sec}"] = df[col].values * 100
+        events["route"] = df.get("route", "?")
+        return events
+    else:
+        raise ValueError(f"Unknown format: {filepath}")
+
+
+def format_report(results_df, top_n=10):
+    """상위 N개 규칙 리포트"""
+    lines = []
+    lines.append("=" * 90)
+    lines.append(f"  Exit Rule Backtest — 총 {len(results_df)}개 규칙")
+    lines.append("=" * 90)
+
+    # 상위 N개 (avg_pnl 기준)
+    top = results_df.sort_values("avg_pnl", ascending=False).head(top_n)
+    lines.append(f"\n[상위 {top_n} 규칙 — avg_pnl 순]")
+    lines.append(f"{'Rule':<38} {'n':>4} {'avg':>7} {'wr%':>5} {'sharpe':>7} {'sortino':>7} {'PF':>5} {'MDD':>7}")
+    lines.append("-" * 100)
+    for _, r in top.iterrows():
+        lines.append(
+            f"{r['rule']:<38} {r['n']:>4.0f} "
+            f"{r['avg_pnl']:>+7.3f} {r['winrate']:>5.1f} "
+            f"{r['sharpe_like']:>+7.3f} {r['sortino']:>+7.3f} "
+            f"{r['profit_factor']:>5.2f} {r['max_dd']:>+7.2f}"
+        )
+
+    # Sortino/PF 관점 상위 5 (avg 아니라)
+    lines.append(f"\n[상위 5 — Sortino 순 (하방편차만 반영)]")
+    top_sort = results_df.sort_values("sortino", ascending=False).head(5)
+    for _, r in top_sort.iterrows():
+        lines.append(f"  {r['rule']:<38} avg={r['avg_pnl']:>+.3f}  sortino={r['sortino']:>+.3f}  PF={r['profit_factor']:.2f}")
+
+    lines.append(f"\n[상위 5 — Profit Factor 순]")
+    top_pf = results_df.sort_values("profit_factor", ascending=False).head(5)
+    for _, r in top_pf.iterrows():
+        lines.append(f"  {r['rule']:<38} avg={r['avg_pnl']:>+.3f}  PF={r['profit_factor']:>5.2f}  MDD={r['max_dd']:>+.2f}")
+
+    # Baseline 비교
+    baseline = results_df[results_df["rule"] == "Baseline_300s"]
+    if not baseline.empty:
+        b = baseline.iloc[0]
+        lines.append(f"\n[Baseline (원본 300s 청산)]")
+        lines.append(
+            f"{'Baseline_300s':<38} {b['n']:>4.0f} "
+            f"{b['avg_pnl']:>+7.3f} {b['median']:>+7.3f} "
+            f"{b['winrate']:>5.1f} {b['sharpe_like']:>+7.3f}"
+        )
+        best = top.iloc[0]
+        gain = best["avg_pnl"] - b["avg_pnl"]
+        lines.append(f"\n[최고 vs Baseline 개선]  +{gain:.3f}%p ({gain / b['avg_pnl'] * 100 if b['avg_pnl'] else 0:+.0f}%)")
+
+    lines.append("=" * 90)
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filepath", help="이벤트 파일 (parquet or json)")
+    parser.add_argument("--route", default=None, help="특정 route만 (json인 경우)")
+    parser.add_argument("--top", type=int, default=15, help="상위 N개 출력")
+    parser.add_argument("--fee", type=float, default=0.001, help="수수료 (편도, 왕복 x2)")
+    parser.add_argument("--output", default=None, help="결과 CSV 저장")
+    parser.add_argument("--no-tg", action="store_true", help="텔레그램 스킵")
+    parser.add_argument("--entry-grid", action="store_true",
+                       help="Entry filter grid + cross grid 실행 (Phase 1/2)")
+    parser.add_argument("--combo-grid", action="store_true",
+                       help="Entry combo grid (cs × X 조합) — Phase 1.5")
+    parser.add_argument("--oos", action="store_true",
+                       help="Out-of-sample 검증 (time-based train/test split 60:40)")
+    parser.add_argument("--oos-ratio", type=float, default=0.6,
+                       help="OOS train 비율 (기본 0.6, test 0.4)")
+    parser.add_argument("--min-n", type=int, default=30,
+                       help="Entry filter 후 최소 표본 수 (기본 30)")
+    parser.add_argument("--top-entry", type=int, default=5,
+                       help="Cross grid용 top-N entry")
+    parser.add_argument("--top-exit", type=int, default=5,
+                       help="Cross grid용 top-N exit")
+    args = parser.parse_args()
+
+    global tg_send
+    if args.no_tg:
+        tg_send = None
+
+    print(f"로드: {args.filepath}")
+    events = load_events(args.filepath)
+
+    if args.route and "route" in events.columns:
+        events = events[events["route"] == args.route].copy()
+        print(f"Route 필터: {args.route} → {len(events)}건")
+
+    if len(events) < 30:
+        print(f"❌ 표본 부족 (n={len(events)}). 30건 이상 필요.")
+        return
+
+    print(f"이벤트: {len(events)}건")
+    print(f"수수료: 편도 {args.fee*100:.2f}% (왕복 {args.fee*200:.2f}%)")
+
+    rules = build_rules()
+    print(f"규칙: {len(rules)}개 백테스트 시작...")
+
+    results = run_backtest(events, rules, fee=args.fee)
+
+    report = format_report(results, top_n=args.top)
+    print(f"\n{report}")
+
+    if args.output:
+        results.to_csv(args.output, index=False)
+        print(f"\n저장: {args.output}")
+
+    baseline_avg = float(results[results["rule"] == "Baseline_300s"]["avg_pnl"].iloc[0])
+
+    # ── Phase 1/2: Entry Filter Grid + Cross Grid ──
+    entry_report = None
+    cross_report = None
+    judged = None
+    if args.entry_grid:
+        # Entry Filter Grid
+        needed_cols = ["vr5", "wick_ratio", "body_pct", "close_strength"]
+        missing = [c for c in needed_cols if c not in events.columns]
+        if missing:
+            print(f"\n❌ Entry Grid 컬럼 부족: {missing}")
+        else:
+            print(f"\n{'='*105}")
+            print(f"[Phase 1] Entry Filter Grid 실행")
+            print(f"{'='*105}")
+            entry_filters = build_entry_filters()
+            grid = run_entry_grid(events, rules, entry_filters,
+                                  fee=args.fee, min_n=args.min_n)
+            entry_report, filter_scores = format_entry_grid_report(grid)
+            print(f"\n{entry_report}")
+
+            # ── Phase 2: Cross Grid ──
+            print(f"\n{'='*105}")
+            print(f"[Phase 2] Cross Grid (top-{args.top_entry} entry × top-{args.top_exit} exit)")
+            print(f"{'='*105}")
+            cross_df, top_entries, top_exit_rows = run_cross_grid(
+                events, entry_filters, rules, filter_scores,
+                baseline_results=results,
+                top_n_entry=args.top_entry, top_n_exit=args.top_exit,
+                fee=args.fee, min_n=args.min_n,
+            )
+            cross_report = format_cross_grid_report(cross_df, top_entries, top_exit_rows, baseline_avg)
+            print(f"\n{cross_report}")
+
+            # ── 판정 기준 5개 (n≥100은 표본에 따라 조정 가능) ──
+            print(f"\n{'='*105}")
+            print(f"[판정 기준] baseline({baseline_avg:+.3f}%) 대비 +0.10%p, n≥100, WR≥45% or PF≥1.2")
+            print(f"{'='*105}")
+            judged = apply_judgment(cross_df, baseline_avg,
+                                    min_n=100, wr_thr=45.0, pf_thr=1.2, delta_thr=0.10)
+            if judged.empty:
+                print("❌ 판정 통과 조합 없음. (표본 부족 또는 개선폭 부족)")
+                print("   → top30/90d 후에 top50/180d로 확장 필요할 수 있음.")
+            else:
+                print(f"✅ 판정 통과 {len(judged)}개 조합:")
+                for _, r in judged.iterrows():
+                    print(f"  {r['entry']:<16} × {r['exit']:<36} "
+                          f"n={r['n']:>4.0f} avg={r['avg_pnl']:>+.3f}%  "
+                          f"WR={r['winrate']:>5.1f}%  PF={r['profit_factor']:>4.2f}  "
+                          f"Δbase={r['delta_base']:>+.3f}%p")
+
+    # ── Phase 1.5: Combo Grid (concern #4) ──
+    combo_report = None
+    combo_grid = None
+    if args.combo_grid:
+        needed_cols = ["vr5", "wick_ratio", "body_pct", "close_strength"]
+        missing = [c for c in needed_cols if c not in events.columns]
+        if missing:
+            print(f"\n❌ Combo Grid 컬럼 부족: {missing}")
+        else:
+            print(f"\n{'='*105}")
+            print(f"[Phase 1.5] Combo Grid — cs 단독 vs cs+X 조합 알파 원천 검증")
+            print(f"{'='*105}")
+            combo_filters = build_combo_filters()
+            combo_grid = run_entry_grid(events, rules, combo_filters,
+                                        fee=args.fee, min_n=args.min_n)
+            combo_report, combo_scores = format_entry_grid_report(combo_grid, top_exit_per_filter=1)
+            print(f"\n{combo_report}")
+
+    # ── Phase 3: OOS 검증 (concern #5) ──
+    oos_report = None
+    if args.oos:
+        try:
+            print(f"\n{'='*105}")
+            print(f"[Phase 3] Out-of-Sample 검증 (train/test = {args.oos_ratio:.0%}/{1-args.oos_ratio:.0%})")
+            print(f"{'='*105}")
+            train_events, test_events, split_date = run_oos_split(events, ratio=args.oos_ratio)
+            print(f"  Train: n={len(train_events)}, Test: n={len(test_events)}, split_date={split_date}")
+
+            # OOS 대상: judged 통과 조합 + 핵심 후보 (Baseline 및 top exit 단독)
+            oos_targets = []
+            if judged is not None and not judged.empty:
+                for _, r in judged.iterrows():
+                    oos_targets.append({
+                        "combo_key": f"{r['entry']} × {r['exit']}",
+                        "entry_name": r['entry'],
+                        "exit_name": r['exit'],
+                    })
+            # Baseline exit + no entry filter도 항상 포함
+            best_exit_baseline = results.sort_values("avg_pnl", ascending=False).iloc[0]['rule']
+            oos_targets.insert(0, {
+                "combo_key": f"NO_FILTER × {best_exit_baseline}",
+                "entry_name": None,
+                "exit_name": best_exit_baseline,
+            })
+            # cs_le_0.40 단독 (핵심 검증 대상)
+            oos_targets.insert(1, {
+                "combo_key": f"cs_le_0.40 × {best_exit_baseline}",
+                "entry_name": "cs_le_0.40",
+                "exit_name": best_exit_baseline,
+            })
+
+            # 사용자 지적 반영: combo filter들도 OOS에 포함
+            # cs+body, cs+vr5 등 조합 필터가 test에서도 유지되는지 확인
+            best_exit_240 = "Trail_arm180_pct15_hold240"  # Combo Grid에서 승자
+            _combo_pool = [
+                ("cs_le_0.40+body_le_0.45", best_exit_240),
+                ("cs_le_0.40+body_le_0.50", best_exit_240),
+                ("cs_le_0.40+vr5_ge_3.0", best_exit_240),
+                ("cs_le_0.40+vr5_ge_4.0", best_exit_240),
+                ("cs_le_0.40+body_le_0.45+vr5_ge_3.0", best_exit_240),
+            ]
+            for _ename, _xname in _combo_pool:
+                oos_targets.insert(2, {
+                    "combo_key": f"{_ename} × {_xname}",
+                    "entry_name": _ename,
+                    "exit_name": _xname,
+                })
+
+            rules_by_name = {n: fn for n, fn in rules}
+            # 1차원 + 조합 필터 모두 pool에 등록
+            entry_fn_by_name = {n: fn for n, fn in build_entry_filters()}
+            for _cn, _cf in build_combo_filters():
+                entry_fn_by_name[_cn] = _cf
+            fee_pct = args.fee * 100 * 2
+
+            def _eval(df, target):
+                efn = entry_fn_by_name.get(target["entry_name"]) if target["entry_name"] else None
+                sub = efn(df) if efn else df
+                n = len(sub)
+                if n < 15:
+                    return {"n": n, "avg_pnl": None}
+                pnls = sub.apply(rules_by_name[target["exit_name"]], axis=1).values.astype(float) - fee_pct
+                return {"n": n, "avg_pnl": float(np.mean(pnls))}
+
+            train_res = {t["combo_key"]: _eval(train_events, t) for t in oos_targets}
+            test_res = {t["combo_key"]: _eval(test_events, t) for t in oos_targets}
+
+            oos_report = format_oos_report(train_res, test_res, split_date, oos_targets)
+            print(f"\n{oos_report}")
+
+            # ── 판정 ──
+            print(f"\n{'='*105}")
+            print(f"[OOS 판정] test avg 양수 + train과 부호 일치 + |Δ|<0.30%p → 재현 성공")
+            print(f"{'='*105}")
+            passed = 0; total = 0
+            for t in oos_targets:
+                tr = train_res.get(t["combo_key"], {}).get("avg_pnl")
+                te = test_res.get(t["combo_key"], {}).get("avg_pnl")
+                if tr is None or te is None:
+                    continue
+                total += 1
+                ok = (te > 0) and (tr > 0) and (abs(te - tr) < 0.30)
+                if ok:
+                    passed += 1
+            print(f"{passed}/{total} 조합 재현. 실전 배포 전 반드시 이 결과 확인.")
+        except Exception as e:
+            print(f"\n❌ OOS 검증 실패: {e}")
+            oos_report = None
+
+    if tg_send:
+        route_str = args.route or "ALL"
+        tg_send(f"🎯 Exit Backtest: {route_str} (n={len(events)})", report)
+        if entry_report:
+            tg_send(f"🔍 Entry Filter Grid (n={len(events)})", entry_report)
+        if cross_report:
+            tg_send(f"⚡ Cross Grid (top-{args.top_entry}×{args.top_exit})", cross_report)
+        if judged is not None and not judged.empty:
+            j_body = "\n".join([
+                f"{r['entry']} × {r['exit']}: avg={r['avg_pnl']:+.3f}% Δ={r['delta_base']:+.3f}%p n={r['n']:.0f} WR={r['winrate']:.1f}% PF={r['profit_factor']:.2f}"
+                for _, r in judged.iterrows()
+            ])
+            tg_send(f"✅ 판정 통과 {len(judged)}개", j_body)
+        if combo_report:
+            tg_send(f"🧪 Combo Grid (n={len(events)})", combo_report)
+        if oos_report:
+            tg_send(f"🔬 OOS 검증 (train/test 60:40)", oos_report)
+
+
+if __name__ == "__main__":
+    main()

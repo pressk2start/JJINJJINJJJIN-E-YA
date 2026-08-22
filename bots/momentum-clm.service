@@ -1,0 +1,20 @@
+[Unit]
+Description=CLM_RAW Phase 1 Overheat Scanner (Paper Trading)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot/bots
+ExecStart=/usr/bin/python3 /home/ubuntu/bot/bots/momentum_scanner_clm.py
+EnvironmentFile=/home/ubuntu/bot/.env
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/tmp/momentum_clm.log
+StandardError=append:/tmp/momentum_clm.log
+
+[Install]
+WantedBy=multi-user.target
