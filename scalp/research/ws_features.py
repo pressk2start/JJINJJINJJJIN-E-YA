@@ -51,6 +51,7 @@
 import os, sys, json, gzip, glob, math, heapq, argparse
 from collections import defaultdict, deque
 
+MAX_STALE_SEC = 60.0        # 호가가 이보다 낡은 프레임은 만들지 않는다 (아래 설명)
 LATENESS_MS = 2000
 LAST_QC = {}                # 직전 replay() 의 품질 지표 (지각 폐기 수 등)          # 수신 지연 jitter 흡수용 워터마크 (실측 p99 443ms의 여유배)
 OB_HIST_SEC = 60.0
@@ -84,58 +85,61 @@ def microprice(u0):
 
 
 class Book:
-    """호가 상태 + **가격별** 감소량 누적."""
+    """호가 상태. 감소분은 **스냅샷 transition 단위**로 반환한다 (프레임 단위 누적 아님).
+
+    왜 transition 단위인가 — 프레임 전체로 뭉치면 앞선 체결이 나중 감소를 잘못 설명한다:
+        0.10s  bid 100 = 50
+        0.20s  100 에서 매도체결 20
+        0.30s  bid 100 = 50      ← 즉시 재보충. 순감소 없음
+        0.80s  bid 100 = 30      ← 이후 취소 20
+        1.00s  frame
+      프레임 단위로 합치면 depl@100=20 / exec@100=20 → unexplained 0 이 된다.
+      그러나 그 체결은 이미 재보충으로 흡수됐고, 나중 감소는 체결과 무관하다. 정답은 20.
+      → 각 transition (prev_ob_ts, cur_ob_ts] 마다 그 구간의 같은 가격 체결로만 상계한다.
+    """
 
     def __init__(self):
         self.units = None
         self.ts = None                      # 마지막 orderbook event_ts (초)
         self.pb = {}                        # price -> size (직전 스냅샷, 매수)
         self.pa = {}
-        self.depl_b = defaultdict(float)    # 가격별 감소량 — 보이는 전 호가단 (프레임 단위 리셋)
-        self.depl_a = defaultdict(float)
-        # 최우선호가(touch)만 따로. "매수벽이 진짜냐"는 깊은 단이 아니라 touch 의 질문이다.
-        # 깊은 단은 체결 없이 계속 갱신되므로 전 단 합산은 구조적으로 1 에 붙는다.
-        self.depl_b_top = defaultdict(float)
-        self.depl_a_top = defaultdict(float)
         self.obi_hist = deque()             # (ts, obi5)
 
     def apply(self, m, ts):
+        """스냅샷 반영. 반환: (depl_bid, depl_ask, top_b, top_a, t0, t1)
+        depl_* = {price: 감소수량} — **이번 transition 에서만**. 없으면 빈 dict."""
         u = m.get("orderbook_units") or []
         if not u:
-            return
-        nb = {x["bid_price"]: x["bid_size"] for x in u}
-        na = {x["ask_price"]: x["ask_size"] for x in u}
-        # 가격별 감소분.
-        # ⚠ **관측 창 밖으로 밀려난 가격은 세지 않는다.** 스냅샷은 상위 N단만 담으므로,
-        #   호가가 움직여 어떤 레벨이 창 밖으로 나가면 size 0 으로 보인다. 그건 잔량이
-        #   사라진 게 아니라 **안 보이는 것**이다. 이걸 감소로 세면 체결로 설명될 리가 없어
-        #   unexplained_ratio 가 1 쪽으로 구조적으로 편향된다 (실측에서 p50=1.000 이었다).
-        #   → 새 스냅샷의 가시 범위 안에 있는 가격만 비교 대상으로 삼는다.
-        floor_b = min(nb) if nb else None          # 새 스냅샷의 최저 매수호가
-        ceil_a = max(na) if na else None           # 새 스냅샷의 최고 매도호가
-        top_b = max(self.pb) if self.pb else None  # 직전 스냅샷의 최우선 매수호가
+            return {}, {}, None, None, None, None
+        nb = {x["bid_price"]: x["bid_size"] for x in u if x["bid_price"] > 0}
+        na = {x["ask_price"]: x["ask_size"] for x in u if x["ask_price"] > 0}
+        d_b, d_a = {}, {}
+        top_b = max(self.pb) if self.pb else None
         top_a = min(self.pa) if self.pa else None
-        for pr, sz in self.pb.items():
-            if floor_b is None or pr < floor_b:    # 창 밖 → 판정 불가, 세지 않음
-                continue
-            d = sz - nb.get(pr, 0.0)
-            if d > 0:
-                self.depl_b[pr] += d
-                if pr == top_b:
-                    self.depl_b_top[pr] += d
-        for pr, sz in self.pa.items():
-            if ceil_a is None or pr > ceil_a:
-                continue
-            d = sz - na.get(pr, 0.0)
-            if d > 0:
-                self.depl_a[pr] += d
-                if pr == top_a:
-                    self.depl_a_top[pr] += d
+        t0 = self.ts
+        # 관측 창 밖으로 밀려난 가격은 세지 않는다 — 사라진 게 아니라 안 보이는 것이다.
+        floor_b = min(nb) if nb else None
+        ceil_a = max(na) if na else None
+        if self.pb and nb:
+            for pr, sz in self.pb.items():
+                if floor_b is None or pr < floor_b:
+                    continue
+                d = sz - nb.get(pr, 0.0)
+                if d > 0:
+                    d_b[pr] = d
+        if self.pa and na:
+            for pr, sz in self.pa.items():
+                if ceil_a is None or pr > ceil_a:
+                    continue
+                d = sz - na.get(pr, 0.0)
+                if d > 0:
+                    d_a[pr] = d
         self.pb, self.pa = nb, na
         self.units, self.ts = u, ts
         self.obi_hist.append((ts, obi(u, 5)))
         while self.obi_hist and ts - self.obi_hist[0][0] > OB_HIST_SEC:
             self.obi_hist.popleft()
+        return d_b, d_a, top_b, top_a, t0, ts
 
     def d_obi(self, g, win):
         """g 시점 기준 win초 전 대비 OBI 변화. 그 시점 관측이 없으면 None."""
@@ -150,32 +154,35 @@ class Book:
                 break
         return None if past is None else cur - past
 
-    def reset_window(self):
-        self.depl_b = defaultdict(float); self.depl_a = defaultdict(float)
-        self.depl_b_top = defaultdict(float); self.depl_a_top = defaultdict(float)
-
 
 class Flow:
     """체결 흐름 + **가격별** 체결량 누적 (프레임 단위)."""
 
     def __init__(self):
         self.tr = deque()                   # (ts, krw, side, vol, price)
-        self.exec_b = defaultdict(float)    # 매수호가를 친 체결(=TAKER_SELL) 가격별 수량
-        self.exec_a = defaultdict(float)
 
     def apply(self, m, ts):
         px = float(m["trade_price"]); vol = float(m["trade_volume"])
         side = m.get("ask_bid")
         self.tr.append((ts, px * vol, side, vol, px))
-        if side == TAKER_SELL:
-            self.exec_b[px] += vol
-        elif side == TAKER_BUY:
-            self.exec_a[px] += vol
         while self.tr and ts - self.tr[0][0] > TR_HIST_SEC:
             self.tr.popleft()
 
     def win(self, g, w):
         return [x for x in self.tr if g - w < x[0] <= g]
+
+    def exec_in(self, t0, t1, side):
+        """(t0, t1] 구간의 가격별 체결 수량.
+        side='bid' = 매수호가를 친 체결(테이커 매도, ask_bid="ASK") → bid 큐를 줄인다.
+        t0 None 이면 첫 스냅샷이라 직전 구간이 없다는 뜻 → 빈 결과."""
+        if t0 is None:
+            return {}
+        want = TAKER_SELL if side == "bid" else TAKER_BUY
+        out = defaultdict(float)
+        for ts, krw, sd, qty, px in self.tr:
+            if t0 < ts <= t1 and sd == want:
+                out[px] += qty
+        return out
 
     def imbalance(self, g, w):
         s = self.win(g, w)
@@ -189,22 +196,32 @@ class Flow:
         tot = sum(x[1] for x in s)
         return (max(x[1] for x in s) / tot) if (s and tot > 0) else None
 
-    def reset_window(self):
-        self.exec_b = defaultdict(float)
-        self.exec_a = defaultdict(float)
+
+class DeplAcc:
+    """프레임 단위 누산기. **transition 마다 이미 상계된 값**을 더한다.
+
+    핵심: 상계(가격별 max(depl−exec,0))는 각 스냅샷 transition 안에서 끝낸다.
+    프레임에는 그 결과만 누적한다. 프레임 전체로 depl 과 exec 를 각각 뭉쳐서
+    마지막에 상계하면, 앞선 체결이 나중 감소를 설명해버린다 (Book 독스트링 §참조)."""
+
+    def __init__(self):
+        self.depl = 0.0; self.unexp = 0.0
+        self.depl_top = 0.0; self.unexp_top = 0.0
+
+    def add(self, depl_map, exec_map, top_price):
+        for pr, q in depl_map.items():
+            un = max(q - exec_map.get(pr, 0.0), 0.0)
+            self.depl += q; self.unexp += un
+            if top_price is not None and pr == top_price:
+                self.depl_top += q; self.unexp_top += un
+
+    def ratio(self):
+        r = (self.unexp / self.depl) if self.depl > 0 else None
+        rt = (self.unexp_top / self.depl_top) if self.depl_top > 0 else None
+        return r, self.depl, rt, self.depl_top
 
 
-def unexplained(depl, execd):
-    """Σ max(감소[p] − 체결[p], 0) / Σ 감소[p].  가격별로 매칭한다.
-    ⚠ '취소'가 아니라 '설명되지 않은 감소'다 — 스냅샷만으로는 취소와 재보충을 구분 못 한다."""
-    tot = sum(depl.values())
-    if tot <= 0:
-        return None, 0.0
-    un = sum(max(q - execd.get(p, 0.0), 0.0) for p, q in depl.items())
-    return un / tot, tot
-
-
-def frame(code, g, bk, fl, cnt):
+def frame(code, g, bk, fl, cnt, accb, acca):
     if not bk.units:
         return None
     u0 = bk.units[0]
@@ -222,14 +239,13 @@ def frame(code, g, bk, fl, cnt):
     r["depth_ask_krw"] = sum(x["ask_price"] * x["ask_size"] for x in bk.units[:5])
     r["d_obi_1s"] = bk.d_obi(g, 1.0); r["d_obi_5s"] = bk.d_obi(g, 5.0)
 
-    rb, tb = unexplained(bk.depl_b, fl.exec_b)
-    ra, ta = unexplained(bk.depl_a, fl.exec_a)
+    rb, tb, rbt, tbt = accb.ratio()
+    ra, ta, rat, tat = acca.ratio()
     r["unexplained_depl_ratio_bid"] = rb
     r["unexplained_depl_ratio_ask"] = ra
     r["depl_qty_bid"] = tb; r["depl_qty_ask"] = ta
     # 최우선호가 한정 — 벽의 진위 판별에 쓸 값은 이쪽이다
-    rbt, tbt = unexplained(bk.depl_b_top, fl.exec_b)
-    rat, tat = unexplained(bk.depl_a_top, fl.exec_a)
+    # (전 호가단 합산은 깊은 단의 일상 갱신 때문에 구조적으로 1 에 붙는다)
     r["unexplained_depl_ratio_bid_top"] = rbt
     r["unexplained_depl_ratio_ask_top"] = rat
     r["depl_qty_bid_top"] = tbt; r["depl_qty_ask_top"] = tat
@@ -249,14 +265,25 @@ def frame(code, g, bk, fl, cnt):
 
 
 class MarketState:
-    def __init__(self, code, grid):
-        self.code = code; self.grid = grid
+    """⚠ 낡은 호가 프레임 문제
+      격자는 이벤트가 올 때마다 그 이전 grid 를 채운다. 그런데 재접속·수집 중단·
+      한산 구간처럼 오랫동안 호가 갱신이 없으면, **같은 스냅샷의 복사본**이 초당 하나씩
+      계속 찍힌다. 실측: 두 스모크 세션(116초+30초) 사이 공백 때문에 전체 61,985 프레임 중
+      **96%가 낡은 복사본**이었고 book_age 중앙값이 2.6시간이었다.
+      그대로 분석에 넣으면 표본 수가 허구로 부풀고 자기상관이 극단적으로 커진다.
+      → book_age > max_stale_sec 인 프레임은 **만들지 않고 카운트만 한다.**
+        (book_age_ms 는 남은 프레임에도 기록되므로 후처리에서 더 좁게 거를 수 있다.)"""
+
+    def __init__(self, code, grid, max_stale=MAX_STALE_SEC):
+        self.code = code; self.grid = grid; self.max_stale = max_stale
+        self.n_stale = 0
         self.bk = Book(); self.fl = Flow()
         self.cnt = [0, 0]
         self.next_emit = None
         self.rows = []
         self.last_ts = None
         self.n_late = 0            # 워터마크 허용을 넘어 늦게 도착한 이벤트 수
+        self.accb = DeplAcc(); self.acca = DeplAcc()
 
     def step(self, m, ts):
         """이벤트 1건 처리. **emit 먼저, apply 나중** — look-ahead 차단.
@@ -272,19 +299,31 @@ class MarketState:
             self.next_emit = math.floor(ts / self.grid) * self.grid + self.grid
         else:
             while self.next_emit < ts:                    # `<` : event_ts == g 는 g에 포함
-                row = frame(self.code, self.next_emit, self.bk, self.fl, self.cnt)
-                if row:
+                stale = (self.bk.ts is not None
+                         and (self.next_emit - self.bk.ts) > self.max_stale)
+                row = None if stale else frame(self.code, self.next_emit, self.bk,
+                                               self.fl, self.cnt, self.accb, self.acca)
+                if stale:
+                    self.n_stale += 1
+                elif row:
                     self.rows.append(row)
                 self.cnt = [0, 0]
-                self.bk.reset_window(); self.fl.reset_window()
+                self.accb = DeplAcc(); self.acca = DeplAcc()
                 self.next_emit += self.grid
         if m["type"] == "orderbook":
-            self.bk.apply(m, ts); self.cnt[0] += 1
+            d_b, d_a, top_b, top_a, t0, t1 = self.bk.apply(m, ts)
+            # transition (t0, t1] 의 같은 가격 체결로만 상계한다.
+            # 이 구간의 체결은 event-time 순서상 이미 Flow 에 들어와 있다.
+            if d_b:
+                self.accb.add(d_b, self.fl.exec_in(t0, t1, "bid"), top_b)
+            if d_a:
+                self.acca.add(d_a, self.fl.exec_in(t0, t1, "ask"), top_a)
+            self.cnt[0] += 1
         else:
             self.fl.apply(m, ts); self.cnt[1] += 1
 
 
-def replay(events, grid=1.0, lateness_ms=LATENESS_MS):
+def replay(events, grid=1.0, lateness_ms=LATENESS_MS, max_stale=MAX_STALE_SEC):
     """event-time 재생. events = 원자료 dict 이터러블 (수신 순서, 순서 무관).
 
     워터마크: 마켓별 힙에 담아두고 (최신 event_ts − 힙 최소) > lateness 일 때만 꺼낸다.
@@ -310,19 +349,21 @@ def replay(events, grid=1.0, lateness_ms=LATENESS_MS):
         h = heaps[code]
         while h and hi[code] - h[0][0] > lateness_ms:
             ets0, _, _, m0 = heapq.heappop(h)
-            st.setdefault(code, MarketState(code, grid)).step(m0, ets0 / 1000.0)
+            st.setdefault(code, MarketState(code, grid, max_stale)).step(m0, ets0 / 1000.0)
     for code, h in heaps.items():                          # 잔여 flush
         while h:
             ets0, _, _, m0 = heapq.heappop(h)
-            st.setdefault(code, MarketState(code, grid)).step(m0, ets0 / 1000.0)
-    out = []; late = {}
+            st.setdefault(code, MarketState(code, grid, max_stale)).step(m0, ets0 / 1000.0)
+    out = []; late = {}; stale = 0
     for code, s in st.items():
         out += s.rows
+        stale += s.n_stale
         if s.n_late:
             late[code] = s.n_late
     out.sort(key=lambda r: (r["market"], r["ts"]))
     global LAST_QC
     LAST_QC = {"n_frames": len(out), "late_dropped": late, "lateness_ms": lateness_ms,
+               "stale_skipped": stale, "max_stale_sec": max_stale,
                "note": "late_dropped>0 = 워터마크 초과 지각. --lateness-ms 늘려 재처리할 것."}
     return out
 
@@ -375,10 +416,12 @@ def main():
     ap.add_argument("--market", default="")
     ap.add_argument("--labels", default="")
     ap.add_argument("--lateness-ms", type=int, default=LATENESS_MS)
+    ap.add_argument("--max-stale-sec", type=float, default=MAX_STALE_SEC,
+                    help="호가가 이보다 낡으면 프레임을 만들지 않는다 (재접속·공백 구간 방어)")
     ap.add_argument("--out", default="features.jsonl.gz")
     a = ap.parse_args()
 
-    rows = replay(stream(a.paths, a.market or None), a.grid, a.lateness_ms)
+    rows = replay(stream(a.paths, a.market or None), a.grid, a.lateness_ms, a.max_stale_sec)
     if a.labels:
         rows = add_labels(rows, [float(x) for x in a.labels.split(",") if x.strip()])
     print(f"프레임 {len(rows):,} (격자 {a.grid}s · 워터마크 {a.lateness_ms}ms)")
@@ -386,6 +429,8 @@ def main():
         print(f"  ⚠ 지각 폐기: {LAST_QC['late_dropped']} — --lateness-ms 를 늘려 재처리할 것")
     else:
         print("  지각 폐기 0건 (워터마크 충분)")
+    print(f"  낡은 호가로 생략한 프레임: {LAST_QC.get('stale_skipped',0):,} "
+          f"(book_age > {LAST_QC.get('max_stale_sec')}s)")
     if rows:
         mks = sorted({r["market"] for r in rows})
         span = max(r["ts"] for r in rows) - min(r["ts"] for r in rows)

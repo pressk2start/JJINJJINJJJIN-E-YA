@@ -118,7 +118,10 @@ async def run(markets, depth, writer, stats):
     import websockets
     ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) else None
     sub = [{"ticket": f"scalp-rec-{int(time.time())}"},
-           {"type": "orderbook", "codes": markets},
+           # level=0 = 모아보기 없음(원본 격자). depth(단수)와 level(가격 집계)은 별개다.
+           # level>0 이면 거래소가 호가를 묶어 보내고 그 안의 ΔOBI·depletion 이 사라진다.
+           # 기본값이 0이더라도 연구 원칙(원본 격자 보존)을 코드에 박아 애매함을 없앤다.
+           {"type": "orderbook", "codes": markets, "level": 0},
            {"type": "trade", "codes": markets},
            {"format": "DEFAULT"}]
     connected_at = None
@@ -153,7 +156,8 @@ async def run(markets, depth, writer, stats):
                 writer.write({"_meta": "status", "recv_ts": recv_ts, "raw": m})
                 continue
             m["recv_ts"] = recv_ts
-            m["_seq"] = state["n"]        # 수신 순번 — event_ts 동률 시 secondary key
+            stats["recv_seq"] += 1
+            m["_seq"] = stats["recv_seq"]  # 수신 순번 — event_ts 동률 시 secondary key
             code = m.get("code")
             if t == "orderbook":
                 u = m.get("orderbook_units") or []
@@ -193,7 +197,7 @@ async def run(markets, depth, writer, stats):
 
 
 async def main_async(a):
-    stats = {"ob": 0, "tr": 0, "connects": 0, "seq_anomaly": 0,
+    stats = {"ob": 0, "tr": 0, "connects": 0, "seq_anomaly": 0, "recv_seq": 0,
              "last_seq": {}, "last_disconnect": None, "lat_sum": 0.0, "lat_n": 0}
     writer = Writer(DIR)
     markets = ([s.strip() for s in a.markets.split(",") if s.strip()]
