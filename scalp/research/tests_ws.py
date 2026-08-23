@@ -245,9 +245,51 @@ def test_window_exit():
     return "6. 관측 창 경계 처리", ok
 
 
+# ============================================================
+# 7. 체결 → 재보충 → 이후 감소: 앞선 체결이 나중 감소를 설명하면 안 된다
+#   프레임 전체로 depl 과 exec 를 각각 뭉쳐서 마지막에 상계하면
+#   "이미 재보충으로 흡수된 체결"이 "나중의 취소"를 지워버린다.
+#   → 상계는 각 스냅샷 transition 안에서 끝나야 한다.
+# ============================================================
+def test_replenish_then_cancel():
+    ok = True
+    T0 = 1_700_000_000_000
+    evs = [
+        ob2(T0 + 100,  1, [(100.0, 50.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),
+        tr(T0 + 200,   2, 100.0, 20.0, "ASK"),                      # 100 에서 매도체결 20
+        ob2(T0 + 300,  3, [(100.0, 50.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),  # 즉시 재보충 → 순감소 0
+        ob2(T0 + 800,  4, [(100.0, 30.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),  # 이후 취소 20
+        ob2(T0 + 1500, 5, [(100.0, 30.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),
+    ]
+    rows = WF.replay(evs, grid=1.0, lateness_ms=0)
+    f = [r for r in rows if r["depl_qty_bid"] > 0]
+    ok &= p("감소분 20 이 잡힘", bool(f) and abs(f[0]["depl_qty_bid"] - 20.0) < 1e-9)
+    # transition 단위면 (0.3s, 0.8s] 구간에 체결이 없으므로 전부 unexplained
+    ok &= p("앞선 체결이 나중 감소를 설명하지 못함 → ratio 1.0",
+             bool(f) and abs(f[0]["unexplained_depl_ratio_bid"] - 1.0) < 1e-9)
+    if f:
+        print(f"     (참고) depl={f[0]['depl_qty_bid']:.1f} "
+              f"ratio={f[0]['unexplained_depl_ratio_bid']:.4f} "
+              f"top_ratio={f[0]['unexplained_depl_ratio_bid_top']}")
+
+    # 대조군: 재보충 없이 같은 transition 안에서 체결로 줄면 설명돼야 한다
+    evs2 = [
+        ob2(T0 + 100,  1, [(100.0, 50.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),
+        tr(T0 + 200,   2, 100.0, 20.0, "ASK"),
+        ob2(T0 + 300,  3, [(100.0, 30.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),  # 체결분만큼 감소
+        ob2(T0 + 1500, 4, [(100.0, 30.0), (99.0, 20.0)], [(101.0, 20.0), (102.0, 20.0)]),
+    ]
+    rows2 = WF.replay(evs2, grid=1.0, lateness_ms=0)
+    f2 = [r for r in rows2 if r["depl_qty_bid"] > 0]
+    ok &= p("같은 transition 내 체결은 정상 상계 → ratio 0",
+             bool(f2) and abs(f2[0]["unexplained_depl_ratio_bid"]) < 1e-9)
+    return "7. 재보충 후 감소 귀속", ok
+
+
 def main():
     suites = [test_lookahead, test_receive_order, test_price_matching,
-              test_labels, test_tie_break, test_window_exit]
+              test_labels, test_tie_break, test_window_exit,
+              test_replenish_then_cancel]
     res = []
     for s in suites:
         print(f"\n=== {s.__name__} ===")
