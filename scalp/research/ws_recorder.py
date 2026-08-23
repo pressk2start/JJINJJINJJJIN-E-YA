@@ -22,9 +22,15 @@ WebSocket이면 orderbook과 trade가 같은 연결로 각자의 발생 시각�
 
 설계 원칙
 ---------
-1. **원자료 불변.** 수신한 JSON을 그대로 저장하고 `recv_ts`(로컬 수신 epoch ms)만 덧붙인다.
+1. **원자료 불변.** 수신한 JSON을 그대로 저장하고 `recv_ts`(로컬 수신 epoch ms)와
+   `_seq`(세션 내 수신 순번, 동일 ms 이벤트의 결정적 정렬용)만 덧붙인다.
    특징량(OBI/microprice/ΔOBI/queue depletion/signed flow…)은 **후처리에서** 계산한다.
    지금 집계해서 저장하면 나중에 다른 정의로 다시 못 만든다. 오더북은 소급 불가다.
+
+   ⚠ `--depth N` (N>0) 은 이 원칙의 **유일한 예외이며 되돌릴 수 없는 손실**이다.
+     N단만 남기고 나머지는 영구히 사라진다. `units_total` 로 자른 사실은 남지만 데이터는 안 남는다.
+     그래서 **기본값은 0(30단 전량 보존)** 이다. discovery 기간에는 절대 자르지 말 것.
+     용량이 문제일 때만 명시적으로 지정한다 (20종목 기준 30단 ≈ 1.2GB/일, 15단 ≈ 0.9GB/일).
 2. **손실 구간을 명시.** 재접속·끊김·구독실패를 `_meta` 이벤트로 같은 스트림에 기록한다.
    후처리는 이 구간을 반드시 제외해야 한다. 조용히 이어붙이면 없는 연속성을 만들어낸다.
 3. **두 시각을 모두 보존.** `timestamp`(거래소) 와 `recv_ts`(수신) 를 함께 남긴다.
@@ -116,6 +122,7 @@ async def run(markets, depth, writer, stats):
             gap_ms = int((connected_at - stats["last_disconnect"]) * 1000)
         writer.write({"_meta": "connect", "recv_ts": int(connected_at * 1000),
                       "markets": markets, "depth": depth,
+                      "depth_note": "0=30단 전량 보존, N>0=N단만 남기고 영구 손실",
                       "gap_since_last_disconnect_ms": gap_ms,
                       "note": "이 이벤트 이전 gap 구간은 데이터 없음 — 후처리에서 제외할 것"})
         await ws.send(json.dumps(sub))
@@ -138,6 +145,7 @@ async def run(markets, depth, writer, stats):
                 writer.write({"_meta": "status", "recv_ts": recv_ts, "raw": m})
                 continue
             m["recv_ts"] = recv_ts
+            m["_seq"] = state["n"]        # 수신 순번 — event_ts 동률 시 secondary key
             code = m.get("code")
             if t == "orderbook":
                 u = m.get("orderbook_units") or []
@@ -215,9 +223,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--markets", default="")
-    ap.add_argument("--depth", type=int, default=15,
-                    help="저장할 호가 단수 (Upbit는 30단 전송). 0=자르지 않음. "
-                         "queue depletion은 상위 5단이 핵심이라 15면 충분하다.")
+    ap.add_argument("--depth", type=int, default=0,
+                    help="저장할 호가 단수. **0(기본)=자르지 않음 = 30단 전량 보존.** "
+                         "N>0 은 되돌릴 수 없는 손실이므로 discovery 기간에는 쓰지 말 것.")
     ap.add_argument("--hours", type=float, default=0, help="0=무한")
     a = ap.parse_args()
     signal.signal(signal.SIGINT, _sig)
