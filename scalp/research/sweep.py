@@ -32,7 +32,11 @@ DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "feat")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 # 비용 시나리오 (왕복, %). Upbit 현물 수수료 0.05%×2 = 0.10 고정 + 슬리피지 가정.
-COSTS = {"base": 0.15, "stress": 0.20, "worst": 0.30}
+COSTS = {"base": 0.20, "expected": 0.217, "stress": 0.30}
+# base 0.20 = backtest_engine 기본값과 정합 (수수료 왕복 0.10 + 편도 슬리피지 5bp × 2).
+# expected 0.217 = 호가 사다리 실측(스프레드+소진 ~5.7bp) + 수수료 공시 10bp
+#                  + **가정** latency 6bp. 전부 실측이 아니다 — latency는 미측정 가정치.
+# ⚠ 비용을 0.15 → 0.20 으로 올려도 결론은 불변이다 (생존 셀이 0개였으므로 a fortiori).
 MIN_N = 300                      # 레포 규율: 이하는 결론 안 냄
 QUANTILES = [0.90, 0.95, 0.99, 0.995, 0.999]
 
