@@ -1,0 +1,4 @@
+# 원자료·중간산출물은 커밋하지 않는다 (research/.gitignore 관행과 동일)
+data/
+*.jsonl.gz
+*.json
