@@ -56,7 +56,7 @@ trade 이벤트가 touch를 함께 싣는다 (실측 확인)
   nohup python3 ws_recorder.py --top 20 > ws_recorder.log 2>&1 &
   nohup python3 ws_recorder.py --markets KRW-XRP,KRW-ETH,KRW-SOL,KRW-TRUMP --depth 30 &
 """
-import os, sys, json, gzip, time, signal, asyncio, argparse, datetime, ssl
+import os, sys, json, gzip, time, signal, asyncio, argparse, datetime, ssl, shutil
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -66,10 +66,23 @@ URL = "wss://api.upbit.com/websocket/v1"
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ws")
 CA = "/root/.ccr/ca-bundle.crt"          # 프록시 환경용. 없으면 시스템 기본.
 
+# ⚠ 디스크 안전장치 — 이 레코더는 **라이브 봇과 같은 디스크**를 쓸 수 있다.
+#   연구용 수집이 디스크를 채워 bot.py 를 죽이는 일은 절대 없어야 한다.
+#   실측(2026-08-23): 20종목 depth0 = 0.96GB/일 (종목당 0.048GB/일).
+#   대상 서버가 Lightsail nano(20GB 디스크, 여유 8.2GB)면 20종목은 8.5일이면 가득 찬다.
+MIN_FREE_GB = 2.0      # 여유가 이보다 적으면 **수집을 중단**한다 (디스크를 채우지 않는다)
+RETAIN_DAYS = 14       # 이보다 오래된 날짜 디렉터리는 시간 로테이션 때 자동 삭제
+
 _stop = False
 
 
 def _sig(*_):
+    global _stop
+    _stop = True
+
+
+def _request_stop():
+    """함수 안에서 global 선언 없이 중단을 요청한다 (디스크 가드 등)."""
     global _stop
     _stop = True
     print("[ws] 종료 신호 — 파일 닫는 중", flush=True)
@@ -84,6 +97,26 @@ class Writer:
         self.fh = None
         self.n = 0
         self.bytes = 0
+        self.rotated = False
+
+    def free_gb(self):
+        return shutil.disk_usage(self.root).free / 1e9
+
+    def purge_old(self, retain_days):
+        """오래된 날짜 디렉터리 삭제. 삭제한 목록을 반환(호출측이 메타로 남긴다)."""
+        if not retain_days or not os.path.isdir(self.root):
+            return []
+        cutoff = (datetime.datetime.utcnow()
+                  - datetime.timedelta(days=retain_days)).strftime("%Y-%m-%d")
+        gone = []
+        for d in sorted(os.listdir(self.root)):
+            full = os.path.join(self.root, d)
+            if os.path.isdir(full) and len(d) == 10 and d < cutoff:
+                try:
+                    shutil.rmtree(full); gone.append(d)
+                except OSError:
+                    pass
+        return gone
 
     def _path(self, now):
         d = now.strftime("%Y-%m-%d")
@@ -98,6 +131,7 @@ class Writer:
                 self.fh.close()
             self.fh = gzip.open(self._path(now), "at", encoding="utf-8")
             self.key = key
+            self.rotated = True          # 호출측이 시간마다 디스크 점검/정리하도록
         line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
         self.fh.write(line + "\n")
         self.n += 1
@@ -113,7 +147,8 @@ class Writer:
             self.fh = None
 
 
-async def run(markets, depth, writer, stats):
+async def run(markets, depth, writer, stats, retain_days=RETAIN_DAYS,
+              min_free_gb=MIN_FREE_GB):
     """한 번의 연결 수명. 정상/비정상 종료 모두 _meta 로 남긴다."""
     import websockets
     ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) else None
@@ -179,6 +214,23 @@ async def run(markets, depth, writer, stats):
                 stats["lat_n"] += 1
             writer.write(m)
 
+            # ---- 디스크 가드: 시간 로테이션마다 정리하고, 여유가 없으면 중단 ----
+            if writer.rotated:
+                writer.rotated = False
+                gone = writer.purge_old(retain_days)
+                free = writer.free_gb()
+                if gone:
+                    writer.write({"_meta": "purge", "recv_ts": int(time.time() * 1000),
+                                  "removed_days": gone, "free_gb": round(free, 2)})
+                if free < min_free_gb:
+                    writer.write({"_meta": "disk_stop", "recv_ts": int(time.time() * 1000),
+                                  "free_gb": round(free, 2), "min_free_gb": min_free_gb,
+                                  "note": "디스크 여유 부족 → 수집 중단. 라이브 봇을 지키기 위함."})
+                    print(f"[ws] ⚠ 디스크 여유 {free:.2f}GB < {min_free_gb}GB → 수집 중단",
+                          flush=True)
+                    _request_stop()
+                    return
+
             now = time.time()
             if now - last_hb >= 60:
                 writer.flush()
@@ -202,13 +254,22 @@ async def main_async(a):
     writer = Writer(DIR)
     markets = ([s.strip() for s in a.markets.split(",") if s.strip()]
                or [m for m, _ in collect.krw_markets_by_value()[:a.top]])
+    os.makedirs(DIR, exist_ok=True)
+    free0 = writer.free_gb()
+    est = 0.048 * len(markets)          # 실측 0.96GB/일 ÷ 20종목 (depth0, gzip)
     print(f"[ws] {len(markets)} markets · depth={a.depth} · 출력 {DIR}", flush=True)
+    print(f"[ws] 디스크 여유 {free0:.1f}GB · 예상 {est:.2f}GB/일 "
+          f"→ 보관 {a.retain_days}일이면 정상상태 약 {est*a.retain_days:.1f}GB "
+          f"· 여유 {a.min_free_gb}GB 미만이면 자동 중단", flush=True)
+    if free0 < a.min_free_gb * 2:
+        print(f"[ws] ⚠ 디스크 여유가 빠듯하다 ({free0:.1f}GB). "
+              f"--markets 로 종목을 줄이거나 --retain-days 를 낮출 것.", flush=True)
     print(f"[ws] markets: {','.join(markets)}", flush=True)
     backoff = 1.0
     try:
         while not _stop:
             try:
-                await run(markets, a.depth, writer, stats)
+                await run(markets, a.depth, writer, stats, a.retain_days, a.min_free_gb)
                 backoff = 1.0
             except Exception as e:
                 if _stop:
@@ -239,6 +300,10 @@ def main():
                     help="저장할 호가 단수. **0(기본)=자르지 않음 = 30단 전량 보존.** "
                          "N>0 은 되돌릴 수 없는 손실이므로 discovery 기간에는 쓰지 말 것.")
     ap.add_argument("--hours", type=float, default=0, help="0=무한")
+    ap.add_argument("--retain-days", type=int, default=RETAIN_DAYS,
+                    help="이보다 오래된 날짜 디렉터리 자동 삭제 (0=삭제 안 함)")
+    ap.add_argument("--min-free-gb", type=float, default=MIN_FREE_GB,
+                    help="디스크 여유가 이보다 적으면 수집 중단 (라이브 봇 보호)")
     a = ap.parse_args()
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
