@@ -99,6 +99,23 @@ class Writer:
         self.n = 0
         self.bytes = 0
         self.rotated = False
+        self.cur_path = None
+        self.comp_closed = 0        # 닫힌 파일들의 압축 후 바이트 합
+        self.t0 = time.time()
+
+    def _cur_size(self):
+        try:
+            return os.path.getsize(self.cur_path) if self.cur_path else 0
+        except OSError:
+            return 0
+
+    def gb_per_day(self):
+        """압축 후 실측 증가율. 시작 배너의 추정치를 대체한다.
+        표본이 짧으면 신뢰할 수 없으므로 10분 미만이면 None 을 준다."""
+        el = time.time() - self.t0
+        if el < 600:
+            return None
+        return (self.comp_closed + self._cur_size()) / el * 86400 / 1e9
 
     def free_gb(self):
         return shutil.disk_usage(self.root).free / 1e9
@@ -130,7 +147,13 @@ class Writer:
         if key != self.key:
             if self.fh:
                 self.fh.close()
-            self.fh = gzip.open(self._path(now), "at", encoding="utf-8")
+                self.comp_closed += self._cur_size()
+            self.cur_path = self._path(now)
+            # level 9 는 이 파이프라인에서 CPU 를 지배한다. 실측(2026-08-24, 실데이터
+            # 2.3MB): lvl9 대비 lvl6 은 2.8배 빠르고 크기는 17% 크다. lvl1 은 5.3배
+            # 빠르지만 2.4배 커진다 — 여기서는 디스크가 병목이라 6 이 균형점이다.
+            self.fh = gzip.open(self.cur_path, "at", encoding="utf-8",
+                                compresslevel=6)
             self.key = key
             self.rotated = True          # 호출측이 시간마다 디스크 점검/정리하도록
         line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
@@ -245,10 +268,15 @@ async def run(markets, depth, writer, stats, retain_days=RETAIN_DAYS,
                               "n_orderbook": stats["ob"], "n_trade": stats["tr"],
                               "seq_anomaly": stats["seq_anomaly"],
                               "latency_ms_avg": round(lat_avg, 1),
-                              "written": writer.n, "bytes": writer.bytes})
+                              "written": writer.n, "bytes": writer.bytes,
+                              "gb_per_day": writer.gb_per_day()})
+                gbd = writer.gb_per_day()
+                cap = (f" · 실측 {gbd:.2f}GB/일 → {retain_days}일 보관 시 "
+                       f"{gbd*retain_days:.1f}GB (여유 {writer.free_gb():.1f}GB)"
+                       if gbd else "")
                 print(f"[ws] up={el/60:.1f}분 ob={stats['ob']:,} tr={stats['tr']:,} "
                       f"lat={lat_avg:.0f}ms 기록={writer.n:,}행 "
-                      f"{writer.bytes/1024/1024:.1f}MB(비압축)", flush=True)
+                      f"{writer.bytes/1024/1024:.1f}MB(비압축){cap}", flush=True)
                 last_hb = now
 
 
@@ -260,9 +288,12 @@ async def main_async(a):
                or [m for m, _ in collect.krw_markets_by_value()[:a.top]])
     os.makedirs(DIR, exist_ok=True)
     free0 = writer.free_gb()
-    est = 0.048 * len(markets)          # 실측 0.96GB/일 ÷ 20종목 (depth0, gzip)
+    # 20종목 평균(0.96GB/일 ÷ 20). 거래대금 상위만 고르면 종목당 2배까지 간다
+    # — 실측 2026-08-24: XRP/TRUMP/ETH/SOL/BTC 5종목이 0.50GB/일(종목당 0.10).
+    # 그래서 이 값은 하한으로만 읽고, 10분 뒤부터 하트비트의 "실측"을 믿는다.
+    est = 0.048 * len(markets)
     print(f"[ws] {len(markets)} markets · depth={a.depth} · 출력 {DIR}", flush=True)
-    print(f"[ws] 디스크 여유 {free0:.1f}GB · 예상 {est:.2f}GB/일 "
+    print(f"[ws] 디스크 여유 {free0:.1f}GB · 예상(하한) {est:.2f}GB/일 "
           f"→ 보관 {a.retain_days}일이면 정상상태 약 {est*a.retain_days:.1f}GB "
           f"· 여유 {a.min_free_gb}GB 미만이면 자동 중단", flush=True)
     if free0 < a.min_free_gb * 2:
