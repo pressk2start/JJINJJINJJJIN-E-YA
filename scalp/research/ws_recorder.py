@@ -71,6 +71,7 @@ CA = "/root/.ccr/ca-bundle.crt"          # 프록시 환경용. 없으면 시스
 #   실측(2026-08-23): 20종목 depth0 = 0.96GB/일 (종목당 0.048GB/일).
 #   대상 서버가 Lightsail nano(20GB 디스크, 여유 8.2GB)면 20종목은 8.5일이면 가득 찬다.
 MIN_FREE_GB = 2.0      # 여유가 이보다 적으면 **수집을 중단**한다 (디스크를 채우지 않는다)
+SETUP_FAIL_LIMIT = 5   # 한 번도 못 붙은 채 같은 오류가 이만큼 반복되면 중단
 RETAIN_DAYS = 14       # 이보다 오래된 날짜 디렉터리는 시간 로테이션 때 자동 삭제
 
 _stop = False
@@ -151,7 +152,10 @@ async def run(markets, depth, writer, stats, retain_days=RETAIN_DAYS,
               min_free_gb=MIN_FREE_GB):
     """한 번의 연결 수명. 정상/비정상 종료 모두 _meta 로 남긴다."""
     import websockets
-    ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) else None
+    # CA 번들이 있으면 그걸 쓰고, 없으면 시스템 기본 컨텍스트를 만든다.
+    # ssl=None 을 그대로 넘기면 최신 websockets 가 wss:// 에서 ValueError 를 낸다.
+    ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) \
+        else ssl.create_default_context()
     sub = [{"ticket": f"scalp-rec-{int(time.time())}"},
            # level=0 = 모아보기 없음(원본 격자). depth(단수)와 level(가격 집계)은 별개다.
            # level>0 이면 거래소가 호가를 묶어 보내고 그 안의 ΔOBI·depletion 이 사라진다.
@@ -266,6 +270,7 @@ async def main_async(a):
               f"--markets 로 종목을 줄이거나 --retain-days 를 낮출 것.", flush=True)
     print(f"[ws] markets: {','.join(markets)}", flush=True)
     backoff = 1.0
+    first_error, first_error_n = None, 0
     try:
         while not _stop:
             try:
@@ -281,6 +286,23 @@ async def main_async(a):
                 writer.flush()
                 print(f"[ws] 끊김 ({type(e).__name__}: {str(e)[:80]}) · {backoff:.0f}초 후 재접속",
                       flush=True)
+                # 한 번도 붙은 적이 없는데 같은 예외가 반복되면 네트워크가 아니라 설정
+                # 문제다. 무한 재시도로 로그만 채우지 말고 끊어서 눈에 띄게 만든다.
+                if stats["connects"] == 0:
+                    sig = f"{type(e).__name__}: {str(e)[:200]}"
+                    if sig == first_error:
+                        first_error_n += 1
+                    else:
+                        first_error, first_error_n = sig, 1
+                    if first_error_n >= SETUP_FAIL_LIMIT:
+                        writer.write({"_meta": "setup_failed", "error": sig,
+                                      "recv_ts": int(time.time() * 1000),
+                                      "attempts": first_error_n})
+                        print(f"[ws] ✗ 접속에 한 번도 성공하지 못했고 같은 오류가 "
+                              f"{first_error_n}회 반복됐다 — 설정 문제로 보고 중단한다.\n"
+                              f"    {sig}", flush=True)
+                        _request_stop()
+                        break
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     finally:
