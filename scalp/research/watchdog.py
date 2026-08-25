@@ -19,7 +19,7 @@
 4. **알림 실패가 감시를 멈추지 않는다.** 텔레그램이 안 되면 stdout 으로
    떨어뜨리고 계속 간다.
 """
-import os, sys, json, time, shutil, subprocess, argparse
+import os, sys, json, time, re, shutil, subprocess, argparse
 
 R = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, R)
@@ -95,11 +95,97 @@ def collect(data_dir, min_free_gb, min_avail_mb, max_disc):
 
     # 하트비트가 최근에 찍혔는지. 프로세스는 살아있는데 수신이 멎은 경우를 잡는다.
     hb = sh("journalctl", "-u", UNIT, "-n", "1", "--no-pager", "-o", "cat")
-    info["last_hb"] = hb[-90:] if hb else ""
     if active == "active" and "up=" not in hb and n_disc == 0:
         bad["silent"] = "서비스는 active 인데 최근 하트비트가 안 보인다"
+    info.update(parse_hb(hb))
 
+    du = shutil.disk_usage(data_dir)
+    info["disk_used_pct"] = round(du.used / du.total * 100)
+    info["disk_total_gb"] = round(du.total / 1e9, 1)
+    info["mem_total_mb"] = round(mem_total_mb())
+    info["data_mb"] = dir_mb(os.path.join(data_dir, "ws"))
     return bad, info
+
+
+def parse_hb(hb):
+    """하트비트 한 줄에서 지표를 뽑는다. 형식이 바뀌면 조용히 비워둔다."""
+    out = {}
+    for key, pat, cast in (
+            ("up_min", r"up=([\d.]+)분", float),
+            ("ob", r"ob=([\d,]+)", lambda v: int(v.replace(",", ""))),
+            ("tr", r"tr=([\d,]+)", lambda v: int(v.replace(",", ""))),
+            ("lat_ms", r"lat=(\d+)ms", int),
+            ("gb_day", r"실측 ([\d.]+)GB/일", float),
+            ("retain_gb", r"보관 시 ([\d.]+)GB", float)):
+        m = re.search(pat, hb)
+        if m:
+            try:
+                out[key] = cast(m.group(1))
+            except Exception:
+                pass
+    return out
+
+
+def mem_total_mb():
+    for ln in open("/proc/meminfo"):
+        if ln.startswith("MemTotal:"):
+            return int(ln.split()[1]) / 1024
+    return float("nan")
+
+
+def dir_mb(p):
+    """수집 디렉터리 크기(MB). 파일 수가 적어 매 30분 계산해도 부담이 없다."""
+    tot = 0
+    for root, _, files in os.walk(p):
+        for f in files:
+            try:
+                tot += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return round(tot / 1e6)
+
+
+def _hhmm(minutes):
+    if minutes is None:
+        return "-"
+    h, m = divmod(int(minutes), 60)
+    d, h = divmod(h, 24)
+    return (f"{d}일 {h}시간" if d else f"{h}시간 {m}분" if h else f"{m}분")
+
+
+def _n(v, unit="", dash="-"):
+    return dash if v is None else (f"{v:,}{unit}" if isinstance(v, int) else f"{v}{unit}")
+
+
+def card(info, bad=None):
+    """사람이 읽는 상태 카드. tg_notify 는 plain text 로 보내므로 마크다운을 쓰지 않는다."""
+    L = []
+    if bad:
+        for v in bad.values():
+            L.append(f"⛔ {v}")
+        L.append("")
+
+    g = info.get
+    # 중첩 f-string 을 피해 미리 계산한다 (파이썬 3.11 에서 같은 따옴표 중첩 불가)
+    gbd = "-" if g("gb_day") is None else f"{g('gb_day'):.2f}GB/일"
+    rtn = "-" if g("retain_gb") is None else f"{g('retain_gb'):.1f}GB"
+    bar = "─" * 26
+    L += [bar,
+          f"서비스     {g('unit') or '-'}",
+          f"가동       {_hhmm(g('up_min'))}",
+          f"수집       호가 {_n(g('ob'))} · 체결 {_n(g('tr'))}",
+          f"지연       {_n(g('lat_ms'), 'ms')}",
+          f"끊김(1h)   {_n(g('disc_1h'), '회')}",
+          f"재시작     {g('restarts') or '-'}회",
+          bar,
+          f"디스크     {g('free_gb')}GB 여유 / {g('disk_total_gb')}GB"
+          f" ({g('disk_used_pct')}% 사용)",
+          f"메모리     {g('mem_avail_mb')}MB 여유 / {g('mem_total_mb')}MB",
+          f"수집량     {gbd} → 14일 {rtn}",
+          f"쌓인양     {_n(g('data_mb'), 'MB')}",
+          bar,
+          f"🕐 {time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() + 9 * 3600))} KST"]
+    return "\n".join(L)
 
 
 def load_state():
@@ -131,18 +217,22 @@ def main():
     now = time.time()
 
     if a.test:
-        tg_send("🔎 레코더 감시 설치 확인",
-                json.dumps(info, ensure_ascii=False, indent=1) +
-                ("\n\n이상 없음" if not bad else "\n\n이상:\n" +
-                 "\n".join(f"· {v}" for v in bad.values())))
+        tg_send("🔎 감시 설치 확인",
+                card(info, bad) + ("\n\n이상 없음 — 감시가 정상 작동한다."
+                                   if not bad else ""))
         return
 
     if not bad:
         # 직전에 문제가 있었다면 복구 사실만 한 번 알리고 상태를 지운다
         if st.get("open"):
-            tg_send("✅ 레코더 정상 복구",
-                    "직전 이상:\n" + "\n".join(f"· {v}" for v in st["open"].values())
-                    + "\n\n현재:\n" + json.dumps(info, ensure_ascii=False, indent=1))
+            dur = ""
+            if st.get("first_at"):
+                mins = (now - st["first_at"]) / 60
+                dur = f"\n이상 지속 시간   {_hhmm(mins)}"
+            tg_send("✅ 레코더 복구",
+                    "해소된 이상:\n"
+                    + "\n".join(f"· {v}" for v in st["open"].values())
+                    + dur + "\n\n" + card(info))
             save_state({})
         return
 
@@ -152,15 +242,17 @@ def main():
     stale = (now - last) > a.repeat_hours * 3600
 
     # 새 문제가 생겼거나, 같은 문제가 오래 지속될 때만 보낸다
+    first_at = st.get("first_at") or now
     if new_keys or stale:
-        head = "🚨 레코더 이상" + (" (지속)" if not new_keys else "")
-        tg_send(head,
-                "\n".join(f"· {v}" for v in bad.values())
-                + "\n\n현재 상태:\n" + json.dumps(info, ensure_ascii=False, indent=1)
-                + "\n\n확인: journalctl -u ws-recorder -n 20 --no-pager")
-        save_state({"open": bad, "sent_at": now})
+        ongoing = "" if new_keys else f" · {_hhmm((now - first_at) / 60)}째"
+        tg_send(f"🚨 레코더 이상{ongoing}",
+                card(info, bad)
+                + "\n\n확인:\n"
+                + "journalctl -u ws-recorder -n 20 --no-pager\n"
+                + "systemctl restart ws-recorder")
+        save_state({"open": bad, "sent_at": now, "first_at": first_at})
     else:
-        save_state({"open": bad, "sent_at": last})
+        save_state({"open": bad, "sent_at": last, "first_at": first_at})
 
 
 if __name__ == "__main__":
