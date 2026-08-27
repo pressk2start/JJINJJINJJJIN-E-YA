@@ -56,7 +56,23 @@ MAX_BOOK_STALE_MS = 30_000         # 호가가 이보다 낡으면 그 체결로
 # 미설명 감소(취소)를 내 앞에서 나간 것으로 얼마나 인정할지. 이 축만 바꾸고
 # **이벤트 집합은 고정한다.** 부분집합을 바꾸면 큐 효과와 국면 효과가 섞여
 # 비교 자체가 성립하지 않는다 (mm_sim.py 의 3층이 정확히 그 오류였다).
-CANCEL_CREDITS = (0.0, 0.5, 1.0)
+# (cancel_credit, level_gone_credit) 쌍.
+#   cancel_credit     : 부분 취소로 줄어든 몫을 내 앞에서 나간 것으로 얼마나 인정할지
+#   level_gone_credit : 관측창 **안**에서 레벨이 **전량** 사라졌을 때의 인정 비율
+#
+# 이 둘을 나눈 이유 — 리뷰 두 개가 정확히 여기서 갈렸다.
+#   · "관측창 안에서 잔량이 0 이 됐다면 내 앞의 타인 주문이 더 이상 관측되지
+#      않는다는 뜻이니 queue_ahead=0 이 관측과 정합적이다" (맞다)
+#   · "그러면 부분취소 credit 0 / 전량취소 credit 1.0 이 되어 cc=0 이 하한이
+#      아니게 되고, 하필 그 순간이동이 호가가 얇아진 순간에만 일어난다" (역시 맞다)
+# 둘 다 맞으므로 선택하지 않고 **축으로 두고 차이를 보고한다.**
+# (0.0, 0.0) 과 (0.0, 1.0) 의 차이가 곧 소멸 override 의 기여분이고,
+# 그 차이가 결과보다 크면 결과는 override 의 산물이다.
+SCENARIOS = (("cc0-strict", 0.0, 0.0),
+             ("cc0+소멸", 0.0, 1.0),
+             ("cc0.5", 0.5, 0.5),
+             ("cc1.0", 1.0, 1.0))
+CANCEL_CREDITS = tuple(x[0] for x in SCENARIOS)
 
 
 # ────────────────────────────────────────────────────────────── 입력
@@ -170,7 +186,7 @@ class MyOrder:
     """내 지정가 주문 하나. queue_ahead 는 **내 앞의 잔량**이다."""
 
     __slots__ = ("side", "price", "qty", "queue_ahead", "placed_ts", "level_size0",
-                 "q0", "adv_exec", "adv_credit", "q_unknown")
+                 "q0", "adv_exec", "adv_credit", "q_unknown", "saw_level_gone")
 
     def __init__(self, side, price, qty, queue_ahead, ts, level_size0):
         self.side = side                 # +1 매수, -1 매도
@@ -183,13 +199,14 @@ class MyOrder:
         self.adv_exec = 0.0              # 체결로 전진한 몫
         self.adv_credit = 0.0            # 취소 credit 으로 전진한 몫
         self.q_unknown = False           # 관측창 밖 — 큐 상태 판단 불가
+        self.saw_level_gone = False      # 이 주문이 겪은 관측창 안 전량 소멸
 
 
 # ────────────────────────────────────────────────────────────── 시뮬
 
 class Sim:
     def __init__(self, cancel_credit, order_krw, cap_krw, latency_ms, horizon_s,
-                 init_cash_krw=None, init_asset_krw=None):
+                 init_cash_krw=None, init_asset_krw=None, level_gone_credit=None):
         """현물 자금제약 모형.
 
         업비트 KRW 현물에는 **공매도가 없다.** 매도 지정가를 걸려면 그만큼의
@@ -203,6 +220,8 @@ class Sim:
         건다 — target 자체는 전략이 아니라 시장 노출이다.
         """
         self.cc = cancel_credit
+        # 지정 안 하면 cancel_credit 을 따른다 (= strict, 순간이동 없음)
+        self.lgc = cancel_credit if level_gone_credit is None else level_gone_credit
         self.order_krw = order_krw
         self.cap_krw = cap_krw
         self.latency = latency_ms
@@ -256,7 +275,7 @@ class Sim:
 
     # ---- 큐 전진
 
-    def _advance(self, side, price, executed, observed_drop):
+    def _advance(self, side, price, executed, observed_drop, level_gone=False):
         """내 앞 큐를 줄인다. 반환: 나에게 돌아온 체결량."""
         o = self.orders[side]
         if o is None or o.price != price:
@@ -271,7 +290,8 @@ class Sim:
         # 관측창 밖으로 밀린 주문은 큐 상태를 알 수 없다. 보수적으로 전진시키지
         # 않는다 — 여기서 credit 을 주면 '안 보이니 앞이 비었을 것'이라는 낙관이다.
         if unexp > 0 and o.queue_ahead > 0 and not o.q_unknown:
-            credit = unexp * self.cc
+            # 전량 소멸이면 level_gone_credit, 부분 감소면 cancel_credit
+            credit = unexp * (self.lgc if level_gone else self.cc)
             credit = min(credit, o.queue_ahead)
             o.queue_ahead -= credit
             o.adv_credit += credit
@@ -328,8 +348,17 @@ class Sim:
         if o0 is not None and o0.q0 > 0:
             cshare = o0.adv_credit / o0.q0
         self.fills.append((ts, side, price, qty, mid, stale))
+        if stale:
+            reason = "STALE"
+        elif o0 is not None and o0.saw_level_gone:
+            reason = "LEVEL_GONE"
+        elif cshare > 1e-12:
+            reason = "CREDIT"
+        else:
+            reason = "FIFO"
         self.fill_log.append(dict(ts=ts, side=side, price=price, qty=qty, mid=mid,
                                   stale=stale, credit_share=cshare, seg=self.seg,
+                                  reason=reason,
                                   q_unknown=bool(o0.q_unknown) if o0 else False))
         if stale:
             self.n_stale += 1
@@ -463,8 +492,17 @@ class Sim:
             d = drop[side].get(o.price)
             if d:
                 ex = self.exec_acc.get((side, o.price), 0.0)
+                book = self.bk.bid if side > 0 else self.bk.ask
+                # 관측창 **안**에서 잔량이 완전히 사라진 경우만 level_gone 이다.
+                lg = (o.price not in book) and self.bk.in_window(side, o.price)
+                if lg:
+                    self.stat["fill_ctx_levelgone"] += 0   # 카운터 초기화 보장
                 # 체결분은 on_trade 에서 이미 반영했다. 여기선 **미설명분만** 처리.
-                got = self._advance(side, o.price, 0.0, max(0.0, d - ex))
+                got = self._advance(side, o.price, 0.0, max(0.0, d - ex), lg)
+                if lg:
+                    o_lg = self.orders[side]
+                    if o_lg is not None:
+                        o_lg.saw_level_gone = True
                 if got > 0:
                     self._fill(ts, side, o.price, got, False)
             # ⚠ 예전 버전은 여기서 queue_ahead 를 0 으로 순간이동시켰다. 그러면
@@ -546,9 +584,8 @@ def drift_report(fill_log, track, horizons_ms, max_slip_ms):
       · CREDIT : 취소 credit 으로 큐를 통과해 체결 (credit_share > 0)
     """
     out = {}
-    for grp, pred in (("FIFO", lambda f: f["credit_share"] <= 1e-12),
-                      ("CREDIT", lambda f: f["credit_share"] > 1e-12)):
-        sel = [f for f in fill_log if pred(f) and f["mid"]]
+    for grp in ("FIFO", "CREDIT", "LEVEL_GONE", "STALE"):
+        sel = [f for f in fill_log if f.get("reason") == grp and f["mid"]]
         g = {"n": len(sel), "krw": sum(f["qty"] * f["price"] for f in sel)}
         for h in horizons_ms:
             num = den = 0.0
@@ -567,10 +604,11 @@ def drift_report(fill_log, track, horizons_ms, max_slip_ms):
     return out
 
 
-def run_one(paths, market, cancel_credit, order_krw, cap_krw, latency_ms, horizon_s,
+def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
             init_cash_krw=None, init_asset_krw=None, drift_h=(1, 5, 30)):
+    label, cancel_credit, level_gone_credit = scen
     sim = Sim(cancel_credit, order_krw, cap_krw, latency_ms, horizon_s,
-              init_cash_krw, init_asset_krw)
+              init_cash_krw, init_asset_krw, level_gone_credit)
     track = {"ts": [], "mid": [], "seg": []}
     max_inv = 0.0
     daily = defaultdict(lambda: {"equity0": None, "equity1": None})
@@ -614,7 +652,8 @@ def run_one(paths, market, cancel_credit, order_krw, cap_krw, latency_ms, horizo
     dj = {d: v["equity1"] - v["equity0"] for d, v in daily.items()
           if v["equity0"] is not None}
 
-    return dict(market=market, cancel_credit=cancel_credit, latency_ms=latency_ms,
+    return dict(market=market, scen=label, cancel_credit=cancel_credit,
+                level_gone_credit=level_gone_credit, latency_ms=latency_ms,
                 order_krw=order_krw, cap_krw=cap_krw,
                 n_fills=len(sim.fills), n_stale=sim.n_stale,
                 stale_frac=(sim.n_stale / len(sim.fills)) if sim.fills else float("nan"),
@@ -634,7 +673,16 @@ def run_one(paths, market, cancel_credit, order_krw, cap_krw, latency_ms, horizo
                 liq_cost_krw=liq, liq_krw=sim.stat.get("liq_krw", 0.0),
                 # ── 자본·규모 정합성 (bp 만 보면 안 된다) ──────────────
                 required_capital_krw=req_cap,
-                net_krw=net, net_ex_market_krw=net_ex_mkt,
+                net_krw=net,
+                # ── 베타 분리 ────────────────────────────────────────
+                # 기초재고를 그냥 들고만 있었어도 얻었을 손익이 baseline_beta 다.
+                # 현물이라 헤지도 안 되므로 이건 전략이 아니라 방향성 노출이다.
+                # **buy-and-hold 가 이기면 MM 기계장치는 아무것도 더하지 않은 것**이고,
+                # 그건 DOGE 가 오른 구간에서 롱 재고를 들고 있었을 뿐이라는 뜻이다.
+                baseline_beta_krw=mkt,
+                mm_alpha_krw=net_ex_mkt,
+                alpha_on_capital=(net_ex_mkt / req_cap) if req_cap else float("nan"),
+                net_ex_market_krw=net_ex_mkt,
                 ret_on_capital=(net / req_cap) if req_cap else float("nan"),
                 ret_on_capital_ex_mkt=(net_ex_mkt / req_cap) if req_cap else float("nan"),
                 max_inv_krw=max_inv, mkt_turn_krw=sim.mkt_turn,
@@ -692,24 +740,24 @@ def main():
     orders = [float(s) for s in a.order_krw.split(",")]
     caps = [float(s) for s in a.cap_krw.split(",")]
     lats = [int(s) for s in a.latency_ms.split(",")]
-    total = len(mks) * len(orders) * len(caps) * len(lats) * len(CANCEL_CREDITS)
+    total = len(mks) * len(orders) * len(caps) * len(lats) * len(SCENARIOS)
     print(f"[queue] {len(mks)}종목 × 주문{len(orders)} × 상한{len(caps)} × "
-          f"지연{len(lats)} × credit{len(CANCEL_CREDITS)} = {total}회", flush=True)
+          f"지연{len(lats)} × 시나리오{len(SCENARIOS)} = {total}회", flush=True)
 
     rows, done = [], 0
     for mk in mks:
         for oq in orders:
             for cap in caps:
                 for lat in lats:
-                    for cc in CANCEL_CREDITS:
+                    for scen in SCENARIOS:
                         try:
-                            rows.append(run_one(a.paths, mk, cc, oq, cap, lat,
+                            rows.append(run_one(a.paths, mk, scen, oq, cap, lat,
                                                 a.horizon_sec, a.init_cash_krw,
                                                 a.init_asset_krw))
                         except SystemExit:
                             raise
                         except Exception as e:
-                            print(f"  ! {mk} cc={cc} {oq:.0f} {cap:.0f} {lat}ms: "
+                            print(f"  ! {mk} {scen[0]} {oq:.0f} {cap:.0f} {lat}ms: "
                                   f"{type(e).__name__}: {e}")
                         done += 1
                         if done % 25 == 0:
@@ -721,35 +769,40 @@ def main():
     print("판정: 세 credit 의 부호가 갈리면 확정 불가.")
     print(f"단조: 진단 지표다(정리가 아니다). 체결 {MIN_FILLS_FOR_MONO}건 미만이면 판정하지 않는다.")
     print("-" * 118)
-    hdr = "".join(f"{'cc='+str(c):>10}" for c in CANCEL_CREDITS)
+    hdr = "".join(f"{n:>11}" for n, _, _ in SCENARIOS)
     print(f"{'종목':<10}{'주문':>7}{'상한':>7}{'지연':>7}{hdr}"
-          f"{'폭':>8}{'체결':>8}{'낡은':>7}{'재호가':>7}{'판정':>12}{'단조':>6}")
+          f"{'override':>9}{'체결':>8}{'낡은':>7}{'재호가':>7}{'판정':>12}{'단조':>6}")
+    print("  override = (cc0+소멸) − (cc0-strict). 이게 결과보다 크면 결과는 "
+          "소멸 순간이동의 산물이다.")
     for mk in mks:
         for oq in orders:
             for cap in caps:
                 for lat in lats:
-                    g = {r["cancel_credit"]: r for r in rows
+                    # 라벨로 키를 잡는다. cancel_credit 은 cc0-strict 와
+                    # cc0+소멸 이 둘 다 0.0 이라 키가 충돌한다.
+                    g = {r["scen"]: r for r in rows
                          if r["market"] == mk and r["order_krw"] == oq
                          and r["cap_krw"] == cap and r["latency_ms"] == lat}
-                    if len(g) != len(CANCEL_CREDITS):
+                    if len(g) != len(SCENARIOS):
                         continue
-                    vals = [g[c]["bp"] for c in CANCEL_CREDITS]
-                    b = g[CANCEL_CREDITS[0]]
-                    v, mono = verdict_of(vals, b['n_fills'])
+                    vals = [g[n]["bp"] for n, _, _ in SCENARIOS]
+                    b = g[SCENARIOS[0][0]]
+                    v, mono = verdict_of(vals, b["n_fills"])
+                    ov = vals[1] - vals[0]        # 소멸 override 기여분
                     print(f"{mk:<10}{oq/1e4:>5.0f}만{cap/1e4:>5.0f}만{lat:>5}ms"
-                          + "".join(f"{x:>+10.2f}" for x in vals)
-                          + f"{vals[-1]-vals[0]:>8.2f}{b['n_fills']:>8,}"
+                          + "".join(f"{x:>+11.2f}" for x in vals)
+                          + f"{ov:>8.2f}{b['n_fills']:>8,}"
                           + f"{b['stale_frac']*100:>6.1f}%{b['requotes']:>7,}"
                           + f"{v:>12}{mono:>6}")
 
     # 손익 분해 — cancel_credit=0(보수)만
     print("\n" + "=" * 118)
-    print("손익 분해 (cancel_credit=0, 원) — 강제청산이 수익 대부분을 먹는지 본다")
+    print("손익 분해 (cc0-strict, 원) — 강제청산이 수익 대부분을 먹는지 본다")
     print("-" * 118)
     print(f"{'종목':<10}{'주문':>7}{'상한':>7}{'지연':>7}{'스프레드':>12}{'수수료':>11}"
           f"{'재고손익':>12}{'청산비용':>11}{'순손익':>12}{'잔차':>9}{'bp':>8}")
     for r in rows:
-        if r["cancel_credit"] != 0.0:
+        if r["scen"] != SCENARIOS[0][0]:
             continue
         print(f"{r['market']:<10}{r['order_krw']/1e4:>5.0f}만{r['cap_krw']/1e4:>5.0f}만"
               f"{r['latency_ms']:>5}ms{r['spread_krw']:>+12,.0f}{-r['fees_krw']:>+11,.0f}"
@@ -757,32 +810,35 @@ def main():
               f"{r['net_krw']:>+12,.0f}{r['resid_krw']:>+9,.0f}{r['bp']:>+8.2f}")
 
     print("\n" + "=" * 126)
-    print("자본·규모 정합성 (cancel_credit=0) — bp 가 아니라 이쪽이 판정 기준이다")
+    print("자본·규모 정합성 (cc0-strict) — bp 가 아니라 이쪽이 판정 기준이다")
     print("필요자본 = 초기 원화 + 초기 코인. 현물은 공매도가 없어 양방향 호가에 둘 다 필요하다.")
     print("-" * 126)
-    print(f"{'종목':<9}{'주문':>6}{'상한':>6}{'지연':>6}{'순손익':>12}{'시장제외':>12}"
-          f"{'필요자본':>11}{'자본수익':>9}{'최대재고':>11}{'상한체류':>8}"
-          f"{'낡은손실':>10}{'청산손실':>10}{'흐름점유':>9}")
+    print("판정식: mm_alpha ÷ required_capital. buy-and-hold(베타)가 이기면 "
+          "MM 기계장치는 아무것도 더하지 않은 것이다.")
+    print(f"{'종목':<9}{'주문':>6}{'상한':>6}{'지연':>6}{'순손익':>12}{'베타':>12}"
+          f"{'알파':>11}{'필요자본':>10}{'알파/자본':>10}{'최대재고':>11}"
+          f"{'상한체류':>8}{'낡은손실':>9}{'청산손실':>9}{'흐름점유':>9}")
     for r in rows:
-        if r["cancel_credit"] != 0.0:
+        if r["scen"] != SCENARIOS[0][0]:
             continue
         print(f"{r['market']:<9}{r['order_krw']/1e4:>4.0f}만{r['cap_krw']/1e4:>4.0f}만"
-              f"{r['latency_ms']:>4}ms{r['net_krw']:>+12,.0f}{r['net_ex_market_krw']:>+12,.0f}"
-              f"{r['required_capital_krw']/1e4:>9,.0f}만{r['ret_on_capital_ex_mkt']*100:>+8.2f}%"
+              f"{r['latency_ms']:>4}ms{r['net_krw']:>+12,.0f}"
+              f"{r['baseline_beta_krw']:>+12,.0f}{r['mm_alpha_krw']:>+11,.0f}"
+              f"{r['required_capital_krw']/1e4:>8,.0f}만{r['alpha_on_capital']*100:>+9.2f}%"
               f"{r['max_inv_krw']:>11,.0f}{r['at_cap_frac']*100:>7.1f}%"
-              f"{-r['stale_loss_krw']:>+10,.0f}{-r['liq_cost_krw']:>+10,.0f}"
+              f"{-r['stale_loss_krw']:>+9,.0f}{-r['liq_cost_krw']:>+9,.0f}"
               f"{r['flow_share']*100:>8.3f}%")
 
     print("\n" + "=" * 126)
-    print("체결 사유 분해 · 체결 후 mid drift (cancel_credit=0)")
+    print("체결 사유 분해 · 체결 후 mid drift (cc0-strict)")
     print("CREDIT 군의 drift 가 유의하게 불리하지 않으면 adverse selection 이 계측되지 않는 것이다.")
     print("-" * 126)
     print(f"{'종목':<9}{'주문':>6}{'지연':>6}{'군':>8}{'체결':>9}{'대금':>11}"
           f"{'drift1s':>10}{'drift5s':>10}{'drift30s':>10}")
     for r in rows:
-        if r["cancel_credit"] != 0.0:
+        if r["scen"] != SCENARIOS[0][0]:
             continue
-        for g in ("FIFO", "CREDIT"):
+        for g in ("FIFO", "CREDIT", "LEVEL_GONE", "STALE"):
             d = r["drift"].get(g, {})
             if not d.get("n"):
                 continue
@@ -793,12 +849,12 @@ def main():
                   f"{d.get('drift_30s_bp', float('nan')):>+10.2f}")
 
     print("\n" + "=" * 126)
-    print("모형 계기 (cancel_credit=0) — 이 값들이 크면 결과보다 먼저 이걸 봐야 한다")
+    print("모형 계기 (cc0-strict) — 이 값들이 크면 결과보다 먼저 이걸 봐야 한다")
     print("-" * 126)
     print(f"{'종목':<9}{'주문':>6}{'지연':>6}{'창밖이탈':>9}{'레벨소멸':>9}{'공백리셋':>9}"
           f"{'낡은호가스킵':>13}{'상한클립':>9}{'현금부족':>9}{'코인부족':>9}{'credit체결비':>13}")
     for r in rows:
-        if r["cancel_credit"] != 0.0:
+        if r["scen"] != SCENARIOS[0][0]:
             continue
         print(f"{r['market']:<9}{r['order_krw']/1e4:>4.0f}만{r['latency_ms']:>4}ms"
               f"{r['window_exit']:>9,}{r['level_gone']:>9,}{r['gap_resets']:>9,}"
