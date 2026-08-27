@@ -390,6 +390,44 @@ def t17_drift_freshness():
           f"정상={a} (기대 101.0) · 초과={b} (기대 None) · 세그먼트불일치={c} (기대 None)")
 
 
+# ─────────────────────────────────────────────────────── 18
+def t18_level_gone_axis():
+    """소멸 override 를 **축**으로 둔다. cc=0 이면서 lgc=1 이면 전량 소멸에서만
+    순간이동한다. 두 값의 차이가 곧 override 의 기여분이다."""
+    ev = [ob(1000, [(100.0, 500.0), (99.0, 300.0)], [(101.0, 500.0)]),
+          ob(1200, [(99.0, 300.0)], [(101.0, 500.0)])]      # 100 이 창 안에서 소멸
+    strict = Q.Sim(0.0, 10000, 1e9, 10_000, 30, 1e12, 1e12, 0.0)
+    lg1    = Q.Sim(0.0, 10000, 1e9, 10_000, 30, 1e12, 1e12, 1.0)
+    import tempfile, gzip as gz, json as js
+    for sim in (strict, lg1):
+        path = write(ev)
+        try:
+            for ts, m in Q.stream([path], MK):
+                (sim.on_book if m["type"] == "orderbook" else sim.on_trade)(ts, m)
+        finally:
+            os.remove(path)
+    a = strict.orders[1].queue_ahead if strict.orders[1] else None
+    b = lg1.orders[1].queue_ahead if lg1.orders[1] else None
+    check("18. 소멸 override 축이 실제로 갈린다",
+          a == 500.0 and b == 0.0,
+          f"cc0-strict 앞={a} (기대 500) · cc0+소멸 앞={b} (기대 0)")
+
+
+def t19_beta_alpha_split():
+    """베타(기초재고를 그냥 들고만 있었을 때)와 알파(MM 기여분)가 분리돼야 한다."""
+    s = Q.Sim(0.0, 10000, 1e9, 100, 30, 100_000.0, 100_000.0)
+    s.bk.bid = {100.0: 10.0}; s.bk.ask = {101.0: 10.0}; s.bk.ts = 1000
+    s._init_balances(s.bk.mid())
+    s._mark(s.bk.mid())
+    s.bk.bid = {200.0: 10.0}; s.bk.ask = {201.0: 10.0}     # 가격 약 2배
+    s._mark(s.bk.mid())
+    beta = s.stat["market"]
+    expect = s.target * (s.bk.mid() - 100.5)
+    check("19. 베타 = 기초재고 × mid 이동", abs(beta - expect) < 1e-6,
+          f"베타 {beta:,.1f}원 (기대 {expect:,.1f}) · 전략재고 편차 손익 "
+          f"{s.stat['inventory']:,.1f} (기대 0)")
+
+
 def main():
     print("queue_sim.py 회귀 테스트")
     print("=" * 66)
@@ -402,7 +440,8 @@ def main():
               t11_pnl_identity, t12_credit_monotone,
               t13_no_naked_short, t13b_no_overspend, t14_fill_time_cap,
               t14b_cap_allows_reducing, t14c_asset_never_negative,
-              t15_gap_reset, t16_book_stale_skip, t17_drift_freshness):
+              t15_gap_reset, t16_book_stale_skip, t17_drift_freshness,
+              t18_level_gone_axis, t19_beta_alpha_split):
         try:
             f()
         except Exception as e:

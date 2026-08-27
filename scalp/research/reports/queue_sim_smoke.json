@@ -14,14 +14,17 @@
  },
  "fee": 0.0005,
  "cancel_credits": [
-  0.0,
-  0.5,
-  1.0
+  "cc0-strict",
+  "cc0+소멸",
+  "cc0.5",
+  "cc1.0"
  ],
  "rows": [
   {
    "market": "KRW-XRP",
+   "scen": "cc0-strict",
    "cancel_credit": 0.0,
+   "level_gone_credit": 0.0,
    "latency_ms": 50,
    "order_krw": 100000.0,
    "cap_krw": 2000000.0,
@@ -49,6 +52,9 @@
    "liq_krw": 99999.85888469241,
    "required_capital_krw": 4000000.0,
    "net_krw": -3693.257864916697,
+   "baseline_beta_krw": -3393.116820164809,
+   "mm_alpha_krw": -300.14104475188833,
+   "alpha_on_capital": -7.503526118797208e-05,
    "net_ex_market_krw": -300.14104475188833,
    "ret_on_capital": -0.0009233144662291742,
    "ret_on_capital_ex_mkt": -7.503526118797208e-05,
@@ -80,6 +86,26 @@
      "n_5s": 0,
      "drift_30s_bp": NaN,
      "n_30s": 0
+    },
+    "LEVEL_GONE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    },
+    "STALE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
     }
    },
    "resid_krw": 4.729372449219227e-11,
@@ -87,7 +113,100 @@
   },
   {
    "market": "KRW-XRP",
+   "scen": "cc0+소멸",
+   "cancel_credit": 0.0,
+   "level_gone_credit": 1.0,
+   "latency_ms": 50,
+   "order_krw": 100000.0,
+   "cap_krw": 2000000.0,
+   "n_fills": 8,
+   "n_stale": 0,
+   "stale_frac": 0.0,
+   "requotes": 20,
+   "level_gone": 14,
+   "window_exit": 0,
+   "gap_resets": 1,
+   "skip_book_stale": 0,
+   "clip_cap": 0,
+   "reject_cash": 0,
+   "reject_asset": 0,
+   "queue_credit": 2376.074036220003,
+   "n_fills_credit": 0,
+   "credit_fill_frac": 0.0,
+   "turn_krw": 500000.00000000186,
+   "spread_krw": 96.96970266855917,
+   "fees_krw": 299.99992944234714,
+   "inventory_krw": -97.11081797814722,
+   "market_krw": -3393.116820164809,
+   "stale_loss_krw": 0.0,
+   "liq_cost_krw": 74.28352800589462,
+   "liq_krw": 99999.85888469241,
+   "required_capital_krw": 4000000.0,
+   "net_krw": -3693.257864916697,
+   "baseline_beta_krw": -3393.116820164809,
+   "mm_alpha_krw": -300.14104475188833,
+   "alpha_on_capital": -7.503526118797208e-05,
+   "net_ex_market_krw": -300.14104475188833,
+   "ret_on_capital": -0.0009233144662291742,
+   "ret_on_capital_ex_mkt": -7.503526118797208e-05,
+   "max_inv_krw": 100048.4260818195,
+   "mkt_turn_krw": 450456335.94623315,
+   "flow_share": 0.0011099854971507877,
+   "avg_inv_krw": 31117.764464137275,
+   "at_cap_frac": 0.0,
+   "daily_krw": {
+    "08-23": -3618.974336910527
+   },
+   "drift": {
+    "FIFO": {
+     "n": 8,
+     "krw": 500000.00000000186,
+     "drift_1s_bp": -3.8801994878754433,
+     "n_1s": 8,
+     "drift_5s_bp": -2.4251836491584218,
+     "n_5s": 8,
+     "drift_30s_bp": 1.2127091923356268,
+     "n_30s": 7
+    },
+    "CREDIT": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    },
+    "LEVEL_GONE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    },
+    "STALE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    }
+   },
+   "resid_krw": 4.729372449219227e-11,
+   "bp": -6.002820895037744
+  },
+  {
+   "market": "KRW-XRP",
+   "scen": "cc0.5",
    "cancel_credit": 0.5,
+   "level_gone_credit": 0.5,
    "latency_ms": 50,
    "order_krw": 100000.0,
    "cap_krw": 2000000.0,
@@ -115,6 +234,9 @@
    "liq_krw": 3395.9063549051098,
    "required_capital_krw": 4000000.0,
    "net_krw": -3547.7296827225946,
+   "baseline_beta_krw": -3393.116820164809,
+   "mm_alpha_krw": -154.61286255778577,
+   "alpha_on_capital": -3.865321563944644e-05,
    "net_ex_market_krw": -154.61286255778577,
    "ret_on_capital": -0.0008869324206806486,
    "ret_on_capital_ex_mkt": -3.865321563944644e-05,
@@ -146,6 +268,26 @@
      "n_5s": 6,
      "drift_30s_bp": 4.765203209083973,
      "n_30s": 5
+    },
+    "LEVEL_GONE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    },
+    "STALE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
     }
    },
    "resid_krw": 6.125446816440672e-10,
@@ -153,7 +295,9 @@
   },
   {
    "market": "KRW-XRP",
+   "scen": "cc1.0",
    "cancel_credit": 1.0,
+   "level_gone_credit": 1.0,
    "latency_ms": 50,
    "order_krw": 100000.0,
    "cap_krw": 2000000.0,
@@ -181,6 +325,9 @@
    "liq_krw": 109650.84124819352,
    "required_capital_krw": 4000000.0,
    "net_krw": -3563.6256580380723,
+   "baseline_beta_krw": -3393.116820164809,
+   "mm_alpha_krw": -170.50883787326347,
+   "alpha_on_capital": -4.2627209468315865e-05,
    "net_ex_market_krw": -170.50883787326347,
    "ret_on_capital": -0.0008909064145095181,
    "ret_on_capital_ex_mkt": -4.2627209468315865e-05,
@@ -212,6 +359,26 @@
      "n_5s": 8,
      "drift_30s_bp": 2.42483040445689,
      "n_30s": 4
+    },
+    "LEVEL_GONE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
+    },
+    "STALE": {
+     "n": 0,
+     "krw": 0,
+     "drift_1s_bp": NaN,
+     "n_1s": 0,
+     "drift_5s_bp": NaN,
+     "n_5s": 0,
+     "drift_30s_bp": NaN,
+     "n_30s": 0
     }
    },
    "resid_krw": 9.458744898438454e-11,
