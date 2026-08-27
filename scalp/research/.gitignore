@@ -3,3 +3,6 @@ results/
 *.log
 ws/
 ticks/
+
+# 재현성 산출물은 코드와 함께 커밋한다. 대용량 raw/feature 는 계속 제외.
+!reports/

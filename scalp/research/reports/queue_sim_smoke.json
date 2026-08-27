@@ -1,0 +1,93 @@
+{
+ "params": {
+  "paths": [
+   "data/ws/*/*.jsonl.gz"
+  ],
+  "markets": "KRW-XRP",
+  "order_krw": "100000",
+  "cap_krw": "2000000",
+  "latency_ms": "50",
+  "horizon_sec": 30,
+  "save": "reports/queue_sim_smoke.json"
+ },
+ "fee": 0.0005,
+ "cancel_credits": [
+  0.0,
+  0.5,
+  1.0
+ ],
+ "rows": [
+  {
+   "market": "KRW-XRP",
+   "cancel_credit": 0.0,
+   "latency_ms": 50,
+   "order_krw": 100000.0,
+   "cap_krw": 2000000.0,
+   "n_fills": 7,
+   "n_stale": 0,
+   "stale_frac": 0.0,
+   "requotes": 21,
+   "level_gone": 6,
+   "queue_credit": 0.0,
+   "turn_krw": 400000.00000000186,
+   "spread_krw": 96.9697026685592,
+   "fees_krw": 200.0242012870073,
+   "inventory_krw": -48.5671286577587,
+   "liq_cost_krw": 0.03595519036056576,
+   "liq_krw": 48.40257401268709,
+   "adverse_bp_krw": 485083.67693425296,
+   "n_adverse": 7,
+   "net_krw": -151.62162727619557,
+   "resid_krw": 1.1226575225009583e-11,
+   "bp": -3.7905406819048713
+  },
+  {
+   "market": "KRW-XRP",
+   "cancel_credit": 0.5,
+   "latency_ms": 50,
+   "order_krw": 100000.0,
+   "cap_krw": 2000000.0,
+   "n_fills": 11,
+   "n_stale": 0,
+   "stale_frac": 0.0,
+   "requotes": 21,
+   "level_gone": 4,
+   "queue_credit": 111947.48681099001,
+   "turn_krw": 603544.7638274417,
+   "spread_krw": 96.99321047526765,
+   "fees_krw": 403.4460750232453,
+   "inventory_krw": 100.38439791388832,
+   "liq_cost_krw": 151.02985481317705,
+   "liq_krw": 203347.38621904884,
+   "adverse_bp_krw": 1455486.451175003,
+   "n_adverse": 11,
+   "net_krw": -206.06846663408214,
+   "resid_krw": 7.219114195322618e-12,
+   "bp": -3.414302947925148
+  },
+  {
+   "market": "KRW-XRP",
+   "cancel_credit": 1.0,
+   "latency_ms": 50,
+   "order_krw": 100000.0,
+   "cap_krw": 2000000.0,
+   "n_fills": 15,
+   "n_stale": 0,
+   "stale_frac": 0.0,
+   "requotes": 19,
+   "level_gone": 3,
+   "queue_credit": 217743.90842152,
+   "turn_krw": 1009990.1529074019,
+   "spread_krw": 194.0570356520364,
+   "fees_krw": 609.7962370098696,
+   "inventory_krw": 193.77475940878355,
+   "liq_cost_krw": 155.67551034071656,
+   "liq_krw": 209602.32111233732,
+   "adverse_bp_krw": 485083.676934253,
+   "n_adverse": 15,
+   "net_krw": -221.96444194906508,
+   "resid_krw": -1.5404566511278972e-11,
+   "bp": -2.1976891686528677
+  }
+ ]
+}
