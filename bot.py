@@ -2389,6 +2389,8 @@ def _common_cohort_paired_summary():
             "A": "CLM_A_CLEAN_bp30",
             "A×A2": "CLM_A_x_A2_bp30",
         }
+        # advisor 3자 (2026-08-27): "동일 frozen experiment 조건" 요건
+        # per-route EXPERIMENT_EPOCH 로 필터 · 이전 epoch 오염 방지 (강한 계약)
         route_trades = {}  # route_label → {signal_id → trade_dict}
         with _SHADOW_PERF_LOCK:
             for key, s in _SHADOW_PERF_STATS.items():
@@ -2396,8 +2398,12 @@ def _common_cohort_paired_summary():
                 for label, r in target_routes.items():
                     if route == r:
                         _trs = s.get("trade_records", []) or []
+                        _current_exp_epoch = _route_experiment_epoch(route)
                         by_id = {}
                         for t in _trs:
+                            _tep = t.get("route_epoch") or t.get("epoch")
+                            if _tep and _tep != _current_exp_epoch:
+                                continue  # 다른 실험 계약 · 페어 대상 제외
                             sid = t.get("signal_id") or t.get("entry_ts")
                             if sid is not None:
                                 by_id[sid] = t
@@ -2617,15 +2623,25 @@ def _common_cohort_paired_summary():
         _a_delta_pct_2arm = None
         _a_divergence_2arm = None
         _a_paired_2arm = 0
+        _ctrl_net_per_2arm = None
+        _a_net_per_2arm = None
+        _ctrl_wr_2arm = None
+        _a_wr_2arm = None
         if "CONTROL" in route_trades and "A" in route_trades:
             _2arm_deltas = []
             _2arm_div = 0
+            _2arm_ctrl_pnls = []
+            _2arm_a_pnls = []
             for _sid in control_a_common:
                 _ct = route_trades["CONTROL"].get(_sid)
                 _at = route_trades["A"].get(_sid)
                 if _ct is None or _at is None:
                     continue
-                _2arm_deltas.append(_at.get("pnl", 0) - _ct.get("pnl", 0))
+                _cp = _ct.get("pnl", 0)
+                _ap = _at.get("pnl", 0)
+                _2arm_ctrl_pnls.append(_cp)
+                _2arm_a_pnls.append(_ap)
+                _2arm_deltas.append(_ap - _cp)
                 _a_paired_2arm += 1
                 _c_r = _ct.get("exit_reason")
                 _a_r = _at.get("exit_reason")
@@ -2634,6 +2650,15 @@ def _common_cohort_paired_summary():
             if _2arm_deltas:
                 _a_delta_pct_2arm = sum(_2arm_deltas) / len(_2arm_deltas) * 100
                 _a_divergence_2arm = _2arm_div
+                _ctrl_net_per_2arm = sum(_2arm_ctrl_pnls) / len(_2arm_ctrl_pnls) * 100
+                _a_net_per_2arm = sum(_2arm_a_pnls) / len(_2arm_a_pnls) * 100
+                _ctrl_wr_2arm = sum(1 for p in _2arm_ctrl_pnls if p > 0) / len(_2arm_ctrl_pnls) * 100
+                _a_wr_2arm = sum(1 for p in _2arm_a_pnls if p > 0) / len(_2arm_a_pnls) * 100
+                lines.append(
+                    f"  2-arm cohort (CONTROL_A_closed n={_a_paired_2arm}): "
+                    f"CONTROL net/건={_ctrl_net_per_2arm:+.3f}% WR={_ctrl_wr_2arm:.0f}% · "
+                    f"A net/건={_a_net_per_2arm:+.3f}% WR={_a_wr_2arm:.0f}%"
+                )
                 lines.append(
                     f"  Δ A vs CONTROL (2-arm CONTROL_A_closed): "
                     f"{_a_delta_pct_2arm:+.3f}%p (n={_a_paired_2arm}) · "
