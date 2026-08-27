@@ -2654,8 +2654,11 @@ def _common_cohort_paired_summary():
                 _a_net_per_2arm = sum(_2arm_a_pnls) / len(_2arm_a_pnls) * 100
                 _ctrl_wr_2arm = sum(1 for p in _2arm_ctrl_pnls if p > 0) / len(_2arm_ctrl_pnls) * 100
                 _a_wr_2arm = sum(1 for p in _2arm_a_pnls if p > 0) / len(_2arm_a_pnls) * 100
+                # advisor 3자 (2026-08-27) 검증 게이트: count == n · trade_records terminal-only 확인용
+                _verify_tag = "✅" if _a_paired_2arm == len(control_a_common) else "⚠VERIFY_FAIL"
                 lines.append(
-                    f"  2-arm cohort (CONTROL_A_closed n={_a_paired_2arm}): "
+                    f"  2-arm cohort (CONTROL_A_closed count={len(control_a_common)} · "
+                    f"paired n={_a_paired_2arm} {_verify_tag} · terminal-only): "
                     f"CONTROL net/건={_ctrl_net_per_2arm:+.3f}% WR={_ctrl_wr_2arm:.0f}% · "
                     f"A net/건={_a_net_per_2arm:+.3f}% WR={_a_wr_2arm:.0f}%"
                 )
@@ -2679,8 +2682,18 @@ def _common_cohort_paired_summary():
                 f"(30 첫판정 · 50 확인 · 100 승격 · A KILL 기준)"
             )
         else:
+            # 검증 게이트 (advisor 3자 · 2026-08-27): count == ΔA/divergence 기저 n 일치
+            # trade_records 는 terminal-only (_shadow_record_result 는 closed_results 만 축적) ·
+            # 구조상 _a_paired_2arm == len(control_a_common) 이어야 함
+            # 불일치 = matched-relabel 회귀 신호 → KILL 자동 보류
             _deadline = []
-            if _a_delta_pct_2arm is not None:
+            if _a_paired_2arm != len(control_a_common) or _a_delta_pct_2arm is None:
+                _deadline.append(
+                    f"  ⚠ VERIFY_FAIL · A KILL 자동 보류: "
+                    f"_a_paired_2arm={_a_paired_2arm} vs CONTROL_A_closed={len(control_a_common)} "
+                    f"불일치 또는 ΔA 미계산 · matched-relabel 회귀 의심 · 코드 감사"
+                )
+            else:
                 if _a_divergence_2arm == 0:
                     _deadline.append(
                         f"  🚫 A 실험 STRUCTURAL_KILL (CONTROL_A_closed={len(control_a_common)}≥30 · "
@@ -4017,7 +4030,12 @@ if os.getenv("DEBUG_KEYS") == "1":
 # 리스크 관리 — config.py에서 정의됨 (RISK_PER_TRADE, AGGRESSIVE_MODE, USE_PYRAMIDING,
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
-print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
+# LIVE_ENTRY_DISABLED · advisor 3자 (2026-08-27) 승인 · LIVE 신규진입만 정지 스위치
+# 목적: 자본 노출 0 · 기존 포지션은 기존 청산 규칙으로 정상 종료
+# 배선: open_auto_position + add_auto_position 만 게이트 · close_auto_position 무영향
+# 재개조건: forward 검증된 새 후보의 LIVE 승격 · 손실 직후 flagship threshold 손보기 금지
+LIVE_ENTRY_DISABLED = os.getenv("LIVE_ENTRY_DISABLED", "0") == "1"
+print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, LIVE_ENTRY_DISABLED={LIVE_ENTRY_DISABLED}, RISK_PER_TRADE={RISK_PER_TRADE}")
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
 
@@ -5798,6 +5816,16 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         except Exception:
             pass
 
+    # advisor 3자 (2026-08-27) 승인 · LIVE 신규진입 정지 스위치 (entry-only · close 무영향)
+    if LIVE_ENTRY_DISABLED:
+        signal_skip("LIVE_ENTRY_DISABLED=1 (LIVE 신규진입 정지 · 자문 3자 승인)",
+                    skip_bucket="entry_skip_live_disabled")
+        tg_send_mid(f"⏸ {m} LIVE 신규진입 정지 (LIVE_ENTRY_DISABLED=1)")
+        try:
+            _pipeline_inc("post_signal_live_entry_disabled")
+        except Exception:
+            pass
+        return False, None
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)", skip_bucket="entry_skip_auto_off")
         tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
@@ -6725,6 +6753,9 @@ def add_auto_position(m, cur_price, reason=""):
     - ADD_RISK_FRACTION 비율만큼 RISK_PER_TRADE를 다시 사용
     - 평균단가 재계산
     """
+    # advisor 3자 (2026-08-27) · LIVE 신규진입 정지 시 추매도 정지 (신규 자본 노출 0)
+    if LIVE_ENTRY_DISABLED:
+        return False, None
     if not AUTO_TRADE:
         return False, None
 
