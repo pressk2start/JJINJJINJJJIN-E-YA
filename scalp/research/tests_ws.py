@@ -286,10 +286,50 @@ def test_replenish_then_cancel():
     return "7. 재보충 후 감소 귀속", ok
 
 
+def test_label_gap():
+    """8. 라벨이 녹화 공백을 넘지 않는다.
+    'ts >= target' 첫 행을 그냥 집으면 몇 시간 뒤 행을 30초 forward 로 붙이게 된다."""
+    print("  공백(2시간)을 사이에 둔 행에 30초 라벨을 요청한다")
+    rows = [{"market": "M", "ts": 0.0, "mid": 100.0},
+            {"market": "M", "ts": 30.0, "mid": 101.0},
+            {"market": "M", "ts": 60.0, "mid": 102.0},
+            {"market": "M", "ts": 7260.0, "mid": 200.0}]     # 2시간 공백 뒤
+    WF.add_labels(rows, [30.0])
+    ok = (rows[0]["fwd_30_bp"] is not None
+          and abs(rows[0]["fwd_30_bp"] - 100.0) < 1e-6
+          and rows[1]["fwd_30_bp"] is not None
+          and rows[2]["fwd_30_bp"] is None)
+    print(f"  t0={rows[0]['fwd_30_bp']} · t30={rows[1]['fwd_30_bp']} · "
+          f"t60={rows[2]['fwd_30_bp']} (t60 은 None 이어야 한다)")
+    print(f"  [라벨 공백 차단] → {'PASS' if ok else 'FAIL'}")
+    return ("8. 라벨 공백 차단", ok)
+
+
+def test_gap_state_reset():
+    """9. 공백 뒤에는 상태를 끊는다 — 공백 전 호가/체결이 공백 후로 새면 안 된다."""
+    print("  1000초에 스냅샷 하나, 8200초(2시간 뒤)에 또 하나를 넣는다")
+    st = WF.MarketState("M", 1.0, 60.0)
+    st.step({"type": "orderbook", "code": "M", "timestamp": 1_000_000,
+             "orderbook_units": [{"bid_price": 100.0, "bid_size": 10.0,
+                                  "ask_price": 101.0, "ask_size": 10.0}]}, 1000.0)
+    st.step({"type": "trade", "code": "M", "timestamp": 1_000_500,
+             "trade_price": 100.0, "trade_volume": 5.0, "ask_bid": "ASK"}, 1000.5)
+    before, n_tr = st.n_reset, len(st.fl.tr)
+    st.step({"type": "orderbook", "code": "M", "timestamp": 1_007_200_000,
+             "orderbook_units": [{"bid_price": 200.0, "bid_size": 10.0,
+                                  "ask_price": 201.0, "ask_size": 10.0}]}, 8200.0)
+    ok = (st.n_reset == before + 1) and (len(st.fl.tr) == 0)
+    print(f"  reset {before}→{st.n_reset} (기대 +1) · "
+          f"Flow 잔여 {n_tr}→{len(st.fl.tr)}건 (기대 0)")
+    print(f"  [공백 상태 단절] → {'PASS' if ok else 'FAIL'}")
+    return ("9. 공백 상태 단절", ok)
+
+
 def main():
     suites = [test_lookahead, test_receive_order, test_price_matching,
               test_labels, test_tie_break, test_window_exit,
-              test_replenish_then_cancel]
+              test_replenish_then_cancel,
+              test_label_gap, test_gap_state_reset]
     res = []
     for s in suites:
         print(f"\n=== {s.__name__} ===")

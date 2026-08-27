@@ -52,6 +52,7 @@ import os, sys, json, gzip, glob, math, heapq, argparse
 from collections import defaultdict, deque
 
 MAX_STALE_SEC = 60.0        # 호가가 이보다 낡은 프레임은 만들지 않는다 (아래 설명)
+GAP_RESET_SEC = 60.0     # 이만큼 이벤트가 없으면 녹화 공백으로 보고 상태를 끊는다
 LATENESS_MS = 2000
 LAST_QC = {}                # 직전 replay() 의 품질 지표 (지각 폐기 수 등)          # 수신 지연 jitter 흡수용 워터마크 (실측 p99 443ms의 여유배)
 OB_HIST_SEC = 60.0
@@ -278,6 +279,8 @@ class MarketState:
         self.code = code; self.grid = grid; self.max_stale = max_stale
         self.n_stale = 0
         self.bk = Book(); self.fl = Flow()
+        self.last_ev = None                 # 직전 이벤트 시각 — 공백 감지용
+        self.n_reset = 0
         self.cnt = [0, 0]
         self.next_emit = None
         self.rows = []
@@ -295,6 +298,16 @@ class MarketState:
             self.n_late += 1
             return
         self.last_ts = ts
+        # 녹화가 끊겼다 이어지면 이전 상태를 그대로 쓰면 안 된다.
+        # Book 은 업비트가 스냅샷을 보내 자동 교체되고 Flow 는 TR_HIST_SEC 프루닝으로
+        # 자가 치유되지만, 그건 **우연히 그렇게 되는 것**이지 코드가 보장한 게 아니다.
+        # 공백을 만나면 명시적으로 끊는다 — 공백 전 체결이 공백 후 감소에 귀속되거나
+        # 낡은 호가가 첫 프레임에 들어가는 일을 막는다.
+        if self.last_ev is not None and (ts - self.last_ev) > GAP_RESET_SEC:
+            self.bk = Book(); self.fl = Flow()
+            self.next_emit = None
+            self.n_reset += 1
+        self.last_ev = ts
         if self.next_emit is None:
             self.next_emit = math.floor(ts / self.grid) * self.grid + self.grid
         else:
@@ -368,22 +381,45 @@ def replay(events, grid=1.0, lateness_ms=LATENESS_MS, max_stale=MAX_STALE_SEC):
     return out
 
 
-def add_labels(rows, horizons):
-    """mid 기준 forward bp. 커버리지 부족은 0으로 채우지 않고 None 으로 남긴다."""
+def add_labels(rows, horizons, max_slip=None):
+    """mid 기준 forward bp.
+
+    ⚠ 녹화 공백을 넘어 라벨링하지 않는다.
+      `ts >= target` 인 첫 행을 그냥 집으면, 공백 뒤 몇 시간 후의 행을 집어놓고
+      '30초 forward 수익률'이라고 붙이게 된다. 그 값은 지평이 다른 다른 관측이다.
+      목표 시각을 max_slip 이상 넘어선 행은 라벨을 만들지 않고 None 으로 둔다.
+      기본 max_slip = 지평의 50% 와 5초 중 큰 값 — 격자 간격보다는 넉넉하되
+      공백은 확실히 걸러내는 폭이다.
+
+    커버리지 부족은 0 으로 채우지 않고 None 으로 남긴다.
+    """
     by = defaultdict(list)
     for r in rows:
         by[r["market"]].append(r)
+    n_slip = 0
     for rs in by.values():
         rs.sort(key=lambda r: r["ts"])
         ts = [r["ts"] for r in rs]
         for i, r in enumerate(rs):
             for h in horizons:
                 target = r["ts"] + h
+                slip = max_slip if max_slip is not None else max(h * 0.5, 5.0)
                 j = None
                 for k in range(i + 1, len(rs)):
                     if ts[k] >= target:
-                        j = k; break
-                r[f"fwd_{int(h)}_bp"] = ((rs[j]["mid"] / r["mid"] - 1.0) * 1e4) if j else None
+                        j = k
+                        break
+                key = f"fwd_{int(h)}_bp"
+                if j is None or r.get("mid") in (None, 0) or rs[j].get("mid") in (None, 0):
+                    r[key] = None
+                elif ts[j] - target > slip:          # 공백을 건너뛴 것 — 라벨 무효
+                    r[key] = None
+                    n_slip += 1
+                else:
+                    r[key] = (rs[j]["mid"] / r["mid"] - 1.0) * 1e4
+    if n_slip:
+        print(f"  라벨 무효(공백 초과) {n_slip:,}건 — 0 으로 채우지 않고 None 으로 둔다",
+              flush=True)
     return rows
 
 
@@ -415,6 +451,9 @@ def main():
     ap.add_argument("--grid", type=float, default=1.0)
     ap.add_argument("--market", default="")
     ap.add_argument("--labels", default="")
+    ap.add_argument("--max-label-slip-sec", type=float, default=None,
+                    help="목표 시각을 이만큼 넘어선 행은 라벨을 만들지 않는다 "
+                         "(기본: 지평의 50%% 와 5초 중 큰 값)")
     ap.add_argument("--lateness-ms", type=int, default=LATENESS_MS)
     ap.add_argument("--max-stale-sec", type=float, default=MAX_STALE_SEC,
                     help="호가가 이보다 낡으면 프레임을 만들지 않는다 (재접속·공백 구간 방어)")
@@ -423,7 +462,8 @@ def main():
 
     rows = replay(stream(a.paths, a.market or None), a.grid, a.lateness_ms, a.max_stale_sec)
     if a.labels:
-        rows = add_labels(rows, [float(x) for x in a.labels.split(",") if x.strip()])
+        rows = add_labels(rows, [float(x) for x in a.labels.split(",") if x.strip()],
+                          a.max_label_slip_sec)
     print(f"프레임 {len(rows):,} (격자 {a.grid}s · 워터마크 {a.lateness_ms}ms)")
     if LAST_QC.get("late_dropped"):
         print(f"  ⚠ 지각 폐기: {LAST_QC['late_dropped']} — --lateness-ms 를 늘려 재처리할 것")
