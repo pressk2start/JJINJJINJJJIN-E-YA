@@ -4030,12 +4030,16 @@ if os.getenv("DEBUG_KEYS") == "1":
 # 리스크 관리 — config.py에서 정의됨 (RISK_PER_TRADE, AGGRESSIVE_MODE, USE_PYRAMIDING,
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
-# LIVE_ENTRY_DISABLED · advisor 3자 (2026-08-27) 승인 · LIVE 신규진입만 정지 스위치
+# LIVE_ENTRY_DISABLED · advisor 3자 (2026-08-27) 승인 · 의미 = LIVE_PAUSED_PENDING_EDGE_VALIDATION
+# (flagship 폐기 확정 아님 · forward 검증된 새 후보의 LIVE 승격 조건 통과 시 재개)
 # 목적: 자본 노출 0 · 기존 포지션은 기존 청산 규칙으로 정상 종료
 # 배선: open_auto_position + add_auto_position 만 게이트 · close_auto_position 무영향
-# 재개조건: forward 검증된 새 후보의 LIVE 승격 · 손실 직후 flagship threshold 손보기 금지
+# ※ AUTO_TRADE=0 을 대신 쓰면 안 되는 이유: line 6943 에서 close_auto_position 도 early-return
+#   → 기존 포지션 SL/트레일/타임아웃 조건 걸려도 실제 매도 안 됨 (master switch).
+#   자문 2 조건 "exit manager 계속 작동" 이 AUTO_TRADE=0 로는 성립하지 않아 이 flag 사용.
+# 금지: 손실 직후 flagship threshold 손보기 · 다른 shadow route 임시 LIVE 승격
 LIVE_ENTRY_DISABLED = os.getenv("LIVE_ENTRY_DISABLED", "0") == "1"
-print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, LIVE_ENTRY_DISABLED={LIVE_ENTRY_DISABLED}, RISK_PER_TRADE={RISK_PER_TRADE}")
+print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, LIVE_ENTRY_DISABLED={LIVE_ENTRY_DISABLED} (LIVE_PAUSED_PENDING_EDGE_VALIDATION), RISK_PER_TRADE={RISK_PER_TRADE}")
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
 
@@ -5816,11 +5820,12 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         except Exception:
             pass
 
-    # advisor 3자 (2026-08-27) 승인 · LIVE 신규진입 정지 스위치 (entry-only · close 무영향)
+    # advisor 3자 (2026-08-27) 승인 · LIVE_PAUSED_PENDING_EDGE_VALIDATION
+    # (entry-only · close_auto_position 무영향 · 기존 포지션은 정상 청산)
     if LIVE_ENTRY_DISABLED:
-        signal_skip("LIVE_ENTRY_DISABLED=1 (LIVE 신규진입 정지 · 자문 3자 승인)",
+        signal_skip("LIVE_PAUSED_PENDING_EDGE_VALIDATION (LIVE_ENTRY_DISABLED=1 · 자문 3자 승인)",
                     skip_bucket="entry_skip_live_disabled")
-        tg_send_mid(f"⏸ {m} LIVE 신규진입 정지 (LIVE_ENTRY_DISABLED=1)")
+        tg_send_mid(f"⏸ {m} LIVE_PAUSED_PENDING_EDGE_VALIDATION (신규진입 정지 · 청산 정상)")
         try:
             _pipeline_inc("post_signal_live_entry_disabled")
         except Exception:
