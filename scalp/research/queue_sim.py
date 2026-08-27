@@ -179,6 +179,11 @@ class Sim:
         self.pos = 0.0
         self.cash = 0.0
         self.last_mid = None
+        self.inv_t = 0.0          # 시간가중 재고 적분 (원·ms)
+        self.cap_t = 0.0          # 상한 99% 이상 체류 시간 (ms)
+        self.span_t = 0.0
+        self.last_t = None
+        self.mkt_turn = 0.0       # 시장 전체 체결대금 — 내 흐름 점유율 계산용
         self.fills = []                        # (ts, side, price, qty, mid_at_fill, stale)
         self.n_stale = 0
         self.exec_acc = defaultdict(float)     # (side, price) -> 직전 transition 이후 체결량
@@ -278,11 +283,25 @@ class Sim:
 
     # ---- 이벤트 처리
 
+    def _tick_clock(self, ts):
+        """재고 궤적을 시간가중으로 적분한다. bp 만 보면 규모 정합성을 놓친다."""
+        if self.last_t is not None:
+            dt = ts - self.last_t
+            if 0 <= dt < 3_600_000:                 # 녹화 공백은 적분하지 않는다
+                px = self.bk.mid() or 0.0
+                self.inv_t += abs(self.pos) * px * dt
+                self.span_t += dt
+                if self.cap_krw and abs(self.pos) * px >= self.cap_krw * 0.99:
+                    self.cap_t += dt
+        self.last_t = ts
+
     def on_trade(self, ts, m):
         p = m.get("trade_price")
         v = m.get("trade_volume")
         if not p or not v:
             return
+        self._tick_clock(ts)
+        self.mkt_turn += p * v
         # ask_bid = 테이커 방향. BID=공격적 매수 → 매도호가 소진 → MM 의 매도(-1) 체결
         taker_buy = (m.get("ask_bid") == "BID")
         hit_side = -1 if taker_buy else 1        # 소진되는 호가 쪽 = MM 이 걸어둔 쪽
@@ -296,6 +315,7 @@ class Sim:
                 self._fill(ts, hit_side, p, got, stale)
 
     def on_book(self, ts, m):
+        self._tick_clock(ts)
         drop = self.bk.apply(m, ts)
         for side in (1, -1):
             o = self.orders[side]
@@ -414,6 +434,17 @@ def run_one(paths, market, cancel_credit, order_krw, cap_krw, latency_ms, horizo
                 liq_cost_krw=liq, liq_krw=sim.stat.get("liq_krw", 0.0),
                 adverse_bp_krw=adv, n_adverse=nadv,
                 net_krw=net, resid_krw=resid,
+                # ── 규모 정합성 계기 ──────────────────────────────────
+                # bp 는 규모 불변이 **아니다**. mm_sim baseline 에서 참여율을
+                # 5%→0.38%(자본 정합)로 낮추자 +11.81 → +2.34bp 로 무너졌다.
+                # 재고 상한이 '재고를 늘리는 체결'만 골라 버려 평균회귀 필터로
+                # 작동했고 높은 참여율이 그것을 증폭한 것이다. 다시는 이 착각을
+                # 하지 않도록 절대 원화·재고 궤적·흐름 점유율을 항상 같이 낸다.
+                mkt_turn_krw=sim.mkt_turn,
+                flow_share=(turn / sim.mkt_turn) if sim.mkt_turn > 0 else float("nan"),
+                avg_inv_krw=(sim.inv_t / sim.span_t) if sim.span_t > 0 else 0.0,
+                at_cap_frac=(sim.cap_t / sim.span_t) if sim.span_t > 0 else 0.0,
+                ret_on_cap=(net / cap_krw) if cap_krw else float("nan"),
                 bp=(net / turn * 1e4) if turn > 0 else float("nan"))
 
 
@@ -521,6 +552,21 @@ def main():
               f"{r['latency_ms']:>5}ms{r['spread_krw']:>+12,.0f}{-r['fees_krw']:>+11,.0f}"
               f"{r['inventory_krw']:>+12,.0f}{-r['liq_cost_krw']:>+11,.0f}"
               f"{r['net_krw']:>+12,.0f}{r['resid_krw']:>+9,.0f}{r['bp']:>+8.2f}")
+
+    print("\n" + "=" * 118)
+    print("규모 정합성 (cancel_credit=0) — bp 만 보면 안 된다")
+    print("흐름점유가 큐 안에서의 내 비중을 넘으면 체결량이 과대한 것이다.")
+    print("-" * 118)
+    print(f"{'종목':<10}{'주문':>7}{'상한':>7}{'지연':>7}{'순손익(원)':>14}"
+          f"{'자본수익':>10}{'평균재고':>12}{'상한체류':>9}{'회전':>10}{'흐름점유':>10}")
+    for r in rows:
+        if r["cancel_credit"] != 0.0:
+            continue
+        print(f"{r['market']:<10}{r['order_krw']/1e4:>5.0f}만{r['cap_krw']/1e4:>5.0f}만"
+              f"{r['latency_ms']:>5}ms{r['net_krw']:>+14,.0f}"
+              f"{r['ret_on_cap']*100:>+9.1f}%{r['avg_inv_krw']:>12,.0f}"
+              f"{r['at_cap_frac']*100:>8.1f}%{r['turn_krw']/1e8:>8.2f}억"
+              f"{r['flow_share']*100:>9.3f}%")
 
     if a.save:
         os.makedirs(os.path.dirname(a.save) or ".", exist_ok=True)
