@@ -2389,6 +2389,8 @@ def _common_cohort_paired_summary():
             "A": "CLM_A_CLEAN_bp30",
             "A×A2": "CLM_A_x_A2_bp30",
         }
+        # advisor 3자 (2026-08-27): "동일 frozen experiment 조건" 요건
+        # per-route EXPERIMENT_EPOCH 로 필터 · 이전 epoch 오염 방지 (강한 계약)
         route_trades = {}  # route_label → {signal_id → trade_dict}
         with _SHADOW_PERF_LOCK:
             for key, s in _SHADOW_PERF_STATS.items():
@@ -2396,8 +2398,12 @@ def _common_cohort_paired_summary():
                 for label, r in target_routes.items():
                     if route == r:
                         _trs = s.get("trade_records", []) or []
+                        _current_exp_epoch = _route_experiment_epoch(route)
                         by_id = {}
                         for t in _trs:
+                            _tep = t.get("route_epoch") or t.get("epoch")
+                            if _tep and _tep != _current_exp_epoch:
+                                continue  # 다른 실험 계약 · 페어 대상 제외
                             sid = t.get("signal_id") or t.get("entry_ts")
                             if sid is not None:
                                 by_id[sid] = t
@@ -2493,9 +2499,12 @@ def _common_cohort_paired_summary():
         # advisor 3자 (2026-08-21): progress (넓은 CONTROL_A) vs paired_closed_n (실 확정) 분리 표기
         # 이전: paired common_n=X · progress Y% 를 한 줄에 · X != Y*30/100 이면 오독 가능
         # 정정: 두 지표 명시적 분리 · KILL 판정은 paired_closed_n=triple_common 기준
+        # advisor 3자 (2026-08-27): KILL 기준 = CONTROL_A_closed (2-arm 확정 청산)
+        # 이전 라벨 'CONTROL_A_matched' 는 오해 유발 (매칭≠청산) · triple 은 A2 참고로 강등
         lines = [
-            f"COMMON_COHORT paired_closed_n={len(_ids)} (triple · 3-arm 확정) · "
-            f"CONTROL_A_matched={len(control_a_common)}/{_target} (넓은 매칭 · progress 기준):",
+            f"COMMON_COHORT CONTROL_A_closed={len(control_a_common)}/{_target} "
+            f"(2-arm 확정 청산 · A KILL 기준) · "
+            f"paired_closed_n={len(_ids)} (triple · 3-arm A2 참고):",
             _bar_line,
         ]
         # advisor 2 우선 audit 라인 (사라진 pair 감지 · task #64)
@@ -2582,7 +2591,10 @@ def _common_cohort_paired_summary():
                         deltas.append(route_trades[label][sid].get("pnl", 0) - ctrl_pnls[sid])
                 if deltas:
                     mean_delta = sum(deltas) / len(deltas) * 100
-                    lines.append(f"  Δ{label} vs CONTROL: {mean_delta:+.3f}%p (n={len(deltas)})")
+                    lines.append(
+                        f"  Δ{label} vs CONTROL (triple 참고): "
+                        f"{mean_delta:+.3f}%p (n={len(deltas)})"
+                    )
                     if label == "A":
                         _a_delta_pct = mean_delta
                     elif label == "A×A2":
@@ -2601,51 +2613,119 @@ def _common_cohort_paired_summary():
                 if _paired > 0:
                     _a_divergence = _div
                     lines.append(
-                        f"  A exit divergence vs CONTROL: {_div}/{_paired} "
-                        f"(A 고유 메커니즘 발동 카운트 · BE/early_SL/hard_stop 물린 pair)"
+                        f"  A exit divergence vs CONTROL (triple 참고): {_div}/{_paired} "
+                        f"(A 고유 메커니즘 발동 카운트 · KILL 판정은 2-arm divergence 기준)"
                     )
-        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20/21 · task #63 + 정밀화) ──
-        # 이전: "50 첫 판정" · 사용자 답답함 정당 (무한 대기)
-        # 정정 v1: common_n=30 강제 첫 판정 · 폐기/연장/경계 자동 라벨
-        # 정정 v2 (advisor 3자 · 2026-08-21): divergence count 병행
-        #   - divergence=0 → 🚫 STRUCTURAL_KILL (A 메커니즘 아예 안 발동 · 표본 더 모아도 무의미)
-        #   - divergence>0 · |ΔA|<0.05 → 🚫 폐기 (갈리는데 개선 없음)
-        #   - divergence>0 · ΔA≥+0.10 → ✅ 연장 (50까지 검증)
-        #   - divergence>0 · 경계 → ⚠ n=50 대기
-        # advisor 3자 명시: divergence=0 인 감정적 연장 원천 차단 (구조적 무력 확정)
-        if len(_ids) < 30:
-            lines.append(f"  ※ common_n<30: 참고만 · 판정 대기 (30 첫판정 · 50 확인 · 100 승격)")
+        # ── advisor 3자 (2026-08-27) · CONTROL_A_closed 기반 primary KILL 지표 ─
+        # 이전: KILL 을 triple (paired_closed_n) 에 바인딩 → 3-arm 대기로 stall
+        # 정정: A vs CONTROL 검증에 A2 매칭 불필요 · CONTROL·A 둘 다 청산이면 충분
+        # 2-arm 표본 (control_a_common) 에서 ΔA·divergence 재계산 · KILL 은 이 값으로 판정
+        _a_delta_pct_2arm = None
+        _a_divergence_2arm = None
+        _a_paired_2arm = 0
+        _ctrl_net_per_2arm = None
+        _a_net_per_2arm = None
+        _ctrl_wr_2arm = None
+        _a_wr_2arm = None
+        if "CONTROL" in route_trades and "A" in route_trades:
+            _2arm_deltas = []
+            _2arm_div = 0
+            _2arm_ctrl_pnls = []
+            _2arm_a_pnls = []
+            for _sid in control_a_common:
+                _ct = route_trades["CONTROL"].get(_sid)
+                _at = route_trades["A"].get(_sid)
+                if _ct is None or _at is None:
+                    continue
+                _cp = _ct.get("pnl", 0)
+                _ap = _at.get("pnl", 0)
+                _2arm_ctrl_pnls.append(_cp)
+                _2arm_a_pnls.append(_ap)
+                _2arm_deltas.append(_ap - _cp)
+                _a_paired_2arm += 1
+                _c_r = _ct.get("exit_reason")
+                _a_r = _at.get("exit_reason")
+                if _c_r and _a_r and _c_r != _a_r:
+                    _2arm_div += 1
+            if _2arm_deltas:
+                _a_delta_pct_2arm = sum(_2arm_deltas) / len(_2arm_deltas) * 100
+                _a_divergence_2arm = _2arm_div
+                _ctrl_net_per_2arm = sum(_2arm_ctrl_pnls) / len(_2arm_ctrl_pnls) * 100
+                _a_net_per_2arm = sum(_2arm_a_pnls) / len(_2arm_a_pnls) * 100
+                _ctrl_wr_2arm = sum(1 for p in _2arm_ctrl_pnls if p > 0) / len(_2arm_ctrl_pnls) * 100
+                _a_wr_2arm = sum(1 for p in _2arm_a_pnls if p > 0) / len(_2arm_a_pnls) * 100
+                # advisor 3자 (2026-08-27) 검증 게이트: count == n · trade_records terminal-only 확인용
+                _verify_tag = "✅" if _a_paired_2arm == len(control_a_common) else "⚠VERIFY_FAIL"
+                lines.append(
+                    f"  2-arm cohort (CONTROL_A_closed count={len(control_a_common)} · "
+                    f"paired n={_a_paired_2arm} {_verify_tag} · terminal-only): "
+                    f"CONTROL net/건={_ctrl_net_per_2arm:+.3f}% WR={_ctrl_wr_2arm:.0f}% · "
+                    f"A net/건={_a_net_per_2arm:+.3f}% WR={_a_wr_2arm:.0f}%"
+                )
+                lines.append(
+                    f"  Δ A vs CONTROL (2-arm CONTROL_A_closed): "
+                    f"{_a_delta_pct_2arm:+.3f}%p (n={_a_paired_2arm}) · "
+                    f"divergence={_a_divergence_2arm}/{_a_paired_2arm} "
+                    f"(A 고유 메커니즘 발동 카운트 · primary KILL 기준)"
+                )
+        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20/21/27 · task #63 · CONTROL_A_closed rewire) ──
+        # 이전: 데드라인이 triple (_ids) 카운터를 조회 → A2 매칭 대기로 KILL 지연
+        # 정정 v3 (2026-08-27): 데드라인은 CONTROL_A_closed (control_a_common) + ΔA_2arm + divergence_2arm 기준
+        #   - divergence_2arm=0 → 🚫 STRUCTURAL_KILL
+        #   - divergence_2arm>0 · |ΔA_2arm|<0.05 → 🚫 폐기 후보
+        #   - divergence_2arm>0 · ΔA_2arm≥+0.10 → ✅ 연장
+        #   - divergence_2arm>0 · 경계 → ⚠ n=50 대기
+        # triple/paired_closed_n 은 A2 실험 참고용으로만 유지
+        if len(control_a_common) < 30:
+            lines.append(
+                f"  ※ CONTROL_A_closed={len(control_a_common)}<30: 참고만 · 판정 대기 "
+                f"(30 첫판정 · 50 확인 · 100 승격 · A KILL 기준)"
+            )
         else:
+            # 검증 게이트 (advisor 3자 · 2026-08-27): count == ΔA/divergence 기저 n 일치
+            # trade_records 는 terminal-only (_shadow_record_result 는 closed_results 만 축적) ·
+            # 구조상 _a_paired_2arm == len(control_a_common) 이어야 함
+            # 불일치 = matched-relabel 회귀 신호 → KILL 자동 보류
             _deadline = []
-            if _a_delta_pct is not None:
-                if _a_divergence == 0:
+            if _a_paired_2arm != len(control_a_common) or _a_delta_pct_2arm is None:
+                _deadline.append(
+                    f"  ⚠ VERIFY_FAIL · A KILL 자동 보류: "
+                    f"_a_paired_2arm={_a_paired_2arm} vs CONTROL_A_closed={len(control_a_common)} "
+                    f"불일치 또는 ΔA 미계산 · matched-relabel 회귀 의심 · 코드 감사"
+                )
+            else:
+                if _a_divergence_2arm == 0:
                     _deadline.append(
-                        f"  🚫 A 실험 STRUCTURAL_KILL (common_n={len(_ids)}≥30 · divergence=0): "
-                        f"A 고유 메커니즘 (BE/early_SL/hard_stop) 이 매칭쌍 어디에도 안 물림 · "
+                        f"  🚫 A 실험 STRUCTURAL_KILL (CONTROL_A_closed={len(control_a_common)}≥30 · "
+                        f"divergence_2arm=0): "
+                        f"A 고유 메커니즘 (BE/early_SL/hard_stop) 이 2-arm 매칭쌍 어디에도 안 물림 · "
                         f"이 신호 모집단에서 A 는 구조적 무력 · 표본 더 모아도 안 갈림 · "
                         f"강한 KILL 근거 · 자원 새 후보(feature_screen)로 즉시 전환"
                     )
-                elif abs(_a_delta_pct) < 0.05:
+                elif abs(_a_delta_pct_2arm) < 0.05:
                     _deadline.append(
-                        f"  🚫 A 실험 폐기 후보 (common_n={len(_ids)}≥30 · divergence={_a_divergence}>0 · "
-                        f"ΔA={_a_delta_pct:+.3f}%p ≈ 0): "
+                        f"  🚫 A 실험 폐기 후보 (CONTROL_A_closed={len(control_a_common)}≥30 · "
+                        f"divergence_2arm={_a_divergence_2arm}>0 · "
+                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p ≈ 0): "
                         f"갈리는데 개선 없음 · 50까지 무작정 X · 새 후보로 전환 검토"
                     )
-                elif _a_delta_pct >= 0.10:
+                elif _a_delta_pct_2arm >= 0.10:
                     _deadline.append(
-                        f"  ✅ A 실험 연장 (common_n={len(_ids)}≥30 · divergence={_a_divergence} · "
-                        f"ΔA={_a_delta_pct:+.3f}%p 유의미한 양수): "
+                        f"  ✅ A 실험 연장 (CONTROL_A_closed={len(control_a_common)}≥30 · "
+                        f"divergence_2arm={_a_divergence_2arm} · "
+                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p 유의미한 양수): "
                         f"50까지 검증 지속 · MDD/꼬리 개선 병행 확인"
                     )
                 else:
                     _deadline.append(
-                        f"  ⚠ A 실험 경계 판정 (common_n={len(_ids)}≥30 · divergence={_a_divergence} · "
-                        f"ΔA={_a_delta_pct:+.3f}%p 경계 [-0.05, +0.10]): "
+                        f"  ⚠ A 실험 경계 판정 (CONTROL_A_closed={len(control_a_common)}≥30 · "
+                        f"divergence_2arm={_a_divergence_2arm} · "
+                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p 경계 [-0.05, +0.10]): "
                         f"n=50까지 방향 확정 대기"
                     )
             if _a_a2_delta_pct is not None and abs(_a_a2_delta_pct) < 0.05:
                 _deadline.append(
-                    f"  ℹ A×A2 vs CONTROL 도 ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
+                    f"  ℹ A×A2 vs CONTROL (triple) ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
                     f"A2 손실제거 가설 미지지 · cutoff 재튜닝 금지 유지"
                 )
             # A_A2_common<10 · A 판정 시점 동시 A2 INFEASIBLE 종료 라벨 (advisor 3자 사전등록)
@@ -2658,10 +2738,14 @@ def _common_cohort_paired_summary():
                     f"A2 route 종료 검토 (feasibility failure)"
                 )
             lines.extend(_deadline)
-            if len(_ids) < 50:
-                lines.append(f"  ※ common_n=30~49: 첫판정 단계 · 50 확인 · 100 승격 대기")
+            if len(control_a_common) < 50:
+                lines.append(
+                    f"  ※ CONTROL_A_closed=30~49: 첫판정 단계 · 50 확인 · 100 승격 대기"
+                )
             else:
-                lines.append(f"  ※ common_n≥50: 확인 판정 도달 · 100 승격 대기")
+                lines.append(
+                    f"  ※ CONTROL_A_closed≥50: 확인 판정 도달 · 100 승격 대기"
+                )
         return "\n".join(lines)
     except Exception as exc:
         return f"COMMON_COHORT: ERROR {exc}"
@@ -3946,7 +4030,16 @@ if os.getenv("DEBUG_KEYS") == "1":
 # 리스크 관리 — config.py에서 정의됨 (RISK_PER_TRADE, AGGRESSIVE_MODE, USE_PYRAMIDING,
 #   SEED_RISK_FRACTION, ADD_RISK_FRACTION, PYRAMID_ADD_*)
 AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
-print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, RISK_PER_TRADE={RISK_PER_TRADE}")
+# LIVE_ENTRY_DISABLED · advisor 3자 (2026-08-27) 승인 · 의미 = LIVE_PAUSED_PENDING_EDGE_VALIDATION
+# (flagship 폐기 확정 아님 · forward 검증된 새 후보의 LIVE 승격 조건 통과 시 재개)
+# 목적: 자본 노출 0 · 기존 포지션은 기존 청산 규칙으로 정상 종료
+# 배선: open_auto_position + add_auto_position 만 게이트 · close_auto_position 무영향
+# ※ AUTO_TRADE=0 을 대신 쓰면 안 되는 이유: line 6943 에서 close_auto_position 도 early-return
+#   → 기존 포지션 SL/트레일/타임아웃 조건 걸려도 실제 매도 안 됨 (master switch).
+#   자문 2 조건 "exit manager 계속 작동" 이 AUTO_TRADE=0 로는 성립하지 않아 이 flag 사용.
+# 금지: 손실 직후 flagship threshold 손보기 · 다른 shadow route 임시 LIVE 승격
+LIVE_ENTRY_DISABLED = os.getenv("LIVE_ENTRY_DISABLED", "0") == "1"
+print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, LIVE_ENTRY_DISABLED={LIVE_ENTRY_DISABLED} (LIVE_PAUSED_PENDING_EDGE_VALIDATION), RISK_PER_TRADE={RISK_PER_TRADE}")
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
 
@@ -5727,6 +5820,17 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         except Exception:
             pass
 
+    # advisor 3자 (2026-08-27) 승인 · LIVE_PAUSED_PENDING_EDGE_VALIDATION
+    # (entry-only · close_auto_position 무영향 · 기존 포지션은 정상 청산)
+    if LIVE_ENTRY_DISABLED:
+        signal_skip("LIVE_PAUSED_PENDING_EDGE_VALIDATION (LIVE_ENTRY_DISABLED=1 · 자문 3자 승인)",
+                    skip_bucket="entry_skip_live_disabled")
+        tg_send_mid(f"⏸ {m} LIVE_PAUSED_PENDING_EDGE_VALIDATION (신규진입 정지 · 청산 정상)")
+        try:
+            _pipeline_inc("post_signal_live_entry_disabled")
+        except Exception:
+            pass
+        return False, None
     if not AUTO_TRADE:
         signal_skip("AUTO_TRADE=False (환경변수 AUTO_TRADE=1 필요)", skip_bucket="entry_skip_auto_off")
         tg_send_mid(f"⚠️ {m} 자동매수 비활성 (AUTO_TRADE=0)")
@@ -6654,6 +6758,9 @@ def add_auto_position(m, cur_price, reason=""):
     - ADD_RISK_FRACTION 비율만큼 RISK_PER_TRADE를 다시 사용
     - 평균단가 재계산
     """
+    # advisor 3자 (2026-08-27) · LIVE 신규진입 정지 시 추매도 정지 (신규 자본 노출 0)
+    if LIVE_ENTRY_DISABLED:
+        return False, None
     if not AUTO_TRADE:
         return False, None
 
