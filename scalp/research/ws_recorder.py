@@ -71,6 +71,7 @@ CA = "/root/.ccr/ca-bundle.crt"          # 프록시 환경용. 없으면 시스
 #   실측(2026-08-23): 20종목 depth0 = 0.96GB/일 (종목당 0.048GB/일).
 #   대상 서버가 Lightsail nano(20GB 디스크, 여유 8.2GB)면 20종목은 8.5일이면 가득 찬다.
 MIN_FREE_GB = 2.0      # 여유가 이보다 적으면 **수집을 중단**한다 (디스크를 채우지 않는다)
+SETUP_FAIL_LIMIT = 5   # 한 번도 못 붙은 채 같은 오류가 이만큼 반복되면 중단
 RETAIN_DAYS = 14       # 이보다 오래된 날짜 디렉터리는 시간 로테이션 때 자동 삭제
 
 _stop = False
@@ -98,6 +99,23 @@ class Writer:
         self.n = 0
         self.bytes = 0
         self.rotated = False
+        self.cur_path = None
+        self.comp_closed = 0        # 닫힌 파일들의 압축 후 바이트 합
+        self.t0 = time.time()
+
+    def _cur_size(self):
+        try:
+            return os.path.getsize(self.cur_path) if self.cur_path else 0
+        except OSError:
+            return 0
+
+    def gb_per_day(self):
+        """압축 후 실측 증가율. 시작 배너의 추정치를 대체한다.
+        표본이 짧으면 신뢰할 수 없으므로 10분 미만이면 None 을 준다."""
+        el = time.time() - self.t0
+        if el < 600:
+            return None
+        return (self.comp_closed + self._cur_size()) / el * 86400 / 1e9
 
     def free_gb(self):
         return shutil.disk_usage(self.root).free / 1e9
@@ -129,7 +147,13 @@ class Writer:
         if key != self.key:
             if self.fh:
                 self.fh.close()
-            self.fh = gzip.open(self._path(now), "at", encoding="utf-8")
+                self.comp_closed += self._cur_size()
+            self.cur_path = self._path(now)
+            # level 9 는 이 파이프라인에서 CPU 를 지배한다. 실측(2026-08-24, 실데이터
+            # 2.3MB): lvl9 대비 lvl6 은 2.8배 빠르고 크기는 17% 크다. lvl1 은 5.3배
+            # 빠르지만 2.4배 커진다 — 여기서는 디스크가 병목이라 6 이 균형점이다.
+            self.fh = gzip.open(self.cur_path, "at", encoding="utf-8",
+                                compresslevel=6)
             self.key = key
             self.rotated = True          # 호출측이 시간마다 디스크 점검/정리하도록
         line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
@@ -151,7 +175,10 @@ async def run(markets, depth, writer, stats, retain_days=RETAIN_DAYS,
               min_free_gb=MIN_FREE_GB):
     """한 번의 연결 수명. 정상/비정상 종료 모두 _meta 로 남긴다."""
     import websockets
-    ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) else None
+    # CA 번들이 있으면 그걸 쓰고, 없으면 시스템 기본 컨텍스트를 만든다.
+    # ssl=None 을 그대로 넘기면 최신 websockets 가 wss:// 에서 ValueError 를 낸다.
+    ctx = ssl.create_default_context(cafile=CA) if os.path.exists(CA) \
+        else ssl.create_default_context()
     sub = [{"ticket": f"scalp-rec-{int(time.time())}"},
            # level=0 = 모아보기 없음(원본 격자). depth(단수)와 level(가격 집계)은 별개다.
            # level>0 이면 거래소가 호가를 묶어 보내고 그 안의 ΔOBI·depletion 이 사라진다.
@@ -241,10 +268,15 @@ async def run(markets, depth, writer, stats, retain_days=RETAIN_DAYS,
                               "n_orderbook": stats["ob"], "n_trade": stats["tr"],
                               "seq_anomaly": stats["seq_anomaly"],
                               "latency_ms_avg": round(lat_avg, 1),
-                              "written": writer.n, "bytes": writer.bytes})
+                              "written": writer.n, "bytes": writer.bytes,
+                              "gb_per_day": writer.gb_per_day()})
+                gbd = writer.gb_per_day()
+                cap = (f" · 실측 {gbd:.2f}GB/일 → {retain_days}일 보관 시 "
+                       f"{gbd*retain_days:.1f}GB (여유 {writer.free_gb():.1f}GB)"
+                       if gbd else "")
                 print(f"[ws] up={el/60:.1f}분 ob={stats['ob']:,} tr={stats['tr']:,} "
                       f"lat={lat_avg:.0f}ms 기록={writer.n:,}행 "
-                      f"{writer.bytes/1024/1024:.1f}MB(비압축)", flush=True)
+                      f"{writer.bytes/1024/1024:.1f}MB(비압축){cap}", flush=True)
                 last_hb = now
 
 
@@ -256,9 +288,12 @@ async def main_async(a):
                or [m for m, _ in collect.krw_markets_by_value()[:a.top]])
     os.makedirs(DIR, exist_ok=True)
     free0 = writer.free_gb()
-    est = 0.048 * len(markets)          # 실측 0.96GB/일 ÷ 20종목 (depth0, gzip)
+    # 20종목 평균(0.96GB/일 ÷ 20). 거래대금 상위만 고르면 종목당 2배까지 간다
+    # — 실측 2026-08-24: XRP/TRUMP/ETH/SOL/BTC 5종목이 0.50GB/일(종목당 0.10).
+    # 그래서 이 값은 하한으로만 읽고, 10분 뒤부터 하트비트의 "실측"을 믿는다.
+    est = 0.048 * len(markets)
     print(f"[ws] {len(markets)} markets · depth={a.depth} · 출력 {DIR}", flush=True)
-    print(f"[ws] 디스크 여유 {free0:.1f}GB · 예상 {est:.2f}GB/일 "
+    print(f"[ws] 디스크 여유 {free0:.1f}GB · 예상(하한) {est:.2f}GB/일 "
           f"→ 보관 {a.retain_days}일이면 정상상태 약 {est*a.retain_days:.1f}GB "
           f"· 여유 {a.min_free_gb}GB 미만이면 자동 중단", flush=True)
     if free0 < a.min_free_gb * 2:
@@ -266,6 +301,7 @@ async def main_async(a):
               f"--markets 로 종목을 줄이거나 --retain-days 를 낮출 것.", flush=True)
     print(f"[ws] markets: {','.join(markets)}", flush=True)
     backoff = 1.0
+    first_error, first_error_n = None, 0
     try:
         while not _stop:
             try:
@@ -281,6 +317,23 @@ async def main_async(a):
                 writer.flush()
                 print(f"[ws] 끊김 ({type(e).__name__}: {str(e)[:80]}) · {backoff:.0f}초 후 재접속",
                       flush=True)
+                # 한 번도 붙은 적이 없는데 같은 예외가 반복되면 네트워크가 아니라 설정
+                # 문제다. 무한 재시도로 로그만 채우지 말고 끊어서 눈에 띄게 만든다.
+                if stats["connects"] == 0:
+                    sig = f"{type(e).__name__}: {str(e)[:200]}"
+                    if sig == first_error:
+                        first_error_n += 1
+                    else:
+                        first_error, first_error_n = sig, 1
+                    if first_error_n >= SETUP_FAIL_LIMIT:
+                        writer.write({"_meta": "setup_failed", "error": sig,
+                                      "recv_ts": int(time.time() * 1000),
+                                      "attempts": first_error_n})
+                        print(f"[ws] ✗ 접속에 한 번도 성공하지 못했고 같은 오류가 "
+                              f"{first_error_n}회 반복됐다 — 설정 문제로 보고 중단한다.\n"
+                              f"    {sig}", flush=True)
+                        _request_stop()
+                        break
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     finally:
