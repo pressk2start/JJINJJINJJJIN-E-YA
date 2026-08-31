@@ -2480,6 +2480,16 @@ def _common_cohort_paired_summary():
                     f"    원인 후보: (a) trade_records cap pop (4713a6c 300 확대 반영 대기) "
                     f"(b) route 재초기화 (c) signal_id 재계산 (d) 자연 재분류"
                 )
+            elif _prev:
+                # advisor 2 (2026-08-31) · 명시적 clean 라인 · A KILL audit gate 정면 close
+                # 이전: lost>0 시에만 라인 · advisor2 지적 "PAIRED AUDIT 결과 라인 없으면
+                #   cohort integrity 확정 불가 → KILL HOLD" → clean 라인을 상시 노출
+                _audit_lines.append(
+                    f"  ✅ PAIRED AUDIT clean (직전 대비 lost=0 · "
+                    f"CONTROL_A={len(control_a_common)} triple={len(triple_common)} "
+                    f"CONTROL_route={len(ctrl_ids)} A_route={len(a_ids)}) · "
+                    f"cohort integrity 확인 · A verdict 신뢰 가능"
+                )
             # 현 스냅샷 저장 (append-only 는 원인 확인 후 결정)
             _snap = {
                 "ts": int(time.time()),
