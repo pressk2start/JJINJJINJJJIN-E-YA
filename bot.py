@@ -2480,6 +2480,16 @@ def _common_cohort_paired_summary():
                     f"    원인 후보: (a) trade_records cap pop (4713a6c 300 확대 반영 대기) "
                     f"(b) route 재초기화 (c) signal_id 재계산 (d) 자연 재분류"
                 )
+            elif _prev:
+                # advisor 2 (2026-08-31) · 명시적 clean 라인 · A KILL audit gate 정면 close
+                # 이전: lost>0 시에만 라인 · advisor2 지적 "PAIRED AUDIT 결과 라인 없으면
+                #   cohort integrity 확정 불가 → KILL HOLD" → clean 라인을 상시 노출
+                _audit_lines.append(
+                    f"  ✅ PAIRED AUDIT clean (직전 대비 lost=0 · "
+                    f"CONTROL_A={len(control_a_common)} triple={len(triple_common)} "
+                    f"CONTROL_route={len(ctrl_ids)} A_route={len(a_ids)}) · "
+                    f"cohort integrity 확인 · A verdict 신뢰 가능"
+                )
             # 현 스냅샷 저장 (append-only 는 원인 확인 후 결정)
             _snap = {
                 "ts": int(time.time()),
@@ -2654,6 +2664,65 @@ def _common_cohort_paired_summary():
                 _a_net_per_2arm = sum(_2arm_a_pnls) / len(_2arm_a_pnls) * 100
                 _ctrl_wr_2arm = sum(1 for p in _2arm_ctrl_pnls if p > 0) / len(_2arm_ctrl_pnls) * 100
                 _a_wr_2arm = sum(1 for p in _2arm_a_pnls if p > 0) / len(_2arm_a_pnls) * 100
+                # ── advisor 2 (2026-08-28) · A KILL archival audit ───────────────
+                # A/A2 종료 확정 후에도 33-pair 재현 가능 유지: signal_id 별 CONTROL/A pnl · exit_reason
+                # · Δ 저장 · divergence 4건 상세 분리 · 향후 KILL 근거 완전 재현
+                # 배선: n≥30 도달 시 매 리포트 최신 스냅샷 덮어쓰기 (append 대신 latest)
+                # 규칙 위반 없음: 관측만 · 예외 격리 · 매매 로직 무영향
+                if len(control_a_common) >= 30:
+                    try:
+                        _archive_rows = []
+                        _div_rows = []
+                        for _sid in sorted(control_a_common, key=str):
+                            _ct = route_trades["CONTROL"].get(_sid)
+                            _at = route_trades["A"].get(_sid)
+                            if _ct is None or _at is None:
+                                continue
+                            _cp = _ct.get("pnl", 0)
+                            _ap = _at.get("pnl", 0)
+                            _c_r = _ct.get("exit_reason")
+                            _a_r = _at.get("exit_reason")
+                            _row = {
+                                "signal_id": str(_sid),
+                                "market": _ct.get("market") or _at.get("market"),
+                                "control_pnl": round(_cp, 6),
+                                "a_pnl": round(_ap, 6),
+                                "delta": round(_ap - _cp, 6),
+                                "control_exit_reason": _c_r,
+                                "a_exit_reason": _a_r,
+                                "divergent": bool(_c_r and _a_r and _c_r != _a_r),
+                            }
+                            _archive_rows.append(_row)
+                            if _row["divergent"]:
+                                _div_rows.append(_row)
+                        _archive = {
+                            "ts": int(time.time()),
+                            "deploy": _OBSERVE_EPOCH,
+                            "experiment_epoch_A": _route_experiment_epoch("CLM_A_CLEAN_bp30"),
+                            "experiment_epoch_CONTROL": _route_experiment_epoch(
+                                "CS40_VR3_TR180_bp30_240"),
+                            "n_control_a_closed": len(control_a_common),
+                            "a_paired_2arm": _a_paired_2arm,
+                            "delta_pct_2arm": round(_a_delta_pct_2arm, 6),
+                            "divergence_2arm": _a_divergence_2arm,
+                            "control_net_per_pct": round(_ctrl_net_per_2arm, 6),
+                            "a_net_per_pct": round(_a_net_per_2arm, 6),
+                            "control_wr_pct": round(_ctrl_wr_2arm, 3),
+                            "a_wr_pct": round(_a_wr_2arm, 3),
+                            "verdict": (
+                                "STRUCTURAL_KILL" if _a_divergence_2arm == 0
+                                else "DISCARD" if abs(_a_delta_pct_2arm) < 0.05
+                                else "EXTEND" if _a_delta_pct_2arm >= 0.10
+                                else "BORDERLINE"
+                            ),
+                            "pairs": _archive_rows,
+                            "divergent_pairs_detail": _div_rows,
+                        }
+                        with open("/tmp/a_kill_archive_latest.json", "w",
+                                  encoding="utf-8") as _af:
+                            json.dump(_archive, _af, ensure_ascii=False)
+                    except Exception:
+                        pass
                 # advisor 3자 (2026-08-27) 검증 게이트: count == n · trade_records terminal-only 확인용
                 _verify_tag = "✅" if _a_paired_2arm == len(control_a_common) else "⚠VERIFY_FAIL"
                 lines.append(
