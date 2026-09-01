@@ -53,6 +53,8 @@
    "required_capital_krw": 4000000.0,
    "net_krw": -3693.257864916697,
    "baseline_beta_krw": -3393.116820164809,
+   "market_krw_observed": -3393.116820164809,
+   "gap_beta_unobserved_krw": 0.0,
    "mm_alpha_krw": -300.14104475188833,
    "alpha_on_capital": -7.503526118797208e-05,
    "net_ex_market_krw": -300.14104475188833,
@@ -64,8 +66,15 @@
    "avg_inv_krw": 31117.764464137275,
    "at_cap_frac": 0.0,
    "daily_krw": {
-    "08-23": -3618.974336910527
+    "08-23": -3693.257864916697
    },
+   "daily_beta_krw": {
+    "08-23": -3393.116820164809
+   },
+   "daily_alpha_krw": {
+    "08-23": -300.14104475188833
+   },
+   "daily_sum_check": 0.0,
    "drift": {
     "FIFO": {
      "n": 8,
@@ -144,6 +153,8 @@
    "required_capital_krw": 4000000.0,
    "net_krw": -3693.257864916697,
    "baseline_beta_krw": -3393.116820164809,
+   "market_krw_observed": -3393.116820164809,
+   "gap_beta_unobserved_krw": 0.0,
    "mm_alpha_krw": -300.14104475188833,
    "alpha_on_capital": -7.503526118797208e-05,
    "net_ex_market_krw": -300.14104475188833,
@@ -155,8 +166,15 @@
    "avg_inv_krw": 31117.764464137275,
    "at_cap_frac": 0.0,
    "daily_krw": {
-    "08-23": -3618.974336910527
+    "08-23": -3693.257864916697
    },
+   "daily_beta_krw": {
+    "08-23": -3393.116820164809
+   },
+   "daily_alpha_krw": {
+    "08-23": -300.14104475188833
+   },
+   "daily_sum_check": 0.0,
    "drift": {
     "FIFO": {
      "n": 8,
@@ -235,6 +253,8 @@
    "required_capital_krw": 4000000.0,
    "net_krw": -3547.7296827225946,
    "baseline_beta_krw": -3393.116820164809,
+   "market_krw_observed": -3393.116820164809,
+   "gap_beta_unobserved_krw": 0.0,
    "mm_alpha_krw": -154.61286255778577,
    "alpha_on_capital": -3.865321563944644e-05,
    "net_ex_market_krw": -154.61286255778577,
@@ -246,8 +266,15 @@
    "avg_inv_krw": 59395.74965459453,
    "at_cap_frac": 0.0,
    "daily_krw": {
-    "08-23": -3545.2074804296717
+    "08-23": -3547.7296827225946
    },
+   "daily_beta_krw": {
+    "08-23": -3393.116820164809
+   },
+   "daily_alpha_krw": {
+    "08-23": -154.61286255778577
+   },
+   "daily_sum_check": 0.0,
    "drift": {
     "FIFO": {
      "n": 5,
@@ -326,6 +353,8 @@
    "required_capital_krw": 4000000.0,
    "net_krw": -3563.6256580380723,
    "baseline_beta_krw": -3393.116820164809,
+   "market_krw_observed": -3393.116820164809,
+   "gap_beta_unobserved_krw": 0.0,
    "mm_alpha_krw": -170.50883787326347,
    "alpha_on_capital": -4.2627209468315865e-05,
    "net_ex_market_krw": -170.50883787326347,
@@ -337,8 +366,15 @@
    "avg_inv_krw": 169942.3262553277,
    "at_cap_frac": 0.0,
    "daily_krw": {
-    "08-23": -3482.1859555575065
+    "08-23": -3563.6256580380723
    },
+   "daily_beta_krw": {
+    "08-23": -3393.116820164809
+   },
+   "daily_alpha_krw": {
+    "08-23": -170.50883787326347
+   },
+   "daily_sum_check": 0.0,
    "drift": {
     "FIFO": {
      "n": 5,
