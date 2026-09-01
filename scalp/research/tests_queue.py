@@ -428,6 +428,59 @@ def t19_beta_alpha_split():
           f"{s.stat['inventory']:,.1f} (기대 0)")
 
 
+# ─────────────────────────────────────────────────────── 20
+def t20_beta_gap_immune():
+    """베타는 공백에 면역이어야 한다. _mark 적분 베타는 공백에서 끊기므로
+    그 구간의 가격 이동이 알파로 샌다."""
+    ev = [ob(1_000_000, [(100.0, 10.0)], [(101.0, 10.0)]),
+          # 2시간 공백 뒤 가격이 200 으로
+          ob(8_200_000, [(200.0, 10.0)], [(201.0, 10.0)])]
+    path = write(ev)
+    try:
+        r = Q.run_one([path], MK, ("t", 0.0, 0.0), 10_000, 1e9, 100, 30,
+                      init_cash_krw=100_000.0, init_asset_krw=100_000.0)
+    finally:
+        os.remove(path)
+    # 기초재고 = 100,000 / 100.5 개. mid 100.5 → 200.5
+    target = 100_000.0 / 100.5
+    expect = target * (200.5 - 100.5)
+    ok = (abs(r["baseline_beta_krw"] - expect) < 1.0
+          and abs(r["gap_beta_unobserved_krw"] - expect) < 1.0
+          and abs(r["mm_alpha_krw"]) < 1.0)
+    check("20. 베타가 공백에 면역 (알파로 안 샌다)", ok,
+          f"베타 {r['baseline_beta_krw']:,.0f} (기대 {expect:,.0f}) · "
+          f"공백베타 {r['gap_beta_unobserved_krw']:,.0f} · "
+          f"알파 {r['mm_alpha_krw']:,.2f} (기대 0)")
+
+
+def t21_daily_sum_identity():
+    """일별 합이 전체와 닫혀야 한다. 각 날의 (첫→끝) 을 쓰면 밤사이 이동이
+    어느 날에도 안 들어가 합이 어긋난다."""
+    ev = []
+    t0 = 1_756_000_000_000        # 임의 시작
+    for i in range(6):
+        ts = t0 + i * 6 * 3600 * 1000          # 6시간 간격 → 날짜가 넘어간다
+        px = 100.0 + i * 5
+        ev.append(ob(ts, [(px, 10.0)], [(px + 1, 10.0)]))
+    path = write(ev)
+    try:
+        r = Q.run_one([path], MK, ("t", 0.0, 0.0), 10_000, 1e9, 100, 30,
+                      init_cash_krw=100_000.0, init_asset_krw=100_000.0)
+    finally:
+        os.remove(path)
+    s_net = sum(r["daily_krw"].values())
+    s_beta = sum(r["daily_beta_krw"].values())
+    s_alpha = sum(r["daily_alpha_krw"].values())
+    ok = (abs(s_net - r["net_krw"]) < 1e-6
+          and abs(s_beta - r["baseline_beta_krw"]) < 1e-6
+          and abs(s_alpha - r["mm_alpha_krw"]) < 1e-6)
+    check("21. 일별 합 = 전체 (net/beta/alpha 셋 다)", ok,
+          f"Σnet {s_net:,.2f} vs {r['net_krw']:,.2f} · "
+          f"Σbeta {s_beta:,.2f} vs {r['baseline_beta_krw']:,.2f} · "
+          f"Σalpha {s_alpha:,.2f} vs {r['mm_alpha_krw']:,.2f} · "
+          f"일수 {len(r['daily_krw'])}")
+
+
 def main():
     print("queue_sim.py 회귀 테스트")
     print("=" * 66)
@@ -441,7 +494,8 @@ def main():
               t13_no_naked_short, t13b_no_overspend, t14_fill_time_cap,
               t14b_cap_allows_reducing, t14c_asset_never_negative,
               t15_gap_reset, t16_book_stale_skip, t17_drift_freshness,
-              t18_level_gone_axis, t19_beta_alpha_split):
+              t18_level_gone_axis, t19_beta_alpha_split,
+              t20_beta_gap_immune, t21_daily_sum_identity):
         try:
             f()
         except Exception as e:

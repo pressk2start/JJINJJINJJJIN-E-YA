@@ -611,7 +611,12 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
               init_cash_krw, init_asset_krw, level_gone_credit)
     track = {"ts": [], "mid": [], "seg": []}
     max_inv = 0.0
-    daily = defaultdict(lambda: {"equity0": None, "equity1": None})
+    # 일별은 **마지막 관측**만 잡고 연속으로 이어 붙인다.
+    #   day1 = day1_close − 초기 equity
+    #   dayN = dayN_close − day(N-1)_close
+    # 이래야 Σ daily 가 total 과 항등식으로 닫힌다. 각 날의 (첫→끝) 을 쓰면
+    # 밤사이 이동이 어느 날에도 안 들어가 합이 total 과 어긋난다.
+    day_close = {}          # day -> (equity, mid)
     last_ts = None
     for ts, m in stream(paths, market):
         last_ts = ts
@@ -626,16 +631,16 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
                 track["seg"].append(sim.seg)
                 max_inv = max(max_inv, abs(sim.pos) * mm)
                 d = datetime.datetime.utcfromtimestamp(ts / 1000).strftime("%m-%d")
-                e = sim.equity(mm)
-                if daily[d]["equity0"] is None:
-                    daily[d]["equity0"] = e
-                daily[d]["equity1"] = e
+                day_close[d] = (sim.equity(mm), mm)
         else:
             sim.on_trade(ts, m)
     if last_ts is not None:
         sim.liquidate(last_ts)
 
     mid_end = sim.bk.mid() or sim.mid0
+    if day_close and mid_end:               # 마지막 날 종가는 청산 **후** equity
+        last_day = sorted(day_close)[-1]
+        day_close[last_day] = (sim.equity(mid_end), mid_end)
     turn = sim.stat["turn"]
     spread, fees = sim.stat["spread"], sim.stat["fees"]
     inv, mkt = sim.stat["inventory"], sim.stat["market"]
@@ -643,14 +648,34 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
 
     req_cap = sim.init_cash + sim.init_asset_krw
     net = sim.equity(mid_end) - req_cap        # 기초재고의 시장 이동까지 포함한 실제 손익
-    net_ex_mkt = net - mkt                     # 시장 노출을 뺀 전략 손익
-    resid = net - (spread + inv + mkt - fees)
+
+    # ⚠ 베타는 **적분하지 않는다.** _mark() 로 누적한 stat["market"] 은 공백에서
+    #   last_mid 를 끊으므로(그건 큐·adverse selection 에는 맞다) 공백 구간의
+    #   가격 이동이 통째로 빠진다. 그런데 net 은 최종 자산가치로 계산되므로 그
+    #   빠진 베타가 **알파에 남는다.** 기초재고 buy-and-hold 와 비교하는 게
+    #   목적이므로 정의식이 정확하다.
+    beta = (sim.target * (mid_end - sim.mid0)
+            if (sim.target is not None and sim.mid0 and mid_end) else 0.0)
+    net_ex_mkt = net - beta                    # = mm_alpha
+    # QC: 정의식 베타와 관측구간 적분 베타의 차이 = 공백에서 관측 못 한 베타
+    gap_beta = beta - mkt
+    # 항등식은 **관측구간 적분** 베타로 닫힌다(공백 구간은 어차피 관측 밖).
+    resid = net - (spread + inv + mkt - fees) - gap_beta
 
     drift = drift_report(sim.fill_log, track, [h * 1000 for h in drift_h],
                          max_slip_ms=max(5000, horizon_s * 500))
     n_credit = sum(1 for f in sim.fill_log if f["credit_share"] > 1e-12)
-    dj = {d: v["equity1"] - v["equity0"] for d, v in daily.items()
-          if v["equity0"] is not None}
+    # 연속 attribution — net / beta / alpha 세 갈래로 낸다
+    dj, dj_beta, dj_alpha = {}, {}, {}
+    prev_eq = req_cap
+    prev_mid = sim.mid0
+    for d in sorted(day_close):
+        eq, mdd = day_close[d]
+        n_d = eq - prev_eq
+        b_d = (sim.target * (mdd - prev_mid)) if (sim.target is not None
+                                                  and prev_mid) else 0.0
+        dj[d], dj_beta[d], dj_alpha[d] = n_d, b_d, n_d - b_d
+        prev_eq, prev_mid = eq, mdd
 
     return dict(market=market, scen=label, cancel_credit=cancel_credit,
                 level_gone_credit=level_gone_credit, latency_ms=latency_ms,
@@ -668,7 +693,7 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
                 credit_fill_frac=(n_credit / len(sim.fill_log)) if sim.fill_log
                 else float("nan"),
                 turn_krw=turn, spread_krw=spread, fees_krw=fees,
-                inventory_krw=inv, market_krw=mkt,
+                inventory_krw=inv, market_krw=beta,
                 stale_loss_krw=sim.stat["stale_loss"],
                 liq_cost_krw=liq, liq_krw=sim.stat.get("liq_krw", 0.0),
                 # ── 자본·규모 정합성 (bp 만 보면 안 된다) ──────────────
@@ -679,7 +704,9 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
                 # 현물이라 헤지도 안 되므로 이건 전략이 아니라 방향성 노출이다.
                 # **buy-and-hold 가 이기면 MM 기계장치는 아무것도 더하지 않은 것**이고,
                 # 그건 DOGE 가 오른 구간에서 롱 재고를 들고 있었을 뿐이라는 뜻이다.
-                baseline_beta_krw=mkt,
+                baseline_beta_krw=beta,          # 정의식 (공백 면역)
+                market_krw_observed=mkt,         # 관측구간 적분 (QC 용)
+                gap_beta_unobserved_krw=gap_beta,
                 mm_alpha_krw=net_ex_mkt,
                 alpha_on_capital=(net_ex_mkt / req_cap) if req_cap else float("nan"),
                 net_ex_market_krw=net_ex_mkt,
@@ -689,7 +716,9 @@ def run_one(paths, market, scen, order_krw, cap_krw, latency_ms, horizon_s,
                 flow_share=(turn / sim.mkt_turn) if sim.mkt_turn > 0 else float("nan"),
                 avg_inv_krw=(sim.inv_t / sim.span_t) if sim.span_t > 0 else 0.0,
                 at_cap_frac=(sim.cap_t / sim.span_t) if sim.span_t > 0 else 0.0,
-                daily_krw=dj, drift=drift, resid_krw=resid,
+                daily_krw=dj, daily_beta_krw=dj_beta, daily_alpha_krw=dj_alpha,
+                daily_sum_check=(sum(dj.values()) - net),
+                drift=drift, resid_krw=resid,
                 bp=(net_ex_mkt / turn * 1e4) if turn > 0 else float("nan"))
 
 
@@ -797,17 +826,22 @@ def main():
 
     # 손익 분해 — cancel_credit=0(보수)만
     print("\n" + "=" * 118)
-    print("손익 분해 (cc0-strict, 원) — 강제청산이 수익 대부분을 먹는지 본다")
+    print("손익 분해 (cc0-strict, 원)")
+    print("  항등식: 순 = 스프레드 + 재고 + 베타 − 수수료.")
+    print("  ⚠ 청산비용은 **가산 버킷이 아니다** — 슬리피지는 스프레드에, 수수료는")
+    print("     수수료에 이미 들어 있다. 따로 더하면 이중계상이다. 규모 진단용이다.")
     print("-" * 118)
-    print(f"{'종목':<10}{'주문':>7}{'상한':>7}{'지연':>7}{'스프레드':>12}{'수수료':>11}"
-          f"{'재고손익':>12}{'청산비용':>11}{'순손익':>12}{'잔차':>9}{'bp':>8}")
+    print(f"{'종목':<10}{'주문':>7}{'상한':>7}{'지연':>7}{'스프레드':>11}{'수수료':>10}"
+          f"{'재고':>10}{'베타':>12}{'순손익':>12}{'잔차':>8}"
+          f"{'[청산진단]':>11}{'일별합오차':>11}")
     for r in rows:
         if r["scen"] != SCENARIOS[0][0]:
             continue
         print(f"{r['market']:<10}{r['order_krw']/1e4:>5.0f}만{r['cap_krw']/1e4:>5.0f}만"
-              f"{r['latency_ms']:>5}ms{r['spread_krw']:>+12,.0f}{-r['fees_krw']:>+11,.0f}"
-              f"{r['inventory_krw']:>+12,.0f}{-r['liq_cost_krw']:>+11,.0f}"
-              f"{r['net_krw']:>+12,.0f}{r['resid_krw']:>+9,.0f}{r['bp']:>+8.2f}")
+              f"{r['latency_ms']:>5}ms{r['spread_krw']:>+11,.0f}{-r['fees_krw']:>+10,.0f}"
+              f"{r['inventory_krw']:>+10,.0f}{r['baseline_beta_krw']:>+12,.0f}"
+              f"{r['net_krw']:>+12,.0f}{r['resid_krw']:>+8,.0f}"
+              f"{-r['liq_cost_krw']:>+11,.0f}{r['daily_sum_check']:>+11,.0f}")
 
     print("\n" + "=" * 126)
     print("자본·규모 정합성 (cc0-strict) — bp 가 아니라 이쪽이 판정 기준이다")
@@ -817,7 +851,7 @@ def main():
           "MM 기계장치는 아무것도 더하지 않은 것이다.")
     print(f"{'종목':<9}{'주문':>6}{'상한':>6}{'지연':>6}{'순손익':>12}{'베타':>12}"
           f"{'알파':>11}{'필요자본':>10}{'알파/자본':>10}{'최대재고':>11}"
-          f"{'상한체류':>8}{'낡은손실':>9}{'청산손실':>9}{'흐름점유':>9}")
+          f"{'상한체류':>8}{'낡은손실':>9}{'청산손실':>9}{'공백베타':>10}{'흐름점유':>9}")
     for r in rows:
         if r["scen"] != SCENARIOS[0][0]:
             continue
@@ -827,7 +861,7 @@ def main():
               f"{r['required_capital_krw']/1e4:>8,.0f}만{r['alpha_on_capital']*100:>+9.2f}%"
               f"{r['max_inv_krw']:>11,.0f}{r['at_cap_frac']*100:>7.1f}%"
               f"{-r['stale_loss_krw']:>+9,.0f}{-r['liq_cost_krw']:>+9,.0f}"
-              f"{r['flow_share']*100:>8.3f}%")
+              f"{r['gap_beta_unobserved_krw']:>+10,.0f}{r['flow_share']*100:>8.3f}%")
 
     print("\n" + "=" * 126)
     print("체결 사유 분해 · 체결 후 mid drift (cc0-strict)")
