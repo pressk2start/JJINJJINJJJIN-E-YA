@@ -26,8 +26,15 @@ from urllib.parse import urlencode
 import urllib.request
 
 API = "https://api.upbit.com"
-MIN_KRW = 5000
+# ⚠ 업비트 최소 주문금액은 매수·매도 **둘 다** 5,000원인데 기준이 다르다.
+#   매수: 지정한 KRW 금액 그대로
+#   매도: 수량 × **매수 1호가(bid)**
+#   5,000원어치를 ask 에 사면 bid 로 환산했을 때 스프레드만큼 모자라 매도가 거부된다.
+#   실제로 KRW-XRP 5,000원 왕복이 under_min_total_market_ask 로 두 번 실패했다.
+#   그래서 매수 최소를 6,000원으로 올린다 — 스프레드 100bp 까지 견딘다.
+MIN_KRW = 6000
 MAX_KRW = 20000          # 배관 점검에 이보다 큰 돈을 쓸 이유가 없다
+MIN_SELL_KRW = 5000
 
 
 def load_env(path):
@@ -83,6 +90,13 @@ def req(method, path, body=None, params=None, timeout=10):
         sys.exit(f"[{method} {path}] HTTP {e.code}: {detail}")
 
 
+def best_bid(market):
+    with urllib.request.urlopen(
+            f"{API}/v1/orderbook?markets={market}", timeout=10) as f:
+        ob = json.load(f)
+    return float(ob[0]["orderbook_units"][0]["bid_price"])
+
+
 def tg(title, body):
     """봇과 같은 경로(curl)로 보낸다. 실패해도 스크립트는 계속 간다."""
     tok = os.getenv("TELEGRAM_TOKEN") or os.getenv("TG_TOKEN")
@@ -131,10 +145,14 @@ def main():
     ap.add_argument("--env", default="/home/ubuntu/bot/.env")
     ap.add_argument("--yes", action="store_true", help="이게 없으면 주문하지 않는다")
     ap.add_argument("--hold-sec", type=float, default=2.0)
+    ap.add_argument("--sell-all", action="store_true",
+                    help="이번에 산 것뿐 아니라 보유 전량을 판다 (잔량 정리용)")
+    ap.add_argument("--sell-only", action="store_true",
+                    help="매수 없이 보유분만 시장가 매도 (실패한 점검 뒷정리)")
     a = ap.parse_args()
 
     load_env(a.env)
-    if not (MIN_KRW <= a.krw <= MAX_KRW):
+    if not a.sell_only and not (MIN_KRW <= a.krw <= MAX_KRW):
         sys.exit(f"--krw 는 {MIN_KRW}~{MAX_KRW} 범위여야 한다 (배관 점검용)")
 
     # ── 1. 인증 확인 (읽기만) ────────────────────────────────────────
@@ -145,6 +163,29 @@ def main():
     print(f"[1] 인증 OK · KRW 잔고 {krw:,.0f}원 · {cur} 보유 {have:.8f}")
     if krw < a.krw * 1.1:
         sys.exit(f"KRW 잔고 부족: {krw:,.0f} < {a.krw:,}")
+
+    if a.sell_only:
+        bid = best_bid(a.market)
+        est = have * bid
+        print(f"[정리] 보유 {have:.8f} {cur} · bid {bid:,.4f} → 약 {est:,.0f}원")
+        if have <= 0:
+            print("  보유 없음 — 할 일 없다.")
+            return
+        if est < MIN_SELL_KRW:
+            sys.exit(f"매도 최소금액 미달: {est:,.0f}원 < {MIN_SELL_KRW:,}원. "
+                     f"조금 더 매수해서 합쳐야 팔 수 있다.")
+        if not a.yes:
+            print("  실제 매도는 --yes 필요.")
+            return
+        s2 = req("POST", "/v1/orders", body={"market": a.market, "side": "ask",
+                                             "ord_type": "market",
+                                             "volume": f"{have:.8f}"})
+        so2 = wait_fill(s2["uuid"])
+        v, avg, funds, fee = filled_of(so2)
+        print(f"  매도 체결 {v:.8f} @ {avg:,.4f} · {funds:,.0f}원 · 수수료 {fee:,.2f}원")
+        tg("🧹 잔량 정리 완료",
+           f"{a.market}\n매도 {v:.8f} @ {avg:,.4f}\n회수 {funds - fee:,.0f}원")
+        return
 
     if not a.yes:
         print(f"\n[중단] 실제 주문은 --yes 를 붙여야 나간다.")
@@ -169,9 +210,19 @@ def main():
 
     # ── 3. 전량 시장가 매도 (수수료 차감분까지 실제 잔고로 확인) ──────
     accts = req("GET", "/v1/accounts")
-    sell_qty = next((float(x["balance"]) for x in accts if x["currency"] == cur), 0.0)
-    sell_qty = min(sell_qty, bvol)          # 이번에 산 것만 판다
-    print(f"\n[3] 시장가 매도 {sell_qty:.8f} {cur} …")
+    bal = next((float(x["balance"]) for x in accts if x["currency"] == cur), 0.0)
+    sell_qty = bal if a.sell_all else min(bal, bvol)   # 기본은 이번에 산 것만
+    bid = best_bid(a.market)
+    est = sell_qty * bid
+    print(f"\n[3] 시장가 매도 {sell_qty:.8f} {cur} (bid {bid:,.4f} 기준 {est:,.0f}원) …")
+    if est < MIN_SELL_KRW:
+        tg("⚠ 주문 배관 점검 — 매도 불가, 잔량 남음",
+           f"{a.market}\n매수는 됐으나 매도 최소금액 미달\n"
+           f"보유 {bal:.8f} {cur} · bid {bid:,.4f} → {est:,.0f}원 < {MIN_SELL_KRW:,}원\n\n"
+           f"수동 정리: python3 ~/tools/order_smoke.py --sell-only --sell-all "
+           f"--market {a.market}")
+        sys.exit(f"매도 최소금액 미달 ({est:,.0f}원 < {MIN_SELL_KRW:,}원). "
+                 f"--sell-all 로 전량 정리하거나 --krw 를 올려라.")
     s = req("POST", "/v1/orders", body={"market": a.market, "side": "ask",
                                         "ord_type": "market",
                                         "volume": f"{sell_qty:.8f}"})
