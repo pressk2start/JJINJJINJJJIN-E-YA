@@ -15,6 +15,17 @@ bot.py 에는 수동 주문 경로가 없고 텔레그램 명령 수신부도 �
 bot.py 를 import 하면 봇이 통째로 기동되므로 쓸 수 없다. 그래서 서명·주문을
 최소한으로 다시 구현한다.
 
+⚠ 라이브 봇이 도는 동안 쓰면 안 된다
+------------------------------------
+봇은 `AUTO_TRADE=1` 이면 **잔고에 나타난 포지션을 자기 것으로 채택**한다.
+실제로 이 스크립트의 테스트 매수분(5.40102973 XRP)을 봇이 가져가서
+"시간만료 본절컷"으로 청산하고 `[UPDATE_TRADE] pnl -0.18%` 로 **전략 성과
+기록에 남겼다.** v4 가 낸 거래가 아닌데 v4 통계에 섞인 것이다.
+
+종목을 바꾸는 걸로는 못 막는다 — 봇 스캔 목록은 거래대금 상위로 동적이라
+어떤 종목도 안전하다고 보장할 수 없다. 그래서 봇 프로세스가 살아 있으면
+아예 거부한다.
+
 ⚠ 실제 돈이 나간다
 ------------------
 기본 5,000원(업비트 최소 주문금액). 왕복 수수료 0.1% + 스프레드로 대략
@@ -35,6 +46,17 @@ API = "https://api.upbit.com"
 MIN_KRW = 6000
 MAX_KRW = 20000          # 배관 점검에 이보다 큰 돈을 쓸 이유가 없다
 MIN_SELL_KRW = 5000
+
+
+def bot_running():
+    """라이브 봇이 도는지 본다. 돌면 잔고를 채가므로 주문을 내면 안 된다."""
+    try:
+        r = subprocess.run(["pgrep", "-f", "bot/bot.py"],
+                           capture_output=True, text=True, timeout=5)
+        pids = [x for x in (r.stdout or "").split() if x]
+        return pids
+    except Exception:
+        return []
 
 
 def load_env(path):
@@ -149,9 +171,23 @@ def main():
                     help="이번에 산 것뿐 아니라 보유 전량을 판다 (잔량 정리용)")
     ap.add_argument("--sell-only", action="store_true",
                     help="매수 없이 보유분만 시장가 매도 (실패한 점검 뒷정리)")
+    ap.add_argument("--allow-with-bot", action="store_true",
+                    help="라이브 봇이 도는 중에도 강행한다 (거래기록 오염 감수)")
     a = ap.parse_args()
 
     load_env(a.env)
+
+    pids = bot_running()
+    if pids and not a.allow_with_bot:
+        sys.exit(
+            f"라이브 봇이 실행 중이다 (pid {','.join(pids)}).\n"
+            "  봇은 AUTO_TRADE=1 이면 잔고에 뜬 포지션을 자기 것으로 채택하고\n"
+            "  청산한 뒤 **전략 성과 기록에 남긴다.** 실제로 그 사고가 났다\n"
+            "  (5.40102973 XRP → '시간만료 본절컷' → UPDATE_TRADE pnl -0.18%).\n"
+            "  종목을 바꿔도 못 막는다 — 스캔 목록이 거래대금 상위로 동적이다.\n\n"
+            "  안전한 방법: sudo systemctl stop upbit-bot 후 점검, 끝나면 start.\n"
+            "  그래도 강행하려면 --allow-with-bot (기록 오염을 감수한다는 뜻).")
+
     if not a.sell_only and not (MIN_KRW <= a.krw <= MAX_KRW):
         sys.exit(f"--krw 는 {MIN_KRW}~{MAX_KRW} 범위여야 한다 (배관 점검용)")
 
