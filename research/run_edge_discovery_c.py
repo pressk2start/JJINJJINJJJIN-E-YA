@@ -45,15 +45,16 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 
-# ── frozen decision-time features (사전등록 · advisor 3자) ─────────────
+# ── frozen decision-time features (사전등록 · advisor 1 목록 · 2026-09-04 정정) ─
+# advisor 3 지적: C1 은 frozen 6 만 · entry_vol_krw_m 은 C2 (capture) 로 이동
 # 진입시각에 확정 가능한 지표만 · post-entry 자동 배제
 _FROZEN_FEATURES = (
     "adx_60",
+    "ob_slip_sell_100k",
     "rsi_60m",
     "macd_hist_5m_bps",
+    "entry_spread_pct",
     "atr_pct",
-    "ob_spread_pct",
-    "entry_vol_krw_m",
 )
 
 # look-ahead 자동 배제 (feature_screen.py 와 동일 규율)
@@ -209,11 +210,18 @@ def _concentration(kept_rows):
 def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
     """TRAIN 스크리닝 · frozen quantile threshold · concentration check."""
     n_total = len(rows)
+    if n_total == 0:
+        return {
+            "n_total": 0,
+            "not_run_reason": "no_target_route_data",
+            "verdict": "NOT_RUN",
+            "candidates_final": [],
+        }
     if n_total < min_n:
         return {
             "n_total": n_total,
-            "verdict": f"INSUFFICIENT (n={n_total} < {min_n})",
-            "candidates_train": [],
+            "not_run_reason": f"insufficient_n (n={n_total} < min_n={min_n})",
+            "verdict": "NOT_RUN",
             "candidates_final": [],
         }
 
@@ -221,13 +229,40 @@ def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
     if n_train < 20 or (n_total - n_train) < 10:
         return {
             "n_total": n_total,
-            "verdict": f"INSUFFICIENT_SPLIT (train={n_train}, oos={n_total-n_train})",
-            "candidates_train": [],
+            "not_run_reason": f"split_impossible (train={n_train}, oos={n_total-n_train})",
+            "verdict": "NOT_RUN",
             "candidates_final": [],
         }
 
     train_rows = rows[:n_train]
     oos_rows = rows[n_train:]
+    # advisor 3 (2026-09-04): split boundary timestamp lock · reproducibility
+    # OOS 재열기 방지 · TRAIN 완료 후 threshold 는 절대 재선택 X
+    train_last_ts = train_rows[-1]["entry_ts"] if train_rows else None
+    oos_first_ts = oos_rows[0]["entry_ts"] if oos_rows else None
+    boundary_iso = None
+    if train_last_ts is not None:
+        try:
+            boundary_iso = datetime.fromtimestamp(
+                train_last_ts, tz=timezone.utc
+            ).isoformat()
+        except Exception:
+            pass
+
+    # frozen feature 존재 여부 검증 (모두 결측이면 NOT_RUN)
+    _feats_present = [
+        f for f in _FROZEN_FEATURES
+        if any(f in r for r in train_rows)
+    ]
+    if not _feats_present:
+        return {
+            "n_total": n_total,
+            "n_train": n_train,
+            "n_oos": n_total - n_train,
+            "not_run_reason": "no_frozen_features_present (missing columns in train)",
+            "verdict": "NOT_RUN",
+            "candidates_final": [],
+        }
 
     # frozen feature × quantile × direction 그리드 (사전등록)
     train_candidates = []
@@ -310,11 +345,18 @@ def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
         "n_total": n_total,
         "n_train": n_train,
         "n_oos": n_total - n_train,
+        "split_boundary_ts": train_last_ts,
+        "split_boundary_iso": boundary_iso,
+        "oos_first_ts": oos_first_ts,
         "train_grid_evaluated": len(train_candidates),
         "train_passed_filters": len(train_pass),
+        "features_present": _feats_present,
         "candidates_final": final_train_pass,
         "survivors_n": len(survivors),
-        "verdict": f"{len(survivors)}개" if survivors else "0개",
+        "verdict": (
+            "CANDIDATES" if survivors else "ZERO"
+        ),
+        "verdict_detail": f"{len(survivors)}개" if survivors else "0개",
     }
 
 
@@ -322,11 +364,23 @@ def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
     ts = int(time.time())
     records, err = _load_records(input_path)
     if records is None:
+        # advisor 3 (2026-09-04): NOT_RUN 사유 세분화 · 5가지 blocking artifact 강제
+        # {input_file_not_found, json_load_error, no_records_in_file, ...}
+        reason_key = "unknown"
+        if err and "not found" in err:
+            reason_key = "input_file_not_found"
+        elif err and "load failed" in err:
+            reason_key = "json_load_error"
+        elif err and "empty" in err:
+            reason_key = "no_records_in_file"
+        elif err and "not a list" in err:
+            reason_key = "malformed_json"
         result = {
             "status": "NOT_RUN",
             "ts": ts,
             "input_file": input_path,
-            "reason": err,
+            "reason_key": reason_key,
+            "reason_detail": err,
         }
         _write_result(output_path, result)
         return result
