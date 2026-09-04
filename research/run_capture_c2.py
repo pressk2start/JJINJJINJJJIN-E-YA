@@ -54,12 +54,17 @@ Look-ahead 금지 강조:
                                      [--max-candidates 3]
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+
+# ── 프로토콜 버전 (advisor 3 · 2026-09-04) ────────────────────────────
+# C2_v1 = a3daf6b 시점 · 재변경 시 v2 로 새 프로토콜 번호
+_PROTOCOL_VERSION = "C2_v1"
 
 
 # ── C2 outcome label preregister (사전등록 · advisor 3 · 2026-09-04) ──
@@ -77,6 +82,10 @@ _FROZEN_FEATURES_C2 = (
     "atr_pct",
     "entry_vol_krw_m",   # advisor 3: C2 에서만 · C1 은 6 만
 )
+# advisor 3 (2026-09-04): feature universe 봉인 검증 · 해시로 재변경 감지
+_FROZEN_FEATURES_C2_HASH = hashlib.sha256(
+    "|".join(sorted(_FROZEN_FEATURES_C2)).encode("utf-8")
+).hexdigest()[:12]
 
 # concentration 임계 (사전등록 · C1 과 동일)
 _TOP_COIN_MAX_SHARE = 0.40
@@ -387,6 +396,14 @@ def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
         "ts": ts,
         "input_file": input_path,
         "protocol": "C2_CAPTURE_ENTRY_v1",
+        "protocol_version": _PROTOCOL_VERSION,
+        "frozen_features_hash": _FROZEN_FEATURES_C2_HASH,
+        # advisor 3 (2026-09-04): C2 실데이터 실행 blocker · A_CLEAN audit 미완료
+        # 시 실데이터 실행 금지 (label = post-entry exit behavior 에 의존 · 오염 시 왜곡)
+        "blocker_warning": (
+            "C2 실데이터 실행은 A_CLEAN execution-contract audit 완료 후만 가능. "
+            "smoke test 는 OK · A_CLEAN 오염 확정 근거 있으면 label 왜곡 가능."
+        ),
         "label_definition": {
             "name": "high_capture",
             "rule": "(pnl > 0) AND (mfe >= MIN_MFE_FLOOR) AND (pnl/mfe >= RATIO_THR)",
@@ -399,6 +416,7 @@ def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
             "train_frac": train_frac,
             "max_candidates": max_candidates,
             "frozen_features_c2": list(_FROZEN_FEATURES_C2),
+            "frozen_features_hash": _FROZEN_FEATURES_C2_HASH,
             "quantiles": [0.50, 0.66],
             "top_coin_max_share": _TOP_COIN_MAX_SHARE,
             "top_hour_max_share": _TOP_HOUR_MAX_SHARE,
@@ -426,6 +444,13 @@ def _write_result(output_path, result):
 
 def _print_summary(result):
     print(f"=== C2_CAPTURE_ENTRY_v1 ({result.get('status')}) ===")
+    if result.get("status") == "OK":
+        print(f"  protocol_version: {result.get('protocol_version', '?')}")
+        print(f"  frozen_features_hash: {result.get('frozen_features_hash', '?')}")
+        print(f"  frozen_features_c2: {list(_FROZEN_FEATURES_C2)}")
+        # advisor 3 blocker warning · A_CLEAN audit 완료 여부 사용자 확인 필요
+        if result.get("blocker_warning"):
+            print(f"  ⚠ BLOCKER: {result['blocker_warning']}")
     if result.get("status") != "OK":
         print(f"  reason_key: {result.get('reason_key')}")
         print(f"  reason_detail: {result.get('reason_detail')}")

@@ -37,12 +37,17 @@ C_RESULT 계약 (반드시 셋 중 하나):
   - "0개" 도 답 (대기 종료 · null result = 유효)
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+
+# ── 프로토콜 버전 (advisor 3 · 2026-09-04 · C1_v1 lock) ────────────────
+# C1 frozen 6 은 이 시점부터 v1 로 고정 · 재변경 시 v2 프로토콜 새 번호 필수
+_PROTOCOL_VERSION = "C1_v1"
 
 
 # ── frozen decision-time features (사전등록 · advisor 1 목록 · 2026-09-04 정정) ─
@@ -56,6 +61,11 @@ _FROZEN_FEATURES = (
     "entry_spread_pct",
     "atr_pct",
 )
+# advisor 3 (2026-09-04): feature universe 봉인 검증 · 해시로 재변경 즉시 감지
+# 재변경 시 hash 변화 → 실행 로그 즉시 mismatch · protocol v2 로 새 번호 강제
+_FROZEN_FEATURES_HASH = hashlib.sha256(
+    "|".join(sorted(_FROZEN_FEATURES)).encode("utf-8")
+).hexdigest()[:12]
 
 # look-ahead 자동 배제 (feature_screen.py 와 동일 규율)
 _LOOKAHEAD_KEYS = frozenset({
@@ -493,11 +503,14 @@ def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
         "ts": ts,
         "input_file": input_path,
         "protocol": "EDGE_DISCOVERY_C_v1",
+        "protocol_version": _PROTOCOL_VERSION,
+        "frozen_features_hash": _FROZEN_FEATURES_HASH,
         "config": {
             "min_n": min_n,
             "train_frac": train_frac,
             "max_candidates": max_candidates,
             "frozen_features": list(_FROZEN_FEATURES),
+            "frozen_features_hash": _FROZEN_FEATURES_HASH,
             "quantiles": [0.50, 0.66],
             "top_coin_max_share": _TOP_COIN_MAX_SHARE,
             "top_hour_max_share": _TOP_HOUR_MAX_SHARE,
@@ -534,6 +547,11 @@ def _write_result(output_path, result):
 
 def _print_summary(result):
     print(f"=== EDGE_DISCOVERY_C_v1 ({result.get('status')}) ===")
+    if result.get("status") == "OK":
+        # advisor 3 (2026-09-04): feature universe echo + hash · 재변경 즉시 감지
+        print(f"  protocol_version: {result.get('protocol_version', '?')}")
+        print(f"  frozen_features_hash: {result.get('frozen_features_hash', '?')}")
+        print(f"  frozen_features: {list(_FROZEN_FEATURES)}")
     if result.get("status") != "OK":
         print(f"  reason_key: {result.get('reason_key', 'unknown')}")
         print(f"  reason_detail: {result.get('reason_detail', 'unknown')}")
