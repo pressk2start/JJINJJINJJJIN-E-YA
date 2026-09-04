@@ -70,6 +70,20 @@ _LOOKAHEAD_KEYS = frozenset({
 _TOP_COIN_MAX_SHARE = 0.40
 _TOP_HOUR_MAX_SHARE = 0.40
 
+# ── SURVIVE 판정 강화 (advisor 3 · 2026-09-04) ────────────────────────
+# 이전: SURVIVE = OOS delta > 0 (+concentration) → +0.01%p 노이즈도 통과
+# 정정: 사전등록 승격 기준 = 아래 4중 조건 전부 통과 시에만 SURVIVE
+#   1. OOS Δavg ≥ +0.10%p (경제적 유의 · 노이즈 컷)
+#   2. OOS ΔMDD ≤ +2.0%p (MDD 악화 없음)
+#   3. Cost stress 후 Δavg > 0 (spread+slippage α 차감 후 부호 유지)
+#   4. TRAIN 3-fold walk-forward 방향 일관성 (rolling window · 3/3 or 2/3)
+# 미충족이면 WEAK (OOS Δ>0 이지만 승격 기준 미달) / KILL / INSUFFICIENT
+_PROMOTE_DELTA_MIN = 0.10       # OOS Δavg %p 최소
+_PROMOTE_MDD_MAX = 2.0          # OOS ΔMDD %p 최대 (악화 허용)
+_COST_STRESS_ALPHA = 0.05       # 진입당 %p 비용 (spread + slippage · 보수적)
+_WALK_FORWARD_FOLDS = 3
+_WF_MIN_POSITIVE = 2            # 3-fold 중 최소 2개에서 delta > 0
+
 # 판정 대상 route (paired shadow · A/A2 봉인 이후에도 flagship 관측)
 _TARGET_ROUTES = (
     "CS40_VR3_TR180_bp30_240",   # flagship (CONTROL)
@@ -179,6 +193,49 @@ def _matched_delta(rows, feature, threshold, direction):
         "delta_vs_baseline": kept_mean - baseline,
         "keep_ratio": len(kept) / total_n,
         "kept_rows": kept,
+    }
+
+
+def _mdd_pct(pnls):
+    """equal-weight 누적 equity 의 max drawdown %p 반환 (0 이상)."""
+    if not pnls:
+        return 0.0
+    eq = 0.0
+    peak = 0.0
+    mdd = 0.0
+    for p in pnls:
+        eq += p
+        if eq > peak:
+            peak = eq
+        dd = peak - eq
+        if dd > mdd:
+            mdd = dd
+    return mdd * 100.0  # 소수 → %p
+
+
+def _walk_forward_direction_consistency(rows, feature, threshold, direction,
+                                         folds=_WALK_FORWARD_FOLDS):
+    """TRAIN 내부 3-fold walk-forward · direction 일관성 검증.
+    각 fold 에서 matched_delta > 0 이면 pass · min_positive/folds 로 판정."""
+    if len(rows) < folds * 10:
+        return None
+    fold_size = len(rows) // folds
+    positive_count = 0
+    fold_deltas = []
+    for i in range(folds):
+        start = i * fold_size
+        end = (i + 1) * fold_size if i < folds - 1 else len(rows)
+        fold_rows = rows[start:end]
+        r = _matched_delta(fold_rows, feature, threshold, direction)
+        if r and r["delta_vs_baseline"] > 0:
+            positive_count += 1
+        fold_deltas.append(r["delta_vs_baseline"] if r else None)
+    return {
+        "folds": folds,
+        "positive_count": positive_count,
+        "pass_rate": positive_count / folds,
+        "fold_deltas": [round(d, 5) if d is not None else None for d in fold_deltas],
+        "consistent": positive_count >= _WF_MIN_POSITIVE,
     }
 
 
@@ -317,12 +374,20 @@ def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
         if len(final_train_pass) >= max_candidates:
             break
 
-    # UNTOUCHED FORWARD: OOS 에서 frozen threshold 로 matched delta
+    # TRAIN 3-fold walk-forward · direction 일관성 (advisor 3 · 2026-09-04)
+    # OOS 열기 전 · TRAIN 내부 다중비교 방어
+    for c in final_train_pass:
+        wf = _walk_forward_direction_consistency(
+            train_rows, c["feature"], c["threshold"], c["direction"]
+        )
+        c["train_walk_forward"] = wf
+
+    # UNTOUCHED FORWARD (OOS 를 처음이자 마지막으로 열음 · advisor 3 · 강화)
     for c in final_train_pass:
         oos_r = _matched_delta(oos_rows, c["feature"], c["threshold"], c["direction"])
         if not oos_r or oos_r["kept_n"] < 5:
             c["oos_status"] = "INSUFFICIENT"
-            c["verdict"] = "KILL"
+            c["verdict"] = "INSUFFICIENT"
             continue
         oos_conc = _concentration(oos_r["kept_rows"])
         c["oos_kept_n"] = oos_r["kept_n"]
@@ -331,15 +396,49 @@ def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
         c["oos_kept_pct"] = round(oos_r["kept_mean"] * 100, 4)
         c["oos_delta_pct"] = round(oos_r["delta_vs_baseline"] * 100, 4)
         c["oos_concentration"] = oos_conc
-        # SURVIVE 조건: OOS delta > 0 + concentration 유지
-        survives = (
-            c["oos_delta_pct"] > 0.0
-            and oos_conc["top_coin_share"] <= _TOP_COIN_MAX_SHARE
+
+        # MDD 계산 (kept vs baseline · 전체 OOS)
+        kept_pnls = [r["pnl"] for r in oos_r["kept_rows"]]
+        all_pnls = [r["pnl"] for r in oos_rows]
+        mdd_kept = _mdd_pct(kept_pnls)
+        mdd_baseline = _mdd_pct(all_pnls)
+        c["oos_mdd_kept_pct"] = round(mdd_kept, 3)
+        c["oos_mdd_baseline_pct"] = round(mdd_baseline, 3)
+        c["oos_delta_mdd_pct"] = round(mdd_kept - mdd_baseline, 3)
+
+        # Cost stress: 진입당 α %p 비용 차감 후 부호 유지 확인
+        cost_stressed_kept_mean = oos_r["kept_mean"] - (_COST_STRESS_ALPHA / 100.0)
+        cost_stressed_delta = cost_stressed_kept_mean - oos_r["baseline_mean"]
+        c["oos_cost_stressed_delta_pct"] = round(cost_stressed_delta * 100, 4)
+
+        # 사전등록 4중 승격 조건 판정 (advisor 3 · SURVIVE 강화)
+        wf = c.get("train_walk_forward")
+        wf_consistent = bool(wf and wf.get("consistent"))
+        cond_delta = c["oos_delta_pct"] >= _PROMOTE_DELTA_MIN
+        cond_mdd = c["oos_delta_mdd_pct"] <= _PROMOTE_MDD_MAX
+        cond_cost = cost_stressed_delta > 0
+        cond_conc = (
+            oos_conc["top_coin_share"] <= _TOP_COIN_MAX_SHARE
             and oos_conc["top_hour_share"] <= _TOP_HOUR_MAX_SHARE
         )
-        c["verdict"] = "SURVIVE" if survives else "KILL"
+        c["promotion_criteria"] = {
+            "delta_min": cond_delta,
+            "mdd_max": cond_mdd,
+            "cost_stress": cond_cost,
+            "concentration": cond_conc,
+            "wf_consistent": wf_consistent,
+        }
+
+        if cond_delta and cond_mdd and cond_cost and cond_conc and wf_consistent:
+            c["verdict"] = "SURVIVE"
+        elif c["oos_delta_pct"] > 0 and cond_conc:
+            # 통과선 못 넘음 · 관측 가치는 있음 (승격 아님)
+            c["verdict"] = "WEAK"
+        else:
+            c["verdict"] = "KILL"
 
     survivors = [c for c in final_train_pass if c.get("verdict") == "SURVIVE"]
+    weak = [c for c in final_train_pass if c.get("verdict") == "WEAK"]
 
     return {
         "n_total": n_total,
@@ -353,10 +452,14 @@ def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
         "features_present": _feats_present,
         "candidates_final": final_train_pass,
         "survivors_n": len(survivors),
+        "weak_n": len(weak),
         "verdict": (
             "CANDIDATES" if survivors else "ZERO"
         ),
-        "verdict_detail": f"{len(survivors)}개" if survivors else "0개",
+        "verdict_detail": (
+            f"SURVIVE={len(survivors)} · WEAK={len(weak)} · "
+            f"total_evaluated={len(final_train_pass)}"
+        ),
     }
 
 
@@ -398,6 +501,11 @@ def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
             "quantiles": [0.50, 0.66],
             "top_coin_max_share": _TOP_COIN_MAX_SHARE,
             "top_hour_max_share": _TOP_HOUR_MAX_SHARE,
+            "promote_delta_min_pct": _PROMOTE_DELTA_MIN,
+            "promote_mdd_max_pct": _PROMOTE_MDD_MAX,
+            "cost_stress_alpha_pct": _COST_STRESS_ALPHA,
+            "walk_forward_folds": _WALK_FORWARD_FOLDS,
+            "wf_min_positive": _WF_MIN_POSITIVE,
         },
         "routes": [],
     }
@@ -427,18 +535,34 @@ def _write_result(output_path, result):
 def _print_summary(result):
     print(f"=== EDGE_DISCOVERY_C_v1 ({result.get('status')}) ===")
     if result.get("status") != "OK":
-        print(f"  reason: {result.get('reason', 'unknown')}")
+        print(f"  reason_key: {result.get('reason_key', 'unknown')}")
+        print(f"  reason_detail: {result.get('reason_detail', 'unknown')}")
         return
     for r in result.get("routes", []):
-        print(f"\n[{r['route']}] n_total={r['n_total']} · verdict={r['verdict']}")
+        print(f"\n[{r['route']}] n_total={r['n_total']} · {r.get('verdict_detail', r['verdict'])}")
         if r.get("candidates_final"):
             for c in r["candidates_final"]:
                 v = c.get("verdict", "N/A")
-                marker = "✅" if v == "SURVIVE" else "❌"
+                markers = {"SURVIVE": "✅", "WEAK": "🟡", "KILL": "❌",
+                           "INSUFFICIENT": "⏳"}
+                marker = markers.get(v, "?")
                 oos_delta = c.get("oos_delta_pct", "N/A")
+                cost_delta = c.get("oos_cost_stressed_delta_pct", "N/A")
+                mdd_delta = c.get("oos_delta_mdd_pct", "N/A")
+                wf = c.get("train_walk_forward") or {}
+                wf_str = f"WF={wf.get('positive_count', '?')}/{wf.get('folds', '?')}"
                 print(f"  {marker} {c['feature']} {c['direction']}{c['threshold']} "
                       f"(q={c['quantile']}) · TRAIN Δ={c['train_delta_pct']:+.4f}%p · "
-                      f"OOS Δ={oos_delta}%p · verdict={v}")
+                      f"OOS Δ={oos_delta}%p (cost {cost_delta}%p · MDD Δ{mdd_delta}%p · "
+                      f"{wf_str}) · verdict={v}")
+                pc = c.get("promotion_criteria")
+                if pc:
+                    ok = [k for k, v in pc.items() if v]
+                    fail = [k for k, v in pc.items() if not v]
+                    if fail:
+                        print(f"      fail: {fail}")
+        elif r.get("not_run_reason"):
+            print(f"  NOT_RUN: {r['not_run_reason']}")
         else:
             print(f"  (0개 · TRAIN 필터 통과 없음)")
 
