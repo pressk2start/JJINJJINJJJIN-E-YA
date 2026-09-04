@@ -1,0 +1,420 @@
+# -*- coding: utf-8 -*-
+"""
+run_edge_discovery_c — EDGE_DISCOVERY_C_v1 end-to-end runner (advisor 3자 · 2026-09-04).
+
+목적: "offline C 대기" 무한루프 종료 · 매 실행마다 반드시 C_RESULT ∈ {0개 / 후보N / NOT_RUN} 배출.
+
+배경 (advisor 3자 · 2026-09-04):
+  4리포트째 offline C 산출물 부재 · "0개인지 안 돌렸는지"조차 불명 = 관측 불가 = 최악.
+  → 자동 실행 파이프라인 · JSON 계약 · frozen threshold · untouched forward.
+
+프로토콜 (사전등록 · 사후 재튜닝 금지):
+  A. TRAIN (앞 60%) · OOS (뒤 40%) · 시간순 · 경계 1회 고정
+  B. Frozen 6-feature (decision-time · look-ahead 배제)
+     - adx_60 · rsi_60m · macd_hist_5m_bps · atr_pct · ob_spread_pct · entry_vol_krw_m
+  C. Threshold = TRAIN quantile (P50, P66) · 관찰 cutpoint 금지
+  D. Direction: 승자 mean > 패자 mean → ">=" · 아니면 "<="
+  E. Max 3 candidates per route (다중비교 할인) · 유사 threshold 중복 제거
+  F. Concentration check: 상위 1 coin ≤ 40% · 상위 1 hour ≤ 40%
+  G. UNTOUCHED FORWARD: frozen threshold 로 OOS matched delta
+     - SURVIVE: OOS delta > 0 AND coin/hour concentration ≤ 40%
+     - KILL: 그 외
+
+C_RESULT 계약 (반드시 셋 중 하나):
+  {"status": "OK", "routes": [...]}     # 정상 실행 · candidates 0~N
+  {"status": "NOT_RUN", "reason": ...}  # 실행 실패 (파일 없음/데이터 부족 등)
+
+사용:
+  python research/run_edge_discovery_c.py [--input /tmp/clm_trades.json]
+                                          [--output /tmp/c_result_latest.json]
+                                          [--min-n 30]
+                                          [--train-frac 0.6]
+                                          [--max-candidates 3]
+
+트리거 (advisor 3자):
+  - 매 정규 리포트 전 write-session 이 실행
+  - NOT_RUN 2회 연속 → 운영 실패 escalate
+  - "0개" 도 답 (대기 종료 · null result = 유효)
+"""
+import argparse
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+
+# ── frozen decision-time features (사전등록 · advisor 3자) ─────────────
+# 진입시각에 확정 가능한 지표만 · post-entry 자동 배제
+_FROZEN_FEATURES = (
+    "adx_60",
+    "rsi_60m",
+    "macd_hist_5m_bps",
+    "atr_pct",
+    "ob_spread_pct",
+    "entry_vol_krw_m",
+)
+
+# look-ahead 자동 배제 (feature_screen.py 와 동일 규율)
+_LOOKAHEAD_KEYS = frozenset({
+    "mfe", "mfe_peak_sec", "mfe_peak", "mfe_30s", "mfe_60s", "mfe_120s",
+    "dd_peak_30s", "dd_peak_60s", "dd_peak_120s",
+    "mae", "mae_60s", "mae_120s", "mae_peak",
+    "hold", "hold_sec", "exit_reason", "exit_origin", "realized_pnl", "pnl",
+    "kst_hour",  # matched sim 반증 (누적 재버킷 착시)
+})
+
+# concentration 임계 (사전등록)
+_TOP_COIN_MAX_SHARE = 0.40
+_TOP_HOUR_MAX_SHARE = 0.40
+
+# 판정 대상 route (paired shadow · A/A2 봉인 이후에도 flagship 관측)
+_TARGET_ROUTES = (
+    "CS40_VR3_TR180_bp30_240",   # flagship (CONTROL)
+    "CLM_A_CLEAN_bp30",          # A (archived · reference)
+    "CLM_A_x_A2_bp30",           # A×A2 (archived · reference)
+)
+
+
+def _quantile(sorted_vals, q):
+    """빠른 quantile · numpy 미사용 (의존성 최소화)."""
+    if not sorted_vals:
+        return None
+    n = len(sorted_vals)
+    idx = q * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    frac = idx - lo
+    return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
+
+
+def _mean(vals):
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _load_records(json_path):
+    """export_trade_records() JSON 로드 · offline C 필수 필드 검증."""
+    if not os.path.exists(json_path):
+        return None, f"input file not found: {json_path}"
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        return None, f"json load failed: {exc}"
+    if not isinstance(data, list):
+        return None, f"json is not a list (got {type(data).__name__})"
+    if not data:
+        return None, "empty records"
+    return data, None
+
+
+def _prep_route_rows(records, route):
+    """route filter · look-ahead 배제 · 시간정렬 · feature dict flatten."""
+    rows = []
+    for rec in records:
+        if rec.get("route") != route:
+            continue
+        exit_ts = rec.get("exit_ts")
+        entry_ts = rec.get("entry_ts")
+        if entry_ts is None or exit_ts is None:
+            continue
+        pnl = rec.get("pnl")
+        if pnl is None:
+            continue
+        row = {
+            "entry_ts": float(entry_ts),
+            "exit_ts": float(exit_ts),
+            "pnl": float(pnl),
+            "market": rec.get("market", ""),
+            "signal_id": rec.get("signal_id"),
+            "route_epoch": rec.get("route_epoch"),
+        }
+        # ind_ prefix flatten (frozen features only)
+        for feat in _FROZEN_FEATURES:
+            v = rec.get(f"ind_{feat}")
+            if v is not None:
+                try:
+                    row[feat] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        # kst_hour 유도 (look-ahead 아님 · 진입시각 확정)
+        # 배제 규율에 있음 · matched sim 반증 · 판정 대상 X (정보만)
+        try:
+            dt = datetime.fromtimestamp(row["entry_ts"], tz=timezone.utc)
+            # KST = UTC+9
+            row["_hour_kst"] = (dt.hour + 9) % 24
+        except Exception:
+            row["_hour_kst"] = None
+        rows.append(row)
+    rows.sort(key=lambda r: r["entry_ts"])
+    return rows
+
+
+def _matched_delta(rows, feature, threshold, direction):
+    """filter 통과 vs 전체 baseline net PnL 차이."""
+    kept, dropped = [], []
+    for r in rows:
+        v = r.get(feature)
+        if v is None:
+            continue
+        pnl = r["pnl"]
+        passes = (v >= threshold) if direction == ">=" else (v <= threshold)
+        if passes:
+            kept.append(r)
+        else:
+            dropped.append(r)
+    total_n = len(kept) + len(dropped)
+    if total_n == 0 or not kept:
+        return None
+    baseline = _mean([r["pnl"] for r in kept + dropped])
+    kept_mean = _mean([r["pnl"] for r in kept])
+    return {
+        "kept_n": len(kept),
+        "dropped_n": len(dropped),
+        "total_n": total_n,
+        "baseline_mean": baseline,
+        "kept_mean": kept_mean,
+        "delta_vs_baseline": kept_mean - baseline,
+        "keep_ratio": len(kept) / total_n,
+        "kept_rows": kept,
+    }
+
+
+def _concentration(kept_rows):
+    """kept cohort 의 상위 coin/hour 집중도 · 사후최적화 방어."""
+    if not kept_rows:
+        return {"top_coin": None, "top_coin_share": 0.0,
+                "top_hour": None, "top_hour_share": 0.0}
+    coin_cnt = defaultdict(int)
+    hour_cnt = defaultdict(int)
+    n = len(kept_rows)
+    for r in kept_rows:
+        market = r.get("market", "")
+        coin = market.split("-")[-1] if "-" in market else market
+        coin_cnt[coin] += 1
+        h = r.get("_hour_kst")
+        if h is not None:
+            hour_cnt[h] += 1
+    top_coin = max(coin_cnt.items(), key=lambda x: x[1]) if coin_cnt else (None, 0)
+    top_hour = max(hour_cnt.items(), key=lambda x: x[1]) if hour_cnt else (None, 0)
+    return {
+        "top_coin": top_coin[0],
+        "top_coin_share": round(top_coin[1] / n, 3),
+        "top_hour": top_hour[0],
+        "top_hour_share": round(top_hour[1] / max(sum(hour_cnt.values()), 1), 3),
+    }
+
+
+def _screen_route(rows, min_n=30, train_frac=0.6, max_candidates=3):
+    """TRAIN 스크리닝 · frozen quantile threshold · concentration check."""
+    n_total = len(rows)
+    if n_total < min_n:
+        return {
+            "n_total": n_total,
+            "verdict": f"INSUFFICIENT (n={n_total} < {min_n})",
+            "candidates_train": [],
+            "candidates_final": [],
+        }
+
+    n_train = int(n_total * train_frac)
+    if n_train < 20 or (n_total - n_train) < 10:
+        return {
+            "n_total": n_total,
+            "verdict": f"INSUFFICIENT_SPLIT (train={n_train}, oos={n_total-n_train})",
+            "candidates_train": [],
+            "candidates_final": [],
+        }
+
+    train_rows = rows[:n_train]
+    oos_rows = rows[n_train:]
+
+    # frozen feature × quantile × direction 그리드 (사전등록)
+    train_candidates = []
+    for feat in _FROZEN_FEATURES:
+        vals_train = sorted(r[feat] for r in train_rows if feat in r)
+        if len(vals_train) < min_n // 2:
+            continue
+        # W/L direction 결정 (TRAIN 만 · OOS 절대 X)
+        wins = [r[feat] for r in train_rows if r["pnl"] > 0 and feat in r]
+        losses = [r[feat] for r in train_rows if r["pnl"] <= 0 and feat in r]
+        if len(wins) < 5 or len(losses) < 5:
+            continue
+        direction = ">=" if _mean(wins) > _mean(losses) else "<="
+
+        for q in (0.50, 0.66):
+            threshold = _quantile(vals_train, q)
+            if threshold is None:
+                continue
+            train_r = _matched_delta(train_rows, feat, threshold, direction)
+            if not train_r or train_r["kept_n"] < 10:
+                continue
+            conc = _concentration(train_r["kept_rows"])
+            train_candidates.append({
+                "feature": feat,
+                "quantile": q,
+                "threshold": round(threshold, 6),
+                "direction": direction,
+                "train_kept_n": train_r["kept_n"],
+                "train_keep_ratio": round(train_r["keep_ratio"], 3),
+                "train_baseline_pct": round(train_r["baseline_mean"] * 100, 4),
+                "train_kept_pct": round(train_r["kept_mean"] * 100, 4),
+                "train_delta_pct": round(train_r["delta_vs_baseline"] * 100, 4),
+                "train_concentration": conc,
+            })
+
+    # TRAIN 통과 조건: delta > 0 + concentration OK
+    train_pass = [
+        c for c in train_candidates
+        if c["train_delta_pct"] > 0.0
+        and c["train_concentration"]["top_coin_share"] <= _TOP_COIN_MAX_SHARE
+        and c["train_concentration"]["top_hour_share"] <= _TOP_HOUR_MAX_SHARE
+    ]
+    # delta 내림차순 · max_candidates 로 축소 · 유사 threshold 중복 제거 (같은 feature 중복 방지)
+    train_pass.sort(key=lambda c: -c["train_delta_pct"])
+    seen_features = set()
+    final_train_pass = []
+    for c in train_pass:
+        if c["feature"] in seen_features:
+            continue  # 같은 feature 다른 quantile 은 상위만 채택
+        seen_features.add(c["feature"])
+        final_train_pass.append(c)
+        if len(final_train_pass) >= max_candidates:
+            break
+
+    # UNTOUCHED FORWARD: OOS 에서 frozen threshold 로 matched delta
+    for c in final_train_pass:
+        oos_r = _matched_delta(oos_rows, c["feature"], c["threshold"], c["direction"])
+        if not oos_r or oos_r["kept_n"] < 5:
+            c["oos_status"] = "INSUFFICIENT"
+            c["verdict"] = "KILL"
+            continue
+        oos_conc = _concentration(oos_r["kept_rows"])
+        c["oos_kept_n"] = oos_r["kept_n"]
+        c["oos_keep_ratio"] = round(oos_r["keep_ratio"], 3)
+        c["oos_baseline_pct"] = round(oos_r["baseline_mean"] * 100, 4)
+        c["oos_kept_pct"] = round(oos_r["kept_mean"] * 100, 4)
+        c["oos_delta_pct"] = round(oos_r["delta_vs_baseline"] * 100, 4)
+        c["oos_concentration"] = oos_conc
+        # SURVIVE 조건: OOS delta > 0 + concentration 유지
+        survives = (
+            c["oos_delta_pct"] > 0.0
+            and oos_conc["top_coin_share"] <= _TOP_COIN_MAX_SHARE
+            and oos_conc["top_hour_share"] <= _TOP_HOUR_MAX_SHARE
+        )
+        c["verdict"] = "SURVIVE" if survives else "KILL"
+
+    survivors = [c for c in final_train_pass if c.get("verdict") == "SURVIVE"]
+
+    return {
+        "n_total": n_total,
+        "n_train": n_train,
+        "n_oos": n_total - n_train,
+        "train_grid_evaluated": len(train_candidates),
+        "train_passed_filters": len(train_pass),
+        "candidates_final": final_train_pass,
+        "survivors_n": len(survivors),
+        "verdict": f"{len(survivors)}개" if survivors else "0개",
+    }
+
+
+def run(input_path, output_path, min_n=30, train_frac=0.6, max_candidates=3):
+    ts = int(time.time())
+    records, err = _load_records(input_path)
+    if records is None:
+        result = {
+            "status": "NOT_RUN",
+            "ts": ts,
+            "input_file": input_path,
+            "reason": err,
+        }
+        _write_result(output_path, result)
+        return result
+
+    result = {
+        "status": "OK",
+        "ts": ts,
+        "input_file": input_path,
+        "protocol": "EDGE_DISCOVERY_C_v1",
+        "config": {
+            "min_n": min_n,
+            "train_frac": train_frac,
+            "max_candidates": max_candidates,
+            "frozen_features": list(_FROZEN_FEATURES),
+            "quantiles": [0.50, 0.66],
+            "top_coin_max_share": _TOP_COIN_MAX_SHARE,
+            "top_hour_max_share": _TOP_HOUR_MAX_SHARE,
+        },
+        "routes": [],
+    }
+    for route in _TARGET_ROUTES:
+        rows = _prep_route_rows(records, route)
+        route_result = _screen_route(
+            rows,
+            min_n=min_n,
+            train_frac=train_frac,
+            max_candidates=max_candidates,
+        )
+        route_result["route"] = route
+        result["routes"].append(route_result)
+
+    _write_result(output_path, result)
+    return result
+
+
+def _write_result(output_path, result):
+    """atomic write."""
+    tmp = output_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+    os.rename(tmp, output_path)
+
+
+def _print_summary(result):
+    print(f"=== EDGE_DISCOVERY_C_v1 ({result.get('status')}) ===")
+    if result.get("status") != "OK":
+        print(f"  reason: {result.get('reason', 'unknown')}")
+        return
+    for r in result.get("routes", []):
+        print(f"\n[{r['route']}] n_total={r['n_total']} · verdict={r['verdict']}")
+        if r.get("candidates_final"):
+            for c in r["candidates_final"]:
+                v = c.get("verdict", "N/A")
+                marker = "✅" if v == "SURVIVE" else "❌"
+                oos_delta = c.get("oos_delta_pct", "N/A")
+                print(f"  {marker} {c['feature']} {c['direction']}{c['threshold']} "
+                      f"(q={c['quantile']}) · TRAIN Δ={c['train_delta_pct']:+.4f}%p · "
+                      f"OOS Δ={oos_delta}%p · verdict={v}")
+        else:
+            print(f"  (0개 · TRAIN 필터 통과 없음)")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", default="/tmp/clm_trades.json",
+                    help="export_trade_records() JSON path")
+    ap.add_argument("--output", default="/tmp/c_result_latest.json",
+                    help="C_RESULT JSON output path")
+    ap.add_argument("--min-n", type=int, default=30,
+                    help="minimum records per route to run")
+    ap.add_argument("--train-frac", type=float, default=0.6,
+                    help="TRAIN fraction (rest = OOS)")
+    ap.add_argument("--max-candidates", type=int, default=3,
+                    help="max candidates per route (다중비교 할인)")
+    args = ap.parse_args()
+
+    result = run(
+        input_path=args.input,
+        output_path=args.output,
+        min_n=args.min_n,
+        train_frac=args.train_frac,
+        max_candidates=args.max_candidates,
+    )
+    _print_summary(result)
+    print(f"\n→ C_RESULT written: {args.output}")
+    # exit code: OK=0 · NOT_RUN=1
+    sys.exit(0 if result.get("status") == "OK" else 1)
+
+
+if __name__ == "__main__":
+    main()

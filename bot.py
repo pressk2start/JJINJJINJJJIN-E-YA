@@ -15871,12 +15871,23 @@ def export_trade_records(filepath="clm_trades.json"):
             route = stats.get("route", key.split(":")[0] if ":" in key else key)
             strat = stats.get("strat", key.split(":", 1)[1] if ":" in key else "")
             for tr in stats.get("trade_records", []):
+                # offline C (EDGE_DISCOVERY_C_v1) 필수 필드 (2026-09-04)
+                # entry_ts 는 exit_ts - hold 로 유도 (walk-forward 시간정렬 무결성)
+                _exit_ts = tr.get("exit_ts")
+                _hold = tr.get("hold", 0)
+                _entry_ts = (_exit_ts - _hold) if (_exit_ts is not None) else None
                 rec = {
                     "route": route,
                     "strat": strat,
+                    "market": tr.get("market", ""),
+                    "signal_id": tr.get("signal_id"),
+                    "route_epoch": tr.get("route_epoch"),
+                    "exit_origin": tr.get("exit_origin"),
+                    "entry_ts": _entry_ts,
+                    "exit_ts": _exit_ts,
                     "pnl": tr.get("pnl", 0),
                     "mfe": tr.get("mfe", 0),
-                    "hold": tr.get("hold", 0),
+                    "hold": _hold,
                     "exit_reason": tr.get("exit_reason", ""),
                 }
                 for k, v in tr.get("inds", {}).items():
