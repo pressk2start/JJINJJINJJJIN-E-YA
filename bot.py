@@ -2495,8 +2495,8 @@ def _common_cohort_paired_summary():
         # 이전 라벨 'CONTROL_A_matched' 는 오해 유발 (매칭≠청산) · triple 은 A2 참고로 강등
         lines = [
             f"COMMON_COHORT CONTROL_A_closed={len(control_a_common)}/{_target} "
-            f"(2-arm 확정 청산 · A KILL 기준) · "
-            f"paired_closed_n={len(_ids)} (triple · 3-arm A2 참고):",
+            f"(2-arm 확정 청산 · A [ARCHIVAL ONLY · CLOSED]) · "
+            f"paired_closed_n={len(_ids)} (triple · 3-arm A2 [TERMINATED]):",
             _bar_line,
         ]
         # advisor 2 우선 audit 라인 (사라진 pair 감지 · task #64)
@@ -2606,7 +2606,7 @@ def _common_cohort_paired_summary():
                     _a_divergence = _div
                     lines.append(
                         f"  A exit divergence vs CONTROL (triple 참고): {_div}/{_paired} "
-                        f"(A 고유 메커니즘 발동 카운트 · KILL 판정은 2-arm divergence 기준)"
+                        f"[ARCHIVAL ONLY · A CLOSED]"
                     )
         # ── advisor 3자 (2026-08-27) · CONTROL_A_closed 기반 primary KILL 지표 ─
         # 이전: KILL 을 triple (paired_closed_n) 에 바인딩 → 3-arm 대기로 stall
@@ -2714,10 +2714,10 @@ def _common_cohort_paired_summary():
                     f"A net/건={_a_net_per_2arm:+.3f}% WR={_a_wr_2arm:.0f}%"
                 )
                 lines.append(
-                    f"  Δ A vs CONTROL (2-arm CONTROL_A_closed): "
-                    f"{_a_delta_pct_2arm:+.3f}%p (n={_a_paired_2arm}) · "
-                    f"divergence={_a_divergence_2arm}/{_a_paired_2arm} "
-                    f"(A 고유 메커니즘 발동 카운트 · primary KILL 기준)"
+                    f"  post-final ΔA: {_a_delta_pct_2arm:+.3f}%p "
+                    f"(n={_a_paired_2arm}) [ARCHIVAL ONLY] · "
+                    f"divergence={_a_divergence_2arm}/{_a_paired_2arm} · "
+                    f"verdict reevaluation: DISABLED"
                 )
         # ── advisor 3자 (2026-09-23) · A 봉인 강제 · optional stopping 방지 ──
         # 이전 (2026-08-27): 데드라인 로직 (STRUCTURAL_KILL / 폐기 / 연장 / 경계 4중 분기)
