@@ -16,7 +16,7 @@ import jwt
 
 # advisor 3자 수렴 (2026-08-10 · task #56): A_CLEAN PURITY 판정 순수 함수 분리 ·
 # 9782331 계약 (AT본절 허용 · 본절SL/early_SL 금지) 을 pytest 로 회귀 방지.
-from _a_clean_purity import judge_a_clean_purity
+from _a_clean_purity import judge_a_clean_purity, split_early_sl_by_provenance
 
 # 🔧 WF 데이터 기반 전략 모듈 (bot.py에 인라인 통합)
 # strategy_v4 함수들은 아래 "# ============ strategy_v4 통합 ============" 섹션에 정의
@@ -2071,13 +2071,14 @@ def _shadow_contamination_check():
     4-state 판정:
       ✅ VALID              : 설정 OFF + 실측 청산 발생 + 모든 금지 exit 0건
       ⏳ PENDING_NO_EXIT    : 청산 이벤트 0건 (미확정 · 표본 부족)
-      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/early_SL) 발생
+      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/tiered_SL_early) 발생
       ❌ CONFIG_FAIL        : 설정 자체 실패 (be_off/tiered_off 없음)
 
     ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
-    허용 exit_reason: AT익절 · AT본절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
-    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL)
+    허용 exit_reason: AT익절 · AT본절 · AT타임아웃 · 손절SL(hold≥180s far_SL) ·
+                    hard_stop_early (sl_tiers=[] · hold<180s 손절SL · 백스톱 정상)
+    금지 exit_reason: 본절SL · tiered_SL_early (sl_tiers 존재 · hold<180s 손절SL)
 
     AT본절 재분류 이유 (2026-08-10 · advisor 3자 수렴 코드 감사 결과):
     -----------------------------------------------------------------
@@ -2104,7 +2105,10 @@ def _shadow_contamination_check():
 
     수정:
     - AT본절 을 허용 목록으로 재분류 (트레일 정상 청산)
-    - 본절SL (checkpoint BE) · early_SL (tiered SL) 만 금지 (진짜 배선 오염 지표)
+    - 본절SL (checkpoint BE) · tiered_SL_early (sl_tiers 존재 시 조기 티어드 발동) 만
+      금지 (진짜 배선 오염 지표 · advisor 3자 2026-09-23 옵션 B)
+    - hard_stop_early (sl_tiers=[] 인 route 에서 hold<180s "손절SL") 는 spec-permitted:
+      hard_stop 3% 백스톱 조기 발동 (급격한 dump 방어) · A_CLEAN 스펙 정상
     - LIVE = CONTROL 청산 세분화 (AT본절 = 본절 근처 트레일 · 별도 의미)
       A_CLEAN = TRAIL_HIT 통합 개념 (스펙 line 71 · 손실/이익 무관)
 
@@ -2155,26 +2159,38 @@ def _shadow_contamination_check():
                                 cnt += 1
                     return cnt
                 # 현 epoch 카운트
+                # advisor 3자 (2026-09-23 · 옵션 B · ROOT_CAUSE=classification 정합성):
+                #   "손절SL" AND hold<180 을 sl_tiers provenance 로 이등분:
+                #     - has_tiered=True  → tiered_sl_early (forbidden)
+                #     - has_tiered=False → hard_stop_early (spec-permitted · 백스톱 정상)
+                #   provenance = 이 epoch 의 config_tiered_off (한 epoch 내 config 안정성 계약).
+                _has_tiered = not config_tiered_off
                 be_sl_e = _count_by_reason(_epoch_trs, "본절SL")
                 at_be_e = _count_by_reason(_epoch_trs, "AT본절")
-                early_sl_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h < 180)
+                tiered_sl_early_e, hard_stop_early_e = split_early_sl_by_provenance(
+                    _epoch_trs, _has_tiered, arm_sec=180
+                )
                 trail_hit_e = _count_by_reason(_epoch_trs, "AT익절")
                 hold_cap_e = _count_by_reason(_epoch_trs, "AT타임아웃")
                 far_stop_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h >= 180)
-                total_exits_e = trail_hit_e + hold_cap_e + far_stop_e + be_sl_e + at_be_e + early_sl_e
-                # legacy 카운트 (표시용)
+                total_exits_e = (trail_hit_e + hold_cap_e + far_stop_e + be_sl_e + at_be_e
+                                 + tiered_sl_early_e + hard_stop_early_e)
+                # legacy 카운트 (표시용 · 같은 provenance 규칙 적용)
                 be_sl_l = _count_by_reason(_legacy_trs, "본절SL")
                 at_be_l = _count_by_reason(_legacy_trs, "AT본절")
-                early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
-                legacy_forbidden = be_sl_l + early_sl_l
+                tiered_sl_early_l, hard_stop_early_l = split_early_sl_by_provenance(
+                    _legacy_trs, _has_tiered, arm_sec=180
+                )
+                legacy_forbidden = be_sl_l + tiered_sl_early_l
                 # VALIDATION 게이트 판정 (advisor 3자 수렴 · pure function 위임 · 2026-08-10 task #56)
                 # 판정 로직은 _a_clean_purity.judge_a_clean_purity 에 · pytest 로 회귀 방지.
                 # AT본절 은 forbidden 에서 제거 (9782331 · docstring 3겹 감사 참조).
-                config_ok = config_be_off and config_tiered_off
-                # 판정 위임 (pure function · pytest 회귀 방지 · task #56)
+                # advisor 3자 (2026-09-23 옵션 B): forbidden 인수는 tiered_sl_early 만 · hard_stop_early
+                # 는 spec-permitted 이므로 purity 판정 입력에서 제외 (리포트 표시만).
+                # 판정 위임 (pure function · pytest 회귀 방지 · task #56 · 옵션 B 갱신)
                 verdict, status_note = judge_a_clean_purity(
                     config_be_off, config_tiered_off,
-                    total_exits_e, be_sl_e, early_sl_e,
+                    total_exits_e, be_sl_e, tiered_sl_early_e,
                     len(_legacy_trs),
                 )
                 # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
@@ -2184,12 +2200,14 @@ def _shadow_contamination_check():
                     f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
                 lines.append(
-                    f"    epoch 실측: 본절SL={be_sl_e} early_SL={early_sl_e} · "
-                    f"허용[AT익절={trail_hit_e} AT본절={at_be_e} AT타임아웃={hold_cap_e} far_SL={far_stop_e}]"
+                    f"    epoch 실측 금지: 본절SL={be_sl_e} tiered_SL_early={tiered_sl_early_e} · "
+                    f"허용[AT익절={trail_hit_e} AT본절={at_be_e} AT타임아웃={hold_cap_e} "
+                    f"far_SL={far_stop_e} hard_stop_early={hard_stop_early_e}]"
                 )
-                if legacy_forbidden > 0:
+                if legacy_forbidden > 0 or hard_stop_early_l > 0:
                     lines.append(
-                        f"    legacy 참고: 본절SL={be_sl_l} early_SL={early_sl_l} AT본절={at_be_l} "
+                        f"    legacy 참고: 본절SL={be_sl_l} tiered_SL_early={tiered_sl_early_l} "
+                        f"hard_stop_early={hard_stop_early_l} AT본절={at_be_l} "
                         f"(배선 전 표본 · 판정 제외)"
                     )
                 lines.append(f"    → {verdict} {status_note}")
