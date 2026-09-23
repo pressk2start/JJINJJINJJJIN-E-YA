@@ -16,7 +16,7 @@ import jwt
 
 # advisor 3자 수렴 (2026-08-10 · task #56): A_CLEAN PURITY 판정 순수 함수 분리 ·
 # 9782331 계약 (AT본절 허용 · 본절SL/early_SL 금지) 을 pytest 로 회귀 방지.
-from _a_clean_purity import judge_a_clean_purity
+from _a_clean_purity import judge_a_clean_purity, split_early_sl_by_provenance
 
 # 🔧 WF 데이터 기반 전략 모듈 (bot.py에 인라인 통합)
 # strategy_v4 함수들은 아래 "# ============ strategy_v4 통합 ============" 섹션에 정의
@@ -2071,13 +2071,14 @@ def _shadow_contamination_check():
     4-state 판정:
       ✅ VALID              : 설정 OFF + 실측 청산 발생 + 모든 금지 exit 0건
       ⏳ PENDING_NO_EXIT    : 청산 이벤트 0건 (미확정 · 표본 부족)
-      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/early_SL) 발생
+      ❌ CONTAMINATED       : 실측 금지 exit (본절SL/tiered_SL_early) 발생
       ❌ CONFIG_FAIL        : 설정 자체 실패 (be_off/tiered_off 없음)
 
     ⚠ VALID 아니면 성과 (WR/PnL/cap/MDD) 해석 원천 차단.
 
-    허용 exit_reason: AT익절 · AT본절 · AT타임아웃 · 손절SL(hold≥180s far_SL)
-    금지 exit_reason: 본절SL · early_SL(hold<180s 손절SL)
+    허용 exit_reason: AT익절 · AT본절 · AT타임아웃 · 손절SL(hold≥180s far_SL) ·
+                    hard_stop_early (sl_tiers=[] · hold<180s 손절SL · 백스톱 정상)
+    금지 exit_reason: 본절SL · tiered_SL_early (sl_tiers 존재 · hold<180s 손절SL)
 
     AT본절 재분류 이유 (2026-08-10 · advisor 3자 수렴 코드 감사 결과):
     -----------------------------------------------------------------
@@ -2104,7 +2105,10 @@ def _shadow_contamination_check():
 
     수정:
     - AT본절 을 허용 목록으로 재분류 (트레일 정상 청산)
-    - 본절SL (checkpoint BE) · early_SL (tiered SL) 만 금지 (진짜 배선 오염 지표)
+    - 본절SL (checkpoint BE) · tiered_SL_early (sl_tiers 존재 시 조기 티어드 발동) 만
+      금지 (진짜 배선 오염 지표 · advisor 3자 2026-09-23 옵션 B)
+    - hard_stop_early (sl_tiers=[] 인 route 에서 hold<180s "손절SL") 는 spec-permitted:
+      hard_stop 3% 백스톱 조기 발동 (급격한 dump 방어) · A_CLEAN 스펙 정상
     - LIVE = CONTROL 청산 세분화 (AT본절 = 본절 근처 트레일 · 별도 의미)
       A_CLEAN = TRAIL_HIT 통합 개념 (스펙 line 71 · 손실/이익 무관)
 
@@ -2155,26 +2159,38 @@ def _shadow_contamination_check():
                                 cnt += 1
                     return cnt
                 # 현 epoch 카운트
+                # advisor 3자 (2026-09-23 · 옵션 B · ROOT_CAUSE=classification 정합성):
+                #   "손절SL" AND hold<180 을 sl_tiers provenance 로 이등분:
+                #     - has_tiered=True  → tiered_sl_early (forbidden)
+                #     - has_tiered=False → hard_stop_early (spec-permitted · 백스톱 정상)
+                #   provenance = 이 epoch 의 config_tiered_off (한 epoch 내 config 안정성 계약).
+                _has_tiered = not config_tiered_off
                 be_sl_e = _count_by_reason(_epoch_trs, "본절SL")
                 at_be_e = _count_by_reason(_epoch_trs, "AT본절")
-                early_sl_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h < 180)
+                tiered_sl_early_e, hard_stop_early_e = split_early_sl_by_provenance(
+                    _epoch_trs, _has_tiered, arm_sec=180
+                )
                 trail_hit_e = _count_by_reason(_epoch_trs, "AT익절")
                 hold_cap_e = _count_by_reason(_epoch_trs, "AT타임아웃")
                 far_stop_e = _count_by_reason(_epoch_trs, "손절SL", lambda h: h >= 180)
-                total_exits_e = trail_hit_e + hold_cap_e + far_stop_e + be_sl_e + at_be_e + early_sl_e
-                # legacy 카운트 (표시용)
+                total_exits_e = (trail_hit_e + hold_cap_e + far_stop_e + be_sl_e + at_be_e
+                                 + tiered_sl_early_e + hard_stop_early_e)
+                # legacy 카운트 (표시용 · 같은 provenance 규칙 적용)
                 be_sl_l = _count_by_reason(_legacy_trs, "본절SL")
                 at_be_l = _count_by_reason(_legacy_trs, "AT본절")
-                early_sl_l = _count_by_reason(_legacy_trs, "손절SL", lambda h: h < 180)
-                legacy_forbidden = be_sl_l + early_sl_l
+                tiered_sl_early_l, hard_stop_early_l = split_early_sl_by_provenance(
+                    _legacy_trs, _has_tiered, arm_sec=180
+                )
+                legacy_forbidden = be_sl_l + tiered_sl_early_l
                 # VALIDATION 게이트 판정 (advisor 3자 수렴 · pure function 위임 · 2026-08-10 task #56)
                 # 판정 로직은 _a_clean_purity.judge_a_clean_purity 에 · pytest 로 회귀 방지.
                 # AT본절 은 forbidden 에서 제거 (9782331 · docstring 3겹 감사 참조).
-                config_ok = config_be_off and config_tiered_off
-                # 판정 위임 (pure function · pytest 회귀 방지 · task #56)
+                # advisor 3자 (2026-09-23 옵션 B): forbidden 인수는 tiered_sl_early 만 · hard_stop_early
+                # 는 spec-permitted 이므로 purity 판정 입력에서 제외 (리포트 표시만).
+                # 판정 위임 (pure function · pytest 회귀 방지 · task #56 · 옵션 B 갱신)
                 verdict, status_note = judge_a_clean_purity(
                     config_be_off, config_tiered_off,
-                    total_exits_e, be_sl_e, early_sl_e,
+                    total_exits_e, be_sl_e, tiered_sl_early_e,
                     len(_legacy_trs),
                 )
                 # 상세 라인 (advisor 2 아키텍처: 실험 계약 버전 표시 · 배포 SHA 와 분리)
@@ -2184,12 +2200,14 @@ def _shadow_contamination_check():
                     f"설정[BE=OFF={config_be_off}, tiered=OFF={config_tiered_off}]"
                 )
                 lines.append(
-                    f"    epoch 실측: 본절SL={be_sl_e} early_SL={early_sl_e} · "
-                    f"허용[AT익절={trail_hit_e} AT본절={at_be_e} AT타임아웃={hold_cap_e} far_SL={far_stop_e}]"
+                    f"    epoch 실측 금지: 본절SL={be_sl_e} tiered_SL_early={tiered_sl_early_e} · "
+                    f"허용[AT익절={trail_hit_e} AT본절={at_be_e} AT타임아웃={hold_cap_e} "
+                    f"far_SL={far_stop_e} hard_stop_early={hard_stop_early_e}]"
                 )
-                if legacy_forbidden > 0:
+                if legacy_forbidden > 0 or hard_stop_early_l > 0:
                     lines.append(
-                        f"    legacy 참고: 본절SL={be_sl_l} early_SL={early_sl_l} AT본절={at_be_l} "
+                        f"    legacy 참고: 본절SL={be_sl_l} tiered_SL_early={tiered_sl_early_l} "
+                        f"hard_stop_early={hard_stop_early_l} AT본절={at_be_l} "
                         f"(배선 전 표본 · 판정 제외)"
                     )
                 lines.append(f"    → {verdict} {status_note}")
@@ -2276,13 +2294,14 @@ def _a2_audit_summary():
         reject_ratio = reject_cnt / eligible * 100
         missing_rate = (vr5_missing / a2_n * 100) if a2_n > 0 else 0
         lines = [
-            # advisor 3자 확정 (task #59): 실 A×A2 계약은 밴드 [3.0, 3.5]
-            # check_fn 상한 (vr5≤3.5) + ind_filters 하한 (vr5≥3.0 · base climax 요건) 조합
-            f"A2_STATUS: band={vr5_cap_lo:.1f}≤vr5≤{vr5_cap_hi:.1f} · state=🔒 FROZEN (재튜닝 = 전향검증 무효)",
-            f"  변경 조건 (3중 · 모두 필요):",
-            f"    □ common_n ≥ 50",
-            f"    □ paired A×A2 shadow 결과 확정",
-            f"    □ reviewer 승인",
+            # advisor 3자 (2026-09-23) · A2 봉인 강제 · optional stopping 방지
+            # 이전: FROZEN + 변경 조건 3중 (common_n≥50 · paired shadow · reviewer 승인)
+            #   문제: A2 = TERMINATED_INFEASIBLE 봉인 (자문 3자 확정) 이후에도
+            #   "FROZEN · 변경 조건" 라벨이 계속 출력되어 재개 가능 서사 자동 생성
+            # 정정: A2_STATUS = TERMINATED_INFEASIBLE / CLOSED · reference only
+            f"A2_STATUS: band={vr5_cap_lo:.1f}≤vr5≤{vr5_cap_hi:.1f} · "
+            f"state=🔒 TERMINATED_INFEASIBLE / CLOSED (재개 X · reference only)",
+            f"  historical metrics: archive/debug only · 판정 엔진 입력 X · cutoff/band 재튜닝 금지",
             # advisor 3자 (2026-08-14 · task #62): 층별 명명 분리 · 이전 "pass" 용어
             # 이 audit/source 두 층에서 다른 의미로 재사용되어 혼선 (audit pass=0 vs source pass=X)
             # 재정의:
@@ -2331,29 +2350,10 @@ def _a2_audit_summary():
                 f"  ℹ A2 pass 회계: source_pass={_src_pass_sum} = "
                 f"ind_filter_drop={_ind_drop_total} + shadow_vp_created≈{_est_vp_created}"
             )
-        # ── A2 EXPERIMENT_INFEASIBLE 판정 (advisor 3자 · Edge discovery mode) ──
-        # 이전: vr5_pass_low<5 기준 (audit key 버그로 항상 0 이었음 · task #60 fix 후 정상화)
-        # 강화: band [3.0, 3.5] 실 VP 생산률 (_est_vp_created) 기반 · 명확한 종료 기준
-        #   eligible ≥ 100 · _est_vp_created < 5 → 구조적 불가 (종료 후보 확정)
-        #   eligible ≥ 50 · _est_vp_created < 3 → 조기 경보 (feasibility 위험)
-        #   그 외 · reject_ratio ≥ 90 → 관찰 지속 라벨
-        if eligible >= 100 and _est_vp_created < 5:
-            lines.append(
-                f"  🚫 A2 EXPERIMENT_INFEASIBLE 확정: eligible={eligible}≥100 · "
-                f"band[{vr5_cap_lo},{vr5_cap_hi}] 실 VP={_est_vp_created}<5 · "
-                f"현 라이브 신호 분포에서 A2 표본 생성 구조적 불가 · "
-                f"cutoff/band 재튜닝 절대 금지 · A×A2 route 종료 검토"
-            )
-        elif eligible >= 50 and _est_vp_created < 3:
-            lines.append(
-                f"  ⚠ A2 feasibility 경보: eligible={eligible}≥50 · 실 VP={_est_vp_created}<3 · "
-                f"100 도달 시 EXPERIMENT_INFEASIBLE 자동 판정 예상 · 새 후보 준비 권장"
-            )
-        elif eligible >= 30 and reject_ratio >= 90:
-            lines.append(
-                f"  ⚠ A2 표본 생성률 낮음: eligible={eligible} reject_ratio={reject_ratio:.0f}% "
-                f"· band 하한 drop 도 함께 관찰 (100 도달 시 INFEASIBLE 판정)"
-            )
+        # advisor 3자 (2026-09-23): A2 봉인 이후 EXPERIMENT_INFEASIBLE 진행 판정 라벨 제거
+        # 이전: "100 도달 시 INFEASIBLE" · "feasibility 경보" · "종료 후보 확정" 등 진행형 라벨
+        #   문제: A2 는 이미 TERMINATED_INFEASIBLE 봉인 · 진행 라벨 자체가 재개 서사 유도
+        # 정정: 봉인 상태에서 재판정 라벨 없음 · eligible/reject_ratio 는 audit 계층 회계로만 유지
         # 결측군 편중 감사 (advisor 2)
         if vr5_missing >= 3:
             _mp_avg = (sum(missing_pnls) / len(missing_pnls) * 100) if missing_pnls else 0
@@ -2513,8 +2513,8 @@ def _common_cohort_paired_summary():
         # 이전 라벨 'CONTROL_A_matched' 는 오해 유발 (매칭≠청산) · triple 은 A2 참고로 강등
         lines = [
             f"COMMON_COHORT CONTROL_A_closed={len(control_a_common)}/{_target} "
-            f"(2-arm 확정 청산 · A KILL 기준) · "
-            f"paired_closed_n={len(_ids)} (triple · 3-arm A2 참고):",
+            f"(2-arm 확정 청산 · A [ARCHIVAL ONLY · CLOSED]) · "
+            f"paired_closed_n={len(_ids)} (triple · 3-arm A2 [TERMINATED]):",
             _bar_line,
         ]
         # advisor 2 우선 audit 라인 (사라진 pair 감지 · task #64)
@@ -2624,7 +2624,7 @@ def _common_cohort_paired_summary():
                     _a_divergence = _div
                     lines.append(
                         f"  A exit divergence vs CONTROL (triple 참고): {_div}/{_paired} "
-                        f"(A 고유 메커니즘 발동 카운트 · KILL 판정은 2-arm divergence 기준)"
+                        f"[ARCHIVAL ONLY · A CLOSED]"
                     )
         # ── advisor 3자 (2026-08-27) · CONTROL_A_closed 기반 primary KILL 지표 ─
         # 이전: KILL 을 triple (paired_closed_n) 에 바인딩 → 3-arm 대기로 stall
@@ -2732,89 +2732,39 @@ def _common_cohort_paired_summary():
                     f"A net/건={_a_net_per_2arm:+.3f}% WR={_a_wr_2arm:.0f}%"
                 )
                 lines.append(
-                    f"  Δ A vs CONTROL (2-arm CONTROL_A_closed): "
-                    f"{_a_delta_pct_2arm:+.3f}%p (n={_a_paired_2arm}) · "
-                    f"divergence={_a_divergence_2arm}/{_a_paired_2arm} "
-                    f"(A 고유 메커니즘 발동 카운트 · primary KILL 기준)"
+                    f"  post-final ΔA: {_a_delta_pct_2arm:+.3f}%p "
+                    f"(n={_a_paired_2arm}) [ARCHIVAL ONLY] · "
+                    f"divergence={_a_divergence_2arm}/{_a_paired_2arm} · "
+                    f"verdict reevaluation: DISABLED"
                 )
-        # ── advisor 3자 · Edge discovery mode 데드라인 (2026-08-20/21/27 · task #63 · CONTROL_A_closed rewire) ──
-        # 이전: 데드라인이 triple (_ids) 카운터를 조회 → A2 매칭 대기로 KILL 지연
-        # 정정 v3 (2026-08-27): 데드라인은 CONTROL_A_closed (control_a_common) + ΔA_2arm + divergence_2arm 기준
-        #   - divergence_2arm=0 → 🚫 STRUCTURAL_KILL
-        #   - divergence_2arm>0 · |ΔA_2arm|<0.05 → 🚫 폐기 후보
-        #   - divergence_2arm>0 · ΔA_2arm≥+0.10 → ✅ 연장
-        #   - divergence_2arm>0 · 경계 → ⚠ n=50 대기
-        # triple/paired_closed_n 은 A2 실험 참고용으로만 유지
-        if len(control_a_common) < 30:
+        # ── advisor 3자 (2026-09-23) · A 봉인 강제 · optional stopping 방지 ──
+        # 이전 (2026-08-27): 데드라인 로직 (STRUCTURAL_KILL / 폐기 / 연장 / 경계 4중 분기)
+        #   문제: A verdict = REJECTED_FINAL 봉인 (aa5ef7a · 33-pair archive) 이후에도
+        #   cohort n 증가 (37→51→103) 마다 데드라인이 계속 발동 · peeked cohort ΔA drift
+        #   (-0.037 → +0.057%p 부호 반전) 로 "경계 판정 · n=50 대기 · 100 승격" 라벨을 출력 →
+        #   optional stopping / garden of forking paths · 봉인 재개 서사 자동 생성 (규율 위반)
+        # 정정 (2026-09-23):
+        #   A_STATUS = REJECTED_FINAL / CLOSED · primary verdict immutable
+        #   후속 표본 = archival / confirmation only (drift 관찰만 · 판정 재개 X)
+        #   재개 유일 경로 = 지금 (n 시점) 부터 fresh forward cohort 새로 등록 후 untouched 데이터
+        # 검증 게이트 (VERIFY_FAIL) 는 유지 (accounting 정합성 · 봉인 판정과 독립)
+        if _a_paired_2arm != len(control_a_common) or _a_delta_pct_2arm is None:
             lines.append(
-                f"  ※ CONTROL_A_closed={len(control_a_common)}<30: 참고만 · 판정 대기 "
-                f"(30 첫판정 · 50 확인 · 100 승격 · A KILL 기준)"
+                f"  ⚠ VERIFY_FAIL · accounting 불일치: "
+                f"_a_paired_2arm={_a_paired_2arm} vs CONTROL_A_closed={len(control_a_common)} "
+                f"불일치 또는 ΔA 미계산 · matched-relabel 회귀 의심 · 코드 감사"
             )
-        else:
-            # 검증 게이트 (advisor 3자 · 2026-08-27): count == ΔA/divergence 기저 n 일치
-            # trade_records 는 terminal-only (_shadow_record_result 는 closed_results 만 축적) ·
-            # 구조상 _a_paired_2arm == len(control_a_common) 이어야 함
-            # 불일치 = matched-relabel 회귀 신호 → KILL 자동 보류
-            _deadline = []
-            if _a_paired_2arm != len(control_a_common) or _a_delta_pct_2arm is None:
-                _deadline.append(
-                    f"  ⚠ VERIFY_FAIL · A KILL 자동 보류: "
-                    f"_a_paired_2arm={_a_paired_2arm} vs CONTROL_A_closed={len(control_a_common)} "
-                    f"불일치 또는 ΔA 미계산 · matched-relabel 회귀 의심 · 코드 감사"
-                )
-            else:
-                if _a_divergence_2arm == 0:
-                    _deadline.append(
-                        f"  🚫 A 실험 STRUCTURAL_KILL (CONTROL_A_closed={len(control_a_common)}≥30 · "
-                        f"divergence_2arm=0): "
-                        f"A 고유 메커니즘 (BE/early_SL/hard_stop) 이 2-arm 매칭쌍 어디에도 안 물림 · "
-                        f"이 신호 모집단에서 A 는 구조적 무력 · 표본 더 모아도 안 갈림 · "
-                        f"강한 KILL 근거 · 자원 새 후보(feature_screen)로 즉시 전환"
-                    )
-                elif abs(_a_delta_pct_2arm) < 0.05:
-                    _deadline.append(
-                        f"  🚫 A 실험 폐기 후보 (CONTROL_A_closed={len(control_a_common)}≥30 · "
-                        f"divergence_2arm={_a_divergence_2arm}>0 · "
-                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p ≈ 0): "
-                        f"갈리는데 개선 없음 · 50까지 무작정 X · 새 후보로 전환 검토"
-                    )
-                elif _a_delta_pct_2arm >= 0.10:
-                    _deadline.append(
-                        f"  ✅ A 실험 연장 (CONTROL_A_closed={len(control_a_common)}≥30 · "
-                        f"divergence_2arm={_a_divergence_2arm} · "
-                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p 유의미한 양수): "
-                        f"50까지 검증 지속 · MDD/꼬리 개선 병행 확인"
-                    )
-                else:
-                    _deadline.append(
-                        f"  ⚠ A 실험 경계 판정 (CONTROL_A_closed={len(control_a_common)}≥30 · "
-                        f"divergence_2arm={_a_divergence_2arm} · "
-                        f"ΔA_2arm={_a_delta_pct_2arm:+.3f}%p 경계 [-0.05, +0.10]): "
-                        f"n=50까지 방향 확정 대기"
-                    )
-            if _a_a2_delta_pct is not None and abs(_a_a2_delta_pct) < 0.05:
-                _deadline.append(
-                    f"  ℹ A×A2 vs CONTROL (triple) ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
-                    f"A2 손실제거 가설 미지지 · cutoff 재튜닝 금지 유지"
-                )
-            # A_A2_common<10 · A 판정 시점 동시 A2 INFEASIBLE 종료 라벨 (advisor 3자 사전등록)
-            _a_a2_n = len(a_a2_common)
-            if _a_a2_n < 10:
-                _deadline.append(
-                    f"  🚫 A2 실험 동시 종료 후보 (A_A2_common={_a_a2_n}<10 · "
-                    f"A 판정 시점 실 검증 표본 부족): "
-                    f"band[3.0, 3.5] 표본 생산 구조적 불가 · cutoff/band 재튜닝 절대 금지 · "
-                    f"A2 route 종료 검토 (feasibility failure)"
-                )
-            lines.extend(_deadline)
-            if len(control_a_common) < 50:
-                lines.append(
-                    f"  ※ CONTROL_A_closed=30~49: 첫판정 단계 · 50 확인 · 100 승격 대기"
-                )
-            else:
-                lines.append(
-                    f"  ※ CONTROL_A_closed≥50: 확인 판정 도달 · 100 승격 대기"
-                )
+        lines.append(
+            f"  🔒 A_STATUS = REJECTED_FINAL / CLOSED "
+            f"(archived at n=37 · aa5ef7a · immutable) · "
+            f"post-archive 표본 = drift 관찰 only · 재판정 금지 · peeked cohort 로 재개 X · "
+            f"재개 시 fresh forward cohort 새 preregister 필요"
+        )
+        if _a_a2_delta_pct is not None and abs(_a_a2_delta_pct) < 0.05:
+            lines.append(
+                f"  ℹ A×A2 vs CONTROL (triple · archive) ≈ 0 (ΔA×A2={_a_a2_delta_pct:+.3f}%p) · "
+                f"A2 손실제거 가설 미지지 (A2 = TERMINATED_INFEASIBLE 봉인)"
+            )
         return "\n".join(lines)
     except Exception as exc:
         return f"COMMON_COHORT: ERROR {exc}"
