@@ -1008,9 +1008,16 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
                 risk_override = float(risk_calc_krw) < entry_krw
             except Exception:
                 pass
+        # P1-a (advisor 3자 · 2026-09-24 · measurement-only):
+        # shadow_ref_id = "{market}:{int(entry_ts)}" · shadow signal_id 와 동일 포맷 ·
+        # 정확 매칭 안 되면 ±60s window 로 조인 (P1 후속 forensic 스크립트 담당).
+        # is_live=True (이 함수는 실 매수 후만 호출됨 · shadow 는 별도 경로).
+        shadow_ref_id = f"{market}:{int(entry_ts)}"
         event = {
             "event_type": "ENTRY_FILLED",
             "trade_id": trade_id,
+            "shadow_ref_id": shadow_ref_id,
+            "is_live": True,
             "market": market,
             "route": route,
             "entry_order_uuid": entry_order_uuid,
@@ -1029,10 +1036,11 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
             "max_seed_krw": max_seed_krw,
         }
         _live_trade_write_event(event)
-        # pending에 exit 조인용 정보만 남김 (trade_id + entry_krw + entry_ts)
+        # pending에 exit 조인용 정보만 남김 (trade_id + entry_krw + entry_ts + shadow_ref_id)
         with _LIVE_TRADE_LOCK:
             _LIVE_TRADE_PENDING[market] = {
                 "trade_id": trade_id,
+                "shadow_ref_id": shadow_ref_id,
                 "entry_ts": entry_ts,
                 "entry_krw": entry_krw,
                 "filled_volume": filled_volume,
@@ -1061,6 +1069,7 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         exit_ts = time.time()
         exit_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(exit_ts))
         trade_id = pending["trade_id"]
+        shadow_ref_id = pending.get("shadow_ref_id")
         entry_krw = pending.get("entry_krw", 0)
         entry_vol = pending.get("filled_volume", 0)
         # net_pnl_pct 스케일 자동 판별 (소수 vs 퍼센트)
@@ -1080,10 +1089,12 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         # executed_exit_volume 기본값: 전체 volume
         if executed_exit_volume is None:
             executed_exit_volume = entry_vol
-        # EXIT_FILLED 이벤트
+        # EXIT_FILLED 이벤트 (P1-a: shadow_ref_id 는 pending 에서 전파 · pair 조인 키)
         exit_event = {
             "event_type": "EXIT_FILLED",
             "trade_id": trade_id,
+            "shadow_ref_id": shadow_ref_id,
+            "is_live": True,
             "market": market,
             "exit_order_uuid": exit_order_uuid,
             "exit_time": exit_iso,
@@ -1100,6 +1111,8 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         closed_event = {
             "event_type": "TRADE_CLOSED",
             "trade_id": trade_id,
+            "shadow_ref_id": shadow_ref_id,
+            "is_live": True,
             "market": market,
             "hold_sec": round(hold_sec, 1) if hold_sec else None,
             "exit_reason": exit_reason,
@@ -1955,6 +1968,21 @@ def _pass_entry_funnel_summary():
                 parts.append(f"send_fail[{_fail_parts}]")
         except Exception:
             pass
+        # P1-a exchange lifecycle 계측 노출 (advisor 3자 · 2026-09-24 · measurement-only):
+        # exch_limit_submit/fill_full/cancel · exch_market_fallback · exch_market_direct
+        # hybrid_buy 내부 경로 관측 · 실행 로직 무변경
+        try:
+            with _PIPELINE_COUNTERS_LOCK:
+                _exch = {
+                    k[len("exch_"):]: v
+                    for k, v in _PIPELINE_COUNTERS.items()
+                    if k.startswith("exch_") and v > 0
+                }
+            if _exch:
+                _exch_parts = " ".join(f"{r}={n}" for r, n in sorted(_exch.items(), key=lambda x: -x[1]))
+                parts.append(f"exch[{_exch_parts}]")
+        except Exception:
+            pass
         # advisor 지적: 정상 안전장치 vs 이상 판단
         # send_attempt < pass 면 pre_entry 차단 (killswitch/cooldown/daily_guard 등)
         # send_success < send_attempt 면 open_auto_position 내부 skip
@@ -2053,7 +2081,8 @@ def _shadow_exit_engine_config_summary():
             _tiered_sl_str = f"tiered{len(sl_tiers)}" if sl_tiers else "OFF"
             _hard_stop_str = f"{sl_pct*100:.1f}%"
             _trail_str = f"arm{arm_sec}s/bp{int(trail_pct*10000)}/hold{hold_sec}s"
-            _live_tag = " LIVE" if cfg.get("enabled") else ""
+            # advisor 3자 (2026-09-24 · P1-b): "LIVE" → "CURRENT_LIVE_ROUTE" 라벨 정합성
+            _live_tag = " CURRENT_LIVE_ROUTE" if cfg.get("enabled") else ""
             lines.append(
                 f"  {route}{_live_tag}: BE={_be_str} early_SL={_tiered_sl_str} "
                 f"hard_stop={_hard_stop_str} trail={_trail_str}"
@@ -5098,8 +5127,18 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
     except Exception:
         pass
 
+    # P1-a exchange lifecycle 계측 (advisor 3자 · 2026-09-24 · measurement-only · 예외 격리):
+    #   exch_limit_submit / exch_limit_fill_full / exch_limit_cancel /
+    #   exch_market_fallback / exch_market_direct — 실행 로직 무변경 · 카운터만
+    def _p1_inc(_k):
+        try:
+            _pipeline_inc(_k)
+        except Exception:
+            pass
+
     if not ask1_price or ask1_price <= 0:
         print(f"[HYBRID] {market} 호가 정보 없음 → 시장가 폴백")
+        _p1_inc("exch_market_direct")
         return place_market_buy(market, krw_amount)
 
     buy_volume = krw_amount / ask1_price
@@ -5107,23 +5146,28 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
 
     if buy_volume <= 0 or ask1_price * buy_volume < 5000:
         print(f"[HYBRID] {market} 주문금액 부족 → 시장가 폴백")
+        _p1_inc("exch_market_direct")
         return place_market_buy(market, krw_amount)
 
     try:
+        _p1_inc("exch_limit_submit")
         limit_res = place_limit_buy(market, ask1_price, buy_volume)
         if not limit_res or not isinstance(limit_res, dict):
             print(f"[HYBRID] {market} 지정가 주문 실패 → 시장가 폴백")
+            _p1_inc("exch_market_fallback")
             return place_market_buy(market, krw_amount)
 
         order_uuid = limit_res.get("uuid")
         if not order_uuid:
             print(f"[HYBRID] {market} 지정가 UUID 없음 → 시장가 폴백")
+            _p1_inc("exch_market_fallback")
             return place_market_buy(market, krw_amount)
 
         print(f"[HYBRID] {market} 지정가 매수 @ {ask1_price:,.0f}원 × {buy_volume:.6f} | 대기 {timeout_sec}초")
 
     except Exception as e:
         print(f"[HYBRID] {market} 지정가 예외: {e} → 시장가 폴백")
+        _p1_inc("exch_market_fallback")
         return place_market_buy(market, krw_amount)
 
     deadline = time.time() + timeout_sec
@@ -5135,6 +5179,7 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
             state = od.get("state", "")
             if state == "done":
                 print(f"[HYBRID] {market} 지정가 전량체결!")
+                _p1_inc("exch_limit_fill_full")
                 # 실체결 audit log: ENTRY_FILLED 이벤트 append (조언자 스펙)
                 try:
                     _executed_vol = float(od.get("executed_volume", 0) or 0)
@@ -5161,6 +5206,7 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
         except Exception as _poll_e:
             print(f"[HYBRID] {market} 주문조회 실패: {_poll_e}")
 
+    _p1_inc("exch_limit_cancel")
     cancel_order(order_uuid)  # 🔧 FIX: 취소 먼저 → 체결량 확정 후 잔여 계산 (레이스 방지)
 
     # 🔧 FIX: 취소 후 최종 체결량 재조회 (취소 전 od는 stale → 과잉매수 위험)
@@ -5207,6 +5253,7 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
         except Exception:
             pass  # 조회 실패 시 기존 로직 진행
         print(f"[HYBRID] {market} 잔여분 시장가 매수 {remaining_krw:,}원")
+        _p1_inc("exch_market_fallback")
         try:
             place_market_buy(market, remaining_krw)
             return limit_res
@@ -15785,7 +15832,9 @@ def _v4_shadow_score_compact():
                 icon = "🟡"
             else:
                 icon = "🔴"
-            tag = " LIVE" if route in _PRODUCTION_ROUTES else ""
+            # advisor 3자 (2026-09-24 · P1-b): "LIVE" → "CURRENT_LIVE_ROUTE" 라벨 정합성
+            # 배경: 여러 route 가 후보 상태 · 실제 현재 LIVE 로 배선된 route 만 명확히 태그
+            tag = " CURRENT_LIVE_ROUTE" if route in _PRODUCTION_ROUTES else ""
             _scored_routes.append(
                 f"{icon} {route} {n}전{wins}승 wr{wr:.0f}%"
                 f" pnl{avg_pnl:+.2f} cap{cap:.0f}{tag}")
@@ -15897,7 +15946,8 @@ def _v4_shadow_report_lines():
                 state = "collecting"
             elif route in _PRODUCTION_ROUTES:
                 icon = "🟢" if wr >= 50 else "🟠" if wr >= 40 else "🔴"
-                state = "LIVE"
+                # advisor 3자 (2026-09-24 · P1-b): 라벨 정합성 · 실 현재 LIVE route 만 명시
+                state = "CURRENT_LIVE_ROUTE"
             elif wr >= 55:
                 icon = "🟢"
                 state = "cont"
