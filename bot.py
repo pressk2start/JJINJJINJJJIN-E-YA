@@ -1015,6 +1015,7 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
         shadow_ref_id = f"{market}:{int(entry_ts)}"
         event = {
             "event_type": "ENTRY_FILLED",
+            "schema_v": 2,
             "trade_id": trade_id,
             "shadow_ref_id": shadow_ref_id,
             "is_live": True,
@@ -1059,7 +1060,18 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
                          exit_fee_krw=None, hold_sec=None,
                          exit_order_uuid=None, executed_exit_volume=None,
                          remaining_volume=0.0):
-    """실 청산 완료 시 호출. EXIT_FILLED + TRADE_CLOSED 이벤트 append."""
+    """실 청산 완료 시 호출. EXIT_FILLED + TRADE_CLOSED 이벤트 append.
+
+    ⚠ 단위 계약 (advisor 4 · 2026-09-30 · P1-a 이중변환 버그 fix):
+    - gross_pnl_pct · net_pnl_pct 는 **percent scale 로 전달** (예: 0.5 = 0.5%).
+    - 이전 코드는 caller (bot.py:8360) 와 recorder 양쪽에서 `abs<1` 휴리스틱으로
+      decimal→percent 변환을 시도 · caller 가 decimal 을 percent 로 바꿔 전달할
+      때 recorder 가 다시 100x → **|pnl|<1% 인 모든 실 거래가 100x 증폭되어 저장**
+      되던 버그 (JSONL data/live_trades.jsonl 오염).
+    - fix: recorder 는 휴리스틱 제거 · caller 가 명시적으로 percent 전달 책임.
+    - 기존 legacy 기록은 append-only 이므로 그대로 보존 · 신규 기록은 schema_v=2
+      태그로 구분 (분석 시 filter).
+    """
     try:
         with _LIVE_TRADE_LOCK:
             pending = _LIVE_TRADE_PENDING.pop(market, None)
@@ -1072,17 +1084,12 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         shadow_ref_id = pending.get("shadow_ref_id")
         entry_krw = pending.get("entry_krw", 0)
         entry_vol = pending.get("filled_volume", 0)
-        # net_pnl_pct 스케일 자동 판별 (소수 vs 퍼센트)
+        # advisor 4 (2026-09-30) · 이중변환 버그 fix: caller (percent scale) 를 그대로
+        # 저장 · 이전 `abs<1` 휴리스틱 제거. caller 계약 = percent (0.5 = 0.5%).
         if net_pnl_pct is not None:
-            _np = float(net_pnl_pct)
-            if abs(_np) < 1.0:  # 소수 → 퍼센트로 변환
-                _np = _np * 100
-            net_pnl_pct = round(_np, 4)
+            net_pnl_pct = round(float(net_pnl_pct), 4)
         if gross_pnl_pct is not None:
-            _gp = float(gross_pnl_pct)
-            if abs(_gp) < 1.0:
-                _gp = _gp * 100
-            gross_pnl_pct = round(_gp, 4)
+            gross_pnl_pct = round(float(gross_pnl_pct), 4)
         net_pnl_krw = None
         if net_pnl_pct is not None and entry_krw:
             net_pnl_krw = round(entry_krw * net_pnl_pct / 100, 2)
@@ -1090,8 +1097,11 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         if executed_exit_volume is None:
             executed_exit_volume = entry_vol
         # EXIT_FILLED 이벤트 (P1-a: shadow_ref_id 는 pending 에서 전파 · pair 조인 키)
+        # advisor 4 (2026-09-30) · schema_v=2 · 이중변환 버그 fix 이후 · 분석 시
+        # schema_v 없거나 =1 인 legacy 기록은 net_pnl_pct 100x 증폭 가능성 있음 · filter.
         exit_event = {
             "event_type": "EXIT_FILLED",
+            "schema_v": 2,
             "trade_id": trade_id,
             "shadow_ref_id": shadow_ref_id,
             "is_live": True,
@@ -1110,6 +1120,7 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         # TRADE_CLOSED 이벤트 (최종 요약)
         closed_event = {
             "event_type": "TRADE_CLOSED",
+            "schema_v": 2,
             "trade_id": trade_id,
             "shadow_ref_id": shadow_ref_id,
             "is_live": True,
@@ -8352,12 +8363,15 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     print(f"[UPDATE_TRADE] {market} 청산 기록 시작 (pnl: {pnl_pct:.2%})")
 
     # 실체결 audit log: pending 진입 정보와 매칭해서 JSONL append (조언자 스펙)
+    # advisor 4 (2026-09-30) · 이중변환 버그 fix: 이 시점 pnl_pct 는 decimal (line 8352
+    # `pnl_pct:.2%` 포맷 확증). recorder 계약 = percent scale · 여기서 명시적으로
+    # decimal→percent 변환 · recorder 는 그대로 저장 (이중 100x 증폭 방지).
     try:
         _live_trade_log_exit(
             market=market,
             exit_price=exit_price,
             exit_reason=exit_reason,
-            net_pnl_pct=pnl_pct * 100 if abs(pnl_pct) < 1 else pnl_pct,  # 소수 vs 퍼센트 자동
+            net_pnl_pct=pnl_pct * 100,
             hold_sec=hold_sec,
         )
     except Exception as _ltl_err:
