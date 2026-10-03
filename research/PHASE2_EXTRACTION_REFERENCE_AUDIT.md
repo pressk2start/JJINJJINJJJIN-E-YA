@@ -76,20 +76,32 @@ for mfunc in open_auto_position close_auto_position hybrid_buy monitor_position:
 **패턴**: 각 함수 = **1 정의 + 1 리포트 조립 호출** (가끔 추가 1개)
 **결론**: 분리 시 리포트 조립 function 의 **import 경로만 수정** 하면 됨.
 
-### 2c. Survival 재검증 (advisor 2 지적)
+### 2c. Survival 재검증 (advisor 2 지적 · 2026-10-03 재실측)
 
+**추가 grep 발견** (내 이전 "매매 참조 0" claim 수정):
 ```
 bot.py:14045: _SURVIVAL_SCORING_CACHE = {}
 bot.py:17171: _SURVIVAL_SCORING_CACHE[route] = list(rules)
 bot.py:17200: """캐시된 survival rules로 HI/LO 예측. 순수 로깅용, 진입 차단 없음."""
+bot.py:17202: rules = _SURVIVAL_SCORING_CACHE.get(route)
+bot.py:19791: pre["survival_score"] = _sv_score                        # 쓰기 (예측 시점)
+bot.py:6613:  "survival_score": pre.get("survival_score", 0)            # trade record 저장 (open path body)
 ```
 
-- 매매 로직 함수 내부 참조 = **0** (grep 실측)
-- 하지만 **cache 가 route 별로 저장** · HI/LO 예측 함수 (bot.py:17200 근처) 가
-  trade recording path 에서 호출될 가능성
-- **진입 차단 영향 X** (명시) · 하지만 **로깅 재배선 필요** (분리 시 cache
-  import 경로 유지)
-- **Phase 2 scope 에서 Survival 제외 유지** · 별도 Phase (cache 의존 정리 후) 로 격리
+**정정 (advisor 2 지적 수용)**:
+- 매매 로직 함수 body 내부에서 `pre["survival_score"]` **쓰기 경로 존재**
+  (bot.py:6613 · trade record 기록)
+- 즉 "매매 참조 0" 은 **과장** · 판단에는 쓰이지 X ("진입 차단 없음" 유지) ·
+  **저장 의존성은 있음**
+- 분리 시: survival_score 쓰기 경로 **재배선 필요** · 단순 cache 분리 X
+
+**advisor 2 핵심 지적 재확인**:
+> "'진입 차단 없음' 주석만으로 매매 영향이 없다고 확정할 수 없습니다. 반환값과
+> `pre["survival_score"]`의 모든 소비처를 확인해야 합니다."
+
+- **Phase 2 scope 에서 Survival 제외 유지** · 별도 Phase (cache + score 쓰기
+  경로 전체 정리 후) 로 격리
+- 분리 후보 분류: **RED (분리 전 추가 작업 필수)** 유지 · 등급 변화 없음
 
 ---
 

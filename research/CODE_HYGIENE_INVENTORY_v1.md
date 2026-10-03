@@ -60,12 +60,17 @@ Related PR: #546 (`codex/cleanup-and-alpha-workplan`) · workplan 문서 중복 
 - **격리 후보** = BLOCK 상태 + 수개월 음수 + 승격 조건 지속 미달 (리포트 기반 분류)
 - **보류** = 아직 관찰 가치 (Research Top-3 · survival 변동 · n 미달)
 
-**⚠ 중요 정정 (advisor 2 지적 · 실측 확인 결과)**:
-- "격리 후보" 분류는 **리포트 상태 기반 추측** · 각 route 가 **shadow 신규 생성
-  활성 여부는 실측 미확정**
-- advisor 2 (PR #546 writer): "**EC_A · PP30 · PP40 · OBSLIP 등 일부는 이미
-  신규 평가에서 제외되는 설정**" 명시 · 하지만 내 grep 으로 명확한 skip 조건
-  확정 불가 · 다른 분기/변수 가능성
+**⚠ 중요 정정 (advisor 2 지적 · 2026-10-03 추가 grep 실측 확인)**:
+- "격리 후보" 분류는 **리포트 상태 기반 추측 · 많은 수가 이미 격리 완료 상태**
+- **bot.py:15455-15456 명시 (실측 확인)**:
+  ```
+  - enabled=False + shadow_enabled=True : 관심 shadow route (interval마다 평가)
+  - enabled=False + shadow_enabled 없음/False : 완전 skip (계산 안 함)
+  ```
+- advisor 2 지적 정확 확인: **EC_A/PP30/40/OBSLIP 등 `shadow_enabled` 없는 route
+  = 이미 평가 루프에서 완전 skip · 신규 shadow 생성 중단 상태**
+- **"격리 후보 → isolate 필요"** 라벨 잘못 · 정확: **"이미 격리 완료 · 리포트
+  집계는 과거 축적 데이터 접근 코드만 남음"**
 - grep 실측 결과:
   - `_V0_EXIT_PARAMS_CLM_PP30/PP40/EC_A` 전부 bot.py:11829-11836 정의
   - `_STRATEGY_REGISTRY` 에 route config 등록 (bot.py:13678-13695)
