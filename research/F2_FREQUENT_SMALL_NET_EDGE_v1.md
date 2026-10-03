@@ -109,7 +109,12 @@ subset** (동일 기간 · 동일 종목 · 동일 outcome/cost 정의).
 
 ## 3. Outcome = Executable Return (not mid)
 
-**Horizons fixed in advance**: 30 / 60 / 120 / 180s **전부** (post-hoc pick 금지).
+**Horizons fixed in advance** (**advisor 1+2 요구 수용 · 2026-10-03 추가** ·
+사용자 "초단위 상승기류" 프레이밍 반영):
+
+- **초단위 지평**: 5 / 10 / 15 s (**신규** · 짧은 상승기류 수확 가능성 측정)
+- **분단위 지평**: 30 / 60 / 120 / 180 s (기존)
+- 총 7개 horizon · 전부 post-hoc pick 금지
 
 ### 정의
 
@@ -119,23 +124,46 @@ Exit_h       = executable SELL at t0 + h
 NetReturn_h  = sell_proceeds − buy_cost − fees
 ```
 
-### Price basis (우선순위)
+### Price basis (두 execution variant 병행 보고 · advisor 2 요구 수용)
 
-1. **Preferred**: **depth-aware VWAP** at **fixed KRW notional** (§12 freeze).
-   - Buy VWAP(t0, notional) → Sell VWAP(t0+h, **same quantity bought**)
-   - Spread + depth/slippage 둘 다 outcome 에 포함.
-2. **Fallback (TOB proxy)**: top-of-book 만 사용 가능 시 → **label 을
-   `small-fill TOB executable proxy` 로 한정** · 실 execution 과 동일 주장 X.
-   - `ask1(t0) → bid1(t0+h)` 는 소액 체결 근사일 뿐 · depth-VWAP 과 동등 X
-     (advisor 2 명시).
-3. **Limit (maker) 가정 시 추가 의무** (별도 variant 로 선언 시):
-   - **Non-fill** · **partial fill** · **체결 후 adverse drift** 전부 모델링 ·
-     없으면 edge overstate (advisor 1 v2 명시).
+**이유** (advisor 2 명시 수용): "박리다매의 진짜 집은 모멘텀 추격이 아니라
+마켓메이킹/유동성 제공. Upbit KRW maker rebate 없지만 **스프레드를 내는 대신
+아끼는 구조로 비용 확 줄 수 있음**."
+
+### Variant 1 — Taker (시장가 추격 · 보수적 비용)
+
+- Entry: `ask1(t0)` 또는 top-N depth-VWAP buy
+- Exit: `bid1(t0+h)` 또는 top-N depth-VWAP sell
+- 비용: 왕복 수수료 + full spread + fallback slippage
+- **"초단위 상승 감지 → 즉시 추격" 시나리오 비용 바닥**
+
+### Variant 2 — Maker (지정가 체결 · 스프레드 아낌 · advisor 1+2 요구 추가)
+
+- Entry: `bid1(t0)` 또는 그 근처 지정가 · timeout window 내 체결 가정
+- Exit: `ask1(t0+h)` 또는 그 근처 지정가 · timeout window 내 체결 가정
+- 비용: 왕복 수수료 + 체결 지연 cost + **non-fill 손실** + **partial fill** +
+  **체결 후 adverse drift** (전부 명시적 모델링 · 없으면 edge overstate)
+- **"스프레드 아끼는 구조" 시나리오 · 성립 조건 엄격**
+
+### 두 variant 비교 리포트 필수
+
+각 feature × horizon 조합마다 **Taker net vs Maker net** 나란히 보고.
+- Taker 로 음수 · Maker 로 양수 → 전략은 **메이커 구조 전용** · 모멘텀 추격 X
+- 둘 다 양수 → 가장 robust (하지만 흔치 않음)
+- 둘 다 음수 → 그 state 는 edge 없음
+
+### Price basis 세부 (TOB proxy fallback 라벨 유지)
+
+- **Preferred**: depth-aware VWAP at `FIXED_NOTIONAL_KRW` (§12 freeze)
+- **Fallback**: top-of-book 만 가용 시 → `small-fill TOB executable proxy` 라벨
+  한정 · 실 execution 동일 주장 X
+- `ask1(t0) → bid1(t0+h)` 는 소액 체결 근사 · depth-VWAP 아님
 
 ### Fee treatment
 
-- Upbit KRW 수수료 schedule freeze (왕복 명시).
-- Maker/taker 차등 없음 (ARCHIVE 기록 · maker rebate 가정 금지).
+- Upbit KRW 수수료 schedule freeze (왕복 명시)
+- Maker/taker 차등 없음 (ARCHIVE 기록 · **maker rebate 가정 금지**)
+- 메이커 체결 · 테이커 체결 동일 수수료 · 다만 **스프레드 지불 vs 아낌 차이** 만 반영
 
 ### 결측 처리
 
@@ -235,6 +263,33 @@ return_bp    = 20      (베이시스 포인트)
 
 > "자주 이기는 화면보다, **작은 이익들이 큰 손실과 비용을 덮고 계좌에 남는
 > 구조**."
+
+### 박리다매 판정 (advisor 1+2 요구 · 2026-10-03 추가 · 사용자 프레이밍)
+
+사용자 아이디어 ("초단위 상승기류 수없이 매매 · 소액 수익 누적") 가 수학적으로
+성립하는지 **직접 판정 지표**:
+
+필수 측정:
+- **event frequency per day** (TRAIN · OOS 각각): 하루 몇 번 trigger 가능?
+- **average net per event** (Taker variant + Maker variant 각각)
+- **daily aggregate net** = frequency × avg_net (단 §7 포트폴리오 규칙 전제)
+- **loss tail dominance**: 하루 중 가장 큰 손실 1건 vs 하루 수익 합산 비율
+- **time-of-day stability**: 특정 시간대 집중도 (concentration guard 와 동일)
+
+박리다매 성공 조건 (SURVIVE criteria 와 **추가로 전부 만족**):
+1. `event_frequency_per_day ≥ MIN_FREQ` (§12 freeze · "자주" 정의)
+2. `avg_net_per_event > 0` after both Taker and Maker cost scenarios
+   OR Taker 음수 but Maker 양수 (→ 메이커 전용 전략 분류)
+3. `worst_single_loss_per_day < daily_net_avg × K` (K § 12 freeze · 한 번 손실
+   이 하루 수익 못 지우도록)
+4. `temporal_stability` (하루 중 특정 시간대 캐리 X)
+5. (옵션) 월 단위 수익 매끈함 (sharpe-like · §12 freeze)
+
+**실패 명확화** (NOT "불가능" · F2 §10 정신 유지):
+- Taker 음수 + Maker 음수: 이 universe/horizon 에서 박리다매 **구조적 불가능**
+- Taker 음수 + Maker 양수: **메이커 전용** · 모멘텀 추격 X · limit-only 구조
+- 하루 1건 손실이 하루 수익 전부 지움: **단일 손실 리스크 과대** · 박리다매 아닌
+  "분산된 소량 캐리" 구조
 
 ---
 
@@ -364,6 +419,11 @@ Advisor 1 명시: "임의로 지금 수치를 만들어 넣지 않겠음 · 코�
 | **F2c `MIN_DEPTH_KRW`** · **`MAX_SPREAD_PCT`** | 데이터 분포 X · 사전 가설 (사용자 거래 가능 조건) |
 | **F2c feature family 최대 수** | multiple-comparison 보정 |
 | **포트폴리오 규칙** (자본당 일일 net 계산 시) · 또는 포기 결정 | 동시 포지션 cap · 중복 신호 처리 · 보유시간 분포 보고 결정 · 없으면 건당·빈도만 보고 |
+| **초단위 horizons (5/10/15s) 데이터 가용성** (NEW 2026-10-03) | tick/orderbook 저장 해상도 확인 · 1분 간격이면 초단위 분석 불가 · DATA_INSUFFICIENT → collection phase |
+| **Maker variant 체결 window** (NEW) · timeout + non-fill 모델 | 사전 freeze · 실 봇의 hybrid_buy timeout 1.2s 참조 가능 |
+| **Maker non-fill 손실 가정** (NEW) · 미체결 시 가격 drift cost | 사전 freeze · 보수적 추정 (실측 전엔 upper bound) |
+| **박리다매 `MIN_FREQ`** (NEW · "자주" 정의) | 연구자 사전 freeze (예: 하루 50건 · 100건 등) |
+| **박리다매 `K` (worst-single-loss 상한 배수)** (NEW) | 연구자 위험선호 사전 freeze |
 
 ---
 
