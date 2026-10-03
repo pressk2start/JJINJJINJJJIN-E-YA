@@ -197,12 +197,28 @@ state 에서** 단기 continuation (30-120s) 를 예측할 수 있다.
 - **Trade stream** (체결 timestamp · 가격 · volume · 매수/매도 taker 구분)
 - **Tick-level 또는 1초 bar** 데이터 (microprice 계산용)
 
-### 봇 데이터 가용성 확인 필요 (§12)
+### 봇 데이터 가용성 확인 결과 (grep 실측 2026-10-03) · DATA_INSUFFICIENT 확정
 
-- 현재 봇이 orderbook depth 를 어느 해상도로 저장하는지
-- Trade taker side 정보가 저장되는지 (업비트 API ask_bid 필드)
-- 저장 기간 (최소 F3 TRAIN+OOS 커버 필요)
-- 가용 X 시 → 데이터 수집 phase 선행 필요 (별도 ticket)
+**실측 결과** (bot.py grep):
+- WebSocket **없음** (REST polling 만 · grep 0건)
+- Orderbook snapshot **영구 저장 X** (매 scan 메모리 fetch · 디스크 X)
+- Trade stream (taker side) **저장 X**
+- 유일 저장: `data/live_trades.jsonl` (실 체결 결과만 · schema_v=2)
+- Scan 해상도: 평균 ~7초 · p95 ~12초
+
+→ **F3 전체 features 전부 `DATA_INSUFFICIENT`** · 현 저장 체계로 불가능
+
+### 선결 조건 (별도 티켓 · 사용자 승인 필요)
+
+**WebSocket 틱 수집기 신규 구축** 이 F3 선결 인프라:
+- Scope: Upbit WebSocket API (orderbook + trade stream) subscribe
+- 저장: tick/orderbook snapshot (예: 1초 또는 더 정밀) · 로컬 디스크 또는 DB
+- Universe: F3-α/β/γ/δ 대상 종목 (유동성 filter 통과)
+- 실매매 로직 **완전 분리** (별도 process · 매매 봇 영향 0)
+- 수집 기간: F3 TRAIN+OOS 커버 (최소 수주)
+- 주문 지연 (REST API latency) 도 함께 계측 · 감지 빠름 ≠ 주문 빠름
+
+**이 수집기 없이는 F3 implementation 자체 불가능** · F3 §12 freeze 전제 조건.
 
 ---
 
