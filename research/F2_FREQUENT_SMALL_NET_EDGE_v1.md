@@ -116,6 +116,14 @@ subset** (동일 기간 · 동일 종목 · 동일 outcome/cost 정의).
 - **분단위 지평**: 30 / 60 / 120 / 180 s (기존)
 - 총 7개 horizon · 전부 post-hoc pick 금지
 
+**Horizon selection rule (FREEZE 전 확정 필수 · advisor 2 2026-10-03 교정)**:
+- OOS 열린 후 7개 중 "제일 좋은 시간" 고르는 방식 **금지** (multiple testing)
+- Freeze 시 다음 중 하나 사전 선택 (사용자/advisor 결정):
+  - (a) 7개 전부 **각각 독립 verdict** (per feature × horizon · 공동 보정 포함)
+  - (b) **사전 지정 1개 horizon 만 primary** · 나머지는 diagnostic
+  - (c) 초단위 (5/10/15) 중 1개 + 분단위 (30/60/120/180) 중 1개 **사전 선택**
+- Freeze 이후 지평 추가 금지 (`F2_v2` + fresh untouched slice 필요)
+
 ### 정의
 
 ```
@@ -130,20 +138,29 @@ NetReturn_h  = sell_proceeds − buy_cost − fees
 마켓메이킹/유동성 제공. Upbit KRW maker rebate 없지만 **스프레드를 내는 대신
 아끼는 구조로 비용 확 줄 수 있음**."
 
-### Variant 1 — Taker (시장가 추격 · 보수적 비용)
+### Variant 1 — Taker (시장가 추격)
 
 - Entry: `ask1(t0)` 또는 top-N depth-VWAP buy
 - Exit: `bid1(t0+h)` 또는 top-N depth-VWAP sell
-- 비용: 왕복 수수료 + full spread + fallback slippage
-- **"초단위 상승 감지 → 즉시 추격" 시나리오 비용 바닥**
+- 비용: **왕복 수수료 + fallback slippage 만 추가** (왕복 지연 효과 포함)
+- ⚠ **비용 이중차감 금지** (advisor 1+2 2026-10-03 교정):
+  - `ask1→bid1` 자체가 이미 **spread 반영** · depth-VWAP 도 호가 깊이 가격 불리함 포함
+  - **"+ full spread" 추가 차감 금지** (이중 차감 · 이전 draft 오류 수정)
+  - 추가 차감은 **그 가격 모델에 포함 안 된 것만** (수수료 · fallback 전환 지연 slippage)
 
-### Variant 2 — Maker (지정가 체결 · 스프레드 아낌 · advisor 1+2 요구 추가)
+### Variant 2 — Maker (지정가 · execution scenario upper-bound 성격)
 
-- Entry: `bid1(t0)` 또는 그 근처 지정가 · timeout window 내 체결 가정
-- Exit: `ask1(t0+h)` 또는 그 근처 지정가 · timeout window 내 체결 가정
-- 비용: 왕복 수수료 + 체결 지연 cost + **non-fill 손실** + **partial fill** +
-  **체결 후 adverse drift** (전부 명시적 모델링 · 없으면 edge overstate)
-- **"스프레드 아끼는 구조" 시나리오 · 성립 조건 엄격**
+- ⚠ **"실 실행" 주장 금지** (advisor 1+2 2026-10-03 교정):
+  - `bid1 매수 → ask1 매도` 가정은 **execution scenario / upper-bound** 성격
+  - 두 주문 **실제 체결 여부**는 queue position 없이는 모름
+  - "가격이 찍혔다 = 내 주문이 체결됐다" X
+  - 체결 가능성 재현 데이터 (L2 orderbook + 체결 time-series) 확보 후에만 강한 결론
+- 모델링 필수 (전부 사전 freeze · §12):
+  - Timeout window 내 체결 확률 가정 (실측 전엔 상한)
+  - 미체결 시 **잔여 재고 손익** + 종료 방식 (강제 taker 전환 vs 다음 window 재시도)
+  - Partial fill 처리
+  - 체결 직후 adverse drift
+- **임의 "non-fill 손실 cost" 상수 추가 금지** · 재고 처리 명시적 모델만
 
 ### 두 variant 비교 리포트 필수
 
@@ -264,26 +281,35 @@ return_bp    = 20      (베이시스 포인트)
 > "자주 이기는 화면보다, **작은 이익들이 큰 손실과 비용을 덮고 계좌에 남는
 > 구조**."
 
-### 박리다매 판정 (advisor 1+2 요구 · 2026-10-03 추가 · 사용자 프레이밍)
+### 박리다매 판정 (사용자 프레이밍 · diagnostic 성격)
 
-사용자 아이디어 ("초단위 상승기류 수없이 매매 · 소액 수익 누적") 가 수학적으로
-성립하는지 **직접 판정 지표**:
+사용자 아이디어 ("초단위 상승기류 수없이 매매 · 소액 수익 누적") 성립 여부
+diagnostic (**SURVIVE 필수 조건 아님 · advisor 1+2 2026-10-03 교정**):
 
-필수 측정:
-- **event frequency per day** (TRAIN · OOS 각각): 하루 몇 번 trigger 가능?
-- **average net per event** (Taker variant + Maker variant 각각)
-- **daily aggregate net** = frequency × avg_net (단 §7 포트폴리오 규칙 전제)
-- **loss tail dominance**: 하루 중 가장 큰 손실 1건 vs 하루 수익 합산 비율
-- **time-of-day stability**: 특정 시간대 집중도 (concentration guard 와 동일)
+**필수 (SURVIVE gate)**:
+- §7 본체 criteria (mean executable net > 0 · cost stress · concentration ·
+  temporal consistency) 가 SURVIVE 결정자
 
-박리다매 성공 조건 (SURVIVE criteria 와 **추가로 전부 만족**):
-1. `event_frequency_per_day ≥ MIN_FREQ` (§12 freeze · "자주" 정의)
-2. `avg_net_per_event > 0` after both Taker and Maker cost scenarios
-   OR Taker 음수 but Maker 양수 (→ 메이커 전용 전략 분류)
-3. `worst_single_loss_per_day < daily_net_avg × K` (K § 12 freeze · 한 번 손실
-   이 하루 수익 못 지우도록)
-4. `temporal_stability` (하루 중 특정 시간대 캐리 X)
-5. (옵션) 월 단위 수익 매끈함 (sharpe-like · §12 freeze)
+**함께 보고 (박리다매 profile 판정 · diagnostic)**:
+- **event frequency per day** (TRAIN · OOS 각각)
+- **average executable net per event** (Taker + Maker 각각 · Maker 는 upper-bound 성격)
+- **자본 대비 최대 손실 · 낙폭** (daily_net 기반 X · 자본 대비 로 측정)
+- **상위 손실 기여도** (worst-K 분포)
+- **time-of-day stability** · **cross-coin stability**
+- (**옵션**) 포트폴리오 규칙 (동시 포지션 cap · 중복 신호 처리) **사전 freeze 된
+  경우에만** calculated daily net 보고
+
+**실패 명확화** (좁게 · "불가능" 단정 X):
+- Taker/Maker variant 모두 §7 SURVIVE 미달 = 이 universe/horizon/procedure 에서
+  후보 발견 못함 (**NOT**: 업비트 박리다매 전체 불가능)
+- Taker 미달 · Maker 양수 = **upper-bound 로만 양수** · 실제 체결 모델링 전엔
+  "메이커 전용 전략" 결론 금지 · 추가 queue position 검증 필수
+- 자본 대비 큰 손실 1건이 수개월 수익 지움 = 박리다매 risk profile 불일치 ·
+  하지만 edge 자체 존재 가능 (별도 리스크 관리 설계)
+
+**금지**: `worst_single_loss < daily_net × K` 를 generic SURVIVE gate 로 사용 X ·
+daily_net 이 0/음수일 때 불안정 · 자본·동시 포지션 규칙 사전 freeze 전엔
+diagnostic 로만 사용 (advisor 2 명시 교정).
 
 **실패 명확화** (NOT "불가능" · F2 §10 정신 유지):
 - Taker 음수 + Maker 음수: 이 universe/horizon 에서 박리다매 **구조적 불가능**
