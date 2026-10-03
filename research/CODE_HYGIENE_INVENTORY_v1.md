@@ -57,10 +57,33 @@ Related PR: #546 (`codex/cleanup-and-alpha-workplan`) · workplan 문서 중복 
 | `PBR` · `PBR_STRICT` · `PBR_MOMO` | n=10~123 pnl-0.03~-0.06% BLOCK ⏳skew | **격리 후보** (PBR family · skew 유지) |
 
 **격리 vs 보류 기준**:
-- **격리 후보** = BLOCK 상태 + 수개월 음수 + 승격 조건 지속 미달 (수개월 유지)
+- **격리 후보** = BLOCK 상태 + 수개월 음수 + 승격 조건 지속 미달 (리포트 기반 분류)
 - **보류** = 아직 관찰 가치 (Research Top-3 · survival 변동 · n 미달)
 
-**총계**: 격리 후보 ~20개 · 보류 ~10개 · LIVE 1개 · Shadow 유지 4개
+**⚠ 중요 정정 (advisor 2 지적 · 실측 확인 결과)**:
+- "격리 후보" 분류는 **리포트 상태 기반 추측** · 각 route 가 **shadow 신규 생성
+  활성 여부는 실측 미확정**
+- advisor 2 (PR #546 writer): "**EC_A · PP30 · PP40 · OBSLIP 등 일부는 이미
+  신규 평가에서 제외되는 설정**" 명시 · 하지만 내 grep 으로 명확한 skip 조건
+  확정 불가 · 다른 분기/변수 가능성
+- grep 실측 결과:
+  - `_V0_EXIT_PARAMS_CLM_PP30/PP40/EC_A` 전부 bot.py:11829-11836 정의
+  - `_STRATEGY_REGISTRY` 에 route config 등록 (bot.py:13678-13695)
+  - 리포트 집계에 참조 (`_bladder` 16575 · `_pp_rm_routes` 16598 ·
+    `_pp_er_routes` 16628 · `_eas.get("route") != "CLM_EC_A"` 16788)
+  - 즉 **registry 등록 + 리포트 참조 상태** · 실제 shadow 생성 여부는 scan loop
+    쪽에서 확인 필요
+
+**조치 (advisor 2 요구 수용)**:
+- 각 격리 후보 route 는 **"격리 전 참조 그래프 확인 필수"** · 바로 delete 금지
+- PR #546 inventory (codex/cleanup-and-alpha-workplan · 37줄 압축 version) 와
+  **cross-check 필요** · 두 inventory 의 분류 차이 확인
+- Advisor 2 명시 "A/A2 신규 shadow 생성 중단" 을 **첫 코드 변경 scope 로 좁힘**
+  (내가 inventory v1 에서 "~20개 격리 후보" 로 넓힌 것 과잉)
+
+**총계 (하향 조정)**: 
+- LIVE 1개 (확정) · shadow_enabled=True 명시 4개 (확정)
+- 격리 후보 ~20개 **(리포트 기반 추측 · 실측 확인 필요)** · 보류 ~10개
 
 ---
 
@@ -81,15 +104,28 @@ Related PR: #546 (`codex/cleanup-and-alpha-workplan`) · workplan 문서 중복 
 - `_v4_shadow_score_compact()` (compact score · 활성)
 - `_pass_entry_funnel_summary()` (PASS→ENTRY · P1 lifecycle 포함 · 활성)
 
-### 2c. Research-only (분리 1순위 후보)
-- Survival Analysis (`[*] A:B:C lift+X hl+Y → BLOCK/SHADOW`) · retrospective diagnostic
-- EarlyCut 분류 (CLM 60s 시점) · 사후 분석
+### 2c. Research-only (분리 1순위 후보 · **단 참조 그래프 사전 확인 필수**)
+- Survival Analysis — **⚠ 정정 (advisor 2 지적 · grep 실측)**:
+  - `_SURVIVAL_SCORING_CACHE` (bot.py:14045) 가 route 별 rules 저장
+  - bot.py:17171: `_SURVIVAL_SCORING_CACHE[route] = list(rules)`
+  - bot.py:17200 명시: `"""캐시된 survival rules로 HI/LO 예측. 순수 로깅용, 진입 차단 없음."""`
+  - **매매 결정 영향 X** (진입 차단 없음) · 하지만 **route↔cache 참조 존재** ·
+    출력 부분만 분리 시 로깅 재배선 필요
+  - 조치: 분리 가능하되 "research-only 1순위" 단정 X · 참조 재배선 commit 포함 필요
+- EarlyCut 분류 (CLM 60s 시점) · 사후 분석 (**grep 확인 전 분리 판단 보류**)
 - 필터검증 fail-WR 집계 (`[효과 식별 불가]` 다수)
-- B-ladder + LE + PP 비교 · 격리 후보 route 전용
-- PP r/m 비교 · 격리 후보 전용
+- B-ladder + LE + PP 비교 · 격리 후보 route 전용 (**단 §1c cross-check 필요**)
+- PP r/m 비교 · 격리 후보 전용 (**단 §1c cross-check 필요**)
 
-**예상 효과**: `_report_builders.py` 로 분리 시 bot.py에서 **1,500-2,500줄 감소 가능**
-(reporting 코드 추정) · 매매 로직 무영향.
+**예상 효과 (하향 조정)**: `_report_builders.py` 로 분리 시 bot.py에서 감소 가능
+하되 **정확한 줄 수는 실측 필요** (1,500-2,500 는 추측). 매매 로직 무영향은 유지 ·
+하지만 **참조 재배선 동반 필요** (Survival cache 등).
+
+**⚠ 추측 vs 실측 구분**:
+- grep 실측된 사실: 참조 존재 여부
+- 추측 (실측 필요): 격리 후보 route 가 "shadow 신규 생성 여부" (advisor 2: "EC_A·
+  PP30/40·OBSLIP 등 이미 신규 평가 제외" 라고 명시했으나 내 grep 으로 미확정)
+- PR #546 inventory (`codex/cleanup-and-alpha-workplan`) 와 cross-check 필요
 
 ---
 
@@ -134,17 +170,25 @@ Related PR: #546 (`codex/cleanup-and-alpha-workplan`) · workplan 문서 중복 
 - PR #546 workplan 문서와 중복 피함 (내용 상호 보완)
 
 **Phase 2 — Archive-only reporting 분리 (저위험 · 매매 로직 X)**:
-- `_report_builders.py` 신규 파일로 이동 (reporting 함수 §2a + §2c)
+- `_report_builders.py` 신규 파일로 이동 (**단 Survival cache 참조 재배선 포함**)
 - bot.py 는 import + orchestration 만
-- 각 분리 commit 별 regression + startup/import test
-- 예상: ~1,500줄 감소
+- 각 분리 commit 별 regression + startup/import test + **참조 그래프 확인**
+- 예상: 실측 필요 (추측 숫자 삭제)
 
-**Phase 3 — 격리 후보 route (shadow 중단 · bot 없이 shadow registry 격리)**:
-- §1c "격리 후보 ~20개" 를 `_archived_route_registry.py` 로 이동
-- 활성 shadow (§1b 4개) 와 LIVE (§1a 1개) 만 `_STRATEGY_REGISTRY` 에 유지
-- 과거 데이터는 `data/archived_shadow_stats_*.json` 로 보존
-- 각 route 격리 전 참조 검증 (PAIRED AUDIT · COMMON_COHORT 에 필수인지 grep)
-- 예상: ~800-1,500줄 감소 + 리포트 대폭 간소
+**Phase 3 — 격리 후보 route (⚠ advisor 2 요구 수용 · scope 좁힘)**:
+- **첫 scope = "A/A2 신규 shadow 생성 중단"** (advisor 2 명시 · 좁게)
+  - A/A2 는 봉인 (REJECTED_FINAL/TERMINATED) 상태 · shadow 신규 생성만 중단
+  - 기존 cohort/trade_records 전부 보존 (archival · 재현용)
+  - 봉인 라벨/post-final ΔA 라인 전부 유지
+- 그 다음 scope = 다른 격리 후보 route (§1c · 각각 참조 그래프 확인 후)
+- **"~20개 일괄 격리" 금지** (내 inventory v1 과잉 scope)
+- 각 route 격리 전:
+  - PAIRED AUDIT · COMMON_COHORT 참조 grep
+  - trade_records 참조 grep
+  - 리포트 집계 참조 grep (_bladder/_pp_rm_routes/_pp_er_routes 등)
+  - Survival cache 참조 grep (`_SURVIVAL_SCORING_CACHE`)
+  - 참조 있으면 isolate (분리 모듈로 이동) · 삭제 X
+  - 참조 0 확인된 것만 나중에 제거
 
 **Phase 4 — 주문·포지션·청산 core 리팩토링 (최후 · P1 Layer A/B/C 안정 후)**:
 - advisor 1 명시: "주문·포지션·청산 core 는 마지막에 건드립니다"
