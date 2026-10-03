@@ -445,7 +445,7 @@ Advisor 1 명시: "임의로 지금 수치를 만들어 넣지 않겠음 · 코�
 | **F2c `MIN_DEPTH_KRW`** · **`MAX_SPREAD_PCT`** | 데이터 분포 X · 사전 가설 (사용자 거래 가능 조건) |
 | **F2c feature family 최대 수** | multiple-comparison 보정 |
 | **포트폴리오 규칙** (자본당 일일 net 계산 시) · 또는 포기 결정 | 동시 포지션 cap · 중복 신호 처리 · 보유시간 분포 보고 결정 · 없으면 건당·빈도만 보고 |
-| **초단위 horizons (5/10/15s) 데이터 가용성** (NEW 2026-10-03) | ⚠ **grep 실측 결과 (2026-10-03)**: WebSocket 없음 · orderbook/trade stream 영구 저장 없음 · scan REST polling ~7초 간격 · live_trades.jsonl (실 체결만 저장) · **초단위 분석 원천적 불가능** · **`DATA_INSUFFICIENT` 확정** · **별도 WebSocket 틱 수집기 신규 구축 선결 (고정)** |
+| **초단위 horizons (5/10/15s) 데이터 가용성** (NEW 2026-10-03 · **2차 정정**) | ⚠ **1차 claim** (`93de3b2`): "WebSocket 없음 · DATA_INSUFFICIENT 확정" → **grep 범위 과장** (bot.py 만 봄). **2차 실측**: `scalp/research/ws_recorder.py` 등 **수집기 코드 존재 확인** (recv_ts + exchange_ts 두 시각 · 원자료 불변 · _meta 끊김 기록 · 주문 분리). **정확한 현 상태**: 수집 구현 ✅ 존재 · 서버 실행 여부 ❌ 미확인 · 축적 데이터 ❌ 미확인. **다음**: 신규 구축 X · **서버에서 기존 수집기 실행/데이터 확인 (사용자)** |
 | **Maker variant 체결 window** (NEW) · timeout + non-fill 모델 | 사전 freeze · 실 봇의 hybrid_buy timeout 1.2s 참조 가능 |
 | **Maker non-fill 손실 가정** (NEW) · 미체결 시 가격 drift cost | 사전 freeze · 보수적 추정 (실측 전엔 upper bound) |
 | **박리다매 `MIN_FREQ`** (NEW · "자주" 정의) | 연구자 사전 freeze (예: 하루 50건 · 100건 등) |
