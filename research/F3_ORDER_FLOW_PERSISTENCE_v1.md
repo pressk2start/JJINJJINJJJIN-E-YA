@@ -197,12 +197,59 @@ state 에서** 단기 continuation (30-120s) 를 예측할 수 있다.
 - **Trade stream** (체결 timestamp · 가격 · volume · 매수/매도 taker 구분)
 - **Tick-level 또는 1초 bar** 데이터 (microprice 계산용)
 
-### 봇 데이터 가용성 확인 필요 (§12)
+### 봇 데이터 가용성 확인 결과 (grep 실측 2026-10-03 · **2차 정정**)
 
-- 현재 봇이 orderbook depth 를 어느 해상도로 저장하는지
-- Trade taker side 정보가 저장되는지 (업비트 API ask_bid 필드)
-- 저장 기간 (최소 F3 TRAIN+OOS 커버 필요)
-- 가용 X 시 → 데이터 수집 phase 선행 필요 (별도 ticket)
+**이전 claim** (`93de3b2`): "WebSocket 없음 · DATA_INSUFFICIENT 확정 · 신규 구축 필요"
+
+**정정** (advisor 1+2 2026-10-03 지적 · 실측): 1차 grep 범위가 `bot.py` 만 ·
+`scalp/research/` 디렉토리 **미확인** 상태의 과장. 실 코드 확인:
+
+| 기존 파일 (실측 · repo 존재) | 기능 |
+|---|---|
+| `scalp/research/ws_recorder.py` (46KB) | Upbit WebSocket 체결·호가 구독 · recv_ts + exchange_ts 두 시각 보존 · 원자료 불변 원칙 · _meta 이벤트로 재접속/끊김 기록 · 압축 JSONL · 주문 코드 없음 (읽기 전용) |
+| `scalp/research/ticks_collect.py` | REST 체결 원자료 저장 |
+| `scalp/research/ob_recorder.py` | 호가 + 체결 방향 거래대금 |
+| `scalp/research/queue_sim.py` (26KB) | 큐 시뮬레이션 (maker queue position 재현) |
+| `scalp/research/mm_adverse.py` · `mm_sim.py` | 마켓메이킹 · adverse selection |
+| `scalp/research/seconds.py` · `flow.py` · `features.py` | 초/흐름/특징량 |
+
+→ **F3 수집 인프라 코드 존재 확인** · 신규 구축 선결 **아님**
+
+### 정확한 현재 상태 (3층 분리 · advisor 지적 수용)
+
+- **수집 구현**: ✅ **존재 확인** (`scalp/research/ws_recorder.py` 등)
+- **서버에서 실행 중인지**: ❌ 미확인 (로컬 repo 만 봄)
+- **축적 파일 · 기간 · 종목 · 누락**: ❌ 미확인
+- **F2c/F3 에 충분한 데이터인지**: ❌ 판정 불가 (서버 확인 전)
+
+### 다음 작업 (신규 구축 아님 · 기존 활용)
+
+**1순위**: 서버에서 기존 수집기 실행 여부 + 저장 데이터 확인
+```bash
+# 서버에서 사용자 실행
+ps aux | grep -E 'ws_recorder|ticks_collect|ob_recorder'
+ls -la /home/ubuntu/bot/scalp/research/*.jsonl.gz 2>/dev/null
+ls -la /home/ubuntu/bot/scalp/data/ 2>/dev/null
+systemctl list-units | grep -iE 'recorder|collect'
+```
+
+**결과 분기**:
+- (a) 수집기 **실행 중 + 데이터 충분** → F2c/F3 offline runner 바로 구현
+- (b) 수집기 **코드 있음 but 미실행** → 기존 수집기 실행 (별도 process · 매매 봇 영향 0 · 자원 사용량 확인 필수)
+- (c) 수집기 실행 중 but **데이터 품질 불충분** → 품질 보완 (reconnect/gap 처리 · universe 확장 등)
+
+**ws_recorder.py 설계가 advisor 2 요구 전부 만족** (실측):
+- ✅ 원 이벤트 보존 (aggregation X · "지금 집계하면 나중에 다른 정의로 다시 못 만든다")
+- ✅ recv_ts + exchange_ts 두 시각 (latency 실측)
+- ✅ _meta 이벤트로 reconnect/끊김 기록
+- ✅ 주문 코드 없음 (읽기 전용 · 매매 완전 분리)
+- → 추가 설계 변경 불필요 · 실행 상태만 확인
+
+### 자원 사용량 주의 (advisor 2 지적 수용)
+
+- 별도 프로세스라도 CPU · 디스크 · 네트워크 공유
+- "실매매 영향 0" 사전 보장 X · 실측 필요
+- 서버 실행 전 vs 후 매매 봇 지표 비교 (scan latency 등)
 
 ---
 
