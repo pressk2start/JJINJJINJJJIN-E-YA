@@ -1,0 +1,21 @@
+name: Micro edge probe regression
+on:
+  push:
+    branches: [codex/micro-edge-probe]
+  pull_request:
+    paths:
+      - scalp/research/micro_edge_probe.py
+      - scalp/research/test_micro_edge_probe.py
+      - .github/workflows/micro-edge-probe.yml
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 -m py_compile scalp/research/micro_edge_probe.py
+      - run: python3 -m unittest discover -s scalp/research -p 'test_micro_edge_probe.py'
