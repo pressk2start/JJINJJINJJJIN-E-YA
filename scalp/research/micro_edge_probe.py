@@ -84,6 +84,13 @@ def replay(args):
     files = sorted(Path(args.root).rglob("*.jsonl.gz"))
     if not files:
         raise ValueError("no .jsonl.gz files under root")
+    available_dates = sorted({p.parent.name for p in files})
+    if args.days:
+        selected_dates = set(available_dates[-args.days:])
+        files = [p for p in files if p.parent.name in selected_dates]
+    else:
+        selected_dates = set(available_dates)
+    observed_days = len(selected_dates)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     counters = collections.Counter()
@@ -91,6 +98,7 @@ def replay(args):
     ticks, quotes, first, last_event = {}, {}, {}, {}
     next_event, pending, seen_trade = {}, {}, {}
     rows, manifest, events = [], [], {}
+    opportunity_dates = {}
     last_recv, seq, session = None, None, 0
     digest = hashlib.sha256()
     latency = collections.Counter()
@@ -243,6 +251,7 @@ def replay(args):
                 event_id = "%s:%s:%s" % (session, market, t)
                 counters["opportunity_events"] += 1
                 events[event_id] = (2 * buy_value - total) / total
+                opportunity_dates[event_id] = path.parent.name
                 base = {
                     "event_id": event_id, "market": market,
                     "date": path.parent.name, "decision_recv_ms": t,
@@ -274,6 +283,9 @@ def replay(args):
     # Quantiles on all declared exploratory inputs, not horizon-specific survivors.
     for percentile in (.8, .9, .95):
         thresholds[str(percentile)] = quantile(list(events.values()), percentile)
+    frequency = {"all": len(events) / observed_days}
+    for p, cut in thresholds.items():
+        frequency["buy_pressure_q" + p] = sum(v >= cut for v in events.values()) / observed_days if cut is not None else 0
     tables = {}
     for horizon in args.horizons:
         cohort = [r for r in rows if r["horizon_s"] == horizon]
@@ -288,6 +300,9 @@ def replay(args):
                    "No maker fills or portfolio returns. Quotes are hypothetical taker benchmark.",
         "input_sha256_uncompressed_stream": digest.hexdigest(),
         "parameters": vars(args), "input_files": manifest,
+        "observed_calendar_dates": sorted(selected_dates),
+        "opportunities_per_observed_date": frequency,
+        "frequency_warning": "Calendar dates may be partial; not full 24h exposure or executable fills/day.",
         "quality_counts": dict(counters),
         "coverage": {k: dict(v) for k, v in market_counts.items()},
         "receive_latency_bins": dict(latency),
@@ -297,11 +312,16 @@ def replay(args):
     }
     (out / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False))
     print("EXPLORATORY TAKER BENCHMARK — not a strategy verdict")
-    print("horizon group n mean_net_pct median_net_pct positive_rate")
+    labels = ["all"] + ["buy_pressure_q" + str(p) for p in (.8, .9, .95)]
+    print("group opportunities/observed-date " + " ".join(str(h) + "s_net_pct" for h in args.horizons))
+    for label in labels:
+        values = [tables[str(h)][label].get("mean_net_pct") for h in args.horizons]
+        print(label, round(frequency[label], 2), *[("NA" if v is None else "%.6f" % v) for v in values])
+    print("horizon group completed_n median_net_pct positive_rate no_top1_pct no_top5_pct")
     for horizon, groups in tables.items():
         for name, s in groups.items():
-            print(horizon, name, s["n"], s.get("mean_net_pct"),
-                  s.get("median_net_pct"), s.get("positive_rate"))
+            print(horizon, name, s["n"], s.get("median_net_pct"), s.get("positive_rate"),
+                  s.get("mean_without_top1_pct"), s.get("mean_without_top5_pct"))
     print("Outputs:", out / "report.json", out / "events.csv")
 
 
@@ -324,6 +344,8 @@ def self_test():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("root", nargs="?")
+    p.add_argument("--days", type=int, default=0,
+                   help="latest N date directories; 0 reads all; partial dates remain partial")
     p.add_argument("--output", default="micro_edge_probe_output")
     p.add_argument("--notional-krw", type=float, default=6000)
     p.add_argument("--fee-oneway-frac", type=float, default=.0005)
@@ -345,7 +367,7 @@ def main():
         return
     if not a.root:
         p.error("root required")
-    if (a.notional_krw <= 0 or not 0 <= a.fee_oneway_frac < 1 or
+    if (a.days < 0 or a.notional_krw <= 0 or not 0 <= a.fee_oneway_frac < 1 or
             min(a.horizons) <= 0 or a.latency_ms < 0 or
             min(a.max_quote_age_ms, a.max_lateness_ms, a.max_gap_ms,
                 a.feature_window_ms, a.event_window_ms) <= 0 or a.stress_bp < 0):
