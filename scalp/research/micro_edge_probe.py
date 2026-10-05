@@ -90,7 +90,7 @@ def replay(args):
     market_counts = collections.defaultdict(collections.Counter)
     ticks, quotes, first, last_event = {}, {}, {}, {}
     next_event, pending, seen_trade = {}, {}, {}
-    rows, manifest = [], []
+    rows, manifest, events = [], [], {}
     last_recv, seq, session = None, None, 0
     digest = hashlib.sha256()
     latency = collections.Counter()
@@ -242,6 +242,7 @@ def replay(args):
                     raise ValueError("crossed/invalid book")
                 event_id = "%s:%s:%s" % (session, market, t)
                 counters["opportunity_events"] += 1
+                events[event_id] = (2 * buy_value - total) / total
                 base = {
                     "event_id": event_id, "market": market,
                     "date": path.parent.name, "decision_recv_ms": t,
@@ -271,9 +272,6 @@ def replay(args):
             writer.writerows(rows)
     thresholds = {}
     # Quantiles on all declared exploratory inputs, not horizon-specific survivors.
-    events = {}
-    for r in rows:
-        events[r["event_id"]] = r["buy_imbalance"]
     for percentile in (.8, .9, .95):
         thresholds[str(percentile)] = quantile(list(events.values()), percentile)
     tables = {}
@@ -294,8 +292,8 @@ def replay(args):
         "coverage": {k: dict(v) for k, v in market_counts.items()},
         "receive_latency_bins": dict(latency),
         "quantile_thresholds_exploratory": thresholds, "results": tables,
-        "selection_warning": "Thresholds computed from completed events; missing outcomes may bias selection. "
-                             "Inspect quality counts; no alpha claim from this probe.",
+        "selection_warning": "Thresholds use all admitted opportunities, including missing outcomes. "
+                             "Outcome exclusions still may bias averages; inspect quality counts.",
     }
     (out / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False))
     print("EXPLORATORY TAKER BENCHMARK — not a strategy verdict")
