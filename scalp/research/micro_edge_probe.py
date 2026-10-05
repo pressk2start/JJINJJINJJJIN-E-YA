@@ -60,7 +60,10 @@ PRESSURE_PERCENTILES = [100, 80, 90, 95]     # 100=전체 · 80=상위 20% · 90
 
 
 def parse_args():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="F2c micro-edge exploration probe (Taker benchmark only)")
+    ap.add_argument("data_dir_pos", nargs="?", default=None,
+                    help="ws_recorder output root (positional · overrides --data-dir)")
     ap.add_argument("--data-dir", default="/home/ubuntu/scalp/research/data/ws",
                     help="ws_recorder output root (contains YYYY-MM-DD/HH.jsonl.gz)")
     ap.add_argument("--days", type=int, default=14,
@@ -68,7 +71,10 @@ def parse_args():
     ap.add_argument("--out", default="/tmp/micro_edge_probe_result.json")
     ap.add_argument("--sample-only", action="store_true",
                     help="only 2 days for quick smoke test")
-    return ap.parse_args()
+    args = ap.parse_args()
+    if args.data_dir_pos:
+        args.data_dir = args.data_dir_pos
+    return args
 
 
 def iter_event_files(root: str, days: int):
@@ -175,7 +181,7 @@ class ForwardTracker:
     def __init__(self):
         self.pending = []  # list of (code, entry_ts_ms, entry_ask, pressure, by_horizon_dict)
 
-    def add(self, code, ts_ms, entry_ask, pressure):
+    def add(self, code, ts_ms, entry_ask, pressure, latency_ms=None):
         if entry_ask is None or entry_ask <= 0:
             return
         self.pending.append({
@@ -183,6 +189,7 @@ class ForwardTracker:
             "entry_ts": ts_ms,
             "entry_ask": entry_ask,
             "pressure": pressure,
+            "latency_ms": latency_ms,  # recv_ts - exchange_ts at entry
             "forward": {h: None for h in HORIZONS_SEC},  # bid price at t+h
         })
 
@@ -267,11 +274,38 @@ def analyze_results(completed):
             }
         # coin / hour concentration
         coin_counter = collections.Counter(c["code"] for c in subset)
-        g["top_coin"] = coin_counter.most_common(5)
+        g["top_coin"] = coin_counter.most_common(10)
         hour_counter = collections.Counter(
             dt.datetime.utcfromtimestamp(c["entry_ts"] / 1000).hour for c in subset
         )
         g["top_hour"] = hour_counter.most_common(5)
+        # per-day net (10s horizon basis · representative) · 특정 하루 의존성 확인
+        by_day = collections.defaultdict(list)
+        for c in subset:
+            d = dt.datetime.utcfromtimestamp(c["entry_ts"] / 1000).strftime("%Y-%m-%d")
+            net = compute_net_return(c["entry_ask"], c["forward"].get(10))
+            if net is not None:
+                by_day[d].append(net)
+        g["per_day_net_10s"] = {d: round(sum(v) / len(v), 5) for d, v in sorted(by_day.items())}
+        g["per_day_n"] = {d: len(v) for d, v in sorted(by_day.items())}
+        # per-coin net (10s · 종목 의존성)
+        by_coin = collections.defaultdict(list)
+        for c in subset:
+            net = compute_net_return(c["entry_ask"], c["forward"].get(10))
+            if net is not None:
+                by_coin[c["code"]].append(net)
+        g["per_coin_net_10s"] = {k: round(sum(v) / len(v), 5) for k, v in by_coin.items()}
+        g["per_coin_n"] = {k: len(v) for k, v in by_coin.items()}
+        # entry latency (recv_ts - exchange_ts) distribution
+        lats = [c["latency_ms"] for c in subset if c.get("latency_ms") is not None]
+        if lats:
+            lats_sorted = sorted(lats)
+            g["latency_ms"] = {
+                "n": len(lats),
+                "p50": lats_sorted[len(lats) // 2],
+                "p95": lats_sorted[min(len(lats) - 1, int(len(lats) * 0.95))],
+                "max": max(lats),
+            }
         return g
 
     # Compute percentile thresholds (unconditional on pressure > 0 for group assignment)
@@ -360,8 +394,11 @@ def main():
                 continue
             if st.best_ask is None:
                 continue
+            # Entry latency: recv_ts - exchange timestamp (if present)
+            ex_ts = ev.get("timestamp") or ev.get("trade_timestamp")
+            latency = (recv_ts - int(ex_ts)) if ex_ts else None
             # Create new forward entry
-            tracker.add(code, recv_ts, st.best_ask, pressure)
+            tracker.add(code, recv_ts, st.best_ask, pressure, latency_ms=latency)
             st.last_probe_ts = recv_ts
 
         # progress log every 500k events
@@ -378,6 +415,18 @@ def main():
           f"skipped_meta={skipped_meta} skipped_gap={skipped_gap} elapsed={elapsed:.1f}s")
     print(f"[probe] coins observed: {len(states)}: {sorted(states.keys())}")
     print(f"[probe] completed by coin: {collections.Counter(c['code'] for c in completed_all).most_common()}")
+
+    # Data coverage summary (date range + file count · 추측 X · 실측만)
+    if files:
+        date_set = sorted(set(dt for dt, hr, pt in files))
+        print(f"[probe] data coverage: {len(files)} files · dates {date_set[0]}~{date_set[-1]} ({len(date_set)} days)")
+    # Events/day 추정
+    if completed_all:
+        completed_days = len(set(dt.datetime.utcfromtimestamp(c["entry_ts"] / 1000).strftime("%Y-%m-%d")
+                                  for c in completed_all))
+        if completed_days > 0:
+            print(f"[probe] completed events/day avg: {len(completed_all) / completed_days:.1f} "
+                  f"(across {completed_days} days)")
 
     results = analyze_results(completed_all)
 
