@@ -997,13 +997,19 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
         trade_id = str(uuid.uuid4())
         entry_ts = time.time()
         entry_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(entry_ts))
-        entry_krw = round(float(filled_price) * float(filled_volume), 2)
-        slippage = 0.0
-        if signal_price and float(signal_price) > 0:
-            slippage = (float(filled_price) - float(signal_price)) / float(signal_price) * 100
+        # P1-fix-A (2026-10-14): absent/invalid fill data must not become a zero-price fill.
+        # Treat filled_price/filled_volume=None (or 0) as unknown; store None, never fake.
+        _fill_px = float(filled_price) if filled_price is not None else None
+        _fill_vol = float(filled_volume) if filled_volume is not None else None
+        _valid_fill = (_fill_px is not None and math.isfinite(_fill_px) and _fill_px > 0
+                       and _fill_vol is not None and math.isfinite(_fill_vol) and _fill_vol > 0)
+        entry_krw = round(_fill_px * _fill_vol, 2) if _valid_fill else None
+        slippage = None
+        if _valid_fill and signal_price is not None and float(signal_price) > 0:
+            slippage = (_fill_px - float(signal_price)) / float(signal_price) * 100
         # risk_override: risk_calc_krw < 실제 entry_krw면 최소주문 상향된 상태
         risk_override = False
-        if risk_calc_krw is not None:
+        if risk_calc_krw is not None and entry_krw is not None:
             try:
                 risk_override = float(risk_calc_krw) < entry_krw
             except Exception:
@@ -1031,7 +1037,7 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
             "filled_volume": filled_volume,
             "entry_krw": entry_krw,
             "entry_fee_krw": entry_fee_krw,
-            "entry_slippage_pct": round(slippage, 4),
+            "entry_slippage_pct": round(slippage, 4) if slippage is not None else None,
             "risk_calc_krw": risk_calc_krw,
             "risk_override": risk_override,
             "max_seed_krw": max_seed_krw,
@@ -5193,10 +5199,33 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                 _p1_inc("exch_limit_fill_full")
                 # 실체결 audit log: ENTRY_FILLED 이벤트 append (조언자 스펙)
                 try:
+                    # P1-fix-A (2026-10-14): Upbit `/v1/order` top-level `executed_funds`가
+                    # 0으로 돌아오는 경우가 있어 체결가 0 저장 → 모든 체결 기록 오염.
+                    # trades[] 배열에서 VWAP 집계하고, 수량 일치 안 하면 None 저장.
                     _executed_vol = float(od.get("executed_volume", 0) or 0)
-                    _executed_funds = float(od.get("executed_funds", 0) or 0)
-                    _paid_fee = float(od.get("paid_fee", 0) or 0)
-                    _avg_fill_price = (_executed_funds / _executed_vol) if _executed_vol > 0 else float(ask1_price)
+                    _paid_fee_raw = od.get("paid_fee")
+                    _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
+                    # Order detail trades[] is the source of executed funds; do not use ask1 as fill.
+                    _trades = od.get("trades") or []
+                    _trade_vol = 0.0
+                    _trade_funds = 0.0
+                    _trades_valid = True
+                    for _tr in _trades:
+                        try:
+                            _p = float(_tr["price"])
+                            _v = float(_tr["volume"])
+                            if not (math.isfinite(_p) and math.isfinite(_v) and _p > 0 and _v > 0):
+                                raise ValueError("invalid fill")
+                            _trade_vol += _v
+                            _trade_funds += _p * _v
+                        except (KeyError, TypeError, ValueError, OverflowError):
+                            _trades_valid = False
+                            break
+                    # A partial/missing trades[] list is not a verified VWAP.
+                    _volume_matches = abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8)
+                    _avg_fill_price = (_trade_funds / _trade_vol
+                                       if _trades_valid and _trade_vol > 0 and _volume_matches
+                                       else None)
                     _live_trade_log_entry(
                         market=market,
                         order_price=float(ask1_price),
@@ -5204,7 +5233,7 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                         filled_volume=_executed_vol,
                         signal_price=float(ask1_price),
                         entry_order_uuid=order_uuid,
-                        entry_fee_krw=round(_paid_fee, 4) if _paid_fee else None,
+                        entry_fee_krw=round(_paid_fee, 4) if _paid_fee is not None else None,
                         route=None,  # 상위 caller가 알고 있음 (별도 개선 필요)
                         risk_calc_krw=None,  # 상위에서 SIZE_BUMP 로직에 있음
                         max_seed_krw=None,
