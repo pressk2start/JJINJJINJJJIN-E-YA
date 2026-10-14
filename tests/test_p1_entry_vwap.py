@@ -25,17 +25,23 @@ import unittest
 
 
 def fill_vwap_from_order(od):
-    """bot.py:5196-5225의 trades[] VWAP 로직을 격리 재현.
+    """bot.py:5201-5240의 trades[] VWAP 로직을 격리 재현 (P1-fix-A.1 반영).
 
     반환:
         (avg_price, executed_vol, paid_fee)
         avg_price: 실제 체결가 (VWAP) 또는 None (미확인)
         executed_vol: top-level executed_volume
-        paid_fee: 실제 수수료 또는 None (missing)
+        paid_fee: 실제 수수료 또는 None (missing/parse error)
     """
     _executed_vol = float(od.get("executed_volume", 0) or 0)
+    # P1-fix-A.1: 수수료 파싱 실패가 전체 ENTRY 로깅 중단 안 되도록 격리
     _paid_fee_raw = od.get("paid_fee")
-    _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
+    try:
+        _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
+        if _paid_fee is not None and not math.isfinite(_paid_fee):
+            _paid_fee = None
+    except (TypeError, ValueError):
+        _paid_fee = None
     _trades = od.get("trades") or []
     _trade_vol = 0.0
     _trade_funds = 0.0
@@ -52,8 +58,10 @@ def fill_vwap_from_order(od):
             _trades_valid = False
             break
     _volume_matches = abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8)
+    _funds_finite = math.isfinite(_trade_funds)
     _avg_fill_price = (_trade_funds / _trade_vol
                        if _trades_valid and _trade_vol > 0 and _volume_matches
+                       and _funds_finite
                        else None)
     return _avg_fill_price, _executed_vol, _paid_fee
 
@@ -193,6 +201,40 @@ class TestVWAPContract(unittest.TestCase):
         }
         _, _, fee = fill_vwap_from_order(od)
         self.assertIsNone(fee)
+
+    def test_corrupt_paid_fee_does_not_abort_entry(self):
+        """P1-fix-A.1 regression: 손상된 paid_fee 문자열이 체결 집계까지 날리면 안 됨.
+        수수료만 None, VWAP는 trades[]에서 정상 집계되어야 함."""
+        od = {
+            "executed_volume": "1.0",
+            "paid_fee": "not_a_number",  # 손상된 응답
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        px, _, fee = fill_vwap_from_order(od)
+        self.assertAlmostEqual(px, 100.0, places=4)  # VWAP 정상
+        self.assertIsNone(fee)  # fee만 미확인
+
+    def test_nan_paid_fee_treated_as_missing(self):
+        """P1-fix-A.1: NaN/Inf 수수료는 '수수료 0'이 아니라 '미확인'."""
+        od = {
+            "executed_volume": "1.0",
+            "paid_fee": "nan",
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        _, _, fee = fill_vwap_from_order(od)
+        self.assertIsNone(fee)
+
+    def test_funds_overflow_returns_none(self):
+        """P1-fix-A.1: funds 집계가 overflow하면 VWAP 미확인."""
+        od = {
+            "executed_volume": "2e308",
+            "trades": [
+                {"price": "1e308", "volume": "1e308"},
+                {"price": "1e308", "volume": "1e308"},
+            ],
+        }
+        px, _, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
 
 
 class TestEntryFieldsContract(unittest.TestCase):
