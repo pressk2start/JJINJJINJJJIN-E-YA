@@ -5203,8 +5203,16 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                     # 0으로 돌아오는 경우가 있어 체결가 0 저장 → 모든 체결 기록 오염.
                     # trades[] 배열에서 VWAP 집계하고, 수량 일치 안 하면 None 저장.
                     _executed_vol = float(od.get("executed_volume", 0) or 0)
+                    # P1-fix-A.1 (2026-10-14): 수수료 파싱 실패가 ENTRY 로깅 전체를 중단시키지
+                    # 않도록 격리. 손상된 paid_fee 하나 때문에 정상 체결정보까지 날아가면
+                    # 더 큰 문제이므로 fee 미확인은 fee=None 처리, 체결 집계는 계속.
                     _paid_fee_raw = od.get("paid_fee")
-                    _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
+                    try:
+                        _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
+                        if _paid_fee is not None and not math.isfinite(_paid_fee):
+                            _paid_fee = None
+                    except (TypeError, ValueError):
+                        _paid_fee = None
                     # Order detail trades[] is the source of executed funds; do not use ask1 as fill.
                     _trades = od.get("trades") or []
                     _trade_vol = 0.0
@@ -5222,9 +5230,12 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                             _trades_valid = False
                             break
                     # A partial/missing trades[] list is not a verified VWAP.
+                    # P1-fix-A.1: funds 누적값도 유한한지 추가 검사 (overflow 방어).
                     _volume_matches = abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8)
+                    _funds_finite = math.isfinite(_trade_funds)
                     _avg_fill_price = (_trade_funds / _trade_vol
                                        if _trades_valid and _trade_vol > 0 and _volume_matches
+                                       and _funds_finite
                                        else None)
                     _live_trade_log_entry(
                         market=market,
