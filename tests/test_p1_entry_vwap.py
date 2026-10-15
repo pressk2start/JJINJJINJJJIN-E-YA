@@ -25,20 +25,27 @@ import unittest
 
 
 def fill_vwap_from_order(od):
-    """bot.py:5201-5240의 trades[] VWAP 로직을 격리 재현 (P1-fix-A.1 반영).
+    """bot.py:5201-5260의 trades[] VWAP 로직을 격리 재현 (P1-fix-A.2 반영).
 
     반환:
         (avg_price, executed_vol, paid_fee)
         avg_price: 실제 체결가 (VWAP) 또는 None (미확인)
-        executed_vol: top-level executed_volume
-        paid_fee: 실제 수수료 또는 None (missing/parse error)
+        executed_vol: 유효한 executed_volume 또는 0.0 (손상값)
+        paid_fee: 실제 수수료 또는 None (missing/invalid)
     """
-    _executed_vol = float(od.get("executed_volume", 0) or 0)
-    # P1-fix-A.1: 수수료 파싱 실패가 전체 ENTRY 로깅 중단 안 되도록 격리
+    # P1-fix-A.2: executed_volume 유한값·비음수 검사
+    _executed_vol_raw = od.get("executed_volume", 0)
+    try:
+        _executed_vol = float(_executed_vol_raw) if _executed_vol_raw is not None else 0.0
+        if not (math.isfinite(_executed_vol) and _executed_vol >= 0):
+            _executed_vol = 0.0
+    except (TypeError, ValueError):
+        _executed_vol = 0.0
+    # P1-fix-A.1 + A.2: 수수료 파싱 격리, NaN/Inf/음수 모두 미확인
     _paid_fee_raw = od.get("paid_fee")
     try:
         _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
-        if _paid_fee is not None and not math.isfinite(_paid_fee):
+        if _paid_fee is not None and (not math.isfinite(_paid_fee) or _paid_fee < 0):
             _paid_fee = None
     except (TypeError, ValueError):
         _paid_fee = None
@@ -52,12 +59,24 @@ def fill_vwap_from_order(od):
             _v = float(_tr["volume"])
             if not (math.isfinite(_p) and math.isfinite(_v) and _p > 0 and _v > 0):
                 raise ValueError("invalid fill")
+            # P1-fix-A.2: trade별 funds가 있으면 price*volume과 교차검증
+            _tr_funds_raw = _tr.get("funds")
+            if _tr_funds_raw is not None:
+                _tr_funds_val = float(_tr_funds_raw)
+                if not (math.isfinite(_tr_funds_val) and _tr_funds_val > 0):
+                    raise ValueError("invalid trade funds")
+                _expected_funds = _p * _v
+                _funds_tolerance = max(1e-6, _expected_funds * 1e-6)
+                if abs(_tr_funds_val - _expected_funds) > _funds_tolerance:
+                    raise ValueError("funds mismatch")
             _trade_vol += _v
             _trade_funds += _p * _v
         except (KeyError, TypeError, ValueError, OverflowError):
             _trades_valid = False
             break
-    _volume_matches = abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8)
+    _exec_vol_valid = math.isfinite(_executed_vol) and _executed_vol > 0
+    _volume_matches = (_exec_vol_valid and
+                       abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8))
     _funds_finite = math.isfinite(_trade_funds)
     _avg_fill_price = (_trade_funds / _trade_vol
                        if _trades_valid and _trade_vol > 0 and _volume_matches
@@ -235,6 +254,86 @@ class TestVWAPContract(unittest.TestCase):
         }
         px, _, _ = fill_vwap_from_order(od)
         self.assertIsNone(px)
+
+    def test_negative_paid_fee_is_missing(self):
+        """P1-fix-A.2: 음수 수수료는 '0' 또는 '유효값'이 아닌 '미확인'."""
+        od = {
+            "executed_volume": "1.0",
+            "paid_fee": "-5.0",
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        _, _, fee = fill_vwap_from_order(od)
+        self.assertIsNone(fee)
+
+    def test_executed_volume_infinity_returns_none(self):
+        """P1-fix-A.2: executed_volume이 Infinity면 VWAP 미확인.
+        현재 _volume_matches 허용오차가 inf 입력에서 silently 통과하는 문제 방어."""
+        od = {
+            "executed_volume": "inf",
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        px, vol, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
+        self.assertEqual(vol, 0.0)  # 손상값은 0.0으로 처리
+
+    def test_executed_volume_negative_rejected(self):
+        """P1-fix-A.2: executed_volume 음수는 손상값."""
+        od = {
+            "executed_volume": "-1.0",
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        px, vol, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
+        self.assertEqual(vol, 0.0)
+
+    def test_executed_volume_nan_rejected(self):
+        """P1-fix-A.2: executed_volume NaN도 손상값."""
+        od = {
+            "executed_volume": "nan",
+            "trades": [{"price": "100", "volume": "1.0"}],
+        }
+        px, vol, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
+        self.assertEqual(vol, 0.0)
+
+    def test_funds_cross_check_match_ok(self):
+        """P1-fix-A.2: trade에 funds가 있고 price*volume과 일치하면 VWAP 정상."""
+        od = {
+            "executed_volume": "2.0",
+            "trades": [
+                {"price": "100", "volume": "1.0", "funds": "100"},
+                {"price": "102", "volume": "1.0", "funds": "102"},
+            ],
+        }
+        px, _, _ = fill_vwap_from_order(od)
+        self.assertAlmostEqual(px, 101.0, places=4)
+
+    def test_funds_cross_check_mismatch_rejected(self):
+        """P1-fix-A.2: trade의 funds가 price*volume과 불일치면 VWAP 미확인."""
+        od = {
+            "executed_volume": "1.0",
+            "trades": [{"price": "100", "volume": "1.0", "funds": "999"}],  # 100*1≠999
+        }
+        px, _, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
+
+    def test_funds_cross_check_negative_funds_rejected(self):
+        """P1-fix-A.2: trade의 funds가 음수면 손상."""
+        od = {
+            "executed_volume": "1.0",
+            "trades": [{"price": "100", "volume": "1.0", "funds": "-100"}],
+        }
+        px, _, _ = fill_vwap_from_order(od)
+        self.assertIsNone(px)
+
+    def test_funds_absent_in_trade_ok(self):
+        """P1-fix-A.2: trade에 funds가 없으면 price*volume만 사용 (강제 X)."""
+        od = {
+            "executed_volume": "1.0",
+            "trades": [{"price": "100", "volume": "1.0"}],  # no funds
+        }
+        px, _, _ = fill_vwap_from_order(od)
+        self.assertAlmostEqual(px, 100.0, places=4)
 
 
 class TestEntryFieldsContract(unittest.TestCase):

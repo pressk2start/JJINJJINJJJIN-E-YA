@@ -5202,18 +5202,28 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                     # P1-fix-A (2026-10-14): Upbit `/v1/order` top-level `executed_funds`가
                     # 0으로 돌아오는 경우가 있어 체결가 0 저장 → 모든 체결 기록 오염.
                     # trades[] 배열에서 VWAP 집계하고, 수량 일치 안 하면 None 저장.
-                    _executed_vol = float(od.get("executed_volume", 0) or 0)
+                    # P1-fix-A.2 (2026-10-14): executed_volume 유한값 검사, 음수 수수료 거부,
+                    # trades[] funds 교차검증 추가.
+                    _executed_vol_raw = od.get("executed_volume", 0)
+                    try:
+                        _executed_vol = float(_executed_vol_raw) if _executed_vol_raw is not None else 0.0
+                        if not (math.isfinite(_executed_vol) and _executed_vol >= 0):
+                            _executed_vol = 0.0
+                    except (TypeError, ValueError):
+                        _executed_vol = 0.0
                     # P1-fix-A.1 (2026-10-14): 수수료 파싱 실패가 ENTRY 로깅 전체를 중단시키지
                     # 않도록 격리. 손상된 paid_fee 하나 때문에 정상 체결정보까지 날아가면
                     # 더 큰 문제이므로 fee 미확인은 fee=None 처리, 체결 집계는 계속.
+                    # P1-fix-A.2: 음수 수수료는 미확인 처리 (paid_fee 의미상 음수 비정상).
                     _paid_fee_raw = od.get("paid_fee")
                     try:
                         _paid_fee = float(_paid_fee_raw) if _paid_fee_raw is not None else None
-                        if _paid_fee is not None and not math.isfinite(_paid_fee):
+                        if _paid_fee is not None and (not math.isfinite(_paid_fee) or _paid_fee < 0):
                             _paid_fee = None
                     except (TypeError, ValueError):
                         _paid_fee = None
                     # Order detail trades[] is the source of executed funds; do not use ask1 as fill.
+                    # P1-fix-A.2: 각 trade의 funds 필드가 있으면 price*volume과 교차검증.
                     _trades = od.get("trades") or []
                     _trade_vol = 0.0
                     _trade_funds = 0.0
@@ -5224,6 +5234,16 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                             _v = float(_tr["volume"])
                             if not (math.isfinite(_p) and math.isfinite(_v) and _p > 0 and _v > 0):
                                 raise ValueError("invalid fill")
+                            # Cross-check: trades[].funds vs price*volume (허용오차 1e-6).
+                            _tr_funds_raw = _tr.get("funds")
+                            if _tr_funds_raw is not None:
+                                _tr_funds_val = float(_tr_funds_raw)
+                                if not (math.isfinite(_tr_funds_val) and _tr_funds_val > 0):
+                                    raise ValueError("invalid trade funds")
+                                _expected_funds = _p * _v
+                                _funds_tolerance = max(1e-6, _expected_funds * 1e-6)
+                                if abs(_tr_funds_val - _expected_funds) > _funds_tolerance:
+                                    raise ValueError("funds mismatch")
                             _trade_vol += _v
                             _trade_funds += _p * _v
                         except (KeyError, TypeError, ValueError, OverflowError):
@@ -5231,7 +5251,10 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
                             break
                     # A partial/missing trades[] list is not a verified VWAP.
                     # P1-fix-A.1: funds 누적값도 유한한지 추가 검사 (overflow 방어).
-                    _volume_matches = abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8)
+                    # P1-fix-A.2: executed_volume이 유한하고 양수일 때만 수량 비교 유의미.
+                    _exec_vol_valid = math.isfinite(_executed_vol) and _executed_vol > 0
+                    _volume_matches = (_exec_vol_valid and
+                                       abs(_trade_vol - _executed_vol) <= max(1e-8, _executed_vol * 1e-8))
                     _funds_finite = math.isfinite(_trade_funds)
                     _avg_fill_price = (_trade_funds / _trade_vol
                                        if _trades_valid and _trade_vol > 0 and _volume_matches
