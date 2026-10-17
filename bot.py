@@ -8712,6 +8712,9 @@ def _trade_log_migrate_header(path=None, fields=None):
         if not header or "market" not in header:
             print(f"[TRADE_LOG_MIGRATE] 헤더 인식 불가 → 스킵: {header[:5]}")
             return False
+        if header != fields[:len(header)]:
+            print("[TRADE_LOG_MIGRATE] 예상 외 헤더 순서: 원본 보존")
+            return False
         extra_fields = [c for c in fields if c not in header]  # 헤더에 없던 필드 (fields 순서)
         migrated = []
         n_short = n_long = n_bad = 0
@@ -8732,10 +8735,13 @@ def _trade_log_migrate_header(path=None, fields=None):
                             row[k] = v
                         n_long += 1
                     else:
-                        n_bad += 1  # 매핑 불가 초과값은 버림 (값 추측 안 함)
+                        n_bad += 1  # 매핑 불가 초과값이 있으면 변환 중단
                 elif len(vals) < len(header):
                     n_short += 1
                 migrated.append(row)
+        if n_short or n_bad:
+            print(f"[TRADE_LOG_MIGRATE] 예상 밖의 행 크기 short={n_short}, extra={n_bad}: 원본 보존")
+            return False
         import tempfile
         _dir = os.path.dirname(path) or "."
         with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
@@ -8761,6 +8767,11 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
         new_file = not os.path.exists(TRADE_LOG_PATH)
         if not new_file:
             _trade_log_migrate_header()  # 헤더/필드 불일치면 append 전에 정렬 (no-op if same)
+            with open(TRADE_LOG_PATH, newline="", encoding="utf-8") as _f:
+                _header = next(csv.reader(_f), [])
+            if _header != FEATURE_FIELDS:
+                print("[TRADE_LOG] CSV 헤더 불일치: 기록 보류, 원본 유지")
+                return
         with open(TRADE_LOG_PATH, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
             if new_file:
@@ -8857,9 +8868,8 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                 with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     rows = list(reader)
-                # 방어: 남은 초과 열(key=None)은 DictWriter 가 거부하므로 제거
-                for _r in rows:
-                    _r.pop(None, None)
+                if reader.fieldnames != FEATURE_FIELDS or any(None in _r for _r in rows):
+                    raise ValueError("CSV schema or unmapped columns: refusing to rewrite")
 
                 # 마지막 해당 마켓 찾아서 업데이트
                 _csv_updated = False

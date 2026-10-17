@@ -164,16 +164,40 @@ class TestTradeFeaturesHeaderMigrate(unittest.TestCase):
         self.assertFalse(self.ns["_trade_log_migrate_header"]())
         self.assertEqual(os.stat(self.path).st_mtime_ns, before)
 
-    def test_unmappable_extras_are_dropped_not_guessed(self):
-        """초과 값 개수가 신규 필드 수와 다르면 추측 매핑하지 않고 버림 (값 보존 우선)."""
+    def test_unmappable_extras_preserved_not_dropped(self):
         with open(self.path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(SERVER_HEADER)
-            w.writerow([""] * len(SERVER_HEADER) + ["x", "y"])  # 2개 초과 (v7 는 4개)
-        self.assertTrue(self.ns["_trade_log_migrate_header"]())
-        rows = self._read_rows()
-        self.assertEqual(len(rows), 1)
-        self.assertTrue(all(rows[0][k] == "" for k in self.v7))
+            w.writerow([""] * len(SERVER_HEADER) + ["x", "y"])
+        with open(self.path, "rb") as f:
+            before = f.read()
+        self.assertFalse(self.ns["_trade_log_migrate_header"]())
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_append_skips_unknown_schema_to_protect_original(self):
+        with open(self.path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(SERVER_HEADER)
+            w.writerow([""] * len(SERVER_HEADER) + ["x", "y"])
+        with open(self.path, "rb") as f:
+            before = f.read()
+        self.ns["log_trade_features"]({"market": "KRW-TEST"})
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_reordered_header_refused_without_file_change(self):
+        bad = SERVER_HEADER[:]
+        bad[2], bad[3] = bad[3], bad[2]
+        with open(self.path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(bad)
+            w.writerow(["z"] * len(bad))
+        with open(self.path, "rb") as f:
+            before = f.read()
+        self.assertFalse(self.ns["_trade_log_migrate_header"]())
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_missing_file_is_noop(self):
         self.assertFalse(self.ns["_trade_log_migrate_header"]())
