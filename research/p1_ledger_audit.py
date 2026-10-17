@@ -172,6 +172,9 @@ def analyze(rows, orders=(), since=None, until=None):
             quality["exchange_order_missing_uuid"] += 1
     submissions = []
     for row in rows:
+        if not isinstance(row.get("event_type"), str) or not row["event_type"]:
+            quality["event_type_invalid"] += 1
+            continue
         # ORDER_SUBMITTED precedes a trade ID. A missing UUID is an unknown
         # submission result, never evidence that the exchange accepted a fill.
         if row.get("event_type") == "ORDER_SUBMITTED":
@@ -396,7 +399,7 @@ def analyze(rows, orders=(), since=None, until=None):
             submission_flags.append("submission_not_linked_to_trade")
         submission_output.append({
             "order_uuid": order_uuid, "market": event.get("market"),
-            "submit_ts": event.get("ts"), "submit_path": event.get("submit_path"),
+            "submit_ts": event.get("submit_ts", event.get("ts")), "submit_path": event.get("submit_path"),
             "requested_krw": plain(number(event.get("requested_krw"), positive=True)),
             "referenced_trade_ids": owners,
             "status": "ENTRY_REFERENCE_ONLY" if owners else "UNRESOLVED",
@@ -450,6 +453,8 @@ def analyze(rows, orders=(), since=None, until=None):
 def save_report(report, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    if any((output / name).is_symlink() for name in ("report.json", "trades.csv", "orders.csv")):
+        raise ValueError("refusing symlink output files")
     (output / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
@@ -461,6 +466,10 @@ def save_report(report, output):
             for row in submissions:
                 writer.writerow({**row, "flags": ";".join(row["flags"]),
                                  "referenced_trade_ids": ";".join(row["referenced_trade_ids"])})
+    else:
+        (output / "orders.csv").write_text(
+            "order_uuid,market,submit_ts,submit_path,requested_krw,referenced_trade_ids,status,flags\n",
+            encoding="utf-8-sig")
     trades = report["trades"]
     if trades:
         with (output / "trades.csv").open("w", newline="", encoding="utf-8-sig") as target:
@@ -468,6 +477,9 @@ def save_report(report, output):
             writer.writeheader()
             for row in trades:
                 writer.writerow({**row, "flags": ";".join(row["flags"])})
+    else:
+        (output / "trades.csv").write_text(
+            "trade_id,market,reconciliation,flags\n", encoding="utf-8-sig")
 
 
 def main(argv=None):
@@ -484,7 +496,11 @@ def main(argv=None):
     out = Path(args.output).resolve()
     orders_path = Path(args.orders).resolve() if args.orders else None
     targets = {out / "report.json", out / "trades.csv", out / "orders.csv"}
-    if ledger in targets or orders_path in targets:
+    if any(target.is_symlink() for target in targets):
+        parser.error("refusing symlink output files")
+    inputs = [path for path in (ledger, orders_path) if path is not None]
+    if any(target.resolve() == source or (target.exists() and source.exists() and target.samefile(source))
+           for target in targets for source in inputs):
         parser.error("output would overwrite an input file")
     rows, invalid, sha = read_ledger(ledger)
     orders, _ = read_orders(orders_path)
@@ -508,7 +524,7 @@ def main(argv=None):
         len(report["order_submissions"]), report["submission_issue_counts"]))
     for flag, count in report["quality_trade_counts"].items():
         print("  %s: %d" % (flag, count))
-    print("Outputs: %s/report.json %s/trades.csv; orders.csv when submissions exist" % (out, out))
+    print("Outputs: %s/report.json %s/trades.csv; orders.csv contains submission inventory" % (out, out))
 
 
 if __name__ == "__main__":

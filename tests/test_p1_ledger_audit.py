@@ -3,6 +3,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import contextlib
+import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -400,6 +403,51 @@ class BcEventAuditTests(unittest.TestCase):
         self.assertEqual(result["selected_trade_ids"], 1)
         self.assertEqual(result["matched_exported_order_pairs"], 0)
         self.assertIn("order_uuid_reused_across_trades", result["trades"][0]["flags"])
+
+
+class OutputSafetyTests(unittest.TestCase):
+    def test_empty_rerun_clears_previous_csv_records(self):
+        with tempfile.TemporaryDirectory() as folder:
+            populated = audit.analyze([BcEventAuditTests().submission()] + ledger())
+            audit.save_report(populated, folder)
+            audit.save_report(audit.analyze([]), folder)
+            self.assertNotIn("t1-buy", (Path(folder) / "orders.csv").read_text(encoding="utf-8-sig"))
+            self.assertNotIn("t1", (Path(folder) / "trades.csv").read_text(encoding="utf-8-sig"))
+            self.assertEqual(len((Path(folder) / "trades.csv").read_text(encoding="utf-8-sig").splitlines()), 1)
+
+    def test_cli_symlink_output_cannot_overwrite_input(self):
+        for name in ("report.json", "trades.csv", "orders.csv"):
+            with self.subTest(output=name), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                source = root / "input.jsonl"
+                source.write_text("\n".join(json.dumps(x) for x in ledger()), encoding="utf-8")
+                before = source.read_bytes()
+                out = root / "out"
+                out.mkdir()
+                (out / name).symlink_to(source)
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    audit.main([str(source), "--output", str(out)])
+                self.assertEqual(source.read_bytes(), before)
+
+    def test_cli_hardlink_output_cannot_overwrite_input(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "input.jsonl"
+            source.write_text("\n".join(json.dumps(x) for x in ledger()), encoding="utf-8")
+            before = source.read_bytes()
+            out = root / "out"
+            out.mkdir()
+            os.link(source, out / "report.json")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                audit.main([str(source), "--output", str(out)])
+            self.assertEqual(source.read_bytes(), before)
+
+    def test_malformed_event_type_is_a_quality_issue(self):
+        for value in (None, [], {}, 7, ""):
+            with self.subTest(value=value):
+                result = audit.analyze([{"event_type": value, "trade_id": "bad"}] + ledger())
+                self.assertEqual(result["quality_trade_counts"]["event_type_invalid"], 1)
+                self.assertEqual(result["selected_trade_ids"], 1)
 
 
 if __name__ == "__main__":

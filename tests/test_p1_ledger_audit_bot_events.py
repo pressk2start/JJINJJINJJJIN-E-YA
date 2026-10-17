@@ -18,6 +18,7 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 MARKET = "KRW-TEST"
 HELPERS = {
+    "_live_trade_log_order_submitted",
     "_live_trade_log_entry",
     "_live_trade_log_entry_reconcile",
     "_live_trade_log_exit",
@@ -108,6 +109,17 @@ class TestActualLoggerAuditBoundary(unittest.TestCase):
                 row["reconciliation"], "MATCHED_EXPORTED_ORDER_PAIR")
             self.assertIsNone(row["exchange_cashflow_net_krw"])
         return report
+
+    def test_actual_submission_timestamp_and_unresolved_status(self):
+        self.call("_live_trade_log_order_submitted", market=MARKET,
+                  order_uuid="unlinked-market-buy", requested_krw=6000,
+                  path="market_fallback", ask1_price=100)
+        report = AUDIT.analyze(self.events)
+        item = report["order_submissions"][0]
+        self.assertEqual(item["submit_ts"], self.events[0]["submit_ts"])
+        self.assertIsNotNone(item["submit_ts"])
+        self.assertEqual(item["status"], "UNRESOLVED")
+        self.assertEqual(report["selected_trade_ids"], 0)
 
     def test_partial_exit_never_becomes_full_roundtrip(self):
         self.entry(quantity=60.0, fee=3.0)
