@@ -263,5 +263,144 @@ class TestExitCashflow(unittest.TestCase):
         self.assertEqual(self.events, [])
 
 
+class TestAdvisorReproducedDefects(unittest.TestCase):
+    """어드바이저가 실 로거로 재현한 결함 3건의 회귀 테스트 (P1-fix-B.1 / C.1 / C.2)."""
+
+    def setUp(self):
+        self.ns, self.events, self.pending = _load_ledger()
+        self.entry = self.ns["_live_trade_log_entry"]
+        self.exit = self.ns["_live_trade_log_exit"]
+        self.rec = self.ns["_live_trade_log_entry_reconcile"]
+
+    # ── 결함 #1: 부분매도에 전체 원가 차감 + 거래 종료 처리 ──
+    def test_partial_exit_prorates_cost_and_keeps_pending(self):
+        self.entry(market="KRW-T", order_price=100.0, filled_price=100.0, filled_volume=60.0,
+                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=3.0)
+        tid = self.pending["KRW-T"]["trade_id"]
+        self.events.clear()
+        self.exit(market="KRW-T", exit_price=110.0, exit_reason="partial", net_pnl_pct=9.9,
+                  hold_sec=60, exit_order_uuid="sell-1", executed_exit_volume=30.0,
+                  exit_fee_krw=1.65, remaining_volume=30.0)
+        closed = _by_type(self.events, "TRADE_CLOSED")[0]
+        ex = _by_type(self.events, "EXIT_FILLED")[0]
+        self.assertTrue(closed["partial_exit"]); self.assertTrue(ex["partial_exit"])
+        self.assertAlmostEqual(closed["exit_fraction"], 0.5, places=6)
+        self.assertFalse(closed["completed"])
+        self.assertEqual(closed["remaining_volume"], 30.0)
+        # 이번분 원가 = 6000 × 0.5 = 3000, 매수수수료 1.5
+        self.assertEqual(closed["entry_krw_used"], 3000.0)
+        self.assertEqual(closed["entry_fee_krw_used"], 1.5)
+        # 현금흐름: 110×30 − 3000 − 1.5 − 1.65 = +296.85 (전체원가 차감 시 −2704.65 였음)
+        self.assertEqual(closed["net_pnl_krw_cashflow"], round(110 * 30 - 3000 - 1.5 - 1.65, 2))
+        # legacy derivation 도 이번분 원가 기준
+        self.assertEqual(closed["net_pnl_krw"], round(3000 * 9.9 / 100, 2))
+        # pending 유지 · 같은 trade_id · 잔량/잔여원가/잔여수수료
+        p = self.pending["KRW-T"]
+        self.assertEqual(p["trade_id"], tid)
+        self.assertEqual(p["filled_volume"], 30.0)
+        self.assertEqual(p["entry_krw"], 3000.0)
+        self.assertEqual(p["entry_fee_krw"], 1.5)
+
+    def test_partial_then_remainder_exit_completes_and_pops(self):
+        self.entry(market="KRW-T", order_price=100.0, filled_price=100.0, filled_volume=60.0,
+                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=3.0)
+        tid = self.pending["KRW-T"]["trade_id"]
+        self.exit(market="KRW-T", exit_price=110.0, exit_reason="p1", net_pnl_pct=9.9, hold_sec=60,
+                  exit_order_uuid="sell-1", executed_exit_volume=30.0, exit_fee_krw=1.65)
+        self.events.clear()
+        self.exit(market="KRW-T", exit_price=120.0, exit_reason="p2", net_pnl_pct=19.9, hold_sec=90,
+                  exit_order_uuid="sell-2", executed_exit_volume=30.0, exit_fee_krw=1.8)
+        closed = _by_type(self.events, "TRADE_CLOSED")[0]
+        self.assertEqual(closed["trade_id"], tid)
+        self.assertFalse(closed["partial_exit"])
+        self.assertTrue(closed["completed"])
+        self.assertEqual(closed["entry_krw_used"], 3000.0)
+        self.assertEqual(closed["net_pnl_krw_cashflow"], round(120 * 30 - 3000 - 1.5 - 1.8, 2))
+        self.assertNotIn("KRW-T", self.pending)
+
+    def test_unmeasured_exit_volume_treated_as_full(self):
+        self.entry(market="KRW-U", order_price=100.0, filled_price=100.0, filled_volume=10.0,
+                   signal_price=100.0, entry_order_uuid="b", entry_fee_krw=0.5)
+        self.events.clear()
+        self.exit(market="KRW-U", exit_price=101.0, exit_reason="r", net_pnl_pct=0.9, hold_sec=5)
+        closed = _by_type(self.events, "TRADE_CLOSED")[0]
+        self.assertFalse(closed["partial_exit"]); self.assertTrue(closed["completed"])
+        self.assertNotIn("KRW-U", self.pending)
+
+    # ── 결함 #2: 추매 leg 가 pending 을 새 trade_id 로 덮어쓰기 ──
+    def test_add_leg_entry_keeps_seed_trade_id_and_pending(self):
+        self.entry(market="KRW-A", order_price=100.0, filled_price=100.0, filled_volume=10.0,
+                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=0.5)
+        seed_tid = self.pending["KRW-A"]["trade_id"]
+        seed_ref = self.pending["KRW-A"]["shadow_ref_id"]
+        ret = self.entry(market="KRW-A", order_price=102.0, filled_price=102.0, filled_volume=10.0,
+                         signal_price=102.0, entry_order_uuid="buy-2", entry_fee_krw=0.51)
+        self.assertEqual(ret, seed_tid)
+        fills = _by_type(self.events, "ENTRY_FILLED")
+        self.assertEqual(len(fills), 2)
+        self.assertEqual({f["trade_id"] for f in fills}, {seed_tid})
+        self.assertEqual([f["leg"] for f in fills], ["seed", "add"])
+        self.assertEqual(fills[1]["shadow_ref_id"], seed_ref)
+        # pending 은 seed 그대로 (원가 합산은 reconcile 몫)
+        p = self.pending["KRW-A"]
+        self.assertEqual(p["trade_id"], seed_tid)
+        self.assertEqual(p["filled_volume"], 10.0)
+        self.assertEqual(p["entry_krw"], 1000.0)
+        # 이어서 add reconcile → 합산 원가·누적 수수료
+        self.rec("KRW-A", avg_price=101.0, volume_filled=20.0, signal_price=102.0,
+                 entry_order_uuid="buy-2", source="add_auto_position", entry_fee_krw=0.51,
+                 added_leg={"avg_price": 102.0, "volume": 10.0, "order_uuid": "buy-2"},
+                 price_source="order_trades")
+        p = self.pending["KRW-A"]
+        self.assertEqual(p["trade_id"], seed_tid)
+        self.assertEqual(p["filled_volume"], 20.0)
+        self.assertEqual(p["entry_krw"], 2020.0)
+        self.assertAlmostEqual(p["entry_fee_krw"], 1.01, places=4)
+        # exit 가 seed trade_id 로 조인됨 (고아 거래 없음)
+        self.events.clear()
+        self.exit(market="KRW-A", exit_price=110.0, exit_reason="r", net_pnl_pct=8.8, hold_sec=10,
+                  exit_order_uuid="s", executed_exit_volume=20.0, exit_fee_krw=1.1)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["trade_id"], seed_tid)
+
+    # ── 결함 #3: 추정 평단을 체결가로 확정 기록 ──
+    def test_estimate_source_created_from_final_does_not_certify_price(self):
+        self.rec("KRW-E", avg_price=100.0, volume_filled=59.7, signal_price=100.0,
+                 entry_order_uuid="u", source="open_auto_position", entry_fee_krw=3.0,
+                 price_source="signal_estimate")
+        f = _by_type(self.events, "ENTRY_FILLED")[0]
+        r = _by_type(self.events, "ENTRY_RECONCILED")[0]
+        self.assertIsNone(f["filled_price"]); self.assertIsNone(f["entry_krw"])
+        self.assertEqual(f["filled_volume"], 59.7)
+        self.assertEqual(r["price_source"], "signal_estimate")
+        self.assertIsNone(r["final_avg_price"]); self.assertIsNone(r["final_entry_krw"])
+        self.assertEqual(r["estimated_avg_price"], 100.0)
+        self.assertIsNone(self.pending["KRW-E"]["entry_krw"])
+
+    def test_estimate_source_updated_pending_keeps_verified_price(self):
+        self.entry(market="KRW-F", order_price=100.0, filled_price=100.0, filled_volume=40.0,
+                   signal_price=100.0, entry_order_uuid="u1", entry_fee_krw=2.0)
+        self.events.clear()
+        self.rec("KRW-F", avg_price=105.0, volume_filled=72.0, signal_price=100.0,
+                 entry_order_uuid="u1", source="open_auto_position", entry_fee_krw=3.0,
+                 price_source="requested_krw_estimate")
+        p = self.pending["KRW-F"]
+        self.assertEqual(p["filled_volume"], 72.0)          # 수량은 잔고 확정값 → 갱신
+        self.assertEqual(p["filled_price"], 100.0)          # 평단은 검증값 유지
+        self.assertEqual(p["entry_krw"], 4000.0)            # 원가도 유지 (추정으로 덮지 않음)
+        r = _by_type(self.events, "ENTRY_RECONCILED")[0]
+        self.assertEqual(r["reconcile_mode"], "updated_pending")
+        self.assertIsNone(r["final_avg_price"]); self.assertEqual(r["estimated_avg_price"], 105.0)
+
+    def test_verified_source_updated_pending_overwrites_price(self):
+        self.entry(market="KRW-G", order_price=100.0, filled_price=100.0, filled_volume=40.0,
+                   signal_price=100.0, entry_order_uuid="u1", entry_fee_krw=2.0)
+        self.rec("KRW-G", avg_price=100.5, volume_filled=72.0, signal_price=100.0,
+                 entry_order_uuid="u1", source="open_auto_position", entry_fee_krw=3.0,
+                 price_source="account_avg")
+        p = self.pending["KRW-G"]
+        self.assertEqual(p["filled_price"], 100.5)
+        self.assertEqual(p["entry_krw"], round(100.5 * 72.0, 2))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

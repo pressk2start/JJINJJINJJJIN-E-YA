@@ -203,8 +203,8 @@ class TestRealLiveTradeLogEntry(unittest.TestCase):
         self.assertIsNone(ev["entry_slippage_pct"])
 
     def test_pending_overwrites_same_market(self):
-        """같은 종목 추가 호출: PENDING이 덮어쓰기됨 (advisor 지적 — 피라미딩 결함).
-        현재 코드 동작 사실 확인용 (fix는 P1-fix-D 범위)."""
+        """같은 종목 추가 호출: P1-fix-C.1 이후 PENDING 은 덮어쓰지 않고 seed trade_id 유지.
+        두 번째 ENTRY_FILLED 는 leg="add" 로 같은 trade_id 를 공유 (고아 거래 방지)."""
         self.func(
             market="KRW-E",
             order_price=100.0,
@@ -224,9 +224,12 @@ class TestRealLiveTradeLogEntry(unittest.TestCase):
             entry_order_uuid="u5b",
             entry_fee_krw=1.0,
         )
-        # 두 번째 호출이 첫 pending을 덮어씀 (현재 동작 — 피라미딩 결함)
-        self.assertNotEqual(first_pending, self.pending["KRW-E"]["trade_id"])
-        self.assertEqual(len(self.events), 2)  # 로그는 둘 다 남음
+        # P1-fix-C.1: 두 번째 호출은 pending 을 교체하지 않음 → seed trade_id 유지
+        self.assertEqual(first_pending, self.pending["KRW-E"]["trade_id"])
+        self.assertEqual(len(self.events), 2)  # 로그는 둘 다 남음 (seed + add)
+        self.assertEqual([e["leg"] for e in self.events], ["seed", "add"])
+        self.assertEqual(self.events[1]["trade_id"], first_pending)
+        self.assertEqual(self.pending["KRW-E"]["filled_volume"], 1.0)  # seed 값 유지 (합산은 reconcile 몫)
 
 
 if __name__ == "__main__":
