@@ -1044,6 +1044,7 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
         }
         _live_trade_write_event(event)
         # pending에 exit 조인용 정보만 남김 (trade_id + entry_krw + entry_ts + shadow_ref_id)
+        # P1-fix-B: entry_fee_krw 도 보존 → exit 에서 현금흐름 기반 net 계산에 사용.
         with _LIVE_TRADE_LOCK:
             _LIVE_TRADE_PENDING[market] = {
                 "trade_id": trade_id,
@@ -1052,6 +1053,7 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
                 "entry_krw": entry_krw,
                 "filled_volume": filled_volume,
                 "filled_price": filled_price,
+                "entry_fee_krw": entry_fee_krw,
             }
         print(f"[LIVE_ENTRY_FILLED] {market} trade_id={trade_id[:8]} "
               f"price={filled_price} vol={filled_volume} krw={entry_krw}")
@@ -1059,6 +1061,141 @@ def _live_trade_log_entry(market, order_price, filled_price, filled_volume,
     except Exception as e:
         print(f"[LIVE_TRADE_LOG] entry 기록 실패 {market}: {e}")
         return None
+
+
+def _order_paid_fee(od):
+    """주문 응답 dict 에서 paid_fee 를 float 으로. 없거나 손상/음수/비유한이면 None."""
+    try:
+        if not isinstance(od, dict):
+            return None
+        raw = od.get("paid_fee")
+        if raw is None:
+            return None
+        fee = float(raw)
+        if not math.isfinite(fee) or fee < 0:
+            return None
+        return round(fee, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_trade_log_order_submitted(market, order_uuid, requested_krw, path,
+                                    ask1_price=None):
+    """P1-fix-C: 시장가 폴백 등 주문 *접수* 사실만 기록. 체결로 취급하지 않음.
+
+    - 재조회/폴링 없음 → 주문 경로 지연 0.
+    - pending 미변경 (체결 확정은 reconcile 단계에서만).
+    - order_uuid 가 없으면 (응답 실패) uuid=None 으로 남겨 접수 시도 자체는 보존.
+    """
+    try:
+        ts = time.time()
+        _live_trade_write_event({
+            "event_type": "ORDER_SUBMITTED",
+            "schema_v": 2,
+            "is_live": True,
+            "market": market,
+            "order_uuid": order_uuid,
+            "order_type": "market",
+            "submit_path": path,
+            "requested_krw": requested_krw,
+            "ask1_price_at_submit": ask1_price,
+            "submit_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)),
+            "submit_ts": ts,
+        })
+    except Exception as e:
+        print(f"[LIVE_TRADE_LOG] order_submitted 기록 실패 {market}: {e}")
+
+
+def _live_trade_log_entry_reconcile(market, avg_price, volume_filled, signal_price,
+                                    entry_order_uuid, source, entry_fee_krw=None,
+                                    krw_requested=None, route=None, added_leg=None):
+    """P1-fix-C: 포지션 확정값(avg_price·volume_filled)으로 진입 원장을 대조.
+
+    회계 전용. OPEN_POSITIONS/주문 판단은 읽지도 바꾸지도 않음 (호출부가 확정한 값만 받음).
+    - pending 없음 (지정가 전량체결 외 경로: 시장가 폴백·부분체결+시장가 잔여 등)
+      → ENTRY_FILLED 를 확정값으로 신규 기록 (pending 생성).
+    - pending 있음 (지정가 경로가 이미 기록) 이고 수량/평단이 확정값과 다르면
+      → ENTRY_RECONCILED 기록 + pending 의 원가 필드를 확정값으로 갱신
+        (exit 의 net_pnl_krw 가 실제 원가 기준이 되도록).
+    - 확정값이 유효하지 않으면 (avg_price/volume ≤0·비유한) 아무것도 기록하지 않음.
+    """
+    try:
+        try:
+            _px = float(avg_price) if avg_price is not None else None
+            _vol = float(volume_filled) if volume_filled is not None else None
+        except (TypeError, ValueError):
+            return
+        _valid = (_px is not None and math.isfinite(_px) and _px > 0
+                  and _vol is not None and math.isfinite(_vol) and _vol > 0)
+        if not _valid:
+            return
+        with _LIVE_TRADE_LOCK:
+            pending = dict(_LIVE_TRADE_PENDING.get(market) or {})
+        if not pending:
+            _live_trade_log_entry(
+                market=market,
+                order_price=signal_price,
+                filled_price=_px,
+                filled_volume=_vol,
+                signal_price=signal_price,
+                entry_order_uuid=entry_order_uuid,
+                entry_fee_krw=entry_fee_krw,
+                route=route,
+                risk_calc_krw=krw_requested,
+            )
+            _live_trade_write_event({
+                "event_type": "ENTRY_RECONCILED",
+                "schema_v": 2,
+                "is_live": True,
+                "market": market,
+                "reconcile_source": source,
+                "reconcile_mode": "created_from_final",
+                "final_avg_price": _px,
+                "final_volume": _vol,
+                "final_entry_krw": round(_px * _vol, 2),
+                "added_leg": added_leg,
+                "reconcile_ts": time.time(),
+            })
+            return
+        _prev_vol = float(pending.get("filled_volume") or 0)
+        _prev_px = pending.get("filled_price")
+        _vol_tol = max(1e-8, _vol * 1e-6)
+        _px_tol = max(1e-8, _px * 1e-6)
+        _vol_diff = abs(_vol - _prev_vol) > _vol_tol
+        _px_diff = (_prev_px is None) or abs(_px - float(_prev_px)) > _px_tol
+        if not (_vol_diff or _px_diff):
+            return
+        _final_krw = round(_px * _vol, 2)
+        with _LIVE_TRADE_LOCK:
+            cur = _LIVE_TRADE_PENDING.get(market)
+            if cur is not None and cur.get("trade_id") == pending.get("trade_id"):
+                cur["filled_volume"] = _vol
+                cur["filled_price"] = _px
+                cur["entry_krw"] = _final_krw
+                if entry_fee_krw is not None:
+                    _old_fee = cur.get("entry_fee_krw")
+                    cur["entry_fee_krw"] = (round(float(_old_fee) + float(entry_fee_krw), 4)
+                                            if (added_leg and _old_fee is not None) else entry_fee_krw)
+        _live_trade_write_event({
+            "event_type": "ENTRY_RECONCILED",
+            "schema_v": 2,
+            "trade_id": pending.get("trade_id"),
+            "shadow_ref_id": pending.get("shadow_ref_id"),
+            "is_live": True,
+            "market": market,
+            "reconcile_source": source,
+            "reconcile_mode": "updated_pending",
+            "prev_filled_price": _prev_px,
+            "prev_filled_volume": _prev_vol,
+            "final_avg_price": _px,
+            "final_volume": _vol,
+            "final_entry_krw": _final_krw,
+            "entry_order_uuid": entry_order_uuid,
+            "added_leg": added_leg,
+            "reconcile_ts": time.time(),
+        })
+    except Exception as e:
+        print(f"[LIVE_TRADE_LOG] entry reconcile 실패 {market}: {e}")
 
 
 def _live_trade_log_exit(market, exit_price, exit_reason,
@@ -1100,8 +1237,24 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
         if net_pnl_pct is not None and entry_krw:
             net_pnl_krw = round(entry_krw * net_pnl_pct / 100, 2)
         # executed_exit_volume 기본값: 전체 volume
+        _exit_vol_is_measured = executed_exit_volume is not None
         if executed_exit_volume is None:
             executed_exit_volume = entry_vol
+        # P1-fix-B: 현금흐름 기반 net (매도금액 − 매수금액 − 매수수수료 − 매도수수료).
+        # 기존 net_pnl_krw (= entry_krw × pct) 는 그대로 두고 별도 필드로 병기.
+        # 입력 하나라도 미확인이면 None (추정값으로 채우지 않음).
+        net_pnl_krw_cashflow = None
+        try:
+            _entry_fee = pending.get("entry_fee_krw")
+            _xp = float(exit_price) if exit_price is not None else None
+            _xv = float(executed_exit_volume) if _exit_vol_is_measured else None
+            if (entry_krw and _entry_fee is not None and exit_fee_krw is not None
+                    and _xp is not None and _xv is not None
+                    and math.isfinite(_xp) and math.isfinite(_xv) and _xp > 0 and _xv > 0):
+                net_pnl_krw_cashflow = round(
+                    _xp * _xv - float(entry_krw) - float(_entry_fee) - float(exit_fee_krw), 2)
+        except (TypeError, ValueError):
+            net_pnl_krw_cashflow = None
         # EXIT_FILLED 이벤트 (P1-a: shadow_ref_id 는 pending 에서 전파 · pair 조인 키)
         # advisor 4 (2026-09-30) · schema_v=2 · 이중변환 버그 fix 이후 · 분석 시
         # schema_v 없거나 =1 인 legacy 기록은 net_pnl_pct 100x 증폭 가능성 있음 · filter.
@@ -1136,6 +1289,8 @@ def _live_trade_log_exit(market, exit_price, exit_reason,
             "gross_pnl_pct": gross_pnl_pct,
             "net_pnl_pct": net_pnl_pct,
             "net_pnl_krw": net_pnl_krw,
+            "net_pnl_krw_cashflow": net_pnl_krw_cashflow,
+            "exit_fee_krw": exit_fee_krw,
             "remaining_volume": round(float(remaining_volume), 8),
             "completed": True,
         }
@@ -5156,7 +5311,10 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
     if not ask1_price or ask1_price <= 0:
         print(f"[HYBRID] {market} 호가 정보 없음 → 시장가 폴백")
         _p1_inc("exch_market_direct")
-        return place_market_buy(market, krw_amount)
+        _mk_res = place_market_buy(market, krw_amount)
+        _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                        krw_amount, "market_direct_no_orderbook", ask1_price)
+        return _mk_res
 
     buy_volume = krw_amount / ask1_price
     buy_volume = round(buy_volume, 8)
@@ -5164,7 +5322,10 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
     if buy_volume <= 0 or ask1_price * buy_volume < 5000:
         print(f"[HYBRID] {market} 주문금액 부족 → 시장가 폴백")
         _p1_inc("exch_market_direct")
-        return place_market_buy(market, krw_amount)
+        _mk_res = place_market_buy(market, krw_amount)
+        _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                        krw_amount, "market_direct_min_notional", ask1_price)
+        return _mk_res
 
     try:
         _p1_inc("exch_limit_submit")
@@ -5172,20 +5333,29 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
         if not limit_res or not isinstance(limit_res, dict):
             print(f"[HYBRID] {market} 지정가 주문 실패 → 시장가 폴백")
             _p1_inc("exch_market_fallback")
-            return place_market_buy(market, krw_amount)
+            _mk_res = place_market_buy(market, krw_amount)
+            _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                            krw_amount, "market_fallback_limit_submit_failed", ask1_price)
+            return _mk_res
 
         order_uuid = limit_res.get("uuid")
         if not order_uuid:
             print(f"[HYBRID] {market} 지정가 UUID 없음 → 시장가 폴백")
             _p1_inc("exch_market_fallback")
-            return place_market_buy(market, krw_amount)
+            _mk_res = place_market_buy(market, krw_amount)
+            _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                            krw_amount, "market_fallback_limit_no_uuid", ask1_price)
+            return _mk_res
 
         print(f"[HYBRID] {market} 지정가 매수 @ {ask1_price:,.0f}원 × {buy_volume:.6f} | 대기 {timeout_sec}초")
 
     except Exception as e:
         print(f"[HYBRID] {market} 지정가 예외: {e} → 시장가 폴백")
         _p1_inc("exch_market_fallback")
-        return place_market_buy(market, krw_amount)
+        _mk_res = place_market_buy(market, krw_amount)
+        _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                        krw_amount, "market_fallback_limit_exception", ask1_price)
+        return _mk_res
 
     deadline = time.time() + timeout_sec
     od = None
@@ -5329,7 +5499,10 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
         print(f"[HYBRID] {market} 잔여분 시장가 매수 {remaining_krw:,}원")
         _p1_inc("exch_market_fallback")
         try:
-            place_market_buy(market, remaining_krw)
+            _mk_res = place_market_buy(market, remaining_krw)
+            # P1-fix-C: 잔여분 시장가 주문 접수 기록 (체결 확정은 open_auto_position reconcile 에서).
+            _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
+                                            remaining_krw, "market_fallback_remainder_after_limit_cancel", ask1_price)
             return limit_res
         except Exception as e:
             print(f"[HYBRID] {market} 잔여분 시장가 실패: {e}")
@@ -6677,6 +6850,25 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
             }
             _entered_open = True  # 🔧 FIX: pending→open 전환 성공 마킹
 
+        # P1-fix-C (2026-10-17): 진입 원장 reconcile — 회계 전용 · 매매 판단 무영향.
+        # 위에서 확정된 avg_price/volume_filled (지정가 체결 + 시장가 잔여 + 잔고 보정 반영)를
+        # 그대로 읽어 원장과 대조. hybrid_buy 가 지정가 전량체결 외 경로(시장가 폴백·부분체결)
+        # 로 끝나 ENTRY_FILLED 가 없으면 여기서 생성, 있으면 수량/평단 차이만 ENTRY_RECONCILED.
+        try:
+            _live_trade_log_entry_reconcile(
+                market=m,
+                avg_price=avg_price,
+                volume_filled=volume_filled,
+                signal_price=signal_price,
+                entry_order_uuid=oid,
+                source="open_auto_position",
+                entry_fee_krw=_order_paid_fee(od),
+                krw_requested=krw_to_use,
+                route=(_strat_conf.get("route") if _strat_conf else None),
+            )
+        except Exception as _rc_err:
+            print(f"[LIVE_TRADE_LOG] entry reconcile hook 실패 {m}: {_rc_err}")
+
         slip_pct = (avg_price / signal_price - 1.0) if signal_price else 0.0
         # 🔧 FIX: 불리한 슬리피지만 기록 (abs()는 유리한 체결도 비용으로 취급 → 체크포인트 과대)
         # 유리한 체결(음수) → 0, 불리한 체결(양수) → 그대로, 1% 캡
@@ -7066,6 +7258,25 @@ def add_auto_position(m, cur_price, reason=""):
         except Exception as e:
             print(f"[PYRA_STOP_ERR] 추매 후 손절가 갱신 실패: {e}")
 
+    # P1-fix-C/D (2026-10-17): 추매 원장 reconcile — 회계 전용 · 매매 판단 무영향.
+    # 추매 후 평단/수량은 위 락 블록에서 이미 확정됨. pending 의 원가 필드를 합산 평단·총수량으로
+    # 갱신하고 ENTRY_RECONCILED 를 남겨 exit net_pnl_krw 가 실제 총원가 기준이 되도록.
+    try:
+        _live_trade_log_entry_reconcile(
+            market=m,
+            avg_price=new_entry_price,
+            volume_filled=new_vol,
+            signal_price=cur_price,
+            entry_order_uuid=order_uuid,
+            source="add_auto_position",
+            entry_fee_krw=_order_paid_fee(od),
+            krw_requested=krw_to_use,
+            added_leg={"avg_price": avg_price_add, "volume": volume_filled,
+                       "order_uuid": order_uuid, "krw_requested": krw_to_use},
+        )
+    except Exception as _rc_err:
+        print(f"[LIVE_TRADE_LOG] add reconcile hook 실패 {m}: {_rc_err}")
+
     gain_from_old = (avg_price_add / entry_price_old - 1) * 100 if entry_price_old > 0 else 0
     tg_send(
         f"📈 <b>추매 체결</b> {m}\n"
@@ -7225,11 +7436,13 @@ def close_auto_position(m, reason=""):
                             OPEN_POSITIONS.pop(m, None)
 
                         # 🔧 FIX: 지연청산 시 실제 체결가 조회 시도 (학습 데이터 정확도 개선)
+                        _od_delayed_fee = None  # P1-fix-B: 지연 조회 응답의 paid_fee (없으면 None)
                         if order_uuid:
                             try:
                                 od_delayed = get_order_result(order_uuid, timeout_sec=8.0)
                                 if od_delayed:
                                     delayed_avg = float(od_delayed.get("avg_price") or "0")
+                                    _od_delayed_fee = _order_paid_fee(od_delayed)
                                     if delayed_avg > 0:
                                         exit_price_used = delayed_avg
                                         ret_pct = (exit_price_used / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
@@ -7254,7 +7467,11 @@ def close_auto_position(m, reason=""):
                                                 added=pos.get('added', False), exit_reason=reason,
                                                 mfe_pct=mfe, mae_pct=mae,
                                                 entry_ts=pos.get("entry_ts"),
-                                                pos_snapshot=dict(pos))
+                                                pos_snapshot=dict(pos),
+                                                # P1-fix-B: 잔고=0 확인 = 전량 체결로 간주 · 수수료는 지연조회 응답에서
+                                                exit_order_uuid=order_uuid,
+                                                executed_exit_volume=vol,
+                                                exit_fee_krw=_od_delayed_fee)
                         except Exception as _e:
                             print("[DELAYED_CLOSE_LOG_ERR]", _e)
                         return
@@ -7266,6 +7483,7 @@ def close_auto_position(m, reason=""):
                 def _followup_check():
                     try:
                         _fup_exit_price = cur_price  # 🔧 FIX: 초기값은 closure의 cur_price
+                        _fup_fee = None  # P1-fix-B: 후속 조회 응답의 paid_fee (없으면 None)
                         for _ in range(120):  # 추가 4분 감시 (120회 x 2초)
                             time.sleep(2.0)
                             _fup_bal = get_balance_with_locked(m)  # 🔧 locked 포함
@@ -7278,6 +7496,7 @@ def close_auto_position(m, reason=""):
                                         _od_fup = get_order_result(order_uuid, timeout_sec=5.0)
                                         if _od_fup:
                                             _fup_avg = float(_od_fup.get("avg_price") or "0")
+                                            _fup_fee = _order_paid_fee(_od_fup)
                                             if _fup_avg > 0:
                                                 _fup_exit_price = _fup_avg
                                     except Exception:
@@ -7301,7 +7520,11 @@ def close_auto_position(m, reason=""):
                                                         exit_reason=reason or "후속확인_청산",
                                                         mfe_pct=_mfe, mae_pct=_mae,
                                                         entry_ts=pos.get("entry_ts"),
-                                                        pos_snapshot=dict(pos))
+                                                        pos_snapshot=dict(pos),
+                                                        # P1-fix-B: 잔고=0 확인 = 전량 체결로 간주
+                                                        exit_order_uuid=order_uuid,
+                                                        executed_exit_volume=vol,
+                                                        exit_fee_krw=_fup_fee)
                                 except Exception as _e:
                                     print(f"[FOLLOWUP_TRADE_LOG_ERR] {_e}")
                                 return
@@ -7427,7 +7650,11 @@ def close_auto_position(m, reason=""):
                                     added=was_added, exit_reason=reason,
                                     mfe_pct=mfe, mae_pct=mae,
                                     entry_ts=pos.get("entry_ts"),
-                                    pos_snapshot=dict(pos))
+                                    pos_snapshot=dict(pos),
+                                    # P1-fix-B: 이미 폴링한 매도 응답(od) 재사용 · 추가 조회 없음
+                                    exit_order_uuid=order_uuid,
+                                    executed_exit_volume=executed,
+                                    exit_fee_krw=_order_paid_fee(od))
             except Exception as _e:
                 print(f"[FEATURE_UPDATE_ERR] {_e}")
 
@@ -7863,7 +8090,11 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
                                         added=backup_added, exit_reason=reason or "부분청산",
                                         mfe_pct=_ps_mfe, mae_pct=_ps_mae,
                                         entry_ts=backup_entry_ts,
-                                        pos_snapshot=backup_pos_snapshot)
+                                        pos_snapshot=backup_pos_snapshot,
+                                        # P1-fix-B: 이미 폴링한 매도 응답(od) 재사용
+                                        exit_order_uuid=order_uuid,
+                                        executed_exit_volume=executed,
+                                        exit_fee_krw=_order_paid_fee(od))
             except Exception as _e:
                 print(f"[PARTIAL_TRADE_LOG_ERR] {_e}")
 
@@ -8382,9 +8613,13 @@ def log_trade_features(entry_data: dict, exit_data: dict = None):
 def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec: float,
                         added: bool = False, exit_reason: str = "",
                         mfe_pct: float = 0.0, mae_pct: float = 0.0,
-                        entry_ts: float = None, pos_snapshot: dict = None):
+                        entry_ts: float = None, pos_snapshot: dict = None,
+                        exit_order_uuid: str = None, executed_exit_volume: float = None,
+                        exit_fee_krw: float = None):
     """
     청산 시 결과 업데이트 + 건수 기반 학습 트리거 + 경로 리포트
+    - P1-fix-B: exit_order_uuid / executed_exit_volume / exit_fee_krw 는 매도 주문 응답
+      (호출부가 이미 폴링한 od) 에서 전달. 기본 None = 기존 동작 (원장에 null 기록).
     - added: 추매 여부 (probe → confirm 승격 시 True)
     - exit_reason: 청산 사유 (예: ATR손절, 트레일링, 얇은수익, 시간종료 등)
     - mfe_pct: 최고 수익률 (Maximum Favorable Excursion)
@@ -8436,6 +8671,9 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
             exit_reason=exit_reason,
             net_pnl_pct=pnl_pct * 100,
             hold_sec=hold_sec,
+            exit_order_uuid=exit_order_uuid,
+            executed_exit_volume=executed_exit_volume,
+            exit_fee_krw=exit_fee_krw,
         )
     except Exception as _ltl_err:
         print(f"[LIVE_TRADE_LOG] exit hook 실패 {market}: {_ltl_err}")
@@ -19070,10 +19308,13 @@ def box_monitor_position(m, entry_price, volume, box_info):
         time.sleep(0.5)
 
         # 매도가 조회 (Private API — get_order_result 사용)
+        _box_od = None   # P1-fix-B: 폴링한 매도 응답 보존 (수수료 전달용)
+        order_id = ""
         try:
             order_id = sell_result.get("uuid", "")
             if order_id:
                 od = get_order_result(order_id, timeout_sec=10.0)
+                _box_od = od
                 if od and od.get("avg_price"):
                     sell_price = float(od["avg_price"])
                 elif od and od.get("trades"):
@@ -19113,7 +19354,12 @@ def box_monitor_position(m, entry_price, volume, box_info):
         # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
         try:
             update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
-                                exit_reason=sell_reason)
+                                exit_reason=sell_reason,
+                                # P1-fix-B: 마지막 매도 leg 응답 재사용. 70% 부분익절 leg(_partial_res)는
+                                # 폴링 없이 접수만 되므로 이 호출엔 미반영 (후속 과제).
+                                exit_order_uuid=(order_id or None),
+                                executed_exit_volume=(remaining_vol if remaining_vol > 0 else None),
+                                exit_fee_krw=_order_paid_fee(_box_od))
         except Exception as _e:
             print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
 
