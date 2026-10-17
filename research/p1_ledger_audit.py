@@ -5,7 +5,7 @@ import csv
 import hashlib
 import json
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -86,10 +86,15 @@ def read_orders(path):
 
 def order_summary(order, side, market):
     """Require full trade detail, quantity agreement, final state and explicit fee."""
+    if not market.startswith("KRW-"):
+        return None, "non_krw_market_unsupported"
     if order.get("market") != market or order.get("side") != side:
         return None, "order_market_or_side_mismatch"
     if order.get("state") not in ("done", "cancel"):
         return None, "order_not_final"
+    if order.get("state") == "done" and order.get("remaining_volume") is not None:
+        if number(order["remaining_volume"], nonnegative=True) != Decimal(0):
+            return None, "completed_order_has_remaining_volume"
     qty = number(order.get("executed_volume"), positive=True)
     fee = number(order.get("paid_fee"), nonnegative=True)
     if qty is None or fee is None:
@@ -109,7 +114,13 @@ def order_summary(order, side, market):
         volume = number(trade.get("volume"), positive=True)
         if price is None or volume is None:
             return None, "invalid_order_trade"
+        if trade.get("market") is not None and trade["market"] != market:
+            return None, "trade_market_conflict"
+        if trade.get("side") is not None and trade["side"] != side:
+            return None, "trade_side_conflict"
         if trade.get("uuid") is not None:
+            if not isinstance(trade["uuid"], str):
+                return None, "invalid_trade_uuid"
             if trade["uuid"] in trade_ids:
                 return None, "duplicate_exchange_trade"
             trade_ids.add(trade["uuid"])
@@ -164,6 +175,14 @@ def analyze(rows, orders=(), since=None, until=None):
             quality["event_missing_trade_id"] += 1
             continue
         grouped[str(row["trade_id"])].append(row)
+    # Build UUID ownership before date filtering, so a hidden leg cannot make a
+    # reused order look unique in a selected slice.
+    all_uuid_owners = defaultdict(set)
+    for owner, owner_events in grouped.items():
+        for event in owner_events:
+            for field in ("entry_order_uuid", "exit_order_uuid"):
+                if event.get(field):
+                    all_uuid_owners[str(event[field])].add(owner)
     output = []
     for trade_id, events in sorted(grouped.items()):
         kinds = defaultdict(list)
@@ -190,9 +209,10 @@ def analyze(rows, orders=(), since=None, until=None):
         for name, group in (("entry", entries), ("exit", exits), ("close", closes)):
             if len(group) != 1:
                 flags.append(name + ("_missing" if not group else "_duplicate"))
-        markets = {x.get("market") for x in events if x.get("market")}
+        market_values = [x.get("market") for x in events if x.get("market")]
+        markets = {x for x in market_values if isinstance(x, str)}
         market = next(iter(markets)) if len(markets) == 1 else ""
-        if len(markets) != 1:
+        if len(markets) != 1 or len(markets) != len(set(str(x) for x in market_values)):
             flags.append("market_missing_or_conflict")
         versions = {str(x.get("schema_v", 1)) for x in events}
         schema = next(iter(versions)) if len(versions) == 1 else "mixed"
@@ -264,9 +284,19 @@ def analyze(rows, orders=(), since=None, until=None):
             if len(buys) != 1 or len(sells) != 1 or buy_uuid == sell_uuid:
                 flags.append("exchange_order_missing_or_duplicate")
             else:
+                time_error = False
+                if buys[0].get("created_at") is not None and sells[0].get("created_at") is not None:
+                    try:
+                        buy_time = datetime.fromisoformat(str(buys[0]["created_at"]).replace("Z", "+00:00"))
+                        sell_time = datetime.fromisoformat(str(sells[0]["created_at"]).replace("Z", "+00:00"))
+                        time_error = sell_time < buy_time
+                    except (ValueError, TypeError):
+                        time_error = True
                 buy, error = order_summary(buys[0], "bid", market)
                 sell, error2 = order_summary(sells[0], "ask", market)
-                if error or error2:
+                if time_error:
+                    flags.append("exchange_order_time_invalid")
+                elif error or error2:
                     flags.extend(x for x in (error, error2) if x)
                 elif not matches(buy["qty"], sell["qty"]):
                     flags.append("exchange_roundtrip_volume_mismatch")
@@ -290,7 +320,7 @@ def analyze(rows, orders=(), since=None, until=None):
         for field in ("entry_order_uuid", "exit_order_uuid"):
             if item[field]:
                 uuid_owners[str(item[field])].add(item["trade_id"])
-    shared = {key for key, owners in uuid_owners.items() if len(owners) > 1}
+    shared = {key for key, owners in all_uuid_owners.items() if len(owners) > 1}
     for item in output:
         if any(str(item[field]) in shared for field in ("entry_order_uuid", "exit_order_uuid") if item[field]):
             item["flags"].append("order_uuid_reused_across_trades")
@@ -309,7 +339,8 @@ def analyze(rows, orders=(), since=None, until=None):
             if field == "entry_time":
                 key = key[:10] or "UNKNOWN"
             elif field == "exit_reason":
-                key = key.split("|")[0].strip().split(" ")[0]
+                parts = key.split("|")[0].strip().split()
+                key = " ".join(parts[:2] if parts and parts[0] == "시간만료" else parts[:1]) or "UNKNOWN"
             temp[key].append(item)
         name.update({key: reported_stats(value) for key, value in sorted(temp.items())})
     reconciled = [x for x in output if x["reconciliation"] == "MATCHED_EXPORTED_ORDER_PAIR"]
@@ -373,6 +404,7 @@ def main(argv=None):
                      args.since.isoformat() if args.since else None,
                      args.until.isoformat() if args.until else None)
     report["input_sha256"] = sha
+    report["orders_export_sha256"] = hashlib.sha256(orders_path.read_bytes()).hexdigest() if orders_path else None
     report["invalid_json_lines"] = invalid
     report["date_filter"] = {"since": str(args.since) if args.since else None,
                              "until": str(args.until) if args.until else None}

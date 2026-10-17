@@ -210,6 +210,40 @@ class AuditTests(unittest.TestCase):
         result = audit.analyze(ledger(), exported)
         self.assertEqual(result["trades"][0]["exchange_cashflow_net_krw"], 18)
 
+    def test_shared_uuid_outside_date_filter_still_blocks_matching(self):
+        rows = ledger() + ledger("t2")
+        rows[3]["entry_order_uuid"] = "t1-buy"
+        rows[3]["entry_time"] = "2026-10-09T00:00:00"
+        result = audit.analyze(rows, orders() + orders("t2"), since="2026-10-10")
+        self.assertEqual(result["selected_trade_ids"], 1)
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertIn("order_uuid_reused_across_trades", result["trades"][0]["flags"])
+
+    def test_non_krw_market_is_never_reported_as_krw_cashflow(self):
+        rows = ledger(market="BTC-XRP")
+        exported = orders()
+        for order in exported:
+            order["market"] = "BTC-XRP"
+        result = audit.analyze(rows, exported)
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertIsNone(result["matched_pair_net_krw_sum"])
+
+    def test_completed_order_with_remaining_volume_rejected(self):
+        exported = orders()
+        exported[0]["remaining_volume"] = "1"
+        self.assertEqual(audit.analyze(ledger(), exported)["matched_exported_order_pairs"], 0)
+
+    def test_exchange_order_time_reversal_rejected(self):
+        exported = orders()
+        exported[0]["created_at"] = "2026-10-11T01:00:00+09:00"
+        exported[1]["created_at"] = "2026-10-10T01:00:00+09:00"
+        self.assertEqual(audit.analyze(ledger(), exported)["matched_exported_order_pairs"], 0)
+
+    def test_trade_side_conflict_rejected(self):
+        exported = orders()
+        exported[0]["trades"][0]["side"] = "ask"
+        self.assertEqual(audit.analyze(ledger(), exported)["matched_exported_order_pairs"], 0)
+
     def test_user_v2_reported_values_remain_reported(self):
         values = [-.6, -.5556, -.1, -1.004, -1.2091, -1.1309, -.9107,
                   -1.734, -1.3987, .2745, -1.3559, -.1, -.6859]
