@@ -4,12 +4,14 @@ on:
     branches: ["claude/review-codebase-7fOpB"]
     paths:
       - "research/p1_ledger_audit.py"
-      - "tests/test_p1_ledger_audit.py"
+      - "tests/test_p1_*.py"
+      - "bot.py"
       - ".github/workflows/p1-ledger-audit.yml"
   pull_request:
     paths:
       - "research/p1_ledger_audit.py"
-      - "tests/test_p1_ledger_audit.py"
+      - "tests/test_p1_*.py"
+      - "bot.py"
       - ".github/workflows/p1-ledger-audit.yml"
 permissions:
   contents: read
@@ -23,6 +25,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Syntax
-        run: python -m py_compile research/p1_ledger_audit.py tests/test_p1_ledger_audit.py
-      - name: Actual analyzer tests (synthetic data, no network or exchange)
-        run: python -m unittest discover -s tests -p test_p1_ledger_audit.py -v
+        run: python -m py_compile bot.py research/p1_ledger_audit.py tests/test_p1_*.py
+      - name: P1 source and analyzer tests (isolated, synthetic data)
+        run: python -m unittest discover -s tests -p 'test_p1_*.py' -v
