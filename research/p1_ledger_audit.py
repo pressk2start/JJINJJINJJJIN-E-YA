@@ -9,7 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 
 def number(value, positive=False, nonnegative=False):
@@ -170,7 +170,18 @@ def analyze(rows, orders=(), since=None, until=None):
             order_index[str(order["uuid"])].append(order)
         else:
             quality["exchange_order_missing_uuid"] += 1
+    submissions = []
     for row in rows:
+        if not isinstance(row.get("event_type"), str) or not row["event_type"]:
+            quality["event_type_invalid"] += 1
+            continue
+        # ORDER_SUBMITTED precedes a trade ID. A missing UUID is an unknown
+        # submission result, never evidence that the exchange accepted a fill.
+        if row.get("event_type") == "ORDER_SUBMITTED":
+            if not row.get("trade_id"):
+                quality["order_submitted_without_trade_id"] += 1
+            submissions.append(row)
+            continue
         if not row.get("trade_id"):
             quality["event_missing_trade_id"] += 1
             continue
@@ -183,6 +194,9 @@ def analyze(rows, orders=(), since=None, until=None):
             for field in ("entry_order_uuid", "exit_order_uuid"):
                 if event.get(field):
                     all_uuid_owners[str(event[field])].add(owner)
+            leg = event.get("added_leg")
+            if isinstance(leg, dict) and leg.get("order_uuid"):
+                all_uuid_owners[str(leg["order_uuid"])].add(owner)
     output = []
     for trade_id, events in sorted(grouped.items()):
         kinds = defaultdict(list)
@@ -191,6 +205,11 @@ def analyze(rows, orders=(), since=None, until=None):
         entries, exits, closes = (
             kinds["ENTRY_FILLED"], kinds["EXIT_FILLED"], kinds["TRADE_CLOSED"]
         )
+        reconciliations = kinds["ENTRY_RECONCILED"]
+        latest_reconcile = reconciliations[-1] if reconciliations else {}
+        final_rec_qty = number(latest_reconcile.get("final_volume"), positive=True)
+        final_rec_price = number(latest_reconcile.get("final_avg_price"), positive=True)
+        final_rec_cost = number(latest_reconcile.get("final_entry_krw"), positive=True)
         entry = entries[0] if entries else {}
         exit_row = exits[0] if exits else {}
         closed = closes[0] if closes else {}
@@ -257,18 +276,45 @@ def analyze(rows, orders=(), since=None, until=None):
         start, end = number(entry.get("entry_ts")), number(exit_row.get("exit_ts"))
         if start is not None and end is not None and end < start:
             flags.append("time_reversal")
+        # Preserve the existing audit flags for updated/incomplete reconcile records.
+        if any(r.get("reconcile_mode") == "updated_pending" for r in reconciliations):
+            flags.append("entry_reconciled_after_initial_fill")
+        if latest_reconcile and (final_rec_qty is None or final_rec_price is None or final_rec_cost is None):
+            flags.append("entry_reconcile_incomplete")
+        # Position averages can include quote fallbacks, account inventory or
+        # several orders. Keep them separate from the original fill evidence.
+        for rec in reconciliations:
+            flags.append("position_reconciliation_requires_order_evidence")
+            if rec.get("added_leg"):
+                flags.append("multileg_entry_requires_all_orders")
+            for field, original in (("final_avg_price", buy_price),
+                                    ("final_volume", buy_qty),
+                                    ("final_entry_krw", buy_cost)):
+                final = number(rec.get(field), positive=True)
+                if final is None:
+                    flags.append("entry_reconciliation_invalid")
+                elif original is None or not matches(final, original):
+                    flags.append("entry_reconciliation_changed_basis")
+        flags = list(dict.fromkeys(flags))
         reported = number(closed.get("net_pnl_pct"))
         # A sum of reported returns is never account performance or verified cashflow.
         item = {
             "trade_id": trade_id, "market": market, "entry_time": when,
             "exit_time": exit_row.get("exit_time"), "schema": schema, "live": live,
             "entry_events": len(entries), "exit_events": len(exits), "close_events": len(closes),
+            "entry_reconcile_events": len(reconciliations),
+            "reconciled_final_qty": plain(final_rec_qty),
+            "reconciled_final_avg_price": plain(final_rec_price),
+            "reconciled_final_entry_krw": plain(final_rec_cost),
             "entry_order_uuid": buy_uuid, "exit_order_uuid": sell_uuid,
             "entry_price": plain(buy_price), "entry_qty": plain(buy_qty),
             "entry_krw": plain(buy_cost), "entry_fee_krw": plain(buy_fee),
             "exit_price": plain(sell_price), "exit_qty": plain(sell_qty),
             "exit_fee_krw": plain(sell_fee), "exit_reason": closed.get("exit_reason"),
             "reported_net_pct": plain(reported), "reported_net_krw": plain(number(closed.get("net_pnl_krw"))),
+            # A bot-generated field called "cashflow" is still a reported value.
+            "reported_cashflow_krw": plain(number(closed.get("net_pnl_krw_cashflow"))),
+            "reported_cashflow_minus_exchange_krw": None,
             "exchange_cashflow_net_krw": None, "exchange_cashflow_net_pct": None,
             "reported_minus_exchange_pp": None,
             "reconciliation": "UNVERIFIED", "flags": flags,
@@ -278,6 +324,9 @@ def analyze(rows, orders=(), since=None, until=None):
             "entry_missing", "entry_duplicate", "exit_missing", "exit_duplicate",
             "close_missing", "close_duplicate", "market_missing_or_conflict",
             "live_false_or_conflict", "live_unmarked", "closure_not_confirmed", "time_reversal",
+            "entry_reconciliation_invalid", "entry_reconciliation_changed_basis",
+            "entry_reconciled_after_initial_fill", "entry_reconcile_incomplete",
+            "multileg_entry_requires_all_orders", "logged_volume_mismatch",
         ))
         if orders and not blockers and buy_uuid and sell_uuid:
             buys, sells = order_index[str(buy_uuid)], order_index[str(sell_uuid)]
@@ -312,6 +361,11 @@ def analyze(rows, orders=(), since=None, until=None):
                     item["exchange_cashflow_net_pct"] = plain(pct)
                     item["reported_minus_exchange_pp"] = plain(reported - pct) if reported is not None else None
                     item["reconciliation"] = "MATCHED_EXPORTED_ORDER_PAIR"
+                    cashflow = number(closed.get("net_pnl_krw_cashflow"))
+                    if cashflow is not None:
+                        item["reported_cashflow_minus_exchange_krw"] = plain(cashflow - net)
+                        if abs(cashflow - net) > Decimal("0.02"):
+                            flags.append("reported_cashflow_mismatch")
         output.append(item)
         quality.update(set(flags))
     # Shared UUIDs across trade IDs require a portfolio/cost-allocation model; reject here.
@@ -326,8 +380,31 @@ def analyze(rows, orders=(), since=None, until=None):
             item["flags"].append("order_uuid_reused_across_trades")
             quality["order_uuid_reused_across_trades"] += 1
             item["reconciliation"] = "UNVERIFIED"
-            for field in ("exchange_cashflow_net_krw", "exchange_cashflow_net_pct", "reported_minus_exchange_pp"):
+            for field in ("exchange_cashflow_net_krw", "exchange_cashflow_net_pct",
+                          "reported_minus_exchange_pp", "reported_cashflow_minus_exchange_krw"):
                 item[field] = None
+    # Submission inventory covers the whole input, including records without a
+    # trade ID. An exact UUID reference is a link, not confirmation of execution.
+    submission_counts = Counter(str(x["order_uuid"]) for x in submissions if x.get("order_uuid"))
+    submission_output = []
+    for event in submissions:
+        order_uuid = event.get("order_uuid")
+        owners = sorted(all_uuid_owners.get(str(order_uuid), ())) if order_uuid else []
+        submission_flags = []
+        if not order_uuid:
+            submission_flags.append("submission_uuid_unknown")
+        elif submission_counts[str(order_uuid)] > 1:
+            submission_flags.append("submission_uuid_repeated")
+        if order_uuid and not owners:
+            submission_flags.append("submission_not_linked_to_trade")
+        submission_output.append({
+            "order_uuid": order_uuid, "market": event.get("market"),
+            "submit_ts": event.get("submit_ts", event.get("ts")), "submit_path": event.get("submit_path"),
+            "requested_krw": plain(number(event.get("requested_krw"), positive=True)),
+            "referenced_trade_ids": owners,
+            "status": "ENTRY_REFERENCE_ONLY" if owners else "UNRESOLVED",
+            "flags": submission_flags,
+        })
     eligible = [x for x in output if x["schema"] == "2" and x["live"] == "true"
                 and x["entry_events"] == x["close_events"] == 1
                 and "market_missing_or_conflict" not in x["flags"]]
@@ -353,6 +430,8 @@ def analyze(rows, orders=(), since=None, until=None):
             "Exported order pairs verify only matched quantities/cashflows, not exchange authenticity or complete history.",
             "No inferred fills, fee-rate estimates, fuzzy shadow matching, portfolio returns, or exit-causality claims.",
             "Dates use recorded entry_time; no timezone inference.",
+            "Submission inventory covers the whole input; a UUID reference does not establish a fill.",
+            "Position reconciliation is not exchange evidence; changed basis/multiple legs require a separate complete order allocation.",
         ],
         "event_counts": dict(Counter(str(x.get("event_type", "UNKNOWN")) for x in rows)),
         "schema_counts": dict(Counter(str(x.get("schema_v", 1)) for x in rows)),
@@ -363,6 +442,10 @@ def analyze(rows, orders=(), since=None, until=None):
         "reported_by_exit_family": by_reason,
         "matched_exported_order_pairs": len(reconciled),
         "matched_pair_net_krw_sum": sum(x["exchange_cashflow_net_krw"] for x in reconciled) if reconciled else None,
+        "order_submissions": submission_output,
+        "submission_issue_counts": dict(sorted(Counter(
+            flag for item in submission_output for flag in item["flags"]
+        ).items())),
         "trades": output,
     }
 
@@ -370,9 +453,23 @@ def analyze(rows, orders=(), since=None, until=None):
 def save_report(report, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    if any((output / name).is_symlink() for name in ("report.json", "trades.csv", "orders.csv")):
+        raise ValueError("refusing symlink output files")
     (output / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
+    submissions = report.get("order_submissions", [])
+    if submissions:
+        with (output / "orders.csv").open("w", newline="", encoding="utf-8-sig") as target:
+            writer = csv.DictWriter(target, fieldnames=list(submissions[0]))
+            writer.writeheader()
+            for row in submissions:
+                writer.writerow({**row, "flags": ";".join(row["flags"]),
+                                 "referenced_trade_ids": ";".join(row["referenced_trade_ids"])})
+    else:
+        (output / "orders.csv").write_text(
+            "order_uuid,market,submit_ts,submit_path,requested_krw,referenced_trade_ids,status,flags\n",
+            encoding="utf-8-sig")
     trades = report["trades"]
     if trades:
         with (output / "trades.csv").open("w", newline="", encoding="utf-8-sig") as target:
@@ -380,6 +477,9 @@ def save_report(report, output):
             writer.writeheader()
             for row in trades:
                 writer.writerow({**row, "flags": ";".join(row["flags"])})
+    else:
+        (output / "trades.csv").write_text(
+            "trade_id,market,reconciliation,flags\n", encoding="utf-8-sig")
 
 
 def main(argv=None):
@@ -395,8 +495,12 @@ def main(argv=None):
     ledger = Path(args.ledger).resolve()
     out = Path(args.output).resolve()
     orders_path = Path(args.orders).resolve() if args.orders else None
-    targets = {out / "report.json", out / "trades.csv"}
-    if ledger in targets or orders_path in targets:
+    targets = {out / "report.json", out / "trades.csv", out / "orders.csv"}
+    if any(target.is_symlink() for target in targets):
+        parser.error("refusing symlink output files")
+    inputs = [path for path in (ledger, orders_path) if path is not None]
+    if any(target.resolve() == source or (target.exists() and source.exists() and target.samefile(source))
+           for target in targets for source in inputs):
         parser.error("output would overwrite an input file")
     rows, invalid, sha = read_ledger(ledger)
     orders, _ = read_orders(orders_path)
@@ -416,9 +520,11 @@ def main(argv=None):
         stats["n"], stats["wins"], stats["mean_reported_pct"], stats["sum_reported_pp"]))
     print("matched exported order pairs=%d net_krw_sum=%s" % (
         report["matched_exported_order_pairs"], report["matched_pair_net_krw_sum"]))
+    print("submission records=%d issues=%s (whole input, not proof of fills)" % (
+        len(report["order_submissions"]), report["submission_issue_counts"]))
     for flag, count in report["quality_trade_counts"].items():
         print("  %s: %d" % (flag, count))
-    print("Outputs: %s/report.json %s/trades.csv" % (out, out))
+    print("Outputs: %s/report.json %s/trades.csv; orders.csv contains submission inventory" % (out, out))
 
 
 if __name__ == "__main__":
