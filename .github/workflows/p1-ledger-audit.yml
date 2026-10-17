@@ -5,12 +5,14 @@ on:
     paths:
       - "research/p1_ledger_audit.py"
       - "tests/test_p1_*.py"
+      - "tests/test_trade_features_header_migrate.py"
       - "bot.py"
       - ".github/workflows/p1-ledger-audit.yml"
   pull_request:
     paths:
       - "research/p1_ledger_audit.py"
       - "tests/test_p1_*.py"
+      - "tests/test_trade_features_header_migrate.py"
       - "bot.py"
       - ".github/workflows/p1-ledger-audit.yml"
 permissions:
@@ -25,6 +27,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Syntax
-        run: python -m py_compile bot.py research/p1_ledger_audit.py tests/test_p1_*.py
+        run: python -m py_compile bot.py research/p1_ledger_audit.py tests/test_p1_*.py tests/test_trade_features_header_migrate.py
       - name: P1 source and analyzer tests (isolated, synthetic data)
-        run: python -m unittest discover -s tests -p 'test_p1_*.py' -v
+        run: |
+          python -m unittest discover -s tests -p 'test_p1_*.py' -v
+          python -m unittest discover -s tests -p 'test_trade_features_header_migrate.py' -v
