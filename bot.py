@@ -8685,12 +8685,82 @@ FEATURE_FIELDS = [
     "entry_rsi", "entry_vr5", "entry_buy_ratio", "entry_accel",
 ]
 
+def _trade_log_migrate_header(path=None, fields=None):
+    """trade_features.csv 헤더를 현재 FEATURE_FIELDS 로 맞춘다 (호출자가 _trade_log_lock 보유).
+
+    배경 (2026-10-17 발견): 2026-07-19 v7 필드 4개(entry_rsi 등)가 FEATURE_FIELDS 끝에 추가됐지만
+    기존 파일 헤더(40열)는 그대로였고, 이후 append 된 행은 44열. csv.DictReader 는 초과 열을
+    key=None 에 담고, update_trade_result 의 DictWriter.writerows 가
+    "dict contains fields not in fieldnames: None" 으로 매번 실패 → 청산 결과(mfe/mae/result)가
+    7월 19일 이후 한 번도 기록되지 않음 (723/730 행 공백). pd.read_csv 기반 리포트도 열 수 불일치로 실패.
+
+    동작: 헤더 == fields 면 아무것도 안 함(첫 줄만 읽음). 다르면 전체를 읽어 각 행을
+    이름 기준(기존 헤더) + 위치 기준(초과 값 → fields 중 헤더에 없던 필드 순서) 으로 재배치해
+    새 헤더로 원자적 재작성. 값은 바꾸지 않고 열 정렬만 한다.
+    반환: True = 재작성함, False = 불필요/불가.
+    """
+    path = path or TRADE_LOG_PATH
+    fields = list(fields or FEATURE_FIELDS)
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            first = f.readline()
+        header = next(csv.reader([first])) if first.strip() else []
+        if header == fields:
+            return False
+        if not header or "market" not in header:
+            print(f"[TRADE_LOG_MIGRATE] 헤더 인식 불가 → 스킵: {header[:5]}")
+            return False
+        extra_fields = [c for c in fields if c not in header]  # 헤더에 없던 필드 (fields 순서)
+        migrated = []
+        n_short = n_long = n_bad = 0
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # header
+            for vals in reader:
+                if not vals:
+                    continue
+                row = {k: "" for k in fields}
+                for k, v in zip(header, vals):
+                    if k in row:
+                        row[k] = v
+                extras = vals[len(header):]
+                if extras:
+                    if len(extras) == len(extra_fields):
+                        for k, v in zip(extra_fields, extras):
+                            row[k] = v
+                        n_long += 1
+                    else:
+                        n_bad += 1  # 매핑 불가 초과값은 버림 (값 추측 안 함)
+                elif len(vals) < len(header):
+                    n_short += 1
+                migrated.append(row)
+        import tempfile
+        _dir = os.path.dirname(path) or "."
+        with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
+                                          dir=_dir, suffix=".tmp", delete=False) as tf:
+            w = csv.DictWriter(tf, fieldnames=fields)
+            w.writeheader()
+            w.writerows(migrated)
+            _tmp = tf.name
+        os.replace(_tmp, path)
+        print(f"[TRADE_LOG_MIGRATE] 헤더 {len(header)}→{len(fields)}열 재작성: rows={len(migrated)} "
+              f"extra_mapped={n_long} short={n_short} unmapped_extra={n_bad}")
+        return True
+    except Exception as e:
+        print(f"[TRADE_LOG_MIGRATE_ERR] {e}")
+        return False
+
+
 def log_trade_features(entry_data: dict, exit_data: dict = None):
     """
     거래 피처 로깅 (진입 시 호출, 청산 시 업데이트)
     """
     with _trade_log_lock:
         new_file = not os.path.exists(TRADE_LOG_PATH)
+        if not new_file:
+            _trade_log_migrate_header()  # 헤더/필드 불일치면 append 전에 정렬 (no-op if same)
         with open(TRADE_LOG_PATH, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=FEATURE_FIELDS)
             if new_file:
@@ -8781,12 +8851,18 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
     else:
         with _trade_log_lock:
             try:
+                # 헤더가 FEATURE_FIELDS 와 다르면 먼저 정렬 (2026-07-19 이후 update 전부 실패하던 원인)
+                _trade_log_migrate_header()
                 rows = []
                 with open(TRADE_LOG_PATH, "r", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     rows = list(reader)
+                # 방어: 남은 초과 열(key=None)은 DictWriter 가 거부하므로 제거
+                for _r in rows:
+                    _r.pop(None, None)
 
                 # 마지막 해당 마켓 찾아서 업데이트
+                _csv_updated = False
                 for i in range(len(rows) - 1, -1, -1):
                     if rows[i]["market"] == market and not rows[i].get("exit_price"):
                         rows[i]["exit_price"] = str(exit_price)
@@ -8809,7 +8885,10 @@ def update_trade_result(market: str, exit_price: float, pnl_pct: float, hold_sec
                         rows[i]["trail_stop_pct"] = str(_pos_for_csv.get("trail_stop_pct", ""))
                         _mfe_f = float(rows[i].get("mfe_pct", 0) or 0)
                         rows[i]["peak_drop"] = f"{_mfe_f - pnl_pct * 100:.4f}" if _mfe_f else ""
+                        _csv_updated = True
                         break
+                if not _csv_updated:
+                    print(f"[UPDATE_TRADE] {market} CSV 미체결 진입행 없음 → 청산 결과 미기록 (rows={len(rows)})")
 
                 # 🔧 FIX: 원자적 쓰기 (임시파일 → rename, 크래시 시 원본 보존)
                 import tempfile
