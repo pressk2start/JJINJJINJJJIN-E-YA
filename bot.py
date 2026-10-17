@@ -1132,7 +1132,7 @@ def _live_trade_log_entry_reconcile(market, avg_price, volume_filled, signal_pri
         with _LIVE_TRADE_LOCK:
             pending = dict(_LIVE_TRADE_PENDING.get(market) or {})
         if not pending:
-            _live_trade_log_entry(
+            _new_trade_id = _live_trade_log_entry(
                 market=market,
                 order_price=signal_price,
                 filled_price=_px,
@@ -1143,9 +1143,14 @@ def _live_trade_log_entry_reconcile(market, avg_price, volume_filled, signal_pri
                 route=route,
                 risk_calc_krw=krw_requested,
             )
+            with _LIVE_TRADE_LOCK:
+                _new_ref = (_LIVE_TRADE_PENDING.get(market) or {}).get("shadow_ref_id")
             _live_trade_write_event({
                 "event_type": "ENTRY_RECONCILED",
                 "schema_v": 2,
+                # trade_id 포함 → 원장 audit 가 같은 거래로 그룹핑 (event_missing_trade_id 미증가)
+                "trade_id": _new_trade_id,
+                "shadow_ref_id": _new_ref,
                 "is_live": True,
                 "market": market,
                 "reconcile_source": source,

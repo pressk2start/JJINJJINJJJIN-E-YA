@@ -152,6 +152,11 @@ class TestEntryReconcile(unittest.TestCase):
         self.assertEqual(recon[0]["reconcile_mode"], "created_from_final")
         self.assertIn("KRW-DKA", self.pending)
         self.assertEqual(self.pending["KRW-DKA"]["entry_fee_krw"], 3.0)
+        # audit 그룹핑 호환: RECONCILED 가 생성된 ENTRY_FILLED 와 같은 trade_id/shadow_ref_id 를 가져야
+        # research/p1_ledger_audit.py 의 event_missing_trade_id 카운터에 잡히지 않음.
+        self.assertEqual(recon[0]["trade_id"], filled[0]["trade_id"])
+        self.assertEqual(recon[0]["trade_id"], self.pending["KRW-DKA"]["trade_id"])
+        self.assertEqual(recon[0]["shadow_ref_id"], filled[0]["shadow_ref_id"])
 
     def test_pending_exists_volume_differs_updates_pending(self):
         """지정가 부분체결(ENTRY_FILLED 기록) + 시장가 잔여 → 확정 수량이 더 큼."""
