@@ -244,6 +244,33 @@ class AuditTests(unittest.TestCase):
         exported[0]["trades"][0]["side"] = "ask"
         self.assertEqual(audit.analyze(ledger(), exported)["matched_exported_order_pairs"], 0)
 
+    def test_order_submitted_without_trade_id_is_a_submission_not_corrupt_event(self):
+        rows = ledger()
+        rows.insert(0, {"event_type": "ORDER_SUBMITTED", "schema_v": 2,
+                        "is_live": True, "market": "KRW-XRP",
+                        "order_uuid": "market-fallback-uuid"})
+        result = audit.analyze(rows)
+        self.assertEqual(result["quality_trade_counts"].get("order_submitted_without_trade_id"), 1)
+        self.assertEqual(result["quality_trade_counts"].get("event_missing_trade_id", 0), 0)
+        self.assertEqual(result["selected_trade_ids"], 1)
+
+    def test_updated_pending_reconcile_never_verifies_single_order_pair(self):
+        # A partial initial entry later gained additional market fills. The
+        # initial entry UUID is NOT authoritative for the final combined cost.
+        rows = ledger()
+        rows.insert(1, {"event_type": "ENTRY_RECONCILED", "trade_id": "t1",
+                        "market": "KRW-XRP", "schema_v": 2, "is_live": True,
+                        "reconcile_mode": "updated_pending",
+                        "final_volume": 3, "final_avg_price": 100,
+                        "final_entry_krw": 300, "entry_order_uuid": "extra-buy"})
+        result = audit.analyze(rows, orders())
+        entry = result["trades"][0]
+        self.assertEqual(entry["entry_reconcile_events"], 1)
+        self.assertEqual(entry["reconciled_final_qty"], 3)
+        self.assertIn("entry_reconciled_after_initial_fill", entry["flags"])
+        self.assertEqual(entry["reconciliation"], "UNVERIFIED")
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+
     def test_user_v2_reported_values_remain_reported(self):
         values = [-.6, -.5556, -.1, -1.004, -1.2091, -1.1309, -.9107,
                   -1.734, -1.3987, .2745, -1.3559, -.1, -.6859]

@@ -172,7 +172,12 @@ def analyze(rows, orders=(), since=None, until=None):
             quality["exchange_order_missing_uuid"] += 1
     for row in rows:
         if not row.get("trade_id"):
-            quality["event_missing_trade_id"] += 1
+            # ORDER_SUBMITTED occurs before a trade_id exists by design.
+            # Keep it visible as an unlinked submission, not a malformed trade event.
+            if row.get("event_type") == "ORDER_SUBMITTED":
+                quality["order_submitted_without_trade_id"] += 1
+            else:
+                quality["event_missing_trade_id"] += 1
             continue
         grouped[str(row["trade_id"])].append(row)
     # Build UUID ownership before date filtering, so a hidden leg cannot make a
@@ -194,6 +199,8 @@ def analyze(rows, orders=(), since=None, until=None):
         entry = entries[0] if entries else {}
         exit_row = exits[0] if exits else {}
         closed = closes[0] if closes else {}
+        reconciles = kinds["ENTRY_RECONCILED"]
+        latest_reconcile = reconciles[-1] if reconciles else {}
         # Date filters use the ledger's entry_time date, with no invented timezone.
         when = str(entry.get("entry_time") or "")
         day = when[:10]
@@ -234,6 +241,16 @@ def analyze(rows, orders=(), since=None, until=None):
         sell_fee = number(exit_row.get("exit_fee_krw"), nonnegative=True)
         remaining = number(closed.get("remaining_volume"), nonnegative=True)
         buy_uuid, sell_uuid = entry.get("entry_order_uuid"), exit_row.get("exit_order_uuid")
+        # Reconcile records may update the in-memory position after an initial partial fill.
+        # They do NOT prove that all buy orders and fees were exported. Explicitly
+        # reject single-buy/single-sell matching for an updated multi-leg entry.
+        final_rec_qty = number(latest_reconcile.get("final_volume"), positive=True)
+        final_rec_price = number(latest_reconcile.get("final_avg_price"), positive=True)
+        final_rec_cost = number(latest_reconcile.get("final_entry_krw"), positive=True)
+        if any(r.get("reconcile_mode") == "updated_pending" for r in reconciles):
+            flags.append("entry_reconciled_after_initial_fill")
+        if latest_reconcile and (final_rec_qty is None or final_rec_price is None or final_rec_cost is None):
+            flags.append("entry_reconcile_incomplete")
         if buy_price is None or buy_qty is None or buy_cost is None:
             flags.append("entry_cashflow_unknown")
         elif abs(buy_cost - buy_price * buy_qty) > max(
@@ -266,6 +283,10 @@ def analyze(rows, orders=(), since=None, until=None):
             "entry_order_uuid": buy_uuid, "exit_order_uuid": sell_uuid,
             "entry_price": plain(buy_price), "entry_qty": plain(buy_qty),
             "entry_krw": plain(buy_cost), "entry_fee_krw": plain(buy_fee),
+            "entry_reconcile_events": len(reconciles),
+            "reconciled_final_qty": plain(final_rec_qty),
+            "reconciled_final_avg_price": plain(final_rec_price),
+            "reconciled_final_entry_krw": plain(final_rec_cost),
             "exit_price": plain(sell_price), "exit_qty": plain(sell_qty),
             "exit_fee_krw": plain(sell_fee), "exit_reason": closed.get("exit_reason"),
             "reported_net_pct": plain(reported), "reported_net_krw": plain(number(closed.get("net_pnl_krw"))),
@@ -278,6 +299,7 @@ def analyze(rows, orders=(), since=None, until=None):
             "entry_missing", "entry_duplicate", "exit_missing", "exit_duplicate",
             "close_missing", "close_duplicate", "market_missing_or_conflict",
             "live_false_or_conflict", "live_unmarked", "closure_not_confirmed", "time_reversal",
+            "entry_reconciled_after_initial_fill", "entry_reconcile_incomplete",
         ))
         if orders and not blockers and buy_uuid and sell_uuid:
             buys, sells = order_index[str(buy_uuid)], order_index[str(sell_uuid)]
