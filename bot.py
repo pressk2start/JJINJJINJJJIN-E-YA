@@ -21589,6 +21589,33 @@ def _tg_split_message(text, max_len=4000):
     return final if final else [text[:max_len]]
 
 
+_TG_ALLOWED_TAG_RE = re.compile(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a(?:\s[^<>]*)?|tg-spoiler|span(?:\s[^<>]*)?)\s*>", re.I)
+_TG_ENTITY_RE = re.compile(r"&(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);")
+
+
+def _tg_sanitize_html(t):
+    """Telegram parse_mode=HTML 로 보내기 전에 허용 태그 외의 '<' 와 맨 '&' 를 이스케이프.
+
+    배경 (2026-10-18 서버 로그): [TG] 1,344건 × 2 chat 이 status=400 "can't parse entities" → plain text
+    재전송. 원인은 리포트 본문의 "<0.1:16", "n<100", "A&B" 같은 비교·구분 문자. 재전송은 되지만
+    API 호출이 2배였고, 실패 로그 5,376줄이 쌓였다. 허용 태그(<b>, <code>, <a href>…)는 그대로 둔다.
+    """
+    if not t or ("<" not in t and "&" not in t):
+        return t
+    keep = {}
+
+    def _stash(m):
+        k = f"\x00{len(keep)}\x00"
+        keep[k] = m.group(0)
+        return k
+    tmp = _TG_ALLOWED_TAG_RE.sub(_stash, t)
+    tmp = _TG_ENTITY_RE.sub(lambda m: m.group(0).replace("&", "\x01"), tmp)  # 이미 이스케이프된 엔티티 보호
+    tmp = tmp.replace("&", "&amp;").replace("\x01", "&").replace("<", "&lt;").replace(">", "&gt;")
+    for k, v in keep.items():
+        tmp = tmp.replace(k, v)
+    return tmp
+
+
 def tg_send(t, retry=3):
     """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)
     🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
@@ -21637,10 +21664,11 @@ def tg_send(t, retry=3):
                 return None
 
     ok_any = False
+    _t_html = _tg_sanitize_html(t)  # 허용 태그 외 < & 이스케이프 (400 → plain 재전송 2배 호출 방지)
     for cid in CHAT_IDS:
         payload = {
             "chat_id": cid,
-            "text": t,
+            "text": _t_html,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
