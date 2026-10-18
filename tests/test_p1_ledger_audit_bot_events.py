@@ -18,6 +18,7 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 MARKET = "KRW-TEST"
 HELPERS = {
+    "_live_trade_order_facts",
     "_live_trade_log_order_submitted",
     "_live_trade_log_entry",
     "_live_trade_log_entry_reconcile",
@@ -38,6 +39,7 @@ def load_actual_loggers():
     def capture(event):
         # Capture serialized snapshots, as the real JSONL writer does.
         events.append(json.loads(json.dumps(event)))
+        return True
 
     ns = {
         "time": time, "uuid": uuid, "math": math, "json": json,
@@ -145,7 +147,7 @@ class TestActualLoggerAuditBoundary(unittest.TestCase):
             exported_order("sell-1", "ask", 10, 110, 0.55),
         ])
         self.assertIn(
-            "entry_reconciliation_changed_basis",
+            "entry_reconciliation_invalid",
             report["trades"][0]["flags"])
 
     def test_changed_entry_cost_requires_more_than_one_order_pair(self):
@@ -157,7 +159,7 @@ class TestActualLoggerAuditBoundary(unittest.TestCase):
             exported_order("sell-1", "ask", 10, 110, 0.55),
         ])
         self.assertIn(
-            "entry_reconciliation_changed_basis",
+            "entry_reconciliation_invalid",
             report["trades"][0]["flags"])
 
     def test_added_leg_requires_all_order_evidence(self):
@@ -179,9 +181,7 @@ class TestActualLoggerAuditBoundary(unittest.TestCase):
         self.reconcile(price=100.0, quantity=10.0)
         self.exit()
         report = self.assert_unmatched()
-        self.assertIn(
-            "position_reconciliation_requires_order_evidence",
-            report["trades"][0]["flags"])
+        self.assertIn("entry_missing", report["trades"][0]["flags"])
 
     def test_entry_then_add_entry_then_reconcile_cannot_hide_seed_trade(self):
         # Actual helper sequence used by hybrid full-fill + add reconcile.

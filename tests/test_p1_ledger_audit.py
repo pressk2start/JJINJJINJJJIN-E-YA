@@ -362,6 +362,14 @@ class BcEventAuditTests(unittest.TestCase):
         self.assertEqual(result["matched_exported_order_pairs"], 1)
         self.assertIn("position_reconciliation_requires_order_evidence", result["trades"][0]["flags"])
 
+
+    def test_unresolved_extra_sell_order_blocks_simple_pair_verification(self):
+        rows = ledger()
+        rows[2]["unresolved_exit_order_uuids"] = ["unknown-sell"]
+        result = audit.analyze(rows, orders())
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertIn("exit_orders_unresolved", result["trades"][0]["flags"])
+
     def test_reported_cashflow_is_not_promoted_without_orders(self):
         rows = ledger()
         rows[2]["net_pnl_krw_cashflow"] = -2704.65

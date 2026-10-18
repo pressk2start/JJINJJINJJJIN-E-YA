@@ -1,27 +1,4 @@
-# -*- coding: utf-8 -*-
-"""P1-fix-B/C regression — 실 bot.py 로거 함수를 AST 추출해 원장 회계 contract 검증.
-
-범위:
-  fix-C (진입 원장 완결)
-    - _live_trade_log_order_submitted: 시장가 폴백 '접수' 이벤트. 체결 취급 X, pending 미변경.
-    - _live_trade_log_entry_reconcile: 포지션 확정값으로 원장 대조.
-        · pending 없음 → ENTRY_FILLED 생성 + ENTRY_RECONCILED(created_from_final)
-        · pending 있고 수량/평단 다름 → pending 원가 갱신 + ENTRY_RECONCILED(updated_pending)
-        · 동일 → 무기록 · 유효하지 않은 확정값 → 무기록
-  fix-B (매도 회계 연결)
-    - _live_trade_log_exit: exit_fee_krw·executed_exit_volume 이 전달되면
-      net_pnl_krw_cashflow = 매도금액 − 매수금액 − 매수수수료 − 매도수수료.
-      기존 net_pnl_krw(= entry_krw × pct) 는 불변. 입력 하나라도 미확인이면 cashflow=None.
-    - _order_paid_fee: 0 보존 · 음수/NaN/Inf/손상/비dict → None.
-
-한계 (어드바이저 지적 그대로):
-  - 함수 단위 동작 검증. hybrid_buy/close_auto_position 전체 주문 경로 통합 테스트는 아님.
-  - 실제 Upbit 응답 샘플이 아닌 합성 입력.
-
-실행:
-  python3 tests/test_p1_fixbc_ledger.py
-  pytest tests/test_p1_fixbc_ledger.py -v
-"""
+"""Actual logger/order-response regressions. Synthetic fixtures; no bot import or API calls."""
 import ast
 import math
 import os
@@ -33,6 +10,7 @@ BOT_PATH = os.path.join(REPO_ROOT, "bot.py")
 
 _FUNCS = (
     "_order_paid_fee",
+    "_live_trade_order_facts",
     "_live_trade_log_order_submitted",
     "_live_trade_log_entry",
     "_live_trade_log_entry_reconcile",
@@ -65,6 +43,7 @@ def _load_ledger():
 
     def _write_stub(event):
         events.append(event)
+        return True
 
     ns = {
         "time": _time, "uuid": _uuid, "math": math, "threading": threading, "json": _json,
@@ -131,275 +110,248 @@ class TestOrderSubmitted(unittest.TestCase):
         self.assertEqual(self.events[0]["order_uuid"], None)
 
 
-class TestEntryReconcile(unittest.TestCase):
+
+
+def raw_order(uid="buy-1", side="bid", volume=60.0, price=100.0, fee=3.0):
+    return {"uuid": uid, "market": "KRW-TEST", "side": side, "state": "done",
+            "executed_volume": str(volume), "paid_fee": str(fee) if fee is not None else None,
+            "remaining_volume": "0", "trades_count": 1,
+            "trades": [{"uuid": uid + "-fill", "price": str(price),
+                        "volume": str(volume), "funds": str(volume * price)}]}
+
+
+class TestOrderEvidence(unittest.TestCase):
     def setUp(self):
         self.ns, self.events, self.pending = _load_ledger()
-        self.rec = self.ns["_live_trade_log_entry_reconcile"]
-        self.entry = self.ns["_live_trade_log_entry"]
 
-    def test_no_pending_creates_entry_from_final(self):
-        """시장가 폴백만 체결된 케이스: hybrid_buy 가 ENTRY_FILLED 를 못 남김 → reconcile 이 생성."""
-        self.rec("KRW-DKA", avg_price=100.5, volume_filled=59.7, signal_price=100.0,
-                 entry_order_uuid="uuid-limit-cancelled", source="open_auto_position",
-                 entry_fee_krw=3.0, krw_requested=6000)
-        filled = _by_type(self.events, "ENTRY_FILLED")
-        recon = _by_type(self.events, "ENTRY_RECONCILED")
-        self.assertEqual(len(filled), 1)
-        self.assertEqual(len(recon), 1)
-        self.assertEqual(filled[0]["filled_price"], 100.5)
-        self.assertEqual(filled[0]["filled_volume"], 59.7)
-        self.assertEqual(filled[0]["entry_krw"], round(100.5 * 59.7, 2))  # 5999.85 (확정값 기준 원가)
-        self.assertEqual(recon[0]["reconcile_mode"], "created_from_final")
-        self.assertIn("KRW-DKA", self.pending)
-        self.assertEqual(self.pending["KRW-DKA"]["entry_fee_krw"], 3.0)
-        # audit 그룹핑 호환: RECONCILED 가 생성된 ENTRY_FILLED 와 같은 trade_id/shadow_ref_id 를 가져야
-        # research/p1_ledger_audit.py 의 event_missing_trade_id 카운터에 잡히지 않음.
-        self.assertEqual(recon[0]["trade_id"], filled[0]["trade_id"])
-        self.assertEqual(recon[0]["trade_id"], self.pending["KRW-DKA"]["trade_id"])
-        self.assertEqual(recon[0]["shadow_ref_id"], filled[0]["shadow_ref_id"])
+    def open(self, fee=3.0, details=True):
+        od = raw_order(fee=fee)
+        self.ns["_live_trade_log_entry"](
+            "KRW-TEST", 100.0, 100.0, 60.0, signal_price=100.0,
+            entry_order_uuid="buy-1", entry_fee_krw=fee,
+            entry_order_details=od if details else None)
+        return od
 
-    def test_pending_exists_volume_differs_updates_pending(self):
-        """지정가 부분체결(ENTRY_FILLED 기록) + 시장가 잔여 → 확정 수량이 더 큼."""
-        self.entry(market="KRW-WAL", order_price=82.9, filled_price=82.9, filled_volume=40.0,
-                   signal_price=82.9, entry_order_uuid="u1", entry_fee_krw=1.5)
-        self.events.clear()
-        self.rec("KRW-WAL", avg_price=82.95, volume_filled=72.37, signal_price=82.9,
-                 entry_order_uuid="u1", source="open_auto_position", entry_fee_krw=3.0)
-        recon = _by_type(self.events, "ENTRY_RECONCILED")
-        self.assertEqual(len(recon), 1)
-        self.assertEqual(recon[0]["reconcile_mode"], "updated_pending")
-        self.assertEqual(recon[0]["prev_filled_volume"], 40.0)
-        self.assertEqual(recon[0]["final_volume"], 72.37)
-        self.assertEqual(_by_type(self.events, "ENTRY_FILLED"), [])  # 중복 ENTRY_FILLED 금지
-        p = self.pending["KRW-WAL"]
-        self.assertEqual(p["filled_volume"], 72.37)
-        self.assertEqual(p["filled_price"], 82.95)
-        self.assertAlmostEqual(p["entry_krw"], round(82.95 * 72.37, 2), places=2)
-        self.assertEqual(p["entry_fee_krw"], 3.0)  # non-added: 치환
+    def sell(self, volume=60.0, price=110.0, fee=3.3, uid="sell-1",
+             remaining=None, details=True, **kwargs):
+        od = raw_order(uid, "ask", volume, price, fee)
+        self.ns["_live_trade_log_exit"](
+            "KRW-TEST", kwargs.get("caller_price", price), "synthetic",
+            net_pnl_pct=9.9, exit_order_uuid=uid,
+            executed_exit_volume=kwargs.get("caller_volume", volume),
+            exit_fee_krw=fee, remaining_volume=remaining,
+            exit_order_details=od if details else None)
+        return od
 
-    def test_pending_equal_is_noop(self):
-        self.entry(market="KRW-A", order_price=100.0, filled_price=100.0, filled_volume=10.0,
-                   signal_price=100.0, entry_order_uuid="u", entry_fee_krw=0.5)
-        self.events.clear()
-        self.rec("KRW-A", avg_price=100.0, volume_filled=10.0, signal_price=100.0,
-                 entry_order_uuid="u", source="open_auto_position", entry_fee_krw=0.5)
-        self.assertEqual(self.events, [])
-
-    def test_invalid_final_values_noop(self):
-        for px, vol in ((0.0, 10.0), (None, 10.0), (100.0, 0.0), (float("nan"), 1.0), (100.0, float("inf"))):
-            self.rec("KRW-B", avg_price=px, volume_filled=vol, signal_price=100.0,
-                     entry_order_uuid="u", source="open_auto_position")
-        self.assertEqual(self.events, [])
-        self.assertEqual(self.pending, {})
-
-    def test_added_leg_accumulates_fee(self):
-        """추매: pending 원가를 합산 평단·총수량으로 갱신, 수수료는 누적."""
-        self.entry(market="KRW-C", order_price=100.0, filled_price=100.0, filled_volume=10.0,
-                   signal_price=100.0, entry_order_uuid="u1", entry_fee_krw=0.5)
-        self.events.clear()
-        self.rec("KRW-C", avg_price=101.0, volume_filled=20.0, signal_price=102.0,
-                 entry_order_uuid="u2", source="add_auto_position", entry_fee_krw=0.51,
-                 added_leg={"avg_price": 102.0, "volume": 10.0, "order_uuid": "u2"})
-        p = self.pending["KRW-C"]
-        self.assertEqual(p["filled_volume"], 20.0)
-        self.assertAlmostEqual(p["entry_fee_krw"], 1.01, places=4)
-        recon = _by_type(self.events, "ENTRY_RECONCILED")[0]
-        self.assertEqual(recon["added_leg"]["order_uuid"], "u2")
-
-
-class TestExitCashflow(unittest.TestCase):
-    def setUp(self):
-        self.ns, self.events, self.pending = _load_ledger()
-        self.entry = self.ns["_live_trade_log_entry"]
-        self.exit = self.ns["_live_trade_log_exit"]
-
-    def _open(self, market="KRW-WAL", px=82.9, vol=72.37635706, fee=3.0):
-        self.entry(market=market, order_price=px, filled_price=px, filled_volume=vol,
-                   signal_price=px, entry_order_uuid="u1", entry_fee_krw=fee)
-        self.events.clear()
-
-    def test_cashflow_computed_and_legacy_field_unchanged(self):
-        self._open()
-        self.exit(market="KRW-WAL", exit_price=87.7, exit_reason="시간만료 본절컷",
-                  net_pnl_pct=5.6901, hold_sec=275.7,
-                  exit_order_uuid="sell-1", executed_exit_volume=72.37635706, exit_fee_krw=3.17)
+    def test_full_raw_pair_cashflow(self):
+        self.open()
+        self.sell()
         closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        entry_krw = round(82.9 * 72.37635706, 2)
-        # 기존 derivation 불변
-        self.assertEqual(closed["net_pnl_krw"], round(entry_krw * 5.6901 / 100, 2))
-        # 현금흐름: 87.7*72.376 − 6000 − 3.0 − 3.17
-        expected = round(87.7 * 72.37635706 - entry_krw - 3.0 - 3.17, 2)
-        self.assertEqual(closed["net_pnl_krw_cashflow"], expected)
-        self.assertEqual(closed["exit_fee_krw"], 3.17)
-        ex = _by_type(self.events, "EXIT_FILLED")[0]
-        self.assertEqual(ex["exit_order_uuid"], "sell-1")
-        self.assertEqual(ex["executed_exit_volume"], 72.37635706)
-
-    def test_cashflow_none_when_exit_fee_missing(self):
-        self._open()
-        self.exit(market="KRW-WAL", exit_price=87.7, exit_reason="r", net_pnl_pct=5.69, hold_sec=10,
-                  exit_order_uuid="sell-1", executed_exit_volume=72.37635706, exit_fee_krw=None)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        self.assertIsNone(closed["net_pnl_krw_cashflow"])
-        self.assertIsNotNone(closed["net_pnl_krw"])  # 기존 필드는 그대로 산출
-
-    def test_cashflow_none_when_exit_volume_not_measured(self):
-        """executed_exit_volume 미전달 → 기본값(진입수량)으로 채우지만 cashflow 는 미확인 처리."""
-        self._open()
-        self.exit(market="KRW-WAL", exit_price=87.7, exit_reason="r", net_pnl_pct=5.69, hold_sec=10,
-                  exit_order_uuid="sell-1", executed_exit_volume=None, exit_fee_krw=3.17)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        self.assertIsNone(closed["net_pnl_krw_cashflow"])
-
-    def test_cashflow_none_when_entry_fee_unknown(self):
-        self._open(fee=None)
-        self.exit(market="KRW-WAL", exit_price=87.7, exit_reason="r", net_pnl_pct=5.69, hold_sec=10,
-                  exit_order_uuid="sell-1", executed_exit_volume=72.37635706, exit_fee_krw=3.17)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        self.assertIsNone(closed["net_pnl_krw_cashflow"])
-
-    def test_exit_without_pending_is_skipped(self):
-        self.exit(market="KRW-NOPE", exit_price=1.0, exit_reason="r", net_pnl_pct=0.0, hold_sec=1)
-        self.assertEqual(self.events, [])
-
-
-class TestAdvisorReproducedDefects(unittest.TestCase):
-    """어드바이저가 실 로거로 재현한 결함 3건의 회귀 테스트 (P1-fix-B.1 / C.1 / C.2)."""
-
-    def setUp(self):
-        self.ns, self.events, self.pending = _load_ledger()
-        self.entry = self.ns["_live_trade_log_entry"]
-        self.exit = self.ns["_live_trade_log_exit"]
-        self.rec = self.ns["_live_trade_log_entry_reconcile"]
-
-    # ── 결함 #1: 부분매도에 전체 원가 차감 + 거래 종료 처리 ──
-    def test_partial_exit_prorates_cost_and_keeps_pending(self):
-        self.entry(market="KRW-T", order_price=100.0, filled_price=100.0, filled_volume=60.0,
-                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=3.0)
-        tid = self.pending["KRW-T"]["trade_id"]
-        self.events.clear()
-        self.exit(market="KRW-T", exit_price=110.0, exit_reason="partial", net_pnl_pct=9.9,
-                  hold_sec=60, exit_order_uuid="sell-1", executed_exit_volume=30.0,
-                  exit_fee_krw=1.65, remaining_volume=30.0)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        ex = _by_type(self.events, "EXIT_FILLED")[0]
-        self.assertTrue(closed["partial_exit"]); self.assertTrue(ex["partial_exit"])
-        self.assertAlmostEqual(closed["exit_fraction"], 0.5, places=6)
-        self.assertFalse(closed["completed"])
-        self.assertEqual(closed["remaining_volume"], 30.0)
-        # 이번분 원가 = 6000 × 0.5 = 3000, 매수수수료 1.5
-        self.assertEqual(closed["entry_krw_used"], 3000.0)
-        self.assertEqual(closed["entry_fee_krw_used"], 1.5)
-        # 현금흐름: 110×30 − 3000 − 1.5 − 1.65 = +296.85 (전체원가 차감 시 −2704.65 였음)
-        self.assertEqual(closed["net_pnl_krw_cashflow"], round(110 * 30 - 3000 - 1.5 - 1.65, 2))
-        # legacy derivation 도 이번분 원가 기준
-        self.assertEqual(closed["net_pnl_krw"], round(3000 * 9.9 / 100, 2))
-        # pending 유지 · 같은 trade_id · 잔량/잔여원가/잔여수수료
-        p = self.pending["KRW-T"]
-        self.assertEqual(p["trade_id"], tid)
-        self.assertEqual(p["filled_volume"], 30.0)
-        self.assertEqual(p["entry_krw"], 3000.0)
-        self.assertEqual(p["entry_fee_krw"], 1.5)
-
-    def test_partial_then_remainder_exit_completes_and_pops(self):
-        self.entry(market="KRW-T", order_price=100.0, filled_price=100.0, filled_volume=60.0,
-                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=3.0)
-        tid = self.pending["KRW-T"]["trade_id"]
-        self.exit(market="KRW-T", exit_price=110.0, exit_reason="p1", net_pnl_pct=9.9, hold_sec=60,
-                  exit_order_uuid="sell-1", executed_exit_volume=30.0, exit_fee_krw=1.65)
-        self.events.clear()
-        self.exit(market="KRW-T", exit_price=120.0, exit_reason="p2", net_pnl_pct=19.9, hold_sec=90,
-                  exit_order_uuid="sell-2", executed_exit_volume=30.0, exit_fee_krw=1.8)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        self.assertEqual(closed["trade_id"], tid)
-        self.assertFalse(closed["partial_exit"])
+        self.assertEqual(closed["net_pnl_krw_cashflow"], 593.7)
         self.assertTrue(closed["completed"])
-        self.assertEqual(closed["entry_krw_used"], 3000.0)
-        self.assertEqual(closed["net_pnl_krw_cashflow"], round(120 * 30 - 3000 - 1.5 - 1.8, 2))
-        self.assertNotIn("KRW-T", self.pending)
+        self.assertNotIn("KRW-TEST", self.pending)
 
-    def test_unmeasured_exit_volume_treated_as_full(self):
-        self.entry(market="KRW-U", order_price=100.0, filled_price=100.0, filled_volume=10.0,
-                   signal_price=100.0, entry_order_uuid="b", entry_fee_krw=0.5)
-        self.events.clear()
-        self.exit(market="KRW-U", exit_price=101.0, exit_reason="r", net_pnl_pct=0.9, hold_sec=5)
-        closed = _by_type(self.events, "TRADE_CLOSED")[0]
-        self.assertFalse(closed["partial_exit"]); self.assertTrue(closed["completed"])
-        self.assertNotIn("KRW-U", self.pending)
+    def test_caller_ticker_price_and_requested_volume_are_not_fill_evidence(self):
+        self.open()
+        self.sell(volume=30, fee=1.65, caller_price=999, caller_volume=60)
+        event = _by_type(self.events, "EXIT_FILLED")[0]
+        self.assertEqual(event["exit_price"], 110)
+        self.assertEqual(event["executed_exit_volume"], 30)
+        self.assertEqual(len(_by_type(self.events, "TRADE_CLOSED")), 0)
 
-    # ── 결함 #2: 추매 leg 가 pending 을 새 trade_id 로 덮어쓰기 ──
-    def test_add_leg_entry_keeps_seed_trade_id_and_pending(self):
-        self.entry(market="KRW-A", order_price=100.0, filled_price=100.0, filled_volume=10.0,
-                   signal_price=100.0, entry_order_uuid="buy-1", entry_fee_krw=0.5)
-        seed_tid = self.pending["KRW-A"]["trade_id"]
-        seed_ref = self.pending["KRW-A"]["shadow_ref_id"]
-        ret = self.entry(market="KRW-A", order_price=102.0, filled_price=102.0, filled_volume=10.0,
-                         signal_price=102.0, entry_order_uuid="buy-2", entry_fee_krw=0.51)
-        self.assertEqual(ret, seed_tid)
-        fills = _by_type(self.events, "ENTRY_FILLED")
-        self.assertEqual(len(fills), 2)
-        self.assertEqual({f["trade_id"] for f in fills}, {seed_tid})
-        self.assertEqual([f["leg"] for f in fills], ["seed", "add"])
-        self.assertEqual(fills[1]["shadow_ref_id"], seed_ref)
-        # pending 은 seed 그대로 (원가 합산은 reconcile 몫)
-        p = self.pending["KRW-A"]
-        self.assertEqual(p["trade_id"], seed_tid)
-        self.assertEqual(p["filled_volume"], 10.0)
-        self.assertEqual(p["entry_krw"], 1000.0)
-        # 이어서 add reconcile → 합산 원가·누적 수수료
-        self.rec("KRW-A", avg_price=101.0, volume_filled=20.0, signal_price=102.0,
-                 entry_order_uuid="buy-2", source="add_auto_position", entry_fee_krw=0.51,
-                 added_leg={"avg_price": 102.0, "volume": 10.0, "order_uuid": "buy-2"},
-                 price_source="order_trades")
-        p = self.pending["KRW-A"]
-        self.assertEqual(p["trade_id"], seed_tid)
-        self.assertEqual(p["filled_volume"], 20.0)
-        self.assertEqual(p["entry_krw"], 2020.0)
-        self.assertAlmostEqual(p["entry_fee_krw"], 1.01, places=4)
-        # exit 가 seed trade_id 로 조인됨 (고아 거래 없음)
-        self.events.clear()
-        self.exit(market="KRW-A", exit_price=110.0, exit_reason="r", net_pnl_pct=8.8, hold_sec=10,
-                  exit_order_uuid="s", executed_exit_volume=20.0, exit_fee_krw=1.1)
-        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["trade_id"], seed_tid)
+    def test_partial_sale_retains_identity_and_basis(self):
+        self.open()
+        seed = self.pending["KRW-TEST"]["trade_id"]
+        self.sell(volume=30, fee=1.65, remaining=30)
+        leg = _by_type(self.events, "TRADE_PARTIALLY_REALIZED")[0]
+        self.assertFalse(leg["completed"])
+        self.assertEqual(leg["net_pnl_krw_cashflow"], 296.85)
+        self.assertEqual(self.pending["KRW-TEST"]["filled_volume"], 30)
+        self.assertEqual(self.pending["KRW-TEST"]["trade_id"], seed)
 
-    # ── 결함 #3: 추정 평단을 체결가로 확정 기록 ──
-    def test_estimate_source_created_from_final_does_not_certify_price(self):
-        self.rec("KRW-E", avg_price=100.0, volume_filled=59.7, signal_price=100.0,
-                 entry_order_uuid="u", source="open_auto_position", entry_fee_krw=3.0,
-                 price_source="signal_estimate")
-        f = _by_type(self.events, "ENTRY_FILLED")[0]
-        r = _by_type(self.events, "ENTRY_RECONCILED")[0]
-        self.assertIsNone(f["filled_price"]); self.assertIsNone(f["entry_krw"])
-        self.assertEqual(f["filled_volume"], 59.7)
-        self.assertEqual(r["price_source"], "signal_estimate")
-        self.assertIsNone(r["final_avg_price"]); self.assertIsNone(r["final_entry_krw"])
-        self.assertEqual(r["estimated_avg_price"], 100.0)
-        self.assertIsNone(self.pending["KRW-E"]["entry_krw"])
+    def test_partial_then_final_reports_cumulative_cashflow(self):
+        self.open()
+        self.sell(volume=30, fee=1.65, remaining=30)
+        self.sell(volume=30, fee=1.65, uid="sell-2", remaining=0)
+        self.assertEqual(len(_by_type(self.events, "TRADE_CLOSED")), 1)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"], 593.7)
+        self.assertNotIn("KRW-TEST", self.pending)
 
-    def test_estimate_source_updated_pending_keeps_verified_price(self):
-        self.entry(market="KRW-F", order_price=100.0, filled_price=100.0, filled_volume=40.0,
-                   signal_price=100.0, entry_order_uuid="u1", entry_fee_krw=2.0)
-        self.events.clear()
-        self.rec("KRW-F", avg_price=105.0, volume_filled=72.0, signal_price=100.0,
-                 entry_order_uuid="u1", source="open_auto_position", entry_fee_krw=3.0,
-                 price_source="requested_krw_estimate")
-        p = self.pending["KRW-F"]
-        self.assertEqual(p["filled_volume"], 72.0)          # 수량은 잔고 확정값 → 갱신
-        self.assertEqual(p["filled_price"], 100.0)          # 평단은 검증값 유지
-        self.assertEqual(p["entry_krw"], 4000.0)            # 원가도 유지 (추정으로 덮지 않음)
-        r = _by_type(self.events, "ENTRY_RECONCILED")[0]
-        self.assertEqual(r["reconcile_mode"], "updated_pending")
-        self.assertIsNone(r["final_avg_price"]); self.assertEqual(r["estimated_avg_price"], 105.0)
+    def test_duplicate_partial_order_does_not_reduce_basis_twice(self):
+        self.open()
+        self.sell(volume=40, fee=2.2, remaining=20)
+        count = len(self.events)
+        self.sell(volume=40, fee=2.2, remaining=20)
+        self.assertEqual(len(self.events), count)
+        self.assertEqual(self.pending["KRW-TEST"]["filled_volume"], 20)
 
-    def test_verified_source_updated_pending_overwrites_price(self):
-        self.entry(market="KRW-G", order_price=100.0, filled_price=100.0, filled_volume=40.0,
-                   signal_price=100.0, entry_order_uuid="u1", entry_fee_krw=2.0)
-        self.rec("KRW-G", avg_price=100.5, volume_filled=72.0, signal_price=100.0,
-                 entry_order_uuid="u1", source="open_auto_position", entry_fee_krw=3.0,
-                 price_source="account_avg")
-        p = self.pending["KRW-G"]
-        self.assertEqual(p["filled_price"], 100.5)
-        self.assertEqual(p["entry_krw"], round(100.5 * 72.0, 2))
+    def test_changed_processed_order_snapshot_is_unverified(self):
+        self.open()
+        self.sell(volume=30, fee=1.65, remaining=30)
+        self.sell(volume=40, fee=2.2, remaining=20)
+        self.assertEqual(self.pending["KRW-TEST"]["filled_volume"], 30)
+        self.assertEqual(_by_type(self.events, "EXIT_UNVERIFIED")[-1]["reason"],
+                         "changed_processed_order_snapshot")
+
+    def test_missing_order_details_cannot_close_or_pop(self):
+        self.open()
+        self.sell(details=False)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED"), [])
+        self.assertIn("KRW-TEST", self.pending)
+        self.assertEqual(_by_type(self.events, "EXIT_UNVERIFIED")[-1]["reason"], "order_details_missing")
+
+    def test_later_valid_response_resolves_same_unknown_order(self):
+        self.open()
+        self.sell(details=False)
+        self.sell()
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"], 593.7)
+
+    def test_unknown_other_sell_leg_blocks_numeric_cashflow(self):
+        self.open()
+        self.sell(uid="unknown-leg", details=False)
+        self.sell(uid="known-leg")
+        self.assertIsNone(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"])
+
+    def test_unverified_entry_cannot_produce_cashflow(self):
+        self.open(details=False)
+        self.sell()
+        self.assertIsNone(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"])
+
+    def test_bad_entry_fee_does_not_discard_valid_fills(self):
+        self.open(fee="damaged")
+        self.assertEqual(_by_type(self.events, "ENTRY_FILLED")[0]["filled_price"], 100)
+        self.assertIsNone(self.pending["KRW-TEST"]["entry_fee_krw"])
+        self.sell()
+        self.assertIsNone(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"])
+
+    def test_missing_exit_fee_is_unknown_not_zero(self):
+        self.open()
+        self.sell(fee=None)
+        self.assertIsNone(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"])
+
+    def test_actual_zero_fees_are_preserved(self):
+        self.open(fee=0)
+        self.sell(fee=0)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"], 600)
+
+    def test_negative_and_nonfinite_fees_do_not_become_cashflow(self):
+        for fee in ("-1", "nan", "inf", "bad"):
+            with self.subTest(fee=fee):
+                self.setUp()
+                self.open()
+                self.sell(fee=fee)
+                self.assertIsNone(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"])
+
+    def test_nonfinite_or_nonpositive_order_quantities_rejected(self):
+        for value in ("inf", "nan", "0", "-1", None, True):
+            with self.subTest(value=value):
+                od = raw_order()
+                od["executed_volume"] = value
+                facts, reason = self.ns["_live_trade_order_facts"](od, "KRW-TEST", "bid")
+                self.assertIsNone(facts)
+                self.assertIsNotNone(reason)
+
+    def test_funds_conflict_rejected_but_absent_funds_allowed(self):
+        od = raw_order()
+        od["trades"][0]["funds"] = "1"
+        self.assertIsNone(self.ns["_live_trade_order_facts"](od, "KRW-TEST", "bid")[0])
+        del od["trades"][0]["funds"]
+        self.assertIsNotNone(self.ns["_live_trade_order_facts"](od, "KRW-TEST", "bid")[0])
+
+    def test_uuid_market_side_and_count_conflicts_rejected(self):
+        for field, value in (("uuid", "other"), ("market", "KRW-OTHER"),
+                             ("side", "ask"), ("trades_count", 2)):
+            with self.subTest(field=field):
+                od = raw_order()
+                od[field] = value
+                self.assertIsNone(self.ns["_live_trade_order_facts"](od, "KRW-TEST", "bid", "buy-1")[0])
+
+    def test_nonfinal_response_cannot_close(self):
+        self.open()
+        od = raw_order("sell-1", "ask", price=110)
+        od["state"] = "wait"
+        self.ns["_live_trade_log_exit"]("KRW-TEST", 110, "s", exit_order_uuid="sell-1",
+                                       exit_order_details=od)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED"), [])
+        self.assertIn("KRW-TEST", self.pending)
+
+    def test_sale_exceeding_recorded_entry_is_unverified(self):
+        self.open()
+        self.sell(volume=70)
+        self.assertEqual(self.pending["KRW-TEST"]["filled_volume"], 60)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED"), [])
+
+    def test_positive_remaining_conflicts_with_full_sale(self):
+        self.open()
+        self.sell(remaining=30)
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED"), [])
+        self.assertIn("KRW-TEST", self.pending)
+
+    def test_failed_writer_keeps_pending_for_recovery(self):
+        self.open()
+        self.ns["_live_trade_write_event"] = lambda event: False
+        self.sell()
+        self.assertIn("KRW-TEST", self.pending)
+
+    def test_raising_writer_does_not_escape_logger(self):
+        self.open()
+        def fail(event):
+            raise OSError("synthetic disk failure")
+        self.ns["_live_trade_write_event"] = fail
+        self.sell()
+        self.assertIn("KRW-TEST", self.pending)
+
+    def test_additional_entry_preserves_seed_and_marks_aggregate_unknown(self):
+        self.open()
+        seed = self.pending["KRW-TEST"]["trade_id"]
+        self.ns["_live_trade_log_entry"](
+            "KRW-TEST", 102, 102, 10, entry_order_uuid="buy-2", entry_fee_krw=.51,
+            entry_order_details=raw_order("buy-2", "bid", 10, 102, .51))
+        self.assertEqual(self.pending["KRW-TEST"]["trade_id"], seed)
+        self.assertFalse(self.pending["KRW-TEST"]["entry_cashflow_complete"])
+        self.assertIsNone(self.pending["KRW-TEST"]["entry_fee_krw"])
+
+    def test_position_estimate_does_not_create_confirmed_entry(self):
+        self.ns["_live_trade_log_entry_reconcile"](
+            "KRW-TEST", 100, 60, 100, "buy-1", "open_auto_position",
+            price_source="account_avg", entry_fee_krw=3)
+        self.assertEqual(_by_type(self.events, "ENTRY_FILLED"), [])
+        self.assertEqual(len(_by_type(self.events, "ENTRY_UNVERIFIED")), 1)
+        self.assertIsNone(self.pending["KRW-TEST"]["filled_volume"])
+
+    def test_position_mismatch_does_not_replace_confirmed_basis(self):
+        self.open()
+        self.ns["_live_trade_log_entry_reconcile"](
+            "KRW-TEST", 101, 70, 100, "buy-1", "open_auto_position",
+            price_source="order_trades", entry_order_details=raw_order())
+        self.assertEqual(self.pending["KRW-TEST"]["filled_volume"], 60)
+        self.assertEqual(self.pending["KRW-TEST"]["filled_price"], 100)
+        self.assertFalse(self.pending["KRW-TEST"]["entry_cashflow_complete"])
+
+    def test_matching_raw_order_reconcile_preserves_verified_entry(self):
+        self.open()
+        self.ns["_live_trade_log_entry_reconcile"](
+            "KRW-TEST", 100, 60, 100, "buy-1", "open_auto_position",
+            price_source="order_trades", entry_order_details=raw_order())
+        self.assertTrue(self.pending["KRW-TEST"]["entry_cashflow_complete"])
+        self.sell()
+        self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"], 593.7)
+
+    def test_report_dedup_cannot_suppress_new_order_evidence(self):
+        with open(BOT_PATH, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+        node = next(x for x in tree.body if isinstance(x, ast.FunctionDef)
+                    and x.name == "update_trade_result")
+        calls = []
+        import time
+        ns = {"_live_trade_log_exit": lambda **kw: calls.append(kw),
+              "_trade_log_lock": threading.Lock(),
+              "_reported_trades": {("KRW-TEST", 1000)}, "time": time}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), BOT_PATH, "exec"), ns)
+        ns["update_trade_result"]("KRW-TEST", 110, .1, 60, entry_ts=1,
+                                  exit_order_uuid="sell-2", exit_order_details={"uuid": "sell-2"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["exit_order_details"]["uuid"], "sell-2")
 
 
 if __name__ == "__main__":
