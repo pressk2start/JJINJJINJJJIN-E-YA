@@ -2852,6 +2852,34 @@ def _a2_audit_summary():
         return f"A2_AUDIT: ERROR {exc}"
 
 
+def _paired_event_mdd(trades):
+    """Event-return drawdown in decimal units, ordered by observed exit time.
+
+    This is not capital-weighted account MDD. Unknown chronology stays unknown.
+    Equal timestamps use signal_id as a deterministic reporting tie-break.
+    """
+    ordered = []
+    for trade in trades:
+        stamp, pnl = trade.get("exit_ts"), trade.get("pnl")
+        if isinstance(stamp, bool) or isinstance(pnl, bool) or stamp is None or pnl is None:
+            return None
+        try:
+            stamp, pnl = float(stamp), float(pnl)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(stamp) or stamp < 0 or not math.isfinite(pnl):
+            return None
+        ordered.append((stamp, str(trade.get("signal_id") or ""), pnl))
+    equity = peak = drawdown = 0.0
+    for stamp, signal_id, pnl in sorted(ordered):
+        equity += pnl
+        if not math.isfinite(equity):
+            return None
+        peak = max(peak, equity)
+        drawdown = max(drawdown, peak - equity)
+    return drawdown
+
+
 def _common_cohort_paired_summary():
     """CONTROL/A/A×A2 common cohort paired 집계 (advisor 지시).
     동일 signal_id 가 세 경로에 모두 있는 페어만 비교.
@@ -3005,24 +3033,16 @@ def _common_cohort_paired_summary():
             net_per = sum(pnls) / len(pnls) * 100 if pnls else 0
             net_total = sum(pnls) * 100  # 총 수익 (기간 누적)
             wr = wins / len(pnls) * 100 if pnls else 0
-            # MDD (equal-weight 누적)
-            eq = 0
-            peak = 0
-            mdd = 0
-            for p in pnls:
-                eq += p
-                if eq > peak:
-                    peak = eq
-                _dd = peak - eq
-                if _dd > mdd:
-                    mdd = _dd
+            # The cohort is a set: use observed exit chronology, never set order.
+            mdd = _paired_event_mdd(trades)
+            _mdd_display = f"{mdd * 100:.2f}%p" if mdd is not None else "미확인(청산시각/손익 누락)"
             arm_summaries[label] = {
                 "n": len(trades), "net_per": net_per, "net_total": net_total,
-                "wr": wr, "mdd": mdd * 100
+                "wr": wr, "mdd": mdd * 100 if mdd is not None else None
             }
             lines.append(
                 f"  {label}: n={len(trades)} net/건={net_per:+.3f}% 총net={net_total:+.2f}%p "
-                f"WR={wr:.0f}% MDD={mdd*100:.2f}%p"
+                f"WR={wr:.0f}% MDD={_mdd_display}"
             )
         # A2 기회비용: A 는 진입, A×A2 는 차단한 signal 의 A net 합계
         if "A" in route_trades and "A×A2" in route_trades:
