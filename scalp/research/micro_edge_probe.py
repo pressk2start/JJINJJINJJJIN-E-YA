@@ -50,6 +50,7 @@ import os
 import statistics
 import sys
 import time
+import zlib
 from pathlib import Path
 
 # ========== 사전 등록 상수 (분석 전 freeze · 결과 보고 수정 금지) ==========
@@ -586,6 +587,10 @@ class ExecutionComparison:
                     or (self.last_sequence is not None and sequence <= self.last_sequence)):
                 self.qc["invalid_or_duplicate_receive_sequence"] += 1
                 return
+            if self.last_sequence is not None and sequence != self.last_sequence + 1:
+                # Recorder increments once for every stored market event. A forward
+                # jump proves missing evidence, even without a disconnect marker.
+                self.reset("receive_sequence_gap")
             self.last_sequence = sequence
         self.first_ts = now if self.first_ts is None else self.first_ts
         self.last_ts = now
@@ -750,7 +755,7 @@ def comparison_stream(files, manifest):
                         continue
                     yield event
             entry["complete"] = True
-        except (OSError, EOFError) as exc:
+        except (OSError, EOFError, zlib.error) as exc:
             entry["read_error"] = type(exc).__name__
             yield {"_meta": "input_error"}
         finally:

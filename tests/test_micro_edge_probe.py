@@ -272,6 +272,40 @@ class TestExecutionComparison(unittest.TestCase):
                 probe.ExecutionComparison(**kwargs)
 
 
+
+    def test_forward_receive_sequence_gap_invalidates_pending_exit_evidence(self):
+        engine = probe.ExecutionComparison()
+        seed(engine)
+        engine.step(book(10250, _seq=100))
+        engine.step(book(14000, _seq=102))
+        engine.step(book(15500, ask=103, bid=102, _seq=103))
+        info = row(engine.result())
+        self.assertEqual(info["completed_roundtrips"], 0)
+        self.assertEqual(info["missing_reasons"]["receive_sequence_gap"], 1)
+        self.assertEqual(engine.qc["receive_sequence_gap"], 1)
+
+    def test_forward_sequence_gap_restarts_signal_warmup(self):
+        engine = probe.ExecutionComparison()
+        engine.step(book(0, _seq=1))
+        for ms, seq in ((1000, 2), (2000, 3), (4000, 4), (6000, 6), (8000, 7)):
+            engine.step(trade(ms, _seq=seq))
+        engine.step(book(9000, _seq=8))
+        engine.step(trade(10000, _seq=9))
+        self.assertEqual(engine.result()["eligible_opportunities"], {})
+        self.assertEqual(engine.qc["receive_sequence_gap"], 1)
+
+    def test_first_sequence_need_not_be_one_and_reconnect_may_restart_it(self):
+        engine = probe.ExecutionComparison()
+        engine.step(book(0, _seq=100))
+        engine.step(trade(1000, _seq=101))
+        self.assertEqual(len(engine.states["KRW-X"]["trades"]), 1)
+        engine.step({"_meta": "connect", "recv_ts": T + 1500})
+        engine.step(book(2000, _seq=1))
+        engine.step(trade(3000, _seq=2))
+        self.assertEqual(len(engine.states["KRW-X"]["trades"]), 1)
+        self.assertEqual(engine.qc["receive_sequence_gap"], 0)
+
+
 class TestFileRunner(unittest.TestCase):
     def test_stream_marks_corrupt_line_and_hashes_input_without_writing_it(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -286,6 +320,21 @@ class TestFileRunner(unittest.TestCase):
             self.assertEqual(manifest[0]["invalid_lines"], 1)
             self.assertEqual(manifest[0]["sha256_uncompressed"], hashlib.sha256(raw).hexdigest())
             self.assertEqual(path.read_bytes(), before)
+
+
+    def test_invalid_deflate_becomes_explicit_input_gap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "00.jsonl.gz"
+            # A gzip header followed by reserved DEFLATE BTYPE=3, then a trailer.
+            raw = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x07" + b"\x00" * 8
+            path.write_bytes(raw)
+            manifest = []
+            events = list(probe.comparison_stream([("2026-10-10", "00", path)], manifest))
+            self.assertEqual(events, [{"_meta": "input_error"}])
+            self.assertFalse(manifest[0]["complete"])
+            self.assertIn("read_error", manifest[0])
+            self.assertEqual(path.read_bytes(), raw)
+
 
     def test_runner_produces_cost_comparison_json_and_csv_with_no_input_changes(self):
         with tempfile.TemporaryDirectory() as folder:
