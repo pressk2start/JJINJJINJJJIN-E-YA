@@ -1,4 +1,5 @@
 """Read-only feature CSV inspection, using the actual analyzer and source schema."""
+import ast
 import contextlib
 import copy
 import csv
@@ -9,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -249,6 +252,140 @@ class TestFeatureCsvInspection(unittest.TestCase):
                     AUDIT.main([str(ledger), "--features", str(self.path),
                                 "--bot-source", str(self.source), "--output", str(output)])
                 self.assertEqual(source.read_bytes(), before)
+
+
+
+    def test_declared_decimal_return_is_percent_but_excursion_fields_are_untouched(self):
+        fields = ["ts", "market", "exit_price", "pnl_pct", "result", "mfe_pct", "mae_pct"]
+        self.write(fields, [["2026-10-18", "KRW-DRV", "551", "-0.0118", "lose", "0.3900", "-0.5700"]])
+        result = AUDIT.inspect_feature_csv(self.path, pnl_unit="decimal_return")
+        row = result["recent_outcomes"][0]
+        self.assertEqual(row["pnl_raw"], "-0.0118")
+        self.assertAlmostEqual(row["pnl_percent"], -1.18)
+        self.assertEqual(row["stored_fields"]["mfe_pct"], "0.3900")
+        self.assertEqual(row["stored_fields"]["mae_pct"], "-0.5700")
+        self.assertEqual(result["writer_unit_reference"]["csv_mfe_pct"], "percent")
+        self.assertEqual(result["writer_unit_reference"]["csv_mae_pct"], "percent")
+        self.assertEqual(result["pnl_unit"]["source"], "EXPLICIT_ARGUMENT")
+
+    def test_return_unit_is_never_inferred_from_value_magnitude(self):
+        for text in (".0099", ".01", ".9999", "1", "1.01", "-.0118", "-1.2"):
+            with self.subTest(value=text):
+                self.assertIsNone(AUDIT.feature_pnl_percent(text, None))
+                self.assertAlmostEqual(AUDIT.feature_pnl_percent(text, "decimal_return"), float(text) * 100)
+                self.assertAlmostEqual(AUDIT.feature_pnl_percent(text, "percent"), float(text))
+
+    def test_conversion_preserves_zero_and_rejects_missing_invalid_and_overflow(self):
+        self.assertEqual(AUDIT.feature_pnl_percent("0", "decimal_return"), 0.0)
+        for value in ("", None, "NaN", "Infinity", "-Infinity", "damaged", False, "1e9999"):
+            with self.subTest(value=value):
+                self.assertIsNone(AUDIT.feature_pnl_percent(value, "decimal_return"))
+        with self.assertRaises(ValueError):
+            AUDIT.feature_pnl_percent("1", "guessed_unit")
+
+    def test_default_keeps_raw_pnl_without_assuming_a_historical_unit(self):
+        self.write(rows=[["KRW-DRV", "551", "-.0118", "lose", ""]])
+        result = self.inspect()
+        self.assertIsNone(result["pnl_unit"]["declared_input_unit"])
+        self.assertFalse(result["pnl_unit"]["inferred_from_magnitude"])
+        self.assertEqual(result["latest_record"]["pnl_raw"], "-.0118")
+        self.assertIsNone(result["latest_record"]["pnl_percent"])
+        self.assertEqual(result["latest_record"]["conversion_status"], "unit_unspecified")
+        self.assertEqual(result["pnl_counts_aligned"], {"negative": 1})
+
+    def test_reported_731_shape_keeps_723_blank_results_out_of_outcome_sample(self):
+        # Synthetic shape from the report; this does not inspect the server CSV.
+        self.write(rows=[["KRW-A", "101", ".01", "win", ""] for _ in range(2)]
+                   + [["KRW-B", "99", "-.01", "lose", ""] for _ in range(6)]
+                   + [["KRW-C", "", "", "", ""] for _ in range(723)])
+        result = AUDIT.inspect_feature_csv(self.path, pnl_unit="decimal_return")
+        self.assertEqual(result["rows"], 731)
+        self.assertEqual(result["result_counts_aligned"], {"win": 2, "lose": 6, "EMPTY": 723})
+        self.assertEqual(result["outcome_fields_present_rows"], 8)
+        self.assertEqual(len(result["recent_outcomes"]), 8)
+        self.assertNotIn("win_rate", result)
+        self.assertNotIn("account_mdd", result)
+
+    def test_unit_declaration_does_not_override_invalid_schema_or_row_width(self):
+        self.write(header=["market", "result", "pnl_pct", "result"],
+                   rows=[["KRW-A", "win", ".01", "lose"]])
+        result = AUDIT.inspect_feature_csv(self.path, pnl_unit="decimal_return")
+        self.assertEqual(result["schema_status"], "INVALID_HEADER")
+        self.assertEqual(result["recent_outcomes"], [])
+        self.assertNotIn("pnl_percent", result["latest_record"])
+        with self.assertRaises(ValueError):
+            AUDIT.inspect_feature_csv(self.path, pnl_unit="infer_from_filename")
+
+    def test_recent_outcomes_are_bounded_and_keep_the_latest_stored_records(self):
+        self.write(rows=[["KRW-" + str(i), "101", ".01", "win", ""] for i in range(25)])
+        result = AUDIT.inspect_feature_csv(self.path, pnl_unit="decimal_return")
+        self.assertEqual(result["outcome_fields_present_rows"], 25)
+        self.assertEqual(len(result["recent_outcomes"]), 20)
+        self.assertEqual(result["recent_outcomes"][0]["record"], 6)
+        self.assertEqual(result["recent_outcomes"][-1]["stored_fields"]["market"], "KRW-24")
+
+    def test_cli_explicit_unit_changes_display_only_not_raw_input(self):
+        self.write(rows=[["KRW-DRV", "551", "-.0118", "lose", ""]])
+        ledger = self.root / "live_trades.jsonl"
+        ledger.write_text("", encoding="utf-8")
+        before = self.path.read_bytes()
+        output = self.root / "units"
+        with contextlib.redirect_stdout(io.StringIO()):
+            AUDIT.main([str(ledger), "--features", str(self.path), "--bot-source", str(self.source),
+                        "--feature-pnl-unit", "decimal_return", "--output", str(output)])
+        result = json.loads((output / "report.json").read_text(encoding="utf-8"))
+        self.assertAlmostEqual(result["feature_csv"]["recent_outcomes"][0]["pnl_percent"], -1.18)
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_cli_rejects_unit_option_without_feature_input(self):
+        ledger = self.root / "live_trades.jsonl"
+        ledger.write_text("", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            AUDIT.main([str(ledger), "--feature-pnl-unit", "decimal_return",
+                        "--output", str(self.root / "unused")])
+        self.assertFalse((self.root / "unused").exists())
+
+    def test_actual_update_function_writes_decimal_csv_and_percent_ledger_hook(self):
+        # Execute the whole actual function in isolation; no bot import/order/API call.
+        source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        names = {"update_trade_result", "_trade_log_migrate_header"}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual(len(nodes), len(names))
+        schema = AUDIT.feature_fields_from_source(ROOT / "bot.py")
+        fields = schema["fields"]
+        entry = {"ts": "2026-10-18", "market": "KRW-DRV", "entry_price": "557"}
+        self.write(fields, [[entry.get(k, "") for k in fields]])
+        hook_calls = []
+        ns = {
+            "os": os, "csv": csv, "time": time, "TRADE_LOG_PATH": str(self.path),
+            "FEATURE_FIELDS": fields, "_trade_log_lock": threading.Lock(),
+            "_TRADE_LOSS_LOCK": threading.Lock(), "_POSITION_LOCK": threading.Lock(),
+            "last_trade_was_loss": {}, "_reported_trades": set(), "OPEN_POSITIONS": {},
+            "_live_trade_log_exit": lambda **kw: hook_calls.append(kw),
+            "update_signal_stats": lambda **kw: None, "MFE_SNAPSHOT_TIMES": (),
+            "AUTO_LEARN_ENABLED": False, "_path_report_count": 0, "_batch_report_count": 0,
+            "PATH_REPORT_INTERVAL": 999, "BATCH_REPORT_INTERVAL": 999,
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / "bot.py"), "exec"), ns)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ns["update_trade_result"](
+                "KRW-DRV", 551.0, -.011772, 97.0, mfe_pct=.18, mae_pct=-1.44,
+                entry_ts=1000.0, pos_snapshot={"entry_price": 557, "mfe_sec": 6.9})
+        self.assertEqual(len(hook_calls), 1)
+        self.assertAlmostEqual(hook_calls[0]["net_pnl_pct"], -1.1772)
+        with self.path.open(newline="", encoding="utf-8") as stream:
+            row = next(csv.DictReader(stream))
+        self.assertEqual(row["pnl_pct"], "-0.0118")
+        self.assertEqual(row["mfe_pct"], "0.1800")
+        self.assertEqual(row["mae_pct"], "-1.4400")
+        result = AUDIT.inspect_feature_csv(self.path, schema, "decimal_return")
+        shown = result["recent_outcomes"][0]["pnl_percent"]
+        self.assertAlmostEqual(shown, -1.18)
+        # Different storage precision, not an exchange cashflow reconciliation.
+        self.assertGreater(abs(shown - hook_calls[0]["net_pnl_pct"]), 0)
+        self.assertLess(abs(shown - hook_calls[0]["net_pnl_pct"]), .005)
 
 
 if __name__ == "__main__":

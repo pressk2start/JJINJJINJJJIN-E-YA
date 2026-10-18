@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import contextlib
+import csv
 import io
 import os
 from pathlib import Path
@@ -411,6 +412,61 @@ class BcEventAuditTests(unittest.TestCase):
         self.assertEqual(result["selected_trade_ids"], 1)
         self.assertEqual(result["matched_exported_order_pairs"], 0)
         self.assertIn("order_uuid_reused_across_trades", result["trades"][0]["flags"])
+
+
+
+    def test_parent_link_does_not_certify_child_or_original_pair(self):
+        submission = self.submission("market-child")
+        submission["parent_order_uuid"] = "t1-buy"
+        result = audit.analyze([submission] + ledger(), orders())
+        item = result["order_submissions"][0]
+        self.assertEqual(item["parent_order_uuid"], "t1-buy")
+        self.assertEqual(item["parent_referenced_trade_ids"], ["t1"])
+        self.assertEqual(item["referenced_trade_ids"], [])
+        self.assertEqual(item["status"], "UNRESOLVED")
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertIn("related_fallback_requires_all_orders", result["trades"][0]["flags"])
+
+    def test_missing_child_uuid_still_blocks_single_parent_pair(self):
+        submission = self.submission(None)
+        submission["parent_order_uuid"] = "t1-buy"
+        result = audit.analyze(ledger() + [submission], orders())
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+        self.assertIn("submission_uuid_unknown", result["order_submissions"][0]["flags"])
+
+    def test_invalid_parent_metadata_is_not_a_normal_parent_reference(self):
+        for parent in ("market-child", "", 123, ["t1-buy"]):
+            with self.subTest(parent=parent):
+                submission = self.submission("market-child")
+                submission["parent_order_uuid"] = parent
+                item = audit.analyze([submission] + ledger())["order_submissions"][0]
+                self.assertIn("submission_parent_uuid_invalid", item["flags"])
+                self.assertEqual(item["parent_referenced_trade_ids"], [])
+
+    def test_parent_relation_is_not_inferred_from_market_or_time(self):
+        submission = self.submission("market-child")
+        result = audit.analyze([submission] + ledger(), orders())
+        self.assertEqual(result["matched_exported_order_pairs"], 1)
+        self.assertEqual(result["order_submissions"][0]["parent_referenced_trade_ids"], [])
+
+    def test_parent_related_submission_blocks_even_when_outside_entry_date_filter(self):
+        submission = self.submission("market-child")
+        submission.update(parent_order_uuid="t1-buy", submit_ts=1)
+        result = audit.analyze(ledger() + [submission], orders(), since="2026-10-10")
+        self.assertEqual(result["selected_trade_ids"], 1)
+        self.assertEqual(result["matched_exported_order_pairs"], 0)
+
+    def test_orders_csv_separates_parent_reference_from_child_reference(self):
+        submission = self.submission("market-child")
+        submission["parent_order_uuid"] = "t1-buy"
+        with tempfile.TemporaryDirectory() as folder:
+            audit.save_report(audit.analyze([submission] + ledger()), folder)
+            with (Path(folder) / "orders.csv").open(encoding="utf-8-sig", newline="") as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(row["parent_order_uuid"], "t1-buy")
+            self.assertEqual(row["parent_referenced_trade_ids"], "t1")
+            self.assertEqual(row["referenced_trade_ids"], "")
+            self.assertEqual(row["status"], "UNRESOLVED")
 
 
 class OutputSafetyTests(unittest.TestCase):

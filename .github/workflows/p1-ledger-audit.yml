@@ -4,6 +4,8 @@ on:
     branches: ["claude/review-codebase-7fOpB"]
     paths:
       - "research/p1_ledger_audit.py"
+      - "scalp/research/micro_edge_probe.py"
+      - "tests/test_micro_edge_probe.py"
       - "tests/test_p1_*.py"
       - "tests/test_trade_features_header_migrate.py"
       - "bot.py"
@@ -11,6 +13,8 @@ on:
   pull_request:
     paths:
       - "research/p1_ledger_audit.py"
+      - "scalp/research/micro_edge_probe.py"
+      - "tests/test_micro_edge_probe.py"
       - "tests/test_p1_*.py"
       - "tests/test_trade_features_header_migrate.py"
       - "bot.py"
@@ -27,8 +31,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Syntax
-        run: python -m py_compile bot.py research/p1_ledger_audit.py tests/test_p1_*.py tests/test_trade_features_header_migrate.py
+        run: python -m py_compile bot.py research/p1_ledger_audit.py scalp/research/micro_edge_probe.py tests/test_p1_*.py tests/test_trade_features_header_migrate.py tests/test_micro_edge_probe.py
       - name: P1 source and analyzer tests (isolated, synthetic data)
         run: |
           python -m unittest discover -s tests -p 'test_p1_*.py' -v
           python -m unittest discover -s tests -p 'test_trade_features_header_migrate.py' -v
+          python -m unittest discover -s tests -p 'test_micro_edge_probe.py' -v

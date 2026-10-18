@@ -1188,10 +1188,10 @@ def _order_paid_fee(od):
 
 
 def _live_trade_log_order_submitted(market, order_uuid, requested_krw, path,
-                                    ask1_price=None):
+                                    ask1_price=None, parent_order_uuid=None):
     """P1-fix-C: 시장가 폴백 등 주문 *접수* 사실만 기록. 체결로 취급하지 않음.
 
-    - 재조회/폴링 없음 → 주문 경로 지연 0.
+    - 추가 조회/폴링 없음. 파일 기록 자체의 지연이 없다는 뜻은 아님.
     - pending 미변경 (체결 확정은 reconcile 단계에서만).
     - order_uuid 가 없으면 (응답 실패) uuid=None 으로 남겨 접수 시도 자체는 보존.
     """
@@ -1204,6 +1204,8 @@ def _live_trade_log_order_submitted(market, order_uuid, requested_krw, path,
             "market": market,
             "order_uuid": order_uuid,
             "order_type": "market",
+            # Original canceled limit order; correlation only, never fill evidence.
+            "parent_order_uuid": parent_order_uuid,
             "submit_path": path,
             "requested_krw": requested_krw,
             "ask1_price_at_submit": ask1_price,
@@ -5796,7 +5798,8 @@ def hybrid_buy(market, krw_amount, ob_data=None, timeout_sec=1.2):
             _mk_res = place_market_buy(market, remaining_krw)
             # P1-fix-C: 잔여분 시장가 주문 접수 기록 (체결 확정은 open_auto_position reconcile 에서).
             _live_trade_log_order_submitted(market, (_mk_res or {}).get("uuid") if isinstance(_mk_res, dict) else None,
-                                            remaining_krw, "market_fallback_remainder_after_limit_cancel", ask1_price)
+                                            remaining_krw, "market_fallback_remainder_after_limit_cancel", ask1_price,
+                                            parent_order_uuid=order_uuid)
             return limit_res
         except Exception as e:
             print(f"[HYBRID] {market} 잔여분 시장가 실패: {e}")
