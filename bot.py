@@ -3720,9 +3720,13 @@ def _pipeline_report(force=False):
         _guard_warn = f" 🚫한도{_limit_str}초과"
     elif _live_pnl < SVE1_DAILY_MAX_LOSS_PCT * 0.7:
         _guard_warn = f" ⚠한도{_limit_str}의 {_guard_pct:.0f}%"
+    # 보유 포지션 수 — 1시간 요약에서 "보유 0개일 때 머지/재시작" 판단용 (어드바이저 조건 A-2)
+    with _POSITION_LOCK:
+        _open_pos = [m for m, p in OPEN_POSITIONS.items() if p.get("state") == "open"]
+    _pos_str = f" | 보유 {len(_open_pos)}개" + (f" ({', '.join(x.replace('KRW-', '') for x in _open_pos[:5])})" if _open_pos else "")
     lines = [
         f"{'🟢' if _live_cnt > 0 else '⚪'} LIVE {_live_cnt}전{_live_wins}승{_live_wr}"
-        f" PnL{_live_pnl*100:+.2f}%/{_limit_str}{_guard_warn}",
+        f" PnL{_live_pnl*100:+.2f}%/{_limit_str}{_guard_warn}{_pos_str}",
     ]
     # ACTION 라인 — 운영 판단 자동 요약
     # advisor 2 개선: "신규진입 중단" (능동 차단으로 오해) → "신규진입 없음(raw=0)" 명확화
@@ -5170,6 +5174,54 @@ def _save_bot_state(force=False):
         print(f"[STATE_PERSIST] 저장 실패: {e}")
 
 
+# ── 종료 중 주문 보호 (2026-10-18 · 어드바이저 조건 A-1) ──
+# 매수/매도 주문 함수는 실행 중 _ORDER_INFLIGHT 를 1 올리고 끝나면 내린다. SIGTERM 핸들러는
+# 이 값이 0 이 될 때까지 최대 _ORDER_DRAIN_MAX_SEC 기다린 뒤 종료 → 제출~폴링~기록 도중에 죽지 않음.
+_ORDER_INFLIGHT = 0
+_ORDER_INFLIGHT_LOCK = threading.Lock()
+_ORDER_DRAIN_MAX_SEC = 10.0
+
+
+class _order_critical:
+    """with 블록 동안 '주문 진행 중' 표시. 예외가 나도 반드시 해제."""
+    def __enter__(self):
+        global _ORDER_INFLIGHT
+        with _ORDER_INFLIGHT_LOCK:
+            _ORDER_INFLIGHT += 1
+        return self
+
+    def __exit__(self, *exc):
+        global _ORDER_INFLIGHT
+        with _ORDER_INFLIGHT_LOCK:
+            _ORDER_INFLIGHT = max(0, _ORDER_INFLIGHT - 1)
+        return False
+
+
+def _order_guarded(fn):
+    """주문을 내는 함수 전체를 _order_critical 로 감싸는 데코레이터."""
+    def _wrapped(*a, **kw):
+        with _order_critical():
+            return fn(*a, **kw)
+    _wrapped.__name__ = fn.__name__
+    _wrapped.__doc__ = fn.__doc__
+    _wrapped.__wrapped__ = fn
+    return _wrapped
+
+
+def _order_inflight_count():
+    with _ORDER_INFLIGHT_LOCK:
+        return _ORDER_INFLIGHT
+
+
+def _wait_orders_drained(max_sec=None):
+    """진행 중 주문이 끝날 때까지 대기 (상한 max_sec). 반환: (남은 건수, 기다린 초)."""
+    max_sec = _ORDER_DRAIN_MAX_SEC if max_sec is None else max_sec
+    t0 = time.time()
+    while _order_inflight_count() > 0 and time.time() - t0 < max_sec:
+        time.sleep(0.1)
+    return _order_inflight_count(), time.time() - t0
+
+
 _SHUTDOWN_DONE = False           # _shutdown_save_all 1회 실행 가드 (signal + atexit 이중 호출 방지)
 _SHUTDOWN_EXECUTORS = []         # 종료 시 즉시 내릴 ThreadPoolExecutor 목록 (main 에서 등록)
 _SHUTDOWN_LOCK = threading.Lock()
@@ -5212,7 +5264,12 @@ def _signal_handler(signum, frame):
     os._exit 은 atexit/스레드 join 을 건너뛰므로 저장은 반드시 이 함수 안에서 끝낸다.
     """
     _t0 = time.time()
-    print(f"[SHUTDOWN] 시그널 {signum} 수신")
+    print(f"[SHUTDOWN] 시그널 {signum} 수신 (진행 중 주문 {_order_inflight_count()}건)")
+    _left, _waited = _wait_orders_drained()
+    if _left:
+        print(f"[SHUTDOWN] ⚠ 주문 {_left}건이 {_waited:.1f}s 내 안 끝남 → 저장 후 종료 (수동 확인 필요)")
+    elif _waited > 0.05:
+        print(f"[SHUTDOWN] 진행 중 주문 완료 대기 {_waited:.1f}s")
     try:
         _shutdown_save_all()
     except Exception as _e:
@@ -5954,6 +6011,7 @@ def get_balance_with_locked(market, retries=2):
     print(f"[BALANCE_ERR] {market} 잔고 조회 실패 ({retries+1}회 시도): {last_err}")
     return -1.0  # 🔧 -1 = 조회 실패 (0 = 진짜 없음과 구분)
 
+@_order_guarded
 def sell_all(market):
     """실제 보유량 전량 매도 (1원 찌꺼기 방지). 성공 시 주문결과 dict, 실패 시 None 반환."""
     actual = get_actual_balance(market)
@@ -6458,6 +6516,7 @@ def final_price_guard(m, initial_price, max_drift=None, ticks=None, is_circle=Fa
 # =========================
 # 🔥 자동 매수 진입
 # =========================
+@_order_guarded
 def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
     """
     초입·공격모드 대응 자동 매수 진입
@@ -7462,6 +7521,7 @@ def _reset_pos_after_reprice(pos: dict, new_entry: float, curp: float):
     return pos
 
 
+@_order_guarded
 def add_auto_position(m, cur_price, reason=""):
     """
     이미 seed 포지션이 있을 때, 강한 추세에서 1회 추매(add) 수행
@@ -7678,6 +7738,7 @@ def add_auto_position(m, cur_price, reason=""):
 # =========================
 # 🔥 자동 청산
 # =========================
+@_order_guarded
 def close_auto_position(m, reason=""):
     """
     손절/청산 시 자동 매도 (찌꺼기 방지 포함)
@@ -8156,6 +8217,7 @@ def close_auto_position(m, reason=""):
 
 # 포지션 관리 — config.py에서 정의됨 (PARTIAL_PENDING_TIMEOUT, DUST_PREVENT_KRW)
 
+@_order_guarded
 def safe_partial_sell(m, sell_ratio=0.5, reason=""):
     """
     부분 청산 공용 함수
@@ -18687,37 +18749,38 @@ def box_monitor_position(m, entry_price, volume, box_info):
         # 1) 익절: 박스 상단 영역 도달 → 70% 부분익절
         if cur_price >= box_tp and not partial_sold:
             partial_vol = remaining_vol * 0.70
-            try:
-                _partial_res = place_market_sell(m, partial_vol)
+            with _order_critical():  # 종료 중 주문 보호
                 try:
-                    _live_trade_log_exit(
-                        m, cur_price, "box_partial_submission",
-                        exit_order_uuid=(_partial_res.get("uuid") if isinstance(_partial_res, dict) else None),
-                        exit_order_details=_partial_res)
-                except Exception as _ledger_error:
-                    print(f"[LIVE_TRADE_LOG] box partial observer 실패 {m}: {_ledger_error}")
-                remaining_vol -= partial_vol
-                partial_sold = True
-                # 🔧 FIX: 부분매도 실현금액 누적 (정확한 손익 계산)
-                realized_krw += cur_price * partial_vol  # 체결가 근사치
-                realized_vol += partial_vol
-                # 🔧 FIX: OPEN_POSITIONS volume 동기화 (크래시 복구 시 이중매도 방지)
-                with _POSITION_LOCK:
-                    _bp = OPEN_POSITIONS.get(m)
-                    if _bp:
-                        _bp["volume"] = remaining_vol
-                print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 실현 {realized_krw:,.0f}원 | 나머지 {remaining_vol:.6f}")
-                _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
-                tg_send(
-                    f"💰 <b>부분익절 70%</b> {m}\n"
-                    f"• 현재가: {fmt6(cur_price)}원 ({_partial_gain:+.2f}%)\n"
-                    f"• 나머지 30% 돌파 대기\n"
-                    f"{link_for(m)}"
-                )
-            except Exception as pe:
-                print(f"[BOX_MON] 부분매도 실패: {pe}")
-                sell_reason = f"📦 박스 상단 익절 (부분매도실패→전량)"
-                break
+                    _partial_res = place_market_sell(m, partial_vol)
+                    try:
+                        _live_trade_log_exit(
+                            m, cur_price, "box_partial_submission",
+                            exit_order_uuid=(_partial_res.get("uuid") if isinstance(_partial_res, dict) else None),
+                            exit_order_details=_partial_res)
+                    except Exception as _ledger_error:
+                        print(f"[LIVE_TRADE_LOG] box partial observer 실패 {m}: {_ledger_error}")
+                    remaining_vol -= partial_vol
+                    partial_sold = True
+                    # 🔧 FIX: 부분매도 실현금액 누적 (정확한 손익 계산)
+                    realized_krw += cur_price * partial_vol  # 체결가 근사치
+                    realized_vol += partial_vol
+                    # 🔧 FIX: OPEN_POSITIONS volume 동기화 (크래시 복구 시 이중매도 방지)
+                    with _POSITION_LOCK:
+                        _bp = OPEN_POSITIONS.get(m)
+                        if _bp:
+                            _bp["volume"] = remaining_vol
+                    print(f"[BOX_MON] 📦 {m} 상단 부분익절 70% | 실현 {realized_krw:,.0f}원 | 나머지 {remaining_vol:.6f}")
+                    _partial_gain = (cur_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                    tg_send(
+                        f"💰 <b>부분익절 70%</b> {m}\n"
+                        f"• 현재가: {fmt6(cur_price)}원 ({_partial_gain:+.2f}%)\n"
+                        f"• 나머지 30% 돌파 대기\n"
+                        f"{link_for(m)}"
+                    )
+                except Exception as pe:
+                    print(f"[BOX_MON] 부분매도 실패: {pe}")
+                    sell_reason = f"📦 박스 상단 익절 (부분매도실패→전량)"
+                    break
             continue
 
         # 2) 부분익절 후 박스 돌파 → 트레일 모드
@@ -18738,106 +18801,107 @@ def box_monitor_position(m, entry_price, volume, box_info):
             break
 
     # 나머지 수량 매도
-    try:
-        if remaining_vol > 0:
-            sell_result = place_market_sell(m, remaining_vol)
-        else:
-            sell_result = {"uuid": ""}  # 이미 전량 부분매도됨
-        time.sleep(0.5)
-
-        # 매도가 조회 (Private API — get_order_result 사용)
-        _box_od = None   # P1-fix-B: 폴링한 매도 응답 보존 (수수료 전달용)
-        order_id = ""
+    with _order_critical():  # 종료 중 주문 보호 (매도 제출~폴링~기록)
         try:
-            order_id = sell_result.get("uuid", "")
-            if order_id:
-                od = get_order_result(order_id, timeout_sec=10.0)
-                _box_od = od
-                if od and od.get("avg_price"):
-                    sell_price = float(od["avg_price"])
-                elif od and od.get("trades"):
-                    trades = od["trades"]
-                    total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
-                    total_vol = sum(float(tr["volume"]) for tr in trades)
-                    sell_price = total_krw / total_vol if total_vol > 0 else cur_price
+            if remaining_vol > 0:
+                sell_result = place_market_sell(m, remaining_vol)
+            else:
+                sell_result = {"uuid": ""}  # 이미 전량 부분매도됨
+            time.sleep(0.5)
+
+            # 매도가 조회 (Private API — get_order_result 사용)
+            _box_od = None   # P1-fix-B: 폴링한 매도 응답 보존 (수수료 전달용)
+            order_id = ""
+            try:
+                order_id = sell_result.get("uuid", "")
+                if order_id:
+                    od = get_order_result(order_id, timeout_sec=10.0)
+                    _box_od = od
+                    if od and od.get("avg_price"):
+                        sell_price = float(od["avg_price"])
+                    elif od and od.get("trades"):
+                        trades = od["trades"]
+                        total_krw = sum(float(tr["price"]) * float(tr["volume"]) for tr in trades)
+                        total_vol = sum(float(tr["volume"]) for tr in trades)
+                        sell_price = total_krw / total_vol if total_vol > 0 else cur_price
+                    else:
+                        sell_price = cur_price
                 else:
                     sell_price = cur_price
-            else:
+            except Exception:
                 sell_price = cur_price
-        except Exception:
-            sell_price = cur_price
 
-        # 🔧 FIX: 부분익절 실현금액을 합산한 정확한 손익 계산
-        # 기존: sell_price * volume (마지막 매도가로 전체 계산 → 부분익절 무시)
-        # 변경: realized_krw(부분매도 누적) + sell_price * remaining_vol(나머지) = 실제 총 매도금액
-        hold_sec = time.time() - start_ts
-        est_entry_value = entry_price * volume
-        final_sell_krw = sell_price * remaining_vol if remaining_vol > 0 else 0.0
-        est_exit_value = realized_krw + final_sell_krw  # 부분+나머지 합산
-        pl_value = est_exit_value - est_entry_value
-        # 가중평균 매도가 (기록/학습용)
-        avg_exit_price = est_exit_value / volume if volume > 0 else sell_price
-        gross_ret_pct = (avg_exit_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-        net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
-        fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY
-        net_pl_value = pl_value - fee_total
-        result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
+            # 🔧 FIX: 부분익절 실현금액을 합산한 정확한 손익 계산
+            # 기존: sell_price * volume (마지막 매도가로 전체 계산 → 부분익절 무시)
+            # 변경: realized_krw(부분매도 누적) + sell_price * remaining_vol(나머지) = 실제 총 매도금액
+            hold_sec = time.time() - start_ts
+            est_entry_value = entry_price * volume
+            final_sell_krw = sell_price * remaining_vol if remaining_vol > 0 else 0.0
+            est_exit_value = realized_krw + final_sell_krw  # 부분+나머지 합산
+            pl_value = est_exit_value - est_entry_value
+            # 가중평균 매도가 (기록/학습용)
+            avg_exit_price = est_exit_value / volume if volume > 0 else sell_price
+            gross_ret_pct = (avg_exit_price / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
+            net_ret_pct = gross_ret_pct - (FEE_RATE_ROUNDTRIP * 100.0)
+            fee_total = (est_entry_value + est_exit_value) * FEE_RATE_ONEWAY
+            net_pl_value = pl_value - fee_total
+            result_emoji = "🟢" if net_ret_pct > 0 else "🔴"
 
-        # 🔧 거래 결과 기록 (승률 기반 리스크 튜닝)
-        try:
-            record_trade(m, net_ret_pct / 100.0, "박스")
-        except Exception as _e:
-            print(f"[BOX_TRADE_RECORD_ERR] {_e}")
+            # 🔧 거래 결과 기록 (승률 기반 리스크 튜닝)
+            try:
+                record_trade(m, net_ret_pct / 100.0, "박스")
+            except Exception as _e:
+                print(f"[BOX_TRADE_RECORD_ERR] {_e}")
 
-        # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
-        try:
-            update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
-                                exit_reason=sell_reason,
-                                # P1-fix-B: 마지막 매도 leg 응답 재사용. 70% 부분익절 leg(_partial_res)는
-                                # 폴링 없이 접수만 되므로 이 호출엔 미반영 (후속 과제).
-                                exit_order_uuid=(order_id or None),
-                                executed_exit_volume=(remaining_vol if remaining_vol > 0 else None),
-                                exit_fee_krw=_order_paid_fee(_box_od),
-                                exit_order_details=_box_od)
-        except Exception as _e:
-            print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
+            # 🔧 FIX: AUTO_LEARN_ENABLED 무관하게 항상 호출 (배치 리포트 카운터)
+            try:
+                update_trade_result(m, sell_price, net_ret_pct / 100.0, hold_sec,
+                                    exit_reason=sell_reason,
+                                    # P1-fix-B: 마지막 매도 leg 응답 재사용. 70% 부분익절 leg(_partial_res)는
+                                    # 폴링 없이 접수만 되므로 이 호출엔 미반영 (후속 과제).
+                                    exit_order_uuid=(order_id or None),
+                                    executed_exit_volume=(remaining_vol if remaining_vol > 0 else None),
+                                    exit_fee_krw=_order_paid_fee(_box_od),
+                                    exit_order_details=_box_od)
+            except Exception as _e:
+                print(f"[BOX_FEATURE_UPDATE_ERR] {_e}")
 
-        # 🔧 FIX: 일반 매매와 동일한 헤더 형식
-        tg_send(
-            f"====================================\n"
-            f"{result_emoji} <b>자동청산 완료</b> {m}\n"
-            f"====================================\n"
-            f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{gross_ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
-            f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
-            f"• 사유: {sell_reason}\n"
-            f"• 매수평단: {fmt6(entry_price)}원\n"
-            f"• 실매도가: {fmt6(sell_price)}원\n"
-            f"• 체결수량: {volume:.6f}\n"
-            f"• 매수금액: {est_entry_value:,.0f}원\n"
-            f"• 청산금액: {est_exit_value:,.0f}원\n"
-            f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
-            f"• 보유시간: {hold_sec:.0f}초\n"
-            f"• 박스: {fmt6(box_low)}~{fmt6(box_high)} ({box_info.get('range_pct', 0)*100:.1f}%)\n"
-            f"====================================\n"
-            f"{link_for(m)}"
-        )
+            # 🔧 FIX: 일반 매매와 동일한 헤더 형식
+            tg_send(
+                f"====================================\n"
+                f"{result_emoji} <b>자동청산 완료</b> {m}\n"
+                f"====================================\n"
+                f"💰 순손익: {net_pl_value:+,.0f}원 (gross:{gross_ret_pct:+.2f}% / net:{net_ret_pct:+.2f}%)\n"
+                f"📊 매매차익: {pl_value:+,.0f}원 → 수수료 {fee_total:,.0f}원 차감 → 실현손익 {net_pl_value:+,.0f}원\n\n"
+                f"• 사유: {sell_reason}\n"
+                f"• 매수평단: {fmt6(entry_price)}원\n"
+                f"• 실매도가: {fmt6(sell_price)}원\n"
+                f"• 체결수량: {volume:.6f}\n"
+                f"• 매수금액: {est_entry_value:,.0f}원\n"
+                f"• 청산금액: {est_exit_value:,.0f}원\n"
+                f"• 수수료: {fee_total:,.0f}원 (매수 {est_entry_value * FEE_RATE_ONEWAY:,.0f} + 매도 {est_exit_value * FEE_RATE_ONEWAY:,.0f})\n"
+                f"• 보유시간: {hold_sec:.0f}초\n"
+                f"• 박스: {fmt6(box_low)}~{fmt6(box_high)} ({box_info.get('range_pct', 0)*100:.1f}%)\n"
+                f"====================================\n"
+                f"{link_for(m)}"
+            )
 
-        print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL net:{net_ret_pct:+.2f}% | {hold_sec:.0f}초")
+            print(f"[BOX_MON] 📦 {m} 매도 완료 | {sell_reason} | PnL net:{net_ret_pct:+.2f}% | {hold_sec:.0f}초")
 
-    except Exception as e:
-        print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
-        tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
-        # 🔧 FIX: 매도 실패 시 잔고 확인 → 코인 남아있으면 OPEN_POSITIONS 유지 (유령 방지)
-        try:
-            _fail_bal = get_balance_with_locked(m)
-            if _fail_bal is not None and _fail_bal > 0:
-                print(f"[BOX_MON] 📦 {m} 매도 실패 but 잔고 {_fail_bal:.6f} 존재 → 포지션 유지 (유령 전환 방지)")
-                tg_send(f"⚠️ {m} 매도 실패 → 포지션 유지 중 (다음 동기화에서 재시도)")
-                with _BOX_LOCK:
-                    _BOX_WATCHLIST.pop(m, None)
-                return  # mark_position_closed 호출하지 않음 → OPEN_POSITIONS 유지
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[BOX_MON] 📦 {m} 매도 실패: {e}")
+            tg_send(f"⚠️ <b>자동청산 실패</b> {m}\n사유: {e}")
+            # 🔧 FIX: 매도 실패 시 잔고 확인 → 코인 남아있으면 OPEN_POSITIONS 유지 (유령 방지)
+            try:
+                _fail_bal = get_balance_with_locked(m)
+                if _fail_bal is not None and _fail_bal > 0:
+                    print(f"[BOX_MON] 📦 {m} 매도 실패 but 잔고 {_fail_bal:.6f} 존재 → 포지션 유지 (유령 전환 방지)")
+                    tg_send(f"⚠️ {m} 매도 실패 → 포지션 유지 중 (다음 동기화에서 재시도)")
+                    with _BOX_LOCK:
+                        _BOX_WATCHLIST.pop(m, None)
+                    return  # mark_position_closed 호출하지 않음 → OPEN_POSITIONS 유지
+            except Exception:
+                pass
 
     # 정리 (매도 성공 시에만 도달)
     with _BOX_LOCK:
@@ -21525,6 +21589,33 @@ def _tg_split_message(text, max_len=4000):
     return final if final else [text[:max_len]]
 
 
+_TG_ALLOWED_TAG_RE = re.compile(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a(?:\s[^<>]*)?|tg-spoiler|span(?:\s[^<>]*)?)\s*>", re.I)
+_TG_ENTITY_RE = re.compile(r"&(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);")
+
+
+def _tg_sanitize_html(t):
+    """Telegram parse_mode=HTML 로 보내기 전에 허용 태그 외의 '<' 와 맨 '&' 를 이스케이프.
+
+    배경 (2026-10-18 서버 로그): [TG] 1,344건 × 2 chat 이 status=400 "can't parse entities" → plain text
+    재전송. 원인은 리포트 본문의 "<0.1:16", "n<100", "A&B" 같은 비교·구분 문자. 재전송은 되지만
+    API 호출이 2배였고, 실패 로그 5,376줄이 쌓였다. 허용 태그(<b>, <code>, <a href>…)는 그대로 둔다.
+    """
+    if not t or ("<" not in t and "&" not in t):
+        return t
+    keep = {}
+
+    def _stash(m):
+        k = f"\x00{len(keep)}\x00"
+        keep[k] = m.group(0)
+        return k
+    tmp = _TG_ALLOWED_TAG_RE.sub(_stash, t)
+    tmp = _TG_ENTITY_RE.sub(lambda m: m.group(0).replace("&", "\x01"), tmp)  # 이미 이스케이프된 엔티티 보호
+    tmp = tmp.replace("&", "&amp;").replace("\x01", "&").replace("<", "&lt;").replace(">", "&gt;")
+    for k, v in keep.items():
+        tmp = tmp.replace(k, v)
+    return tmp
+
+
 def tg_send(t, retry=3):
     """텔레그램 메시지 전송 (429 rate-limit 처리 + 지수 백오프 + 실패큐)
     🔧 FIX: _TG_SESSION 전용 세션 사용 (SESSION 리프레시 시 청산알림 유실 방지)
@@ -21573,10 +21664,11 @@ def tg_send(t, retry=3):
                 return None
 
     ok_any = False
+    _t_html = _tg_sanitize_html(t)  # 허용 태그 외 < & 이스케이프 (400 → plain 재전송 2배 호출 방지)
     for cid in CHAT_IDS:
         payload = {
             "chat_id": cid,
-            "text": t,
+            "text": _t_html,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
