@@ -22,6 +22,9 @@ ws_recorder.py 가 수집한 Upbit WebSocket raw event (orderbook + trade) 를 �
 입력: {data-dir}/{YYYY-MM-DD}/{HH}.jsonl.gz
 출력: 콘솔 표 + /tmp/micro_edge_probe_result.json
 
+추가 비교 모드: --execution-compare (주문 금액·깊이·지연·양방향 수수료·시간 분리).
+기존 탐색 결과와 구분하며 과거 holdout을 fresh forward 검증으로 부르지 않는다.
+
 사용:
     cd /home/ubuntu/scalp/research
     python3 micro_edge_probe.py \\
@@ -37,6 +40,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
+import hashlib
+import math
 import datetime as dt
 import gzip
 import json
@@ -71,6 +77,13 @@ def parse_args():
     ap.add_argument("--out", default="/tmp/micro_edge_probe_result.json")
     ap.add_argument("--sample-only", action="store_true",
                     help="only 2 days for quick smoke test")
+    ap.add_argument("--execution-compare", action="store_true",
+                    help="Depth/latency/fee comparison with fixed signals and chronological holdout")
+    ap.add_argument("--order-krw", type=float, default=6000.0)
+    ap.add_argument("--latency-ms", type=int, default=250)
+    ap.add_argument("--fee-rate", type=float, default=.0005, help="Per-side fee fraction")
+    ap.add_argument("--validation-from", default=None,
+                    help="UTC-aware ISO boundary; otherwise derive from input day inventory only")
     args = ap.parse_args()
     if args.data_dir_pos:
         args.data_dir = args.data_dir_pos
@@ -325,10 +338,502 @@ def analyze_results(completed):
     return results
 
 
+
+# Execution-aware comparison stays inside this offline probe. No orders/network.
+COMPARISON_SIGNALS = ("ALL", "FLOW_PERSISTENCE", "FLOW_PLUS_BOOK")
+GAP_META = {"connect", "disconnect", "recv_timeout", "shutdown", "disk_stop",
+            "setup_failed", "input_error"}
+
+
+def finite(value, positive=False):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(result) or (positive and result <= 0):
+        return None
+    return result
+
+
+def depth_snapshot(event):
+    """One complete received ladder; never combine trade touch with old sizes."""
+    units = event.get("orderbook_units")
+    if not isinstance(units, list) or not units or event.get("level", 0) != 0:
+        return None
+    asks, bids = [], []
+    for unit in units:
+        if not isinstance(unit, dict):
+            return None
+        ap, bp = finite(unit.get("ask_price"), True), finite(unit.get("bid_price"), True)
+        aq, bq = finite(unit.get("ask_size")), finite(unit.get("bid_size"))
+        if (None in (ap, bp, aq, bq) or aq < 0 or bq < 0
+                or not math.isfinite(ap * aq) or not math.isfinite(bp * bq)):
+            return None
+        asks.append((ap, aq)); bids.append((bp, bq))
+    if (asks[0][0] <= bids[0][0]
+            or any(asks[i][0] >= asks[i + 1][0] or bids[i][0] <= bids[i + 1][0]
+                   for i in range(len(asks) - 1))):
+        return None
+    if not all(math.isfinite(sum(p * q for p, q in side)) for side in (asks, bids)):
+        return None
+    return tuple(asks), tuple(bids)
+
+
+def depth_buy(asks, notional, adverse_bp=0.0):
+    remaining, quantity = notional, 0.0
+    for raw_price, size in asks:
+        price = raw_price * (1 + adverse_bp / 10000)
+        take = min(size, remaining / price)
+        quantity += take
+        remaining -= take * price
+        if remaining <= max(1e-8, notional * 1e-10):
+            return quantity
+    return None  # insufficient observed capacity; no extrapolation/assumed partial fill
+
+
+def depth_sell(bids, quantity):
+    remaining, funds = quantity, 0.0
+    for price, size in bids:
+        take = min(size, remaining)
+        funds += take * price
+        remaining -= take
+        if remaining <= max(1e-10, quantity * 1e-10):
+            return funds
+    return None
+
+
+def exact_net(notional, sell_funds, fee_rate, adverse_bp):
+    # Extra adverse execution is an assumption, separate from depth/spread.
+    # Same received ladder is adjusted once per side; spread is already in prices.
+    # Entry quantity was walked at adversely adjusted ask prices for this budget.
+    exit_funds = sell_funds * (1 - adverse_bp / 10000)
+    cash_cost = notional * (1 + fee_rate)
+    net = exit_funds * (1 - fee_rate) - cash_cost
+    return net, net / cash_cost * 100
+
+
+class CompareStats:
+    def __init__(self):
+        self.signals = self.entries = self.missing = self.skipped = 0
+        self.values, self.krw_sum = [], 0.0
+        self.stress_sum = self.delta_sum = self.opportunity_sum = 0.0
+        self.common = 0
+        self.reasons = collections.Counter()
+        self.by_coin = collections.defaultdict(lambda: [0, 0.0])
+        self.by_day = collections.defaultdict(lambda: [0, 0.0])
+
+    def result(self):
+        vals = sorted(self.values)
+        n = len(vals)
+        tail = vals[:max(1, math.ceil(n * .05))]
+        no_top5 = vals[:-5] if n > 5 else []
+        return {
+            "selected_signals": self.signals, "snapshot_entry_capacity_ok": self.entries,
+            "completed_roundtrips": n, "selected_unresolved": self.missing,
+            "signals_skipped": self.skipped, "missing_reasons": dict(self.reasons),
+            "mean_net_pct": sum(vals) / n if n else None,
+            "positive_rate": sum(x > 0 for x in vals) / n if n else None,
+            "worst_5pct_mean_net_pct": sum(tail) / len(tail) if tail else None,
+            "mean_net_pct_without_top5": sum(no_top5) / len(no_top5) if no_top5 else None,
+            "stress_mean_net_pct": self.stress_sum / n if n else None,
+            "mean_event_net_krw": self.krw_sum / n if n else None,
+            "paired_complete_opportunities": self.common,
+            "net_pct_per_complete_opportunity_including_skips":
+                self.opportunity_sum / self.common if self.common else None,
+            "delta_vs_all_pct_per_complete_opportunity":
+                self.delta_sum / self.common if self.common else None,
+            "per_coin": {k: {"n": v[0], "mean_net_pct": v[1] / v[0]}
+                         for k, v in sorted(self.by_coin.items())},
+            "per_day": {k: {"n": v[0], "mean_net_pct": v[1] / v[0]}
+                        for k, v in sorted(self.by_day.items())},
+        }
+
+
+class ExecutionComparison:
+    """Receive-time observation -> delayed snapshot capacity -> fixed-horizon exits.
+
+    This is an offline taker model, not proof of live order acceptance or fills.
+    """
+    def __init__(self, notional=6000.0, latency_ms=250, fee_rate=.0005,
+                 validation_ms=None, max_fill_lag_ms=1000, quote_age_ms=2000):
+        if (finite(notional, True) is None or notional < 5000
+                or finite(latency_ms) is None or latency_ms < 0
+                or finite(fee_rate) is None or not 0 <= fee_rate < .1
+                or finite(max_fill_lag_ms) is None or max_fill_lag_ms <= 0
+                or finite(quote_age_ms) is None or quote_age_ms <= 0):
+            raise ValueError("invalid comparison execution assumptions")
+        self.notional, self.latency_ms, self.fee_rate = notional, latency_ms, fee_rate
+        self.validation_ms = validation_ms
+        self.max_lag, self.quote_age = max_fill_lag_ms, quote_age_ms
+        self.purge_ms = (max(HORIZONS_SEC) * 1000 + 2 * latency_ms
+                         + 2 * max_fill_lag_ms + PRESSURE_WINDOW_SEC * 1000)
+        self.states, self.pending, self.groups = {}, [], {}
+        self.qc = collections.Counter()
+        self.last_ts = self.first_ts = None
+        self.last_sequence = None
+        self.eligible = collections.Counter()
+
+    def stats(self, phase, signal, horizon):
+        return self.groups.setdefault((phase, signal, horizon), CompareStats())
+
+    def phase(self, timestamp):
+        if self.validation_ms is None:
+            return "EXPLORATION"
+        if timestamp < self.validation_ms - self.purge_ms:
+            return "TRAIN"
+        if timestamp >= self.validation_ms + PRESSURE_WINDOW_SEC * 1000:
+            return "HISTORICAL_HOLDOUT"
+        return None
+
+    def finish(self, pending, horizon, reason=None, sell_funds=None, stress_sell_funds=None):
+        if horizon in pending["finished"]:
+            return
+        pending["finished"].add(horizon)
+        base = stress = None
+        if reason is None:
+            base = exact_net(self.notional, sell_funds, self.fee_rate, 1.0)
+            stress = exact_net(self.notional, stress_sell_funds, self.fee_rate * 1.5, 2.0)
+        for signal, selected in pending["signals"].items():
+            stat = self.stats(pending["phase"], signal, horizon)
+            if selected:
+                if reason:
+                    stat.missing += 1
+                    stat.reasons[reason] += 1
+                else:
+                    stat.values.append(base[1]); stat.krw_sum += base[0]
+                    stat.stress_sum += stress[1]
+                    stat.by_coin[pending["code"]][0] += 1
+                    stat.by_coin[pending["code"]][1] += base[1]
+                    day = dt.datetime.fromtimestamp(
+                        pending["decision_ts"] / 1000, dt.timezone.utc).date().isoformat()
+                    stat.by_day[day][0] += 1; stat.by_day[day][1] += base[1]
+            # Rejected signals contribute zero only to complete matched opportunities.
+            # Unknown execution outcomes never become zero-return observations.
+            if base is not None:
+                chosen = base[1] if selected else 0.0
+                stat.common += 1
+                stat.opportunity_sum += chosen
+                stat.delta_sum += chosen - base[1]
+
+    def reset(self, reason):
+        for pending in self.pending:
+            for h in HORIZONS_SEC:
+                self.finish(pending, h, reason=reason)
+        self.pending.clear()
+        self.states.clear()
+        self.last_sequence = None
+        self.qc[reason] += 1
+
+    def advance(self, now, code=None, book=None):
+        for pending in self.pending:
+            if pending["quantity"] is None:
+                target = pending["decision_ts"] + self.latency_ms
+                if now > target + self.max_lag:
+                    for h in HORIZONS_SEC:
+                        self.finish(pending, h, reason="entry_quote_late_or_missing")
+                    continue
+                if book is not None and code == pending["code"] and now >= target:
+                    quantity = depth_buy(book[0], self.notional, adverse_bp=1.0)
+                    if quantity is None:
+                        for h in HORIZONS_SEC:
+                            self.finish(pending, h, reason="entry_depth_insufficient")
+                        continue
+                    pending["quantity"], pending["entry_ts"] = quantity, now
+                    pending["stress_quantity"] = depth_buy(book[0], self.notional, adverse_bp=2.0)
+                    for signal, selected in pending["signals"].items():
+                        if selected:
+                            for h in HORIZONS_SEC:
+                                self.stats(pending["phase"], signal, h).entries += 1
+            if pending["quantity"] is None:
+                continue
+            for h in HORIZONS_SEC:
+                if h in pending["finished"]:
+                    continue
+                target = pending["entry_ts"] + h * 1000 + self.latency_ms
+                if now > target + self.max_lag:
+                    self.finish(pending, h, reason="exit_quote_late_or_missing")
+                elif book is not None and code == pending["code"] and now >= target:
+                    funds = depth_sell(book[1], pending["quantity"])
+                    stress_funds = depth_sell(book[1], pending["stress_quantity"])
+                    self.finish(pending, h, reason="exit_depth_insufficient" if funds is None else None,
+                                sell_funds=funds, stress_sell_funds=stress_funds)
+        self.pending = [p for p in self.pending if len(p["finished"]) < len(HORIZONS_SEC)]
+
+    def step(self, event):
+        now = finite(event.get("recv_ts"), True)
+        meta = event.get("_meta")
+        if meta is not None:
+            if not isinstance(meta, str) or meta in GAP_META:
+                self.reset("session_or_input_gap")
+                if now is not None:
+                    self.last_ts = now
+            return
+        if now is None:
+            self.reset("invalid_receive_timestamp")
+            return
+        if self.last_ts is not None:
+            if now < self.last_ts:
+                self.reset("receive_clock_reversed")
+                self.last_ts = now
+                return
+            if now - self.last_ts > 5000:
+                self.reset("unmarked_receive_gap")
+        sequence = event.get("_seq")
+        if sequence is not None:
+            if (not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0
+                    or (self.last_sequence is not None and sequence <= self.last_sequence)):
+                self.qc["invalid_or_duplicate_receive_sequence"] += 1
+                return
+            self.last_sequence = sequence
+        self.first_ts = now if self.first_ts is None else self.first_ts
+        self.last_ts = now
+        self.advance(now)
+        code = event.get("code")
+        if not isinstance(code, str) or not code:
+            self.qc["invalid_market"] += 1
+            return
+        state = self.states.setdefault(
+            code, {"trades": collections.deque(), "book": None, "book_ts": None,
+                   "last_signal": None, "last_trade_id": None, "first_seen_ts": now})
+        if event.get("type") == "orderbook":
+            exchange_ts = finite(event.get("timestamp"), True)
+            book = depth_snapshot(event)
+            if (book is None or exchange_ts is None
+                    or not 0 <= now - exchange_ts <= self.quote_age
+                    or (state["book_ts"] is not None and exchange_ts < state["book_ts"])):
+                state["book"] = state["book_ts"] = None
+                self.qc["invalid_or_delayed_book"] += 1
+                return
+            state["book"], state["book_ts"] = book, exchange_ts
+            self.advance(now, code, book)
+            return
+        if event.get("type") != "trade":
+            return
+        px, qty = finite(event.get("trade_price"), True), finite(event.get("trade_volume"), True)
+        side = event.get("ask_bid")
+        exchange_ts = finite(event.get("trade_timestamp", event.get("timestamp")), True)
+        trade_id = event.get("sequential_id")
+        if trade_id is not None:
+            if (isinstance(trade_id, bool) or not isinstance(trade_id, (int, str))
+                    or not str(trade_id).isdigit() or int(trade_id) <= 0):
+                self.qc["invalid_trade_sequence"] += 1
+                return
+            trade_id = int(trade_id)  # preserve integer identity beyond IEEE-754 exact range
+        if (event.get("_seq_anomaly") or px is None or qty is None or side not in ("ASK", "BID")
+                or exchange_ts is None or not 0 <= now - exchange_ts <= self.quote_age
+                or (trade_id is not None and state["last_trade_id"] is not None
+                    and trade_id <= state["last_trade_id"])):
+            self.qc["invalid_duplicate_or_delayed_trade"] += 1
+            return
+        if trade_id is not None:
+            state["last_trade_id"] = trade_id
+        amount = px * qty
+        if not math.isfinite(amount):
+            self.qc["invalid_trade_notional"] += 1
+            return
+        state["trades"].append((now, amount if side == "BID" else -amount, amount))
+        while state["trades"] and state["trades"][0][0] <= now - 10000:
+            state["trades"].popleft()
+        if now - state["first_seen_ts"] < PRESSURE_WINDOW_SEC * 1000:
+            return
+        if state["last_signal"] is not None and now - state["last_signal"] < EVENT_DEDUP_SEC * 1000:
+            return
+        phase = self.phase(now)
+        if phase is None:
+            self.qc["split_boundary_purged"] += 1
+            return
+        if state["book"] is None or now - state["book_ts"] > self.quote_age:
+            self.qc["decision_book_unavailable"] += 1
+            return
+        old = [t for t in state["trades"] if t[0] <= now - 5000]
+        new = [t for t in state["trades"] if t[0] > now - 5000]
+        if len(old) < MIN_TRADES_FOR_PRESSURE or len(new) < MIN_TRADES_FOR_PRESSURE:
+            return
+        if len(state["book"][0]) < 5:
+            self.qc["decision_depth_under_five_levels"] += 1
+            return
+        totals = [sum(t[1] for t in old), sum(t[2] for t in old),
+                  sum(t[1] for t in new), sum(t[2] for t in new)]
+        if not all(math.isfinite(v) for v in totals) or min(totals[1], totals[3]) <= 0:
+            self.qc["invalid_flow_totals"] += 1
+            return
+        pressure_old, pressure_new = totals[0] / totals[1], totals[2] / totals[3]
+        ask_depth = sum(p * q for p, q in state["book"][0][:5])
+        bid_depth = sum(p * q for p, q in state["book"][1][:5])
+        if ask_depth + bid_depth <= 0:
+            return
+        imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+        persistence = pressure_old > 0 and pressure_new > 0
+        signals = {"ALL": True, "FLOW_PERSISTENCE": persistence,
+                   "FLOW_PLUS_BOOK": persistence and imbalance > 0}
+        state["last_signal"] = now
+        self.eligible[phase] += 1
+        for signal, selected in signals.items():
+            for h in HORIZONS_SEC:
+                stat = self.stats(phase, signal, h)
+                stat.signals += int(selected)
+                stat.skipped += int(not selected)
+        self.pending.append({"code": code, "decision_ts": now, "phase": phase,
+                             "signals": signals, "quantity": None, "stress_quantity": None, "entry_ts": None,
+                             "finished": set()})
+
+    def result(self):
+        for pending in self.pending:
+            for h in HORIZONS_SEC:
+                self.finish(pending, h, reason="end_of_input")
+        self.pending.clear()
+        return {
+            "mode": "SNAPSHOT_DEPTH_TAKER_HISTORICAL_COMPARISON",
+            "assumptions": {
+                "order_notional_krw_excluding_fee": self.notional,
+                "fee_rate_per_side": self.fee_rate, "order_latency_ms_each_side": self.latency_ms,
+                "max_fill_quote_lag_ms": self.max_lag, "max_exchange_quote_age_ms": self.quote_age,
+                "adverse_slip_bp_each_side": 1.0, "stress_fee_multiplier": 1.5,
+                "stress_adverse_slip_bp_each_side": 2.0,
+                "holding_horizons_sec_from_entry_snapshot": HORIZONS_SEC,
+                "validation_boundary_recv_ms_utc": self.validation_ms,
+                "train_end_purge_ms": self.purge_ms, "validation_warmup_ms": 10000,
+                "flow_windows_sec": [5, 5], "flow_cut_frac": 0.0, "book_imbalance_cut_frac": 0.0,
+                "candidate_selection": "FIXED_RULES_NO_FITTING_OR_HOLDOUT_SELECTION",
+            },
+            "eligible_opportunities": dict(self.eligible), "quality_counts": dict(self.qc),
+            "observed_receive_span_ms": (self.last_ts - self.first_ts)
+                if self.first_ts is not None and self.last_ts is not None else None,
+            "results": [
+                {"phase": phase, "signal": signal, "hold_sec": horizon, **stat.result()}
+                for (phase, signal, horizon), stat in sorted(self.groups.items())],
+            "notes": [
+                "Historical split is not fresh forward evidence; previously inspected dates remain exploratory.",
+                "Snapshots estimate taker capacity, not order acceptance, actual fills or guaranteed profit.",
+                "No maker fill assumptions. No LIVE changes. No automatic strategy promotion.",
+                "Spread is already in depth prices. Fees use both buy and sell funds.",
+                "Each horizon is independent. Gaps, late quotes and insufficient depth remain unresolved.",
+                "Skipped signals count as zero only on common complete baseline opportunities.",
+                "KRW and percent are event metrics; no account MDD, portfolio return or hourly profit is inferred.",
+                "Remaining dataset exclusions can bias results; inspect coverage and per-coin/day results.",
+            ],
+        }
+
+
+def comparison_stream(files, manifest):
+    """Streaming read, logical-byte hashes, and explicit corrupt/changed-file gaps."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError("nonfinite JSON constant: " + value)
+    for date_str, hour_str, path in files:
+        before = path.stat()
+        digest = hashlib.sha256()
+        entry = {"path": str(path), "size_bytes": before.st_size,
+                 "sha256_uncompressed": None, "complete": False, "invalid_lines": 0}
+        manifest.append(entry)
+        try:
+            with gzip.open(path, "rb") as stream:
+                for line in stream:
+                    digest.update(line)
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line, object_pairs_hook=unique, parse_constant=invalid_constant)
+                        if not isinstance(event, dict):
+                            raise ValueError("event must be an object")
+                    except (ValueError, UnicodeError):
+                        entry["invalid_lines"] += 1
+                        yield {"_meta": "input_error"}
+                        continue
+                    yield event
+            entry["complete"] = True
+        except (OSError, EOFError) as exc:
+            entry["read_error"] = type(exc).__name__
+            yield {"_meta": "input_error"}
+        finally:
+            entry["sha256_uncompressed"] = digest.hexdigest()
+            try:
+                after = path.stat()
+                entry["changed_while_reading"] = (
+                    before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns
+                    or before.st_ino != after.st_ino)
+            except OSError:
+                entry["changed_while_reading"] = True
+            if entry["changed_while_reading"]:
+                yield {"_meta": "input_error"}
+
+
+def run_execution_comparison(args):
+    files = iter_event_files(args.data_dir, args.days)
+    if not files:
+        raise ValueError("no WS input files")
+    if args.validation_from:
+        boundary = dt.datetime.fromisoformat(args.validation_from.replace("Z", "+00:00"))
+        if boundary.tzinfo is None:
+            raise ValueError("--validation-from requires an explicit timezone, e.g. 2026-10-14T00:00:00Z")
+        validation_ms = boundary.timestamp() * 1000
+    else:
+        days = sorted({day for day, _, _ in files})
+        # Boundary derives only from file calendar inventory, never outcomes.
+        validation_ms = (dt.datetime.fromisoformat(days[max(1, int(len(days) * .7))])
+                         .replace(tzinfo=dt.timezone.utc).timestamp() * 1000) if len(days) >= 2 else None
+    output = Path(args.out).resolve()
+    if output.suffix.lower() != ".json":
+        raise ValueError("--out must be a .json path; comparison CSV uses the same stem")
+    csv_output = output.with_suffix(".csv")
+    for target in (Path(args.out), Path(args.out).with_suffix(".csv")):
+        if target.is_symlink() or any(
+                target.resolve() == path.resolve()
+                or (target.exists() and target.samefile(path)) for _, _, path in files):
+            raise ValueError("refusing to overwrite/link an input file")
+    engine = ExecutionComparison(args.order_krw, args.latency_ms, args.fee_rate,
+                                 validation_ms=validation_ms)
+    manifest = []
+    for event in comparison_stream(files, manifest):
+        engine.step(event)
+    report = engine.result()
+    report["input_manifest"] = manifest
+    report["generated_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    report["input_mutation_or_read_error"] = any(
+        not item["complete"] or item["changed_while_reading"] or item["invalid_lines"]
+        for item in manifest)
+    report["source_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+    columns = ["phase", "signal", "hold_sec", "selected_signals", "snapshot_entry_capacity_ok",
+               "completed_roundtrips", "selected_unresolved", "signals_skipped", "mean_net_pct",
+               "positive_rate", "stress_mean_net_pct", "mean_net_pct_without_top5",
+               "worst_5pct_mean_net_pct", "paired_complete_opportunities",
+               "net_pct_per_complete_opportunity_including_skips",
+               "delta_vs_all_pct_per_complete_opportunity"]
+    with csv_output.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader(); writer.writerows(report["results"])
+    print("OFFLINE COST-AFTER COMPARISON — simulated snapshot capacity, not LIVE profit")
+    for row in report["results"]:
+        print("%s | %s | %ss | selected=%s complete=%s unknown=%s | net_pct=%s stress=%s" % (
+            row["phase"], row["signal"], row["hold_sec"], row["selected_signals"],
+            row["completed_roundtrips"], row["selected_unresolved"],
+            row["mean_net_pct"], row["stress_mean_net_pct"]))
+    print("Results: %s %s" % (output, csv_output))
+    return report
+
+
 def main():
     args = parse_args()
     if args.sample_only:
         args.days = 2
+    if args.execution_compare:
+        try:
+            run_execution_comparison(args)
+        except (ValueError, OSError) as exc:
+            print(f"[probe] comparison error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        return
 
     print(f"[probe] data-dir: {args.data_dir}")
     print(f"[probe] horizons: {HORIZONS_SEC}s · pressure window: {PRESSURE_WINDOW_SEC}s "
