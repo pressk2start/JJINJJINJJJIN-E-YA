@@ -115,7 +115,110 @@ class TestMakerFillReplay(unittest.TestCase):
         write_day(self.root, "2026-10-01", recs)
         rep = run(self.root)
         self.assertEqual(rep["counters"].get("invalidated_session_boundary"), 1)
-        self.assertEqual({x["label"]: x for x in rep["groups"]}["H=10s all"].get("n_opps", 0), 0)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 1)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertIsNone(group["net_per_opp_pct"])
+
+
+    def test_fill_only_before_ttl_with_no_book_at_expiry(self):
+        t0 = 1_000_000
+        for delta in (-1, 0, 1):
+            with self.subTest(relative_to_expiry_ms=delta):
+                recs = [trade(t0 - 1000, 100.0, 1.0, "BID", 1),
+                        book(t0, 100.0, 101.0),
+                        trade(t0 + 10250 + delta, 99.0, 100.0, "ASK", 2)]
+                recs += [book(t0 + offset, 100.0, 101.0) for offset in
+                         (2000, 4000, 6000, 8000, 10300, 12300, 14300,
+                          16300, 18300, 20500)]
+                write_day(self.root, "2026-10-01", recs)
+                rep = run(self.root, latency_ms=250)
+                group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+                self.assertEqual(rep["counters"]["opportunities"], 1)
+                self.assertEqual(group["n_opps"], 1)
+                self.assertEqual(group["n_filled"], int(delta < 0))
+                self.assertEqual(group["n_unknown"], 0)
+                self.assertEqual(rep["counters"]["pending_at_end"], 0)
+                if delta >= 0:
+                    self.assertEqual(group["net_per_opp_pct"], 0.0)
+
+    def test_partial_entry_is_unknown_not_zero_or_lost_opportunity(self):
+        t0 = 1_000_000
+        recs = [trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0),
+                trade(t0 + 500, 99.0, 30.0, "ASK", 2)]
+        recs += filler(t0, 98.0, 99.0) + [book(t0 + 10500, 98.0, 99.0)]
+        write_day(self.root, "2026-10-01", recs)
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 1)
+        self.assertEqual(group["n_unfilled"], 0)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertIsNone(group["fill_rate"])
+        self.assertIsNone(group["net_per_opp_pct"])
+        self.assertEqual(rep["counters"]["unmodeled_partial_entry"], 1)
+        with open(Path(self.root) / "out" / "rows.csv", newline="", encoding="utf-8") as stream:
+            row = list(M.csv.DictReader(stream))[0]
+        self.assertEqual(row["net_frac"], "")
+        self.assertEqual(row["end"], "unmodeled_partial_entry")
+
+    def test_pending_at_end_is_unknown_in_denominator(self):
+        t0 = 1_000_000
+        write_day(self.root, "2026-10-01", [
+            trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0)])
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 1)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertEqual(group["resolved_fraction"], 0)
+        self.assertIsNone(group["net_per_opp_pct"])
+        self.assertEqual(rep["counters"]["pending_at_end"], 1)
+
+    def test_missing_exit_depth_does_not_remove_filled_loss_risk(self):
+        t0 = 1_000_000
+        recs = [trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0),
+                trade(t0 + 500, 99.0, 100.0, "ASK", 2)]
+        recs += filler(t0, 100.0, 101.0) + [book(t0 + 10500, 98.0, 99.0, size=1.0)]
+        write_day(self.root, "2026-10-01", recs)
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 1)
+        self.assertEqual(group["n_filled"], 1)
+        self.assertEqual(group["fill_rate"], 1)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertIsNone(group["net_per_opp_pct"])
+        self.assertIsNone(group["net_per_fill_pct"])
+        self.assertEqual(rep["counters"]["insufficient_exit_depth"], 1)
+
+    def test_resolved_trade_does_not_hide_unknown_opportunity(self):
+        self._day("2026-10-01", "through")
+        t0 = 1_000_000 + 86_400_000
+        write_day(self.root, "2026-10-02", [
+            trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0)])
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 2)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertEqual(group["resolved_fraction"], 0.5)
+        self.assertIsNone(group["net_per_opp_pct"])
+        self.assertIsNotNone(group["net_per_resolved_opp_pct"])
+        self.assertEqual(rep["status"], "EXPLORATORY_ONLY")
+
+
+    def test_missing_mid_path_does_not_publish_survivor_only_filled_mid(self):
+        self._day("2026-10-01", "through")
+        t0 = 1_000_000 + 86_400_000
+        records = [trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0),
+                   trade(t0 + 500, 99.0, 100.0, "ASK", 2)] + filler(t0, 100.0, 101.0)
+        write_day(self.root, "2026-10-02", records)
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 2)
+        self.assertEqual(group["n_filled"], 2)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertIsNone(group["mid_ret_h_filled_pct"])
+        self.assertIsNone(group["net_per_fill_pct"])
+        self.assertIsNone(group["net_per_opp_pct"])
+
 
 
 if __name__ == "__main__":
