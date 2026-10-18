@@ -2,9 +2,9 @@ name: Offline Net Edge Research
 on:
   push:
     paths:
-      - "scalp/research/micro_edge_probe.py"
+      - "scalp/research/micro_edge_quantile_replay.py"
       - "scalp/research/net_edge_oos.py"
-      - "scalp/research/test_micro_edge_probe.py"
+      - "scalp/research/test_quantile_replay.py"
       - "scalp/research/test_net_edge_oos.py"
       - ".github/workflows/net-edge-research.yml"
   workflow_dispatch:
