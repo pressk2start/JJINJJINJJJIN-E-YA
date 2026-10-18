@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # v18e-tune2: G RSI74.55 + 60s조기탈출 + K gap제거 (2026-04-06)
-import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re, atexit, signal
+import os, time, math, requests, statistics, traceback, threading, csv, sys, json, random, copy, re, atexit, signal, queue
 from datetime import datetime, timedelta, timezone
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7790,7 +7790,7 @@ def close_auto_position(m, reason=""):
         vol = actual_vol
 
         # 🔧 청산 시도 알람 (실잔고 확인 후에만 발송)
-        tg_send(f"💣 {m} 청산시도\n• 사유: {reason}\n• 수량: {vol:.4f}")
+        tg_order_notice(f"💣 {m} 청산시도\n• 사유: {reason}\n• 수량: {vol:.4f}")
 
         if vol <= 0:
             print(f"[AUTO] {m} volume<=0 ({vol}) → 포지션 제거만 수행")
@@ -21614,6 +21614,52 @@ def _tg_sanitize_html(t):
     for k, v in keep.items():
         tmp = tmp.replace(k, v)
     return tmp
+
+
+
+# Order-attempt notices must not wait for Telegram HTTP, its session lock, or retries.
+# One bounded daemon worker; overload/startup failure drops this notice, never the order.
+_TG_ORDER_NOTICE_QUEUE = queue.Queue(maxsize=32)
+_TG_ORDER_NOTICE_START_LOCK = threading.Lock()
+_TG_ORDER_NOTICE_WORKER = None
+
+
+def _tg_order_notice_worker():
+    while True:
+        text = _TG_ORDER_NOTICE_QUEUE.get()
+        try:
+            tg_send(text)
+        except Exception as exc:
+            print(f"[TG_ORDER_NOTICE] delivery failed: {exc}")
+        finally:
+            _TG_ORDER_NOTICE_QUEUE.task_done()
+
+
+def tg_order_notice(text):
+    """Best-effort enqueue; no Telegram network call on the order thread."""
+    global _TG_ORDER_NOTICE_WORKER
+    try:
+        worker = _TG_ORDER_NOTICE_WORKER
+        if worker is None or not worker.is_alive():
+            if not _TG_ORDER_NOTICE_START_LOCK.acquire(blocking=False):
+                print("[TG_ORDER_NOTICE] worker starting; notice skipped")
+                return False
+            try:
+                worker = _TG_ORDER_NOTICE_WORKER
+                if worker is None or not worker.is_alive():
+                    worker = threading.Thread(target=_tg_order_notice_worker,
+                                              name="tg-order-notice", daemon=True)
+                    worker.start()
+                    _TG_ORDER_NOTICE_WORKER = worker
+            finally:
+                _TG_ORDER_NOTICE_START_LOCK.release()
+        _TG_ORDER_NOTICE_QUEUE.put_nowait(text)
+        return True
+    except queue.Full:
+        print("[TG_ORDER_NOTICE] queue full; notice skipped")
+    except Exception as exc:
+        print(f"[TG_ORDER_NOTICE] enqueue failed: {exc}")
+    return False
 
 
 def tg_send(t, retry=3):

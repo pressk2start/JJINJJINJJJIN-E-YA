@@ -9,7 +9,7 @@
   2. 미체결=0 포함한 기회당 net (체결건만 평균하면 역선택이 숨는다)
   3. 체결군 vs 미체결군의 이후 mid 수익 비교 (역선택 직접 측정)
   4. 날짜 전/후반 분리
-체결 규칙 (보수적): 주문 가격 = 도착 시점 bid1. 그 뒤 체결(trade) 중 **가격이 내 호가보다 낮은** 체결
+체결 규칙 (보수적): 주문 가격 = 의사결정 시점 bid1, 체결 판정은 설정 지연 이후부터 주문 만료 직전까지. 그 뒤 체결(trade) 중 **가격이 내 호가보다 낮은** 체결
   (= 가격이 내 호가를 뚫고 지나간 경우) 의 누적 수량이 내 수량 이상일 때만 체결. 같은 가격 체결은 큐 순서를
   모르므로 체결로 치지 않는다 (--same-price-fill 로 완화 가능 · 낙관 상한).
 청산: 체결 시각 + H 초 뒤 첫 호가에서 bid 측 깊이 VWAP 로 taker 매도. 수수료 양쪽 0.05%.
@@ -17,7 +17,8 @@
   --signal-quantile q 를 주면 5초 매수불균형이 전체 분포 상위 q 이상인 시점만 (탐색용 · OOS 아님).
 스프레드 버킷: 기회 시점 (ask1-bid1)/mid 로 --spread-buckets 경계에 따라 분할.
 제약: 호가 20단 스냅샷 + 체결 스트림만으로 큐 위치·숨은 유동성은 알 수 없다. 결과는 상한/하한 사이의
-  보수 추정이며 LIVE 규칙이 아니다. 세션 경계·수신 공백·시퀀스 불연속에서 보류 주문 전부 무효화.
+  탐색용 추정이며 LIVE 규칙이 아니다. 부분체결 재고·불완전 경로는 손익 미확인으로 남긴다.
+  세션 경계·수신 공백·시퀀스 불연속에서 보류 주문 전부 무효화.
 """
 import argparse
 import collections
@@ -57,23 +58,39 @@ def _mean(xs):
 
 
 def summarize(rows, label):
-    """rows: dict(filled, net_frac(0 if unfilled), mid_ret_h, ...)"""
+    """Keep every opportunity; unknown PnL is never an unfilled zero."""
     n = len(rows)
     if n == 0:
         return {"label": label, "n_opps": 0}
-    filled = [r for r in rows if r["filled"]]
-    unfilled = [r for r in rows if not r["filled"]]
+    filled = [r for r in rows if r["filled"] is True]
+    unfilled = [r for r in rows if r["filled"] is False]
+    resolved = [r for r in rows if r["net_frac"] is not None]
+    n_unknown = n - len(resolved)
+    fills_known = all(r["filled"] is not None for r in rows)
+    filled_pnl_known = all(r["net_frac"] is not None for r in filled)
+
+    def pct_mean(values):
+        value = _mean(values)
+        return value * 100 if value is not None else None
+
+    filled_mid = _mean([r["mid_ret_h"] for r in filled])
+    unfilled_mid = _mean([r["mid_ret_h"] for r in unfilled])
     return {
         "label": label, "n_opps": n, "n_filled": len(filled),
-        "fill_rate": len(filled) / n,
-        "net_per_opp_pct": _mean([r["net_frac"] for r in rows]) * 100,          # 미체결 = 0 포함
-        "net_per_fill_pct": (_mean([r["net_frac"] for r in filled]) * 100) if filled else None,
-        "mid_ret_h_filled_pct": (_mean([r["mid_ret_h"] for r in filled]) * 100) if filled else None,
-        "mid_ret_h_unfilled_pct": (_mean([r["mid_ret_h"] for r in unfilled]) * 100) if unfilled else None,
+        "n_unfilled": len(unfilled), "n_unknown": n_unknown,
+        "resolved_fraction": len(resolved) / n,
+        "fill_rate": len(filled) / n if fills_known else None,
+        "net_per_opp_pct": pct_mean([r["net_frac"] for r in rows]) if not n_unknown else None,
+        "net_per_resolved_opp_pct": pct_mean([r["net_frac"] for r in resolved]),
+        "net_per_fill_pct": pct_mean([r["net_frac"] for r in filled]) if filled_pnl_known else None,
+        "mid_ret_h_filled_pct": pct_mean([r["mid_ret_h"] for r in filled]),
+        "mid_ret_h_unfilled_pct": pct_mean([r["mid_ret_h"] for r in unfilled]),
         "adverse_selection_pct": (
-            (_mean([r["mid_ret_h"] for r in filled]) - _mean([r["mid_ret_h"] for r in unfilled])) * 100
-            if filled and unfilled and _mean([r["mid_ret_h"] for r in unfilled]) is not None else None),
-        "positive_rate_filled": (sum(r["net_frac"] > 0 for r in filled) / len(filled)) if filled else None,
+            (filled_mid - unfilled_mid) * 100
+            if not n_unknown and filled_mid is not None and unfilled_mid is not None else None),
+        "positive_rate_filled": (
+            sum(r["net_frac"] > 0 for r in filled) / len(filled)
+            if filled and filled_pnl_known else None),
     }
 
 
@@ -98,10 +115,18 @@ def replay(args):
     session = 0
     imb_values = []       # for optional signal quantile (two-pass avoided: exploratory, collect then filter rows)
 
+    def unresolved(o, t, reason):
+        # A gap, partial entry, or missing exit is neither a profitable fill nor a zero-cost nontrade.
+        rows.append(dict(o["base"], horizon_s=o["h"],
+                         filled=True if o["filled"] else None,
+                         fill_ms=o["fill_ms"], fill_wait_ms=None, exit_ms=t,
+                         net_frac=None, mid_ret_h=None, end=reason))
+
     def invalidate(reason):
         for lst in pending.values():
             for o in lst:
                 counters["invalidated_" + reason] += 1
+                unresolved(o, last_recv, reason)
         pending.clear(); ticks.clear(); seen_trade.clear()
 
     def finalize(o, t, units, reason):
@@ -112,12 +137,16 @@ def replay(args):
             proceeds = sell_vwap(units, o["qty"])
             if proceeds is None:
                 counters["insufficient_exit_depth"] += 1
+                unresolved(o, t, "insufficient_exit_depth")
                 return
             cost = o["qty"] * o["px"] * (1 + fee)
             net = proceeds * (1 - fee) - cost
             rows.append(dict(o["base"], horizon_s=o["h"], filled=True, fill_ms=o["fill_ms"],
                              fill_wait_ms=o["fill_ms"] - o["place_ms"], exit_ms=t,
                              net_frac=net / cost, mid_ret_h=mid_ret, end=reason))
+        elif o["cum"] > 0:
+            counters["unmodeled_partial_entry"] += 1
+            unresolved(o, t, "unmodeled_partial_entry")
         else:
             rows.append(dict(o["base"], horizon_s=o["h"], filled=False, fill_ms=None, fill_wait_ms=None,
                              exit_ms=t, net_frac=0.0, mid_ret_h=mid_ret, end=reason))
@@ -166,7 +195,7 @@ def replay(args):
                     q.append((t, price * vol, m.get("ask_bid") == "BID"))
                     # maker fill check: trades strictly below my bid (price traded through), after placement
                     for o in pending.get(market, []):
-                        if o["filled"] or t < o["place_ms"]:
+                        if o["filled"] or t < o["place_ms"] or t >= o["expire_ms"]:
                             continue
                         through = price < o["px"] or (args.same_price_fill and price <= o["px"] and m.get("ask_bid") == "ASK")
                         if through:
@@ -188,6 +217,7 @@ def replay(args):
                         if t >= o["exit_due_ms"]:
                             if t - o["exit_due_ms"] > args.max_lateness_ms:
                                 counters["invalidated_late_exit"] += 1
+                                unresolved(o, t, "late_exit")
                             else:
                                 finalize(o, t, units, "exit")
                             continue
@@ -196,6 +226,7 @@ def replay(args):
                             # unfilled: measure mid return at place + H for adverse-selection comparison
                             if t - o["expire_ms"] > args.max_lateness_ms:
                                 counters["invalidated_late_expire"] += 1
+                                unresolved(o, t, "late_expire")
                             else:
                                 finalize(o, t, units, "unfilled_ttl")
                             continue
@@ -224,6 +255,9 @@ def replay(args):
                         "fill_ms": None, "exit_due_ms": None,
                     })
     counters["pending_at_end"] = sum(len(v) for v in pending.values())
+    for lst in pending.values():
+        for o in lst:
+            unresolved(o, last_recv, "pending_at_end")
     return rows, counters, dates, imb_values
 
 
@@ -237,7 +271,8 @@ def _quantile(vals, q):
 
 
 def report(rows, counters, dates, imb_values, args):
-    out = {"params": vars(args), "counters": dict(counters), "dates": dates, "groups": []}
+    out = {"status": "EXPLORATORY_ONLY", "params": vars(args), "counters": dict(counters),
+           "dates": dates, "groups": []}
     if args.signal_quantile is not None and imb_values:
         thr = _quantile(imb_values, args.signal_quantile)
         out["signal_threshold_buy_imbalance"] = thr
@@ -264,14 +299,16 @@ def print_report(rep):
     print("MAKER FILL REPLAY — bid1 join, fill only when price trades THROUGH my bid (conservative)")
     print(f"dates={rep['dates'][0]}..{rep['dates'][-1]} ({len(rep['dates'])}d)  opportunities={rep['counters'].get('opportunities', 0)}"
           + (f"  signal_thr={rep['signal_threshold_buy_imbalance']:.3f}" if 'signal_threshold_buy_imbalance' in rep else ""))
-    print(f"{'group':28} {'n_opp':>7} {'fill%':>6} {'net/opp':>8} {'net/fill':>8} {'midH_fill':>9} {'midH_unf':>9} {'advsel':>7}")
+    print(f"{'group':28} {'n_opp':>7} {'unknown':>7} {'fill%':>6} {'net/opp':>8} {'net/fill':>8} {'midH_fill':>9} {'midH_unf':>9} {'advsel':>7}")
     for g in rep["groups"]:
         if g["n_opps"] == 0:
             continue
         f = lambda v, w=8: (f"{v:+{w}.3f}" if isinstance(v, (int, float)) else " " * (w - 3) + "n/a")
-        print(f"{g['label']:28} {g['n_opps']:>7} {g['fill_rate']*100:>6.1f} {f(g['net_per_opp_pct'])} {f(g['net_per_fill_pct'])} "
+        fill_pct = g["fill_rate"] * 100 if g["fill_rate"] is not None else None
+        print(f"{g['label']:28} {g['n_opps']:>7} {g['n_unknown']:>7} {f(fill_pct,6)} {f(g['net_per_opp_pct'])} {f(g['net_per_fill_pct'])} "
               f"{f(g['mid_ret_h_filled_pct'],9)} {f(g['mid_ret_h_unfilled_pct'],9)} {f(g['adverse_selection_pct'],7)}")
-    print("net/opp = 미체결 0 포함 기회당 비용 후 수익(%). advsel = 체결군 midH − 미체결군 midH (음수면 역선택).")
+    print("net/opp = 확인된 미체결 0 포함 기회당 비용 후 수익(%). 미확인 경로가 있으면 n/a.")
+    print("unknown = 부분체결·누락 경로 등. advsel은 완결 표본에서만 표시하며 이 결과는 탐색용이다.")
     print("Not a LIVE rule. Conservative fill (through-price only); --same-price-fill gives the optimistic bound.")
 
 
