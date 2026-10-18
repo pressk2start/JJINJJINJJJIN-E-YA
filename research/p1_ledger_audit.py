@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Read-only P1 ledger audit. Stdlib only; never imports bot or calls an exchange."""
 import argparse
+import ast
+import io
 import csv
 import hashlib
 import json
@@ -9,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 
 def number(value, positive=False, nonnegative=False):
@@ -452,6 +454,149 @@ def analyze(rows, orders=(), since=None, until=None):
     }
 
 
+
+def feature_fields_from_source(path):
+    """Read a literal FEATURE_FIELDS declaration without importing/executing bot."""
+    result = {"status": "SCHEMA_UNAVAILABLE", "fields": None, "sha256": None, "reason": None}
+    try:
+        raw = Path(path).read_bytes()
+        result["sha256"] = hashlib.sha256(raw).hexdigest()
+        tree = ast.parse(raw.decode("utf-8-sig"))
+        declarations = [
+            node for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(isinstance(t, ast.Name) and t.id == "FEATURE_FIELDS"
+                    for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))
+        ]
+        stores = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Name) and node.id == "FEATURE_FIELDS"
+                  and isinstance(node.ctx, (ast.Store, ast.Del))]
+        mutators = {"append", "extend", "insert", "pop", "remove", "clear", "sort",
+                    "reverse", "__setitem__", "__delitem__"}
+        mutations = [
+            node for node in ast.walk(tree)
+            if (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name) and node.target.id == "FEATURE_FIELDS")
+            or (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and isinstance(node.value, ast.Name) and node.value.id == "FEATURE_FIELDS")
+            or (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "FEATURE_FIELDS"
+                and node.func.attr in mutators)
+        ]
+        if len(declarations) != 1 or len(stores) != 1 or mutations:
+            result["reason"] = "missing_reassigned_or_mutated_declaration"
+            return result
+        value = ast.literal_eval(declarations[0].value)
+        if (not isinstance(value, (list, tuple)) or not value
+                or not all(isinstance(x, str) and x.strip() and x == x.strip() for x in value)
+                or len(set(value)) != len(value)):
+            result["reason"] = "schema_must_be_unique_nonempty_literal_names"
+            return result
+        result.update(status="LITERAL_SCHEMA_READ", fields=list(value))
+    except (OSError, UnicodeError, SyntaxError, ValueError, TypeError, MemoryError) as exc:
+        result["reason"] = type(exc).__name__
+    return result
+
+
+def inspect_feature_csv(path, source_schema=None):
+    """Inspect a CSV snapshot only. Blank outcomes never imply open/failed trades."""
+    report = {
+        "scope": "FULL_CSV_NOT_LEDGER_DATE_FILTER",
+        "input_sha256": None, "input_bytes": None, "changed_during_read": None,
+        "header": [], "header_columns": 0, "schema_status": "NOT_CHECKED",
+        "source_schema": source_schema, "rows": 0, "blank_records": 0,
+        "width_counts": {}, "aligned_rows": 0, "wrong_width_rows": 0,
+        "interpreted_rows": 0, "unresolved_rows": 0, "outcome_columns_missing": [],
+        "result_counts_aligned": {}, "pnl_counts_aligned": {},
+        "outcome_fields_present_rows": 0, "blank_result_with_exit_fields_rows": 0,
+        "width_issue_samples": [], "latest_record": None,
+        "parse_error": None, "row_count_is_complete": True,
+        "warnings": [
+            "Read-only snapshot: no migration, padding, dropped columns or historical outcome repair.",
+            "Blank result/PnL does not prove an open position or a logging failure.",
+            "Outcome fields are stored CSV values, not exchange-verified cashflow or strategy performance.",
+            "A correct header/row width does not establish that the live exit update path succeeded.",
+        ],
+    }
+    try:
+        before = Path(path).stat()
+        raw = Path(path).read_bytes()
+        after = Path(path).stat()
+        report["input_sha256"] = hashlib.sha256(raw).hexdigest()
+        report["input_bytes"] = len(raw)
+        report["changed_during_read"] = (
+            before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ino != after.st_ino)
+        reader = csv.reader(io.StringIO(raw.decode("utf-8-sig"), newline=""), strict=True)
+        header = next(reader, None)
+        if header is None:
+            report["schema_status"] = "EMPTY_FILE"
+            return report
+        report["header"] = header
+        report["header_columns"] = len(header)
+        header_valid = bool(header) and all(x and x == x.strip() for x in header) and len(set(header)) == len(header)
+        expected = source_schema.get("fields") if source_schema else None
+        if not header_valid:
+            report["schema_status"] = "INVALID_HEADER"
+        elif source_schema is not None and expected is None:
+            report["schema_status"] = "SOURCE_SCHEMA_UNAVAILABLE"
+        elif expected is not None:
+            if header == expected:
+                report["schema_status"] = "EXACT_MATCH"
+            elif len(header) < len(expected) and header == expected[:len(header)]:
+                report["schema_status"] = "PREFIX_ONLY"
+            else:
+                report["schema_status"] = "MISMATCH"
+        allow_names = report["schema_status"] in ("NOT_CHECKED", "EXACT_MATCH")
+        indices = {name: header.index(name) for name in ("result", "pnl_pct", "exit_price") if name in header}
+        report["outcome_columns_missing"] = [
+            name for name in ("result", "pnl_pct", "exit_price") if name not in indices]
+        widths, results, pnls = Counter(), Counter(), Counter()
+        for row in reader:
+            if not row:
+                report["blank_records"] += 1
+                continue
+            report["rows"] += 1
+            widths[str(len(row))] += 1
+            aligned = len(row) == len(header)
+            report["aligned_rows" if aligned else "wrong_width_rows"] += 1
+            item = {"record": report["rows"], "line_end": reader.line_num,
+                    "columns": len(row), "aligned": aligned, "fields_interpreted": False}
+            if not aligned and len(report["width_issue_samples"]) < 20:
+                report["width_issue_samples"].append(dict(item))
+            if aligned and allow_names and "result" in indices and "pnl_pct" in indices:
+                report["interpreted_rows"] += 1
+                item["fields_interpreted"] = True
+                label = row[indices["result"]].strip().lower() or "EMPTY"
+                text = row[indices["pnl_pct"]].strip()
+                pnl = number(text) if text else None
+                pnl_kind = ("missing" if not text else "invalid" if pnl is None else
+                            "positive" if pnl > 0 else "negative" if pnl < 0 else "zero")
+                results[label] += 1
+                pnls[pnl_kind] += 1
+                exit_price = number(row[indices["exit_price"]], positive=True) if "exit_price" in indices else None
+                if label in ("win", "lose") and pnl is not None and exit_price is not None:
+                    report["outcome_fields_present_rows"] += 1
+                if label == "EMPTY" and pnl is not None and exit_price is not None:
+                    report["blank_result_with_exit_fields_rows"] += 1
+                item.update(result=label, pnl_status=pnl_kind, exit_price_present=exit_price is not None)
+            report["latest_record"] = item
+        report["width_counts"] = dict(sorted(widths.items()))
+        report["result_counts_aligned"] = dict(sorted(results.items()))
+        report["pnl_counts_aligned"] = dict(sorted(pnls.items()))
+    except (OSError, UnicodeError, csv.Error) as exc:
+        report["parse_error"] = {"type": type(exc).__name__, "message": str(exc),
+                                 "line_end": reader.line_num if "reader" in locals() else None}
+        report["row_count_is_complete"] = False
+        if "widths" in locals():
+            report["width_counts"] = dict(sorted(widths.items()))
+            report["result_counts_aligned"] = dict(sorted(results.items()))
+            report["pnl_counts_aligned"] = dict(sorted(pnls.items()))
+    report["unresolved_rows"] = report["rows"] - report["interpreted_rows"]
+    return report
+
+
+
 def save_report(report, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -489,18 +634,24 @@ def main(argv=None):
     parser.add_argument("ledger", help="Existing live_trades.jsonl (read only)")
     parser.add_argument("--orders", help="Optional exported Upbit order JSON/JSONL; no API calls")
     parser.add_argument("--output", default="/tmp/p1-audit")
+    parser.add_argument("--features", help="Optional read-only trade_features.csv inspection")
+    parser.add_argument("--bot-source", help="Optional bot.py source; literal FEATURE_FIELDS only, never executed")
     parser.add_argument("--since", type=date.fromisoformat, help="Inclusive recorded entry date YYYY-MM-DD")
     parser.add_argument("--until", type=date.fromisoformat, help="Inclusive recorded entry date YYYY-MM-DD")
     args = parser.parse_args(argv)
     if args.since and args.until and args.since > args.until:
         parser.error("--since must be <= --until")
+    if args.bot_source and not args.features:
+        parser.error("--bot-source requires --features")
     ledger = Path(args.ledger).resolve()
     out = Path(args.output).resolve()
     orders_path = Path(args.orders).resolve() if args.orders else None
+    features_path = Path(args.features).resolve() if args.features else None
+    bot_source_path = Path(args.bot_source).resolve() if args.bot_source else None
     targets = {out / "report.json", out / "trades.csv", out / "orders.csv"}
     if any(target.is_symlink() for target in targets):
         parser.error("refusing symlink output files")
-    inputs = [path for path in (ledger, orders_path) if path is not None]
+    inputs = [path for path in (ledger, orders_path, features_path, bot_source_path) if path is not None]
     if any(target.resolve() == source or (target.exists() and source.exists() and target.samefile(source))
            for target in targets for source in inputs):
         parser.error("output would overwrite an input file")
@@ -514,6 +665,9 @@ def main(argv=None):
     report["invalid_json_lines"] = invalid
     report["date_filter"] = {"since": str(args.since) if args.since else None,
                              "until": str(args.until) if args.until else None}
+    if features_path is not None:
+        schema = feature_fields_from_source(bot_source_path) if bot_source_path else None
+        report["feature_csv"] = inspect_feature_csv(features_path, schema)
     save_report(report, out)
     stats = report["reported_v2_live"]
     print("P1 AUDIT — stored returns are not verified account performance")
@@ -524,6 +678,13 @@ def main(argv=None):
         report["matched_exported_order_pairs"], report["matched_pair_net_krw_sum"]))
     print("submission records=%d issues=%s (whole input, not proof of fills)" % (
         len(report["order_submissions"]), report["submission_issue_counts"]))
+    if "feature_csv" in report:
+        info = report["feature_csv"]
+        print("feature CSV: rows=%d header_columns=%d schema=%s widths=%s" % (
+            info["rows"], info["header_columns"], info["schema_status"], info["width_counts"]))
+        print("feature CSV stored outcomes: interpreted=%d unresolved=%d results=%s pnl=%s" % (
+            info["interpreted_rows"], info["unresolved_rows"],
+            info["result_counts_aligned"], info["pnl_counts_aligned"]))
     for flag, count in report["quality_trade_counts"].items():
         print("  %s: %d" % (flag, count))
     print("Outputs: %s/report.json %s/trades.csv; orders.csv contains submission inventory" % (out, out))
