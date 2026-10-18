@@ -10466,51 +10466,6 @@ def auto_learn_exit_params():
 # 부분청산/본절가드 — config.py에서 정의됨
 # (PARTIAL_EXIT_*, BREAKEVEN_BOX, SOFT_GUARD_SEC)
 
-def is_strong_momentum(ticks, ob):
-    """
-    체크포인트 도달 시점에 강세 여부 판단 (점수 기반 + 가속도)
-    - 약세 점수 3점 이상이면 약세 → 즉시 매도
-    - 약세 점수 2점 이하면 강세 → 홀딩 (트레일링 모드)
-    - 🔧 NEW: 가속도 추가, BTC 레짐 참조
-    """
-    try:
-        t15 = micro_tape_stats_from_ticks(ticks or [], 15)
-        t5 = micro_tape_stats_from_ticks(ticks or [], 5)
-        imb = calc_orderbook_imbalance(ob) if ob else 0.0
-        fresh = uptick_streak_from_ticks(ticks, need=2) if ticks else False
-
-        # 약세 점수 계산 (0~6점)
-        weak_score = 0
-
-        # 1) 매수비 낮음
-        if t15["buy_ratio"] < 0.55:
-            weak_score += 1
-
-        # 2) 거래속도 둔화
-        if t15["krw_per_sec"] < 15000:
-            weak_score += 1
-
-        # 3) 호가 매도우세 (imbalance < -0.1)
-        if imb < -0.1:
-            weak_score += 1
-
-        # 4) 상승틱 끊김
-        if not fresh:
-            weak_score += 1
-
-        # 🔧 NEW: 5) 최근 5초가 15초 대비 급감 (모멘텀 소진)
-        if (t5["krw_per_sec"] > 0 and t15["krw_per_sec"] > 0
-                and t5["krw_per_sec"] < t15["krw_per_sec"] * 0.40):
-            weak_score += 1
-
-        # 🔧 NEW: 강세 보너스 (매수비 + 임밸런스 동시 강하면 약세 점수 감산)
-        if t5["buy_ratio"] >= 0.65 and imb >= 0.30:
-            weak_score = max(0, weak_score - 1)
-
-        # 약세 점수 3점 이상이면 약세 판정 → False 반환
-        return weak_score < 3
-    except Exception:
-        return False
 
 def load_exit_params():
     """저장된 매도 파라미터 로드"""
@@ -10823,14 +10778,6 @@ def last_two_ticks_fresh(ticks, max_age=None, return_age=False):
     return is_fresh
 
 
-def body_ratio(c):
-    try:
-        return max((c["trade_price"] - c["opening_price"]) /
-                   max(c["opening_price"], 1), 0)
-    except Exception:
-        return 0
-
-
 # ---- 5분 컨텍스트: LRU 캐시 ----
 class LRUCache:
 
@@ -10974,63 +10921,6 @@ def _quick_multitf_skip(c1):
     recent_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-5:])
     return recent_vol < 10_000_000
 
-
-def five_min_context_ok(m):
-    if not USE_5M_CONTEXT:
-        return True
-    hit = _C5_CACHE.get(m)
-    # 🔧 FIX: ms 단위 통일 (purge_older_than이 ms 기준 → 기존 초 단위면 매번 전부 삭제됨)
-    _now_ms = int(time.time() * 1000)
-    if hit and (_now_ms - hit.get("ts", 0) <= 3000):
-        c5 = hit["c"]
-    else:
-        c5 = get_minutes_candles(5, m, 6)
-        _C5_CACHE.set(m, {"ts": _now_ms, "c": c5})
-    if len(c5) < 4:
-        return True
-    try:
-        close = [c["trade_price"] for c in c5]
-        slope3 = close[-1] - close[-3]
-        recent_break = c5[-1]["high_price"] > max(x["high_price"]
-                                                  for x in c5[-4:-1])
-        return (slope3 > 0) or recent_break
-    except Exception:
-        return True
-
-def get_dynamic_thresholds():
-    h = now_kst().hour
-    if 0 <= h < 6:
-        return {
-            "zscore": 0.90,   # 기존 0.95
-            "vwap_gap": 0.0008,
-            "uptick": 2,
-            "min_change": 0.0004,  # 기존 0.0005
-            "bidask_min": 1.06
-        }
-    elif 6 <= h < 12:
-        return {
-            "zscore": 0.95,   # 기존 1.0
-            "vwap_gap": 0.0009,
-            "uptick": 2,
-            "min_change": 0.0006,  # 기존 0.0007
-            "bidask_min": 1.07
-        }
-    elif 12 <= h < 18:
-        return {
-            "zscore": 0.95,   # 기존 1.0
-            "vwap_gap": 0.0009,    # 기존 0.0010
-            "uptick": 2,
-            "min_change": 0.0008,  # 기존 0.0010
-            "bidask_min": 1.075    # 살짝 완화
-        }
-    else:
-        return {
-            "zscore": 0.92,   # 기존 0.95
-            "vwap_gap": 0.0009,
-            "uptick": 2,
-            "min_change": 0.0007,
-            "bidask_min": 1.07
-        }
 
 # =========================
 # ★ 장세/야간 완화 노브
@@ -11505,47 +11395,6 @@ def btc_5m_change():
 _BTC_REGIME_CACHE = {"regime": "normal", "ts": 0, "atr_pct": 0.0}
 _BTC_REGIME_LOCK = threading.Lock()  # 🔧 FIX: 캐시 TOCTOU 방지
 
-def btc_volatility_regime():
-    """
-    BTC 1분봉 ATR 기반 변동성 레짐 판단:
-    - "calm"   : ATR < 0.08% → 낮은 변동성, 알트코인 모멘텀 유리 (공격적 진입)
-    - "normal" : 0.08~0.25% → 표준 상태
-    - "storm"  : ATR > 0.25% → 높은 변동성, 알트 연쇄 청산 위험 (보수적 진입)
-
-    10초 캐시로 API 절약.
-    Returns: (regime: str, atr_pct: float)
-    """
-    now = time.time()
-    with _BTC_REGIME_LOCK:
-        if now - _BTC_REGIME_CACHE["ts"] < 10:
-            return _BTC_REGIME_CACHE["regime"], _BTC_REGIME_CACHE["atr_pct"]
-
-    try:
-        c1_btc = _get_c1_cached("KRW-BTC", 20)
-        if not c1_btc or len(c1_btc) < 15:
-            return "normal", 0.0
-
-        atr = atr14_from_candles(c1_btc, 14)
-        if not atr or atr <= 0:
-            return "normal", 0.0
-
-        btc_price = c1_btc[-1].get("trade_price", 1)
-        atr_pct = (atr / max(btc_price, 1)) * 100  # %로 환산
-
-        if atr_pct < 0.08:
-            regime = "calm"
-        elif atr_pct > 0.25:
-            regime = "storm"
-        else:
-            regime = "normal"
-
-        with _BTC_REGIME_LOCK:
-            # 🔧 FIX: time.time() 사용 (now는 API 호출 전에 캡처됨 → 캐시 만료 오차 방지)
-            _BTC_REGIME_CACHE.update({"regime": regime, "ts": time.time(), "atr_pct": atr_pct})
-        return regime, atr_pct
-
-    except Exception:
-        return "normal", 0.0
 
 # =========================
 # 보조: 캔들/ATR/EMA
@@ -11971,70 +11820,6 @@ def _v4_regime_filter_60m(c60):
     if rsi is None:
         return False, None
     return (rsi >= 45.0), rsi
-
-
-# --- 60m 3봉 모멘텀 레짐 필터 (전 시그널 공통 사전필터) ---
-# WF 섹션4 자동탐색: 60m_m3_상위33% TEST EV +0.24% (가장 강한 독립 피처)
-# "상위 TF 모멘텀이 상승 중일 때만 진입" = 추세 방향 확인
-def _v4_momentum_3bar_filter(c60, top_pct=0.33):
-    """60m 3봉 모멘텀 상위 백분위 필터
-    m3 = (close[i] - close[i-3]) / close[i-3]
-    최근 12개 m3 값 중 상위 top_pct(33%) 이상이면 통과
-    Returns: (pass_bool, current_m3, threshold)"""
-    if not c60 or len(c60) < 7:
-        return False, 0.0, 0.0
-    closes = [c["trade_price"] for c in c60]
-    # 사용 가능한 모든 윈도우에서 m3 계산
-    m3_values = []
-    for i in range(3, len(closes)):
-        m3 = (closes[i] - closes[i - 3]) / closes[i - 3]
-        m3_values.append(m3)
-    if len(m3_values) < 4:
-        return False, 0.0, 0.0
-    current_m3 = m3_values[-1]
-    # 상위 33% 임계값 결정 (rolling percentile)
-    sorted_m3 = sorted(m3_values)
-    threshold_idx = int(len(sorted_m3) * (1 - top_pct))
-    threshold_idx = min(threshold_idx, len(sorted_m3) - 1)
-    threshold = sorted_m3[threshold_idx]
-    return current_m3 >= threshold, current_m3, threshold
-
-
-# --- 공통 환경필터 GATE (15m_눌림반전 필수) ---
-def _v4_gate_filter(c15, c60):
-    """공통 환경필터: 60m RSI≥45 AND 1h EMA정배열 AND 15m MACD골든"""
-    # 1) 60m RSI ≥ 45 (필수)
-    regime_ok, rsi_60 = _v4_regime_filter_60m(c60)
-    if not regime_ok:
-        return False, None, "60m_RSI_low"
-
-    # 2) 1h EMA 정배열 (EMA5 > EMA10 > EMA20)
-    ema_aligned = False
-    ema5_60 = ema10_60 = ema20_60 = None
-    if c60 and len(c60) >= 20:
-        ema5_60 = _v4_ema_from_candles(c60, 5)
-        ema10_60 = _v4_ema_from_candles(c60, 10)
-        ema20_60 = _v4_ema_from_candles(c60, 20)
-        if ema5_60 is not None and ema10_60 is not None and ema20_60 is not None:
-            ema_aligned = (ema5_60 > ema10_60 > ema20_60)
-
-    # 3) 15m MACD 골든크로스 상태 (MACD > Signal)
-    macd_golden = False
-    macd_val = sig_val = None
-    if c15 and len(c15) >= 35:
-        closes_15 = [c["trade_price"] for c in c15]
-        macd_val, sig_val, _ = _v4_macd(closes_15)
-        if macd_val is not None and sig_val is not None:
-            macd_golden = (macd_val > sig_val)
-
-    # AND: EMA정배열 + MACD골든 둘 다 필요
-    if not ema_aligned or not macd_golden:
-        return False, None, "GATE_fail_EMA_or_MACD"
-
-    _ema_str = f"1hEMA={ema5_60:.0f}>{ema10_60:.0f}>{ema20_60:.0f}" if ema_aligned else "1hEMA=X"
-    _macd_str = f"15mMACD={macd_val:.4f}>{sig_val:.4f}" if macd_golden else "15mMACD=X"
-    gate_info = f"60mRSI={rsi_60:.1f},{_ema_str},{_macd_str}"
-    return True, gate_info, None
 
 
 # --- 청산 파라미터 (v0: _V4_EXIT_PARAMS 제거 — 레지스트리 exit_params 사용) ---
@@ -12979,96 +12764,6 @@ _V0_EXIT_PARAMS_BREAKOUT = {  # B: V자 패턴, 되돌림 버텨야
 }
 
 
-def _v0_check_volume_burst(c1, c5, c15, c30, c60, gate_info=None):
-    """A 거래량폭발: VR5≥2.5 + 양봉"""
-    _pipeline_inc("vol_burst_enter")
-    if not c1 or len(c1) < 7:
-        return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 2.5:
-        if _pipeline_inc("vol_burst_vr5_fail", value=vr5, threshold=2.5, direction="gte"): return None
-    # 양봉 체크
-    _body_pct_a = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("vol_burst_bull_fail", value=round(_body_pct_a, 2), threshold=0, direction="gt"): return None
-    # v18c: MACD 필터 제거 — 차단건 41% > 통과건 23%, 역효과 확정
-    _pipeline_inc("vol_burst_pass")
-    return {
-        "signal_tag": "거래량폭발",
-        "entry_mode": "confirm",
-        "logic_group": "A",
-        "filters_hit": [f"VR5={vr5:.1f}"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {"vr5": round(vr5, 2)},
-    }
-
-
-def _v0_check_price_breakout(c1, c5, c15, c30, c60, gate_info=None):
-    """B 가격돌파: 종가>20봉고점 + 양봉"""
-    _pipeline_inc("breakout_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    cur_close = c1[-1]["trade_price"]
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    if cur_close <= high_20:
-        gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-        if _pipeline_inc("breakout_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
-    _body_pct_b = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("breakout_bull_fail", value=round(_body_pct_b, 2), threshold=0, direction="gt"): return None
-    # v18: 15분봉 거래량 동반 체크 (W3.20 vs L0.77 → 4.2배 변별력)
-    _vr5_15m_b = None
-    if c15 and len(c15) >= 6:
-        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
-        if avg_vol_15 > 0:
-            _vr5_15m_b = round(cur_vol_15 / avg_vol_15, 2)
-            if _vr5_15m_b < 1.5:
-                if _pipeline_inc("breakout_vr5_15m_fail", value=_vr5_15m_b, threshold=1.5, direction="gte"): return None
-    _pipeline_inc("breakout_pass")
-    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-    return {
-        "signal_tag": "가격돌파",
-        "entry_mode": "confirm",
-        "logic_group": "B",
-        "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
-        "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
-        "indicators": {"gap_20bar": round(gap_pct, 4)},
-    }
-
-
-def _v0_check_price_breakout_bullpass(c1, c5, c15, c30, c60, gate_info=None):
-    """B2 가격돌파 (양봉 필터 제거): 종가>20봉고점 + 15mVR≥1.5"""
-    _pipeline_inc("breakout_bp_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    cur_close = c1[-1]["trade_price"]
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    if cur_close <= high_20:
-        gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-        if _pipeline_inc("breakout_bp_price_fail", value=round(gap_pct, 2), threshold=0, direction="gt"): return None
-    _vr5_15m_b = None
-    if c15 and len(c15) >= 6:
-        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
-        if avg_vol_15 > 0:
-            _vr5_15m_b = round(cur_vol_15 / avg_vol_15, 2)
-            if _vr5_15m_b < 1.5:
-                if _pipeline_inc("breakout_bp_vr5_15m_fail", value=_vr5_15m_b, threshold=1.5, direction="gte"): return None
-    _pipeline_inc("breakout_bp_pass")
-    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-    return {
-        "signal_tag": "가격돌파BP",
-        "entry_mode": "confirm",
-        "logic_group": "B2",
-        "filters_hit": [f"돌파={cur_close:.0f}>{high_20:.0f}", f"VR15={_vr5_15m_b}"],
-        "exit_params": _V0_EXIT_PARAMS_BREAKOUT.copy(),
-        "indicators": {"gap_20bar": round(gap_pct, 4)},
-    }
-
-
 def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
     """C/H 패턴반전: {tf} 음→양 + 종가회복"""
     tag = "패턴반전_15m" if tf == "15m" else "패턴반전_60m"
@@ -13142,14 +12837,6 @@ def _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
     }
 
 
-def _v0_check_reversal_15m(c1, c5, c15, c30, c60, gate_info=None):
-    return _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info, tf="15m")
-
-
-def _v0_check_reversal_60m(c1, c5, c15, c30, c60, gate_info=None):
-    return _v0_check_pattern_reversal(c1, c5, c15, c30, c60, gate_info, tf="60m")
-
-
 def _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
     """F/J 추세정배열: {tf} EMA5>10>20 + 양봉"""
     tag = "추세정배열_15m" if tf == "15m" else "추세정배열_60m"
@@ -13181,53 +12868,6 @@ def _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info=None, tf="15m"):
         "filters_hit": [f"{tf}EMA={ema5:.0f}>{ema10:.0f}>{ema20:.0f}"],
         "exit_params": _V0_EXIT_PARAMS.copy(),
         "indicators": {f"ema_spread_{tf}": spread},
-    }
-
-
-def _v0_check_ema_15m(c1, c5, c15, c30, c60, gate_info=None):
-    return _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info, tf="15m")
-
-
-def _v0_check_ema_60m(c1, c5, c15, c30, c60, gate_info=None):
-    return _v0_check_ema_aligned(c1, c5, c15, c30, c60, gate_info, tf="60m")
-
-
-def _v0_check_momentum_rsi_strict(c1, c5, c15, c30, c60, gate_info=None):
-    """GR 모멘텀(strict): G와 모든 조건 동일하나 5m RSI 임계치만 74.55 → 78
-    - 자동탐지 추천(78.28에서 G/G2 모두 +8%p) 반영
-    - exit는 _V0_EXIT_PARAMS_MOMENTUM (G와 동일) 고정
-    - 별도 pipeline_key("momentum_gr_*")로 카운터 분리
-    - shadow-only, route="GR" → stats 키 "GR:모멘텀GR"로 G/G2/GT와 완전 분리"""
-    _pipeline_inc("momentum_gr_enter")
-    if not c5 or len(c5) < 15:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    # GR: RSI 임계치 74.55 → 78 (G의 유일한 차이점)
-    if rsi_5m is None or rsi_5m < 78.0:
-        if _pipeline_inc("momentum_gr_rsi5_fail", value=rsi_5m, threshold=78.0, direction="gte"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        _bp_gr = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
-        if _pipeline_inc("momentum_gr_1m_fail", value=round(_bp_gr, 2), threshold=0, direction="gt"): return None
-    _vr5_1m_gr = _v4_volume_ratio_5(c1) if c1 and len(c1) >= 7 else None
-    if _vr5_1m_gr is not None and _vr5_1m_gr > 3.2:
-        if _pipeline_inc("momentum_gr_vr5_over_fail", value=round(_vr5_1m_gr, 2), threshold=3.2, direction="lte"): return None
-    _vr5_15m_gr = None
-    if c15 and len(c15) >= 6:
-        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
-        if avg_vol_15 > 0:
-            _vr5_15m_gr = round(cur_vol_15 / avg_vol_15, 2)
-            if _vr5_15m_gr < 2.0:
-                if _pipeline_inc("momentum_gr_vr5_15m_fail", value=_vr5_15m_gr, threshold=2.0, direction="gte"): return None
-    _pipeline_inc("momentum_gr_pass")
-    return {
-        "signal_tag": "모멘텀GR",
-        "entry_mode": "confirm",
-        "logic_group": "GR",
-        "filters_hit": [f"5mRSI={rsi_5m:.1f}(strict)", f"VR5={_vr5_1m_gr}", f"VR15={_vr5_15m_gr}"],
-        "exit_params": _V0_EXIT_PARAMS_MOMENTUM.copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 1)},
     }
 
 
@@ -13354,191 +12994,7 @@ def _make_momentum_vr5low_variant(rsi_min, vr5_max, pkey):
 _v0_check_momentum_vr5low = _make_momentum_vr5low_variant(74.55, 0.707, "momentum_vr5low")
 
 
-def _v0_check_trend_strength(c1, c5, c15, c30, c60, gate_info=None):
-    """L 추세강도: 15m ADX≥28.5 + 양봉"""
-    _pipeline_inc("adx_trend_enter")
-    if not c15 or len(c15) < 30:
-        return None
-    highs = [c["high_price"] for c in c15]
-    lows = [c["low_price"] for c in c15]
-    closes = [c["trade_price"] for c in c15]
-    adx_15 = _v4_adx(highs, lows, closes, 14)
-    # v18c: ADX 30→28.5로 풀기 (신규20건 45% 승률, 전체30%보다 좋음)
-    if adx_15 is None or adx_15 < 28.5:
-        if _pipeline_inc("adx_trend_15_fail", value=adx_15, threshold=28.5, direction="gte"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        _bp_l = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 else 0
-        if _pipeline_inc("adx_trend_1m_fail", value=round(_bp_l, 2), threshold=0, direction="gt"): return None
-    # v18: 15분봉 거래량 동반 체크 (W1.44 vs L0.66 → 2.2배 변별력)
-    _vr5_15m_l = None
-    if c15 and len(c15) >= 6:
-        cur_vol_15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_vols_15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_vol_15 = sum(past_vols_15) / max(len(past_vols_15), 1)
-        if avg_vol_15 > 0:
-            _vr5_15m_l = round(cur_vol_15 / avg_vol_15, 2)
-            if _vr5_15m_l < 0.8:
-                if _pipeline_inc("adx_trend_vr5_15m_fail", value=_vr5_15m_l, threshold=0.8, direction="gte"): return None
-    _pipeline_inc("adx_trend_pass")
-    return {
-        "signal_tag": "추세강도",
-        "entry_mode": "confirm",
-        "logic_group": "L",
-        "filters_hit": [f"15mADX={adx_15:.1f}", f"VR15={_vr5_15m_l}"],
-        "exit_params": _V0_EXIT_PARAMS_SLOW.copy(),
-        "indicators": {"adx_15": round(adx_15, 1)},
-    }
-
-
-def _v0_check_oversold_bounce(c1, c5, c15, c30, c60, gate_info=None):
-    """K 역추세반등: 5m RSI≤35 + 음→양"""
-    _pipeline_inc("oversold_enter")
-    if not c5 or len(c5) < 15:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m > 35:
-        if _pipeline_inc("oversold_rsi_fail", value=rsi_5m, threshold=35, direction="lte"): return None
-    # 5m 현재봉 양봉
-    _bp_k5 = ((c5[-1]["trade_price"] - c5[-1]["opening_price"]) / max(c5[-1]["opening_price"], 1)) * 100
-    if not _v4_is_bullish(c5[-1]):
-        if _pipeline_inc("oversold_5m_bull_fail", value=round(_bp_k5, 2), threshold=0, direction="gt"): return None
-    # 5m 직전봉 음봉
-    if len(c5) >= 2:
-        _bp_k5p = ((c5[-2]["trade_price"] - c5[-2]["opening_price"]) / max(c5[-2]["opening_price"], 1)) * 100
-        if _v4_is_bullish(c5[-2]):
-            if _pipeline_inc("oversold_5m_prev_fail", value=round(_bp_k5p, 2), threshold=0, direction="lt"): return None
-    # (옵션) 1m 양봉
-    _bp_k1 = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100 if c1 and len(c1) >= 1 else 0
-    if c1 and len(c1) >= 1 and not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("oversold_1m_fail", value=round(_bp_k1, 2), threshold=0, direction="gt"): return None
-    # v18: 60분봉 감싸기 비율 체크 (W2.96 vs L1.67 → 1.8배 변별력)
-    _engulf_k = None
-    if c60 and len(c60) >= 2:
-        prev_body_k = abs(c60[-2]["opening_price"] - c60[-2]["trade_price"])
-        cur_body_k = abs(c60[-1]["opening_price"] - c60[-1]["trade_price"])
-        if prev_body_k > 0:
-            _engulf_k = round(cur_body_k / prev_body_k, 2)
-            # v18d: engulf 2.0→2.1 조이기 (62건 44% +3%p)
-            if _engulf_k < 2.1:
-                if _pipeline_inc("oversold_engulf_fail", value=_engulf_k, threshold=2.1, direction="gte"): return None
-    # v18e: gap_20bar 필터 제거 — 차단 39건 44% +0.12%, 역효과 확인
-    # if c1 and len(c1) >= 21:
-    #     ...if _gap_20_k < -3.0: return None
-    _pipeline_inc("oversold_pass")
-    return {
-        "signal_tag": "역추세반등",
-        "entry_mode": "confirm",
-        "logic_group": "K",
-        "filters_hit": [f"5mRSI={rsi_5m:.1f}", "5m음→양", f"Engulf={_engulf_k}"],
-        "exit_params": _V0_EXIT_PARAMS_K.copy(),
-        "indicators": {"rsi_5m": round(rsi_5m, 1)},
-    }
-
-
-def _v0_check_near_high(c1, c5, c15, c30, c60, gate_info=None):
-    """D 고점근접: 20봉고점 대비 -1% 이내 + 양봉"""
-    _pipeline_inc("near_high_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    cur_close = c1[-1]["trade_price"]
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-    # gap_20bar >= -1.0 (고점 대비 1% 이내)
-    if gap_pct < -1.0:
-        if _pipeline_inc("near_high_gap_fail", value=round(gap_pct, 4), threshold=-1.0, direction="gte"): return None
-    # 이미 돌파한 건 B가 담당 → 여기선 제외 (gap > 0)
-    if gap_pct > 0:
-        if _pipeline_inc("near_high_over_fail"): return None
-    # 양봉 체크
-    _body_pct_d = ((c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["opening_price"], 1)) * 100
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("near_high_bull_fail", value=round(_body_pct_d, 2), threshold=0, direction="gt"): return None
-    _pipeline_inc("near_high_pass")
-    return {
-        "signal_tag": "고점근접",
-        "entry_mode": "confirm",
-        "logic_group": "D",
-        "filters_hit": [f"Gap20={gap_pct:+.2f}%"],
-        "exit_params": _V0_EXIT_PARAMS.copy(),
-        "indicators": {"gap_20bar": round(gap_pct, 4)},
-    }
-
-
 # === NEW 시나리오 진입 함수 ===
-
-def _v0_check_broad_bullish(c1, c5, c15, c30, c60, gate_info=None):
-    """X 기본양봉: ind_filters 기반 새 시나리오의 base check (1m 양봉 + 최소 데이터)"""
-    _pipeline_inc("broad_enter")
-    if not c1 or len(c1) < 7:
-        return None
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("broad_bull_fail"): return None
-    _pipeline_inc("broad_pass")
-    return {
-        "signal_tag": "기본양봉",
-        "entry_mode": "confirm",
-        "logic_group": "X",
-        "filters_hit": ["1m_bullish"],
-        "exit_params": {},
-        "indicators": {},
-    }
-
-
-def _v0_check_vol_squeeze(c1, c5, c15, c30, c60, gate_info=None):
-    """VOL 변동성압축→폭발: ATR 압축 상태에서 거래량 급증 + 양봉"""
-    _pipeline_inc("vol_squeeze_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    cur_atr = _v4_atr_pct(c1, 14)
-    if cur_atr is None or cur_atr <= 0:
-        return None
-    old_candles = c1[:-7]
-    if len(old_candles) < 14:
-        return None
-    old_atr = _v4_atr_pct(old_candles, 14)
-    if old_atr is None or old_atr <= 0:
-        return None
-    atr_ratio = cur_atr / old_atr
-    if atr_ratio >= 0.85:
-        if _pipeline_inc("vol_compression_fail", value=round(atr_ratio, 2), threshold=0.85, direction="lt"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.5:
-        if _pipeline_inc("vol_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("vol_bull_fail"): return None
-    _pipeline_inc("vol_squeeze_pass")
-    return {
-        "signal_tag": "변동성압축",
-        "entry_mode": "confirm",
-        "logic_group": "V",
-        "filters_hit": [f"ATR_ratio={atr_ratio:.2f}", f"VR5={vr5:.2f}"],
-        "exit_params": {},
-        "indicators": {"atr_pct": round(cur_atr, 4), "atr_ratio": round(atr_ratio, 2)},
-    }
-
-
-def _v0_check_time_momentum(c1, c5, c15, c30, c60, gate_info=None):
-    """TME 시간대엣지: 특정 KST 시간대 + 기본 모멘텀 (RSI>60 + 양봉)"""
-    _pipeline_inc("time_mom_enter")
-    h = now_kst().hour
-    if h not in (9, 10, 13, 14, 21, 22):
-        if _pipeline_inc("time_hour_fail"): return None
-    if not c5 or len(c5) < 15:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 60:
-        if _pipeline_inc("time_rsi_fail", value=rsi_5m, threshold=60, direction="gte"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("time_bull_fail"): return None
-    _pipeline_inc("time_mom_pass")
-    return {
-        "signal_tag": "시간대모멘텀",
-        "entry_mode": "confirm",
-        "logic_group": "T",
-        "filters_hit": [f"KST_h={h}", f"RSI5={rsi_5m:.1f}"],
-        "exit_params": {},
-        "indicators": {"rsi_5m": round(rsi_5m, 1), "kst_hour": h},
-    }
 
 
 def _v0_check_pullback_reclaim(c1, c5, c15, c30, c60, gate_info=None):
@@ -13627,39 +13083,6 @@ def _v0_check_retest_entry(c1, c5, c15, c30, c60, gate_info=None):
         "filters_hit": [f"surge={surge_pct:.1f}%", f"pullback={pullback_pct:.1f}%", f"EMA_gap={ema_gap:.2f}%"],
         "exit_params": {},
         "indicators": {"surge_pct": round(surge_pct, 2), "pullback_pct": round(pullback_pct, 2)},
-    }
-
-
-def _v0_check_absorption(c1, c5, c15, c30, c60, gate_info=None):
-    """ABS 흡수돌파: 고점근처 매도압력 흡수(음봉 후 반등) + 재양봉"""
-    _pipeline_inc("abs_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    cur_close = c1[-1]["trade_price"]
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    gap_pct = ((cur_close / max(high_20, 1)) - 1.0) * 100
-    if gap_pct < -1.5:
-        if _pipeline_inc("abs_gap_low", value=round(gap_pct, 2), threshold=-1.5, direction="gte"): return None
-    if gap_pct > 0.5:
-        if _pipeline_inc("abs_gap_high", value=round(gap_pct, 2), threshold=0.5, direction="lte"): return None
-    recent_3 = c1[-4:-1]
-    red_count = sum(1 for c in recent_3 if not _v4_is_bullish(c))
-    if red_count < 1:
-        if _pipeline_inc("abs_pressure_fail"): return None
-    recent_low = min(c["low_price"] for c in c1[-4:])
-    drop_pct = (high_20 - recent_low) / max(high_20, 1) * 100
-    if drop_pct > 1.5:
-        if _pipeline_inc("abs_hold_fail", value=round(drop_pct, 2), threshold=1.5, direction="lte"): return None
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("abs_bull_fail"): return None
-    _pipeline_inc("abs_pass")
-    return {
-        "signal_tag": "흡수돌파",
-        "entry_mode": "confirm",
-        "logic_group": "A2",
-        "filters_hit": [f"gap20={gap_pct:+.1f}%", f"red_bars={red_count}", f"drop={drop_pct:.1f}%"],
-        "exit_params": {},
-        "indicators": {"gap_20bar": round(gap_pct, 4)},
     }
 
 
@@ -13820,31 +13243,6 @@ def _v0_check_climax_cs40_vr5cap(c1, c5, c15, c30, c60, gate_info=None,
 
 # === v20 신규 시나리오 check_fn (5개) ===
 
-def _v0_check_quiet_accel(c1, c5, c15, c30, c60, gate_info=None):
-    """QA 조용한가속: RSI 60-74 + 양봉 + VR≥1.5 — '약한 초기 가속이 좋다' 패턴"""
-    _pipeline_inc("quiet_accel_enter")
-    if not c5 or len(c5) < 15:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 60:
-        if _pipeline_inc("quiet_accel_rsi_low", value=rsi_5m, threshold=60, direction="gte"): return None
-    if rsi_5m >= 74:
-        if _pipeline_inc("quiet_accel_rsi_high", value=round(rsi_5m, 1), threshold=74, direction="lt"): return None
-    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("quiet_accel_bull_fail"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.5:
-        if _pipeline_inc("quiet_accel_vr5_fail", value=round(vr5, 2), threshold=1.5, direction="gte"): return None
-    _pipeline_inc("quiet_accel_pass")
-    return {
-        "signal_tag": "조용한가속",
-        "entry_mode": "confirm",
-        "logic_group": "QA",
-        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"VR5={vr5:.1f}"],
-        "exit_params": {},
-        "indicators": {"rsi_5m": round(rsi_5m, 1), "vr5": round(vr5, 2)},
-    }
-
 
 def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _close_thr=0.60):
     """SHK 급락후회복: 큰 아래꼬리 + 강한 마감 — 약한 손 제거 후 continuation"""
@@ -13878,104 +13276,6 @@ def _v0_check_shakeout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None
     }
 
 
-def _v0_check_shakeout_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    return _v0_check_shakeout(c1, c5, c15, c30, c60, gate_info, _close_thr=0.50)
-
-
-def _v0_check_dry_breakout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """DRY 거래량건조: 3봉 저거래량 → 현재 VR폭발 + 양봉 + 5봉고점 돌파"""
-    _pipeline_inc("dry_enter")
-    if not c1 or len(c1) < 10:
-        return None
-    last = c1[-1]
-    if not _v4_is_bullish(last):
-        if _pipeline_inc("dry_bull_fail"): return None
-    cur_vol = last.get("candle_acc_trade_price", 0)
-    prev3_vols = [c.get("candle_acc_trade_price", 0) for c in c1[-4:-1]]
-    avg5_vol = sum(c.get("candle_acc_trade_price", 0) for c in c1[-6:-1]) / 5 if len(c1) >= 6 else 0
-    if avg5_vol <= 0:
-        return None
-    all_dry = all(v < avg5_vol for v in prev3_vols)
-    if not all_dry:
-        if _pipeline_inc("dry_volume_fail"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 2.0:
-        if _pipeline_inc("dry_vr5_fail", value=round(vr5, 2), threshold=2.0, direction="gte"): return None
-    prev5_high = max(c["high_price"] for c in c1[-6:-1])
-    if last["trade_price"] <= prev5_high:
-        if _pipeline_inc("dry_breakout_fail"): return None
-    _pipeline_inc("dry_pass")
-    return {
-        "signal_tag": "거래량건조",
-        "entry_mode": "confirm",
-        "logic_group": "DRY",
-        "filters_hit": [f"VR5={vr5:.1f}", f"dry3={all_dry}"],
-        "exit_params": {},
-        "indicators": {"vr5": round(vr5, 2)},
-    }
-
-
-def _v0_check_macd_cross(c1, c5, c15, c30, c60, gate_info=None):
-    """MZC MACD제로크로스: 5m MACD hist 음→양 전환 + 양봉 + 15mVR≥1.0"""
-    _pipeline_inc("macd_cross_enter")
-    if not c5 or len(c5) < 35:
-        return None
-    cls5 = [c["trade_price"] for c in c5]
-    _, _, hist = _v4_macd(cls5)
-    if hist is None:
-        return None
-    prev_cls5 = [c["trade_price"] for c in c5[:-1]]
-    _, _, prev_hist = _v4_macd(prev_cls5)
-    if prev_hist is None:
-        return None
-    if not (prev_hist < 0 and hist >= 0):
-        if _pipeline_inc("macd_cross_signal_fail"): return None
-    if not c1 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("macd_cross_bull_fail"): return None
-    vr_15m = None
-    if c15 and len(c15) >= 6:
-        cur_v15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_v15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_v15 = sum(past_v15) / max(len(past_v15), 1)
-        if avg_v15 > 0:
-            vr_15m = round(cur_v15 / avg_v15, 2)
-    if vr_15m is not None and vr_15m < 1.0:
-        if _pipeline_inc("macd_cross_vr15_fail", value=vr_15m, threshold=1.0, direction="gte"): return None
-    _pipeline_inc("macd_cross_pass")
-    return {
-        "signal_tag": "MACD반등",
-        "entry_mode": "confirm",
-        "logic_group": "MZC",
-        "filters_hit": [f"hist={hist:.2f}", f"prev={prev_hist:.2f}", f"VR15={vr_15m}"],
-        "exit_params": {},
-        "indicators": {"macd_hist": round(hist, 4), "macd_prev_hist": round(prev_hist, 4)},
-    }
-
-
-def _v0_check_tick_accum(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """TAC 틱축적: 양봉 + RSI≥50 — ind_filters로 tick_buy≥0.65 + tick_rate≤2.0 적용"""
-    _pipeline_inc("tick_accum_enter")
-    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("tick_accum_bull_fail"): return None
-    if not c5 or len(c5) < 15:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 50:
-        if _pipeline_inc("tick_accum_rsi_fail", value=rsi_5m, threshold=50, direction="gte"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.2:
-        if _pipeline_inc("tick_accum_vr5_fail", value=round(vr5, 2), threshold=1.2, direction="gte"): return None
-    _pipeline_inc("tick_accum_pass")
-    return {
-        "signal_tag": "틱축적",
-        "entry_mode": "confirm",
-        "logic_group": "TAC",
-        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"VR5={vr5:.1f}"],
-        "exit_params": {},
-        "indicators": {"rsi_5m": round(rsi_5m, 1), "vr5": round(vr5, 2)},
-    }
-
-
 # === v21 신규 시나리오 진입 함수 (7개) ===
 
 _COIN_BIAS = {}  # {market: (wins, losses, avg_pnl)} — SVE1 coin_wl에서 주기적 갱신
@@ -13998,91 +13298,6 @@ def _update_coin_bias():
                     avg_pnl = sum(coin_pnls[coin]) / len(coin_pnls[coin])
                 _COIN_BIAS[coin] = (w, l, avg_pnl)
             break
-
-
-def _v0_check_quiet_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """QC 조용한continuation: RSI55-72 + 낮은ATR + MACD양수비과열 + 15mVR1.5 + 20봉근접 + 최소에너지 [v22에너지하한]"""
-    _pipeline_inc("quiet_cont_enter")
-    if not c1 or len(c1) < 21 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("quiet_cont_bull_fail"): return None
-    if not c5 or len(c5) < 35:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 55 or rsi_5m > 72:
-        if _pipeline_inc("quiet_cont_rsi_fail", value=rsi_5m, threshold=55): return None
-    atr = _v4_atr_pct(c1, 14)
-    if atr <= 0 or atr > 0.9:
-        if _pipeline_inc("quiet_cont_atr_fail", value=round(atr, 3), threshold=0.9, direction="lte"): return None
-    body_cur = abs(c1[-1]["trade_price"] - c1[-1]["opening_price"]) / max(c1[-1]["trade_price"], 1) * 100
-    if body_cur < 0.1:
-        if _pipeline_inc("quiet_cont_energy_body_fail", value=round(body_cur, 3), threshold=0.1, direction="gte"): return None
-    vr5_cur = _v4_volume_ratio_5(c1)
-    if vr5_cur < 1.3:
-        if _pipeline_inc("quiet_cont_energy_vr5_fail", value=round(vr5_cur, 2), threshold=1.3, direction="gte"): return None
-    closes_5m = [c["trade_price"] for c in c5]
-    _, _, hist_5m = _v4_macd(closes_5m)
-    if hist_5m is None or hist_5m <= 0:
-        if _pipeline_inc("quiet_cont_macd_neg"): return None
-    price_5m = max(closes_5m[-1], 1)
-    macd_bps = hist_5m / price_5m * 10000
-    if macd_bps > 80:
-        if _pipeline_inc("quiet_cont_macd_hot", value=round(macd_bps, 1), threshold=80, direction="lte"): return None
-    vr_15m = None
-    if c15 and len(c15) >= 6:
-        cur_v15 = c15[-1].get("candle_acc_trade_price", 0)
-        past_v15 = [c.get("candle_acc_trade_price", 0) for c in c15[-6:-1]]
-        avg_v15 = sum(past_v15) / max(len(past_v15), 1)
-        if avg_v15 > 0:
-            vr_15m = round(cur_v15 / avg_v15, 2)
-    if vr_15m is None or vr_15m < 1.5:
-        if _pipeline_inc("quiet_cont_vr15_fail", value=vr_15m, threshold=1.5, direction="gte"): return None
-    high_20 = max(c["high_price"] for c in c1[-21:-1])
-    cur_close = c1[-1]["trade_price"]
-    gap_pct = abs((cur_close - high_20) / max(high_20, 1) * 100)
-    if gap_pct > 0.8:
-        if _pipeline_inc("quiet_cont_gap_fail", value=round(gap_pct, 2), threshold=0.8, direction="lte"): return None
-    _pipeline_inc("quiet_cont_pass")
-    return {
-        "signal_tag": "조용한continuation",
-        "entry_mode": "confirm",
-        "logic_group": "QC",
-        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"ATR={atr:.3f}", f"MACD={macd_bps:.1f}bps", f"VR15={vr_15m}", f"gap20={gap_pct:.2f}%"],
-        "exit_params": {},
-        "indicators": {"rsi_5m": round(rsi_5m, 1), "atr_pct": round(atr, 4), "macd_bps": round(macd_bps, 1), "vr_15m": vr_15m},
-    }
-
-
-def _v0_check_shakeout_reclaim(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """SHR shakeout reclaim: -0.3~-0.8% 급락 후 EMA20 복귀 + tick_buy + RSI50-68"""
-    _pipeline_inc("shakeout_reclaim_enter")
-    if not c1 or len(c1) < 21 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("shakeout_reclaim_bull_fail"): return None
-    if not c5 or len(c5) < 15:
-        return None
-    closes = [c["trade_price"] for c in c1]
-    ema20 = _v4_ema(closes, 20)
-    if ema20 is None or closes[-1] <= ema20:
-        if _pipeline_inc("shakeout_reclaim_ema_fail"): return None
-    recent_high = max(c["high_price"] for c in c1[-6:-1])
-    recent_low = min(c["low_price"] for c in c1[-5:-1])
-    dip_pct = (recent_low - recent_high) / max(recent_high, 1) * 100
-    if dip_pct > -0.3 or dip_pct < -0.8:
-        if _pipeline_inc("shakeout_reclaim_dip_fail", value=round(dip_pct, 2), threshold=-0.3, direction="lte"): return None
-    prev_low = min(c["low_price"] for c in c1[-8:-5]) if len(c1) >= 8 else recent_low
-    if recent_low < prev_low * 0.997:
-        if _pipeline_inc("shakeout_reclaim_newlow_fail"): return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 50 or rsi_5m > 68:
-        if _pipeline_inc("shakeout_reclaim_rsi_fail", value=rsi_5m, threshold=50): return None
-    _pipeline_inc("shakeout_reclaim_pass")
-    return {
-        "signal_tag": "shakeout복귀",
-        "entry_mode": "confirm",
-        "logic_group": "SHR",
-        "filters_hit": [f"dip={dip_pct:.2f}%", f"RSI5={rsi_5m:.1f}", f"EMA20={ema20:.0f}"],
-        "exit_params": {},
-        "indicators": {"dip_pct": round(dip_pct, 3), "rsi_5m": round(rsi_5m, 1)},
-    }
 
 
 def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None, _depth_hi=-0.15, _depth_lo=-1.0):
@@ -14138,10 +13353,6 @@ def _v0_check_clm_pullback(c1, c5=None, c15=None, c30=None, c60=None, gate_info=
         "exit_params": {},
         "indicators": {"pullback_pct": round(pullback_pct, 3), "climax_gap": abs(climax_idx)},
     }
-
-
-def _v0_check_clm_pullback_wide(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    return _v0_check_clm_pullback(c1, c5, c15, c30, c60, gate_info, _depth_hi=-0.10, _depth_lo=-1.5)
 
 
 def _v0_check_range_expand(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
@@ -14240,119 +13451,6 @@ def _v0_check_liquidity_trap(c1, c5=None, c15=None, c30=None, c60=None, gate_inf
         "filters_hit": details,
         "exit_params": {},
         "indicators": {"trap_score": score, "spread_pct": round(spread_pct, 3), "vr5": round(vr5, 2)},
-    }
-
-
-def _v0_check_coin_personality(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """CPRS 코인성격: WR≥52% n≥3 + 양봉 — 하위코인 자동 차단 [v22완화]"""
-    _pipeline_inc("coin_pers_enter")
-    if not c1 or len(c1) < 7 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("coin_pers_bull_fail"): return None
-    market = None
-    if gate_info and isinstance(gate_info, dict):
-        market = gate_info.get("market")
-    if not market or market not in _COIN_BIAS:
-        if _pipeline_inc("coin_pers_no_data"): return None
-    w, l, avg_pnl = _COIN_BIAS[market]
-    total = w + l
-    if total < 3:
-        if _pipeline_inc("coin_pers_data_fail", value=total, threshold=3, direction="gte"): return None
-    coin_wr = w / total * 100
-    if coin_wr < 52:
-        if _pipeline_inc("coin_pers_wr_fail", value=round(coin_wr, 1), threshold=52, direction="gte"): return None
-    if avg_pnl < -0.0005:
-        if _pipeline_inc("coin_pers_pnl_fail", value=round(avg_pnl * 100, 2), threshold=-0.05, direction="gte"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 0.8:
-        if _pipeline_inc("coin_pers_vr5_fail", value=round(vr5, 2), threshold=0.8, direction="gte"): return None
-    coin_tag = f"{market}({w}W{l}L)"
-    _pipeline_inc("coin_pers_pass")
-    return {
-        "signal_tag": "코인성격",
-        "entry_mode": "confirm",
-        "logic_group": "CPRS",
-        "filters_hit": [f"coin={coin_tag}", f"WR={coin_wr:.0f}%", f"PnL={avg_pnl*100:+.2f}%"],
-        "exit_params": {},
-        "indicators": {"coin_wr": round(coin_wr, 1), "avg_pnl": round(avg_pnl * 100, 2), "vr5": round(vr5, 2)},
-    }
-
-
-def _v0_check_failed_breakout(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """FBR 실패돌파2차: 1차 돌파→밀림→저점높아짐→재돌파 (spread 감소 시 quality↑)"""
-    _pipeline_inc("fbr_enter")
-    if not c1 or len(c1) < 25 or not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("fbr_bull_fail"): return None
-    high_20 = max(c["high_price"] for c in c1[-25:-5])
-    first_break = None
-    for i in range(-10, -3):
-        if abs(i) > len(c1):
-            continue
-        if c1[i]["high_price"] > high_20:
-            first_break = i
-            break
-    if first_break is None:
-        if _pipeline_inc("fbr_no_first_break"): return None
-    post_break = c1[len(c1) + first_break + 1:-1]
-    if not post_break or len(post_break) < 2:
-        if _pipeline_inc("fbr_no_pullback"): return None
-    pullback_close = min(c["trade_price"] for c in post_break)
-    if pullback_close >= high_20:
-        if _pipeline_inc("fbr_no_rejection"): return None
-    pullback_low = min(c["low_price"] for c in post_break)
-    pre_break_low = min(c["low_price"] for c in c1[-25:len(c1)+first_break])
-    if pullback_low < pre_break_low:
-        if _pipeline_inc("fbr_lower_low"): return None
-    cur_close = c1[-1]["trade_price"]
-    if cur_close <= high_20:
-        if _pipeline_inc("fbr_no_rebreak"): return None
-    first_spread = (c1[first_break]["high_price"] - c1[first_break]["low_price"]) / max(c1[first_break]["trade_price"], 1) * 100
-    cur_spread = (c1[-1]["high_price"] - c1[-1]["low_price"]) / max(cur_close, 1) * 100
-    spread_shrink = cur_spread < first_spread
-    _pipeline_inc("fbr_pass")
-    return {
-        "signal_tag": "실패돌파2차",
-        "entry_mode": "confirm",
-        "logic_group": "FBR",
-        "filters_hit": [f"1st={abs(first_break)}봉전", f"pb_low>pre_low", f"spread_shrink={spread_shrink}"],
-        "exit_params": {},
-        "indicators": {"first_break_gap": abs(first_break), "spread_shrink": 1 if spread_shrink else 0},
-    }
-
-
-def _v0_check_low_heat_cont(c1, c5=None, c15=None, c30=None, c60=None, gate_info=None):
-    """LHC low heat continuation: 안뜨거운데 계속 사는 놈 — GT/TAC/SHR 공통 edge"""
-    _pipeline_inc("lhc_enter")
-    if not c1 or len(c1) < 21:
-        return None
-    if not _v4_is_bullish(c1[-1]):
-        if _pipeline_inc("lhc_bull_fail"): return None
-    if not c5 or len(c5) < 35:
-        return None
-    rsi_5m = _v4_rsi_from_candles(c5, 14)
-    if rsi_5m is None or rsi_5m < 58 or rsi_5m > 72:
-        if _pipeline_inc("lhc_rsi_fail", value=rsi_5m, threshold=58): return None
-    atr = _v4_atr_pct(c1, 14)
-    if atr <= 0 or atr > 0.9:
-        if _pipeline_inc("lhc_atr_fail", value=round(atr, 3), threshold=0.9, direction="lte"): return None
-    body = abs(c1[-1]["trade_price"] - c1[-1]["opening_price"])
-    price = max(c1[-1]["trade_price"], 1)
-    body_pct = body / price * 100
-    if body_pct < 0.1 or body_pct > 0.5:
-        if _pipeline_inc("lhc_body_fail", value=round(body_pct, 3)): return None
-    bullish_count = sum(1 for c in c1[-4:-1] if _v4_is_bullish(c))
-    if bullish_count < 2:
-        if _pipeline_inc("lhc_trend_fail", value=bullish_count, threshold=2, direction="gte"): return None
-    vr5 = _v4_volume_ratio_5(c1)
-    if vr5 < 1.0 or vr5 > 3.0:
-        if _pipeline_inc("lhc_vr5_fail", value=round(vr5, 2)): return None
-    _pipeline_inc("lhc_pass")
-    return {
-        "signal_tag": "저열continuation",
-        "entry_mode": "confirm",
-        "logic_group": "LHC",
-        "filters_hit": [f"RSI5={rsi_5m:.1f}", f"ATR={atr:.3f}", f"body={body_pct:.2f}%", f"bull3={bullish_count}/3"],
-        "exit_params": {},
-        "indicators": {"rsi_5m": round(rsi_5m, 1), "atr_pct": round(atr, 4), "body_pct": round(body_pct, 3), "vr5": round(vr5, 2)},
     }
 
 
@@ -16441,70 +15539,6 @@ def _v4_shadow_test_all_routes(market, c1, c5, c15, c30, c60, m3_info):
     return results
 
 
-def _threshold_sweep(fail_values_list, current_threshold, direction,
-                     trade_records=None, ind_key=None):
-    """v18: 차단건 브루트포스 탐색 + 통과건 합산 전체 비교.
-    direction: 'gte'/'gt' → 값이 threshold 이상이면 통과 (하한)
-               'lt'/'lte' → 값이 threshold 미만이면 통과 (상한)
-    Returns: dict with best alternative threshold or None"""
-    if not fail_values_list or len(fail_values_list) < 5:
-        return None
-    fail_data = [fv for fv in fail_values_list if fv.get("v") is not None]
-    if len(fail_data) < 5:
-        return None
-
-    def _passes(v, th, d):
-        if d == "gte": return v >= th
-        if d == "gt": return v > th
-        if d == "lte": return v <= th
-        if d == "lt": return v < th
-        return False
-
-    # 통과건 데이터 준비
-    pass_data = []
-    if trade_records and ind_key:
-        for tr in trade_records:
-            v = tr.get("inds", {}).get(ind_key)
-            if v is not None:
-                pass_data.append({"v": v, "pnl": tr["pnl"]})
-
-    best = None
-    candidates = sorted(set(fv["v"] for fv in fail_data),
-                        reverse=(direction in ("gte", "gt")))
-    for c in candidates:
-        # 차단건 중 새 임계치로 통과할 건
-        new_passed = [fv for fv in fail_data if _passes(fv["v"], c, direction)]
-        if len(new_passed) < 3:
-            continue
-        # 차단건만 기준
-        fail_n = len(new_passed)
-        fail_avg_pnl = sum(fv["pnl"] for fv in new_passed) / fail_n
-        fail_wr = sum(1 for fv in new_passed if fv["pnl"] > 0) / fail_n * 100
-        if fail_avg_pnl <= 0:
-            continue
-        # 전체건 합산 (통과건 + 새로 통과할 차단건)
-        total_n = len(pass_data) + fail_n
-        total_wins = (sum(1 for p in pass_data if p["pnl"] > 0)
-                      + sum(1 for fv in new_passed if fv["pnl"] > 0))
-        total_pnl = (sum(p["pnl"] for p in pass_data)
-                     + sum(fv["pnl"] for fv in new_passed))
-        total_wr = total_wins / total_n * 100 if total_n > 0 else 0
-        total_avg_pnl = total_pnl / total_n * 100 if total_n > 0 else 0
-        if best is None or fail_avg_pnl > best["fail_avg_pnl"]:
-            best = {
-                "new_th": round(c, 4),
-                # 차단건 기준
-                "fail_n": fail_n,
-                "fail_avg_pnl": round(fail_avg_pnl * 100, 2),
-                "fail_wr": round(fail_wr, 1),
-                # 전체건 기준
-                "total_n": total_n,
-                "total_wr": round(total_wr, 1),
-                "total_avg_pnl": round(total_avg_pnl, 2),
-            }
-    return best
-
-
 # v18: 필터명 → 인디케이터키 매핑 (임계치 sweep 전체건 비교용)
 _SWEEP_FILTER_TO_IND = {
     "vol_burst_vr5_fail": "vr5",
@@ -16520,81 +15554,6 @@ _SWEEP_FILTER_TO_IND = {
     "reversal_15m_gap20_fail": "gap_20bar",
     # v18c: H gap20 제거, D 비활성화 → 매핑 불필요
 }
-
-
-def _threshold_sweep_table(trade_records, fail_values_list, current_threshold, direction, ind_key):
-    """v18: 통과건(trade_records) + 차단건(fail_values) 합산 ±5% 전체 비교.
-    - 조이기: 전체 W/L 승률 (통과건 중 더 조인 임계치 충족분만)
-    - 풀기: 전체 W/L + 신규 추가건 W/L (차단건 중 새로 통과할 분)
-    Returns: list of dicts or []"""
-    if current_threshold == 0:
-        return []
-    # 통과건에서 해당 인디케이터 값 + PnL 추출
-    pass_trades = []
-    for tr in (trade_records or []):
-        v = tr.get("inds", {}).get(ind_key)
-        if v is not None:
-            pass_trades.append({"v": v, "pnl": tr["pnl"], "src": "pass"})
-    # 차단건에서 값 + PnL 추출
-    fail_trades = []
-    for fv in (fail_values_list or []):
-        if fv.get("v") is not None:
-            fail_trades.append({"v": fv["v"], "pnl": fv["pnl"], "src": "fail"})
-    all_trades = pass_trades + fail_trades
-    if len(all_trades) < 5:
-        return []
-
-    def _passes(v, th, d):
-        if d == "gte": return v >= th
-        if d == "gt": return v > th
-        if d == "lte": return v <= th
-        if d == "lt": return v < th
-        return False
-
-    # 풀기/조이기 방향 판별 (음수 임계치도 올바르게 처리)
-    delta = abs(current_threshold) * 0.05
-    if delta == 0:
-        delta = 0.5  # threshold=0일 때 fallback
-    if direction in ("gte", "gt"):
-        loosen_step = round(current_threshold - delta, 4)  # 낮추면 더 많이 통과
-        tighten_step = round(current_threshold + delta, 4)  # 높이면 더 적게 통과
-    else:  # lt, lte
-        loosen_step = round(current_threshold + delta, 4)  # 높이면 더 많이 통과
-        tighten_step = round(current_threshold - delta, 4)  # 낮추면 더 적게 통과
-
-    steps = [loosen_step, round(current_threshold, 4), tighten_step]
-    rows = []
-    for th in steps:
-        is_current = (th == round(current_threshold, 4))
-        matched = [t for t in all_trades if _passes(t["v"], th, direction)]
-        n = len(matched)
-        if n == 0:
-            rows.append({"th": th, "n": 0, "wins": 0, "losses": 0,
-                         "wr": 0, "avg_pnl": 0, "is_current": is_current,
-                         "is_loosen": (th == loosen_step),
-                         "new_n": 0, "new_wins": 0, "new_losses": 0,
-                         "new_wr": 0, "new_avg_pnl": 0})
-            continue
-        wins = sum(1 for t in matched if t["pnl"] > 0)
-        losses = n - wins
-        wr = wins / n * 100
-        avg_pnl = sum(t["pnl"] for t in matched) / n * 100
-        # 신규 추가건 (차단→통과 전환분) — 풀기 방향에서만 의미
-        new_trades = [t for t in matched if t["src"] == "fail"]
-        new_n = len(new_trades)
-        new_wins = sum(1 for t in new_trades if t["pnl"] > 0)
-        new_losses = new_n - new_wins
-        new_wr = new_wins / new_n * 100 if new_n > 0 else 0
-        new_avg_pnl = sum(t["pnl"] for t in new_trades) / new_n * 100 if new_n > 0 else 0
-        rows.append({
-            "th": th, "n": n, "wins": wins, "losses": losses,
-            "wr": round(wr, 1), "avg_pnl": round(avg_pnl, 2),
-            "is_current": is_current,
-            "is_loosen": (th == loosen_step),
-            "new_n": new_n, "new_wins": new_wins, "new_losses": new_losses,
-            "new_wr": round(new_wr, 1), "new_avg_pnl": round(new_avg_pnl, 2),
-        })
-    return rows
 
 
 def _v4_shadow_score_compact():
@@ -18120,17 +17079,6 @@ def _survival_analysis_lines():
     return lines
 
 
-def _v4_shadow_reset_counters():
-    """(비활성) 섀도우 통계는 누적 유지 — 초기화하지 않음"""
-    pass
-
-
-def v4_get_strategy_registry():
-    """전략 레지스트리 조회 (외부 모듈/텔레그램 커맨드용)"""
-    return {k: {kk: vv for kk, vv in v.items() if kk != "check_fn"}
-            for k, v in _STRATEGY_REGISTRY.items()}
-
-
 # --- 공개 API (v6 signal_v4 60일 WF 데이터 기반) ---
 
 def v4_evaluate_entry(market, c5, c15, c30, c60, c1=None, ob_data=None):
@@ -18404,19 +17352,6 @@ def atr14_from_candles(candles, period=14):
 # =========================
 # ★ 그라인드(계단식 상승) 예외
 # =========================
-# === PATCH: grind detector ===
-def is_mega_breakout(c1):
-    if not ULTRA_RELAX_ON_MEGA or len(c1) < 6:
-        return False
-    cur = c1[-1]
-    prev_high = max(x["high_price"] for x in c1[-6:-1])
-    gap = cur["high_price"] / max(prev_high, 1) - 1
-    chg_1m = cur["trade_price"] / max(c1[-2]["trade_price"], 1) - 1 if len(
-        c1) >= 2 else 0
-    z = zscore_krw_1m(c1, 30)
-    abs_krw = cur.get("candle_acc_trade_price", 0)
-    return (gap >= MEGA_BREAK_MIN_GAP) and (chg_1m >= MEGA_MIN_1M_CHG) and (
-        (z >= MEGA_VOL_Z) or (abs_krw >= MEGA_ABS_KRW))
 
 
 # =========================
@@ -20017,31 +18952,6 @@ def calc_ema_slope(c1, period=20, lookback=5):
     return slope
 
 
-def regime_filter(m, c1, cur_price):
-    """
-    통합 레짐 필터: 횡보장/박스상단이면 진입 차단
-    Returns: (pass: bool, reason: str)
-    """
-    # 1) 횡보 판정 → 전면 차단 대신 "SIDEWAYS" 힌트 반환
-    # 호출부(detect_leader_stock)에서 점화/강돌파 예외 판단
-    is_sw, range_pct = is_sideways_regime(c1, lookback=20)
-    if is_sw:
-        return True, f"SIDEWAYS({range_pct*100:.1f}%)"  # 🔧 차단→힌트 (예외 통과 가능)
-
-    # 2) 박스 상단 근처 판정 - 🔧 비활성화 (돌파 전략에서 고점 진입은 정상)
-    # near_box, box_pos = near_box_boundary(cur_price, c1, lookback=20)
-    # if near_box and box_pos == "BOX_TOP":
-    #     return False, "BOX_TOP"
-
-    # 3) EMA 기울기 판정 → 평평하면 entry_mode 다운그레이드
-    slope = calc_ema_slope(c1, period=20, lookback=5)
-    if abs(slope) < 0.001:  # 0.1% 미만 → 기울기 거의 없음
-        # 🔧 FIX: no-op 제거 → "FLAT_SLOPE" 힌트 반환 (caller에서 half로 다운그레이드)
-        return True, "FLAT_SLOPE"
-
-    return True, "OK"
-
-
 # === 🔧 틱버스트 허용 판단 (비활성화됨) ===
 def detect_leader_stock(m, obc, c1=None, tight_mode=False):
     """
@@ -20620,7 +19530,6 @@ def detect_leader_stock(m, obc, c1=None, tight_mode=False):
                       f"gate_pass|mode={_entry_mode}|vwap_gap={vwap_gap:.2f}")
 
     return pre
-
 
 
 # =========================
