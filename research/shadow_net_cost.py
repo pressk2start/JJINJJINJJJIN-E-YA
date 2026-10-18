@@ -158,13 +158,20 @@ def analyze_horizons(records, fee_pct=FEE_RT_PCT_DEFAULT, pnl_unit="fraction", s
     survivor_mean : curve 값 있는 건만 평균 (봇 리포트의 '240s:+0.59' 가 이것 → 생존편향)
     all_mean      : 전건 평균. H 이전에 청산된 건은 실제 청산 pnl 사용 (= '기존 청산규칙 OR H 보유' 의 실측 하한)
     all_net_taker : all_mean − fee − buy_slip − sell_slip (비용 프록시 있는 건만)
+    주의: all 은 '순수 고정보유' 가 아니라 '현 청산규칙 ∪ H 보유' 하이브리드의 실측. 순수 고정보유(청산규칙 OFF)
+    는 전 건의 H 시점 MTM 이 필요해 shadow_stats 로는 계산 불가 (WS 리플레이 영역).
+    판정(verdict, route verdict 와 같은 기준): n_all ≥ MIN_N · 비용 coverage ≥ 0.8 · all_net > 0 ·
+    청산시각 순 전/후반 all_net 모두 > 0 → HYBRID_CANDIDATE. surv 만 양수면 SURVIVOR_ONLY(폐기).
     """
     scale = 100.0 if pnl_unit == "fraction" else 1.0
     out = {}
+    recs = sorted([r for r in records if _f(r.get("pnl")) is not None], key=lambda r: _f(r.get("exit_ts")) or 0.0)
+    half = len(recs) // 2
     for h in horizons:
         k = str(h)
         surv, allv, allnet = [], [], []
-        for r in records:
+        net_first, net_second = [], []
+        for idx, r in enumerate(recs):
             g = _f(r.get("pnl"))
             if g is None:
                 continue
@@ -177,11 +184,24 @@ def analyze_horizons(records, fee_pct=FEE_RT_PCT_DEFAULT, pnl_unit="fraction", s
             allv.append(val)
             buy, sell, _ = trade_costs(r.get("inds"), size_k)
             if buy is not None and sell is not None:
-                allnet.append(val - fee_pct - buy - sell)
+                nv = val - fee_pct - buy - sell
+                allnet.append(nv)
+                (net_first if idx < half else net_second).append(nv)
+        cov = (len(allnet) / len(allv)) if allv else 0.0
+        a_net, f1, f2 = _mean(allnet), _mean(net_first), _mean(net_second)
+        if len(allv) < MIN_N or cov < 0.8:
+            verdict = "INSUFFICIENT"
+        elif a_net is not None and a_net > 0 and (f1 or 0) > 0 and (f2 or 0) > 0:
+            verdict = "HYBRID_CANDIDATE"
+        elif (_mean(surv) or 0) > 0 and (_mean(allv) or 0) <= 0:
+            verdict = "SURVIVOR_ONLY"
+        else:
+            verdict = "NEGATIVE_AFTER_COST"
         out[k] = {"n_all": len(allv), "n_survivor": len(surv),
                   "survivor_share": (len(surv) / len(allv)) if allv else None,
                   "survivor_mean": _mean(surv), "all_mean": _mean(allv),
-                  "all_net_taker_mean": _mean(allnet), "all_net_taker_n": len(allnet)}
+                  "all_net_taker_mean": a_net, "all_net_taker_n": len(allnet), "cost_coverage": cov,
+                  "first_half_net": f1, "second_half_net": f2, "verdict": verdict}
     return out
 
 
@@ -242,7 +262,8 @@ def print_report(res, live=None, min_n=20):
             continue
         cells = []
         for h, v in r["horizons"].items():
-            cells.append(f"{h}s surv{_fmt(v['survivor_mean'],6)}({(v['survivor_share'] or 0):.0%}) all{_fmt(v['all_mean'],6)} net{_fmt(v['all_net_taker_mean'],6)}")
+            cells.append(f"{h}s surv{_fmt(v['survivor_mean'],6)}({(v['survivor_share'] or 0):.0%}) all{_fmt(v['all_mean'],6)} "
+                         f"net{_fmt(v['all_net_taker_mean'],6)} 1st{_fmt(v['first_half_net'],6)} 2nd{_fmt(v['second_half_net'],6)}  {v['verdict']}")
         print(f"  {key[:40]}")
         for c in cells:
             print(f"      {c}")

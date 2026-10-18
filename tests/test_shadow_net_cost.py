@@ -84,6 +84,27 @@ class TestShadowNetCost(unittest.TestCase):
         self.assertIsNone(h["240"]["all_net_taker_mean"])              # no cost fields
         self.assertEqual(h["60"]["n_survivor"], 3)
 
+    def test_horizon_verdicts(self):
+        # 120 trades, all survive to 240 with +0.6% → net +0.4 both halves → HYBRID_CANDIDATE
+        good = []
+        for i in range(120):
+            r = rec(0.006, ts=i); r["curve"] = {"240": 0.006}; good.append(r)
+        self.assertEqual(M.analyze_horizons(good, fee_pct=0.10, horizons=(240,))["240"]["verdict"], "HYBRID_CANDIDATE")
+        # survivors +1.0% (20%) but 80% exited early at -0.5% → all negative → SURVIVOR_ONLY
+        mixed = []
+        for i in range(120):
+            if i % 5 == 0:
+                r = rec(0.010, ts=i); r["curve"] = {"240": 0.010}
+            else:
+                r = rec(-0.005, ts=i); r["curve"] = {}
+            mixed.append(r)
+        h = M.analyze_horizons(mixed, fee_pct=0.10, horizons=(240,))["240"]
+        self.assertGreater(h["survivor_mean"], 0)
+        self.assertLess(h["all_mean"], 0)
+        self.assertEqual(h["verdict"], "SURVIVOR_ONLY")
+        # n < 100 → INSUFFICIENT
+        self.assertEqual(M.analyze_horizons(good[:50], horizons=(240,))["240"]["verdict"], "INSUFFICIENT")
+
     def test_horizons_net_uses_cost_proxies(self):
         recs = [rec(0.010, buy=0.1, sell=0.1)]
         recs[0]["curve"] = {"240": 0.006}
