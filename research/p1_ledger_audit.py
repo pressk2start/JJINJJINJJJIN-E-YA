@@ -6,12 +6,13 @@ import io
 import csv
 import hashlib
 import json
+import math
 from collections import Counter, defaultdict
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from pathlib import Path
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 
 def number(value, positive=False, nonnegative=False):
@@ -511,10 +512,40 @@ def feature_fields_from_source(path):
     return result
 
 
-def inspect_feature_csv(path, source_schema=None):
+def feature_pnl_percent(value, source_unit):
+    """Convert only an explicitly declared input unit; never infer from magnitude."""
+    if source_unit not in (None, "decimal_return", "percent"):
+        raise ValueError("unknown feature PnL unit")
+    if source_unit is None:
+        return None
+    value = number(value)
+    if value is None:
+        return None
+    try:
+        result = float(value * Decimal(100) if source_unit == "decimal_return" else value)
+    except (DecimalException, OverflowError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def inspect_feature_csv(path, source_schema=None, pnl_unit=None):
     """Inspect a CSV snapshot only. Blank outcomes never imply open/failed trades."""
+    if pnl_unit not in (None, "decimal_return", "percent"):
+        raise ValueError("unknown feature PnL unit")
     report = {
         "scope": "FULL_CSV_NOT_LEDGER_DATE_FILTER",
+        "pnl_unit": {"declared_input_unit": pnl_unit, "output_unit": "percent",
+                     "source": "EXPLICIT_ARGUMENT" if pnl_unit else "UNSPECIFIED",
+                     "inferred_from_magnitude": False},
+        "writer_unit_reference": {
+            "scope": "REFERENCE_BOT_WRITER_NOT_PROOF_FOR_EACH_INPUT_ROW",
+            "reference_bot_commit": "b0ccded6c3d640a630b721ee9c2800834b0dec6b",
+            "csv_pnl_pct": "decimal_return", "csv_mfe_pct": "percent",
+            "csv_mae_pct": "percent", "jsonl_v2_net_pnl_pct": "percent",
+            "csv_pnl_decimal_places": 4,
+        },
+        "recent_outcomes": [], "recent_outcomes_limit": 20,
+        "recent_outcomes_order": "CSV_RECORD_ORDER_NOT_TIMESTAMP_ORDER",
         "input_sha256": None, "input_bytes": None, "changed_during_read": None,
         "header": [], "header_columns": 0, "schema_status": "NOT_CHECKED",
         "source_schema": source_schema, "rows": 0, "blank_records": 0,
@@ -529,6 +560,10 @@ def inspect_feature_csv(path, source_schema=None):
             "Blank result/PnL does not prove an open position or a logging failure.",
             "Outcome fields are stored CSV values, not exchange-verified cashflow or strategy performance.",
             "A correct header/row width does not establish that the live exit update path succeeded.",
+            "CSV column names and value magnitudes do not establish the historical return unit.",
+            "pnl_percent is null until an input unit is explicitly declared; raw values are preserved.",
+            "CSV PnL is rounded by the current writer; exact equality with unrounded JSONL is not expected.",
+            "Recent outcomes are a bounded stored-data sample, not all LIVE trades or verified performance.",
         ],
     }
     try:
@@ -561,7 +596,9 @@ def inspect_feature_csv(path, source_schema=None):
             else:
                 report["schema_status"] = "MISMATCH"
         allow_names = report["schema_status"] in ("NOT_CHECKED", "EXACT_MATCH")
-        indices = {name: header.index(name) for name in ("result", "pnl_pct", "exit_price") if name in header}
+        indices = {name: header.index(name) for name in
+                   ("ts", "market", "result", "pnl_pct", "exit_price", "mfe_pct", "mae_pct")
+                   if name in header}
         report["outcome_columns_missing"] = [
             name for name in ("result", "pnl_pct", "exit_price") if name not in indices]
         widths, results, pnls = Counter(), Counter(), Counter()
@@ -592,7 +629,24 @@ def inspect_feature_csv(path, source_schema=None):
                     report["outcome_fields_present_rows"] += 1
                 if label == "EMPTY" and pnl is not None and exit_price is not None:
                     report["blank_result_with_exit_fields_rows"] += 1
-                item.update(result=label, pnl_status=pnl_kind, exit_price_present=exit_price is not None)
+                normalized = feature_pnl_percent(pnl, pnl_unit)
+                conversion_status = (
+                    "unit_unspecified" if pnl_unit is None else
+                    "missing_or_invalid_value" if pnl is None else
+                    "unrepresentable_value" if normalized is None else "converted")
+                item.update(result=label, pnl_status=pnl_kind, exit_price_present=exit_price is not None,
+                            pnl_raw=text, pnl_percent=normalized, conversion_status=conversion_status)
+                if label in ("win", "lose") and pnl is not None and exit_price is not None:
+                    stored = {key: row[indices[key]] for key in
+                              ("ts", "market", "exit_price", "mfe_pct", "mae_pct")
+                              if key in indices}
+                    report["recent_outcomes"].append({
+                        "record": report["rows"], "stored_fields": stored, "result": label,
+                        "pnl_raw": text, "pnl_percent": normalized,
+                        "conversion_status": conversion_status,
+                    })
+                    if len(report["recent_outcomes"]) > report["recent_outcomes_limit"]:
+                        report["recent_outcomes"].pop(0)
             report["latest_record"] = item
         report["width_counts"] = dict(sorted(widths.items()))
         report["result_counts_aligned"] = dict(sorted(results.items()))
@@ -650,6 +704,8 @@ def main(argv=None):
     parser.add_argument("--output", default="/tmp/p1-audit")
     parser.add_argument("--features", help="Optional read-only trade_features.csv inspection")
     parser.add_argument("--bot-source", help="Optional bot.py source; literal FEATURE_FIELDS only, never executed")
+    parser.add_argument("--feature-pnl-unit", choices=("decimal_return", "percent"),
+                        help="Explicit unit of this CSV input; no automatic unit or magnitude inference")
     parser.add_argument("--since", type=date.fromisoformat, help="Inclusive recorded entry date YYYY-MM-DD")
     parser.add_argument("--until", type=date.fromisoformat, help="Inclusive recorded entry date YYYY-MM-DD")
     args = parser.parse_args(argv)
@@ -657,6 +713,8 @@ def main(argv=None):
         parser.error("--since must be <= --until")
     if args.bot_source and not args.features:
         parser.error("--bot-source requires --features")
+    if args.feature_pnl_unit and not args.features:
+        parser.error("--feature-pnl-unit requires --features")
     ledger = Path(args.ledger).resolve()
     out = Path(args.output).resolve()
     orders_path = Path(args.orders).resolve() if args.orders else None
@@ -681,7 +739,7 @@ def main(argv=None):
                              "until": str(args.until) if args.until else None}
     if features_path is not None:
         schema = feature_fields_from_source(bot_source_path) if bot_source_path else None
-        report["feature_csv"] = inspect_feature_csv(features_path, schema)
+        report["feature_csv"] = inspect_feature_csv(features_path, schema, args.feature_pnl_unit)
     save_report(report, out)
     stats = report["reported_v2_live"]
     print("P1 AUDIT — stored returns are not verified account performance")
@@ -696,6 +754,8 @@ def main(argv=None):
         info = report["feature_csv"]
         print("feature CSV: rows=%d header_columns=%d schema=%s widths=%s" % (
             info["rows"], info["header_columns"], info["schema_status"], info["width_counts"]))
+        print("feature CSV PnL unit: %s; normalized output: percent (no magnitude inference)" % (
+            info["pnl_unit"]["declared_input_unit"] or "UNSPECIFIED"))
         print("feature CSV stored outcomes: interpreted=%d unresolved=%d results=%s pnl=%s" % (
             info["interpreted_rows"], info["unresolved_rows"],
             info["result_counts_aligned"], info["pnl_counts_aligned"]))
