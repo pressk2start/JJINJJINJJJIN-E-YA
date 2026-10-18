@@ -18,7 +18,8 @@ class SubmitReached(BaseException):
 def isolated_close():
     source = (ROOT / "bot.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    functions = {"close_auto_position", "tg_order_notice", "_tg_order_notice_worker"}
+    functions = {"close_auto_position", "tg_order_notice", "_tg_order_notice_worker",
+                 "_tg_order_notice_log"}
     assignments = {"_TG_ORDER_NOTICE_QUEUE", "_TG_ORDER_NOTICE_START_LOCK",
                    "_TG_ORDER_NOTICE_WORKER"}
     selected = []
@@ -157,6 +158,39 @@ class TestOrderExecutionSpeed(unittest.TestCase):
             self.assertIsNone(ns["_TG_ORDER_NOTICE_WORKER"])
         finally:
             lock.release()
+
+
+    def test_failed_diagnostic_output_cannot_escape_enqueue(self):
+        ns = isolated_close()
+
+        def broken_stdout(*args, **kwargs):
+            raise BrokenPipeError("simulated stdout failure")
+
+        ns["print"] = broken_stdout
+        ns["_TG_ORDER_NOTICE_WORKER"] = SimpleNamespace(is_alive=lambda: True)
+        for i in range(32):
+            ns["_TG_ORDER_NOTICE_QUEUE"].put_nowait(str(i))
+        self.assertFalse(ns["tg_order_notice"]("queue-full"))
+        self.assertEqual(ns["_TG_ORDER_NOTICE_QUEUE"].qsize(), 32)
+
+    def test_worker_survives_delivery_and_diagnostic_failures(self):
+        ns = isolated_close()
+        delivered = threading.Event()
+
+        def sender(text):
+            if text == "fail":
+                raise RuntimeError("simulated failure")
+            delivered.set()
+
+        def broken_stdout(*args, **kwargs):
+            raise BrokenPipeError("simulated stdout failure")
+
+        ns["print"] = broken_stdout
+        ns["tg_send"] = sender
+        self.assertTrue(ns["tg_order_notice"]("fail"))
+        self.assertTrue(ns["tg_order_notice"]("next"))
+        self.assertTrue(delivered.wait(1.5))
+        self.assertTrue(ns["_TG_ORDER_NOTICE_WORKER"].is_alive())
 
     def test_auto_trade_off_still_skips_close(self):
         ns = isolated_close()

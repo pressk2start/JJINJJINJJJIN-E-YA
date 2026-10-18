@@ -204,5 +204,22 @@ class TestMakerFillReplay(unittest.TestCase):
         self.assertEqual(rep["status"], "EXPLORATORY_ONLY")
 
 
+    def test_missing_mid_path_does_not_publish_survivor_only_filled_mid(self):
+        self._day("2026-10-01", "through")
+        t0 = 1_000_000 + 86_400_000
+        records = [trade(t0 - 1000, 100.0, 1.0, "BID", 1), book(t0, 100.0, 101.0),
+                   trade(t0 + 500, 99.0, 100.0, "ASK", 2)] + filler(t0, 100.0, 101.0)
+        write_day(self.root, "2026-10-02", records)
+        rep = run(self.root)
+        group = {x["label"]: x for x in rep["groups"]}["H=10s all"]
+        self.assertEqual(group["n_opps"], 2)
+        self.assertEqual(group["n_filled"], 2)
+        self.assertEqual(group["n_unknown"], 1)
+        self.assertIsNone(group["mid_ret_h_filled_pct"])
+        self.assertIsNone(group["net_per_fill_pct"])
+        self.assertIsNone(group["net_per_opp_pct"])
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

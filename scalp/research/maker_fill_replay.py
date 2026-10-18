@@ -73,8 +73,10 @@ def summarize(rows, label):
         value = _mean(values)
         return value * 100 if value is not None else None
 
-    filled_mid = _mean([r["mid_ret_h"] for r in filled])
-    unfilled_mid = _mean([r["mid_ret_h"] for r in unfilled])
+    filled_mid = (_mean([r["mid_ret_h"] for r in filled])
+                  if all(r["mid_ret_h"] is not None for r in filled) else None)
+    unfilled_mid = (_mean([r["mid_ret_h"] for r in unfilled])
+                    if all(r["mid_ret_h"] is not None for r in unfilled) else None)
     return {
         "label": label, "n_opps": n, "n_filled": len(filled),
         "n_unfilled": len(unfilled), "n_unknown": n_unknown,
@@ -83,8 +85,8 @@ def summarize(rows, label):
         "net_per_opp_pct": pct_mean([r["net_frac"] for r in rows]) if not n_unknown else None,
         "net_per_resolved_opp_pct": pct_mean([r["net_frac"] for r in resolved]),
         "net_per_fill_pct": pct_mean([r["net_frac"] for r in filled]) if filled_pnl_known else None,
-        "mid_ret_h_filled_pct": pct_mean([r["mid_ret_h"] for r in filled]),
-        "mid_ret_h_unfilled_pct": pct_mean([r["mid_ret_h"] for r in unfilled]),
+        "mid_ret_h_filled_pct": filled_mid * 100 if filled_mid is not None else None,
+        "mid_ret_h_unfilled_pct": unfilled_mid * 100 if unfilled_mid is not None else None,
         "adverse_selection_pct": (
             (filled_mid - unfilled_mid) * 100
             if not n_unknown and filled_mid is not None and unfilled_mid is not None else None),

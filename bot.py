@@ -21624,13 +21624,21 @@ _TG_ORDER_NOTICE_START_LOCK = threading.Lock()
 _TG_ORDER_NOTICE_WORKER = None
 
 
+def _tg_order_notice_log(message, error=None):
+    try:
+        suffix = f": {error}" if error is not None else ""
+        print(f"[TG_ORDER_NOTICE] {message}{suffix}")
+    except Exception:
+        pass  # Diagnostic output is also outside the order's failure domain.
+
+
 def _tg_order_notice_worker():
     while True:
         text = _TG_ORDER_NOTICE_QUEUE.get()
         try:
             tg_send(text)
         except Exception as exc:
-            print(f"[TG_ORDER_NOTICE] delivery failed: {exc}")
+            _tg_order_notice_log("delivery failed", exc)
         finally:
             _TG_ORDER_NOTICE_QUEUE.task_done()
 
@@ -21642,7 +21650,7 @@ def tg_order_notice(text):
         worker = _TG_ORDER_NOTICE_WORKER
         if worker is None or not worker.is_alive():
             if not _TG_ORDER_NOTICE_START_LOCK.acquire(blocking=False):
-                print("[TG_ORDER_NOTICE] worker starting; notice skipped")
+                _tg_order_notice_log("worker starting; notice skipped")
                 return False
             try:
                 worker = _TG_ORDER_NOTICE_WORKER
@@ -21656,9 +21664,9 @@ def tg_order_notice(text):
         _TG_ORDER_NOTICE_QUEUE.put_nowait(text)
         return True
     except queue.Full:
-        print("[TG_ORDER_NOTICE] queue full; notice skipped")
+        _tg_order_notice_log("queue full; notice skipped")
     except Exception as exc:
-        print(f"[TG_ORDER_NOTICE] enqueue failed: {exc}")
+        _tg_order_notice_log("enqueue failed", exc)
     return False
 
 
