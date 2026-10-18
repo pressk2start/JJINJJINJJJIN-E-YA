@@ -152,6 +152,39 @@ def analyze_route(records, fee_pct=FEE_RT_PCT_DEFAULT, pnl_unit="fraction", size
     return out
 
 
+def analyze_horizons(records, fee_pct=FEE_RT_PCT_DEFAULT, pnl_unit="fraction", size_k=100,
+                     horizons=(30, 60, 120, 180, 240, 300)):
+    """고정 보유 가설 (생존편향 분리). trade_records[i].curve["<sec>"] 는 그 시점에 아직 보유 중일 때만 기록됨.
+    survivor_mean : curve 값 있는 건만 평균 (봇 리포트의 '240s:+0.59' 가 이것 → 생존편향)
+    all_mean      : 전건 평균. H 이전에 청산된 건은 실제 청산 pnl 사용 (= '기존 청산규칙 OR H 보유' 의 실측 하한)
+    all_net_taker : all_mean − fee − buy_slip − sell_slip (비용 프록시 있는 건만)
+    """
+    scale = 100.0 if pnl_unit == "fraction" else 1.0
+    out = {}
+    for h in horizons:
+        k = str(h)
+        surv, allv, allnet = [], [], []
+        for r in records:
+            g = _f(r.get("pnl"))
+            if g is None:
+                continue
+            g *= scale
+            cv = (r.get("curve") or {}).get(k)
+            cvf = _f(cv)
+            val = cvf * scale if cvf is not None else g
+            if cvf is not None:
+                surv.append(cvf * scale)
+            allv.append(val)
+            buy, sell, _ = trade_costs(r.get("inds"), size_k)
+            if buy is not None and sell is not None:
+                allnet.append(val - fee_pct - buy - sell)
+        out[k] = {"n_all": len(allv), "n_survivor": len(surv),
+                  "survivor_share": (len(surv) / len(allv)) if allv else None,
+                  "survivor_mean": _mean(surv), "all_mean": _mean(allv),
+                  "all_net_taker_mean": _mean(allnet), "all_net_taker_n": len(allnet)}
+    return out
+
+
 def analyze_stats(stats, **kw):
     res = {}
     for key, s in (stats or {}).items():
@@ -159,6 +192,7 @@ def analyze_stats(stats, **kw):
         if not recs:
             continue
         res[key] = analyze_route(recs, **kw)
+        res[key]["horizons"] = analyze_horizons(recs, **kw)
     return res
 
 
@@ -202,6 +236,16 @@ def print_report(res, live=None, min_n=20):
               f"{_fmt(a['net_taker_mean'],8)} {_fmt(a['net_maker_mean'],8)} {r['cost_coverage']:>5.2f} "
               f"{(r['median_spread_pct'] if r['median_spread_pct'] is not None else float('nan')):>6.3f} "
               f"{_fmt(r['first_half']['net_taker_mean'])} {_fmt(r['second_half']['net_taker_mean'])}  {r['verdict']}")
+    print("\nFIXED-HOLD (survivorship check): survivor=curve-only mean (biased), all=exited-before-H uses exit pnl")
+    for key, r in order:
+        if r.get("n", 0) < MIN_N or not r.get("horizons"):
+            continue
+        cells = []
+        for h, v in r["horizons"].items():
+            cells.append(f"{h}s surv{_fmt(v['survivor_mean'],6)}({(v['survivor_share'] or 0):.0%}) all{_fmt(v['all_mean'],6)} net{_fmt(v['all_net_taker_mean'],6)}")
+        print(f"  {key[:40]}")
+        for c in cells:
+            print(f"      {c}")
     cands = [k for k, r in res.items() if r.get("verdict", "").startswith("CANDIDATE")]
     print(f"\ncandidates (n>={MIN_N}, cost coverage>=0.8, both halves same sign): {cands or 'NONE'}")
     if live:

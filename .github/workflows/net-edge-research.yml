@@ -1,0 +1,24 @@
+name: Offline Net Edge Research
+on:
+  push:
+    paths:
+      - "scalp/research/micro_edge_quantile_replay.py"
+      - "scalp/research/net_edge_oos.py"
+      - "scalp/research/test_quantile_replay.py"
+      - "scalp/research/test_net_edge_oos.py"
+      - ".github/workflows/net-edge-research.yml"
+  workflow_dispatch:
+jobs:
+  offline-replay-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Depth replay and disconnect checks
+        run: python3 -m unittest discover -s scalp/research -p 'test_quantile_replay.py' -v
+      - name: Holdout and cost guard checks
+        run: python3 -m unittest discover -s scalp/research -p 'test_net_edge_oos.py' -v

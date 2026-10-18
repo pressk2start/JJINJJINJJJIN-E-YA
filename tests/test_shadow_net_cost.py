@@ -68,6 +68,28 @@ class TestShadowNetCost(unittest.TestCase):
         self.assertEqual([b["bucket"] for b in r["by_spread_tercile"]], ["tight", "mid", "wide"])
         self.assertEqual(sum(b["n"] for b in r["by_spread_tercile"]), 90)
 
+    def test_horizons_separate_survivor_from_all(self):
+        # 3 trades: A held to 240 (curve 240=+1.0%), B exited at 60s with -0.5% (no 240 key), C held (curve 240=+0.2%)
+        recs = [
+            {"pnl": 0.011, "inds": {}, "curve": {"60": 0.003, "240": 0.010}},
+            {"pnl": -0.005, "inds": {}, "curve": {"60": -0.005}},
+            {"pnl": 0.002, "inds": {}, "curve": {"60": 0.001, "240": 0.002}},
+        ]
+        h = M.analyze_horizons(recs, horizons=(60, 240))
+        self.assertEqual(h["240"]["n_survivor"], 2)
+        self.assertEqual(h["240"]["n_all"], 3)
+        self.assertAlmostEqual(h["240"]["survivor_mean"], 0.6)          # (1.0+0.2)/2
+        self.assertAlmostEqual(h["240"]["all_mean"], (1.0 - 0.5 + 0.2) / 3)
+        self.assertAlmostEqual(h["240"]["survivor_share"], 2 / 3)
+        self.assertIsNone(h["240"]["all_net_taker_mean"])              # no cost fields
+        self.assertEqual(h["60"]["n_survivor"], 3)
+
+    def test_horizons_net_uses_cost_proxies(self):
+        recs = [rec(0.010, buy=0.1, sell=0.1)]
+        recs[0]["curve"] = {"240": 0.006}
+        h = M.analyze_horizons(recs, fee_pct=0.10, horizons=(240,))
+        self.assertAlmostEqual(h["240"]["all_net_taker_mean"], 0.6 - 0.1 - 0.1 - 0.1)
+
     def test_analyze_stats_skips_routes_without_records(self):
         stats = {"A:x": {"trade_records": [rec(0.005)]}, "B:y": {"signals": 3}, "C:z": None}
         res = M.analyze_stats(stats)
