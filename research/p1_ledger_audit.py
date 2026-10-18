@@ -11,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 
 def number(value, positive=False, nonnegative=False):
@@ -255,6 +255,10 @@ def analyze(rows, orders=(), since=None, until=None):
         sell_fee = number(exit_row.get("exit_fee_krw"), nonnegative=True)
         remaining = number(closed.get("remaining_volume"), nonnegative=True)
         buy_uuid, sell_uuid = entry.get("entry_order_uuid"), exit_row.get("exit_order_uuid")
+        # An explicitly related fallback can contain additional fills. A single
+        # exported limit/sell pair cannot allocate that additional order.
+        if buy_uuid and any(s.get("parent_order_uuid") == buy_uuid for s in submissions):
+            flags.append("related_fallback_requires_all_orders")
         if buy_price is None or buy_qty is None or buy_cost is None:
             flags.append("entry_cashflow_unknown")
         elif abs(buy_cost - buy_price * buy_qty) > max(
@@ -330,7 +334,8 @@ def analyze(rows, orders=(), since=None, until=None):
             "live_false_or_conflict", "live_unmarked", "closure_not_confirmed", "time_reversal",
             "entry_reconciliation_invalid", "entry_reconciliation_changed_basis",
             "entry_reconciled_after_initial_fill", "entry_reconcile_incomplete",
-            "multileg_entry_requires_all_orders", "logged_volume_mismatch", "exit_orders_unresolved",
+            "multileg_entry_requires_all_orders", "related_fallback_requires_all_orders",
+            "logged_volume_mismatch", "exit_orders_unresolved",
         ))
         if orders and not blockers and buy_uuid and sell_uuid:
             buys, sells = order_index[str(buy_uuid)], order_index[str(sell_uuid)]
@@ -394,7 +399,13 @@ def analyze(rows, orders=(), since=None, until=None):
     for event in submissions:
         order_uuid = event.get("order_uuid")
         owners = sorted(all_uuid_owners.get(str(order_uuid), ())) if order_uuid else []
+        parent_uuid = event.get("parent_order_uuid")
+        parent_valid = (isinstance(parent_uuid, str) and bool(parent_uuid)
+                        and parent_uuid != order_uuid)
+        parent_owners = sorted(all_uuid_owners.get(parent_uuid, ())) if parent_valid else []
         submission_flags = []
+        if parent_uuid is not None and not parent_valid:
+            submission_flags.append("submission_parent_uuid_invalid")
         if not order_uuid:
             submission_flags.append("submission_uuid_unknown")
         elif submission_counts[str(order_uuid)] > 1:
@@ -403,6 +414,8 @@ def analyze(rows, orders=(), since=None, until=None):
             submission_flags.append("submission_not_linked_to_trade")
         submission_output.append({
             "order_uuid": order_uuid, "market": event.get("market"),
+            "parent_order_uuid": parent_uuid,
+            "parent_referenced_trade_ids": parent_owners,
             "submit_ts": event.get("submit_ts", event.get("ts")), "submit_path": event.get("submit_path"),
             "requested_krw": plain(number(event.get("requested_krw"), positive=True)),
             "referenced_trade_ids": owners,
@@ -612,10 +625,11 @@ def save_report(report, output):
             writer.writeheader()
             for row in submissions:
                 writer.writerow({**row, "flags": ";".join(row["flags"]),
-                                 "referenced_trade_ids": ";".join(row["referenced_trade_ids"])})
+                                 "referenced_trade_ids": ";".join(row["referenced_trade_ids"]),
+                                 "parent_referenced_trade_ids": ";".join(row["parent_referenced_trade_ids"])})
     else:
         (output / "orders.csv").write_text(
-            "order_uuid,market,submit_ts,submit_path,requested_krw,referenced_trade_ids,status,flags\n",
+            "order_uuid,market,parent_order_uuid,parent_referenced_trade_ids,submit_ts,submit_path,requested_krw,referenced_trade_ids,status,flags\n",
             encoding="utf-8-sig")
     trades = report["trades"]
     if trades:
