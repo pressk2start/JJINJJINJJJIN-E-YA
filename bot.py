@@ -5142,12 +5142,23 @@ def _save_bot_state(force=False):
                         if isinstance(v, (str, int, float, bool, type(None)))
                     }
 
+        # P1-fix-D (2026-10-18): 원장 pending(진입 기록 ↔ 청산 조인 키) 영속화.
+        # 재시작 사이에 보유 중이던 포지션이 청산되면 TRADE_CLOSED 가 pending 없이 기록돼
+        # 진입과 조인되지 않던 문제. 복원 시엔 open_positions 에 있는 종목만 되살린다.
+        with _LIVE_TRADE_LOCK:
+            live_pending = {
+                m: {k: v for k, v in (p or {}).items()
+                    if isinstance(v, (str, int, float, bool, type(None), list))}
+                for m, p in _LIVE_TRADE_PENDING.items()
+            }
+
         state = {
             "saved_at": now,
             "trade_history": trade_hist,
             "coin_loss_history": coin_loss,
             "streaks": streaks,
             "open_positions": positions,
+            "live_trade_pending": live_pending,
         }
         tmp_path = STATE_PERSIST_PATH + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -5157,8 +5168,19 @@ def _save_bot_state(force=False):
         print(f"[STATE_PERSIST] 저장 실패: {e}")
 
 
+_SHUTDOWN_DONE = False           # _shutdown_save_all 1회 실행 가드 (signal + atexit 이중 호출 방지)
+_SHUTDOWN_EXECUTORS = []         # 종료 시 즉시 내릴 ThreadPoolExecutor 목록 (main 에서 등록)
+_SHUTDOWN_LOCK = threading.Lock()
+
+
 def _shutdown_save_all():
-    """종료 시 모든 통계 강제 저장 (데이터 유실 방지)"""
+    """종료 시 모든 통계 강제 저장 (데이터 유실 방지). 1회만 실행."""
+    global _SHUTDOWN_DONE
+    with _SHUTDOWN_LOCK:
+        if _SHUTDOWN_DONE:
+            return
+        _SHUTDOWN_DONE = True
+    _t0 = time.time()
     print("[SHUTDOWN] 종료 감지 — 통계 강제 저장 중...")
     try:
         _save_bot_state(force=True)
@@ -5172,20 +5194,41 @@ def _shutdown_save_all():
         _save_shadow_stats()
     except Exception as e:
         print(f"[SHUTDOWN] shadow_stats 저장 실패: {e}")
-    print("[SHUTDOWN] 강제 저장 완료")
+    print(f"[SHUTDOWN] 강제 저장 완료 ({time.time() - _t0:.1f}s)")
 
 
 atexit.register(_shutdown_save_all)
 
 
 def _signal_handler(signum, frame):
-    """SIGTERM/SIGINT 수신 시 저장 후 종료"""
+    """SIGTERM/SIGINT 수신 시 저장 후 즉시 종료.
+
+    2026-10-18 이전: sys.exit(0) → 인터프리터 종료 시 executor worker join + atexit 재저장 등으로
+    58~87초 소요 → systemd TimeoutStopSec(90s) 에 걸려 SIGKILL 되거나 배포 스크립트의
+    status 조회가 deactivating 에 걸려 '배포 실패' 로 표시됨 (10/17 08:06, 11:05, 18:03 관측).
+    변경: 저장 1회 → executor 즉시 shutdown(대기 X, 대기열 취소) → stdout flush → os._exit(0).
+    os._exit 은 atexit/스레드 join 을 건너뛰므로 저장은 반드시 이 함수 안에서 끝낸다.
+    """
+    _t0 = time.time()
     print(f"[SHUTDOWN] 시그널 {signum} 수신")
     try:
         _shutdown_save_all()
     except Exception as _e:
         print(f"[SHUTDOWN] 저장 중 오류(무시): {_e}")
-    sys.exit(0)
+    for _ex in list(_SHUTDOWN_EXECUTORS):
+        try:
+            _ex.shutdown(wait=False, cancel_futures=True)
+        except TypeError:  # python<3.9 호환
+            _ex.shutdown(wait=False)
+        except Exception as _e:
+            print(f"[SHUTDOWN] executor 종료 실패(무시): {_e}")
+    print(f"[SHUTDOWN] 프로세스 종료 ({time.time() - _t0:.1f}s)")
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
 
 
 signal.signal(signal.SIGTERM, _signal_handler)
@@ -5257,6 +5300,24 @@ def _load_bot_state():
                         p["restored"] = True  # 복원된 포지션 표시
                         OPEN_POSITIONS[m] = p
             print(f"[STATE_PERSIST] OPEN_POSITIONS 복원: {len(positions)}개 (orphan_sync에서 검증)")
+
+        # P1-fix-D: 원장 pending 복원 — 저장 당시 보유 중(open_positions)이던 종목만, 24h 이내만.
+        # 그 외 항목을 되살리면 다음 신규 진입이 옛 trade_id 의 add-leg 로 잘못 붙는다 (C.1 경로).
+        live_pending = state.get("live_trade_pending", {}) or {}
+        if live_pending:
+            now_ts = time.time()
+            restored_p = 0
+            with _LIVE_TRADE_LOCK:
+                for m, p in live_pending.items():
+                    if m not in positions or not isinstance(p, dict) or not p.get("trade_id"):
+                        continue
+                    _ets = p.get("entry_ts")
+                    if not isinstance(_ets, (int, float)) or now_ts - _ets > 86400:
+                        continue
+                    if m not in _LIVE_TRADE_PENDING:
+                        _LIVE_TRADE_PENDING[m] = p
+                        restored_p += 1
+            print(f"[STATE_PERSIST] LIVE_TRADE_PENDING 복원: {restored_p}/{len(live_pending)}건 (보유 종목만)")
 
         print(f"[STATE_PERSIST] ✅ 상태 복원 완료")
     except Exception as e:
@@ -23107,6 +23168,7 @@ def main():
 
     # 🔧 FIX: ThreadPoolExecutor를 루프 밖에서 1회 생성 (매 루프 생성/소멸 오버헤드 제거)
     _candle_executor = ThreadPoolExecutor(max_workers=PARALLEL_WORKERS)
+    _SHUTDOWN_EXECUTORS.append(_candle_executor)  # SIGTERM 시 즉시 종료 대상 (graceful shutdown)
 
     # 🔧 주기적 헬스체크 텔레그램 알림 (10분마다)
     _last_heartbeat_ts = time.time()
