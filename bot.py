@@ -526,7 +526,7 @@ _PIPELINE_COUNTERS = {
     "send_success": 0,         # 진입 성공 수
 }
 _PIPELINE_LAST_REPORT_TS = 0
-_PIPELINE_REPORT_INTERVAL = 600  # 10분
+_PIPELINE_REPORT_INTERVAL = int(globals().get("TG_PIPELINE_REPORT_SEC", 600) or 0)  # config.TG_PIPELINE_REPORT_SEC (0 = 발송 안 함)
 _PIPELINE_START_TS = time.time()  # 누적 계측 시작 시각
 try:
     import subprocess as _sp
@@ -3629,7 +3629,8 @@ def _pipeline_report(force=False):
     """10분마다 파이프라인 카운터 리포트 전송 (확장판: delta, 전환율, 값분포, 니어미스, Top-N)"""
     global _PIPELINE_LAST_REPORT_TS, _PIPELINE_PREV_SNAPSHOT, _PIPELINE_PREV_SNAPSHOT_TS
     now = time.time()
-    if not force and (now - _PIPELINE_LAST_REPORT_TS) < _PIPELINE_REPORT_INTERVAL:
+    if not force and (_PIPELINE_REPORT_INTERVAL <= 0
+                      or (now - _PIPELINE_LAST_REPORT_TS) < _PIPELINE_REPORT_INTERVAL):
         return
     _PIPELINE_LAST_REPORT_TS = now
     with _PIPELINE_COUNTERS_LOCK:
@@ -4263,8 +4264,9 @@ def _pipeline_report(force=False):
         for i, h in enumerate(_header):
             _rl.insert(i, h)
         _research_msg = "\n".join(_rl)
-        print(_research_msg)
-        tg_send(_research_msg)
+        print(_research_msg)  # 로그 파일엔 항상 기록 (오프라인 분석용)
+        if globals().get("TG_RESEARCH_DETAIL", True):
+            tg_send(_research_msg)
 
     # 스냅샷 갱신 (다음 리포트의 delta 계산용)
     _PIPELINE_PREV_SNAPSHOT = dict(c)
@@ -8297,7 +8299,7 @@ def safe_partial_sell(m, sell_ratio=0.5, reason=""):
         if executed <= 0:
             msg = f"[PARTIAL_SELL_ERR] {m}: executed_volume=0 (요청 {sell_volume:.6f})"
             print(msg)
-            tg_send_mid(f"⚠️ <b>부분청산 주문 실패</b> {m}\n"
+            tg_send(f"⚠️ <b>부분청산 주문 실패</b> {m}\n"  # 실패 알림은 SILENT 와 무관하게 발송
                         f"• 요청 비율: {sell_ratio*100:.0f}%\n"
                         f"• 요청 수량: {sell_volume:.6f}\n"
                         f"• 체결 수량: 0 (실패)")
@@ -22081,7 +22083,7 @@ def main():
 
     # 🔧 주기적 헬스체크 텔레그램 알림 (10분마다)
     _last_heartbeat_ts = time.time()
-    _HEARTBEAT_INTERVAL = 600  # 10분
+    _HEARTBEAT_INTERVAL = int(globals().get("TG_HEARTBEAT_SEC", 600) or 0)  # config (기존 600초)
 
     # 🔧 FIX: c1_cache 초기화 (첫 반복에서 box_scan_markets에 NameError 방지)
     c1_cache = {}
@@ -22128,8 +22130,8 @@ def main():
             _pipeline_mini_report()
             _pipeline_record_stage("report_mini", (time.time() - _t_stage) * 1000)
 
-            # 🔧 30분마다 텔레그램 헬스체크 알림
-            if time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
+            # 💓 텔레그램 생존 확인 — config.TG_HEARTBEAT_SEC (0 = 발송 안 함)
+            if _HEARTBEAT_INTERVAL > 0 and time.time() - _last_heartbeat_ts >= _HEARTBEAT_INTERVAL:
                 _last_heartbeat_ts = time.time()
                 with _POSITION_LOCK:
                     pos_count = len([p for p in OPEN_POSITIONS.values() if p.get("state") == "open"])

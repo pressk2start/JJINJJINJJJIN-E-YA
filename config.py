@@ -308,7 +308,13 @@ ORPHAN_SYNC_INTERVAL = 30
 # ============================================================
 DEBUG_CUT = True
 DEBUG_NEAR_MISS = True
-SILENT_MIDDLE_ALERTS = False
+# ── 텔레그램 발송 범위 (2026-10-18 정리) ──
+# 기본값 = 필요 메시지만: 매수/매도 체결 · 청산 결과 · 오류/수동확인 · 1시간 파이프라인 요약.
+# 모든 메시지는 /tmp/bot_stdout.log 에 그대로 남으므로 끄더라도 데이터 손실 없음.
+SILENT_MIDDLE_ALERTS = True        # 포지션 중간 상태(트레일 무장·스킵 사유·추매 등) → 로그만. False 면 텔레그램 발송
+TG_PIPELINE_REPORT_SEC = 3600      # compact 파이프라인/LIVE 요약 발송 간격 (초). 0 = 발송 안 함. 기존 600
+TG_RESEARCH_DETAIL = False         # 📋 RESEARCH DETAIL (수백 줄 shadow 노선 상세) 발송 여부. 파일엔 항상 기록
+TG_HEARTBEAT_SEC = 0               # 💓 생존 확인 발송 간격 (초). 0 = 발송 안 함 (systemd + 오류 알림으로 대체). 기존 600
 ALERT_TTL = 1800
 _SPIKE_WAVE_WINDOW = 1800
 
