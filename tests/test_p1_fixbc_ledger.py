@@ -338,7 +338,8 @@ class TestOrderEvidence(unittest.TestCase):
         self.assertEqual(_by_type(self.events, "TRADE_CLOSED")[0]["net_pnl_krw_cashflow"], 593.7)
 
     def test_report_dedup_cannot_suppress_new_order_evidence(self):
-        tree = ast.parse(open(BOT_PATH, encoding="utf-8").read())
+        with open(BOT_PATH, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
         node = next(x for x in tree.body if isinstance(x, ast.FunctionDef)
                     and x.name == "update_trade_result")
         calls = []

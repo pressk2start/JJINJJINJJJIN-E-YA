@@ -159,7 +159,7 @@ class TestActualLoggerAuditBoundary(unittest.TestCase):
             exported_order("sell-1", "ask", 10, 110, 0.55),
         ])
         self.assertIn(
-            "entry_reconciliation_changed_basis",
+            "entry_reconciliation_invalid",
             report["trades"][0]["flags"])
 
     def test_added_leg_requires_all_order_evidence(self):

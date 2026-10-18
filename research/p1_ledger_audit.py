@@ -281,6 +281,8 @@ def analyze(rows, orders=(), since=None, until=None):
             flags.append("entry_reconciled_after_initial_fill")
         if latest_reconcile and (final_rec_qty is None or final_rec_price is None or final_rec_cost is None):
             flags.append("entry_reconcile_incomplete")
+        if closed.get("unresolved_exit_order_uuids"):
+            flags.append("exit_orders_unresolved")
         # Position averages can include quote fallbacks, account inventory or
         # several orders. Keep them separate from the original fill evidence.
         for rec in reconciliations:
@@ -326,7 +328,7 @@ def analyze(rows, orders=(), since=None, until=None):
             "live_false_or_conflict", "live_unmarked", "closure_not_confirmed", "time_reversal",
             "entry_reconciliation_invalid", "entry_reconciliation_changed_basis",
             "entry_reconciled_after_initial_fill", "entry_reconcile_incomplete",
-            "multileg_entry_requires_all_orders", "logged_volume_mismatch",
+            "multileg_entry_requires_all_orders", "logged_volume_mismatch", "exit_orders_unresolved",
         ))
         if orders and not blockers and buy_uuid and sell_uuid:
             buys, sells = order_index[str(buy_uuid)], order_index[str(sell_uuid)]
