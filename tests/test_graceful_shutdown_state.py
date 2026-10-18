@@ -20,14 +20,16 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOT = os.path.join(ROOT, "bot.py")
-NAMES = ("_save_bot_state", "_load_bot_state", "_signal_handler", "_shutdown_save_all")
+NAMES = ("_save_bot_state", "_load_bot_state", "_signal_handler", "_shutdown_save_all",
+         "_order_critical", "_order_guarded", "_order_inflight_count", "_wait_orders_drained")
 
 
 def _load(ns_extra):
     tree = ast.parse(open(BOT, encoding="utf-8").read())
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in NAMES]
+    nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in NAMES]
     assert {n.name for n in nodes} == set(NAMES)
-    ns = {"json": json, "time": time, "copy": copy, "os": os, "threading": threading}
+    ns = {"json": json, "time": time, "copy": copy, "os": os, "threading": threading,
+          "_ORDER_INFLIGHT": 0, "_ORDER_INFLIGHT_LOCK": threading.Lock(), "_ORDER_DRAIN_MAX_SEC": 10.0}
     ns.update(ns_extra)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), BOT, "exec"), ns)
     return ns
@@ -79,6 +81,78 @@ class TestSignalHandler(unittest.TestCase):
         self.ns["_SHUTDOWN_EXECUTORS"].append(Bad())
         self.ns["_signal_handler"](2, None)
         self.assertEqual(self.exits, [0])
+
+
+class TestInFlightOrderGuard(unittest.TestCase):
+    """어드바이저 조건 A-1: 주문 진행 중엔 SIGTERM 이 끊지 않는다 (상한 대기)."""
+
+    def _ns(self, max_sec=10.0):
+        self.saved, self.exits = [], []
+        fake_os = types.SimpleNamespace(_exit=lambda c: self.exits.append(c), path=os.path, replace=os.replace)
+        ns = _load({
+            "os": fake_os, "_ORDER_DRAIN_MAX_SEC": max_sec,
+            "sys": types.SimpleNamespace(stdout=types.SimpleNamespace(flush=lambda: None),
+                                         stderr=types.SimpleNamespace(flush=lambda: None)),
+            "_SHUTDOWN_DONE": False, "_SHUTDOWN_LOCK": threading.Lock(), "_SHUTDOWN_EXECUTORS": [],
+            "_save_signal_stats": lambda: None, "_save_shadow_stats": lambda: None,
+        })
+        ns["_save_bot_state"] = lambda force=False: self.saved.append(time.time())
+        return ns
+
+    def test_handler_waits_for_in_flight_order_then_exits(self):
+        ns = self._ns()
+        order_done = []
+
+        @ns["_order_guarded"]
+        def fake_close():
+            time.sleep(0.6)
+            order_done.append(time.time())
+
+        th = threading.Thread(target=fake_close); th.start()
+        time.sleep(0.1)
+        self.assertEqual(ns["_order_inflight_count"](), 1)
+        t0 = time.time()
+        ns["_signal_handler"](15, None)
+        self.assertEqual(self.exits, [0])
+        self.assertGreaterEqual(time.time() - t0, 0.4)            # 기다렸다
+        self.assertEqual(ns["_order_inflight_count"](), 0)
+        self.assertLess(order_done[0], self.saved[0])             # 주문 완료 후 저장
+        th.join()
+
+    def test_handler_gives_up_after_cap(self):
+        ns = self._ns(max_sec=0.3)
+        stop = threading.Event()
+
+        def stuck():
+            with ns["_order_critical"]():
+                stop.wait(5)
+        th = threading.Thread(target=stuck, daemon=True); th.start()
+        time.sleep(0.05)
+        t0 = time.time()
+        ns["_signal_handler"](15, None)
+        self.assertEqual(self.exits, [0])
+        self.assertLess(time.time() - t0, 2.0)                    # 상한에서 포기
+        self.assertEqual(ns["_order_inflight_count"](), 1)        # 아직 1건 (수동 확인 대상)
+        stop.set()
+
+    def test_guard_released_on_exception(self):
+        ns = self._ns()
+
+        @ns["_order_guarded"]
+        def boom():
+            raise RuntimeError("x")
+        with self.assertRaises(RuntimeError):
+            boom()
+        self.assertEqual(ns["_order_inflight_count"](), 0)
+
+    def test_order_functions_are_decorated_in_bot(self):
+        tree = ast.parse(open(BOT, encoding="utf-8").read())
+        want = {"open_auto_position", "add_auto_position", "close_auto_position", "safe_partial_sell", "sell_all"}
+        got = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)
+               and any(isinstance(d, ast.Name) and d.id == "_order_guarded" for d in n.decorator_list)}
+        self.assertEqual(want, got)
+        src = open(BOT, encoding="utf-8").read()
+        self.assertEqual(src.count("with _order_critical():"), 3)  # 데코레이터 본체 1 + box monitor 2
 
 
 class TestPendingPersistence(unittest.TestCase):
