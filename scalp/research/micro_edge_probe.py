@@ -31,10 +31,13 @@ ws_recorder.py 가 수집한 Upbit WebSocket raw event (orderbook + trade) 를 �
         --data-dir /home/ubuntu/scalp/research/data/ws \\
         --days 14
 
-성립 조건 (저위험 플래그):
-- 매매 봇과 독립 process · 데이터는 read-only
-- 추가 네트워크/디스크 쓰기 없음 (출력 JSON 외)
-- RAM: 14일치 incremental 로딩 · 종목별 sliding window 만 유지
+--candle-compare: 공개 BTC/ETH 5분봉을 로컬 캐시로 받아 5~240분 고정 조건 비교.
+주문·API 키 없이 공개 GET만 사용하며, 시가와 가정 비용은 실제 체결 검산이 아니다.
+
+WS 모드 성립 조건:
+- 매매 봇과 독립 process · WS 데이터는 read-only
+- WS 모드는 추가 네트워크 호출 없음 (결과 JSON/CSV만 기록)
+- RAM: WS incremental 로딩 · 종목별 sliding window 만 유지
 """
 from __future__ import annotations
 
@@ -85,7 +88,16 @@ def parse_args():
     ap.add_argument("--fee-rate", type=float, default=.0005, help="Per-side fee fraction")
     ap.add_argument("--validation-from", default=None,
                     help="UTC-aware ISO boundary; otherwise derive from input day inventory only")
+    ap.add_argument("--candle-compare", action="store_true",
+                    help="Fixed public BTC/ETH candle comparison; no orders or API keys")
+    ap.add_argument("--candle-days", type=int, default=180)
+    ap.add_argument("--candle-end", default=None, help="Exclusive UTC midnight date YYYY-MM-DD")
+    ap.add_argument("--candle-cache", default="candle_cache")
+    ap.add_argument("--candle-slip-bp", type=float, default=10)
+    ap.add_argument("--candle-stress-bp", type=float, default=20)
     args = ap.parse_args()
+    if args.candle_compare and args.execution_compare:
+        ap.error("choose exactly one comparison mode")
     if args.data_dir_pos:
         args.data_dir = args.data_dir_pos
     return args
@@ -828,8 +840,329 @@ def run_execution_comparison(args):
     return report
 
 
+# Public candles: fixed historical comparison; never imports the trading bot.
+CANDLE_STEP_MS = 300000
+CANDLE_DAY_MS = 86400000
+CANDLE_HOLDS_MIN = (5, 15, 60, 240)
+CANDLE_SIGNALS = ("ALL", "MOMENTUM_60M", "REVERSION_60M")
+
+
+def candle_time_ms(value):
+    parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return int(parsed.astimezone(dt.timezone.utc).timestamp() * 1000)
+
+
+def candle_normalize(raw_rows, market, end_ms):
+    """Only completed, aligned, finite, internally consistent UTC 5-minute bars."""
+    if not isinstance(raw_rows, list):
+        raise ValueError("candle response must be a list")
+    result = {}
+    for raw in raw_rows:
+        if not isinstance(raw, dict) or raw.get("market") != market:
+            raise ValueError("candle market mismatch")
+        if raw.get("unit", 5) != 5:
+            raise ValueError("expected 5-minute candles")
+        t = candle_time_ms(raw["candle_date_time_utc"])
+        if t % CANDLE_STEP_MS:
+            raise ValueError("unaligned candle")
+        if t + CANDLE_STEP_MS > end_ms:
+            continue
+        bar = {name: float(raw[key]) for name, key in (
+            ("open", "opening_price"), ("high", "high_price"),
+            ("low", "low_price"), ("close", "trade_price"))}
+        if (not all(math.isfinite(v) and v > 0 for v in bar.values())
+                or bar["high"] < max(bar["open"], bar["close"], bar["low"])
+                or bar["low"] > min(bar["open"], bar["close"], bar["high"])):
+            raise ValueError("invalid candle OHLC")
+        if t in result and result[t] != bar:
+            raise ValueError("conflicting duplicate candle")
+        result[t] = bar
+    return result
+
+
+def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None):
+    """Exclusive UTC pagination, local page cache, bounded retries; public GET only."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    opener = opener or urllib.request.urlopen
+    sleeper = sleeper or time.sleep
+    root = Path(cache_dir) / market
+    root.mkdir(parents=True, exist_ok=True)
+    cursor, pages, raw_rows, manifest = end_ms, 0, [], []
+    lower = start_ms - 13 * CANDLE_STEP_MS
+    while cursor > lower:
+        path = root / ("5m_%d.json" % cursor)
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (payload.get("schema") != 1 or payload.get("market") != market
+                    or payload.get("to_exclusive_ms") != cursor):
+                raise ValueError("cache metadata mismatch: " + str(path))
+            batch = payload["candles"]
+        else:
+            query = urllib.parse.urlencode({
+                "market": market, "count": 200,
+                "to": dt.datetime.fromtimestamp(cursor / 1000, dt.timezone.utc).isoformat()})
+            request = urllib.request.Request(
+                "https://api.upbit.com/v1/candles/minutes/5?" + query,
+                headers={"Accept": "application/json", "User-Agent": "offline-candle-comparison/1"})
+            for attempt in range(5):
+                sleeper(.26)
+                try:
+                    with opener(request, timeout=20) as response:
+                        batch = json.loads(response.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in (429, 500, 502, 503, 504) or attempt == 4:
+                        raise
+                    sleeper(min(2 ** attempt, 8))
+                except (urllib.error.URLError, TimeoutError):
+                    if attempt == 4:
+                        raise
+                    sleeper(min(2 ** attempt, 8))
+            payload = {"schema": 1, "market": market, "to_exclusive_ms": cursor,
+                       "candles": batch}
+            # Validate before caching; failed or malformed responses never become usable pages.
+            candle_normalize(batch, market, end_ms)
+            if len(batch) > 200 or any(candle_time_ms(r["candle_date_time_utc"]) >= cursor for r in batch):
+                raise ValueError("exclusive candle pagination failed")
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            os.replace(temp, path)
+        checked = candle_normalize(batch, market, end_ms)
+        if len(batch) > 200 or any(candle_time_ms(r["candle_date_time_utc"]) >= cursor for r in batch):
+            raise ValueError("exclusive candle pagination failed")
+        manifest.append({"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        if not batch:
+            break
+        earliest = min(candle_time_ms(r["candle_date_time_utc"]) for r in batch)
+        if earliest >= cursor:
+            raise ValueError("candle pagination did not advance")
+        raw_rows.extend(batch)
+        cursor = earliest
+        pages += 1
+        if pages == 1 or pages % 25 == 0:
+            print("[candles] %s pages=%d bars=%d oldest=%s" % (
+                market, pages, len(raw_rows),
+                dt.datetime.fromtimestamp(cursor / 1000, dt.timezone.utc).isoformat()), flush=True)
+        if not checked and cursor > lower:
+            raise ValueError("no completed candles in response")
+    return candle_normalize(raw_rows, market, end_ms), manifest
+
+
+def _candle_cost_return(entry, exit_price, fee_rate, slip_bp):
+    slip = slip_bp / 10000
+    return exit_price * (1 - slip) * (1 - fee_rate) / (
+        entry * (1 + slip) * (1 + fee_rate)) - 1
+
+
+def _candle_summary(events, signal, hold, fee_rate, order_krw):
+    rows = [r for r in events if r["hold_min"] == hold]
+    completed, paired, daily, by_coin = [], [], collections.defaultdict(list), collections.defaultdict(list)
+    selected = skipped = unresolved = 0
+    reasons = collections.Counter()
+    for row in rows:
+        feature = row["return_60m"]
+        choose = (True if signal == "ALL" else
+                  None if feature is None else
+                  feature > 0 if signal == "MOMENTUM_60M" else feature < 0)
+        if choose is True:
+            selected += 1
+        elif choose is False:
+            skipped += 1
+        # Common comparison includes only exactly observed features and executions.
+        if row["common_complete"]:
+            paired.append(row["net"] if choose else 0.0)
+        if choose is False:
+            continue
+        if choose is None or row["net"] is None:
+            unresolved += 1
+            reasons[row["missing_reason"] or "unknown_decision"] += 1
+            continue
+        completed.append(row)
+        day = dt.datetime.fromtimestamp(row["decision_ms"] / 1000, dt.timezone.utc).date().isoformat()
+        daily[day].append(row["net"])
+        by_coin[row["market"]].append(row["net"])
+    n, done = len(rows), len(completed)
+    mean = lambda vals: statistics.mean(vals) if vals else None
+    pct = lambda vals: mean(vals) * 100 if vals else None
+    nets = [r["net"] for r in completed]
+    stress = [r["stress"] for r in completed]
+    trimmed = sorted(nets)[:-5] if done > 5 else []
+    stress_trimmed = sorted(stress)[:-5] if done > 5 else []
+    return {
+        "signal": signal, "hold_min": hold, "opportunities": n,
+        "selected_signals": selected, "completed_roundtrips": done,
+        "signals_skipped": skipped, "unresolved_opportunities": unresolved,
+        "missing_reasons": dict(reasons),
+        "mean_gross_pct": pct([r["gross"] for r in completed]),
+        "fee_only_mean_net_pct": pct([r["fee_only"] for r in completed]),
+        "mean_net_pct": pct(nets), "stress_mean_net_pct": pct(stress),
+        "mean_event_net_krw": mean(nets) * order_krw * (1 + fee_rate) if nets else None,
+        "median_net_pct": statistics.median(nets) * 100 if nets else None,
+        "positive_rate": sum(v > 0 for v in nets) / done if done else None,
+        "worst_5pct_mean_net_pct": pct(sorted(nets)[:max(1, math.ceil(done * .05))]),
+        "mean_net_pct_without_top5": pct(trimmed),
+        "stress_mean_net_pct_without_top5": pct(stress_trimmed),
+        "paired_complete_opportunities": len(paired),
+        "net_pct_per_complete_opportunity_including_skips": pct(paired),
+        "all_opportunity_mean_net_pct": sum(nets) * 100 / n if n and not unresolved else None,
+        "per_coin": {k: {"completed": len(v), "mean_net_pct": pct(v)} for k, v in sorted(by_coin.items())},
+        "per_day": {k: {"completed": len(v), "mean_net_pct": pct(v)} for k, v in sorted(daily.items())},
+    }
+
+
+def candle_evaluate(books, start_ms, end_ms, fee_rate=.0005, order_krw=6000,
+                    slip_bp=10, stress_slip_bp=20):
+    """Fixed rules, hourly event grid, 5-minute response lag; no account simulation."""
+    if (start_ms % CANDLE_DAY_MS or end_ms % CANDLE_DAY_MS
+            or end_ms - start_ms < 30 * CANDLE_DAY_MS):
+        raise ValueError("need >=30 complete UTC days")
+    if (not 0 <= fee_rate < 1 or not math.isfinite(fee_rate)
+            or not math.isfinite(order_krw) or order_krw <= 0
+            or not 0 <= slip_bp <= stress_slip_bp < 10000
+            or not all(math.isfinite(v) for v in (slip_bp, stress_slip_bp))):
+        raise ValueError("invalid candle costs")
+    days = (end_ms - start_ms) // CANDLE_DAY_MS
+    split = start_ms + int(days * .7) * CANDLE_DAY_MS
+    phases = (("TRAIN", start_ms, split), ("HISTORICAL_HOLDOUT", split, end_ms))
+    report = {"status": "EXPLORATORY_ONLY", "mode": "PUBLIC_CANDLE_FIXED_RULE_COMPARISON",
+              "assumptions": {
+                  "markets": sorted(books), "candle_unit_min": 5,
+                  "utc_start": dt.datetime.fromtimestamp(start_ms / 1000, dt.timezone.utc).isoformat(),
+                  "utc_end_exclusive": dt.datetime.fromtimestamp(end_ms / 1000, dt.timezone.utc).isoformat(),
+                  "validation_from_utc": dt.datetime.fromtimestamp(split / 1000, dt.timezone.utc).isoformat(),
+                  "signal": "last completed close / close 60 minutes earlier; sign only",
+                  "decision_grid_minutes": 60, "entry_delay_minutes_after_decision": 5,
+                  "price_proxy": "scheduled candle open, not actual bid/ask fills",
+                  "hold_minutes": list(CANDLE_HOLDS_MIN),
+                  "fee_rate_per_side": fee_rate, "adverse_price_bp_per_side": slip_bp,
+                  "stress_adverse_price_bp_per_side": stress_slip_bp,
+                  "order_krw_excluding_buy_fee": order_krw,
+                  "account_returns_or_executable_frequency": False,
+                  "existing_clm_signal": "NOT_EVALUATED_WITHOUT_ACTUAL_DECISION_TIMESTAMPS",
+                  "fresh_forward_validation": False,
+                  "selection": "FIXED_RULES_NO_THRESHOLD_SEARCH"},
+              "results": []}
+    for phase, lo, hi in phases:
+        events = []
+        for market, bars in sorted(books.items()):
+            for decision in range(lo, hi, 3600000):
+                # Common max-horizon purge prevents any training outcome crossing the split.
+                if decision + CANDLE_STEP_MS + max(CANDLE_HOLDS_MIN) * 60000 >= hi:
+                    continue
+                lookback = [bars.get(t) for t in range(decision - 13 * CANDLE_STEP_MS, decision, CANDLE_STEP_MS)]
+                feature_ok = all(b is not None for b in lookback)
+                feature = lookback[-1]["close"] / lookback[0]["close"] - 1 if feature_ok else None
+                entry_ms = decision + CANDLE_STEP_MS
+                for hold in CANDLE_HOLDS_MIN:
+                    exit_ms = entry_ms + hold * 60000
+                    continuous = all(t in bars for t in range(decision, exit_ms + 1, CANDLE_STEP_MS))
+                    known = continuous and entry_ms in bars and exit_ms in bars
+                    values = {"gross": None, "fee_only": None, "net": None, "stress": None}
+                    if known:
+                        entry, exit_price = bars[entry_ms]["open"], bars[exit_ms]["open"]
+                        values = {
+                            "gross": exit_price / entry - 1,
+                            "fee_only": _candle_cost_return(entry, exit_price, fee_rate, 0),
+                            "net": _candle_cost_return(entry, exit_price, fee_rate, slip_bp),
+                            "stress": _candle_cost_return(entry, exit_price, fee_rate, stress_slip_bp)}
+                    events.append(dict(values, market=market, decision_ms=decision,
+                                       entry_ms=entry_ms, exit_ms=exit_ms, hold_min=hold,
+                                       return_60m=feature, common_complete=feature_ok and known,
+                                       missing_reason="missing_signal_candles" if not feature_ok
+                                       else "missing_execution_candles" if not known else None))
+        for hold in CANDLE_HOLDS_MIN:
+            for signal in CANDLE_SIGNALS:
+                row = _candle_summary(events, signal, hold, fee_rate, order_krw)
+                row["phase"] = phase
+                report["results"].append(row)
+    return report
+
+
+def run_candle_comparison(args):
+    if args.candle_days < 30:
+        raise ValueError("--candle-days must be >=30")
+    if args.candle_end:
+        end_ms = candle_time_ms(args.candle_end)
+    else:
+        end_ms = candle_time_ms(dt.datetime.now(dt.timezone.utc).date().isoformat())
+    if end_ms % CANDLE_DAY_MS:
+        raise ValueError("--candle-end must be a UTC midnight date")
+    now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+    if end_ms > now_ms:
+        raise ValueError("candle end must not be in the future")
+    start_ms = end_ms - args.candle_days * CANDLE_DAY_MS
+    output = Path(args.out)
+    csv_output = output.with_suffix(".csv")
+    text_output = output.with_suffix(".txt")
+    cache = Path(args.candle_cache)
+    if len({output.resolve(), csv_output.resolve(), text_output.resolve()}) != 3:
+        raise ValueError("use a distinct .json output path")
+    for target in (output, csv_output, text_output):
+        if target.resolve() == Path(__file__).resolve() or target.resolve().is_relative_to(cache.resolve()):
+            raise ValueError("output must not overwrite source or candle cache")
+    print("PUBLIC CANDLE HISTORICAL EXPLORATION - no orders, no API keys", flush=True)
+    print("BTC/ETH | 5-minute candles | %d UTC days | hourly decisions | 5-minute response lag" % args.candle_days,
+          flush=True)
+    books, manifest = {}, []
+    for market in ("KRW-BTC", "KRW-ETH"):
+        books[market], files = candle_fetch(market, start_ms, end_ms, cache)
+        manifest.extend(files)
+    report = candle_evaluate(books, start_ms, end_ms, args.fee_rate, args.order_krw,
+                             args.candle_slip_bp, args.candle_stress_bp)
+    report["input_manifest"] = manifest
+    report["generated_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    report["source_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    columns = ["phase", "signal", "hold_min", "opportunities", "selected_signals",
+               "completed_roundtrips", "signals_skipped", "unresolved_opportunities",
+               "mean_gross_pct", "fee_only_mean_net_pct", "mean_net_pct", "stress_mean_net_pct",
+               "mean_event_net_krw", "median_net_pct", "mean_net_pct_without_top5",
+               "paired_complete_opportunities", "net_pct_per_complete_opportunity_including_skips",
+               "all_opportunity_mean_net_pct"]
+    with csv_output.open("w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(report["results"])
+    for row in report["results"]:
+        print("%s | %s | %sm | complete=%d unknown=%d | gross=%s fee_only=%s net=%s stress=%s" % (
+            row["phase"], row["signal"], row["hold_min"], row["completed_roundtrips"],
+            row["unresolved_opportunities"], row["mean_gross_pct"], row["fee_only_mean_net_pct"],
+            row["mean_net_pct"], row["stress_mean_net_pct"]), flush=True)
+    lookup = {(r["phase"], r["signal"], r["hold_min"]): r for r in report["results"]}
+    summary = ["HISTORICAL EXPLORATION ONLY - NOT LIVE PROFIT",
+               "BTC/ETH | UTC %s .. %s (exclusive)" % (
+                   report["assumptions"]["utc_start"], report["assumptions"]["utc_end_exclusive"]),
+               "signal hold_m train_net% test_n unknown gross% fee_only% net% stress%"]
+    fmt = lambda value: "NA" if value is None else "%.4f" % value
+    for hold in CANDLE_HOLDS_MIN:
+        for signal in CANDLE_SIGNALS:
+            train = lookup[("TRAIN", signal, hold)]
+            test = lookup[("HISTORICAL_HOLDOUT", signal, hold)]
+            summary.append("%s %d %s %d %d %s %s %s %s" % (
+                signal, hold, fmt(train["mean_net_pct"]), test["completed_roundtrips"],
+                test["unresolved_opportunities"], fmt(test["mean_gross_pct"]),
+                fmt(test["fee_only_mean_net_pct"]), fmt(test["mean_net_pct"]),
+                fmt(test["stress_mean_net_pct"])))
+    text_output.write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("EXPLORATORY ONLY: candle prices and costs are assumptions, not verified LIVE profit.")
+    print("Results: %s %s %s" % (output, csv_output, text_output))
+    return report
+
+
 def main():
     args = parse_args()
+    if args.candle_compare:
+        try:
+            run_candle_comparison(args)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            print(f"[candles] error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        return
     if args.sample_only:
         args.days = 2
     if args.execution_compare:
