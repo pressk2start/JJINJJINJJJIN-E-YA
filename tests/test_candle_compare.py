@@ -1,4 +1,5 @@
 """Synthetic candle comparison checks; these do not demonstrate trading profit."""
+import contextlib
 import copy
 import importlib.util
 import io
@@ -8,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -238,6 +240,36 @@ class CandleDownloadTests(unittest.TestCase):
                 probe.candle_fetch(MARKET, START, START + DAY, tmp,
                                    opener=fake_get, sleeper=lambda _: None)
             self.assertEqual(list(Path(tmp).rglob("*.json")), [])
+
+
+
+class CandleCommandTests(unittest.TestCase):
+    def test_actual_cli_writes_json_csv_and_short_summary_without_live_imports(self):
+        past_start = probe.candle_time_ms("2020-01-01")
+        bars = {stamp - START + past_start: bar for stamp, bar in flat_books()[MARKET].items()}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "candle_result.json"
+            argv = ["micro_edge_probe.py", "--candle-compare", "--candle-days", "40",
+                    "--candle-end", "2020-02-10", "--candle-cache", str(Path(tmp) / "cache"),
+                    "--out", str(out)]
+            with mock.patch.object(sys, "argv", argv):
+                args = probe.parse_args()
+            self.assertTrue(args.candle_compare)
+            with mock.patch.object(probe, "candle_fetch", return_value=(bars, [])) as fetch:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    report = probe.run_candle_comparison(args)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual({call.args[0] for call in fetch.call_args_list}, {"KRW-BTC", "KRW-ETH"})
+            saved = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "EXPLORATORY_ONLY")
+            self.assertEqual(len(saved["results"]), 24)
+            self.assertEqual(saved["results"], report["results"])
+            self.assertTrue(all(r["unresolved_opportunities"] == 0 for r in saved["results"]))
+            self.assertTrue(out.with_suffix(".csv").exists())
+            summary = out.with_suffix(".txt").read_text(encoding="utf-8")
+            self.assertIn("NOT LIVE PROFIT", summary)
+            self.assertEqual(len(summary.splitlines()), 15)
+            self.assertNotIn("bot", sys.modules)
 
 
 if __name__ == "__main__":
