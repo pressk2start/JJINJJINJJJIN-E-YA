@@ -1026,7 +1026,8 @@ def candle_evaluate(books, start_ms, end_ms, fee_rate=.0005, order_krw=6000,
             or not all(math.isfinite(v) for v in (slip_bp, stress_slip_bp))):
         raise ValueError("invalid candle costs")
     days = (end_ms - start_ms) // CANDLE_DAY_MS
-    split = start_ms + int(days * .7) * CANDLE_DAY_MS
+    # Integer calendar arithmetic: 180 days must split into 126 / 54, not 125 / 55.
+    split = start_ms + (days * 7 // 10) * CANDLE_DAY_MS
     phases = (("TRAIN", start_ms, split), ("HISTORICAL_HOLDOUT", split, end_ms))
     report = {"status": "EXPLORATORY_ONLY", "mode": "PUBLIC_CANDLE_FIXED_RULE_COMPARISON",
               "assumptions": {

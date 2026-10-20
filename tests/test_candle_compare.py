@@ -199,6 +199,24 @@ class CandleComparisonTests(unittest.TestCase):
                          [r for r in changed["results"] if r["phase"] == "TRAIN"])
 
 
+
+    def test_180_day_split_uses_126_training_and_54_holdout_days(self):
+        end = START + 180 * DAY
+        flat = {"open": 100., "high": 100., "low": 100., "close": 100.}
+        books = {MARKET: {stamp: flat for stamp in range(START - 2 * HOUR, end, STEP)}}
+        report = probe.candle_evaluate(books, START, end, slip_bp=0)
+        expected_boundary = probe.dt.datetime.fromtimestamp(
+            (START + 126 * DAY) / 1000, probe.dt.timezone.utc).isoformat()
+        self.assertEqual(report["assumptions"]["validation_from_utc"], expected_boundary)
+        for phase, count in (("TRAIN", 126 * 24 - 4),
+                             ("HISTORICAL_HOLDOUT", 54 * 24 - 4)):
+            for horizon in HORIZONS:
+                row = result(report, phase, "ALL", horizon)
+                self.assertEqual(row["opportunities"], count)
+                self.assertEqual(row["completed_roundtrips"], count)
+                self.assertEqual(row["unresolved_opportunities"], 0)
+
+
 class CandleDownloadTests(unittest.TestCase):
     def test_exclusive_utc_pagination_and_cache_reuse(self):
         end = START + DAY
