@@ -247,6 +247,8 @@ class SignalCommandTests(unittest.TestCase):
             saved = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(saved["results"], report["results"])
             self.assertEqual(saved["input_signal_count"], 2)
+            self.assertFalse(saved["assumptions"]["decision_completion_time_verified"])
+            self.assertIn("not executable entry", saved["assumptions"]["causality_limit"])
             self.assertEqual(snapshot.read_bytes(), original)
             self.assertEqual(saved["input_snapshot"]["sha256"], hashlib.sha256(original).hexdigest())
             self.assertEqual(len(saved["results"]), 8)

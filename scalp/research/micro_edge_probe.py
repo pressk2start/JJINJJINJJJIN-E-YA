@@ -1362,6 +1362,8 @@ def signal_hold_evaluate(signals, books, available_until_ms, fee_rate=.0005,
         "assumptions": {
             "route": SIGNAL_HOLD_ROUTE, "candle_unit_min": 1,
             "signal_time": "recorded scan signal_id seconds, not actual order or position time",
+            "decision_completion_time_verified": False,
+            "causality_limit": "next minute can precede final decision; price response only, not executable entry",
             "entry": "next scheduled UTC minute open strictly after recorded signal",
             "entry_delay_seconds_range": [1, 60],
             "price_proxy": "first public trade in scheduled minute; not actual bid/ask or guaranteed fill",
@@ -1448,6 +1450,7 @@ def run_signal_hold_comparison(args):
             len(report["purged_training_signal_ids"]), len(failures)),
         "next 1-minute open proxy | fee %.4f%%/side | base %.1fbp/side; stress %.1fbp/side" % (
             args.fee_rate * 100, args.candle_slip_bp, args.candle_stress_bp),
+        "SCAN-TIME proxy: final decision/real entry time NOT verified; not an executable profit test",
         "paired = SAME signal IDs with all 4 outcomes; missing results are NOT zero",
         "phase hold_m signals complete unknown paired_n paired_gross% paired_fee% paired_net% paired_stress%"]
     for row in report["results"]:
