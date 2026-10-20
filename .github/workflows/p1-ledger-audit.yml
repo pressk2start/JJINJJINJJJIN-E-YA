@@ -7,6 +7,7 @@ on:
       - "scalp/research/micro_edge_probe.py"
       - "tests/test_micro_edge_probe.py"
       - "tests/test_candle_compare.py"
+      - "tests/test_signal_hold_compare.py"
       - "tests/test_order_execution_speed.py"
       - "tests/test_maker_fill_replay.py"
       - "scalp/research/maker_fill_replay.py"
@@ -20,6 +21,7 @@ on:
       - "scalp/research/micro_edge_probe.py"
       - "tests/test_micro_edge_probe.py"
       - "tests/test_candle_compare.py"
+      - "tests/test_signal_hold_compare.py"
       - "tests/test_order_execution_speed.py"
       - "tests/test_maker_fill_replay.py"
       - "scalp/research/maker_fill_replay.py"
@@ -39,13 +41,14 @@ jobs:
         with:
           python-version: "3.11"
       - name: Syntax
-        run: python -m py_compile bot.py research/p1_ledger_audit.py scalp/research/micro_edge_probe.py tests/test_p1_*.py tests/test_trade_features_header_migrate.py tests/test_micro_edge_probe.py tests/test_candle_compare.py tests/test_order_execution_speed.py tests/test_maker_fill_replay.py scalp/research/maker_fill_replay.py
+        run: python -m py_compile bot.py research/p1_ledger_audit.py scalp/research/micro_edge_probe.py tests/test_p1_*.py tests/test_trade_features_header_migrate.py tests/test_micro_edge_probe.py tests/test_candle_compare.py tests/test_signal_hold_compare.py tests/test_order_execution_speed.py tests/test_maker_fill_replay.py scalp/research/maker_fill_replay.py
       - name: P1 source and analyzer tests (isolated, synthetic data)
         run: |
           python -m unittest discover -s tests -p 'test_p1_*.py' -v
           python -m unittest discover -s tests -p 'test_trade_features_header_migrate.py' -v
           python -m unittest discover -s tests -p 'test_micro_edge_probe.py' -v
           python -m unittest discover -s tests -p 'test_candle_compare.py' -v
+          python -m unittest discover -s tests -p 'test_signal_hold_compare.py' -v
       - name: Actual close-path Telegram isolation and Maker execution guards
         run: |
           python -m unittest discover -s tests -p 'test_order_execution_speed.py' -v
