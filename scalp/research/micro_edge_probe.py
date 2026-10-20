@@ -88,6 +88,8 @@ def parse_args():
     ap.add_argument("--fee-rate", type=float, default=.0005, help="Per-side fee fraction")
     ap.add_argument("--validation-from", default=None,
                     help="UTC-aware ISO boundary; otherwise derive from input day inventory only")
+    ap.add_argument("--signal-hold-compare", metavar="SNAPSHOT", default=None,
+                    help="Compare fixed holding periods of recorded CS40 signal IDs; public minute candles")
     ap.add_argument("--candle-compare", action="store_true",
                     help="Fixed public BTC/ETH candle comparison; no orders or API keys")
     ap.add_argument("--candle-days", type=int, default=180)
@@ -96,7 +98,7 @@ def parse_args():
     ap.add_argument("--candle-slip-bp", type=float, default=10)
     ap.add_argument("--candle-stress-bp", type=float, default=20)
     args = ap.parse_args()
-    if args.candle_compare and args.execution_compare:
+    if sum((bool(args.signal_hold_compare), args.candle_compare, args.execution_compare)) > 1:
         ap.error("choose exactly one comparison mode")
     if args.data_dir_pos:
         args.data_dir = args.data_dir_pos
@@ -854,20 +856,23 @@ def candle_time_ms(value):
     return int(parsed.astimezone(dt.timezone.utc).timestamp() * 1000)
 
 
-def candle_normalize(raw_rows, market, end_ms):
-    """Only completed, aligned, finite, internally consistent UTC 5-minute bars."""
+def candle_normalize(raw_rows, market, end_ms, unit_min=5):
+    """Only completed, aligned, finite, internally consistent UTC candles."""
+    if unit_min not in (1, 5):
+        raise ValueError("unsupported candle unit")
+    step = unit_min * 60000
     if not isinstance(raw_rows, list):
         raise ValueError("candle response must be a list")
     result = {}
     for raw in raw_rows:
         if not isinstance(raw, dict) or raw.get("market") != market:
             raise ValueError("candle market mismatch")
-        if raw.get("unit", 5) != 5:
-            raise ValueError("expected 5-minute candles")
+        if raw.get("unit", unit_min) != unit_min:
+            raise ValueError("candle unit mismatch")
         t = candle_time_ms(raw["candle_date_time_utc"])
-        if t % CANDLE_STEP_MS:
+        if t % step:
             raise ValueError("unaligned candle")
-        if t + CANDLE_STEP_MS > end_ms:
+        if t + step > end_ms:
             continue
         bar = {name: float(raw[key]) for name, key in (
             ("open", "opening_price"), ("high", "high_price"),
@@ -882,23 +887,28 @@ def candle_normalize(raw_rows, market, end_ms):
     return result
 
 
-def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None):
+def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None,
+                 unit_min=5, history_bars=13):
     """Exclusive UTC pagination, local page cache, bounded retries; public GET only."""
     import urllib.error
     import urllib.parse
     import urllib.request
     opener = opener or urllib.request.urlopen
     sleeper = sleeper or time.sleep
+    if unit_min not in (1, 5) or not isinstance(history_bars, int) or history_bars < 0:
+        raise ValueError("invalid candle unit or history")
+    step = unit_min * 60000
     root = Path(cache_dir) / market
     root.mkdir(parents=True, exist_ok=True)
     cursor, pages, raw_rows, manifest = end_ms, 0, [], []
-    lower = start_ms - 13 * CANDLE_STEP_MS
+    lower = start_ms - history_bars * step
     while cursor > lower:
-        path = root / ("5m_%d.json" % cursor)
+        path = root / ("%dm_%d.json" % (unit_min, cursor))
         if path.exists():
             payload = json.loads(path.read_text(encoding="utf-8"))
             if (payload.get("schema") != 1 or payload.get("market") != market
-                    or payload.get("to_exclusive_ms") != cursor):
+                    or payload.get("to_exclusive_ms") != cursor
+                    or payload.get("unit_min", 5) != unit_min):
                 raise ValueError("cache metadata mismatch: " + str(path))
             batch = payload["candles"]
         else:
@@ -906,7 +916,7 @@ def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None)
                 "market": market, "count": 200,
                 "to": dt.datetime.fromtimestamp(cursor / 1000, dt.timezone.utc).isoformat()})
             request = urllib.request.Request(
-                "https://api.upbit.com/v1/candles/minutes/5?" + query,
+                "https://api.upbit.com/v1/candles/minutes/%d?" % unit_min + query,
                 headers={"Accept": "application/json", "User-Agent": "offline-candle-comparison/1"})
             for attempt in range(5):
                 sleeper(.26)
@@ -923,15 +933,15 @@ def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None)
                         raise
                     sleeper(min(2 ** attempt, 8))
             payload = {"schema": 1, "market": market, "to_exclusive_ms": cursor,
-                       "candles": batch}
+                       "unit_min": unit_min, "candles": batch}
             # Validate before caching; failed or malformed responses never become usable pages.
-            candle_normalize(batch, market, end_ms)
+            candle_normalize(batch, market, end_ms, unit_min)
             if len(batch) > 200 or any(candle_time_ms(r["candle_date_time_utc"]) >= cursor for r in batch):
                 raise ValueError("exclusive candle pagination failed")
             temp = path.with_suffix(".tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
             os.replace(temp, path)
-        checked = candle_normalize(batch, market, end_ms)
+        checked = candle_normalize(batch, market, end_ms, unit_min)
         if len(batch) > 200 or any(candle_time_ms(r["candle_date_time_utc"]) >= cursor for r in batch):
             raise ValueError("exclusive candle pagination failed")
         manifest.append({"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
@@ -949,7 +959,7 @@ def candle_fetch(market, start_ms, end_ms, cache_dir, opener=None, sleeper=None)
                 dt.datetime.fromtimestamp(cursor / 1000, dt.timezone.utc).isoformat()), flush=True)
         if not checked and cursor > lower:
             raise ValueError("no completed candles in response")
-    return candle_normalize(raw_rows, market, end_ms), manifest
+    return candle_normalize(raw_rows, market, end_ms, unit_min), manifest
 
 
 def _candle_cost_return(entry, exit_price, fee_rate, slip_bp):
@@ -1026,7 +1036,8 @@ def candle_evaluate(books, start_ms, end_ms, fee_rate=.0005, order_krw=6000,
             or not all(math.isfinite(v) for v in (slip_bp, stress_slip_bp))):
         raise ValueError("invalid candle costs")
     days = (end_ms - start_ms) // CANDLE_DAY_MS
-    split = start_ms + int(days * .7) * CANDLE_DAY_MS
+    # Integer calendar arithmetic: 180 days must split into 126 / 54, not 125 / 55.
+    split = start_ms + (days * 7 // 10) * CANDLE_DAY_MS
     phases = (("TRAIN", start_ms, split), ("HISTORICAL_HOLDOUT", split, end_ms))
     report = {"status": "EXPLORATORY_ONLY", "mode": "PUBLIC_CANDLE_FIXED_RULE_COMPARISON",
               "assumptions": {
@@ -1154,8 +1165,315 @@ def run_candle_comparison(args):
     return report
 
 
+
+# Recorded CS40 signals: sparse, public 1-minute price comparison.
+# This does not replay the actual entry/exit engine or exchange fills.
+SIGNAL_HOLD_ROUTE = "CS40_VR3_TR180_bp30_240"
+SIGNAL_HOLD_STEP_MS = 60000
+
+
+def signal_hold_load(path):
+    """Read a frozen snapshot; use identity/time only, never stored outcomes."""
+    import re
+    raw = Path(path).read_bytes()
+    data = json.loads(raw.decode("utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("signal snapshot must be an object")
+    signals, seen = [], set()
+    matched = duplicate = invalid = groups = 0
+    invalid_reasons = collections.Counter()
+    for key, stats in data.items():
+        if not isinstance(stats, dict) or not (
+                stats.get("route") == SIGNAL_HOLD_ROUTE or key == SIGNAL_HOLD_ROUTE
+                or key.startswith(SIGNAL_HOLD_ROUTE + ":")):
+            continue
+        groups += 1
+        records = stats.get("trade_records", [])
+        if not isinstance(records, list):
+            raise ValueError("trade_records must be a list")
+        for record in records:
+            matched += 1
+            identity = record.get("signal_id") if isinstance(record, dict) else None
+            parts = identity.rsplit(":", 1) if isinstance(identity, str) else []
+            if (len(parts) != 2 or not re.fullmatch(r"KRW-[A-Z0-9]+", parts[0])
+                    or not re.fullmatch(r"[0-9]{9,10}", parts[1])
+                    or not 946684800 <= int(parts[1]) < 4102444800):
+                invalid += 1
+                invalid_reasons["invalid_or_missing_signal_id"] += 1
+                continue
+            if identity in seen:
+                duplicate += 1
+                continue
+            seen.add(identity)
+            stamp = int(parts[1]) * 1000
+            signals.append({"signal_id": identity, "market": parts[0], "signal_ms": stamp,
+                            "entry_ms": (stamp // SIGNAL_HOLD_STEP_MS + 1) * SIGNAL_HOLD_STEP_MS})
+    if not signals:
+        raise ValueError("no valid recorded CS40 signal IDs in snapshot")
+    signals.sort(key=lambda row: (row["signal_ms"], row["signal_id"]))
+    return {"signals": signals, "matched_records": matched, "duplicate_signal_ids": duplicate,
+            "invalid_records": invalid, "invalid_reasons": dict(invalid_reasons),
+            "matched_groups": groups, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def signal_hold_windows(signals, available_until_ms):
+    """Merge just the required market/time windows; end is exclusive UTC."""
+    windows = collections.defaultdict(list)
+    step = SIGNAL_HOLD_STEP_MS
+    for row in signals:
+        start = row["entry_ms"]
+        end = min(start + max(CANDLE_HOLDS_MIN) * step + step, available_until_ms)
+        if start < end:
+            windows[row["market"]].append((start, end))
+    merged = {}
+    for market, spans in sorted(windows.items()):
+        result = []
+        for start, end in sorted(spans):
+            if result and start <= result[-1][1]:
+                result[-1] = (result[-1][0], max(end, result[-1][1]))
+            else:
+                result.append((start, end))
+        merged[market] = result
+    return merged
+
+
+def signal_hold_evaluate(signals, books, available_until_ms, fee_rate=.0005,
+                         order_krw=6000, slip_bp=10, stress_slip_bp=20):
+    """Exact endpoint opens, identical signal IDs across holds, no fitted filters."""
+    if not signals:
+        raise ValueError("no signals to compare")
+    if (not math.isfinite(fee_rate) or not 0 <= fee_rate < 1
+            or not math.isfinite(order_krw) or order_krw <= 0
+            or not all(math.isfinite(v) for v in (slip_bp, stress_slip_bp))
+            or not 0 <= slip_bp <= stress_slip_bp < 10000):
+        raise ValueError("invalid signal comparison costs")
+    step = SIGNAL_HOLD_STEP_MS
+    if not isinstance(available_until_ms, int) or available_until_ms % step:
+        raise ValueError("available_until_ms must be a completed UTC minute boundary")
+    ordered = sorted(signals, key=lambda r: (r["signal_ms"], r["signal_id"]))
+    if len({r["signal_id"] for r in ordered}) != len(ordered):
+        raise ValueError("duplicate signal IDs must be resolved before evaluation")
+    for row in ordered:
+        if row["entry_ms"] != (row["signal_ms"] // step + 1) * step:
+            raise ValueError("entry must be strictly the next scheduled minute")
+    start = ordered[0]["signal_ms"] // CANDLE_DAY_MS * CANDLE_DAY_MS
+    end = (ordered[-1]["signal_ms"] // CANDLE_DAY_MS + 1) * CANDLE_DAY_MS
+    days = (end - start) // CANDLE_DAY_MS
+    split = (start + max(1, min(days - 1, days * 7 // 10)) * CANDLE_DAY_MS
+             if days > 1 else None)
+    phases = ("TRAIN", "HISTORICAL_HOLDOUT") if split is not None else ("ALL_HISTORY",)
+    events, purged = [], []
+    max_hold = max(CANDLE_HOLDS_MIN)
+    for signal in ordered:
+        phase = ("ALL_HISTORY" if split is None else
+                 "TRAIN" if signal["signal_ms"] < split else "HISTORICAL_HOLDOUT")
+        # Shared max-horizon purge: no training exit reaches the validation day.
+        if phase == "TRAIN" and signal["entry_ms"] + max_hold * step >= split:
+            purged.append(signal["signal_id"])
+            continue
+        bars = books.get(signal["market"], {})
+        for hold in CANDLE_HOLDS_MIN:
+            entry_ms = signal["entry_ms"]
+            exit_ms = entry_ms + hold * step
+            entry_bar, exit_bar = bars.get(entry_ms), bars.get(exit_ms)
+            reason = None
+            if entry_ms + step > available_until_ms:
+                reason = "entry_not_yet_available"
+            elif exit_ms + step > available_until_ms:
+                reason = "exit_not_yet_available"
+            elif entry_bar is None:
+                reason = "missing_exact_entry_candle"
+            elif exit_bar is None:
+                reason = "missing_exact_exit_candle"
+            else:
+                prices = (entry_bar.get("open"), exit_bar.get("open"))
+                if any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+                       for v in prices):
+                    reason = "invalid_endpoint_price"
+            values = dict(entry_price=None, exit_price=None, gross_pct=None,
+                          fee_only_net_pct=None, net_pct=None, stress_net_pct=None, net_krw=None)
+            if reason is None:
+                entry, exit_price = entry_bar["open"], exit_bar["open"]
+                net = _candle_cost_return(entry, exit_price, fee_rate, slip_bp)
+                values = dict(entry_price=entry, exit_price=exit_price,
+                              gross_pct=(exit_price / entry - 1) * 100,
+                              fee_only_net_pct=_candle_cost_return(entry, exit_price, fee_rate, 0) * 100,
+                              net_pct=net * 100,
+                              stress_net_pct=_candle_cost_return(
+                                  entry, exit_price, fee_rate, stress_slip_bp) * 100,
+                              net_krw=net * order_krw * (1 + fee_rate))
+            events.append(dict(signal, **values, phase=phase, hold_min=hold, exit_ms=exit_ms,
+                               missing_reason=reason, common_complete=False))
+    results, common_ids = [], {}
+    for phase in phases:
+        rows = [r for r in events if r["phase"] == phase]
+        all_ids = {r["signal_id"] for r in rows}
+        common = set(all_ids)
+        for hold in CANDLE_HOLDS_MIN:
+            common &= {r["signal_id"] for r in rows
+                       if r["hold_min"] == hold and r["missing_reason"] is None}
+        common_ids[phase] = sorted(common)
+        for row in rows:
+            row["common_complete"] = row["signal_id"] in common
+        for hold in CANDLE_HOLDS_MIN:
+            horizon = [r for r in rows if r["hold_min"] == hold]
+            known = [r for r in horizon if r["missing_reason"] is None]
+            paired = [r for r in known if r["common_complete"]]
+            missing = collections.Counter(r["missing_reason"] for r in horizon if r["missing_reason"])
+            mean_field = lambda group, field: statistics.mean(r[field] for r in group) if group else None
+            nets = sorted(r["net_pct"] for r in known)
+            by_coin = collections.defaultdict(list)
+            by_day = collections.defaultdict(list)
+            for row in known:
+                by_coin[row["market"]].append(row["net_pct"])
+                day = dt.datetime.fromtimestamp(row["signal_ms"] / 1000, dt.timezone.utc).date().isoformat()
+                by_day[day].append(row["net_pct"])
+            results.append({
+                "phase": phase, "hold_min": hold, "signals": len(horizon),
+                "completed_price_paths": len(known), "unknown_signals": len(horizon) - len(known),
+                "missing_reasons": dict(missing), "common_complete_signals": len(paired),
+                "mean_gross_pct": mean_field(known, "gross_pct"),
+                "fee_only_mean_net_pct": mean_field(known, "fee_only_net_pct"),
+                "mean_net_pct": mean_field(known, "net_pct"),
+                "stress_mean_net_pct": mean_field(known, "stress_net_pct"),
+                "mean_event_net_krw": mean_field(known, "net_krw"),
+                "paired_mean_gross_pct": mean_field(paired, "gross_pct"),
+                "paired_fee_only_mean_net_pct": mean_field(paired, "fee_only_net_pct"),
+                "paired_mean_net_pct": mean_field(paired, "net_pct"),
+                "paired_stress_mean_net_pct": mean_field(paired, "stress_net_pct"),
+                "paired_mean_event_net_krw": mean_field(paired, "net_krw"),
+                "all_signal_mean_net_pct": mean_field(known, "net_pct")
+                if horizon and len(known) == len(horizon) else None,
+                "median_net_pct": statistics.median(nets) if nets else None,
+                "positive_rate": sum(v > 0 for v in nets) / len(nets) if nets else None,
+                "worst_5pct_mean_net_pct": statistics.mean(nets[:max(1, math.ceil(len(nets) * .05))])
+                if nets else None,
+                "mean_net_pct_without_top5": statistics.mean(nets[:-5]) if len(nets) > 5 else None,
+                "per_coin": {k: {"completed": len(v), "mean_net_pct": statistics.mean(v)}
+                             for k, v in sorted(by_coin.items())},
+                "per_day": {k: {"completed": len(v), "mean_net_pct": statistics.mean(v)}
+                            for k, v in sorted(by_day.items())},
+            })
+    utc = lambda t: dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).isoformat()
+    return {
+        "status": "EXPLORATORY_ONLY", "mode": "RECORDED_CS40_SIGNAL_HOLD_COMPARISON",
+        "input_signal_count": len(ordered), "purged_training_signal_ids": purged,
+        "common_complete_signal_ids": common_ids,
+        "assumptions": {
+            "route": SIGNAL_HOLD_ROUTE, "candle_unit_min": 1,
+            "signal_time": "recorded scan signal_id seconds, not actual order or position time",
+            "decision_completion_time_verified": False,
+            "causality_limit": "next minute can precede final decision; price response only, not executable entry",
+            "entry": "next scheduled UTC minute open strictly after recorded signal",
+            "entry_delay_seconds_range": [1, 60],
+            "price_proxy": "first public trade in scheduled minute; not actual bid/ask or guaranteed fill",
+            "missing_endpoint": "unknown; never substitute a later candle",
+            "intermediate_minutes": "not required for fixed endpoint comparison; no intrabar exit rules",
+            "hold_minutes": list(CANDLE_HOLDS_MIN),
+            "available_until_utc_exclusive": utc(available_until_ms),
+            "signal_date_start_utc": utc(start), "signal_date_end_utc_exclusive": utc(end),
+            "validation_from_utc": utc(split) if split is not None else None,
+            "calendar_span_days": days, "calendar_split": "integer 70/30 by signal-date span",
+            "training_purge": "same 240-minute maximum hold for all four comparisons",
+            "comparison": "paired columns use identical signal IDs with all four exact endpoints",
+            "fee_rate_per_side": fee_rate, "adverse_price_bp_per_side": slip_bp,
+            "stress_adverse_price_bp_per_side": stress_slip_bp,
+            "order_krw_excluding_buy_fee": order_krw,
+            "population": "retained closed shadow records, not every historical or LIVE signal",
+            "account_returns_or_executable_frequency": False,
+            "fresh_forward_validation": False, "selection": "FIXED_HOLDS_NO_THRESHOLD_SEARCH"},
+        "results": results, "events": events}
+
+
+def run_signal_hold_comparison(args):
+    """Public GET only; no bot imports, account access or order submission."""
+    import urllib.error
+    snapshot = Path(args.signal_hold_compare)
+    output = Path(args.out)
+    csv_output, text_output = output.with_suffix(".csv"), output.with_suffix(".txt")
+    cache = Path(args.candle_cache)
+    targets = (output, csv_output, text_output)
+    if len({p.resolve() for p in targets}) != 3:
+        raise ValueError("use a distinct .json output path")
+    for target in targets:
+        if (target.resolve() in (Path(__file__).resolve(), snapshot.resolve())
+                or target.resolve().is_relative_to(cache.resolve())):
+            raise ValueError("output must not overwrite source, signal snapshot or candle cache")
+    loaded = signal_hold_load(snapshot)
+    available = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) // 60000 * 60000
+    windows = signal_hold_windows(loaded["signals"], available)
+    total = sum(len(v) for v in windows.values())
+    print("RECORDED SIGNAL HOLD EXPLORATION - public minute candles, no orders or API keys", flush=True)
+    print("signals=%d markets=%d merged_windows=%d | fixed 5/15/60/240 minutes" % (
+        len(loaded["signals"]), len(windows), total), flush=True)
+    books, manifest, failures, done = {}, [], [], 0
+    for market, spans in windows.items():
+        books[market] = {}
+        for start, end in spans:
+            done += 1
+            print("[signal-hold] window %d/%d %s" % (done, total, market), flush=True)
+            try:
+                bars, files = candle_fetch(market, start, end, cache, unit_min=1, history_bars=0)
+            except (urllib.error.URLError, TimeoutError) as exc:
+                # Delisted/unavailable markets and failed requests remain unknown signals.
+                failures.append({"market": market, "start_ms": start, "end_exclusive_ms": end,
+                                 "error": str(exc)})
+                print("[signal-hold] unavailable %s: %s" % (market, exc), flush=True)
+                continue
+            for stamp, bar in bars.items():
+                if stamp in books[market] and books[market][stamp] != bar:
+                    raise ValueError("conflicting cached candle across windows")
+                books[market][stamp] = bar
+            manifest.extend(files)
+    report = signal_hold_evaluate(loaded["signals"], books, available, args.fee_rate,
+                                  args.order_krw, args.candle_slip_bp, args.candle_stress_bp)
+    report["input_snapshot"] = {k: v for k, v in loaded.items() if k != "signals"}
+    report["input_snapshot"]["path"] = str(snapshot)
+    report["input_manifest"] = list({r["path"]: r for r in manifest}.values())
+    report["fetch_failures"] = failures
+    report["generated_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    report["source_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    columns = ["phase", "signal_id", "market", "signal_ms", "entry_ms", "exit_ms", "hold_min",
+               "entry_price", "exit_price", "gross_pct", "fee_only_net_pct", "net_pct",
+               "stress_net_pct", "net_krw", "missing_reason", "common_complete"]
+    with csv_output.open("w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(report["events"])
+    fmt = lambda value: "NA" if value is None else "%.4f" % value
+    summary = [
+        "RECORDED CS40 SIGNAL HOLD EXPLORATION - NOT LIVE PROFIT",
+        "snapshot: signals=%d invalid=%d duplicates=%d purged=%d fetch_failures=%d" % (
+            len(loaded["signals"]), loaded["invalid_records"], loaded["duplicate_signal_ids"],
+            len(report["purged_training_signal_ids"]), len(failures)),
+        "next 1-minute open proxy | fee %.4f%%/side | base %.1fbp/side; stress %.1fbp/side" % (
+            args.fee_rate * 100, args.candle_slip_bp, args.candle_stress_bp),
+        "SCAN-TIME proxy: final decision/real entry time NOT verified; not an executable profit test",
+        "paired = SAME signal IDs with all 4 outcomes; missing results are NOT zero",
+        "phase hold_m signals complete unknown paired_n paired_gross% paired_fee% paired_net% paired_stress%"]
+    for row in report["results"]:
+        summary.append("%s %d %d %d %d %d %s %s %s %s" % (
+            row["phase"], row["hold_min"], row["signals"], row["completed_price_paths"],
+            row["unknown_signals"], row["common_complete_signals"],
+            fmt(row["paired_mean_gross_pct"]), fmt(row["paired_fee_only_mean_net_pct"]),
+            fmt(row["paired_mean_net_pct"]), fmt(row["paired_stress_mean_net_pct"])))
+    text_output.write_text("\n".join(summary) + "\n", encoding="utf-8")
+    print("\n".join(summary), flush=True)
+    print("Results: %s %s %s" % (output, csv_output, text_output), flush=True)
+    return report
+
+
 def main():
     args = parse_args()
+    if args.signal_hold_compare:
+        try:
+            run_signal_hold_comparison(args)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            print(f"[signal-hold] error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        return
     if args.candle_compare:
         try:
             run_candle_comparison(args)
