@@ -1,0 +1,33 @@
+name: H3 trend paper checks
+on:
+  push:
+    branches: ["claude/review-codebase-7fOpB"]
+    paths:
+      - "scalp/research/trend_paper.py"
+      - "tests/test_trend_paper.py"
+      - ".github/workflows/trend-paper.yml"
+  pull_request:
+    paths:
+      - "scalp/research/trend_paper.py"
+      - "tests/test_trend_paper.py"
+      - ".github/workflows/trend-paper.yml"
+permissions:
+  contents: read
+jobs:
+  paper-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Syntax and offline calendar-cost regressions
+        run: |
+          python -m py_compile scalp/research/trend_paper.py tests/test_trend_paper.py
+          python -X utf8 -m unittest discover -s tests -p "test_trend_paper.py" -v
