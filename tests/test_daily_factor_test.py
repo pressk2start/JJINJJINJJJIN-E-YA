@@ -60,6 +60,23 @@ class TestDailyFactor(unittest.TestCase):
         self.assertEqual(rows[0]["picks"][0], "KRW-K0")
         self.assertLess(rows[0]["dev_pct"][0], -2.5)
 
+    def test_cache_refresh_merges_and_keeps_old_on_failure(self):
+        import tempfile, json, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "c.json")
+            self.assertEqual(DF.cached(p, lambda: {"a": 1}), {"a": 1})
+            self.assertEqual(DF.cached(p, lambda: {"b": 2}), {"a": 1})                 # no refresh → cache
+            self.assertEqual(DF.cached(p, lambda: {"b": 2}, True), {"a": 1, "b": 2})   # refresh → merge
+            def boom():
+                raise RuntimeError("delisted")
+            self.assertEqual(DF.cached(p, boom, True), {"a": 1, "b": 2})               # failure → keep old
+            self.assertEqual(json.load(open(p)), {"a": 1, "b": 2})
+
+    def test_forward_verdict_needs_20_periods(self):
+        rows = [{"date": day(k * 3), "strat": 0.02, "ew": 0.005 + 0.001 * (k % 2), "btc": 0.0} for k in range(15)]
+        self.assertEqual(DF.verdict(DF.summarize(rows), 20), "INSUFFICIENT")
+        self.assertEqual(DF.verdict(DF.summarize(rows)), "PASS")
+
     def test_summary_and_verdict(self):
         rows = [{"date": day(k * 7), "strat": 0.02 + 0.001 * (k % 3), "ew": 0.005, "btc": 0.0} for k in range(20)]
         s = DF.summarize(rows)

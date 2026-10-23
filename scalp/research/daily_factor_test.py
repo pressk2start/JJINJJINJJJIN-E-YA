@@ -44,6 +44,7 @@ TOP_N, LIQ_DAYS, MIN_HIST = 50, 30, 60
 MOM_DAYS, MOM_PICK = 28, 5
 KP_DAYS, KP_PICK, KP_HOLD = 30, 5, 3
 HOLDOUT_START = "2026-04-25"
+FORWARD_START = "2026-10-23"   # 이 날짜 이후 = 결과를 보기 전 미래 구간 (H2 PASS 이후 추가, 판정 기준 동일)
 
 
 def _get(url, retries=6):
@@ -97,11 +98,22 @@ def fetch_binance_daily(sym, limit=1000):
     return None
 
 
-def cached(path, fn):
+def cached(path, fn, refresh=False):
+    """refresh=True 면 새로 받아 기존 캐시에 합친다. 새로 못 받으면(상장폐지 등) 기존 캐시를 그대로 쓴다
+    → 앞으로 상폐되는 종목도 상폐 직전까지의 가격이 남아 forward 구간의 생존편향을 줄인다."""
     p = Path(path)
-    if p.exists():
-        return json.loads(p.read_text())
-    v = fn()
+    old = json.loads(p.read_text()) if p.exists() else None
+    if old is not None and not refresh:
+        return old
+    try:
+        v = fn()
+    except Exception:
+        v = None
+    if v is None:
+        return old
+    if isinstance(old, dict):
+        old.update(v)
+        v = old
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(v))
     return v
@@ -239,8 +251,8 @@ def summarize(rows):
             "btc_cum_pct": cum(b) * 100, "mdd_pct": mdd(s) * 100}
 
 
-def verdict(s):
-    if s.get("periods", 0) < 10:
+def verdict(s, min_periods=10):
+    if s.get("periods", 0) < min_periods:
         return "INSUFFICIENT"
     ok = s["mean_pct"] > 0 and s["excess_pct"] > 0 and s["excess_ci_low_pct"] > 0 and s["cum_pct"] > s["btc_cum_pct"]
     return "PASS" if ok else "FAIL"
@@ -251,13 +263,17 @@ def main(argv=None):
     ap.add_argument("--days", type=int, default=760)
     ap.add_argument("--cache", default="df_cache")
     ap.add_argument("--out", default="df_result")
+    ap.add_argument("--refresh", action="store_true", help="최신 일봉을 받아 캐시에 합침 (forward 재평가용)")
     a = ap.parse_args(argv)
-    markets = sorted(m["market"] for m in _get(f"{UPBIT}/market/all") if m["market"].startswith("KRW-"))
+    markets = {m["market"] for m in _get(f"{UPBIT}/market/all") if m["market"].startswith("KRW-")}
+    # 캐시에만 남은 종목(이후 상장폐지) 도 포함 → forward 구간 생존편향 완화
+    markets |= {q.stem[3:] for q in Path(a.cache).glob("up_KRW-*.json")}
+    markets = sorted(markets)
     print(f"DAILY FACTORS (pre-registered 2026-10-22) | {len(markets)} KRW markets | holdout from {HOLDOUT_START}")
     data, bn = {}, {}
     for k, m in enumerate(markets, 1):
         try:
-            data[m] = {d: tuple(v) for d, v in cached(f"{a.cache}/up_{m}.json", lambda: fetch_upbit_daily(m, a.days)).items()}
+            data[m] = {d: tuple(v) for d, v in (cached(f"{a.cache}/up_{m}.json", lambda: fetch_upbit_daily(m, a.days), a.refresh) or {}).items()}
         except Exception as e:
             print(f"[upbit] skip {m}: {e}")
         if k % 50 == 0:
@@ -267,7 +283,7 @@ def main(argv=None):
             continue
         sym = m.split("-", 1)[1] + "USDT"
         try:
-            v = cached(f"{a.cache}/bn_{sym}.json", lambda: fetch_binance_daily(sym))
+            v = cached(f"{a.cache}/bn_{sym}.json", lambda: fetch_binance_daily(sym), a.refresh)
         except Exception:
             v = None
         if v:
@@ -281,10 +297,12 @@ def main(argv=None):
     print("\nhypothesis    phase     periods  mean%   EW%    excess%  ciLow%  win%   cum%     EWcum%   BTCcum%  MDD%    verdict")
     report = {"groups": [], "params": vars(a)}
     for name, rows in res.items():
-        for ph in ("TRAIN", "HOLDOUT"):
-            sel = [r for r in rows if (r["date"] < HOLDOUT_START) == (ph == "TRAIN")]
+        for ph in ("TRAIN", "HOLDOUT", "FORWARD"):
+            lo, hi = {"TRAIN": ("", HOLDOUT_START), "HOLDOUT": (HOLDOUT_START, FORWARD_START),
+                      "FORWARD": (FORWARD_START, "9999")}[ph]
+            sel = [r for r in rows if lo <= r["date"] < hi]
             s = summarize(sel)
-            vd = verdict(s) if ph == "HOLDOUT" else "(explore)"
+            vd = {"TRAIN": "(explore)", "HOLDOUT": verdict(s), "FORWARD": verdict(s, 20)}[ph]
             s.update(hypothesis=name, phase=ph, verdict=vd)
             report["groups"].append(s)
             f = lambda x, w=7, p=2: (f"{x:{w}.{p}f}" if isinstance(x, (int, float)) else " " * (w - 3) + "n/a")
