@@ -17,6 +17,13 @@ H4 알트 단기 되돌림 (사전 고정 2026-10-24 · H1 이 주당 -2.7%p 로
   내일 시가 매도 (1일 보유). 어제 수익률 < -25% 인 종목은 제외 (상장폐지 공지 급락이 보통 이 범위라 그 편향을 줄임.
   이 수치는 결과를 보기 전에 정함). 비교·비용·구간·합격 기준은 공통과 같음.
   의도: 하루 5건 ≈ 월 150건의 '다매매' 구조에서 건당 기대값이 비용(왕복 0.3%)을 넘는지 직접 본다.
+H5 주 단위 되돌림 (사전 고정 2026-10-24 · H1 의 거울상)
+  H1 과 동일 유니버스·리밸런싱(월요일 시가, 1주 보유). 직전 28일 수익률 '하위' 5개 매수. 단 28일 수익률 < -40% 는
+  상폐 공지 급락 편향으로 제외(결과 보기 전 고정). H5b 는 직전 7일 수익률 기준 같은 규칙.
+  의도: 1일 되돌림(H4·H9)은 졌지만 H1 이 -2.7%p/주 로 크게 진 것은 주 단위 과잉반응을 시사. 그 반대편을 직접 본다.
+  결과 (2026-10-24 실행, 299 종목, 데이터 2024-08-16~): H5_wrev28 HOLDOUT 25주 excess -1.00%p/주 ciLow -2.57 → FAIL.
+  H5b_wrev7 HOLDOUT excess +0.07%p ciLow -2.20 win 44% → FAIL (TRAIN 은 -0.87%p 로 부호 불일치). H1 HOLDOUT -2.70%p FAIL 재확인.
+  해석: 주 단위 모멘텀도 그 반대도 EW 를 못 이김. 알트 횡단면 순위(1일·1주·4주)는 어느 방향도 비용 후 엣지 없음.
 공통
   비용: 수수료 0.05% + 불리한 가격 0.10% (편도). 매 리밸런싱 전량 교체 가정 (보수적)
   비교: 같은 시점·같은 유니버스 전 종목 동일비중(EW) 보유, BTC 단순 보유
@@ -49,6 +56,7 @@ TOP_N, LIQ_DAYS, MIN_HIST = 50, 30, 60
 MOM_DAYS, MOM_PICK = 28, 5
 KP_DAYS, KP_PICK, KP_HOLD = 30, 5, 3
 REV_PICK, REV_HOLD, REV_MIN_RET = 5, 1, -0.25
+WREV_PICK, WREV_MIN_RET = 5, -0.40
 HOLDOUT_START = "2026-04-25"
 FORWARD_START = "2026-10-23"   # 이 날짜 이후 = 결과를 보기 전 미래 구간 (H2 PASS 이후 추가, 판정 기준 동일)
 
@@ -216,6 +224,32 @@ def reversal_periods(data, start, end):
     return rows
 
 
+def weekly_reversal_periods(data, start, end, lookback=MOM_DAYS):
+    """H5: 월요일 시가에 직전 lookback 일 수익률 하위 WREV_PICK 매수, 다음 월요일 시가 매도."""
+    rows, d = [], start
+    while dt.date.fromisoformat(d).weekday() != 0:
+        d = _shift(d, 1)
+    while _shift(d, 7) <= end:
+        uni = universe(data, d)
+        past = {}
+        for m in uni:
+            s = data[m]
+            a, b = _shift(d, -1 - lookback), _shift(d, -1)
+            if a in s and b in s and s[a][1] > 0:
+                past[m] = s[b][1] / s[a][1] - 1
+        cands = sorted((v, m) for m, v in past.items() if v >= WREV_MIN_RET)
+        picks = [m for _, m in cands[:WREV_PICK]]
+        rs = hold_returns(data, picks, d, _shift(d, 7))
+        ew = hold_returns(data, uni, d, _shift(d, 7))
+        btc = data.get("KRW-BTC", {})
+        if rs and ew and d in btc and _shift(d, 7) in btc:
+            rows.append({"date": d, "picks": picks, "past_pct": [round(past[m] * 100, 1) for m in picks],
+                         "strat": statistics.mean(rs.values()), "ew": statistics.mean(ew.values()),
+                         "btc": btc[_shift(d, 7)][0] / btc[d][0] - 1})
+        d = _shift(d, 7)
+    return rows
+
+
 def kimchi_periods(data, bn, start, end):
     rows, d = [], start
     fx = data.get("KRW-USDT", {})
@@ -327,8 +361,10 @@ def main(argv=None):
     start, end = _shift(all_days[0], MIN_HIST + 5), all_days[-1]
     runners = {"H1_momentum": lambda: momentum_periods(data, start, end),
                "H2_kimchi": lambda: kimchi_periods(data, bn, start, end),
-               "H4_reversal": lambda: reversal_periods(data, start, end)}
-    res = {k: f() for k, f in runners.items() if a.only is None or k.split("_")[0] in a.only}
+               "H4_reversal": lambda: reversal_periods(data, start, end),
+               "H5_wrev28": lambda: weekly_reversal_periods(data, start, end, 28),
+               "H5b_wrev7": lambda: weekly_reversal_periods(data, start, end, 7)}
+    res = {k: f() for k, f in runners.items() if a.only is None or k.split("_")[0] in a.only or k in a.only}
     print(f"\ndata {all_days[0]}..{end} | binance matched {len(bn)} | KRW-USDT days {len(data.get('KRW-USDT', {}))}")
     print("\nhypothesis    phase     periods  mean%   EW%    excess%  ciLow%  win%   cum%     EWcum%   BTCcum%  MDD%    verdict")
     report = {"groups": [], "params": vars(a)}
