@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""reversal_check.py — 반전 신호 독립 검증 (다른 세션의 초봉 결론을 1분봉에서 재검정).
+"""reversal_check.py — 반전 조건의 탐색용 가격 시나리오 (실체결·계좌수익 검증 아님).
 
 배경
 ----
@@ -12,8 +12,8 @@
 **해상도가 다르면 호가 바운스의 영향도 다르다.** 1초 종가는 직전 체결 1건이라
 매수호가/매도호가 사이를 그대로 튀지만, 1분 종가는 그 분의 마지막 체결이고
 진입은 다음 분의 시가다 = 바운스가 훨씬 희석된다.
-따라서 1분봉에서도 죽으면 "바운스 착시"가 아니라 **반전 자체가 없다**는 더 강한 결론이고,
-1분봉에서 살면 초봉 결론이 해상도 artifact였다는 뜻이다. 어느 쪽이든 정보가 있다.
+이 비교는 시험한 규칙과 가격 가정의 탐색 결과이며, 다른 반전·유동성 회복 전략까지
+기각하지 않는다. 종가/시가/고가/저가는 실제 체결 증거 또는 엄밀한 체결 상한·하한이 아니다.
 
 세 가지 체결 가정 (초봉 연구와 같은 축)
   · 낙관 opt : 매수 = 신호봉 종가        / 매도 = 종료봉 종가
@@ -23,6 +23,7 @@
 추가 검정: 종목 집중도 (최다 기여 종목 제외 후 생존하는가) — ARCHIVE.md:76 패턴
 """
 import os, sys, json, math
+import datetime as dt
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,6 +38,85 @@ FEATS = ["ret1", "ret3", "ret5", "ret15"]
 MIN_N = 300
 
 
+def observed_feature_returns(close, present, lag):
+    """Return endpoints must both be observed; no ffilled endpoint signals."""
+    close = np.asarray(close, dtype=float)
+    present = np.asarray(present, dtype=bool)
+    if len(close) != len(present) or type(lag) is not int or lag < 1:
+        raise ValueError("invalid return inputs")
+    result = np.full(len(close), np.nan)
+    if len(close) <= lag:
+        return result
+    valid = (present[lag:] & present[:-lag] &
+             np.isfinite(close[lag:]) & np.isfinite(close[:-lag]) &
+             (close[lag:] > 0) & (close[:-lag] > 0))
+    idx = np.flatnonzero(valid) + lag
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        result[idx] = close[idx] / close[idx - lag] - 1
+    result[~np.isfinite(result)] = np.nan
+    return result
+
+
+def observed_outcome_mask(D, hz):
+    """Observed signal, next entry bar, and exact exit bar; valid prices."""
+    if type(hz) is not int or hz < 1:
+        raise ValueError("invalid horizon")
+    n = D["n"]
+    valid = np.zeros(n, dtype=bool)
+    m = n - hz - 1
+    if m <= 0:
+        return valid
+    present = np.asarray(D["present"], dtype=bool)
+    o, h, l, c = [np.asarray(D[k], dtype=float) for k in ("o", "h", "l", "c")]
+    if any(len(a) != n for a in (present, o, h, l, c)):
+        raise ValueError("inconsistent candle lengths")
+    exit_offset = 1 + hz
+    valid[:m] = (present[:m] & present[1:1 + m] &
+                 present[exit_offset:exit_offset + m])
+    views = (c[:m], o[1:1 + m], h[1:1 + m],
+             c[exit_offset:exit_offset + m], l[exit_offset:exit_offset + m])
+    for prices in views:
+        valid[:m] &= np.isfinite(prices) & (prices > 0)
+    return valid
+
+
+def _utc_naive(value):
+    """collect.py's naive candle times are explicitly UTC."""
+    if value.tzinfo is not None:
+        return value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def minute_times(D):
+    base = np.datetime64(_utc_naive(D["t0"]), "m")
+    return base + np.arange(D["n"]).astype("timedelta64[m]")
+
+
+def common_calendar_cut(datasets):
+    """One 70/30 UTC-date boundary across all markets, not per-market cuts."""
+    rows = [D for D in datasets.values() if D["n"] > 0]
+    if not rows:
+        raise ValueError("no dated candles")
+    first = min(_utc_naive(D["t0"]).date() for D in rows)
+    last = max((_utc_naive(D["t0"]) +
+                dt.timedelta(minutes=D["n"] - 1)).date() for D in rows)
+    days = (last - first).days + 1
+    if days < 2:
+        raise ValueError("at least two UTC dates are required")
+    offset = max(1, min(days - 1, days * 7 // 10))
+    return dt.datetime.combine(first + dt.timedelta(days=offset), dt.time())
+
+
+def phase_masks(D, hz, cut):
+    """Train labels end by cut; test signal bars start on/after cut."""
+    clock = minute_times(D)
+    boundary = np.datetime64(_utc_naive(cut), "m")
+    observed = observed_outcome_mask(D, hz)
+    train = observed & (clock + np.timedelta64(hz + 2, "m") <= boundary)
+    test = observed & (clock >= boundary)
+    return train, test
+
+
 def build(market):
     """분 격자 → 반전 검정에 필요한 배열만."""
     rec = collect.load(market)
@@ -44,32 +124,35 @@ def build(market):
         return None
     o, h, l, c, v, present, base = FT._grid(rec)
     n = len(c)
-    eps = 1e-12
     F = {}
     for k in (1, 3, 5, 15):
-        r = np.full(n, np.nan)
-        r[k:] = c[k:] / np.maximum(c[:-k], eps) - 1.0
-        F[f"ret{k}"] = r
+        F[f"ret{k}"] = observed_feature_returns(c, present, k)
     return {"o": o, "h": h, "l": l, "c": c, "present": present, "n": n, "F": F,
             "t0": base}
 
 
 def outcomes(D, hz):
-    """세 체결가정별 총수익률(%) 배열. 진입 시점 = 신호봉 t."""
+    """Price scenarios only; entry t+1 OPEN, exit t+1+hz CLOSE."""
     o, h, l, c, n = D["o"], D["h"], D["l"], D["c"], D["n"]
-    eps = 1e-12
-    opt = np.full(n, np.nan); mid = np.full(n, np.nan); con = np.full(n, np.nan)
+    opt = np.full(n, np.nan)
+    mid = np.full(n, np.nan)
+    con = np.full(n, np.nan)
+    valid = observed_outcome_mask(D, hz)
     m = n - hz - 1
     if m <= 0:
         return opt, mid, con
-    opt[:m] = c[1 + hz:1 + hz + m] / np.maximum(c[:m], eps) - 1.0        # 종가→종가
-    mid[:m] = c[1 + hz:1 + hz + m] / np.maximum(o[1:1 + m], eps) - 1.0   # 다음시가→종가
-    con[:m] = l[1 + hz:1 + hz + m] / np.maximum(h[1:1 + m], eps) - 1.0   # 다음고가→종료저가
-    return opt * 100.0, mid * 100.0, con * 100.0
+    exit_offset = 1 + hz
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        opt[:m] = (c[exit_offset:exit_offset + m] / c[:m] - 1) * 100
+        mid[:m] = (c[exit_offset:exit_offset + m] / o[1:1 + m] - 1) * 100
+        con[:m] = (l[exit_offset:exit_offset + m] / h[1:1 + m] - 1) * 100
+    for result in (opt, mid, con):
+        result[~valid | ~np.isfinite(result)] = np.nan
+    return opt, mid, con
 
 
 def dedupe_mask(idx, hz):
-    """겹침 제거: 직전 채택 이후 hz분 이내 트리거 버림 (단일 마켓, idx 오름차순)."""
+    """Minimum signal spacing in bars; caller supplies full holding duration."""
     keep = []; last = -10**9
     for i in idx:
         if i - last >= hz:
@@ -90,7 +173,10 @@ def main():
     print(f"[rev] {len(D)} markets · 반전 그리드 {len(FEATS)}피처 × {len(QUANTILES)}분위 × "
           f"{len(HORIZONS)}horizon = {len(FEATS)*len(QUANTILES)*len(HORIZONS)}셀", flush=True)
 
-    # train/test 시간분할 (각 마켓 격자의 앞 70% / 뒤 30%)
+    cut_utc = common_calendar_cut(D)
+    print("EXPLORATORY_PRICE_SCENARIO | common UTC split:", cut_utc.isoformat())
+    print("Minute-candle price scenarios; not verified executable or account returns.")
+    # Common calendar split; labels crossing its boundary are purged.
     report = []
     print(f"\n{'조건':<18} {'h':>3} {'n_tr':>7} {'n_te':>7} "
           f"{'낙관_te':>9} {'중간_te':>9} {'보수_te':>9} {'승률_보수':>9} "
@@ -101,10 +187,13 @@ def main():
             # train 전 마켓 pooled 분위수 (마켓별로 스케일이 달라 pooled가 타당)
             pool = []
             for m, d in D.items():
-                col = d["F"][feat]; cut = int(d["n"] * 0.70)
-                s = col[:cut][np.isfinite(col[:cut])]
+                col = d["F"][feat]
+                train_clock = minute_times(d) < np.datetime64(cut_utc, "m")
+                s = col[train_clock & np.isfinite(col)]
                 pool.append(s)
             allv = np.concatenate(pool)
+            if not len(allv):
+                continue
             thr = float(np.quantile(allv, qq))
             for hz in HORIZONS:
                 rows = {"opt": [], "mid": [], "con": []}; mk_of = []
@@ -113,15 +202,13 @@ def main():
                     col = d["F"][feat]
                     opt, mid, con = outcomes(d, hz)
                     ok = (np.isfinite(col) & np.isfinite(opt) & np.isfinite(mid)
-                          & np.isfinite(con) & d["present"])
-                    ok[1:] &= d["present"][:-1]      # 다음 봉 체결 존재 (t+1 진입 가능)
-                    hit = np.nonzero(ok & (col <= thr))[0]
-                    if len(hit) == 0:
-                        continue
-                    sel = dedupe_mask(hit, hz)
-                    cut = int(d["n"] * 0.70)
-                    n_tr += int((sel < cut).sum())
-                    te = sel[sel >= cut]
+                          & np.isfinite(con) & observed_outcome_mask(d, hz))
+                    train_phase, test_phase = phase_masks(d, hz, cut_utc)
+                    train_hit = np.flatnonzero(ok & train_phase & (col <= thr))
+                    test_hit = np.flatnonzero(ok & test_phase & (col <= thr))
+                    train_sel = dedupe_mask(train_hit, hz + 1)
+                    te = dedupe_mask(test_hit, hz + 1)
+                    n_tr += len(train_sel)
                     if len(te) == 0:
                         continue
                     rows["opt"].append(opt[te]); rows["mid"].append(mid[te])
@@ -144,6 +231,8 @@ def main():
                            else ("불확정" if net["mid"].mean() > 0 else "소멸"))
                 rec = {"feature": feat, "q": qq, "thr": thr, "h": hz,
                        "n_train": n_tr, "n_test": n_te,
+                       "holding_bars": hz + 1, "split_utc": cut_utc.isoformat() + "Z",
+                       "cost_pct": cost, "evidence_status": "EXPLORATORY_PRICE_SCENARIO",
                        "opt": float(net["opt"].mean()), "mid": float(net["mid"].mean()),
                        "con": float(net["con"].mean()),
                        "win_con": float((net["con"] > 0).mean()),
@@ -161,8 +250,8 @@ def main():
     print(f"검정 셀 {len(report)}개 · 중간가정 양수 {len(mid_pos)}개 · "
           f"보수가정+종목분산 동시통과(생존) {len(alive)}개")
     if not alive:
-        print("  ✗ 생존 0 — 1분봉 해상도에서도 반전 신호는 채택 불가.")
-        print("    초봉 연구의 '호가 바운스 착시' 판정과 독립적으로 일치.")
+        print("  ✗ 시험한 조건·가격 가정에서 이 스크린을 통과한 셀 없음.")
+        print("    탐색 결과이며, 다른 조건·실행 방식의 수익성까지 기각하지 않음.")
     else:
         for r in sorted(alive, key=lambda x: -x["con"])[:10]:
             print(f"  · {r['feature']}<=P{r['q']*100} h={r['h']} 보수 {r['con']:+.4f}%p "
