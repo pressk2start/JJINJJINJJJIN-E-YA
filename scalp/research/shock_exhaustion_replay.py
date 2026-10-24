@@ -40,6 +40,7 @@ import random
 import re
 import statistics
 import sys
+import zlib
 from pathlib import Path
 
 FEE = 0.0005
@@ -176,12 +177,17 @@ def archive_files(root, days=None):
     return files, dates
 
 
-def iter_lines(files):
-    """(date, raw_bytes) — 원자료 1행."""
+def iter_lines(files, counters=None):
+    """(date, raw_bytes) — 원자료 1행. 잘린 gzip(녹화 중 복사된 마지막 파일 등)은 그 지점까지만 읽고 넘어간다."""
     for p in files:
         with gzip.open(p, "rb") as fh:
-            for raw in fh:
-                yield p.parent.name, raw
+            try:
+                for raw in fh:
+                    yield p.parent.name, raw
+            except (EOFError, OSError, zlib.error) as e:
+                if counters is not None:
+                    counters["truncated_files"] += 1
+                print(f"[warn] truncated gz, partial read: {p} ({type(e).__name__})", flush=True)
 
 
 def _ts(m):
@@ -226,7 +232,7 @@ def replay(files, theta, counters, default_theta=None):
                 counters["unresolved_" + reason] += 1 + len(o["legs"])
         opps.clear(); win.clear(); depth.clear()
 
-    for date, raw in iter_lines(files):
+    for date, raw in iter_lines(files, counters):
         rm = _RECV_RE.search(raw)
         if rm is None:
             continue
