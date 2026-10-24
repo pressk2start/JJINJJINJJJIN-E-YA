@@ -60,6 +60,26 @@ class TestDailyFactor(unittest.TestCase):
         self.assertEqual(rows[0]["picks"][0], "KRW-K0")
         self.assertLess(rows[0]["dev_pct"][0], -2.5)
 
+    def test_reversal_picks_worst_yesterday_excludes_crash_no_lookahead(self):
+        n = 120
+        data = {"KRW-BTC": series(n, lambda k: 100.0)}
+        for i in range(8):
+            data[f"KRW-R{i}"] = series(n, lambda k: 100.0)
+        d = day(100)
+        y, yy = day(99), day(98)
+        # yesterday returns: R0 -10%, R1 -5%, R2 -30% (crash, excluded), R3 +5%, others 0
+        data["KRW-R0"][y] = (100, 90, 1e9); data["KRW-R1"][y] = (100, 95, 1e9)
+        data["KRW-R2"][y] = (100, 70, 1e9); data["KRW-R3"][y] = (100, 105, 1e9)
+        # tomorrow open for R0 bounces above today's open (100), so strat > ew
+        data["KRW-R0"][day(101)] = (103, 103, 1e9)
+        rows = DF.reversal_periods(data, d, day(102))
+        r = rows[0]
+        self.assertEqual(r["date"], d)
+        self.assertEqual(r["picks"][:2], ["KRW-R0", "KRW-R1"])
+        self.assertNotIn("KRW-R2", r["picks"])          # < -25% excluded
+        self.assertNotIn("KRW-R3", r["picks"])          # positive excluded
+        self.assertGreater(r["strat"], r["ew"])
+
     def test_cache_refresh_merges_and_keeps_old_on_failure(self):
         import tempfile, json, os
         with tempfile.TemporaryDirectory() as d:
