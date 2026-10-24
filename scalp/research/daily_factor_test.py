@@ -12,6 +12,11 @@ H2 김치 프리미엄 되돌림 (3일)
   프리미엄 = 업비트 종가 / (바이낸스 USDT 종가 × 업비트 KRW-USDT 종가) − 1
   이탈 = 오늘 프리미엄 − 직전 30일 프리미엄 중앙값. 3일마다, 이탈이 가장 낮은(평소보다 업비트가 싼) 5개를
   다음날 시가에 매수, 3일 뒤 시가에 매도. 이탈 < 0 인 종목만
+H4 알트 단기 되돌림 (사전 고정 2026-10-24 · H1 이 주당 -2.7%p 로 크게 진 것을 보고 '반대 방향' 가설로 추가)
+  매일: 유니버스(위와 동일 상위 50) 중 어제 하루 수익률(어제 종가/그제 종가)이 가장 낮은 5개를 오늘 시가 매수,
+  내일 시가 매도 (1일 보유). 어제 수익률 < -25% 인 종목은 제외 (상장폐지 공지 급락이 보통 이 범위라 그 편향을 줄임.
+  이 수치는 결과를 보기 전에 정함). 비교·비용·구간·합격 기준은 공통과 같음.
+  의도: 하루 5건 ≈ 월 150건의 '다매매' 구조에서 건당 기대값이 비용(왕복 0.3%)을 넘는지 직접 본다.
 공통
   비용: 수수료 0.05% + 불리한 가격 0.10% (편도). 매 리밸런싱 전량 교체 가정 (보수적)
   비교: 같은 시점·같은 유니버스 전 종목 동일비중(EW) 보유, BTC 단순 보유
@@ -43,6 +48,7 @@ FEE, SLIP = 0.0005, 0.0010
 TOP_N, LIQ_DAYS, MIN_HIST = 50, 30, 60
 MOM_DAYS, MOM_PICK = 28, 5
 KP_DAYS, KP_PICK, KP_HOLD = 30, 5, 3
+REV_PICK, REV_HOLD, REV_MIN_RET = 5, 1, -0.25
 HOLDOUT_START = "2026-04-25"
 FORWARD_START = "2026-10-23"   # 이 날짜 이후 = 결과를 보기 전 미래 구간 (H2 PASS 이후 추가, 판정 기준 동일)
 
@@ -185,6 +191,31 @@ def momentum_periods(data, start, end):
     return rows
 
 
+def reversal_periods(data, start, end):
+    """H4: 어제(d-1) 종가/그제(d-2) 종가 기준 하위 REV_PICK 종목을 d 시가 매수, d+REV_HOLD 시가 매도."""
+    rows, d = [], start
+    btc = data.get("KRW-BTC", {})
+    while _shift(d, REV_HOLD) <= end:
+        uni = universe(data, d)
+        ret = {}
+        for m in uni:
+            s = data[m]
+            a, b = _shift(d, -2), _shift(d, -1)
+            if a in s and b in s and s[a][1] > 0:
+                ret[m] = s[b][1] / s[a][1] - 1
+        cands = sorted((v, m) for m, v in ret.items() if REV_MIN_RET <= v < 0)
+        picks = [m for _, m in cands[:REV_PICK]]
+        d_out = _shift(d, REV_HOLD)
+        rs = hold_returns(data, picks, d, d_out)
+        ew = hold_returns(data, list(ret), d, d_out)
+        if rs and ew and d in btc and d_out in btc:
+            rows.append({"date": d, "picks": picks, "ret_pct": [round(ret[m] * 100, 2) for m in picks],
+                         "strat": statistics.mean(rs.values()), "ew": statistics.mean(ew.values()),
+                         "btc": btc[d_out][0] / btc[d][0] - 1})
+        d = _shift(d, REV_HOLD)
+    return rows
+
+
 def kimchi_periods(data, bn, start, end):
     rows, d = [], start
     fx = data.get("KRW-USDT", {})
@@ -264,6 +295,7 @@ def main(argv=None):
     ap.add_argument("--cache", default="df_cache")
     ap.add_argument("--out", default="df_result")
     ap.add_argument("--refresh", action="store_true", help="최신 일봉을 받아 캐시에 합침 (forward 재평가용)")
+    ap.add_argument("--only", nargs="*", default=None, help="실행할 가설만 (예: --only H4). 생략 시 전부")
     a = ap.parse_args(argv)
     markets = {m["market"] for m in _get(f"{UPBIT}/market/all") if m["market"].startswith("KRW-")}
     # 캐시에만 남은 종목(이후 상장폐지) 도 포함 → forward 구간 생존편향 완화
@@ -278,8 +310,9 @@ def main(argv=None):
             print(f"[upbit] skip {m}: {e}")
         if k % 50 == 0:
             print(f"[upbit] {k}/{len(markets)}")
+    need_bn = a.only is None or "H2" in a.only
     for k, m in enumerate(markets, 1):
-        if m in ("KRW-USDT",):
+        if not need_bn or m in ("KRW-USDT",):
             continue
         sym = m.split("-", 1)[1] + "USDT"
         try:
@@ -292,7 +325,10 @@ def main(argv=None):
             print(f"[binance] {k}/{len(markets)} matched={len(bn)}")
     all_days = sorted({d for s in data.values() for d in s})
     start, end = _shift(all_days[0], MIN_HIST + 5), all_days[-1]
-    res = {"H1_momentum": momentum_periods(data, start, end), "H2_kimchi": kimchi_periods(data, bn, start, end)}
+    runners = {"H1_momentum": lambda: momentum_periods(data, start, end),
+               "H2_kimchi": lambda: kimchi_periods(data, bn, start, end),
+               "H4_reversal": lambda: reversal_periods(data, start, end)}
+    res = {k: f() for k, f in runners.items() if a.only is None or k.split("_")[0] in a.only}
     print(f"\ndata {all_days[0]}..{end} | binance matched {len(bn)} | KRW-USDT days {len(data.get('KRW-USDT', {}))}")
     print("\nhypothesis    phase     periods  mean%   EW%    excess%  ciLow%  win%   cum%     EWcum%   BTCcum%  MDD%    verdict")
     report = {"groups": [], "params": vars(a)}
