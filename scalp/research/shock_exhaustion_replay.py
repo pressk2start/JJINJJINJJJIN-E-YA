@@ -27,8 +27,9 @@
   합격(HOLDOUT 셀): n ≥ 50 · 평균 > 0 · 날짜 블록 부트스트랩 90% CI 하한 > 0 · 상위 5건 제외 평균 > 0 · 양수 날 ≥ 80%.
   보고   : 셀별 n·평균·중앙값·승률·CI·ex-top5·양수날, 비용 전 mid 변화(반등 크기 자체), 기회·확인·타임아웃·깊이거절·미해결 개수.
 
-실행 (PC, maker_fill_replay 에 쓴 ws 폴더 그대로):
-  py -X utf8 -u shock_exhaustion_replay.py --root ws --out se_result
+실행 (PC, ws 아카이브 폴더를 위치 인자로):
+  py -X utf8 -u shock_exhaustion_replay.py ws_server\ws -o se_result
+  (메신저로 명령을 옮기면 '--' 가 '—' 로 바뀌므로 '--root' 대신 위치 인자 또는 -r 을 쓴다)
   (전체 15일 ≈ 1~3시간. --days 5 로 뒤 5일만 먼저 돌려 파이프라인 확인 가능 — 단 그 경우 TRAIN 이 없어 판정 없음)
 """
 import argparse
@@ -352,13 +353,18 @@ def _fmt(s):
 
 
 def main(argv=None):
+    # 메신저 경유 복사 시 '--' 가 '—' 로 바뀌는 문제 → 위치 인자와 한 글자 옵션(-r/-o/-d/-t)도 받는다
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True)
-    ap.add_argument("--out", default="se_result")
-    ap.add_argument("--days", type=int, default=0, help="뒤 N일만 (파이프라인 확인용)")
-    ap.add_argument("--train-days", type=int, default=TRAIN_DAYS)
+    ap.add_argument("root_pos", nargs="?", help="ws 아카이브 폴더 (위치 인자)")
+    ap.add_argument("-r", "--root", dest="root_opt")
+    ap.add_argument("-o", "--out", default="se_result")
+    ap.add_argument("-d", "--days", type=int, default=0, help="뒤 N일만 (파이프라인 확인용)")
+    ap.add_argument("-t", "--train-days", type=int, default=TRAIN_DAYS)
     a = ap.parse_args(argv)
-    files, dates = archive_files(a.root, a.days or None)
+    root = a.root_opt or a.root_pos
+    if not root:
+        ap.error("아카이브 폴더를 지정하세요: shock_exhaustion_replay.py ws_server\\ws  (또는 -r ws_server\\ws)")
+    files, dates = archive_files(root, a.days or None)
     train_dates = dates[:a.train_days] if len(dates) > a.train_days else []
     print(f"SHOCK→EXHAUSTION REPLAY (pre-registered 2026-10-24) | {len(files)} files | dates {dates[0]}..{dates[-1]} "
           f"({len(dates)}) | TRAIN {len(train_dates)} days | HOLDOUT {len(dates) - len(train_dates)} days", flush=True)
