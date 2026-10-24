@@ -101,7 +101,7 @@ class H17Tests(unittest.TestCase):
             self.assertEqual(len({(r["opportunity_id"], r["variant"], r["horizon"]) for r in rows}), 12)
             self.assertTrue(all(r["status"] == "RESOLVED" for r in rows))
             self.assertTrue(all(r["net"] > 0 for r in cell(rows, "B_exhaust")))
-            self.assertTrue(all(r["entry_recv_ts"] >= r["signal_recv_ts"] + SE.LAT_MS for r in rows))
+            self.assertTrue(all(r["entry_recv_ts"] >= r["decision_recv_ts"] + SE.LAT_MS for r in rows))
             self.assertTrue(all(r["date"] == DAY for r in rows))
 
     def test_heartbeat_does_not_censor_pending_positions(self):
@@ -161,6 +161,23 @@ class H17Tests(unittest.TestCase):
             r = cell(rows, "C_exhaust_depth")[0]
             self.assertEqual((r["status"], r["reason"]),
                              ("NOT_ENTERED", "depth_not_recovered_at_decision"))
+
+    def test_cached_depth_native_age_is_rechecked_at_decision(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in scenario() if not
+                      (m["type"] == "orderbook" and BASE + 1600 <= m["recv_ts"] <= BASE + 2000)]
+            events += [book(BASE + 1950, mid=99., size=3000., lag=450)]
+            rows, _ = run_rows(root, events)
+            self.assertEqual(cell(rows, "B_exhaust")[0]["status"], "RESOLVED")
+            self.assertEqual(cell(rows, "C_exhaust_depth")[0]["status"], "NOT_ENTERED")
+
+    def test_fresh_message_cannot_hide_an_old_trade_timestamp(self):
+        with tempfile.TemporaryDirectory() as root:
+            stale = trade(BASE + 1500)
+            stale["trade_timestamp"] = BASE - 500
+            rows, counts = run_rows(root, scenario() + [stale])
+            self.assertEqual(cell(rows)[0]["status"], "UNKNOWN")
+            self.assertEqual(counts["rejected_stale_or_future_event"], 1)
 
     def test_split_crossing_is_purged_and_signal_date_is_stable(self):
         with tempfile.TemporaryDirectory() as root:
