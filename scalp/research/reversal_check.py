@@ -256,8 +256,8 @@ def main():
         for r in sorted(alive, key=lambda x: -x["con"])[:10]:
             print(f"  · {r['feature']}<=P{r['q']*100} h={r['h']} 보수 {r['con']:+.4f}%p "
                   f"(n={r['n_test']:,}, 최다 {r['top_market']} {r['top_share']:.2f})")
-    json.dump(report, open(os.path.join(OUT, "reversal_check.json"), "w"), indent=1)
-    print(f"\n→ {OUT}/reversal_check.json")
+    json.dump(report, open(os.path.join(OUT, "reversal_check_observed.json"), "w"), indent=1)
+    print(f"\n→ {OUT}/reversal_check_observed.json")
 
 
 if __name__ == "__main__":
