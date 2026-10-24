@@ -19,6 +19,15 @@
   9개 특징 × 3분위 = 27칸 중 최고를 고르는 것이라 TRAIN 숫자는 우연으로 좋게 나온다. HOLDOUT 이 유일한 판정.
 한계: 일봉만이라 호가·체결흐름 특징은 없음. 상폐 종목 누락(생존편향)은 하락 종목 매수에 유리하게 작용.
 실행: py loser_screen.py   (캐시 lsc_cache/, 첫 실행 5~10분)
+
+결과 (2026-10-24 실행, 2024-08-16~2026-10-24 공개 일봉, 사건 TRAIN 4736 / HOLDOUT 1703):
+  무조건 하위10 다음날 순수익: TRAIN -0.674% / HOLDOUT -0.568%
+  27칸 중 양(+)인 칸: TRAIN 0개, HOLDOUT 1개(sma20 high +0.003%, n=556)
+  양쪽 구간 방향 일치한 '덜 나쁜' 쪽: ret30 high(-0.44/-0.19) · sma20 high(-0.47/+0.00) · volx high(-0.51/-0.14)
+  선택→판정: closepos=high  TRAIN -0.368(n1579) → HOLDOUT -0.548(n470)  FAIL
+            closepos=high AND rel=low  TRAIN +0.427(n433) → HOLDOUT +0.079(n140, CI하한 -0.70, 승률 41%)  FAIL
+  결론: 일봉 특징 9개로는 하락 종목 1일 되돌림을 비용 후 양수로 만드는 조건이 없음. TRAIN 최고 칸(+0.43)이
+        HOLDOUT 에서 0 근처로 회귀 = 다중비교 과적합의 전형. gap 은 업비트 일봉 특성상 거의 0 이라 분위 퇴화.
 """
 import argparse
 import datetime as dt
