@@ -24,7 +24,19 @@ BINANCE = ("wss://data-stream.binance.vision/stream?streams="
            "btcusdt@bookTicker/ethusdt@bookTicker/btcusdt@trade/ethusdt@trade")
 UP_MARKETS = ("KRW-BTC", "KRW-ETH")
 BN_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+STREAM_KEYS = ("upbit:KRW-BTC:book", "upbit:KRW-ETH:book",
+               "upbit:KRW-BTC:trade", "upbit:KRW-ETH:trade",
+               "binance:BTCUSDT:book", "binance:ETHUSDT:book",
+               "binance:BTCUSDT:trade", "binance:ETHUSDT:trade")
 SCHEMA = 1
+
+
+def upbit_subscription(ticket):
+    """Public books and actual taker trades on the same connection."""
+    return [{"ticket": ticket},
+            {"type": "orderbook", "codes": list(UP_MARKETS), "level": 0},
+            {"type": "trade", "codes": list(UP_MARKETS)},
+            {"format": "DEFAULT"}]
 
 
 def positive(value):
@@ -52,7 +64,23 @@ def parse_public(source, raw):
         raise ValueError("not_object")
     if source == "upbit":
         symbol = item.get("code")
-        if item.get("type") != "orderbook" or symbol not in UP_MARKETS:
+        if symbol not in UP_MARKETS:
+            raise ValueError("unexpected_upbit_market")
+        if item.get("type") == "trade":
+            required = ("trade_price", "trade_volume", "ask_bid",
+                        "trade_timestamp", "timestamp", "sequential_id")
+            if not all(key in item for key in required):
+                raise ValueError("missing_upbit_trade_field")
+            if item["ask_bid"] not in ("ASK", "BID"):
+                raise ValueError("invalid_upbit_taker_side")
+            positive(item["trade_price"])
+            positive(item["trade_volume"])
+            return {"symbol": symbol, "kind": "trade",
+                    "exchange_ms": integer(item["trade_timestamp"]),
+                    "event_ms": integer(item["timestamp"]),
+                    "native_id": integer(item["sequential_id"]),
+                    "side": item["ask_bid"]}
+        if item.get("type") != "orderbook":
             raise ValueError("unexpected_upbit_message")
         units = item.get("orderbook_units")
         if not isinstance(units, list) or not units:
@@ -208,6 +236,7 @@ async def collect(args):
     manifest = {"record_type": "manifest", "public_only": True,
                 "markets": list(UP_MARKETS), "binance_symbols": list(BN_SYMBOLS),
                 "sample_ms": args.sample_ms, "raw_sampling": False,
+                "requested_streams": list(STREAM_KEYS),
                 "duration_hours": args.duration_hours,
                 "websockets_version": getattr(websockets, "__version__", "unknown"),
                 "proxy_policy": "disabled_when_supported; older_clients_direct",
@@ -228,10 +257,7 @@ async def collect(args):
                     emit("connect", source=source, session_id=session)
                     notices[source + "_connects"] += 1
                     if source == "upbit":
-                        await ws.send(json.dumps([
-                            {"ticket": writer.run_id},
-                            {"type": "orderbook", "codes": list(UP_MARKETS), "level": 0},
-                            {"format": "DEFAULT"}]))
+                        await ws.send(json.dumps(upbit_subscription(writer.run_id)))
                     retry = 1.0
                     while not stop.is_set():
                         try:
@@ -293,9 +319,7 @@ async def collect(args):
                 await wait_or_stop(stop, retry)
                 retry = min(retry * 2, 30)
 
-    expected = ("upbit:KRW-BTC:book", "upbit:KRW-ETH:book",
-                "binance:BTCUSDT:book", "binance:ETHUSDT:book",
-                "binance:BTCUSDT:trade", "binance:ETHUSDT:trade")
+    expected = STREAM_KEYS
 
     def snapshot(final=False):
         elapsed = time.monotonic() - started
@@ -438,6 +462,92 @@ def selftest():
                 self.assertIsInstance(rec["wall_ns"], int)
                 self.assertEqual(rec["raw"], "unchanged")
                 self.assertEqual(json.loads((writer.root / "status.json").read_text())["ok"], True)
+
+        def test_upbit_trade_sides_exchange_time_and_raw_preservation(self):
+            for side in ("BID", "ASK"):
+                with self.subTest(side=side):
+                    item = {"type": "trade", "code": "KRW-ETH",
+                            "trade_price": 3000000.0, "trade_volume": 0.002,
+                            "ask_bid": side, "trade_timestamp": 1790000000100,
+                            "timestamp": 1790000000149,
+                            "sequential_id": 9007199254740993,
+                            "extra_future_field": {"preserved": True}}
+                    raw = json.dumps(item, separators=(",", ":"))
+                    parsed = parse_public("upbit", raw)
+                    self.assertEqual(parsed["kind"], "trade")
+                    self.assertEqual(parsed["symbol"], "KRW-ETH")
+                    self.assertEqual(parsed["side"], side)
+                    self.assertEqual(parsed["exchange_ms"], 1790000000100)
+                    self.assertEqual(parsed["event_ms"], 1790000000149)
+                    self.assertEqual(parsed["native_id"], 9007199254740993)
+                    self.assertEqual(json.loads(raw), item)
+
+        def test_upbit_trade_requires_price_size_side_and_clocks(self):
+            valid = {"type": "trade", "code": "KRW-BTC", "trade_price": 100.0,
+                     "trade_volume": 0.1, "ask_bid": "BID",
+                     "trade_timestamp": 1000, "timestamp": 1049,
+                     "sequential_id": 123}
+            for field, value in (("trade_price", 0), ("trade_price", float("nan")),
+                                 ("trade_volume", -0.1), ("trade_volume", float("inf")),
+                                 ("trade_volume", True), ("ask_bid", "BUY"),
+                                 ("ask_bid", "bid"), ("timestamp", True),
+                                 ("trade_timestamp", -1), ("sequential_id", False)):
+                with self.subTest(field=field, value=value):
+                    bad = dict(valid)
+                    bad[field] = value
+                    with self.assertRaises(ValueError):
+                        parse_public("upbit", json.dumps(bad))
+            for field in ("trade_price", "trade_volume", "ask_bid", "trade_timestamp",
+                          "timestamp", "sequential_id"):
+                with self.subTest(missing=field):
+                    bad = dict(valid)
+                    del bad[field]
+                    with self.assertRaises((KeyError, ValueError)):
+                        parse_public("upbit", json.dumps(bad))
+
+        def test_upbit_trade_rejects_unsubscribed_market_and_wrong_type(self):
+            valid = {"type": "trade", "code": "KRW-BTC", "trade_price": 100.0,
+                     "trade_volume": 0.1, "ask_bid": "ASK", "trade_timestamp": 1000,
+                     "timestamp": 1049, "sequential_id": 123}
+            for patch in ({"code": "KRW-XRP"}, {"code": "BTC-ETH"}, {"type": "ticker"}):
+                with self.subTest(patch=patch):
+                    bad = dict(valid, **patch)
+                    with self.assertRaises(ValueError):
+                        parse_public("upbit", json.dumps(bad))
+
+        def test_subscription_and_expected_streams_include_upbit_trades(self):
+            subscription = upbit_subscription("offline-ticket")
+            self.assertEqual(subscription[0], {"ticket": "offline-ticket"})
+            typed = {item["type"]: item for item in subscription if "type" in item}
+            self.assertEqual(set(typed), {"orderbook", "trade"})
+            self.assertEqual(typed["orderbook"]["codes"], list(UP_MARKETS))
+            self.assertEqual(typed["orderbook"]["level"], 0)
+            self.assertEqual(typed["trade"]["codes"], list(UP_MARKETS))
+            expected = {"upbit:KRW-BTC:book", "upbit:KRW-ETH:book",
+                        "upbit:KRW-BTC:trade", "upbit:KRW-ETH:trade",
+                        "binance:BTCUSDT:book", "binance:ETHUSDT:book",
+                        "binance:BTCUSDT:trade", "binance:ETHUSDT:trade"}
+            self.assertEqual(set(STREAM_KEYS), expected)
+            self.assertEqual(len(STREAM_KEYS), 8)
+
+        def test_upbit_trade_native_sequence_and_old_book_compatibility(self):
+            item = {"type": "trade", "code": "KRW-BTC", "trade_price": 100.0,
+                    "trade_volume": 0.1, "ask_bid": "BID", "trade_timestamp": 1000,
+                    "timestamp": 1049, "sequential_id": 9007199254740993}
+            trade = parse_public("upbit", json.dumps(item))
+            previous, key = {}, "upbit:KRW-BTC:trade"
+            self.assertIsNone(sequence_flag(previous, key, trade["native_id"]))
+            self.assertEqual(sequence_flag(previous, key, trade["native_id"]),
+                             "duplicate_or_backward_native_id")
+            self.assertIsNone(sequence_flag(previous, key, trade["native_id"] + 2))
+            old_book = {"type": "orderbook", "code": "KRW-BTC", "timestamp": 1050,
+                        "orderbook_units": [{"bid_price": 99, "ask_price": 101,
+                                             "bid_size": 1, "ask_size": 1}]}
+            parsed = parse_public("upbit", json.dumps(old_book))
+            self.assertEqual(parsed["kind"], "book")
+            self.assertEqual(parsed["exchange_ms"], 1050)
+            self.assertIsNone(parsed["native_id"])
+
     result = unittest.TextTestRunner(verbosity=1).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(Checks))
     if result.wasSuccessful():
