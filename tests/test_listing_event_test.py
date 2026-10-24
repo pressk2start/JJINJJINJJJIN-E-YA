@@ -77,6 +77,29 @@ class TestListingEvent(unittest.TestCase):
             got = LE.listing_markets(d)
         self.assertEqual(got, [("KRW-NEW", "2025-03-01"), ("KRW-YOUNG", "2026-10-21")])
 
+    def test_post_listing_uses_next_day_open_and_btc_benchmark(self):
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as d:
+            def w(m, first, opens):
+                base = dt.date.fromisoformat(first)
+                Path(d, f"up_{m}.json").write_text(json.dumps(
+                    {(base + dt.timedelta(days=i)).isoformat(): [o, o, 1e9] for i, o in enumerate(opens)}))
+            w("KRW-BTC", "2026-05-01", [1000 + 10 * i for i in range(20)])
+            w("KRW-NEW", "2026-05-03", [500, 400, 380, 360, 340, 320, 300, 280, 260, 240])  # D0=05-03, D1=05-04
+            w("KRW-SHORT", "2026-05-10", [100, 90, 80])                                      # only 1d leg available
+            ev = LE.post_listing_returns(d, [("KRW-NEW", "2026-05-03"), ("KRW-SHORT", "2026-05-10")])
+        legs = {e["market"]: e["legs"] for e in ev}
+        self.assertEqual(legs["KRW-NEW"]["D1_1d"][:2], (400, 380))
+        self.assertEqual(legs["KRW-NEW"]["D1_3d"][:2], (400, 340))
+        self.assertEqual(legs["KRW-NEW"]["D1_7d"][:2], (400, 260))
+        self.assertAlmostEqual(legs["KRW-NEW"]["D1_1d"][2], 1040 / 1030 - 1)   # BTC 05-05 / 05-04
+        self.assertEqual(set(legs["KRW-SHORT"]), {"D1_1d"})
+        rows = {(r["phase"], r["leg"]): r for r in LE.analyze_post(ev)}
+        self.assertEqual(rows[("HOLDOUT", "D1_1d")]["n"], 2)
+        self.assertEqual(rows[("HOLDOUT", "D1_7d")]["n"], 1)
+        self.assertEqual(rows[("HOLDOUT", "D1_1d")]["verdict"], "INSUFFICIENT")
+        self.assertEqual(rows[("TRAIN", "D1_1d")]["n"], 0)
+
     def test_analyze_phases(self):
         ev = []
         for i in range(30):
