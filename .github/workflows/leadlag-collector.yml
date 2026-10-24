@@ -49,3 +49,25 @@ jobs:
           python -X utf8 -m unittest discover -s tests -p "test_reversal_check_observation.py" -v
           python -X utf8 -m unittest discover -s tests -p "test_shock_exhaustion_replay.py" -v
           python -X utf8 scalp/research/shock_exhaustion_replay.py --help
+  h17-python37:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: "3.7.9"
+          - os: ubuntu-22.04
+            python: "3.7.17"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: H17 standard-library checks on Python 3.7
+        run: |
+          python --version
+          python -m py_compile scalp/research/shock_exhaustion_replay.py tests/test_shock_exhaustion_replay.py
+          python -X utf8 -m unittest discover -s tests -p "test_shock_exhaustion_replay.py" -v
+          python -X utf8 scalp/research/shock_exhaustion_replay.py --help
