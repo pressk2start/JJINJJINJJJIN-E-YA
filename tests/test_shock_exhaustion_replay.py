@@ -129,6 +129,24 @@ class TestShockExhaustion(unittest.TestCase):
             self.assertTrue(res[("HOLDOUT", "B_exhaust", 15)]["primary"])
             self.assertEqual(res[("TRAIN", "A_immediate", 5)]["n"], 1)
 
+    def test_truncated_gzip_is_read_partially(self):
+        with tempfile.TemporaryDirectory() as root:
+            d = Path(root, "2026-10-10")
+            d.mkdir()
+            full = d / "00.jsonl.gz"
+            with gzip.open(full, "wt", encoding="utf-8") as fh:
+                for i in range(2000):
+                    fh.write(json.dumps({"type": "trade", "code": "KRW-T", "recv_ts": i, "_seq": i}) + "\n")
+            data = full.read_bytes()
+            (d / "01.jsonl.gz").write_bytes(data[: len(data) // 2])      # 뒷부분이 잘린 복사본
+            files, _ = SE.archive_files(root)
+            counters = collections.Counter()
+            lines = list(SE.iter_lines(files, counters))
+            self.assertEqual(counters["truncated_files"], 1)
+            self.assertGreater(len(lines), 2000)                          # 온전한 파일 2000 + 잘린 파일 일부
+            self.assertLess(len(lines), 4000)
+            self.assertTrue(all(raw.endswith(b"\n") for _, raw in lines))  # 반 토막 행은 나오지 않음
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

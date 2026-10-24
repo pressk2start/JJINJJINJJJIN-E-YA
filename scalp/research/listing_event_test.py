@@ -57,6 +57,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import daily_factor_test as dft  # noqa: E402  (_get, cached 재사용)
 
 UPBIT = dft.UPBIT
+
+
+def _mean(v):
+    """statistics.fmean 대체 (PC 의 Python 3.7 호환)."""
+    v = list(v)
+    return sum(v) / len(v)
 FEE, SLIP, SLIP_STRESS = 0.0005, 0.0010, 0.0025
 LIST_AFTER = "2024-09-01"
 ENTRY_DELAYS = (5, 30)
@@ -171,7 +177,7 @@ def ci_low(v, n=2000, seed=5):
     if len(v) < 2:
         return float("nan")
     rnd = random.Random(seed)
-    means = sorted(statistics.fmean(rnd.choices(v, k=len(v))) for _ in range(n))
+    means = sorted(_mean(rnd.choices(v, k=len(v))) for _ in range(n))
     return means[int(0.05 * n)]
 
 
@@ -179,9 +185,9 @@ def summarize(v):
     if not v:
         return {"n": 0}
     s = sorted(v)
-    return {"n": len(v), "mean": statistics.fmean(v), "median": statistics.median(v),
+    return {"n": len(v), "mean": _mean(v), "median": statistics.median(v),
             "win": sum(x > 0 for x in v) / len(v), "ci_low": ci_low(v),
-            "ex_top1": statistics.fmean(s[:-1]) if len(s) > 1 else float("nan")}
+            "ex_top1": _mean(s[:-1]) if len(s) > 1 else float("nan")}
 
 
 def verdict(s):
@@ -266,7 +272,7 @@ def analyze_post(events):
             key = f"D1_{h}d"
             legs = [e["legs"][key] for e in ev if key in e["legs"]]
             s = summarize([net(a, b) for a, b, _ in legs])
-            s["btc_mean"] = statistics.fmean(c for _, _, c in legs) if legs else float("nan")
+            s["btc_mean"] = _mean(c for _, _, c in legs) if legs else float("nan")
             v = verdict(s) if phase == "HOLDOUT" else "(explore)"
             if v == "PASS" and not s["mean"] > s["btc_mean"]:
                 v = "FAIL"
