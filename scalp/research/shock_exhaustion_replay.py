@@ -44,6 +44,12 @@ from pathlib import Path
 FEE = 0.0005
 NOTIONAL = 100_000
 LAT_MS = 300
+
+
+def _mean(v):
+    """statistics.fmean 대체 (PC 의 Python 3.7 호환)."""
+    v = list(v)
+    return sum(v) / len(v)
 SHOCK_WIN_MS, SELL_SHARE_MIN, MIN_TRADES = 10_000, 0.70, 5
 EXH_WIN_MS, EXH_MAX_WAIT_MS = 2_000, 10_000
 DEPTH_BASE_MS, DEPTH_LEVELS, DEPTH_SAMPLE_MS = 60_000, 5, 1_000
@@ -129,7 +135,7 @@ def ci_low_days(rows, n=2000, seed=5):
     means = []
     for _ in range(n):
         pool = [x for d in rnd.choices(days, k=len(days)) for x in d]
-        means.append(statistics.fmean(pool))
+        means.append(_mean(pool))
     means.sort()
     return means[int(0.05 * n)]
 
@@ -142,12 +148,12 @@ def summarize(rows):
     by_day = collections.defaultdict(list)
     for r in rows:
         by_day[r["date"]].append(r["net"])
-    day_means = [statistics.fmean(x) for x in by_day.values()]
-    return {"n": len(v), "mean": statistics.fmean(v), "median": statistics.median(v),
+    day_means = [_mean(x) for x in by_day.values()]
+    return {"n": len(v), "mean": _mean(v), "median": statistics.median(v),
             "win": sum(x > 0 for x in v) / len(v), "ci_low": ci_low_days(rows),
-            "ex_top5": statistics.fmean(s[:-5]) if len(s) > 5 else float("nan"),
+            "ex_top5": _mean(s[:-5]) if len(s) > 5 else float("nan"),
             "days": len(day_means), "days_pos": sum(m > 0 for m in day_means),
-            "mid_ret": statistics.fmean(r["mid_ret"] for r in rows)}
+            "mid_ret": _mean(r["mid_ret"] for r in rows)}
 
 
 def verdict(s):

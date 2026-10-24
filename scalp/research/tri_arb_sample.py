@@ -43,6 +43,12 @@ SIZES = (6_000, 100_000, 1_000_000)
 TOP_N = 30
 
 
+def _mean(v):
+    """statistics.fmean 대체 (PC 의 Python 3.7 호환)."""
+    v = list(v)
+    return sum(v) / len(v)
+
+
 def _get(url, retries=4):
     for i in range(retries):
         try:
@@ -151,7 +157,7 @@ def summarize(samples, keys):
         v_sorted = sorted(v)
         rows.append({"path": path, "size": size, "n": len(v), "pos": sum(x > 0 for x in v),
                      "max": v_sorted[-1], "p99": v_sorted[int(0.99 * (len(v) - 1))], "median": statistics.median(v)})
-    best = sorted(((statistics.fmean(v), k, len(v)) for k, v in by_key.items()), reverse=True)[:8]
+    best = sorted(((_mean(v), k, len(v)) for k, v in by_key.items()), reverse=True)[:8]
     # 가장 긴 연속 양수 (어느 (x, path, size) 든)
     longest = 0
     for k in by_key:
