@@ -20,6 +20,12 @@
 
 사전 점검 (2026-10-24, 30초 10샘플 스모크): 네 경로 모두 전부 음수. 최고 -0.31% (= 수수료 0.35% 가 비용 전 +0.04% 를 삼킴).
   BTC/USDT 마켓 알트 호가는 중앙값 -2~-37% 로 사실상 유동성 없음. 본 측정 60분은 이 뒤에 실행.
+결과 (2026-10-24 04:12~05:12 UTC, 1,192 샘플 × 30 알트 × 4 경로 × 3 크기, 오류 0):
+  수수료 후 양수 = 전체 약 41만 관측 중 **1건** (BTC-rev, 6천원, +1.10%, 단일 3초 샘플 · 10만원 이상에서는 0건).
+  경로별 최고치 -0.29 ~ -0.40%, 99분위 -0.36 ~ -0.57%, (종목·경로·크기) 평균 최고 -0.397% (ETH USDT-rev).
+  가장 긴 연속 양수 = 1샘플(≈3초). 세 다리를 순차 주문하는 실제 실행은 1초 이상 걸리므로 그 1건도 잡을 수 없다.
+  판정: 종결. 업비트 내부 삼각 차익은 BTC/USDT 마켓 수수료 0.25% 와 그 마켓들의 스프레드만으로 기회가 소멸한다.
+  (사전 기준 '양수 샘플 1% 미만 또는 연속 1샘플 이하 → 실행 불가' 둘 다 해당)
 실행 (PC 또는 연구용 머신. 거래 서버 금지):
   py -u tri_arb_sample.py --minutes 60 --interval 3 --out tri_result
 """
@@ -221,7 +227,7 @@ def main(argv=None):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps({"universe": universe, "vias": vias, "samples": len(samples),
-                                                 "errors": n_err, "skew_ms": skews, "rows": rows,
+                                                 "errors": n_err, "orderbook_age_median_s": age_s, "rows": rows,
                                                  "best": [(m, list(k), n) for m, k, n in best],
                                                  "longest_run": longest}, indent=1))
     print(f"Results: {out}/report.json")
