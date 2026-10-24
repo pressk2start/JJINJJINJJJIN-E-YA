@@ -6,12 +6,16 @@ on:
       - "scalp/research/leadlag.py"
       - "scalp/research/leadlag_peek.py"
       - "tests/test_leadlag_opportunity.py"
+      - "scalp/research/reversal_check.py"
+      - "tests/test_reversal_check_observation.py"
       - ".github/workflows/leadlag-collector.yml"
   pull_request:
     paths:
       - "scalp/research/leadlag.py"
       - "scalp/research/leadlag_peek.py"
       - "tests/test_leadlag_opportunity.py"
+      - "scalp/research/reversal_check.py"
+      - "tests/test_reversal_check_observation.py"
       - ".github/workflows/leadlag-collector.yml"
 permissions:
   contents: read
@@ -30,11 +34,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install public WebSocket client
-        run: python -m pip install "websockets>=12,<17"
+        run: python -m pip install "websockets>=12,<17" numpy
       - name: Syntax and offline selftest
         run: |
-          python -m py_compile scalp/research/leadlag.py scalp/research/leadlag_peek.py tests/test_leadlag_opportunity.py
+          python -m py_compile scalp/research/leadlag.py scalp/research/leadlag_peek.py scalp/research/reversal_check.py tests/test_leadlag_opportunity.py tests/test_reversal_check_observation.py
           python -X utf8 scalp/research/leadlag.py selftest
           python scalp/research/leadlag.py collect --help
           python -X utf8 -m unittest discover -s tests -p "test_leadlag_opportunity.py" -v
           python scalp/research/leadlag_peek.py --opportunity-audit --help
+          python -X utf8 -m unittest discover -s tests -p "test_reversal_check_observation.py" -v
