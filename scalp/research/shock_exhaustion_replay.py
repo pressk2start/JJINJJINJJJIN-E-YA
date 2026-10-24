@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""H17 shock/exhaustion event study, PUBLIC ARCHIVE ONLY: no network, keys or orders.
+r"""H17 shock/exhaustion event study, PUBLIC ARCHIVE ONLY: no network, keys or orders.
 
 Rules: 10-second receive-time trade return <= TRAIN lower 0.5% quantile (capped
 at -0.3%), >=70% sell notional, >=5 trades, 60-second signal cooldown.
@@ -271,6 +271,8 @@ def iter_events(files, counters, markets=None):
                 raise ValueError("stale_or_future_event")
             key = market, kind
             stamp = int(m.get("trade_timestamp", event_ts)) if kind == "trade" else event_ts
+            if kind == "trade" and not 0 <= recv - stamp <= MAX_AGE_MS:
+                raise ValueError("stale_or_future_event")
             if m.get("_seq_anomaly") or stamp < native.get(key, -1):
                 raise ValueError("native_time_or_sequence")
             if kind == "trade":
@@ -377,7 +379,8 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
                 for leg in list(o["legs"]):
                     if now > leg["exit_target"] + MAX_WAIT_MS:
                         emit(o, leg["var"], leg["h"], "UNKNOWN", "exit_quote_late_or_missing",
-                             entry_recv_ts=leg["entry_recv"], entry_exchange_ts=leg["entry_native"])
+                             entry_recv_ts=leg["entry_recv"], entry_exchange_ts=leg["entry_native"],
+                             decision_recv_ts=leg["decision_recv"])
                         o["legs"].remove(leg)
 
     for date, m in iter_events(files, counters, markets):
@@ -397,7 +400,7 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
             units = m["orderbook_units"]
             mid = (min(float(u["ask_price"]) for u in units)
                    + max(float(u["bid_price"]) for u in units)) / 2
-            books[market] = (now, units)
+            books[market] = (now, units, int(m["timestamp"]))
             dq = depth.setdefault(market, collections.deque())
             if now - last_sample.get(market, -10**18) >= DEPTH_SAMPLE_MS:
                 last_sample[market] = now
@@ -422,13 +425,14 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
                             continue
                         o["legs"].append({"var": var, "h": h, "qty": qty, "mid": mid,
                                           "entry_recv": now, "entry_native": int(m["timestamp"]),
+                                          "decision_recv": target - LAT_MS,
                                           "exit_target": now + h * 1000})
                 for leg in list(o["legs"]):
                     if now < leg["exit_target"]:
                         continue
                     o["legs"].remove(leg)
                     proceeds = sell_vwap(units, leg["qty"])
-                    extra = dict(entry_recv_ts=leg["entry_recv"],
+                    extra = dict(decision_recv_ts=leg["decision_recv"], entry_recv_ts=leg["entry_recv"],
                                  entry_exchange_ts=leg["entry_native"], exit_recv_ts=now,
                                  exit_exchange_ts=int(m["timestamp"]), quantity=leg["qty"],
                                  cost_krw=NOTIONAL * (1 + FEE))
@@ -461,6 +465,7 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
                 book = books.get(market)
                 if (o["depth_base"] is not None and book is not None
                         and 0 <= now - book[0] <= MAX_AGE_MS
+                        and 0 <= now - book[2] <= MAX_AGE_MS
                         and bid_depth_krw(book[1]) >= o["depth_base"]):
                     o["enter"]["C_exhaust_depth"] = now + LAT_MS
                 else:
