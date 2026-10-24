@@ -8,6 +8,8 @@ on:
       - "tests/test_leadlag_opportunity.py"
       - "scalp/research/reversal_check.py"
       - "tests/test_reversal_check_observation.py"
+      - "scalp/research/shock_exhaustion_replay.py"
+      - "tests/test_shock_exhaustion_replay.py"
       - ".github/workflows/leadlag-collector.yml"
   pull_request:
     paths:
@@ -16,6 +18,8 @@ on:
       - "tests/test_leadlag_opportunity.py"
       - "scalp/research/reversal_check.py"
       - "tests/test_reversal_check_observation.py"
+      - "scalp/research/shock_exhaustion_replay.py"
+      - "tests/test_shock_exhaustion_replay.py"
       - ".github/workflows/leadlag-collector.yml"
 permissions:
   contents: read
@@ -37,9 +41,33 @@ jobs:
         run: python -m pip install "websockets>=12,<17" numpy
       - name: Syntax and offline selftest
         run: |
-          python -m py_compile scalp/research/leadlag.py scalp/research/leadlag_peek.py scalp/research/reversal_check.py tests/test_leadlag_opportunity.py tests/test_reversal_check_observation.py
+          python -m py_compile scalp/research/leadlag.py scalp/research/leadlag_peek.py scalp/research/reversal_check.py tests/test_leadlag_opportunity.py tests/test_reversal_check_observation.py scalp/research/shock_exhaustion_replay.py tests/test_shock_exhaustion_replay.py
           python -X utf8 scalp/research/leadlag.py selftest
           python scalp/research/leadlag.py collect --help
           python -X utf8 -m unittest discover -s tests -p "test_leadlag_opportunity.py" -v
           python scalp/research/leadlag_peek.py --opportunity-audit --help
           python -X utf8 -m unittest discover -s tests -p "test_reversal_check_observation.py" -v
+          python -X utf8 -m unittest discover -s tests -p "test_shock_exhaustion_replay.py" -v
+          python -X utf8 scalp/research/shock_exhaustion_replay.py --help
+  h17-python37:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: "3.7.9"
+          - os: ubuntu-22.04
+            python: "3.7.17"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: H17 standard-library checks on Python 3.7
+        run: |
+          python --version
+          python -m py_compile scalp/research/shock_exhaustion_replay.py tests/test_shock_exhaustion_replay.py
+          python -X utf8 -m unittest discover -s tests -p "test_shock_exhaustion_replay.py" -v
+          python -X utf8 scalp/research/shock_exhaustion_replay.py --help

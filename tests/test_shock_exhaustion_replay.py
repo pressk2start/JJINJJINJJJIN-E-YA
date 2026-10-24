@@ -1,152 +1,256 @@
-# -*- coding: utf-8 -*-
-"""shock_exhaustion_replay 순수 로직 + 합성 아카이브 end-to-end 테스트 (네트워크 없음)."""
+"""Offline regressions for H17 availability, censoring and input integrity."""
 import collections
+import contextlib
+import datetime as dt
 import gzip
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("ser", ROOT / "scalp" / "research" / "shock_exhaustion_replay.py")
+SPEC = importlib.util.spec_from_file_location("h17", ROOT / "scalp/research/shock_exhaustion_replay.py")
 SE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SE)
+DAY = "2026-10-10"
+BASE = int(dt.datetime(2026, 10, 10, 12, tzinfo=dt.timezone.utc).timestamp() * 1000)
 
 
-def units(mid, spread=0.001, size=1000.0):
-    a, b = mid * (1 + spread / 2), mid * (1 - spread / 2)
-    return [{"ask_price": a * (1 + 0.001 * i), "ask_size": size, "bid_price": b * (1 - 0.001 * i), "bid_size": size}
-            for i in range(5)]
+def units(mid=100., size=2000.):
+    return [{"ask_price": mid * 1.0005, "ask_size": size,
+             "bid_price": mid * .9995, "bid_size": size}]
 
 
-class Archive:
-    """합성 ws 아카이브 작성기. 모든 이벤트는 (ts, dict) 로 모아 recv_ts 순으로 기록."""
-    def __init__(self):
-        self.ev = []
-        self.seq = 0
-
-    def trade(self, ts, code, price, vol, sell):
-        self.ev.append((ts, {"type": "trade", "code": code, "trade_price": price, "trade_volume": vol,
-                             "ask_bid": "ASK" if sell else "BID", "timestamp": ts, "trade_timestamp": ts,
-                             "sequential_id": ts}))
-
-    def book(self, ts, code, mid, size=1000.0):
-        self.ev.append((ts, {"type": "orderbook", "code": code, "timestamp": ts, "orderbook_units": units(mid, size=size)}))
-
-    def write(self, root, date):
-        d = Path(root, date)
-        d.mkdir(parents=True)
-        with gzip.open(d / "00.jsonl.gz", "wt", encoding="utf-8") as fh:
-            for ts, m in sorted(self.ev, key=lambda x: x[0]):
-                self.seq += 1
-                m = dict(m, recv_ts=ts + 50, _seq=self.seq)
-                fh.write(json.dumps(m, separators=(",", ":")) + "\n")
+def trade(now, price=100., sell=True, code="KRW-TST", lag=50):
+    return {"type": "trade", "code": code, "timestamp": now - lag,
+            "trade_timestamp": now - lag, "recv_ts": now,
+            "sequential_id": now, "trade_price": price, "trade_volume": 1.,
+            "ask_bid": "ASK" if sell else "BID"}
 
 
-def shock_day(arc, code, t0, bounce):
-    """정상 → 10초 급락(매도) → 2.5초 매수 소진 → 반등(bounce 비율) 시나리오."""
-    for k in range(20):                                   # 안정 구간: 1초 간격, 가격 100, 호가 샘플
-        arc.trade(t0 + k * 1000, code, 100.0, 1.0, sell=(k % 2 == 0))
-        arc.book(t0 + k * 1000 + 10, code, 100.0)
-    s = t0 + 20_000
-    for k in range(10):                                   # 충격: 1초마다 -0.1% 매도 체결 → 총 -1%
-        arc.trade(s + k * 1000, code, 100.0 * (1 - 0.001 * (k + 1)), 5.0, sell=True)
-        arc.book(s + k * 1000 + 10, code, 100.0 * (1 - 0.001 * (k + 1)))
-    low_t = s + 9_000                                     # 최저가 99.0 at low_t
-    for k in range(1, 6):                                 # 소진: 매수 체결 500ms 간격, 가격 99.0~99.05
-        arc.trade(low_t + k * 500, code, 99.0 + 0.01 * k, 1.0, sell=False)
-    arc.book(low_t + 2_600, code, 99.05, size=1500.0)     # B/C 진입용 호가 (확인 low_t+2000 → +300ms 이후) · 잔량 회복
-    for h in (5, 15, 30, 60):                             # 청산용 호가: bounce 적용
-        arc.book(low_t + 2_600 + h * 1000 + 20, code, 99.05 * (1 + bounce))
-        arc.book(s + 300 + 20 + h * 1000, code, 99.9 * (1 + bounce))   # A 청산용 (A 진입 호가는 s+10 다음 = s+1010)
-    arc.book(low_t + 70_000, code, 99.05 * (1 + bounce))
-    for k in range(3, 76):                                # 수신 공백(>5초) 방지용 체결 — 실제 스트림은 초당 ~90건
-        arc.trade(low_t + k * 1000 + 1, code, 99.05 * (1 + bounce), 0.1, sell=(k % 2 == 0))
+def book(now, mid=100., code="KRW-TST", lag=50, size=2000.):
+    return {"type": "orderbook", "code": code, "timestamp": now - lag,
+            "recv_ts": now, "orderbook_units": units(mid, size)}
 
 
-class TestShockExhaustion(unittest.TestCase):
-    def test_vwap_and_net(self):
-        u = units(100.0, spread=0.0, size=1.0)
-        self.assertAlmostEqual(SE.buy_vwap(u, 100.0), 1.0)
-        self.assertAlmostEqual(SE.buy_vwap(u, 150.0), 1.0 + 50 / 100.1)
-        self.assertIsNone(SE.buy_vwap(u, 1e9))
-        self.assertAlmostEqual(SE.sell_vwap(u, 1.0), 100.0)
-        self.assertAlmostEqual(SE.net_return(100.0, 100.0), (1 - SE.FEE) / (1 + SE.FEE) - 1)
-        self.assertAlmostEqual(SE.bid_depth_krw(u, 2), 100.0 + 99.9)
+def archive(root, events, date=DAY, hour="00"):
+    folder = Path(root, date)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (hour + ".jsonl.gz")
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        for m in sorted(events, key=lambda m: m.get("recv_ts", 0)):
+            fh.write(json.dumps(m, separators=(",", ":")) + "\n")
+    return path
 
-    def test_threshold_floor_and_quantile(self):
-        self.assertEqual(SE.threshold([]), SE.DROP_FLOOR)
-        self.assertEqual(SE.threshold([-0.001] * 100), SE.DROP_FLOOR)          # 분위수가 floor 보다 높으면 floor
-        rets = [-0.01 * (i + 1) for i in range(200)]                             # -1% .. -200%
-        self.assertLess(SE.threshold(rets), -0.5)                               # 하위 0.5% 는 아주 아래
 
-    def test_window_stats_and_exhaustion(self):
-        win = collections.deque([(0, 100.0, 100.0, True), (1000, 99.0, 300.0, True), (2000, 98.0, 100.0, False)])
-        ret, share = SE.window_stats(win)
-        self.assertAlmostEqual(ret, -0.02)
-        self.assertAlmostEqual(share, 0.8)
-        since = [(0, 98.0, 100.0, True), (1500, 98.1, 100.0, False), (2500, 98.2, 100.0, False)]
-        self.assertFalse(SE.exhausted(since, 2500, low_ts=1000))                # 최저가 1.5초 전 → 미확인
-        self.assertTrue(SE.exhausted(since, 2500, low_ts=0))                     # 2초 이상 미갱신 + 매수 우위
-        self.assertFalse(SE.exhausted([(0, 98.0, 100.0, True)], 2500, low_ts=0))  # 최근 2초 체결 없음
+def scenario(base=BASE):
+    events = [book(base + k, mid=99. if 0 <= k < 5000 else 100.,
+                   size=3000. if 0 <= k < 5000 else 2000.)
+              for k in range(-65000, 70200, 200)]
+    events += [trade(base + k) for k in range(-10000, 0, 1000)]
+    events += [trade(base, 99.), trade(base + 2100, 99.1, sell=False)]
+    return events
 
-    def test_verdict_rules(self):
-        rows = [{"date": f"2026-10-{10 + i % 5:02d}", "net": 0.002 if i % 7 else 0.01, "mid_ret": 0.003} for i in range(60)]
-        s = SE.summarize(rows)
-        self.assertEqual(SE.verdict(s), "PASS")
-        bad = [dict(r, net=(0.05 if i < 5 else -0.001)) for i, r in enumerate(rows)]   # 5건 잭팟
-        self.assertEqual(SE.verdict(SE.summarize(bad)), "FAIL")
-        self.assertEqual(SE.verdict(SE.summarize(rows[:20])), "INSUFFICIENT")
 
-    def test_end_to_end_synthetic_archive(self):
+def run_rows(root, events=None, train_dates=None):
+    if events is not None:
+        archive(root, events)
+    files, _ = SE.archive_files(root)
+    counts = collections.Counter()
+    rows = SE.replay(files, {"KRW-TST": -.005}, counts, train_dates=train_dates)
+    return rows, counts
+
+
+def cell(rows, variant="A_immediate", h=15):
+    return [r for r in rows if r["variant"] == variant and r["horizon"] == h]
+
+
+class H17Tests(unittest.TestCase):
+    def test_vwap_and_fees_use_actual_bid_ask_once(self):
+        self.assertAlmostEqual(SE.buy_vwap(units(100., 2.), 100.), 100 / 100.05)
+        self.assertIsNone(SE.buy_vwap(units(100., 2.), 1000.))
+        self.assertIsNone(SE.sell_vwap(units(100., 2.), 3.))
+        self.assertAlmostEqual(SE.net_return(100., 100.), .9995 / 1.0005 - 1)
+
+    def test_quantile_includes_flat_and_positive_train_returns(self):
+        self.assertAlmostEqual(SE.threshold([0.] * 990 + [-.001] * 4 + [-.0035] * 5 + [-.01]), -.0035)
         with tempfile.TemporaryDirectory() as root:
-            # TRAIN 날: 충격 1회 (θ 산출용 분포 포함) · HOLDOUT 날: 충격 1회 + 반등 +0.5%
-            for i, (date, bounce) in enumerate((("2026-10-10", 0.0), ("2026-10-11", 0.005))):
-                arc = Archive()
-                shock_day(arc, "KRW-TST", t0=1_700_000_000_000 + i * 86_400_000, bounce=bounce)
-                arc.write(root, date)
-            files, dates = SE.archive_files(root)
-            theta = SE.pass_thresholds([p for p in files if p.parent.name == "2026-10-10"])
-            self.assertLessEqual(theta["KRW-TST"], SE.DROP_FLOOR)
-            counters = collections.Counter()
-            rows = SE.replay(files, theta, counters)
-            self.assertEqual(counters["opportunities"], 2)
-            self.assertEqual(counters["B_confirmed"], 2)
-            self.assertEqual(counters["entries_A_immediate"], 2)
-            self.assertEqual(counters["entries_B_exhaust"], 2)
-            self.assertEqual(counters["entries_C_exhaust_depth"], 2)          # 깊이 동일 → 통과
-            hold = [r for r in rows if r["date"] == "2026-10-11" and r["variant"] == "B_exhaust"]
-            self.assertEqual({r["horizon"] for r in hold}, set(SE.HORIZONS_S))
-            for r in hold:
-                self.assertGreater(r["net"], 0.002)                                # +0.5% 반등 − 수수료 0.1% − 스프레드 0.1%
-                self.assertAlmostEqual(r["mid_ret"], 0.005, places=6)
-            flat = [r for r in rows if r["date"] == "2026-10-10" and r["variant"] == "B_exhaust"]
-            for r in flat:
-                self.assertLess(r["net"], 0)                                       # 반등 0 → 비용만큼 손실
-            res = {(s["phase"], s["variant"], s["horizon"]): s for s in SE.analyze(rows, ["2026-10-10"])}
-            self.assertEqual(res[("HOLDOUT", "B_exhaust", 15)]["verdict"], "INSUFFICIENT")
-            self.assertTrue(res[("HOLDOUT", "B_exhaust", 15)]["primary"])
-            self.assertEqual(res[("TRAIN", "A_immediate", 5)]["n"], 1)
+            returns = [-.02, -.01, -.008, -.006, -.005, -.004, -.003, -.002, -.001, -.0005] + [0.] * 990
+            price, events = 100., [trade(BASE)]
+            for i, r in enumerate(returns, 1):
+                price *= 1 + r
+                events.append(trade(BASE + i * 1000, price))
+            path = archive(root, events)
+            with patch.object(SE, "SHOCK_WIN_MS", 1000), patch.object(SE, "MIN_TRADES", 2):
+                theta = SE.pass_thresholds([path])
+            self.assertAlmostEqual(theta["KRW-TST"], -.005)
 
-    def test_truncated_gzip_is_read_partially(self):
+    def test_flat_market_is_not_silently_removed_from_theta(self):
         with tempfile.TemporaryDirectory() as root:
-            d = Path(root, "2026-10-10")
-            d.mkdir()
-            full = d / "00.jsonl.gz"
-            with gzip.open(full, "wt", encoding="utf-8") as fh:
-                for i in range(2000):
-                    fh.write(json.dumps({"type": "trade", "code": "KRW-T", "recv_ts": i, "_seq": i}) + "\n")
-            data = full.read_bytes()
-            (d / "01.jsonl.gz").write_bytes(data[: len(data) // 2])      # 뒷부분이 잘린 복사본
-            files, _ = SE.archive_files(root)
-            counters = collections.Counter()
-            lines = list(SE.iter_lines(files, counters))
-            self.assertEqual(counters["truncated_files"], 1)
-            self.assertGreater(len(lines), 2000)                          # 온전한 파일 2000 + 잘린 파일 일부
-            self.assertLess(len(lines), 4000)
-            self.assertTrue(all(raw.endswith(b"\n") for _, raw in lines))  # 반 토막 행은 나오지 않음
+            path = archive(root, [trade(BASE + i * 1000) for i in range(15)])
+            self.assertEqual(SE.pass_thresholds([path])["KRW-TST"], SE.DROP_FLOOR)
+
+    def test_synthetic_end_to_end_and_per_cell_accounting(self):
+        with tempfile.TemporaryDirectory() as root:
+            rows, counts = run_rows(root, scenario())
+            self.assertEqual(counts["opportunities"], 1)
+            self.assertEqual(len(rows), 12)
+            self.assertEqual(len({(r["opportunity_id"], r["variant"], r["horizon"]) for r in rows}), 12)
+            self.assertTrue(all(r["status"] == "RESOLVED" for r in rows))
+            self.assertTrue(all(r["net"] > 0 for r in cell(rows, "B_exhaust")))
+            self.assertTrue(all(r["entry_recv_ts"] >= r["decision_recv_ts"] + SE.LAT_MS for r in rows))
+            self.assertTrue(all(r["date"] == DAY for r in rows))
+
+    def test_heartbeat_does_not_censor_pending_positions(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario() + [{"_meta": "heartbeat", "recv_ts": BASE + 1500}]
+            rows, _ = run_rows(root, events)
+            self.assertEqual(cell(rows)[0]["status"], "RESOLVED")
+            self.assertEqual(cell(rows, h=60)[0]["status"], "RESOLVED")
+
+    def test_disconnect_invalidates_positions(self):
+        with tempfile.TemporaryDirectory() as root:
+            rows, _ = run_rows(root, scenario() + [{"_meta": "disconnect", "recv_ts": BASE + 1500}])
+            r = cell(rows)[0]
+            self.assertEqual((r["status"], r["reason"]), ("UNKNOWN", "session_disconnect"))
+            self.assertIsNone(r["net"])
+
+    def test_latency_starts_at_receive_time_not_exchange_time(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario()
+            events = [m for m in events if not (m["type"] == "orderbook" and BASE <= m["recv_ts"] < BASE + 400)]
+            events += [book(BASE + 250)]
+            events = [dict(m, timestamp=BASE - 400, trade_timestamp=BASE - 400)
+                      if m["type"] == "trade" and m["recv_ts"] == BASE else m for m in events]
+            rows, _ = run_rows(root, events)
+            self.assertEqual(cell(rows)[0]["entry_recv_ts"], BASE + 400)
+
+    def test_stale_quote_invalidates_instead_of_filling(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario() + [book(BASE + 500, lag=1000)]
+            rows, counts = run_rows(root, events)
+            self.assertEqual(cell(rows)[0]["status"], "UNKNOWN")
+            self.assertEqual(counts["rejected_stale_or_future_event"], 1)
+
+    def test_late_exit_is_unknown_even_while_another_market_is_active(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in scenario() if not
+                      (m["type"] == "orderbook" and BASE + 5400 <= m["recv_ts"] <= BASE + 6100)]
+            events += [book(BASE + k, code="KRW-OTHER") for k in range(5400, 6400, 100)]
+            rows, _ = run_rows(root, events)
+            r = cell(rows, h=5)[0]
+            self.assertEqual((r["status"], r["reason"]), ("UNKNOWN", "exit_quote_late_or_missing"))
+
+    def test_native_time_rollback_does_not_bridge_position(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario() + [book(BASE + 1500, lag=400)]
+            rows, counts = run_rows(root, events)
+            self.assertEqual(cell(rows)[0]["status"], "UNKNOWN")
+            self.assertEqual(counts["rejected_native_time_or_sequence"], 1)
+
+    def test_depth_filter_uses_decision_book_not_execution_book(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [dict(m, orderbook_units=units(99., .01))
+                      if m["type"] == "orderbook" and m["recv_ts"] == BASE + 2000 else m
+                      for m in scenario()]
+            rows, _ = run_rows(root, events)
+            self.assertEqual(cell(rows, "B_exhaust")[0]["status"], "RESOLVED")
+            r = cell(rows, "C_exhaust_depth")[0]
+            self.assertEqual((r["status"], r["reason"]),
+                             ("NOT_ENTERED", "depth_not_recovered_at_decision"))
+
+    def test_cached_depth_native_age_is_rechecked_at_decision(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in scenario() if not
+                      (m["type"] == "orderbook" and BASE + 1600 <= m["recv_ts"] <= BASE + 2000)]
+            events += [book(BASE + 1950, mid=99., size=3000., lag=450)]
+            rows, _ = run_rows(root, events)
+            self.assertEqual(cell(rows, "B_exhaust")[0]["status"], "RESOLVED")
+            self.assertEqual(cell(rows, "C_exhaust_depth")[0]["status"], "NOT_ENTERED")
+
+    def test_fresh_message_cannot_hide_an_old_trade_timestamp(self):
+        with tempfile.TemporaryDirectory() as root:
+            stale = trade(BASE + 1500)
+            stale["trade_timestamp"] = BASE - 500
+            rows, counts = run_rows(root, scenario() + [stale])
+            self.assertEqual(cell(rows)[0]["status"], "UNKNOWN")
+            self.assertEqual(counts["rejected_stale_or_future_event"], 1)
+
+    def test_split_crossing_is_purged_and_signal_date_is_stable(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario()
+            before = [m for m in events if m["recv_ts"] < BASE + 3000]
+            after = [m for m in events if m["recv_ts"] >= BASE + 3000]
+            archive(root, before, DAY)
+            archive(root, after, "2026-10-11")
+            rows, _ = run_rows(root, train_dates=[DAY])
+            self.assertEqual(cell(rows)[0]["status"], "PURGED")
+            self.assertEqual(cell(rows)[0]["date"], DAY)
+        with tempfile.TemporaryDirectory() as root:
+            archive(root, before, DAY)
+            archive(root, after, "2026-10-11")
+            rows, _ = run_rows(root)
+            self.assertEqual(cell(rows)[0]["status"], "RESOLVED")
+            self.assertEqual(cell(rows)[0]["date"], DAY)
+
+    def test_truncated_gzip_emits_barrier_and_blocks_positive_screen(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as output:
+            path = archive(root, scenario())
+            path.write_bytes(path.read_bytes()[:-8])
+            counts = collections.Counter()
+            with contextlib.redirect_stdout(io.StringIO()):
+                events = list(SE.iter_events([path], counts))
+            self.assertTrue(any(m.get("_barrier") == "input_gap" for _, m in events))
+            self.assertEqual(counts["input_errors"], 1)
+            s = {"n": 100, "days": 5, "mean": .01, "ci_low": .005, "ex_top5": .01, "days_pos": 5}
+            self.assertEqual(SE.verdict(s, input_complete=False), "INPUT_INCOMPLETE")
+            archive(root, scenario(BASE + 86400000), "2026-10-11")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(SE.main([root, "-o", output, "-t", "1", "--markets", "KRW-TST"]), 0)
+            report = json.loads(Path(output, "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["input_quality"], "INPUT_INCOMPLETE")
+            self.assertEqual(report["fit_counters"]["input_errors"], 1)
+            self.assertEqual({r["verdict"] for r in report["cells"] if r["phase"] == "HOLDOUT"},
+                             {"INPUT_INCOMPLETE"})
+
+    def test_partial_json_line_is_never_yielded_as_event(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = archive(root, [trade(BASE)])
+            with gzip.open(path, "ab") as fh:
+                fh.write(b'{"type":"trade"')
+            counts = collections.Counter()
+            with contextlib.redirect_stdout(io.StringIO()):
+                raw = list(SE.iter_lines([path], counts))
+            self.assertEqual(counts["partial_line"], 1)
+            self.assertTrue(all(line.endswith(b"\n") or b"input_gap" in line for _, line in raw))
+
+    def test_no_train_cannot_earn_positive_verdict(self):
+        rows = [{"date": f"2026-10-{10 + i % 5:02d}", "variant": "B_exhaust", "horizon": 15,
+                 "net": .01, "mid_ret": .011, "status": "RESOLVED"} for i in range(60)]
+        result = SE.analyze(rows, [])
+        self.assertEqual({s["verdict"] for s in result}, {"NO_TRAIN"})
+        self.assertEqual({s["phase"] for s in result}, {"EXPLORATION_NO_TRAIN"})
+
+    def test_unknowns_are_not_zero_or_ignored_in_positive_screen(self):
+        rows = [{"date": f"2026-10-{10 + i % 5:02d}", "net": .01, "mid_ret": .011,
+                 "status": "RESOLVED"} for i in range(60)]
+        self.assertEqual(SE.verdict(SE.summarize(rows)), "CANDIDATE_SEEN_DATA")
+        rows.append({"date": DAY, "net": None, "mid_ret": None, "status": "UNKNOWN"})
+        summary = SE.summarize(rows)
+        self.assertAlmostEqual(summary["mean"], .01)
+        self.assertEqual((summary["n"], summary["unknown"]), (60, 1))
+        self.assertEqual(SE.verdict(summary), "UNRESOLVED")
+
+    def test_duplicate_archive_slots_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            archive(Path(root, "a"), [trade(BASE)])
+            archive(Path(root, "b"), [trade(BASE)])
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                SE.archive_files(root)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()
