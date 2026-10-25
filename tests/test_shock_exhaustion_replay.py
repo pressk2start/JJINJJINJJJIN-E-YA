@@ -60,7 +60,7 @@ def run_rows(root, events=None, train_dates=None):
         archive(root, events)
     files, _ = SE.archive_files(root)
     counts = collections.Counter()
-    rows = SE.replay(files, {"KRW-TST": -.005}, counts, train_dates=train_dates)
+    rows = SE.replay(files, {"KRW-TST": -.005, "KRW-ALT": -.005}, counts, train_dates=train_dates)
     return rows, counts
 
 
@@ -212,6 +212,11 @@ class H17Tests(unittest.TestCase):
                 self.assertEqual(SE.main([root, "-o", output, "-t", "1", "--markets", "KRW-TST"]), 0)
             report = json.loads(Path(output, "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["input_quality"], "INPUT_INCOMPLETE")
+            brief = Path(output, "brief.txt").read_text(encoding="utf-8")
+            self.assertIn(report["model_revision"], brief)
+            self.assertIn("QUALITY: INPUT_INCOMPLETE", brief)
+            self.assertIn("PROFIT: NOT_VALIDATED", brief)
+            self.assertEqual(len(brief.splitlines()), 8)
             self.assertEqual(report["fit_counters"]["input_errors"], 1)
             self.assertEqual({r["verdict"] for r in report["cells"] if r["phase"] == "HOLDOUT"},
                              {"INPUT_INCOMPLETE"})
@@ -250,6 +255,91 @@ class H17Tests(unittest.TestCase):
             archive(Path(root, "b"), [trade(BASE)])
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 SE.archive_files(root)
+
+
+    def test_other_markets_survive_local_stale_event(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario()
+            events += [dict(m, code="KRW-ALT") for m in scenario()]
+            events += [book(BASE + 1500, code="KRW-ALT", lag=1000)]
+            rows, _ = run_rows(root, events)
+            first = cell([r for r in rows if r["market"] == "KRW-TST"])[0]
+            affected = cell([r for r in rows if r["market"] == "KRW-ALT"])[0]
+            self.assertEqual(first["status"], "RESOLVED")
+            self.assertEqual(affected["status"], "UNKNOWN")
+            self.assertEqual(affected["barrier_market"], "KRW-ALT")
+            self.assertEqual(affected["barrier_stream"], "orderbook")
+            self.assertEqual(affected["barrier_scope"], "market")
+            self.assertIn("entry_recv_ts", affected)
+
+    def test_other_market_training_window_survives_rejected_event(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [trade(BASE + i * 1000) for i in range(15)]
+            events += [book(BASE + 9500, code="KRW-ALT", lag=1000)]
+            path = archive(root, events)
+            theta = SE.pass_thresholds([path])
+            self.assertEqual(theta["KRW-TST"], SE.DROP_FLOOR)
+
+    def test_rejection_preserves_native_high_water_for_each_market(self):
+        for late_code in ("KRW-TST", "KRW-ALT"):
+            with self.subTest(late_code=late_code), tempfile.TemporaryDirectory() as root:
+                first = trade(BASE + 1000, code=late_code)
+                first["sequential_id"] = 100
+                late = trade(BASE + 1200, code=late_code, lag=300)
+                late["sequential_id"] = 99
+                path = archive(root, [first, book(BASE + 1100, code="KRW-ALT", lag=1000), late])
+                counts = collections.Counter()
+                received = list(SE.iter_events([path], counts))
+                self.assertEqual(counts["rejected_native_time_or_sequence"], 1)
+                barriers = [m for _, m in received if m.get("_barrier") == "native_time_or_sequence"]
+                self.assertEqual(barriers[0]["market"], late_code)
+
+    def test_disconnect_still_invalidates_all_markets(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario() + [dict(m, code="KRW-ALT") for m in scenario()]
+            events += [{"_meta": "disconnect", "recv_ts": BASE + 1500}]
+            rows, _ = run_rows(root, events)
+            for code in ("KRW-TST", "KRW-ALT"):
+                r = cell([r for r in rows if r["market"] == code])[0]
+                self.assertEqual((r["status"], r["reason"]), ("UNKNOWN", "session_disconnect"))
+                self.assertEqual(r["barrier_scope"], "global")
+
+    def test_damaged_file_still_invalidates_all_markets(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = scenario() + [dict(m, code="KRW-ALT") for m in scenario()]
+            first = archive(root, [m for m in events if m["recv_ts"] < BASE + 1500])
+            first.write_bytes(first.read_bytes()[:-8])
+            archive(root, [m for m in events if m["recv_ts"] >= BASE + 1500], hour="01")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows, counts = run_rows(root)
+            self.assertEqual(counts["input_errors"], 1)
+            for code in ("KRW-TST", "KRW-ALT"):
+                r = cell([r for r in rows if r["market"] == code])[0]
+                self.assertEqual((r["status"], r["reason"]), ("UNKNOWN", "input_gap"))
+                self.assertEqual(r["barrier_scope"], "global")
+
+    def test_entry_deadline_is_not_relaxed_by_market_scoping(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in scenario() if not
+                      (m["type"] == "orderbook" and BASE + 300 <= m["recv_ts"] <= BASE + 900)]
+            events += [book(BASE + k, code="KRW-ALT") for k in range(300, 1100, 100)]
+            rows, _ = run_rows(root, events)
+            r = cell(rows)[0]
+            self.assertEqual((r["status"], r["reason"]), ("UNKNOWN", "entry_quote_late_or_missing"))
+            self.assertEqual(SE.MAX_WAIT_MS, 500)
+
+    def test_before_date_filters_without_altering_raw_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            for i in range(3):
+                archive(root, [trade(BASE + i * 86400000)], date="2026-10-" + str(10 + i))
+            original, _ = SE.archive_files(root)
+            files, dates = SE.archive_files(root, before_date="2026-10-12")
+            self.assertEqual(dates, ["2026-10-10", "2026-10-11"])
+            self.assertEqual(len(files), 2)
+            tail, tail_dates = SE.archive_files(root, days=1, before_date="2026-10-12")
+            self.assertEqual(tail_dates, ["2026-10-11"])
+            self.assertEqual(len(tail), 1)
+            self.assertEqual(len(SE.archive_files(root)[0]), len(original))
 
 
 if __name__ == "__main__":
