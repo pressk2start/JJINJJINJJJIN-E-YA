@@ -342,5 +342,157 @@ class H17Tests(unittest.TestCase):
             self.assertEqual(len(SE.archive_files(root)[0]), len(original))
 
 
+
+def discovery_scenario(base=BASE):
+    events = [book(base + k, mid=100.) for k in range(-65000, 70200, 200)]
+    events += [trade(base + k, price=100., sell=(k % 2000 == 0))
+               for k in range(-65000, 70200, 1000)]
+    return events
+
+
+class DiscoveryTests(unittest.TestCase):
+    def build(self, root, events):
+        path = archive(root, events)
+        database = Path(root, "panel.sqlite")
+        SE.build_discovery_panel([path], database, ["KRW-TST", "KRW-ALT"])
+        return database
+
+    def at(self, database, ts=BASE, horizon=15, code="KRW-TST"):
+        return next(row for row in SE.discovery_rows(database, horizon)
+                    if row["decision_recv_ts"] == ts and row["market"] == code)
+
+    def test_future_quote_cannot_change_grid_features(self):
+        with tempfile.TemporaryDirectory() as root:
+            database = self.build(root, discovery_scenario() + [book(BASE + 1, mid=150.)])
+            row = self.at(database)
+            self.assertAlmostEqual(row["features"]["ret1"], 0.)
+            self.assertAlmostEqual(row["features"]["ret10"], 0.)
+            self.assertEqual(row["decision_recv_ts"], BASE)
+
+    def test_all_receive_time_ties_are_applied_before_grid(self):
+        with tempfile.TemporaryDirectory() as root:
+            database = self.build(root, discovery_scenario() + [book(BASE, mid=102.)])
+            row = self.at(database)
+            self.assertAlmostEqual(row["features"]["ret1"], .02)
+            self.assertAlmostEqual(row["features"]["ret10"], .02)
+
+    def test_broad_grid_does_not_require_a_shock(self):
+        with tempfile.TemporaryDirectory() as root:
+            database = self.build(root, discovery_scenario())
+            rows = list(SE.discovery_rows(database, 15))
+            self.assertGreater(len(rows), 5)
+            self.assertTrue(all(row["features"]["ret10"] == 0. for row in rows))
+            self.assertTrue(any(row["status"] == "RESOLVED" for row in rows))
+            self.assertTrue(all(row["net"] < 0 for row in rows if row["status"] == "RESOLVED"))
+
+    def test_two_and_three_feature_interactions_are_learned(self):
+        import itertools
+        for degree in (2, 3):
+            names = ["a", "b", "c"][:degree]
+            rows = []
+            for _ in range(20):
+                for values in itertools.product((-1., 1.), repeat=degree):
+                    product = 1.
+                    for v in values:
+                        product *= v
+                    rows.append({"features": dict(zip(names, values)),
+                                 "net": .01 if product > 0 else -.01})
+            model = SE.fit_discovery_model(rows, "score")
+            yes = dict.fromkeys(names, 1.)
+            no = dict(yes, a=-1.)
+            self.assertGreater(SE.predict_discovery_model(model, yes), .5)
+            self.assertLess(SE.predict_discovery_model(model, no), .5)
+            if degree == 3:
+                self.assertEqual(model["search_triples"], 1)
+
+    def test_missing_features_and_serialization_are_stable(self):
+        rows = [{"features": {"x": None if i % 3 == 0 else float(i)},
+                 "net": .01 if i % 2 else -.01} for i in range(80)]
+        model = SE.fit_discovery_model(rows)
+        restored = json.loads(json.dumps(model, allow_nan=False))
+        self.assertEqual(SE.predict_discovery_model(model, {"x": None}),
+                         SE.predict_discovery_model(restored, {"x": None}))
+        changed = [dict(row, future_mfe=999., exit_recv_ts=-1) for row in rows]
+        self.assertEqual(model, SE.fit_discovery_model(changed))
+        tree = SE.fit_discovery_model([{"features": {"x": 1.}, "net": v}
+                                       for v in (.02, -.01, .02, -.01)], "tree")
+        self.assertAlmostEqual(SE.predict_discovery_model(tree, {"x": 100.}), .005)
+
+    def test_future_crossing_labels_are_purged_from_fit(self):
+        rows = [{"features": {"x": 1.}, "status": "RESOLVED", "net": .01,
+                 "exit_recv_ts": ts} for ts in (BASE - 1, BASE, BASE + 1)]
+        selected, eligible = SE._discovery_reservoir(rows, BASE)
+        self.assertEqual((len(selected), eligible), (1, 1))
+        folds = SE.discovery_fold_dates(["2026-10-" + str(i) for i in range(10, 25)])
+        for train, validation, check in folds:
+            self.assertLess(max(train), min(validation))
+            self.assertLess(max(validation), min(check))
+
+    def test_unknown_selected_trade_does_not_release_cash(self):
+        metadata = {"last_recv_ts": BASE + 100000, "daily_books": {}}
+        account = SE.DiscoveryAccount(100100, [DAY], metadata, .5)
+        first = {"market": "KRW-TST", "decision_recv_ts": BASE, "status": "UNKNOWN",
+                 "entry_recv_ts": None, "exit_recv_ts": None, "net": None,
+                 "quantity": None, "cost_krw": SE.NOTIONAL * (1 + SE.FEE)}
+        account.offer(first, 1.)
+        account.offer(dict(first, market="KRW-ALT", decision_recv_ts=BASE + 1000), 1.)
+        summary = account.summary()
+        self.assertEqual(summary["unknown_selected"], 1)
+        self.assertEqual(summary["cash_skips"], 1)
+        self.assertAlmostEqual(account.cash, 50.)
+        self.assertFalse(summary["complete"])
+        self.assertIsNone(summary["net_krw"])
+
+    def test_panel_entry_and_exit_deadlines_remain_fixed(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in discovery_scenario() if not
+                      (m["type"] == "orderbook" and BASE + 300 <= m["recv_ts"] <= BASE + 900)]
+            row = self.at(self.build(root, events))
+            self.assertEqual((row["status"], row["reason"]), ("UNKNOWN", "entry_quote_late_or_missing"))
+        with tempfile.TemporaryDirectory() as root:
+            events = [m for m in discovery_scenario() if not
+                      (m["type"] == "orderbook" and BASE + 5400 <= m["recv_ts"] <= BASE + 6100)]
+            row = self.at(self.build(root, events), horizon=5)
+            self.assertEqual((row["status"], row["reason"]), ("UNKNOWN", "exit_quote_late_or_missing"))
+
+    def test_panel_bad_market_does_not_censor_other_market(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = discovery_scenario() + [dict(m, code="KRW-ALT") for m in discovery_scenario()]
+            events += [book(BASE + 1500, code="KRW-ALT", lag=1000)]
+            database = self.build(root, events)
+            self.assertEqual(self.at(database)["status"], "RESOLVED")
+            other = self.at(database, code="KRW-ALT")
+            self.assertEqual((other["status"], other["reason"]), ("UNKNOWN", "stale_or_future_event"))
+
+    def test_interrupted_panel_is_not_accepted(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "interrupted.sqlite")
+            conn = sqlite3.connect(str(path))
+            conn.execute("CREATE TABLE metadata(key TEXT,value TEXT)")
+            conn.execute("INSERT INTO metadata VALUES ('state',?)", (json.dumps("BUILDING"),))
+            conn.commit()
+            conn.close()
+            with self.assertRaisesRegex(ValueError, "interrupted"):
+                list(SE.discovery_rows(path, 15))
+
+    def test_discovery_end_to_end_reuses_cache(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as output:
+            for i in range(6):
+                archive(root, discovery_scenario(BASE + i * 86400000), date="2026-10-" + str(10 + i))
+            args = [root, "-D", "-o", output, "--markets", "KRW-TST"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(SE.main(args), 0)
+            report = json.loads(Path(output, "discovery_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "EXPLORATION_ONLY")
+            self.assertFalse(report["fresh_independent_validation"])
+            self.assertTrue(Path(output, "conditions.csv").exists())
+            self.assertTrue(Path(output, "learned_conditions.txt").exists())
+            self.assertTrue(Path(output, "discovery_brief.txt").exists())
+            with patch.object(SE, "build_discovery_panel", side_effect=AssertionError("raw replayed")):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(SE.main(args), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
