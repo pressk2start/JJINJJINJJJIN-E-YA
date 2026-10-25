@@ -60,7 +60,7 @@ def run_rows(root, events=None, train_dates=None):
         archive(root, events)
     files, _ = SE.archive_files(root)
     counts = collections.Counter()
-    rows = SE.replay(files, {"KRW-TST": -.005}, counts, train_dates=train_dates)
+    rows = SE.replay(files, {"KRW-TST": -.005, "KRW-ALT": -.005}, counts, train_dates=train_dates)
     return rows, counts
 
 
