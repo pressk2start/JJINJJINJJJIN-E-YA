@@ -610,6 +610,8 @@ class DiscoveryState:
                 _, value, sell = q[0].popleft()
                 q[2 if sell else 1] -= value
                 q[3] -= 1
+            if q[3] == 0:
+                q[1] = q[2] = 0.0
 
     def features(self, now):
         self.expire(now)
@@ -689,6 +691,7 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
                           quantity REAL, cost_krw REAL,
                           PRIMARY KEY(sample_id,horizon));
       CREATE INDEX sample_time ON samples(decision_recv_ts,id);
+      CREATE INDEX sample_date ON samples(date,decision_recv_ts,id);
     """)
     def meta(key, value):
         connection.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)",
@@ -704,6 +707,7 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
     states, active = {}, {}
     counts = collections.Counter()
     next_grid, serial, last_now = None, 0, None
+    next_expiry = None
     final_books, daily_books = {}, {}
 
     def finish(sample, h, status, reason="", exit_ts=None, value=None):
@@ -738,6 +742,10 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
             final_books.pop(market, None)
 
     def expire(now):
+        nonlocal next_expiry
+        if next_expiry is None or now <= next_expiry:
+            return
+        next_expiry = None
         for code in list(active):
             for sample in active[code]:
                 for h in HORIZONS_S:
@@ -748,10 +756,12 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
                     if now > deadline:
                         finish(sample, h, "UNKNOWN", "exit_quote_late_or_missing" if entry else
                                "entry_quote_late_or_missing")
+                    else:
+                        next_expiry = deadline if next_expiry is None else min(next_expiry, deadline)
             active[code] = [s for s in active[code] if len(s["done"]) < len(HORIZONS_S)]
 
     def grid(g):
-        nonlocal serial
+        nonlocal serial, next_expiry
         date = dt.datetime.utcfromtimestamp(g / 1000).date().isoformat()
         for code in markets:
             counts["grid_opportunities"] += 1
@@ -761,6 +771,8 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
                 counts["feature_unavailable"] += 1
                 continue
             serial += 1
+            if serial == 1:
+                meta("feature_names", sorted(features))
             connection.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
                                (serial, code, date, g, json.dumps(features, allow_nan=False,
                                                                   separators=(",", ":"))))
@@ -769,6 +781,8 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
                                      NOTIONAL * (1 + FEE)) for h in HORIZONS_S])
             active.setdefault(code, []).append({"id": serial, "target": g + LAT_MS,
                                                  "entry": None, "done": set()})
+            deadline = g + LAT_MS + MAX_WAIT_MS
+            next_expiry = deadline if next_expiry is None else min(next_expiry, deadline)
             if serial % 1000 == 0:
                 connection.commit()
             if serial % 10000 == 0 and shutil.disk_usage(str(database.parent)).free < 512 * 1024 * 1024:
@@ -864,11 +878,16 @@ def discovery_rows(database, horizon, dates=None):
     try:
         query = ("SELECT s.id,s.market,s.date,s.decision_recv_ts,s.features,l.status,l.reason,"
                  "l.entry_recv_ts,l.exit_recv_ts,l.net,l.quantity,l.cost_krw FROM samples s "
-                 "JOIN labels l ON s.id=l.sample_id WHERE l.horizon=? "
-                 "ORDER BY s.decision_recv_ts,s.id")
-        for row in connection.execute(query, (horizon,)):
-            if allowed is not None and row[2] not in allowed:
-                continue
+                 "JOIN labels l ON s.id=l.sample_id WHERE l.horizon=?")
+        arguments = [horizon]
+        if allowed is not None:
+            if not allowed:
+                return
+            ordered = sorted(allowed)
+            query += " AND s.date IN (" + ",".join("?" for _ in ordered) + ")"
+            arguments.extend(ordered)
+        query += " ORDER BY s.date,s.decision_recv_ts,s.id"
+        for row in connection.execute(query, arguments):
             yield {"id": row[0], "market": row[1], "date": row[2], "decision_recv_ts": row[3],
                    "features": json.loads(row[4]), "status": row[5], "reason": row[6],
                    "entry_recv_ts": row[7], "exit_recv_ts": row[8], "net": row[9],
@@ -989,14 +1008,16 @@ def fit_discovery_model(rows, family="score", max_train=4000, seed=17):
     # Screen ALL pairs and triples, including features with no marginal association.
     # Use an outcome-independent subset of the representative TRAIN reservoir.
     screen_n = min(800, len(sample))
-    y = wins[:screen_n]
+    screen_indices = random.Random(seed + 1).sample(range(len(sample)), screen_n)
+    screen_base = [base[i] for i in screen_indices]
+    y = [wins[i] for i in screen_indices]
     ym = _mean(y)
     yss = sum((v - ym) ** 2 for v in y)
     for degree, keep, key in ((2, 24, "search_pairs"), (3, 12, "search_triples")):
         ranked = []
         for cols in itertools.combinations(range(len(model["features"])), degree):
             model[key] += 1
-            values = [_disc_product(v, cols) for v in base[:screen_n]]
+            values = [_disc_product(v, cols) for v in screen_base]
             xm = _mean(values)
             xss = sum((v - xm) ** 2 for v in values)
             cross = sum((v - xm) * (label - ym) for v, label in zip(values, y))
@@ -1076,7 +1097,7 @@ def explain_discovery_model(model):
                   for cols in model["interactions"]]
         lines = [f"logistic raw score = {model['bias']:.8g} + weighted terms",
                  "z uses TRAIN median/standard deviation and clipping [-5,5]. "
-                 "Scores are not calibrated win-rate guarantees."]
+                 "All interaction products are also clipped [-5,5]. Scores are not calibrated win-rate guarantees."]
         lines += [f"{weight:+.8g} * {name}" for weight, name in
                   sorted(zip(model["weights"], names), key=lambda x: -abs(x[0]))[:30]]
         return lines
@@ -1108,6 +1129,10 @@ class DiscoveryAccount:
         self.worst = None
         self.day_realized = collections.defaultdict(float)
         self.day_closed = collections.Counter()
+        self.market_closed = collections.Counter()
+        self.market_wins = collections.Counter()
+        self.market_pnl = collections.defaultdict(float)
+        self.market_unknown = collections.Counter()
         self.equity = []
         self.next_day = 0
         self.serial = 0
@@ -1128,6 +1153,9 @@ class DiscoveryAccount:
             day = dt.datetime.utcfromtimestamp(ts / 1000).date().isoformat()
             self.day_realized[day] += profit
             self.day_closed[day] += 1
+            self.market_closed[code] += 1
+            self.market_wins[code] += row["net"] > 0
+            self.market_pnl[code] += profit
 
     def _value(self, day, now):
         total = self.cash
@@ -1183,6 +1211,7 @@ class DiscoveryAccount:
         else:
             # Never recycle unknown future exposure as free capital.
             self.unknown += 1
+            self.market_unknown[code] += 1
 
     def summary(self):
         final = min(
@@ -1220,6 +1249,11 @@ class DiscoveryAccount:
             "closed_per_calendar_day": self.closed / len(self.dates),
             "monthly_linear_krw_proxy": (equity - self.capital) * 30 / len(self.dates) if complete else None,
         }
+        result["by_market"] = {
+            code: {"closed": self.market_closed[code],
+                   "wins": self.market_wins[code], "known_realized_krw": self.market_pnl[code],
+                   "unknown_selected": self.market_unknown[code]}
+            for code in sorted(set(self.market_closed) | set(self.market_unknown))}
         if complete and len(day_pnl) >= 2:
             rng = random.Random(41)
             values = sorted(_mean(rng.choices(day_pnl, k=len(day_pnl))) for _ in range(500))
@@ -1257,14 +1291,26 @@ def _discovery_boundary(day):
 def _discovery_evaluate(database, horizon, dates, metadata, policies):
     accounts = [DiscoveryAccount(p.get("capital", 1000000), dates, metadata, p["cutoff"])
                 for p in policies]
+    period_end = min(_discovery_boundary(
+        (dt.date.fromisoformat(dates[-1]) + dt.timedelta(days=1)).isoformat()),
+        metadata.get("last_recv_ts") or 10**18)
+    buffer_ms = LAT_MS + MAX_WAIT_MS + horizon * 1000 + MAX_WAIT_MS
+    purged = 0
     for row in discovery_rows(database, horizon, dates):
+        # Exclude by known clock window before inspecting future RESOLVED/UNKNOWN.
+        if row["decision_recv_ts"] + buffer_ms >= period_end:
+            purged += 1
+            continue
         scores = {}
         for policy, account in zip(policies, accounts):
             key = policy["model_key"]
             if key not in scores:
                 scores[key] = predict_discovery_model(policy["model"], row["features"])
             account.offer(row, scores[key])
-    return [account.summary() for account in accounts]
+    summaries = [account.summary() for account in accounts]
+    for summary in summaries:
+        summary["boundary_purged"] = purged
+    return summaries
 
 
 def analyze_discovery(database, out_dir):
@@ -1279,11 +1325,16 @@ def analyze_discovery(database, out_dir):
               "dates": dates, "cache_counts": metadata.get("counts", {}), "folds": [],
               "fresh_independent_validation": False, "h3_combined_evaluated": False,
               "notional_principal": NOTIONAL, "capital_scenarios": [1000000, 2000000],
+              "entry_latency_ms": LAT_MS, "exit_order_delay_ms": 0,
+              "features": metadata.get("feature_names", []),
               "limitations": ["historical dates already examined", "displayed-depth fill proxy",
                               "uncalibrated model scores", "finite model/search budget",
                               "daily-close drawdown, not intraday drawdown",
                               "unknown selected exposures keep capital reserved",
-                              "no final profitability PASS or actual orders"]}
+                              "no final profitability PASS or actual orders",
+                              "monthly linear proxy is not a forecast",
+                              "each fold starts a separate account; fold PnL is not compounded",
+                              "later dates among known markets; unseen-coin transfer not tested"]}
     latest_profiles = {}
     for fold_number, (train, validation, evaluation) in enumerate(folds, 1):
         print(f"[discovery] fold {fold_number}/{len(folds)} TRAIN={len(train)} "
@@ -1301,8 +1352,12 @@ def analyze_discovery(database, out_dir):
                 model["eligible_train_n"] = eligible
                 models[family] = model
                 scores = sorted(predict_discovery_model(model, row["features"]) for row in fit_rows)
+                seen_cuts = set()
                 for q in (.5, .7, .8, .9, .95):
                     cut = scores[int(q * (len(scores) - 1))]
+                    if cut in seen_cuts:
+                        continue
+                    seen_cuts.add(cut)
                     policies.append({"family": family, "quantile": q, "cutoff": cut,
                                      "model_key": family, "model": model, "horizon": horizon})
             summaries = _discovery_evaluate(database, horizon, validation, metadata, policies)
@@ -1332,17 +1387,18 @@ def analyze_discovery(database, out_dir):
                 "candidate_count": len(candidates), "supported_count": len(supported),
                 "selected": [], "status": "NO_SUPPORTED_CONDITION" if not picks else "EXPLORATORY_CONDITIONS"}
         for candidate in picks:
-            checks = []
-            for capital in (1000000, 2000000):
-                policy = dict(candidate, capital=capital)
-                checks.append(_discovery_evaluate(database, candidate["horizon"], evaluation,
-                                                  metadata, [policy])[0])
+            policies = [dict(candidate, capital=capital) for capital in (1000000, 2000000)]
+            checks = _discovery_evaluate(database, candidate["horizon"], evaluation, metadata, policies)
             fold["selected"].append({k: v for k, v in candidate.items() if k != "model_key"})
             fold["selected"][-1]["check_accounts"] = checks
         # Baseline uses the same grid and cost model with no predictive selection.
         baseline = {"model_key": "constant", "model": {"constant": 1., "family": "score"},
                     "cutoff": 0.}
-        fold["baseline_15s"] = _discovery_evaluate(database, 15, evaluation, metadata, [baseline])[0]
+        fold["baselines"] = {}
+        for hold in sorted({p["horizon"] for p in picks} | {15}):
+            policies = [dict(baseline, capital=capital) for capital in (1000000, 2000000)]
+            fold["baselines"][str(hold)] = _discovery_evaluate(database, hold, evaluation, metadata, policies)
+        fold["baseline_15s"] = fold["baselines"]["15"][0]
         report["folds"].append(fold)
     report["winner_loser_profiles_last_train"] = latest_profiles
     report["selection_rule"] = ("TRAIN-only preprocessing and interactions; past two-date selection; "
@@ -1378,7 +1434,7 @@ def analyze_discovery(database, out_dir):
         profiles = report["winner_loser_profiles_last_train"].get("classes", {})
         lines = ["DISCOVERY_MODEL: " + DISCOVERY_REVISION,
                  f"DATA: {dates[0]}..{dates[-1]} samples={metadata['sample_count']}",
-                 "STATUS: EXPLORATION_ONLY | independent future validation pending",
+                 "STATUS: EXPLORATION_ONLY | INPUT=" + metadata["state"],
                  "TRAIN_CLASSES: " + json.dumps(profiles, sort_keys=True),
                  f"WALK_FORWARD_FOLDS: {len(folds)} | last supported conditions={last['supported_count']}"]
         for candidate in last["selected"][:2]:
@@ -1409,6 +1465,8 @@ def run_discovery(files, out, markets):
                 or metadata.get("manifest") != signature
                 or metadata.get("config", {}).get("revision") != DISCOVERY_REVISION
                 or metadata.get("config", {}).get("markets") != list(markets)
+                or metadata.get("config", {}).get("grid_ms") != 5000
+                or metadata.get("config", {}).get("horizons") != list(HORIZONS_S)
                 or metadata.get("config", {}).get("principal") != NOTIONAL
                 or metadata.get("config", {}).get("fee") != FEE
                 or metadata.get("config", {}).get("latency_ms") != LAT_MS
