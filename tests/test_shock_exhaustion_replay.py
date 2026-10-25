@@ -212,6 +212,11 @@ class H17Tests(unittest.TestCase):
                 self.assertEqual(SE.main([root, "-o", output, "-t", "1", "--markets", "KRW-TST"]), 0)
             report = json.loads(Path(output, "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["input_quality"], "INPUT_INCOMPLETE")
+            brief = Path(output, "brief.txt").read_text(encoding="utf-8")
+            self.assertIn(report["model_revision"], brief)
+            self.assertIn("QUALITY: INPUT_INCOMPLETE", brief)
+            self.assertIn("PROFIT: NOT_VALIDATED", brief)
+            self.assertEqual(len(brief.splitlines()), 8)
             self.assertEqual(report["fit_counters"]["input_errors"], 1)
             self.assertEqual({r["verdict"] for r in report["cells"] if r["phase"] == "HOLDOUT"},
                              {"INPUT_INCOMPLETE"})
