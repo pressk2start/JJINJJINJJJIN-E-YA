@@ -20,19 +20,17 @@ market-impact model, actual orders or funded multi-market portfolio is implied.
 PC: py -X utf8 -u shock_exhaustion_replay.py ws_server\ws -o se_result_checked
 Requires only Python standard library. Preserve the original archive/results.
 
-RESULT 2026-10-25 (this revision, PC run on the 15-day archive, 5 markets):
-  THETA ADA -0.61% DOGE -0.94% XLM -0.42% XPL -0.97% XRP -0.30%(floor).
-  INPUT_QUALITY=INPUT_INCOMPLETE (2026-10-24/05.jsonl.gz truncated at copy time) ->
-  PROFIT_VERDICT NOT_VALIDATED by rule; every one of the 24 cells is negative anyway.
-  HOLDOUT A_immediate net -0.70..-0.87%/trade (n 20..29, days+ 0/5);
-  B_exhaust -0.36..-0.69% (n 8..9, days+ 0/4..5); C n<=1. TRAIN: A -0.41..-0.56%,
-  B -0.39..-0.58% (days+ <=1/8), C n=5 (60s +0.08%, noise). Primary cell (B,15s)
-  HOLDOUT n=9 net -0.48% ciLow -0.65%: fails n, mean, CI, exTop5 and days.
-  Reading: seconds-scale sell-shock bounce in liquid majors is negative after
-  0.05%/side fees even with immediate entry; waiting for exhaustion does not help;
-  the depth-recovery filter leaves almost no events. Consistent with the 5-minute
-  version (H14). Family closed for this archive; a clean re-run needs 2026-10-24
-  re-copied after 00:00 UTC (removes the INPUT_INCOMPLETE flag, cannot flip signs).
+PRIOR EXPLORATION 2026-10-25 (revision 1b855143, user-run, incomplete input):
+  Primary B/15s: TRAIN n=21 mean=-0.498%, HOLDOUT n=9 mean=-0.482%.
+  B/15s UNKNOWN across BOTH phases: entry quote deadline 23, stale/future event
+  21, exit quote deadline 14. These are terminal outcomes, not actual orders.
+  That revision wrongly let a rejected event censor unrelated markets. Do not
+  infer how many of the 21 were affected, or that repairing one file cannot
+  change the completed sample. No family-wide profitability verdict is established.
+  This revision scopes ordinary event rejection to its market; actual file,
+  connection and shared clock discontinuities remain global. Trading thresholds,
+  latency and freshness/deadline limits are unchanged.
+
 """
 import argparse
 import collections
@@ -137,7 +135,10 @@ def summarize(rows):
     resolved = [r for r in rows if r.get("status", "RESOLVED") == "RESOLVED"
                 and r.get("net") is not None]
     v = [r["net"] for r in resolved]
-    out = {"opportunities": len(rows), "n": len(v),
+    unknown = [r for r in rows if r.get("status") == "UNKNOWN"]
+    out = {"unknown_reasons": dict(collections.Counter(r.get("reason", "") for r in unknown)),
+           "unknown_markets": dict(collections.Counter(r.get("market", "UNKNOWN") for r in unknown)),
+           "opportunities": len(rows), "n": len(v),
            "unknown": sum(r.get("status") == "UNKNOWN" for r in rows),
            "not_entered": sum(r.get("status") == "NOT_ENTERED" for r in rows),
            "purged": sum(r.get("status") == "PURGED" for r in rows)}
@@ -170,10 +171,11 @@ def verdict(s, has_train=True, input_complete=True):
     return "CANDIDATE_SEEN_DATA" if ok else "FAIL"
 
 
-def archive_files(root, days=None):
+def archive_files(root, days=None, before_date=None):
     # Reject overlapping roots or unrelated gzip trees rather than double-count.
     files = sorted(p for p in Path(root).rglob("*.jsonl.gz")
-                   if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.parent.name))
+                   if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.parent.name)
+                   and (before_date is None or p.parent.name < before_date))
     if not files:
         raise ValueError("no dated .jsonl.gz under " + str(root))
     slots = [(p.parent.name, p.name) for p in files]
@@ -276,6 +278,7 @@ def iter_events(files, counters, markets=None):
                 native.clear()
                 yield date, {"_barrier": "session_" + str(meta), "recv_ts": recv}
             continue
+        market = m.get("code")
         try:
             kind, market = m["type"], m["code"]
             event_ts = int(m["timestamp"])
@@ -307,8 +310,14 @@ def iter_events(files, counters, markets=None):
             why = str(exc) if str(exc) in ("stale_or_future_event", "native_time_or_sequence",
                                           "invalid_trade", "invalid_book") else "invalid_event"
             counters["rejected_" + why] += 1
-            native.clear()
-            yield date, {"_barrier": why, "recv_ts": recv}
+            barrier = {"_barrier": why, "recv_ts": recv, "source_kind": m.get("type")}
+            if isinstance(market, str):
+                # A bad event does not erase other assets, or lower native high-water marks.
+                barrier["market"] = market
+                counters["rejected_market:" + market + ":" + why] += 1
+            else:
+                native.clear()
+            yield date, barrier
             continue
         yield date, m
 
@@ -321,8 +330,13 @@ def pass_thresholds(files, counters=None, markets=None):
     rets = collections.defaultdict(lambda: array("d"))
     for _, m in iter_events(files, counters, markets):
         if "_barrier" in m:
-            win.clear()
-            started.clear()
+            market = m.get("market")
+            if market is None:
+                win.clear()
+                started.clear()
+            else:
+                win.pop(market, None)
+                started.pop(market, None)
             continue
         if m["type"] != "trade":
             continue
@@ -360,24 +374,37 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
         rows.append(row)
         counters["outcome_" + status] += 1
 
-    def finish_variant(o, var, status, reason):
+    def finish_variant(o, var, status, reason, context=None):
+        active = {leg["h"]: leg for leg in o["legs"] if leg["var"] == var}
         for h in HORIZONS_S:
-            emit(o, var, h, status, reason)
+            extra = dict(context or {})
+            leg = active.get(h)
+            if leg is not None:
+                extra.update(entry_recv_ts=leg["entry_recv"],
+                             entry_exchange_ts=leg["entry_native"],
+                             decision_recv_ts=leg["decision_recv"],
+                             quantity=leg["qty"], cost_krw=NOTIONAL * (1 + FEE))
+            emit(o, var, h, status, reason, **extra)
         o["enter"].pop(var, None)
         o["legs"] = [leg for leg in o["legs"] if leg["var"] != var]
 
-    def invalidate(reason, status="UNKNOWN"):
-        for active in opps.values():
-            for o in active:
+    def invalidate(reason, status="UNKNOWN", market=None, source_kind=None):
+        affected = list(opps) if market is None else [market]
+        context = {"barrier_scope": "global" if market is None else "market",
+                   "barrier_market": market, "barrier_stream": source_kind}
+        for code in affected:
+            for o in opps.get(code, ()):
                 for var in VARIANTS:
-                    finish_variant(o, var, status, reason)
-        opps.clear()
-        win.clear()
-        depth.clear()
-        since.clear()
-        books.clear()
-        last_sample.clear()
-        last_opp.clear()
+                    finish_variant(o, var, status, reason, context)
+            opps.pop(code, None)
+        for state in (win, depth, since, books, last_sample):
+            if market is None:
+                state.clear()
+            else:
+                state.pop(market, None)
+        if market is None:
+            last_opp.clear()
+        # Market-local rejection does not reset the registered 60s signal cooldown.
 
     def expire(now):
         for active in opps.values():
@@ -403,7 +430,7 @@ def replay(files, theta, counters, default_theta=None, train_dates=None, markets
             invalidate("split_boundary", "PURGED")
         phase_before = phase
         if "_barrier" in m:
-            invalidate(m["_barrier"])
+            invalidate(m["_barrier"], market=m.get("market"), source_kind=m.get("source_kind"))
             continue
         now, market = int(m["recv_ts"]), m["code"]
         expire(now)
@@ -546,13 +573,20 @@ def main(argv=None):
     ap.add_argument("-d", "--days", type=int, default=0)
     ap.add_argument("-t", "--train-days", type=int, default=TRAIN_DAYS)
     ap.add_argument("--markets", default=",".join(MARKETS))
+    ap.add_argument("-e", "--before-date", help="exclusive UTC date bound; raw files stay unchanged")
     a = ap.parse_args(argv)
     root = a.root_opt or a.root_pos
     if not root:
         ap.error("specify one archive root, e.g. ws_server\\ws")
     if a.days < 0 or a.train_days < 1:
         ap.error("--days must be >=0 and --train-days >=1")
-    files, dates = archive_files(root, a.days or None)
+    if a.before_date is not None:
+        try:
+            if dt.date.fromisoformat(a.before_date).isoformat() != a.before_date:
+                raise ValueError("noncanonical date")
+        except ValueError:
+            ap.error("--before-date must be YYYY-MM-DD")
+    files, dates = archive_files(root, a.days or None, a.before_date)
     out = Path(a.out)
     if Path(root).resolve() == out.resolve() or Path(root).resolve() in out.resolve().parents:
         ap.error("output must be outside the input archive")
@@ -578,7 +612,8 @@ def main(argv=None):
     complete = unchanged and not fit_counts["input_errors"] and not counters["input_errors"]
     res = analyze(rows, train_dates, complete)
     quality = "RECORDED_WITH_QUALITY_EXCLUSIONS" if complete else "INPUT_INCOMPLETE"
-    report = {"schema": 2, "status": "EXPLORATION_ONLY", "input_quality": quality,
+    report = {"schema": 3, "event_rejection_scope": "market",
+              "before_date_exclusive": a.before_date, "status": "EXPLORATION_ONLY", "input_quality": quality,
               "dates": dates, "train_dates": train_dates, "markets": markets, "theta": theta,
               "params": {"notional_principal_krw": NOTIONAL, "fee_oneway": FEE,
                          "latency_ms": LAT_MS, "max_quote_age_ms": MAX_AGE_MS,
@@ -593,6 +628,10 @@ def main(argv=None):
     (out / "rows.json").write_text(json.dumps(rows, allow_nan=False), encoding="utf-8")
     lines = [f"INPUT_QUALITY: {quality}", "PROFIT_VERDICT: NOT_VALIDATED"]
     lines += [f"{s['phase']} {s['variant']} {s['horizon']}s {_fmt(s)} {s['verdict']}" for s in res]
+    for summary in res:
+        if summary["primary"]:
+            lines.append("UNKNOWN_REASONS " + summary["phase"] + ": "
+                         + json.dumps(summary["unknown_reasons"], sort_keys=True))
     lines.append(f"Results: {out}/report.json {out}/rows.json")
     (out / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines), flush=True)
