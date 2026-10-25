@@ -19,6 +19,20 @@ market-impact model, actual orders or funded multi-market portfolio is implied.
 
 PC: py -X utf8 -u shock_exhaustion_replay.py ws_server\ws -o se_result_checked
 Requires only Python standard library. Preserve the original archive/results.
+
+RESULT 2026-10-25 (this revision, PC run on the 15-day archive, 5 markets):
+  THETA ADA -0.61% DOGE -0.94% XLM -0.42% XPL -0.97% XRP -0.30%(floor).
+  INPUT_QUALITY=INPUT_INCOMPLETE (2026-10-24/05.jsonl.gz truncated at copy time) ->
+  PROFIT_VERDICT NOT_VALIDATED by rule; every one of the 24 cells is negative anyway.
+  HOLDOUT A_immediate net -0.70..-0.87%/trade (n 20..29, days+ 0/5);
+  B_exhaust -0.36..-0.69% (n 8..9, days+ 0/4..5); C n<=1. TRAIN: A -0.41..-0.56%,
+  B -0.39..-0.58% (days+ <=1/8), C n=5 (60s +0.08%, noise). Primary cell (B,15s)
+  HOLDOUT n=9 net -0.48% ciLow -0.65%: fails n, mean, CI, exTop5 and days.
+  Reading: seconds-scale sell-shock bounce in liquid majors is negative after
+  0.05%/side fees even with immediate entry; waiting for exhaustion does not help;
+  the depth-recovery filter leaves almost no events. Consistent with the 5-minute
+  version (H14). Family closed for this archive; a clean re-run needs 2026-10-24
+  re-copied after 00:00 UTC (removes the INPUT_INCOMPLETE flag, cannot flip signs).
 """
 import argparse
 import collections
