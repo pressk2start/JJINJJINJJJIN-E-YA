@@ -46,6 +46,7 @@ import zlib
 from array import array
 from pathlib import Path
 
+MODEL_REVISION = "market-scoped-v3"
 FEE, NOTIONAL, LAT_MS = 0.0005, 100_000, 300
 SHOCK_WIN_MS, SELL_SHARE_MIN, MIN_TRADES = 10_000, 0.70, 5
 EXH_WIN_MS, EXH_MAX_WAIT_MS = 2_000, 10_000
@@ -595,7 +596,7 @@ def main(argv=None):
         ap.error("--markets must contain at least one market")
     manifest = _manifest(files)
     train_dates = dates[:a.train_days] if len(dates) > a.train_days else []
-    print(f"H17 EXPLORATION ONLY | {len(files)} files | {dates[0]}..{dates[-1]} | "
+    print(f"H17 EXPLORATION ONLY | model={MODEL_REVISION} | {len(files)} files | {dates[0]}..{dates[-1]} | "
           f"TRAIN={len(train_dates)} dates | markets={','.join(markets)}", flush=True)
     print("RECEIVE_TIME | quote age/wait <=500ms | delay=300ms | "
           "100000 KRW principal + entry fee | NO FUNDED PORTFOLIO", flush=True)
@@ -612,7 +613,7 @@ def main(argv=None):
     complete = unchanged and not fit_counts["input_errors"] and not counters["input_errors"]
     res = analyze(rows, train_dates, complete)
     quality = "RECORDED_WITH_QUALITY_EXCLUSIONS" if complete else "INPUT_INCOMPLETE"
-    report = {"schema": 3, "event_rejection_scope": "market",
+    report = {"schema": 3, "model_revision": MODEL_REVISION, "event_rejection_scope": "market",
               "before_date_exclusive": a.before_date, "status": "EXPLORATION_ONLY", "input_quality": quality,
               "dates": dates, "train_dates": train_dates, "markets": markets, "theta": theta,
               "params": {"notional_principal_krw": NOTIONAL, "fee_oneway": FEE,
@@ -634,6 +635,18 @@ def main(argv=None):
                          + json.dumps(summary["unknown_reasons"], sort_keys=True))
     lines.append(f"Results: {out}/report.json {out}/rows.json")
     (out / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    brief = ["H17_MODEL: " + MODEL_REVISION,
+             f"DATA: {dates[0]}..{dates[-1]} | dates={len(dates)} files={len(files)}",
+             "QUALITY: " + quality + " | PROFIT: NOT_VALIDATED"]
+    for summary in res:
+        if summary["primary"]:
+            brief.append(summary["phase"] + " B15 " + _fmt(summary))
+    for summary in res:
+        if summary["primary"]:
+            brief.append(summary["phase"] + " UNKNOWN: "
+                         + json.dumps(summary["unknown_reasons"], sort_keys=True))
+    brief.append("SCOPE: exploratory completed outcomes; funded portfolio not evaluated")
+    (out / "brief.txt").write_text("\n".join(brief) + "\n", encoding="utf-8")
     print("\n".join(lines), flush=True)
     return 0
 
