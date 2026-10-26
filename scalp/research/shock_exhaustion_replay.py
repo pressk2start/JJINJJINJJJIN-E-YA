@@ -31,6 +31,18 @@ PRIOR EXPLORATION 2026-10-25 (revision 1b855143, user-run, incomplete input):
   connection and shared clock discontinuities remain global. Trading thresholds,
   latency and freshness/deadline limits are unchanged.
 
+RESULT 2026-10-26 (-D discovery, PC run, ws_closed 2026-10-05..10-18, 5 markets, 5s grid, 415,550 decisions):
+  taker net>0 share by horizon: 5s 0.01% | 15s 0.12% | 30s 0.43% | 60s 1.32%; mean net -0.33..-0.35% at every
+  horizon; walk-forward 5 folds -> supported conditions = 0 (no winner class to learn from).
+  Per market mean net (15s): XRP -0.16%, ADA -0.41%, XLM -0.48%, DOGE -0.96% (0 wins / 48k), XPL -0.98%.
+  Why (verified on live REST books 2026-10-26, not a model artifact): tick size. DOGE 103/102 KRW -> spread 0.98%,
+  XLM 226/225 -> 0.44%, ADA 272/271 -> 0.37%, XRP 1719/1718 -> 0.06%. A taker round trip in sub-1,000 KRW coins
+  costs 0.4-1.1% by exchange design, larger than any 60-second move; only XRP-class spreads (<0.1%) leave a
+  contest, and XRP still shows 1.7% winners at 60s. Touch queues are 2-150 x 10^8 KRW, so a 100k KRW maker order
+  sits last in line (cf. maker_fill_replay / queue_sim adverse selection).
+  Reading (scope-limited, per advisors): in THIS archive, THIS taker fill model and THIS model family there is no
+  positive class to learn; the binding constraint is tick-size spread, not feature choice. Any further
+  seconds-scale work must use tight-spread markets (BTC/ETH/XRP-class) or a queue-aware maker model.
 """
 import argparse
 import collections
