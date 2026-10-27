@@ -569,5 +569,152 @@ class DiscoveryTests(unittest.TestCase):
             self.assertIn("signal", explanation)
 
 
+
+class DiscoveryCacheAuditTests(unittest.TestCase):
+    def make_cache(self, root, count=6, unknown=0, state="READY"):
+        import sqlite3
+        database = Path(root, "panel.sqlite")
+        connection = sqlite3.connect(str(database))
+        connection.executescript("""
+          CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);
+          CREATE TABLE samples(id INTEGER PRIMARY KEY,market TEXT,date TEXT,decision_recv_ts INTEGER,features TEXT);
+          CREATE TABLE labels(sample_id INTEGER,horizon INTEGER,status TEXT,reason TEXT,
+                             entry_recv_ts INTEGER,exit_recv_ts INTEGER,net REAL,quantity REAL,cost_krw REAL,
+                             PRIMARY KEY(sample_id,horizon));
+        """)
+        dates = ["2026-10-%02d" % d for d in range(10, 16)]
+        config = {"revision": SE.DISCOVERY_REVISION, "horizons": [15],
+                  "fee": SE.FEE, "principal": SE.NOTIONAL}
+        metadata = {"state": state, "config": config, "dates": dates, "sample_count": count + unknown}
+        for key, value in metadata.items():
+            connection.execute("INSERT INTO metadata VALUES (?,?)", (key, json.dumps(value)))
+        spread = (116 / 115 - 1) * 10000
+        hint = (116 / 115.5 * (1 + SE.FEE) - 1) * 10000
+        for i in range(count + unknown):
+            now = SE._discovery_boundary(dates[0]) + 3600000 + i * 20000
+            features = json.dumps({"spread_bp": spread, "entry_cost_hint_bp": hint, "signal": i % 7})
+            connection.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                               (i + 1, "KRW-DOGE", dates[0], now, features))
+            resolved = i < count
+            entered = resolved or (i - count) % 2 == 1
+            status = "RESOLVED" if resolved else "UNKNOWN"
+            reason = "" if resolved else ("exit_quote_late_or_missing" if entered else "entry_quote_late_or_missing")
+            net = (.001 if i % 101 == 0 else SE.net_return(116., 115.)) if resolved else None
+            connection.execute("INSERT INTO labels VALUES (?,?,?,?,?,?,?,?,?)",
+                               (i + 1, 15, status, reason, now + 300 if entered else None,
+                                now + 15300 if resolved else None, net,
+                                SE.NOTIONAL / 116 if entered else None, SE.NOTIONAL * (1 + SE.FEE)))
+        connection.commit()
+        connection.close()
+        return database, dates
+
+    def test_audit_uses_read_only_cache_and_does_not_refit_or_replay(self):
+        with tempfile.TemporaryDirectory() as root:
+            database, _ = self.make_cache(root, count=6, unknown=2)
+            before = database.read_bytes()
+            with patch.object(SE, "build_discovery_panel", side_effect=AssertionError("raw replay")), \
+                 patch.object(SE, "fit_discovery_model", side_effect=AssertionError("model fit")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = SE.audit_discovery_cache(database)
+            self.assertEqual(database.read_bytes(), before)
+            self.assertFalse(result["raw_replayed"])
+            self.assertFalse(result["models_fitted"])
+            self.assertEqual(result["totals"]["resolved"], 6)
+            self.assertEqual(result["totals"]["unresolved"], 2)
+            self.assertEqual(result["totals"]["no_entry_evidence"], 1)
+            self.assertEqual(result["totals"]["after_entry_evidence"], 1)
+            self.assertTrue(result["sample_count_matches_metadata"])
+            self.assertEqual(result["consistency_checks"].get("entry_hint_below_touch_floor", 0), 0)
+            cost = result["markets"]["KRW-DOGE"]["resolved"]["same_book_cost_bp"]["mean"]
+            self.assertAlmostEqual(cost, -SE.net_return(116., 115.) * 10000)
+            self.assertAlmostEqual(result["markets"]["KRW-DOGE"]["resolved"]["entry_vwap"]["p50"], 116)
+            brief = Path(root, "cache_audit", "cache_audit_brief.txt").read_text(encoding="utf-8")
+            self.assertLessEqual(len(brief.splitlines()), 12)
+            self.assertNotIn("PASS", brief)
+
+    def test_audit_missing_database_does_not_create_a_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "missing.sqlite")
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                SE.audit_discovery_cache(path)
+            self.assertFalse(path.exists())
+
+    def test_audit_rejects_an_interrupted_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            database, _ = self.make_cache(root, state="BUILDING")
+            with self.assertRaisesRegex(ValueError, "not finished"):
+                SE.audit_discovery_cache(database)
+
+    def test_audit_flags_impossible_entry_hint_without_claiming_bad_labels(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as root:
+            database, _ = self.make_cache(root, count=1)
+            connection = sqlite3.connect(str(database))
+            connection.execute("UPDATE samples SET features=?",
+                               (json.dumps({"spread_bp": 90., "entry_cost_hint_bp": 0.}),))
+            connection.commit()
+            connection.close()
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = SE.audit_discovery_cache(database)
+            self.assertEqual(report["consistency_checks"]["entry_hint_below_touch_floor"], 1)
+            self.assertIn("not a 15s label audit", " ".join(report["limitations"]))
+
+    def test_audit_exact_reservoir_and_screen_winner_counts(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as root:
+            database, dates = self.make_cache(root, count=5001)
+            connection = sqlite3.connect(str(database))
+            boundary = SE._discovery_boundary(dates[3])
+            expected, total = SE._discovery_reservoir(SE.discovery_rows(database, 15, dates[:3]), boundary)
+            result = SE._audit_training_sample(connection, 15, dates[:3], boundary)
+            self.assertEqual(result["population_n"], total)
+            self.assertEqual(result["fit_n"], len(expected))
+            self.assertEqual(result["fit_wins"], sum(r["net"] > 0 for r in expected))
+            indices = SE.random.Random(18).sample(range(len(expected)), 800)
+            self.assertEqual(result["screen_wins"], sum(expected[i]["net"] > 0 for i in indices))
+            self.assertTrue(result["screen_applied"])
+            connection.close()
+
+    def test_audit_single_class_does_not_claim_an_interaction_screen(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as root:
+            database, dates = self.make_cache(root, count=120)
+            connection = sqlite3.connect(str(database))
+            connection.execute("UPDATE labels SET net=-0.001")
+            connection.commit()
+            result = SE._audit_training_sample(connection, 15, dates[:3], SE._discovery_boundary(dates[3]))
+            self.assertEqual(result["fit_wins"], 0)
+            self.assertFalse(result["screen_applied"])
+            self.assertEqual(result["screen_n"], 0)
+            connection.close()
+
+    def test_audit_rejects_a_mismatched_historical_report(self):
+        with tempfile.TemporaryDirectory() as root:
+            database, dates = self.make_cache(root)
+            old = {"revision": SE.DISCOVERY_REVISION, "dates": dates, "sample_count": 99999,
+                   "folds": [{"candidate_count": 999}]}
+            Path(root, "discovery_report.json").write_text(json.dumps(old), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = SE.audit_discovery_cache(database)
+            self.assertFalse(report["source_report_matched"])
+            self.assertEqual(report["folds"], [])
+
+    def test_audit_preserves_matched_fold_summary_and_unknown_selection(self):
+        with tempfile.TemporaryDirectory() as root:
+            database, dates = self.make_cache(root)
+            old = {"revision": SE.DISCOVERY_REVISION, "dates": dates, "sample_count": 6,
+                   "folds": [{"selection_dates": dates[3:5], "check_dates": dates[5:],
+                              "candidate_count": 12, "supported_count": 0, "selected": [],
+                              "baseline_15s": {"closed": 3, "unknown_selected": 5, "complete": False,
+                                               "net_krw": None}}]}
+            Path(root, "discovery_report.json").write_text(json.dumps(old), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = SE.audit_discovery_cache(database)
+            self.assertTrue(report["source_report_matched"])
+            self.assertEqual(report["folds"][0]["baseline_15s"]["unknown_selected"], 5)
+            self.assertIsNone(report["folds"][0]["baseline_15s"]["net_krw"])
+            self.assertIn("individual selection summaries were not saved", " ".join(report["limitations"]))
+
+
 if __name__ == "__main__":
     unittest.main()

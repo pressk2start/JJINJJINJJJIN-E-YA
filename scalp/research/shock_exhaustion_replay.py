@@ -31,18 +31,17 @@ PRIOR EXPLORATION 2026-10-25 (revision 1b855143, user-run, incomplete input):
   connection and shared clock discontinuities remain global. Trading thresholds,
   latency and freshness/deadline limits are unchanged.
 
-RESULT 2026-10-26 (-D discovery, PC run, ws_closed 2026-10-05..10-18, 5 markets, 5s grid, 415,550 decisions):
-  taker net>0 share by horizon: 5s 0.01% | 15s 0.12% | 30s 0.43% | 60s 1.32%; mean net -0.33..-0.35% at every
-  horizon; walk-forward 5 folds -> supported conditions = 0 (no winner class to learn from).
-  Per market mean net (15s): XRP -0.16%, ADA -0.41%, XLM -0.48%, DOGE -0.96% (0 wins / 48k), XPL -0.98%.
-  Why (verified on live REST books 2026-10-26, not a model artifact): tick size. DOGE 103/102 KRW -> spread 0.98%,
-  XLM 226/225 -> 0.44%, ADA 272/271 -> 0.37%, XRP 1719/1718 -> 0.06%. A taker round trip in sub-1,000 KRW coins
-  costs 0.4-1.1% by exchange design, larger than any 60-second move; only XRP-class spreads (<0.1%) leave a
-  contest, and XRP still shows 1.7% winners at 60s. Touch queues are 2-150 x 10^8 KRW, so a 100k KRW maker order
-  sits last in line (cf. maker_fill_replay / queue_sim adverse selection).
-  Reading (scope-limited, per advisors): in THIS archive, THIS taker fill model and THIS model family there is no
-  positive class to learn; the binding constraint is tick-size spread, not feature choice. Any further
-  seconds-scale work must use tight-spread markets (BTC/ETH/XRP-class) or a queue-aware maker model.
+REPORTED EXPLORATION 2026-10-26 (-D, ws_closed 2026-10-05..10-18):
+  The user-run brief records 415,550 decisions, 219 positive and 162,932
+  nonpositive resolved 15s labels in the last TRAIN, and zero supported conditions
+  in the LAST fold. That brief alone does not establish all-fold results.
+  Reported per-market losses and a later REST snapshot are diagnostic clues, not
+  independent verification of historical execution labels. Tick size depends on
+  price band; sub-100 KRW and 100..1,000 KRW prices have different grids.
+  A rare positive class, finite training sample, and unknown exposures require
+  separate inspection. No family-wide impossibility or market-profitability
+  verdict follows. -A audits the existing cache without replaying or refitting.
+
 """
 import argparse
 import collections
@@ -741,7 +740,7 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
                     if h not in sample["done"]:
                         finish(sample, h, "UNKNOWN", reason)
         if reason != "end_of_input" and last_now is not None:
-            day = dt.datetime.utcfromtimestamp(last_now / 1000).date().isoformat()
+            day = dt.datetime.fromtimestamp(last_now / 1000, dt.timezone.utc).date().isoformat()
             if market is None:
                 daily_books.pop(day, None)
             else:
@@ -774,7 +773,7 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
 
     def grid(g):
         nonlocal serial, next_expiry
-        date = dt.datetime.utcfromtimestamp(g / 1000).date().isoformat()
+        date = dt.datetime.fromtimestamp(g / 1000, dt.timezone.utc).date().isoformat()
         for code in markets:
             counts["grid_opportunities"] += 1
             state = states.get(code)
@@ -828,7 +827,7 @@ def build_discovery_panel(files, database, markets, step_ms=5000):
             units = m["orderbook_units"]
             mark = {"recv_ts": now, "timestamp": int(m["timestamp"]), "units": units}
             final_books[code] = mark
-            mark_day = dt.datetime.utcfromtimestamp(now / 1000).date().isoformat()
+            mark_day = dt.datetime.fromtimestamp(now / 1000, dt.timezone.utc).date().isoformat()
             daily_books.setdefault(mark_day, {})[code] = mark
             for sample in active.get(code, ()):
                 if sample["entry"] is None and now >= sample["target"]:
@@ -1162,7 +1161,7 @@ class DiscoveryAccount:
             self.gains += max(0., profit)
             self.losses += min(0., profit)
             self.worst = row["net"] if self.worst is None else min(self.worst, row["net"])
-            day = dt.datetime.utcfromtimestamp(ts / 1000).date().isoformat()
+            day = dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).date().isoformat()
             self.day_realized[day] += profit
             self.day_closed[day] += 1
             self.market_closed[code] += 1
@@ -1492,6 +1491,237 @@ def run_discovery(files, out, markets):
     return analyze_discovery(database, out)
 
 
+
+CACHE_AUDIT_REVISION = "discovery-cache-audit-v1"
+
+
+def _audit_distribution(values):
+    values = sorted(v for v in values if _disc_num(v) is not None)
+    if not values:
+        return {"n": 0, "mean": None, "p50": None, "p90": None}
+    return {"n": len(values), "mean": sum(values) / len(values),
+            "p50": statistics.median(values),
+            "p90": values[int(.9 * (len(values) - 1))]}
+
+
+def _audit_bucket():
+    return {"n": 0, "wins": 0, "spread_bp": [], "entry_hint_bp": [],
+            "same_book_cost_bp": [], "entry_vwap": [], "net": []}
+
+
+def _audit_bucket_summary(bucket):
+    return {"n": bucket["n"], "wins": bucket["wins"],
+            **{name: _audit_distribution(bucket[name]) for name in
+               ("spread_bp", "entry_hint_bp", "same_book_cost_bp", "entry_vwap", "net")}}
+
+
+def _audit_training_sample(connection, horizon, dates, boundary, limit=4000):
+    """Reproduce original chronological reservoir and score-screen class counts."""
+    if not dates:
+        return {"population_n": 0, "population_wins": 0, "fit_n": 0,
+                "fit_wins": 0, "screen_n": 0, "screen_wins": 0,
+                "screen_applied": False}
+    query = ("SELECT l.status,l.net,l.exit_recv_ts,s.features FROM samples s "
+             "JOIN labels l ON s.id=l.sample_id WHERE l.horizon=? AND s.date IN ("
+             + ",".join("?" for _ in dates) + ") "
+             "ORDER BY s.date,s.decision_recv_ts,s.id")
+    counts = collections.Counter()
+    def rows():
+        for status, net, exit_ts, raw in connection.execute(query, [horizon] + list(dates)):
+            if (status == "RESOLVED" and net is not None and exit_ts is not None
+                    and exit_ts < boundary):
+                counts["population_n"] += 1
+                counts["population_wins"] += net > 0
+            yield {"status": status, "net": net, "exit_recv_ts": exit_ts,
+                   "features_raw": raw}
+    selected, eligible = _discovery_reservoir(rows(), boundary, limit)
+    selected = [row for row in selected if _disc_num(row["net"]) is not None]
+    fit_wins = sum(row["net"] > 0 for row in selected)
+    has_feature = False
+    for row in selected:
+        try:
+            features = json.loads(row["features_raw"])
+        except (ValueError, TypeError):
+            features = {}
+        if isinstance(features, dict) and any(_disc_num(v) is not None for v in features.values()):
+            has_feature = True
+            break
+    applied = len(selected) >= 100 and 0 < fit_wins < len(selected) and has_feature
+    indices = (random.Random(18).sample(range(len(selected)), min(800, len(selected)))
+               if applied else [])
+    return {"population_n": eligible, "population_wins": counts["population_wins"],
+            "fit_n": len(selected), "fit_wins": fit_wins,
+            "screen_n": len(indices), "screen_wins": sum(selected[i]["net"] > 0 for i in indices),
+            "screen_applied": applied, "reservoir_seed": 17, "screen_seed": 18}
+
+
+def audit_discovery_cache(database, out_dir=None):
+    """Inspect the existing feature/label cache; never replay raw files or fit a model."""
+    import sqlite3
+    database = Path(database).resolve()
+    if not database.is_file():
+        raise ValueError("cache does not exist: " + str(database))
+    out = Path(out_dir) if out_dir is not None else database.parent / "cache_audit"
+    if out.resolve() == database.parent:
+        raise ValueError("audit output must use a separate directory")
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.execute("BEGIN")
+        metadata = {key: json.loads(value) for key, value in
+                    connection.execute("SELECT key,value FROM metadata")}
+        if metadata.get("state") not in ("READY", "INCOMPLETE"):
+            raise ValueError("cache extraction is not finished; do not audit a BUILDING cache")
+        config = metadata.get("config", {})
+        if config.get("revision") != DISCOVERY_REVISION or 15 not in config.get("horizons", []):
+            raise ValueError("unsupported discovery cache revision or missing 15s labels")
+        fee = float(config["fee"])
+        principal = float(config["principal"])
+        if not (0 <= fee < 1 and math.isfinite(fee)
+                and principal > 0 and math.isfinite(principal)):
+            raise ValueError("invalid cached fee/principal")
+        report = {"revision": CACHE_AUDIT_REVISION, "source_cache": str(database),
+                  "source_revision": config["revision"], "input_state": metadata["state"],
+                  "archive_dates": metadata.get("dates", []), "sample_count": metadata.get("sample_count"),
+                  "fee_oneway": fee, "principal": principal, "raw_replayed": False,
+                  "models_fitted": False, "source_report_matched": False, "markets": {},
+                  "limitations": [
+                      "A current REST book cannot independently validate historical books.",
+                      "same_book_cost_bp is a decision-book, flat-price, top-level benchmark; not a 15s label audit.",
+                      "entry_hint_bp is a decision-time estimate, not the delayed actual entry cost.",
+                      "entry_vwap is inferred from cached principal/quantity; not independent execution evidence.",
+                      "No-entry-evidence UNKNOWN does not establish that an actual order was unfilled.",
+                      "Rejected candidates' individual selection summaries were not saved in discovery v1.",
+                      "An unobserved outcome does not establish either a profit or a loss.",
+                      "No profitability PASS, model reselection or live orders are performed."
+                  ]}
+        buckets, reasons, dates_seen = {}, {}, set()
+        totals = collections.Counter({key: 0 for key in
+            ("samples", "resolved", "unresolved", "no_entry_evidence", "after_entry_evidence")})
+        checks = collections.Counter({key: 0 for key in
+            ("entry_hint_checked", "entry_hint_below_touch_floor", "invalid_resolved_net",
+             "missing_label", "invalid_features_json")})
+        query = ("SELECT s.market,s.date,s.features,l.status,l.reason,l.net,l.quantity,"
+                 "l.entry_recv_ts,l.exit_recv_ts FROM samples s LEFT JOIN labels l "
+                 "ON s.id=l.sample_id AND l.horizon=15 ORDER BY s.date,s.decision_recv_ts,s.id")
+        for market, date, raw, status, reason, net, qty, entry_ts, exit_ts in connection.execute(query):
+            totals["samples"] += 1
+            dates_seen.add(date)
+            status = status or "MISSING_LABEL"
+            resolved = status == "RESOLVED" and _disc_num(net) is not None
+            if status == "RESOLVED" and not resolved:
+                checks["invalid_resolved_net"] += 1
+            group = "resolved" if resolved else "unresolved"
+            totals[group] += 1
+            if group == "unresolved":
+                evidence = "no_entry_evidence" if entry_ts is None else "after_entry_evidence"
+                totals[evidence] += 1
+                checks["missing_label"] += status == "MISSING_LABEL"
+                reasons.setdefault(market, collections.Counter())[reason or status] += 1
+            try:
+                features = json.loads(raw)
+                if not isinstance(features, dict):
+                    raise ValueError("non-object features")
+            except (ValueError, TypeError):
+                features = {}
+                checks["invalid_features_json"] += 1
+            spread = _disc_num(features.get("spread_bp"))
+            hint = _disc_num(features.get("entry_cost_hint_bp"))
+            same_cost, hint_floor = None, None
+            if spread is not None and spread >= 0:
+                ratio = 1 + spread / 10000
+                same_cost = (1 - (1 - fee) / ((1 + fee) * ratio)) * 10000
+                hint_floor = (2 * ratio / (1 + ratio) * (1 + fee) - 1) * 10000
+            if hint_floor is not None and hint is not None:
+                checks["entry_hint_checked"] += 1
+                checks["entry_hint_below_touch_floor"] += hint < hint_floor - 1e-5
+            quantity = _disc_num(qty)
+            entry_price = principal / quantity if quantity is not None and quantity > 0 else None
+            for name in ("all", group):
+                bucket = buckets.setdefault(market, {}).setdefault(name, _audit_bucket())
+                bucket["n"] += 1
+                bucket["wins"] += resolved and net > 0
+                for key, value in (("spread_bp", spread), ("entry_hint_bp", hint),
+                                   ("same_book_cost_bp", same_cost), ("entry_vwap", entry_price)):
+                    if value is not None and math.isfinite(value):
+                        bucket[key].append(value)
+                if resolved:
+                    bucket["net"].append(net)
+        report["totals"] = dict(totals)
+        report["consistency_checks"] = dict(checks)
+        report["sample_dates"] = sorted(dates_seen)
+        report["sample_count_matches_metadata"] = totals["samples"] == metadata.get("sample_count")
+        report["sample_dates_outside_archive_dates"] = sorted(dates_seen - set(metadata.get("dates", [])))
+        for market in sorted(buckets):
+            groups = buckets[market]
+            report["markets"][market] = {
+                name: _audit_bucket_summary(groups.get(name, _audit_bucket()))
+                for name in ("all", "resolved", "unresolved")}
+            report["markets"][market]["unknown_reasons"] = dict(reasons.get(market, {}))
+        dates = metadata.get("dates", [])
+        folds = discovery_fold_dates(dates)
+        report["training_samples"] = {}
+        if folds:
+            train, selection, _ = folds[-1]
+            report["last_train_dates"] = train
+            report["last_selection_dates"] = selection
+            for horizon in config.get("horizons", []):
+                report["training_samples"][str(horizon)] = _audit_training_sample(
+                    connection, horizon, train, _discovery_boundary(selection[0]))
+        old_path = database.parent / "discovery_report.json"
+        report["folds"] = []
+        if old_path.is_file():
+            try:
+                previous = json.loads(old_path.read_text(encoding="utf-8"))
+                matched = (previous.get("revision") == metadata["config"]["revision"]
+                           and previous.get("dates") == dates
+                           and previous.get("sample_count") == metadata.get("sample_count"))
+                report["source_report_matched"] = matched
+                if matched:
+                    for fold in previous.get("folds", []):
+                        baseline = fold.get("baseline_15s", {})
+                        report["folds"].append({
+                            "selection_dates": fold["selection_dates"], "check_dates": fold["check_dates"],
+                            "candidate_count": fold["candidate_count"], "supported_count": fold["supported_count"],
+                            "selected_count": len(fold.get("selected", [])),
+                            "baseline_15s": {key: baseline.get(key) for key in
+                                ("closed", "unknown_selected", "complete", "cash_skips", "overlap_skips",
+                                 "unresolved_positions", "known_realized_krw", "net_krw")}})
+            except (ValueError, KeyError, TypeError):
+                report["source_report_error"] = "unreadable_or_unrecognized_report"
+    finally:
+        connection.close()
+    def display(value, scale=1):
+        return "n/a" if value is None else "{:.3f}".format(value * scale)
+    training = report["training_samples"].get("15", {})
+    lines = [CACHE_AUDIT_REVISION + " | NO RAW REPLAY | NO MODEL FIT",
+             "CACHE: " + database.parent.name + " | INPUT=" + report["input_state"],
+             "15s samples={samples} resolved={resolved} unknown={unresolved} no_entry={no_entry} after_entry={after}".format(
+                 samples=totals["samples"], resolved=totals["resolved"], unresolved=totals["unresolved"],
+                 no_entry=totals["no_entry_evidence"], after=totals["after_entry_evidence"]),
+             "TRAIN15 population_wins={pw}/{pn} FIT_wins={fw}/{fn} SCREEN_wins={sw}/{sn} active={active}".format(
+                 pw=training.get("population_wins", 0), pn=training.get("population_n", 0),
+                 fw=training.get("fit_wins", 0), fn=training.get("fit_n", 0),
+                 sw=training.get("screen_wins", 0), sn=training.get("screen_n", 0),
+                 active=training.get("screen_applied", False))]
+    for market, data in list(report["markets"].items())[:5]:
+        r = data["resolved"]
+        lines.append("{} R={} U={} spread50={}bp hint50={}bp flatCost={}bp net15={}% buy50={}".format(
+            market, r["n"], data["unresolved"]["n"], display(r["spread_bp"]["p50"]),
+            display(r["entry_hint_bp"]["p50"]), display(r["same_book_cost_bp"]["mean"]),
+            display(r["net"]["mean"], 100), display(r["entry_vwap"]["p50"])))
+    last = report["folds"][-1]["baseline_15s"] if report["folds"] else {}
+    lines.append("SUPPORTED={} | last BASE15 closed={} unknown={}".format(
+        [f["supported_count"] for f in report["folds"]], last.get("closed"), last.get("unknown_selected")))
+    lines.append("HINT_FLOOR checks={} violations={} | diagnostic only; no profitability verdict".format(
+        checks["entry_hint_checked"], checks["entry_hint_below_touch_floor"]))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "cache_audit.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    brief = out / "cache_audit_brief.txt"
+    brief.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n".join(lines), flush=True)
+    return report
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("root_pos", nargs="?")
@@ -1502,7 +1732,28 @@ def main(argv=None):
     ap.add_argument("--markets", default=",".join(MARKETS))
     ap.add_argument("-e", "--before-date", help="exclusive UTC date bound; raw files stay unchanged")
     ap.add_argument("-D", "--discover", action="store_true", help="outcome-first feature and interaction discovery; separate cached output")
+    ap.add_argument("-A", "--audit-cache", nargs="?", const="latest",
+                    help="read-only cache audit; omit path to use latest completed cache beside this script")
+    ap.add_argument("--open-audit", action="store_true", help="open audit brief on Windows")
     a = ap.parse_args(argv)
+    if a.audit_cache:
+        if a.audit_cache == "latest":
+            completed = [p.parent / "panel.sqlite" for p in
+                         Path(__file__).resolve().parent.glob("*/discovery_report.json")
+                         if (p.parent / "panel.sqlite").is_file()]
+            if not completed:
+                ap.error("no completed discovery cache beside this script; pass -A path/to/panel.sqlite")
+            database = max(completed, key=lambda p: (p.parent / "discovery_report.json").stat().st_mtime)
+        else:
+            database = Path(a.audit_cache)
+            if database.is_dir():
+                database = database / "panel.sqlite"
+        audit_out = Path(a.out) if a.out != "se_result_checked" else database.parent / "cache_audit"
+        audit_discovery_cache(database, audit_out)
+        if a.open_audit and sys.platform == "win32":
+            import os
+            os.startfile(str((audit_out / "cache_audit_brief.txt").resolve()))
+        return 0
     root = a.root_opt or a.root_pos
     if not root:
         ap.error("specify one archive root, e.g. ws_server\\ws")
