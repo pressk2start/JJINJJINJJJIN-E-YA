@@ -49,13 +49,34 @@ The auditor checked 390,327 entry-hint/touch-floor pairs and found zero lower-bo
 
 - Supported-condition counts: [0, 0, 1, 0].
 - Support means at least 20 completed simulated trades across at least two selection dates. It does not require positive profit.
-- The third fold therefore contains one supported condition requiring inspection of its selection and subsequent CHECK accounts.
+- The third fold contains one supported condition. Its subsequent CHECK CSV has now been provided; the result is incomplete, as detailed below.
 - The last unfiltered 15s baseline closed zero trades and selected five unknown exposures.
 - With one open position per market, five unresolved exposures can block all five markets even while cash remains. This is incomplete account evaluation, not a proven zero-profit or loss result.
 - Rejected candidates' detailed selection summaries were not retained by discovery v1, so their individual rejection causes cannot be reconstructed from the brief.
 
-## Next bounded step
+## Selected condition CHECK result — supplied 2026-10-28 KST
 
-Read the actual archive dates and the third fold's selected family, horizon, threshold and SELECT/CHECK results from the existing discovery_report.json. Do not replay raw files or refit before reading that already-computed condition.
+The user supplied these two rows from this cache's conditions.csv:
+
+| Fold | Family | Hold | TRAIN sample score quantile | Selection reason | Capital (KRW) | Closed | Unknown selected | Complete | Net PnL / win rate |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
+| 3 | score | 60s | 0.9 | validation_net | 1,000,000 | 0 | 5 | False | unavailable |
+| 3 | score | 60s | 0.9 | validation_net | 2,000,000 | 0 | 5 | False | unavailable |
+
+The threshold is the 90th percentile of model scores in the fitted TRAIN sample. It is not a 90% win probability and does not imply that exactly 10% of CHECK rows pass it.
+
+Both capital scenarios have zero completed trades and five unknown exposures. Blank PnL and win-rate fields mean unavailable, not zero. These are two funding scenarios on the same data and policy, not two independent validation results.
+
+The 15s last-TRAIN fit/screen winner counts of 6/1 above must not be attributed to this 60s condition. Its own horizon-specific sampling counts are separate.
+
+The account model reserves cash before reading future outcome availability and allows one open position per market. Unresolved exposures can lock all five markets while cash remains; increasing nominal capital alone does not resolve missing execution evidence. Do not retroactively treat these unknown exposures as confirmed unfilled orders or release them as free cash.
+
+## Bounded disposition and next experiment
+
+This run establishes a cost-dominated unconditional mean in resolved labels and an incomplete subsequent funded evaluation of the one supported condition. It does not establish profitable alpha, a loss on that condition, correctness of every historical execution label, or impossibility of high-frequency trading.
+
+No additional raw replay or repeated H17 run is needed merely to interpret these two rows. The archive calendar range remains unconfirmed in the pasted brief; do not assign the earlier cohort's dates to it.
+
+The next experiment should prioritize empirically lower-cost markets and adequate entry/exit observation quality before treating funded account results as complete. Winner-preserving training is a separate improvement that must retain natural-frequency evaluation and account for sampling prevalence.
 
 Keep H3 unchanged and LIVE entry blocked. No new strategy or live listing guard is approved by these diagnostics.
