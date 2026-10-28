@@ -42,6 +42,15 @@ REPORTED EXPLORATION 2026-10-26 (-D, ws_closed 2026-10-05..10-18):
   separate inspection. No family-wide impossibility or market-profitability
   verdict follows. -A audits the existing cache without replaying or refitting.
 
+REPORTED CACHE AUDIT 2026-10-27 (-A on the 2026-10-05..10-18 cache, user-run):
+  Per market, resolved 15s mean net vs same-book flat round-trip cost (median spread):
+  ADA -0.408% vs 40.9bp (30.6), DOGE -0.956% vs 95.7bp (87.0), XLM -0.481% vs 48.1bp (38.0),
+  XPL -0.976% vs 97.5bp (87.7; median buy price 115 KRW, i.e. the 1 KRW band at that time),
+  XRP -0.159% vs 15.8bp (5.4). Entry-hint floor violations 0/415,550.
+  TRAIN15 positives 219/163,151 in the population, 9 in the 4,000-row fit sample, 1 in the
+  800-row screen. Losses track flat cost closely here, but this audit does not verify every
+  historical label; the rare-class sampling limit stands as a separate issue.
+
 """
 import argparse
 import collections
