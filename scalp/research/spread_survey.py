@@ -11,7 +11,14 @@ r"""spread_survey — 레코더 종목 선정용 실시간 호가 비용 실측 
     최우선 잔량(작은 쪽, 원), 호가 timestamp 나이(ms, 조회 시각 기준).
 요약: 종목별 스프레드 중앙값·p90, 충격 중앙값, 잔량 중앙값, KST 시간대별 스프레드 중앙값.
     기준(조언자 초안, 수집 대상 선별용이며 수익성 기준 아님): 중앙값 <= 5bp · p90 <= 10bp · 10만원 충격 <= 2bp.
-    ETH·XRP·SOL 처럼 스프레드가 항상 1틱인 종목은 5bp 를 구조적으로 못 넘으므로 '1틱 고정' 여부를 함께 표시한다.
+    XRP·SOL 처럼 스프레드가 한 틱에 고정된 종목은 5bp 를 구조적으로 못 넘으므로 1TICK 으로 따로 표시한다.
+
+결과 2026-10-28 (PC, KST 11:31~13:39, 65회 × 10종목): 스프레드 중앙값/p90 bp — BTC 2.1/5.5 PASS, ETH 3.2/6.3 PASS,
+  XRP 5.6/5.6 1TICK, SOL 7.3/14.6, SUI 8.0/15.9, NEAR 8.0/15.9 (평소 1틱, 가끔 2틱), BCH 15.0, ADA 36, XLM 43, DOGE 94.
+  10만·100만원 충격은 전 종목 ~0 (최우선 잔량 충분) → 비용 하한은 스프레드 + 수수료 10bp.
+  조치: 같은 날 서버 레코더를 BTC·ETH·XRP·SOL·NEAR 로 교체 (systemd drop-in
+  /etc/systemd/system/ws-recorder.service.d/markets.conf, --retain-days 10 --min-free-gb 2). 되돌리기 = 그 파일 삭제 후
+  daemon-reload + restart. 이전 5종목(DOGE·XPL·XLM·ADA·XRP) 녹화 10-05~10-24 는 사용자 PC 두 대에 사본.
 
 실행 (PC, upbit-research 폴더에서. PC 절전 끄기):
   py -3 -X utf8 -u spread_survey.py -H 8 -s 120      (8시간, 2분 간격. Ctrl+C 로 중간에 멈춰도 요약은 만든다)
