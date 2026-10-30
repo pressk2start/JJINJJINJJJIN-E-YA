@@ -19,9 +19,6 @@ WebSocket이면 orderbook과 trade가 같은 연결로 각자의 발생 시각�
   · trade 17.2건/s · 평균 457B
   · 원본 214KB/s = 18.9GB/일  → depth 15로 자르면 약 절반, gzip 후 다시 1/5~1/8
   · 수신지연 recv−exchange_ts: p50 88ms (이 컨테이너. 한국 VPS는 훨씬 작다)
-  · 실측 2026-10-29 14시 UTC (Lightsail 서버, BTC·ETH·XRP·SOL·NEAR, CPU steal 50~80% 구간):
-    orderbook n=122,433 p50 88 / p90 261 / p99 539 / max 1,086ms · trade n=12,336 p50 118 / p90 405 / p99 696 / max 1,101ms
-    → 신선도 500ms 기준 분석기에서 호가 ~1%, 체결 수 % 가 '판정 불가'로 빠진다. 1초 이상 해상도 연구에는 사용 가능.
 
 설계 원칙
 ---------
