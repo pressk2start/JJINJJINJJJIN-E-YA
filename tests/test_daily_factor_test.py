@@ -2,6 +2,7 @@
 """daily_factor_test 순수 로직 테스트 (네트워크 없음)."""
 import datetime as dt
 import importlib.util
+import statistics
 import unittest
 from pathlib import Path
 
@@ -59,6 +60,8 @@ class TestDailyFactor(unittest.TestCase):
         rows = DF.kimchi_periods(data, bn, day(100), day(110))
         self.assertEqual(rows[0]["picks"][0], "KRW-K0")
         self.assertLess(rows[0]["dev_pct"][0], -2.5)
+        self.assertEqual(len(rows[0]["pick_pct"]), len(rows[0]["picks"]))          # 종목별 수익 기록
+        self.assertAlmostEqual(statistics.mean(rows[0]["pick_pct"]) / 100, rows[0]["strat"], places=4)
 
     def test_reversal_picks_worst_yesterday_excludes_crash_no_lookahead(self):
         n = 120
