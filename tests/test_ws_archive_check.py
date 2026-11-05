@@ -66,7 +66,9 @@ class TestArchiveCheck(unittest.TestCase):
             self.assertIn("missing_hours=[23]", v)
             self.assertIn("truncated=", v)
             self.assertIn("codes=2", v)
-            self.assertIn("lag_p99>1.5s", v)
+            self.assertIn("stale>500ms", v)
+            self.assertAlmostEqual(WC.stale_share([100, 600, 700, 200]), 50.0)
+            self.assertIsNone(WC.stale_share([]))
             self.assertEqual(WC.verdict(a, today=True).count("missing_hours"), 0)   # 당일은 부분 허용
 
     def test_cross_file_gap_counts(self):

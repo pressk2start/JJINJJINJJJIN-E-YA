@@ -7,6 +7,10 @@ r"""ws_archive_check — ws_recorder 아카이브 사본의 품질 검사 (읽�
     (4) 수신 지연(recv_ts − 거래소 timestamp) p50/p99 가 얼마인지, (5) 종목이 기대한 5개인지를 한 표로 본다.
     2026-10-29 실측 기준: 호가 p99 539ms · 체결 p99 696ms · 공백은 재접속/레코더 재시작 때만. 이보다 크게 나쁘면 알린다.
 
+결과 2026-11-05 (10/22~11/05 사본, PC): 호가 p50 55~86ms·p99 0.3~0.7s 전 기간 안정. 체결 p99 는 CPU 부족 기간(10/27~10/30
+    스캐너 가동)에 11~15s 까지 밀렸다가 스캐너 정지 후 ~2s. 호가는 최신분만 오고 체결은 밀려 오는 형태 → 그 이틀은 호가 갱신
+    누락 가능성이 있어 '품질 낮음' 표시. 11/03 869s 공백 = 레코더 정지 테스트. 10/28 codes=9 = 종목 교체일.
+
 실행 (PC, 복사한 폴더를 위치 인자로):
   py -3 -X utf8 ws_archive_check.py ws_tight
   py -3 -X utf8 ws_archive_check.py ws_tight -d 2026-11-05     (특정 날짜만)
@@ -106,6 +110,11 @@ def check_day(day_dir, sample=1):
     return agg
 
 
+def stale_share(v, ms=500):
+    """분석기 신선도 기준(500ms)보다 늦게 받은 메시지 비율(%). 분석에서 '판정 불가'로 빠지는 몫."""
+    return 100.0 * sum(1 for x in v if x > ms) / len(v) if v else None
+
+
 def verdict(a, expect_codes=5, today=False):
     bad = []
     if a["missing_hours"] and not today:
@@ -114,9 +123,9 @@ def verdict(a, expect_codes=5, today=False):
         bad.append("truncated=%s" % a["truncated"])
     if len(a["codes"]) != expect_codes:
         bad.append("codes=%d" % len(a["codes"]))
-    p99_ob, p99_tr = _q(a["lag_ob"], 0.99), _q(a["lag_tr"], 0.99)
-    if (p99_ob or 0) > 1500 or (p99_tr or 0) > 1500:
-        bad.append("lag_p99>1.5s")
+    so, st = stale_share(a["lag_ob"]), stale_share(a["lag_tr"])
+    if (so or 0) > 5 or (st or 0) > 10:                       # 호가 5%·체결 10% 넘게 500ms 이후 수신이면 CPU 부족 의심
+        bad.append("stale>500ms ob=%.1f%% tr=%.1f%%" % (so or 0, st or 0))
     if a["max_gap_ms"] > 10 * 60 * 1000:
         bad.append("gap>10min")
     return "OK" if not bad else "CHECK " + " ".join(bad)
@@ -126,9 +135,11 @@ def fmt_row(day, a, today=False):
     p50o, p99o = _q(a["lag_ob"], 0.5), _q(a["lag_ob"], 0.99)
     p50t, p99t = _q(a["lag_tr"], 0.5), _q(a["lag_tr"], 0.99)
     f = lambda v: "n/a" if v is None else str(v)
-    return ("{:<10} {:>5} {:>9} {:>8} {:>4} {:>8} {:>7}/{:<6} {:>7}/{:<6} {:>5}  {}".format(
+    g = lambda v: "n/a" if v is None else "{:.1f}".format(v)
+    return ("{:<10} {:>5} {:>9} {:>8} {:>4} {:>8} {:>7}/{:<6} {:>7}/{:<6} {:>5}/{:<5} {:>5}  {}".format(
         day, a["files"], a["books"], a["trades"], a["gaps"], "{:.1f}".format(a["max_gap_ms"] / 1000),
-        f(p50o), f(p99o), f(p50t), f(p99t), len(a["codes"]), verdict(a, today=today)))
+        f(p50o), f(p99o), f(p50t), f(p99t), g(stale_share(a["lag_ob"])), g(stale_share(a["lag_tr"])),
+        len(a["codes"]), verdict(a, today=today)))
 
 
 def main(argv=None):
@@ -145,8 +156,8 @@ def main(argv=None):
     if not days:
         print("no dated folders under", root)
         return 1
-    head = "{:<10} {:>5} {:>9} {:>8} {:>4} {:>8} {:>14} {:>14} {:>5}  verdict".format(
-        "date", "files", "books", "trades", "gaps", "maxgap_s", "ob_lag p50/p99", "tr_lag p50/p99", "codes")
+    head = "{:<10} {:>5} {:>9} {:>8} {:>4} {:>8} {:>14} {:>14} {:>11} {:>5}  verdict".format(
+        "date", "files", "books", "trades", "gaps", "maxgap_s", "ob_lag p50/p99", "tr_lag p50/p99", "stale% ob/tr", "codes")
     lines = ["WS ARCHIVE CHECK | root=%s | gap>%ds | lag=recv_ts-timestamp ms" % (root, GAP_MS // 1000), head]
     last = days[-1].name
     for d in days:
@@ -154,7 +165,8 @@ def main(argv=None):
         lines.append(fmt_row(d.name, agg, today=(d.name == last)))
         print(lines[-1], flush=True)
     lines.append("codes seen: " + ", ".join(sorted(set().union(*[check_day(d, 50)["codes"] for d in days[-1:]]))))
-    lines.append("verdict OK = 24 files, no truncation, %d codes, lag p99<=1.5s, max gap<=10min (last day may be partial)" % a.codes)
+    lines.append("verdict OK = 24 files, no truncation, %d codes, stale(>500ms) ob<=5%% tr<=10%%, max gap<=10min (last day may be partial)" % a.codes)
+    lines.append("2026-10-29..30 reference (CPU-starved recorder): trade p99 11-15s; after scanners stopped 10-30: ~2s.")
     out = Path(str(root).rstrip("\\/") + "_check.txt")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[:1] + lines[-2:]))
