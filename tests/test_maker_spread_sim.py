@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""maker_spread_sim(H21) 테스트 — 보수적 큐 체결 모형·재호가·시간초과·공백·선택/판정 규칙을 합성 이벤트로 검증."""
+"""maker_spread_sim(H22) 테스트 — 보수적 큐 체결 모형·재호가·시간초과·공백·선택/판정 규칙을 합성 이벤트로 검증."""
 import gzip
 import importlib.util
 import json

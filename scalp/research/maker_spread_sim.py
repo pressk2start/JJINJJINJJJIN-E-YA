@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""maker_spread_sim — H21 사전 등록: 1원 틱 종목에서 지정가로 스프레드를 '받는' 구조가 비용 후 양수인가 (읽기 전용, 표준 라이브러리, 3.7+).
+r"""maker_spread_sim — H22 사전 등록: 1원 틱 종목에서 지정가로 스프레드를 '받는' 구조가 비용 후 양수인가 (읽기 전용, 표준 라이브러리, 3.7+).
 
 지금까지의 가설(H1~H20)은 전부 시장가로 들어가 스프레드를 '내는' 구조였고, 틱 1원 종목(ADA·DOGE·XLM·XPL, 가격 100~1000원)은 그
-스프레드가 0.1~1% 라 모든 신호가 비용에 묻혔다. H21 은 반대편이다: 최우선 매수호가에 지정가로 서서, 체결되면 최우선 매도호가에
+스프레드가 0.1~1% 라 모든 신호가 비용에 묻혔다. H22 는 반대편이다: 최우선 매수호가에 지정가로 서서, 체결되면 최우선 매도호가에
 지정가로 되판다. 수수료는 메이커도 0.05% 라 왕복 0.1%, 받는 스프레드는 틱 1개 = 0.1~1%.
 위험: 역선택(내 호가가 맞는 순간 가격이 그쪽으로 움직임), 재고(매수만 체결되고 매도가 안 됨 → 시간 초과 시 시장가 청산으로
 스프레드+수수료 손실), 체결률 자체가 낮을 가능성. 이 셋이 스프레드를 다 먹으면 FAIL 이고, 그것도 답이다.
@@ -369,7 +369,7 @@ def main(argv=None):
         print(s, flush=True)
         out.append(s)
 
-    log("H21 MAKER SPREAD SIM | root=%s | markets=%s | notional=%d KRW | fee=%.2f%%x2 | queue model: conservative"
+    log("H22 MAKER SPREAD SIM | root=%s | markets=%s | notional=%d KRW | fee=%.2f%%x2 | queue model: conservative"
         % (root, ",".join(MARKETS), NOTIONAL, FEE * 100))
     log("TRAIN %s" % ", ".join(TRAIN))
     train = run_days(root, TRAIN, log=log)
@@ -377,7 +377,7 @@ def main(argv=None):
         log(ln)
     chosen = choose(train)
     if chosen is None:
-        log("SELECTION: none (no combo reached n>=%d round trips on TRAIN) -> STOP. H21 cannot be evaluated with this data."
+        log("SELECTION: none (no combo reached n>=%d round trips on TRAIN) -> STOP. H22 cannot be evaluated with this data."
             % MIN_TRAIN_N)
         Path(str(root).rstrip("\\/") + "_maker_train.txt").write_text("\n".join(out) + "\n", encoding="utf-8")
         return 0
