@@ -29,6 +29,16 @@ r"""book_winner_study — H23 사전 등록: 진입 직전 호가 구조만으�
   범위       이 5종목·이 14일·시장가 체결 모형(300ms 지연, 호가 걷기)·이 피처군 안에서만. 내 주문이 호가를 바꾸지 않는다고 가정.
   기대       기저 평균 net 은 −(스프레드+0.1%) 근처, 승률 30~45%. 규칙이 TRAIN 에서 양수여도 HOLDOUT 에서 무너지는 것이 기본 가설이다.
 
+결과 2026-11-06 (TRAIN, PC):
+  기저   n≈50.8만, 건당 −0.17% (보유시간 무관) · 승률 0.8/4.4/10.3% (30/120/300s). BTC −0.13 · ETH −0.16 · XRP −0.17 · SOL −0.20 · NEAR −0.24.
+         보유시간과 무관한 상수 = 수수료 0.10% + 평균 스프레드(BTC 약 0.03%). 5분 안에 그 이상 오르는 경우가 10% 뿐이다(사전 기대 30~45% 는 틀렸다).
+  규칙   잠긴 10개의 TRAIN 평균이 전부 음수(−0.107~−0.119%). 단일 44 + 쌍 946, ×3 보유시간 중 표본 안 최적조차 비용을 못 넘는다.
+         상위 규칙은 대부분 BTC·ETH 만 남기는 효과(BTC 기저 −0.129 대비 +0.02%p). 10/29·30 제외 TRAIN 과 상위 10개 겹침 0/10 = 잡음 적합.
+  해석   HOLDOUT PASS 는 표본 밖 성과가 표본 안 최적보다 0.1%p 이상 좋아야 가능 = 사실상 불가. 형식 판정은 11/12 HOLDOUT 으로 닫는다.
+         답: 이 5종목·5분 이하에서 진입 직전 호가 구조는 기대수익을 많아야 0.02~0.07%p 움직이고, 왕복 비용 0.13~0.24% 를 넘기지 못한다.
+  정정   10분위 진단표가 동률을 net 순으로 정렬해 이산 피처(upd5·spread_ticks)의 rho 를 부풀렸다(0.98 등). 피처값으로만 안정 정렬하도록
+         고침. 진단 전용 표이며 규칙 탐색·판정 로직은 무변경, 이미 저장된 rules.json 은 그대로 유효.
+
 실행 (PC):
   py -3 -X utf8 book_winner_study.py ws_tight             TRAIN: 기저율·피처 분위표·잠근 규칙 → ws_tight_h23_train.txt, ws_tight_h23_rules.json
   py -3 -X utf8 book_winner_study.py ws_tight --holdout   잠근 규칙을 HOLDOUT 에 적용 → ws_tight_h23_holdout.txt   (11/12 복사 후)
@@ -413,7 +423,8 @@ def report_train(records, counters, th, rules, sens_rules, log):
     log("FEATURE DECILES (h=120s): bottom10% mean / top10% mean / spearman(decile, mean)  — 단조성 진단, 선택엔 안 씀")
     h = 120
     for f in FEATURES:
-        pairs = sorted((r["f"][f], r["net"][h]) for r in records if r["f"][f] is not None and r["net"][h] is not None)
+        pairs = sorted(((r["f"][f], r["net"][h]) for r in records if r["f"][f] is not None and r["net"][h] is not None),
+                       key=lambda x: x[0])                    # 동률은 시간순 유지 (net 으로 정렬하면 이산 피처 rho 가 부풀려짐)
         if len(pairs) < 100:
             log("  %-12s n/a" % f)
             continue
