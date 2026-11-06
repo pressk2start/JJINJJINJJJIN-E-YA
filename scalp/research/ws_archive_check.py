@@ -13,6 +13,11 @@ r"""ws_archive_check — ws_recorder 아카이브 사본의 품질 검사 (읽�
     (B) 느린 클라이언트에 대해 거래소가 호가는 최신 스냅샷으로 압축(conflate)하고 체결은 큐에 쌓아 보낸다(호가 갱신 누락 = 품질 저하).
     구분법: 체결 지연 >2s 인 초의 호가 메시지 수 / 하루 중앙값 = ob@late. (A) 면 ≈1 이상(변동 때 호가도 많아짐), (B) 면 ≪1.
     판정 규칙(사전 기재): ob@late < 0.5 → 'conflate?' 표시, 그 날은 ΔOBI·depletion 류 피처에 쓰지 말 것.
+    결과 2026-11-05 (10/22~11/05 전 15일): ob@late 0.67~3.55, 새 5종목 전 일자 1.14~2.79 → (A). 체결이 늦는 순간 호가는 오히려
+    평소의 1.1~3.5배로 들어오고(변동 구간) 호가 지연은 그대로 작다. 호가 압축 징후 없음. 단, 메시지 수가 많다는 것이 모든 호가 변경이
+    기록됐다는 증명은 아니다 — 시점별 유효성은 ws_valid_windows.py(H17 규칙, 초 단위 ready%) 로 본다. 10/29·30 의 체결 p99
+    11.7·14.9s 도 ob@late 1.61·1.14 라 서버 CPU 가 아니라 거래소 체결 피드 지연(체결 최다일)으로 해석. 이전 'CPU 부족' 귀인은 철회.
+    분석 시 체결은 recv_ts 를 as-of 시각으로 써야 한다(trade_timestamp 기준이면 p99 2s, 10/29·30 은 12~15s 의 미래 참조).
 
 판정 기준(10/22~11/04 사본으로 보정): 체결 500ms 초과 비율은 새 5종목(BTC·ETH·XRP·SOL·NEAR) 정상일에도 14~18% 로 일정해서
     10% 기준은 매일 울린다 → 체결은 p99 > 5s(10/29·30 의 11.7·14.9s 만 해당) 또는 >500ms 비율 30% 초과만 알린다.
@@ -222,7 +227,8 @@ def main(argv=None):
     lines.append("verdict OK = 24 files, no truncation (last day's last file exempt), %d codes, ob stale(>%dms)<=5%%, "
                  "tr p99<=5s & stale<=30%%, ob@late>=0.5, max gap<=10min" % (a.codes, STALE_MS))
     lines.append("ob@late <0.5 = exchange conflated books for a slow client (book updates lost) -> skip that day for "
-                 "dOBI/depletion features; ~1 = only the trade feed was late, books complete.")
+                 "dOBI/depletion features; ~1 = no sign of book thinning while trades were late (message counts cannot "
+                 "prove every update was kept; per-second freshness: ws_valid_windows.py).")
     out = Path(str(root).rstrip("\\/") + "_check.txt")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[:1] + lines[-3:]))
