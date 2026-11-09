@@ -33,9 +33,24 @@ r"""book_winner_study — H23 사전 등록: 진입 직전 호가 구조만으�
   기저   n≈50.8만, 건당 −0.17% (보유시간 무관) · 승률 0.8/4.4/10.3% (30/120/300s). BTC −0.13 · ETH −0.16 · XRP −0.17 · SOL −0.20 · NEAR −0.24.
          보유시간과 무관한 상수 = 수수료 0.10% + 평균 스프레드(BTC 약 0.03%). 5분 안에 그 이상 오르는 경우가 10% 뿐이다(사전 기대 30~45% 는 틀렸다).
   규칙   잠긴 10개의 TRAIN 평균이 전부 음수(−0.107~−0.119%). 단일 44 + 쌍 946, ×3 보유시간 중 표본 안 최적조차 비용을 못 넘는다.
-         상위 규칙은 대부분 BTC·ETH 만 남기는 효과(BTC 기저 −0.129 대비 +0.02%p). 10/29·30 제외 TRAIN 과 상위 10개 겹침 0/10 = 잡음 적합.
-  해석   HOLDOUT PASS 는 표본 밖 성과가 표본 안 최적보다 0.1%p 이상 좋아야 가능 = 사실상 불가. 형식 판정은 11/12 HOLDOUT 으로 닫는다.
+         상위 규칙은 대부분 BTC·ETH 만 남기는 효과(BTC 기저 −0.129 대비 +0.02%p).
+  해석   HOLDOUT PASS 는 표본 밖 성과가 표본 안 최적보다 0.1%p 이상 좋아야 가능 = 사실상 불가.
          답: 이 5종목·5분 이하에서 진입 직전 호가 구조는 기대수익을 많아야 0.02~0.07%p 움직이고, 왕복 비용 0.13~0.24% 를 넘기지 못한다.
+  상태   2026-11-06: TRAIN 단계에서 비용 후 양수 후보 없음. 고문 합의로 사전 등록대로 11/12 형식 HOLDOUT 을 한 번 돌려 닫는다.
+         HOLDOUT 을 돌리지 않고 닫는다면 기록은 TERMINATED_EARLY(TRAIN 양수 후보 없음)이지 HOLDOUT FAIL 이 아니다.
+         HOLDOUT 이 우연히 PASS 여도 LIVE 투입 없음, SHADOW 로만.
+  판정   2026-11-06 HOLDOUT 부분 실행(11/05 전일 + 11/06 7시간, 녹화기 정지로 7일 창은 채울 수 없음): H23 = FAIL.
+         잠긴 10개 모두 표본 밖 평균 음수(−0.119~−0.168%, TRAIN −0.107~−0.119 보다 나쁨), 건 단위 부트스트랩 하한도 전부 음수,
+         종목별 양수 0~1/5. 일수가 필요 없는 원래 사전 등록 조건(n·하한·종목)만으로도 10개 전부 탈락이므로 부분 창이 결론을 만든 게 아니다.
+         HOLDOUT 기저 −0.17~−0.19% (TRAIN 과 같음). 앞서 적은 TERMINATED_EARLY 는 이 실행으로 대체한다.
+  개정   2026-11-06, HOLDOUT 데이터를 열기 전 (기준을 더 엄격하게만 바꿈 → 사전 등록 위반 아님):
+         5초 격자 진입은 같은 종목에서 보유 구간이 최대 60개 겹쳐 독립 표본이 아니므로 건 단위 부트스트랩 하한이 너무 높게 나온다.
+         규칙 PASS 에 조건 하나 추가: 종목별로 보유 중 새 진입을 버린 '겹침 제거' 거래로 일별 평균을 내고(HOLDOUT 최대 7일),
+         그 평균의 단측 99.5% t 하한(0.05/10 보정, 자유도 = 일수−1)이 0 초과. 거래가 있는 날이 3일 미만이면 PASS 아님.
+         참고: 잠긴 #1·#3·#8 은 TRAIN 에서 BTC·ETH 두 종목에서만 나와 '5종목 중 3종목 양수' 를 구조적으로 못 넘는다(판정 대상은 사실상 7개).
+  정정   SENSITIVITY 의 0/10 은 숫자 문턱까지 비교한 탓에 과장됐다. 10/29·30 을 빼면 분위 문턱이 다시 계산돼(같은 "obi10 ≥ q90" 도 숫자가 조금 달라짐)
+         같은 규칙도 다른 규칙으로 셌다. 구조 키(h, 피처, 방향, 분위)로 비교하도록 고침. '잡음 적합의 강한 증거' 라는 앞선 해석은 철회.
+         TRAIN 을 다시 돌리면 고친 값이 나온다(선택·rules.json 불변). 핵심 결론(표본 안 최적도 음수)은 이것과 무관.
   정정   10분위 진단표가 동률을 net 순으로 정렬해 이산 피처(upd5·spread_ticks)의 rho 를 부풀렸다(0.98 등). 피처값으로만 안정 정렬하도록
          고침. 진단 전용 표이며 규칙 탐색·판정 로직은 무변경, 이미 저장된 rules.json 은 그대로 유효.
 
@@ -398,9 +413,53 @@ def evaluate(records, rule, alpha=ALPHA):
     pm = {m: _mean(v) for m, v in per.items()}
     pos = sum(1 for v in pm.values() if v is not None and v > 0)
     low = bootstrap_low(vals, alpha)
-    ok = n >= MIN_HOLD_N and low is not None and low > 0 and pos >= 3
+    nov = non_overlap(records, rule)
+    days = {}
+    for r in nov:
+        days.setdefault(r["day"], []).append(r["net"][h])
+    daily = [_mean(v) for _, v in sorted(days.items())]
+    tlow = t_low(daily)
+    ok = (n >= MIN_HOLD_N and low is not None and low > 0 and pos >= 3
+          and tlow is not None and tlow > 0)                        # 2026-11-06 개정: 겹침 제거 일별 평균 t 하한
     return {"n": n, "mean": _mean(vals), "wr": 100.0 * sum(1 for x in vals if x > 0) / n if n else None,
-            "low": low, "per_market": pm, "markets_pos": pos, "pass": ok}
+            "low": low, "per_market": pm, "markets_pos": pos, "n_nov": len(nov), "days": len(daily),
+            "daily_mean": _mean(daily), "tlow": tlow, "pass": ok}
+
+
+def non_overlap(records, rule):
+    """규칙이 고른 거래를 종목별 시간순으로 훑으며, 직전 채택 거래의 만기(진입+h) 이전 진입은 버린다 = 종목당 동시 1포지션."""
+    h = rule["h"]
+    out, busy = [], {}
+    for r in sorted((r for r in records if r["net"][h] is not None and match(r, rule["terms"])),
+                    key=lambda r: (r["code"], r["t_in"])):
+        if r["t_in"] < busy.get(r["code"], -1):
+            continue
+        busy[r["code"]] = r["t_in"] + h * 1000
+        out.append(r)
+    return out
+
+
+# 단측 99.5% (= 0.05/10 보정) t 임계값, 자유도 2..6 (HOLDOUT 7일 → 최대 df 6). 표준 라이브러리에 t 분포가 없어 표로 고정.
+T_CRIT = {2: 9.925, 3: 5.841, 4: 4.604, 5: 4.032, 6: 3.707}
+
+
+def t_low(daily):
+    """일별 평균들의 평균 − t·표준오차. 거래가 있는 날이 3일 미만이면 None(판정 불가 = PASS 아님)."""
+    k = len(daily)
+    if k < 3:
+        return None
+    m = _mean(daily)
+    sd = (sum((x - m) ** 2 for x in daily) / (k - 1)) ** 0.5
+    return m - T_CRIT[min(k - 1, 6)] * sd / k ** 0.5
+
+
+def rule_key(rule, th):
+    """규칙의 구조 키 = (h, {(피처, 방향, 분위)}). 숫자 문턱은 표본마다 다시 계산되므로 비교에 쓰지 않는다."""
+    terms = []
+    for f, op, thr in rule["terms"]:
+        q = next((q for q, o in QUANTS if o == op and th.get(f) and th[f][q] == thr), None)
+        terms.append((f, op, q))
+    return rule["h"], tuple(sorted(terms))
 
 
 def rule_str(rule):
@@ -411,7 +470,7 @@ def _f(v, spec="{:.3f}"):
     return "n/a" if v is None else spec.format(v)
 
 
-def report_train(records, counters, th, rules, sens_rules, log):
+def report_train(records, counters, th, rules, sens_rules, log, sens_th=None):
     log("decisions=%d entered=%d | skipped: no_book=%d no_entry=%d thin=%d no_exit=%d gap=%d" % (
         counters["decisions"], len(records), counters["no_book"], counters["no_entry"], counters["thin"],
         counters["no_exit"], counters["gap"]))
@@ -439,10 +498,10 @@ def report_train(records, counters, th, rules, sens_rules, log):
     if not rules:
         log("  none reached n>=%d" % MIN_RULE_N)
     if sens_rules is not None:
-        a = set(rule_str(r) for r in rules[:TOP_K])
-        b = set(rule_str(r) for r in sens_rules[:TOP_K])
-        log("SENSITIVITY (TRAIN without %s): top-%d overlap with locked = %d/%d (정보용, 선택 불변)" % (
-            "/".join(d[5:] for d in SENS_DROP), TOP_K, len(a & b), min(TOP_K, len(a))))
+        a = set(rule_key(r, th) for r in rules[:TOP_K])
+        b = set(rule_key(r, sens_th or th) for r in sens_rules[:TOP_K])
+        log("SENSITIVITY (TRAIN without %s): top-%d overlap with locked = %d/%d by structure (h, feature, side, quantile) "
+            "— 정보용, 선택 불변" % ("/".join(d[5:] for d in SENS_DROP), TOP_K, len(a & b), min(TOP_K, len(a))))
 
 
 def _spearman(x, y):
@@ -485,8 +544,9 @@ def main(argv=None):
         th = thresholds(records)
         rules = search(records, th)
         sens = [r for r in records if r["day"] not in SENS_DROP]
-        sens_rules = search(sens, thresholds(sens)) if sens else None
-        report_train(records, counters, th, rules, sens_rules, log)
+        sens_th = thresholds(sens) if sens else None
+        sens_rules = search(sens, sens_th) if sens else None
+        report_train(records, counters, th, rules, sens_rules, log, sens_th)
         locked = {"rules": rules[:TOP_K], "thresholds": th, "train_days": TRAIN_DAYS, "holdout_days": HOLDOUT_DAYS,
                   "criteria": {"min_hold_n": MIN_HOLD_N, "alpha_one_sided": ALPHA, "markets_pos_min": 3},
                   "base": {str(h): base_rates(records)[h] for h in HORIZONS}}
@@ -499,7 +559,8 @@ def main(argv=None):
         locked = json.load(fh)
     rules = locked["rules"]
     log("H23 HOLDOUT %s..%s | %d locked rules | rule PASS = n>=%d & bootstrap low(%.3f one-sided)>0 & >=3/5 markets positive"
-        % (HOLDOUT_DAYS[0], HOLDOUT_DAYS[-1], len(rules), MIN_HOLD_N, ALPHA))
+        " & non-overlapping daily-mean t low(%.3f one-sided)>0 with >=3 days" % (
+            HOLDOUT_DAYS[0], HOLDOUT_DAYS[-1], len(rules), MIN_HOLD_N, ALPHA, ALPHA))
     records, counters = run_days(root, HOLDOUT_DAYS, log=log)
     log("decisions=%d entered=%d | skipped: no_book=%d no_entry=%d thin=%d no_exit=%d gap=%d" % (
         counters["decisions"], len(records), counters["no_book"], counters["no_entry"], counters["thin"],
@@ -512,9 +573,10 @@ def main(argv=None):
         e = evaluate(records, r)
         any_pass |= e["pass"]
         any_enough |= e["n"] >= MIN_HOLD_N
-        log("  #%-2d TRAIN mean=%s%% -> HOLDOUT n=%d mean=%s%% low=%s%% wr=%s%% markets+=%d/5 %s | %s" % (
-            i + 1, _f(r["mean"]), e["n"], _f(e["mean"]), _f(e["low"]), _f(e["wr"], "{:.1f}"), e["markets_pos"],
-            "PASS" if e["pass"] else "fail", rule_str(r)))
+        log("  #%-2d TRAIN mean=%s%% -> HOLDOUT n=%d mean=%s%% low=%s%% wr=%s%% markets+=%d/5 | nov n=%d days=%d "
+            "daily=%s%% tlow=%s%% %s | %s" % (
+                i + 1, _f(r["mean"]), e["n"], _f(e["mean"]), _f(e["low"]), _f(e["wr"], "{:.1f}"), e["markets_pos"],
+                e["n_nov"], e["days"], _f(e["daily_mean"]), _f(e["tlow"]), "PASS" if e["pass"] else "fail", rule_str(r)))
     v = "PASS" if any_pass else ("FAIL" if any_enough else "INSUFFICIENT")
     log("H23 VERDICT: %s | scope: 5 markets, %s..%s, taker fill model (300ms, book walk), 11 book features. "
         "PASS -> SHADOW only; FAIL -> winner/loser learning closed." % (v, TRAIN_DAYS[0], HOLDOUT_DAYS[-1]))
