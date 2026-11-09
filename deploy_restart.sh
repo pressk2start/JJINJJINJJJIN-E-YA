@@ -27,13 +27,41 @@ if [ "$OLD_SELF_HASH" != "$NEW_SELF_HASH" ] && [ -z "$DEPLOY_REEXEC" ]; then
     DEPLOY_REEXEC=1 exec bash "$SELF_PATH" "$@"
 fi
 
-# bot.py가 실제로 변경됐을 때만 재시작
+# 봇 재시작 판단 (2026-11-10 검토 반영).
+# 이전: 이 스크립트가 잰 '변경 전/후 bot.py 해시' 만 비교 → 배포 명령이 git reset 을 먼저 하면 둘이 같아져
+#       새 코드는 디스크에만 있고 옛 프로세스가 계속 돌았다(H3 가드 없이).
+# 정정: '실행 중인 프로세스가 지금 디스크의 bot.py 에서 시작됐는가' 로 판단한다. bot.py 가 기동 때 남기는 마커
+#       (pid + 자기 소스 md5)를 trend/bot_version_check.py 로 대조. 재시작 뒤에는 같은 검사로 새 프로세스를 확인한다.
 NEW_BOT_HASH=$(md5sum bot.py | awk '{print $1}')
+BOT_MARKER=/home/ubuntu/bot/data/h3_reserved.json
+bot_pid() { systemctl show -p MainPID --value upbit-bot 2>/dev/null || echo 0; }
+NEED_RESTART=0
+RESTART_REASON=""
 if [ "$OLD_BOT_HASH" != "$NEW_BOT_HASH" ]; then
-    echo "[deploy] bot.py 변경됨 → systemctl restart upbit-bot ..."
+    NEED_RESTART=1
+    RESTART_REASON="bot.py changed during this run"
+elif ! RESTART_REASON=$(python3 trend/bot_version_check.py --marker "$BOT_MARKER" --bot-file bot.py --pid "$(bot_pid)" 2>&1); then
+    NEED_RESTART=1
+fi
+if [ "$NEED_RESTART" = "1" ]; then
+    echo "[deploy] 봇 재시작: $RESTART_REASON"
     sudo systemctl restart upbit-bot
+    BOT_VERIFIED=0
+    for _i in $(seq 1 40); do                      # 느린 서버에서 import 가 오래 걸린다 → 최대 2분 대기
+        sleep 3
+        if VERIFY_MSG=$(python3 trend/bot_version_check.py --marker "$BOT_MARKER" --bot-file bot.py --pid "$(bot_pid)" 2>&1); then
+            BOT_VERIFIED=1
+            break
+        fi
+    done
+    if [ "$BOT_VERIFIED" = "1" ]; then
+        echo "[deploy] 검증 OK: $VERIFY_MSG"
+    else
+        echo "[deploy] ⚠⚠ 검증 실패: 봇이 새 코드로 떴는지 확인되지 않음 — $VERIFY_MSG"
+        echo "[deploy] ⚠⚠ H3 실행기는 이 상태에서 매수를 거부한다. journalctl -u upbit-bot -n 30 으로 확인할 것."
+    fi
 else
-    echo "[deploy] bot.py 변경 없음 → 메인봇 재시작 스킵"
+    echo "[deploy] 재시작 불필요: $RESTART_REASON"
 fi
 
 # 페이퍼 스캐너 (momentum-scanner / momentum-clm)

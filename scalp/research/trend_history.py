@@ -33,9 +33,14 @@ r"""trend_history — H3 동결 규칙(trend_paper.py: 일봉 종가 > SMA50 →
   H 완충 ±2%                          ×76  +67% −47%                ×2.7 +23% −37%
   I 완충 ±3%                          ×61  +63% −52%                ×2.3 +19% −40%
   J 기간 4개(20·50·100·200) 1/4씩     ×54  +60% −41%                ×2.7 +23% −27%
+  재현: py -3 -X utf8 trend_history.py --variants  (아래 표를 그대로 다시 계산한다. 변형 코드는 이 파일의 variant_* 함수들)
+  주의: 위 '전체' 절의 최대낙폭 −57% 는 2018-01 시작 창, 이 표의 −44% 는 2018-06 시작 창이다. 서로 다른 창이라 직접 비교하지 말 것.
   읽기: 늦추는 변형(B~F)은 두 기간 모두 기준보다 나쁘다. 이익은 갑자기 시작하는 큰 추세의 초반에서 나오므로, 나눠 사거나 확인을
         기다리면 그 초반을 놓치고 낙폭은 줄지 않는다. 완충은 ±1% 만 좋고 ±2·3% 는 나빠 방향이 일정하지 않다(잡음으로 본다).
         실제 맞교환이 있는 것은 J 하나: 낙폭이 조금 작고 수익이 낮다. 결론: 동결 규칙(A, 첫날 전부)을 바꿀 근거 없음.
+        정확히 말하면 A 가 '모든 변형보다 우월' 한 것은 아니다 — 완충 ±1%(G)는 두 기간 모두 A 보다 높았다. 다만 ±2·3% 는 낮아
+        폭에 따른 방향이 일정하지 않고, 같은 과거 자료에서 여러 변형을 비교한 결과라 미래 우위를 입증하지 않는다.
+        A 를 유지하는 근거는 '분할·확인이 개선이라는 증거가 없다' 이지 'A 가 최적' 이 아니다.
   추가 확인 (같은 날, 다른 세션이 제안한 2일 분할 4종을 그대로): 2018-06~ / 2022~ / 2024~ 배수, 편도 0.15% → 0.30% 스트레스
         A 첫날 100%                      ×92 / ×3.9 / ×2.7   →  ×74 / ×3.4 / ×2.5
         B 첫날 50% + 다음 날 50%         ×85 / ×3.4 / ×2.4   →  ×70 / ×3.0 / ×2.2
@@ -135,6 +140,135 @@ def trip_stats(trips):
             "median_hold_days": sorted(hold)[len(hold) // 2]}
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# 진입·청산 시점 변형 (기술용 비교). 모든 변형은 '하위 슬리브' 들의 평균으로 표현한다: 분할 = 진입/청산 지연이 다른 슬리브 여러 개.
+def _days(start, end):
+    out, day = [], start
+    while day <= end:
+        out.append(day)
+        day = TP._shift(day, 1)
+    return out
+
+
+def _close_and_mean(data, day, n):
+    closes = [data[TP._shift(day, -k)][1] for k in range(n, 0, -1)]
+    return closes[-1], sum(closes) / n
+
+
+def variant_basic(data, days, n=TP.N):
+    out = []
+    for d in days:
+        close, mean = _close_and_mean(data, d, n)
+        out.append(close > mean)
+    return out
+
+
+def variant_band(data, days, band, n=TP.N):
+    """평균보다 band 위에서 켜지고 band 아래에서 꺼진다(이력 완충)."""
+    out, on = [], False
+    for d in days:
+        close, mean = _close_and_mean(data, d, n)
+        if not on and close > mean * (1 + band):
+            on = True
+        elif on and close < mean * (1 - band):
+            on = False
+        out.append(on)
+    return out
+
+
+def variant_staged(base, enter_delay=0, exit_delay=0):
+    """기본 신호가 enter_delay+1 일 연속 ON 이면 진입, exit_delay+1 일 연속 OFF 면 청산."""
+    out, on, run_on, run_off = [], False, 0, 0
+    for b in base:
+        run_on = run_on + 1 if b else 0
+        run_off = run_off + 1 if not b else 0
+        if not on and run_on >= enter_delay + 1:
+            on = True
+        elif on and run_off >= exit_delay + 1:
+            on = False
+        out.append(on)
+    return out
+
+
+def variant_confirm(base, k):
+    """k 일 연속 같은 쪽이어야 뒤집힌다(진입·청산 모두)."""
+    out, on = [], False
+    for i in range(len(base)):
+        window = base[max(0, i - k + 1):i + 1]
+        if len(window) == k and all(window):
+            on = True
+        elif len(window) == k and not any(window):
+            on = False
+        out.append(on)
+    return out
+
+
+def simulate_wants(data, days, wants):
+    """주어진 보유 여부 열을 동결 규칙과 같은 비용으로 체결 → (curve, 주문 수)."""
+    eq, pos, prev, orders, curve = 1.0, False, None, 0, []
+    for day, want in zip(days, wants):
+        o = data[day][0]
+        if prev is not None and pos:
+            eq *= o / prev
+        if want and not pos:
+            eq /= TP.BUY
+            orders += 1
+        elif pos and not want:
+            eq *= TP.SELL
+            orders += 1
+        pos, prev = want, o
+        curve.append((day, eq))
+    return curve, orders
+
+
+VARIANTS = (
+    ("A baseline: all in / all out on day 1", lambda d, ds: [variant_basic(d, ds)]),
+    ("B buy over 3 days, sell at once", lambda d, ds: [variant_staged(variant_basic(d, ds), enter_delay=j) for j in range(3)]),
+    ("C buy at once, sell over 3 days", lambda d, ds: [variant_staged(variant_basic(d, ds), exit_delay=j) for j in range(3)]),
+    ("D buy and sell over 3 days", lambda d, ds: [variant_staged(variant_basic(d, ds), j, j) for j in range(3)]),
+    ("E confirm 2 days both ways", lambda d, ds: [variant_confirm(variant_basic(d, ds), 2)]),
+    ("F confirm 3 days both ways", lambda d, ds: [variant_confirm(variant_basic(d, ds), 3)]),
+    ("G band +-1%", lambda d, ds: [variant_band(d, ds, 0.01)]),
+    ("H band +-2%", lambda d, ds: [variant_band(d, ds, 0.02)]),
+    ("I band +-3%", lambda d, ds: [variant_band(d, ds, 0.03)]),
+    ("J four periods 20/50/100/200, 1/4 each", lambda d, ds: [variant_basic(d, ds, n) for n in (20, 50, 100, 200)]),
+    ("B2 50% day 1 + 50% day 2, sell at once", lambda d, ds: [variant_staged(variant_basic(d, ds), enter_delay=j) for j in range(2)]),
+    ("C2 buy after 2 straight days, sell day 1", lambda d, ds: [variant_staged(variant_basic(d, ds), enter_delay=1)]),
+    ("D2 50%+50% in, 50%+50% out", lambda d, ds: [variant_staged(variant_basic(d, ds), j, j) for j in range(2)]),
+)
+
+
+def variant_portfolio(data, start, end, builder):
+    days = _days(start, end)
+    curves, orders, k = [], 0, 1
+    for m in TP.ASSETS:
+        subs = builder(data[m], days)
+        k = len(subs)
+        for wants in subs:
+            curve, n = simulate_wants(data[m], days, wants)
+            curves.append(curve)
+            orders += n
+    port = [(days[i], sum(c[i][1] for c in curves) / len(curves)) for i in range(len(days))]
+    years = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days / 365.25
+    return port, orders / len(TP.ASSETS) / years, k
+
+
+def report_variants(data, end, log=print):
+    for start in ("2018-06-01", "2022-01-01", "2024-01-01"):
+        log("== variants %s ~ %s (BTC/ETH 50:50, cost per side %.2f%%) ==" % (start, end, 100 * (TP.BUY - 1)))
+        for name, builder in VARIANTS:
+            port, per_year, k = variant_portfolio(data, start, end, builder)
+            log("  %-42s x%-8.2f CAGR %+6.1f%% MDD %4.0f%% orders/yr/asset %5.1f (each = %s of the sleeve)" % (
+                name, port[-1][1], 100 * cagr(port), 100 * max_drawdown(port), per_year, "all" if k == 1 else "1/%d" % k))
+    days = _days("2018-06-01", end)
+    for m in TP.ASSETS:                                          # 기준 변형이 동결 규칙과 같은 값인지 확인
+        curve, _ = simulate_wants(data[m], days, variant_basic(data[m], days))
+        frozen = TP.simulate_leg(data[m], "2018-06-01", end)["equity"]
+        if abs(curve[-1][1] - frozen) > 1e-9 * max(1.0, frozen):
+            raise ValueError("variant A != frozen rule for " + m)
+    log("check: variant A equals the frozen rule. In-sample comparison of many variants — not evidence of future superiority.")
+
+
 def combine(a, b):
     return [(a[i][0], (a[i][1] + b[i][1]) / 2) for i in range(len(a))]
 
@@ -171,12 +305,16 @@ def report(data, start, end, n=TP.N, log=print, years=False, trips_out=False):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     end = dt.datetime.now(dt.timezone.utc).date().isoformat()
     data = {}
     for m in TP.ASSETS:
         raw = TP.candles(m, through=end, start="2017-12-01")
         data[m], miss = fill_missing(raw)
         print("%s: %d daily candles %s..%s (filled %d missing days)" % (m, len(data[m]), min(data[m]), max(data[m]), miss))
+    if "--variants" in argv:
+        report_variants(data, end)
+        return 0
     print("H3 FROZEN RULE HISTORY (descriptive, in-sample) | cost per side %.2f%% | through %s open" % (
         100 * (TP.BUY - 1), end))
     print("== full history, N=%d ==" % TP.N)
