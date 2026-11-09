@@ -1,0 +1,13 @@
+# 매일 00:01 UTC (09:01 KST) 실행, 00:11 UTC 에 한 번 더 (실행기가 하루 1회만 처리하므로 두 번째는 실패 복구용).
+# Persistent=true: 서버가 꺼져 있었으면 켜진 뒤 한 번 실행한다.
+[Unit]
+Description=H3 daily trend executor timer
+
+[Timer]
+OnCalendar=*-*-* 00:01:00 UTC
+OnCalendar=*-*-* 00:11:00 UTC
+Persistent=true
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

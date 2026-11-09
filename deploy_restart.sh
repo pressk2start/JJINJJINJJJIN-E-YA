@@ -8,12 +8,24 @@ cd /home/ubuntu/bot
 
 # 변경 전 bot.py 해시 저장
 OLD_BOT_HASH=$(md5sum bot.py 2>/dev/null | awk '{print $1}')
+# 이 스크립트 자신의 해시도 저장 (아래 재실행 판단용)
+SELF_PATH="/home/ubuntu/bot/deploy_restart.sh"
+OLD_SELF_HASH=$(md5sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
 
 # 최신 코드 가져오기
 echo "[deploy] git fetch + reset ..."
 git fetch origin main
 git reset --hard origin/main
 echo "[deploy] 코드 업데이트 완료: $(git log --oneline -1)"
+
+# 2026-11-09 사고 재발 방지: reset 이 이 스크립트 자체를 바꿨으면 새 버전으로 다시 실행한다.
+# bash 는 이미 연 옛 파일을 끝까지 실행하므로, 실행 도중 main 이 바뀌면 "새 코드 위에서 옛 배포 로직" 이 돈다.
+# 그날 옛 로직이 새 bot.py 를 올리면서 10/30 에 끈 페이퍼 스캐너를 다시 켰다. DEPLOY_REEXEC 는 무한 재실행 방지.
+NEW_SELF_HASH=$(md5sum "$SELF_PATH" | awk '{print $1}')
+if [ "$OLD_SELF_HASH" != "$NEW_SELF_HASH" ] && [ -z "$DEPLOY_REEXEC" ]; then
+    echo "[deploy] deploy_restart.sh 자체가 갱신됨 → 새 버전으로 재실행"
+    DEPLOY_REEXEC=1 exec bash "$SELF_PATH" "$@"
+fi
 
 # bot.py가 실제로 변경됐을 때만 재시작
 NEW_BOT_HASH=$(md5sum bot.py | awk '{print $1}')

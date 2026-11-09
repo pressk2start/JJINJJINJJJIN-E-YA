@@ -4562,6 +4562,30 @@ AUTO_TRADE = os.getenv("AUTO_TRADE", "0") == "1"
 # 금지: 손실 직후 flagship threshold 손보기 · 다른 shadow route 임시 LIVE 승격
 LIVE_ENTRY_DISABLED = os.getenv("LIVE_ENTRY_DISABLED", "0") == "1"
 print(f"[BOT_MODE] AUTO_TRADE={AUTO_TRADE}, LIVE_ENTRY_DISABLED={LIVE_ENTRY_DISABLED} (LIVE_PAUSED_PENDING_EDGE_VALIDATION), RISK_PER_TRADE={RISK_PER_TRADE}")
+
+# ── H3 예약 마켓 (2026-11-09 · 고문 요청: H3 일봉 실행기와 계좌 공유 시 분리) ──────────────────
+# H3 실행기(trend/h3_executor.py)가 같은 업비트 계좌에서 BTC·ETH 를 며칠~몇 달 보유한다.
+# 이 봇은 (1) 자기가 사지 않은 잔고를 '유령 포지션'으로 입양해 손절·청산하고, (2) 청산 시 그 코인 잔고 전체를 판다.
+# 따라서 예약 마켓은 유령 입양에서 제외하고, 이 봇의 신규 진입도 막는다 (둘 중 하나만 막으면 H3 보유분이 팔린다).
+# 실행기는 아래 마커 파일(이 프로세스의 pid·예약 목록)을 확인한 뒤에만 LIVE 매수를 한다 — 옛 코드의 봇이 돌고 있으면 매수 거부.
+H3_RESERVED_MARKETS = frozenset(
+    _m.strip().upper() for _m in os.getenv("H3_RESERVED_MARKETS", "KRW-BTC,KRW-ETH").split(",") if _m.strip())
+H3_RESERVED_MARKER = os.path.join(os.getcwd(), "data", "h3_reserved.json")
+
+
+def _write_h3_reserved_marker():
+    try:
+        os.makedirs(os.path.dirname(H3_RESERVED_MARKER), exist_ok=True)
+        _tmp = H3_RESERVED_MARKER + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            json.dump({"markets": sorted(H3_RESERVED_MARKETS), "pid": os.getpid(), "ts": int(time.time())}, _f)
+        os.replace(_tmp, H3_RESERVED_MARKER)
+        print(f"[H3_RESERVED] markets={sorted(H3_RESERVED_MARKETS)} marker={H3_RESERVED_MARKER} pid={os.getpid()}")
+    except Exception as _e:
+        print(f"[H3_RESERVED] marker write failed: {_e}")
+
+
+_write_h3_reserved_marker()
 # PYRAMID_ADD_COOLDOWN_SEC — config.py에서 정의됨
 
 
@@ -6077,6 +6101,8 @@ def sync_orphan_positions():
                 continue
 
             market = f"KRW-{currency}"
+            if market in H3_RESERVED_MARKETS:
+                continue  # H3 실행기 보유분 — 이 봇이 입양·손절·청산하지 않는다
             current_markets.add(market)
 
             # 이미 처리한 유령 포지션이면 스킵 (반복 알림 방지)
@@ -6553,6 +6579,11 @@ def open_auto_position(m, pre, dyn_stop, eff_sl_pct):
         except Exception:
             pass
 
+    # H3 예약 마켓: 이 봇이 진입하면 청산 때 계좌의 그 코인 잔고 전체(H3 보유분 포함)를 팔게 된다 → 진입 자체를 막는다
+    if m in H3_RESERVED_MARKETS:
+        signal_skip("H3_RESERVED_MARKET (H3 일봉 실행기 전용 마켓 · 단타 진입 금지)",
+                    skip_bucket="entry_skip_h3_reserved")
+        return False, None
     # advisor 3자 (2026-08-27) 승인 · LIVE_PAUSED_PENDING_EDGE_VALIDATION
     # (entry-only · close_auto_position 무영향 · 기존 포지션은 정상 청산)
     if LIVE_ENTRY_DISABLED:
@@ -7529,6 +7560,8 @@ def add_auto_position(m, cur_price, reason=""):
     - ADD_RISK_FRACTION 비율만큼 RISK_PER_TRADE를 다시 사용
     - 평균단가 재계산
     """
+    if m in H3_RESERVED_MARKETS:          # H3 전용 마켓 — 단타 추매도 금지 (방어적: 씨앗 포지션 자체가 생길 수 없음)
+        return False, None
     # advisor 3자 (2026-08-27) · LIVE 신규진입 정지 시 추매도 정지 (신규 자본 노출 0)
     if LIVE_ENTRY_DISABLED:
         return False, None
