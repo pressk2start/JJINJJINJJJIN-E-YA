@@ -2981,7 +2981,8 @@ def _common_cohort_paired_summary():
                         _sample = list(sorted(_lost))[:3]
                         _audit_lines.append(f"    {_label} 유실 sample: {_sample}")
                 _audit_lines.append(
-                    f"    원인 후보: (a) trade_records cap pop (4713a6c 300 확대 반영 대기) "
+                    f"    원인 후보: (a) trade_records 300건 순환 창에서 오래된 signal_id 밀려남 "
+                    f"(정상 · CONTROL/A 는 300건 포화 · A×A2 는 적어서 짝이 창 밖으로 나가면 triple 감소) "
                     f"(b) route 재초기화 (c) signal_id 재계산 (d) 자연 재분류"
                 )
             elif _prev:
@@ -23310,7 +23311,12 @@ def main():
                         # attempt 후 state != "open" · 사유 분류 (advisor 3자 task #61)
                         # 매매 로직 무영향 · 순수 관측
                         try:
-                            if not _pos_exists:
+                            if LIVE_ENTRY_DISABLED:
+                                # 2026-11-09 라벨 정정 (관측만): 정지 중에는 open_auto_position 이 주문 전에
+                                # 돌아오므로 pre_signal 이 pending 으로 남는다 → 'pending_no_fill' 은 오독
+                                # (주문 미체결 아님). 정지 상태를 그대로 표기.
+                                _send_fail_reason = "live_entry_disabled"
+                            elif not _pos_exists:
                                 # OPEN_POSITIONS 에 없음 = 주문 실패 or 정리됨
                                 _send_fail_reason = "no_position"
                             elif _pos_state == "pending":

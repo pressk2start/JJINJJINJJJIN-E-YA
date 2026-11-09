@@ -24,30 +24,25 @@ else
     echo "[deploy] bot.py 변경 없음 → 메인봇 재시작 스킵"
 fi
 
-# 모멘텀 스캐너 서비스 (설치 안 됐으면 설치 후 시작)
-if ! systemctl is-enabled momentum-scanner &>/dev/null; then
-    echo "[deploy] momentum-scanner 서비스 최초 설치 ..."
-    sudo cp /home/ubuntu/bot/bots/momentum-scanner.service /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo systemctl enable momentum-scanner
-fi
-echo "[deploy] systemctl restart momentum-scanner ..."
-sudo systemctl restart momentum-scanner
-
-# CLM Phase 1 서비스 (설치 안 됐으면 설치 후 시작)
-if ! systemctl is-enabled momentum-clm &>/dev/null; then
-    echo "[deploy] momentum-clm 서비스 최초 설치 ..."
-    sudo cp /home/ubuntu/bot/bots/momentum-clm.service /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo systemctl enable momentum-clm
-fi
-echo "[deploy] systemctl restart momentum-clm ..."
-sudo systemctl restart momentum-clm
+# 페이퍼 스캐너 (momentum-scanner / momentum-clm)
+# 2026-10-30 CPU 부족(스틸 80~96%, 버스트 잔량 0)으로 정지·비활성화했다. 배포가 이를 되살리면 안 된다.
+# 이전: 비활성이면 설치·enable 하고 무조건 restart → 10/30 결정을 조용히 되돌림.
+# 정정: 이미 enable 된 경우에만 restart. 다시 켜는 것은 사람이 명시적으로 systemctl enable 할 때만.
+for svc in momentum-scanner momentum-clm; do
+    if systemctl is-enabled "$svc" &>/dev/null; then
+        echo "[deploy] $svc enabled → restart ..."
+        sudo systemctl restart "$svc"
+    else
+        echo "[deploy] $svc disabled (2026-10-30 CPU 결정) → 건드리지 않음"
+    fi
+done
 
 echo "[deploy] 완료 — $(date)"
 sudo systemctl status upbit-bot --no-pager
-sudo systemctl status momentum-scanner --no-pager
-sudo systemctl status momentum-clm --no-pager
+for svc in momentum-scanner momentum-clm; do
+    systemctl is-enabled "$svc" &>/dev/null && sudo systemctl status "$svc" --no-pager
+done
+true
 
 # ── Research: sweep_defense 안전 조건부 실행 (2026-07-12 조언자 스펙 강화) ──
 # 이전 문제: bot.py route registry 변경 시 자동 sweep으로 CPU 포화 (병목 재발)
