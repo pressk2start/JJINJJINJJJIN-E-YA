@@ -1,0 +1,16 @@
+# H3 일봉 추세 실행기 (BTC·ETH, 50일선). 하루 1회 실행되는 oneshot.
+# 기본 SHADOW. LIVE 는 /home/ubuntu/h3_state/h3.env 에 H3_MODE=LIVE 와 H3_CAPITAL_KRW 를 사람이 직접 적을 때만.
+# 설치·enable 은 사람이 직접 한다. deploy_restart.sh 는 이 유닛을 건드리지 않는다.
+[Unit]
+Description=H3 daily trend executor (BTC/ETH SMA50)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot/trend
+EnvironmentFile=/home/ubuntu/bot/.env
+EnvironmentFile=-/home/ubuntu/h3_state/h3.env
+ExecStart=/usr/bin/python3 -u /home/ubuntu/bot/trend/h3_executor.py
+TimeoutStartSec=300
