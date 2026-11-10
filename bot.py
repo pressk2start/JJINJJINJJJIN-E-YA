@@ -4577,8 +4577,14 @@ def _write_h3_reserved_marker():
     try:
         os.makedirs(os.path.dirname(H3_RESERVED_MARKER), exist_ok=True)
         _tmp = H3_RESERVED_MARKER + ".tmp"
+        try:
+            with open(os.path.abspath(__file__), "rb") as _src:
+                _bot_md5 = hashlib.md5(_src.read()).hexdigest()   # 배포 스크립트가 '실행 중인 코드 = 디스크의 코드' 를 확인하는 값
+        except Exception:
+            _bot_md5 = ""
         with open(_tmp, "w", encoding="utf-8") as _f:
-            json.dump({"markets": sorted(H3_RESERVED_MARKETS), "pid": os.getpid(), "ts": int(time.time())}, _f)
+            json.dump({"markets": sorted(H3_RESERVED_MARKETS), "pid": os.getpid(), "ts": int(time.time()),
+                       "bot_md5": _bot_md5, "order_block": True}, _f)
         os.replace(_tmp, H3_RESERVED_MARKER)
         print(f"[H3_RESERVED] markets={sorted(H3_RESERVED_MARKETS)} marker={H3_RESERVED_MARKER} pid={os.getpid()}")
     except Exception as _e:
@@ -5557,6 +5563,10 @@ def upbit_private_post(path, body=None, timeout=7):
     _max_retries = 3
     # 🔧 FIX: 주문 POST는 500/502/503 재시도 금지 (멱등성 없음 → 중복 주문 위험)
     _is_order = (path == "/v1/orders")
+    # H3 예약 마켓 최종 차단 (2026-11-10 검토 반영): 이 봇의 모든 주문(진입·추매·청산·부분매도·sell_all·유령 손절·수동 명령)은
+    # 이 함수 하나를 거쳐 나간다. 진입·입양 가드가 어딘가에서 빠져도 여기서 막힌다 — H3 보유분은 이 봇이 팔 수 없다.
+    if _is_order and str(body.get("market", "")).upper() in H3_RESERVED_MARKETS:
+        raise RuntimeError(f"H3_RESERVED_MARKET: order blocked market={body.get('market')} side={body.get('side')}")
     for _attempt in range(_max_retries + 1):
         headers = _make_auth_headers(body)
         _throttle()

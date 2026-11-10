@@ -62,5 +62,37 @@ class TestTrendHistory(unittest.TestCase):
         self.assertEqual((miss, filled[day(1)]), (1, (2.0, 2.0)))
 
 
+class TestVariants(unittest.TestCase):
+    def test_baseline_variant_equals_frozen_rule_and_delays_behave(self):
+        data = series(700, lambda k: 100.0 * (1 + 0.5 * math.sin(k / 35.0)) + 0.03 * k)
+        start, end = day(210), day(699)
+        days = TH._days(start, end)
+        base = TH.variant_basic(data, days)
+        curve, orders = TH.simulate_wants(data, days, base)
+        self.assertAlmostEqual(curve[-1][1], TP.simulate_leg(data, start, end)["equity"], places=12)
+        self.assertEqual(orders, len(TP.simulate_leg(data, start, end)["trades"]))
+        late_in = TH.variant_staged(base, enter_delay=2)
+        late_out = TH.variant_staged(base, exit_delay=2)
+        self.assertLess(sum(late_in), sum(base))                  # 늦게 사면 보유일이 줄고
+        self.assertGreater(sum(late_out), sum(base))              # 늦게 팔면 늘어난다
+        self.assertTrue(all(b or not a for a, b in zip(late_in, base)))     # 늦은 진입은 기본 신호의 부분집합
+        self.assertEqual(TH.variant_staged([True, True, False, True], enter_delay=1), [False, True, False, False])
+        self.assertEqual(TH.variant_staged([True, False, False, True], exit_delay=1), [True, True, False, True])
+        self.assertEqual(TH.variant_confirm([True, True, False, True, False, False], 2), [False, True, True, True, True, False])
+        band = TH.variant_band(data, days, 0.05)
+        self.assertLessEqual(sum(1 for a, b in zip(band, band[1:]) if a != b), sum(1 for a, b in zip(base, base[1:]) if a != b))
+        TPA = TP.ASSETS
+        try:
+            TP.ASSETS = ("X", "Y")
+            both = {"X": data, "Y": data}
+            port, per_year, k = TH.variant_portfolio(both, start, end, dict(TH.VARIANTS)["A baseline: all in / all out on day 1"])
+            self.assertEqual(k, 1)
+            self.assertAlmostEqual(port[-1][1], curve[-1][1], places=12)
+            port4, _, k4 = TH.variant_portfolio(both, start, end, dict(TH.VARIANTS)["J four periods 20/50/100/200, 1/4 each"])
+            self.assertEqual(k4, 4)
+        finally:
+            TP.ASSETS = TPA
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
