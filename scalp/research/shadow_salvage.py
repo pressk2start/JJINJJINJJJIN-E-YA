@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""shadow_salvage — H27 사전 등록: 봇이 쌓아 둔 초단타 섀도우 거래를 '지표 1개 조건'으로 되살릴 수 있는가.
-(파일 읽기 전용, 거래소 호출 없음, 키·주문 없음, 표준 라이브러리. PC 에서 실행 — 거래 서버에서 돌리지 않는다.)
+(봇 파일은 복사본을 읽기만 한다. 거래소에는 공개 시세(KRW-BTC 5분봉)만 묻는다 — 키·주문 없음. 표준 라이브러리.
+ PC 에서 실행 — 거래 서버에서 돌리지 않는다. 번호는 H27. 2026-11-10 에 잠깐 H28 로 바꿨다가(커밋 ebe52d1 의 'H28' 이 이 검사)
+ 고문이 번호 변경 요청을 거둬 되돌렸다. 일·주 단위 conditional_salvage 는 H26 그대로다.)
 
 사용자 지적(2026-11-10): 시나리오를 통째로 돌려 "전체 평균이 음수 → 폐기" 로 끝내지 말고, 그 시나리오가 만든 거래 전체를 모수로 놓고
     그 안에서 승패를 가르는 지표 1개를 찾아 붙였을 때 음에서 양으로 바뀌는지를 봐야 한다. 번갈아 봐도 없으면 그때 버린다.
-    H26 은 이것을 일·주 단위 시나리오에 했다(FAIL). 이 스크립트는 같은 절차를 초·분 단위 시나리오에 한다.
+    H26(conditional_salvage) 은 이것을 일·주 단위 시나리오에 했다(FAIL). 이 스크립트는 같은 절차를 초·분 단위 시나리오에 한다.
 
 모수: bot.py 가 매 신호마다 가상 진입·청산해 shadow_stats.json 의 route 별 trade_records 에 남긴 거래.
     한 건 = {pnl(비용 전), hold, exit_ts, signal_id("종목:신호시각"), inds{진입 판단 시점 지표 수십 개 + 호가 비용}}.
@@ -19,13 +21,18 @@ r"""shadow_salvage — H27 사전 등록: 봇이 쌓아 둔 초단타 섀도우 
 사전 등록 (이 커밋이 결과보다 먼저다. 자료를 본 뒤 아래 숫자를 바꾸지 않는다):
   자료      shadow_stats*.json 스냅샷 여러 개를 합친다(봇은 route 당 최근 300건/50건만 보관 → 날짜가 다른 스냅샷을 합치면 늘어난다).
             같은 거래는 (route, signal_id, 청산시각) 으로 한 번만 센다.
-  제외      pnl·exit_ts·hold 가 없는 건, 청산 사유 '가격없음'(시세 조회 실패로 닫힌 건), 비용 지표가 없는 건. 건수를 보고한다.
+  제외      pnl·exit_ts·hold 가 없는 건, 진입 시각이 2025 년 이전으로 찍힌 건(기록 오류), 청산 사유 '가격없음'(시세 조회
+            실패로 닫힌 건), 비용 지표가 없는 건. 건수를 보고한다.
   비용      순손익 = pnl − 수수료 왕복 0.10% − 매수 불리폭(ob_slip_buy_100k) − 매도 불리폭(ob_exit_slip_sell_100k, 없으면
             진입 시점 ob_slip_sell_100k). shadow_net_cost.py 와 같은 정의. 10만 원 주문 기준 호가 실측.
   시나리오  위 제외 후 거래 ≥ 120건 이고 진입일 ≥ 15일인 route 만 판정 대상(그 밖은 표본 부족으로 목록에만 표시).
   구간      route 마다 진입 시각 순으로, 날짜 경계에서 앞 60% = TRAIN, 뒤 40% = HOLDOUT (하루가 양쪽에 걸치지 않게).
   지표      inds 의 숫자 지표 전부. 단 진입 뒤에 생기는 값은 제외: mfe_*, dd_peak_*, mae_*, ob_exit_*, at_*.
             파생 1개 추가: ob_imb5 = 매수 5호가 잔량 / (매수+매도 5호가 잔량). TRAIN 거래의 80% 이상에 값이 있는 지표만.
+  시장 상태 봇 기록에는 코인 자체 지표만 있고 시장 상태가 없다. 2개를 붙인다: btc_ret_15m · btc_ret_60m = 진입 전에 끝난
+            마지막 KRW-BTC 5분봉 종가 / 그 15분·60분 전 종가 − 1 (진입 뒤 값은 쓰지 않는다). 넣는 이유: 고문의 15분봉 검증
+            (2026-11-10)에서 급락 매수의 갈림선이 코인 지표가 아니라 'BTC 도 같이 빠졌는가' 였다. 결과 실행 전에 추가.
+            시세를 못 받으면 머리말에 UNAVAILABLE 로 표시하고 이 2개 없이 진행한다(그 결과는 '시장 상태 미검사').
   조건      지표마다 2개: TRAIN 3분위의 아래 1/3('low')·위 1/3('high'). 값이 두 가지뿐인 지표는 각 값. 지표 1개짜리만(쌍 없음).
   통계      표본 단위는 거래지만 같은 날 거래는 독립이 아니므로 '진입일(KST)' 을 묶음으로 한 군집 표준오차로 t 를 낸다(자유도 = 일수−1).
   선택      TRAIN 에서 거래 ≥ 30건·일수 ≥ 8·평균 순손익 > 0·t ≥ 2.0 인 조건 중 t 가 가장 큰 1개를 route 마다 잠근다(지표 1개).
@@ -33,6 +40,14 @@ r"""shadow_salvage — H27 사전 등록: 봇이 쌓아 둔 초단타 섀도우 
   판정      잠긴 조건만 HOLDOUT 에서: 거래 ≥ 15건·일수 ≥ 6, 평균 순손익의 단측 하한(유의수준 0.05/잠긴 조건 수, t 분포) > 0 → PASS.
             PASS 는 '후보' 다. 이 파일의 10월 자료는 봇 리포트·다른 분석에서 이미 본 구간이므로, 최종 판정은 --frozen 으로
             동결 시각 이후 새로 쌓인 섀도우 거래에서 한 번 더 한다. 전부 FAIL 이면 초단타 route 의 조건부 구제는 닫는다.
+  보고만    (판정에 쓰지 않는다. 고문·제3세션이 결과를 읽을 때 확인하려던 항목, 결과 실행 전에 추가)
+            · route 별 제외 비율: 비용 지표가 없어 빠진 거래가 많으면 남은 거래만 좋아 보일 수 있다 → kept % 와 사유별 건수.
+            · 날짜 가중 평균(daymean): 하루를 한 표로 센 평균. 거래 평균과 부호가 다르면 며칠에 몰린 결과다.
+            · 조건에 쓴 지표 이름 전부와 '진입 뒤 값' 으로 뺀 이름 전부(INDICATORS 줄) — 미래 정보가 섞였는지 눈으로 감사.
+              bot.py 대조(2026-11-10): 진입 뒤에 inds 에 더해지는 키는 mfe_peak_sec·mfe_30s/60s·dd_peak_30s/60s·mae_60s·
+              at_ob_slip/at_trail_pct/at_tier/at_max_hold·ob_exit_* 뿐이고 모두 위 제외 접두어에 걸린다.
+            · route_epoch 태그 수: 같은 route 안에 실험 계약 버전이 몇 개 섞였는지. 단 대부분 route 는 이 값이 배포 SHA 라
+              '배포 횟수' 일 뿐이다. 버전 문자열(예: CONTROL_v1)을 쓰는 route 에서만 규칙 변경을 뜻한다.
   보조 진단 route 마다 TRAIN 상위 5개 조건이 HOLDOUT 에서 (a) 기본보다 나았는지 (b) 비용 후 양수였는지 센다. 아무 신호가
             없으면 (a) 는 절반쯤 나온다 — '조건을 붙여 살리는' 방법이 이 자료에서 얼마나 재현되는지 보는 수치(판정에는 안 씀).
   한계      가상 진입은 스캔 시작 시각의 현재가에 100% 체결 가정. 실거래는 더 늦고 더 비싸게 들어간다(shadow_net_cost.py 머리말:
@@ -41,7 +56,8 @@ r"""shadow_salvage — H27 사전 등록: 봇이 쌓아 둔 초단타 섀도우 
             같은 신호를 청산 방식만 달리한 route 들은 서로 독립이 아니다 — 잠긴 조건 수로 나누는 보정은 그래서 보수적이다.
 
 실행 (PC):
-  py -3 -X utf8 shadow_salvage.py shadow_stats_20261020.json shadow_stats_20261110.json --out h27_result
+  py -3 -X utf8 shadow_salvage.py "shadow_stats*.json" "ws_tight\_bot\shadow_stats*.json" --out h27_result
+      (패턴에 맞는 파일이 없으면 건너뛴다. 같은 파일이 두 군데 있어도 거래는 한 번만 센다. --no-market 은 시세 조회 생략)
   py -3 -X utf8 shadow_salvage.py <새 스냅샷들> --frozen h27_result\h27_result.json --out h27_forward      (PASS 가 있을 때만, 나중에)
 """
 import argparse
@@ -50,6 +66,10 @@ import glob
 import json
 import math
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 FEE_RT = 0.0010
@@ -64,6 +84,11 @@ TOP_SHOW = 5
 LEAK_PREFIXES = ("mfe_", "dd_peak_", "mae_", "ob_exit_", "at_")
 SKIP_EXIT = ("가격없음",)
 KST = dt.timezone(dt.timedelta(hours=9))
+UTC = dt.timezone.utc
+UPBIT = "https://api.upbit.com/v1"
+BTC_BAR_SEC = 300
+MIN_ENTRY_TS = 1735689600.0          # 2025-01-01 UTC. 그 전 시각은 기록 오류로 본다
+MARKET_IND = (("btc_ret_15m", 900), ("btc_ret_60m", 3600))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -96,6 +121,8 @@ def to_trade(key, rec):
     pnl, exit_ts, hold = _num(rec.get("pnl")), _num(rec.get("exit_ts")), _num(rec.get("hold"))
     if pnl is None or exit_ts is None or hold is None:
         return None, "no_time_or_pnl"
+    if exit_ts - hold < MIN_ENTRY_TS:
+        return None, "bad_time"
     if rec.get("exit_reason") in SKIP_EXIT:
         return None, "price_unavailable"
     inds = rec.get("inds") or {}
@@ -111,11 +138,12 @@ def to_trade(key, rec):
     return {"key": key, "entry_ts": entry_ts, "exit_ts": exit_ts,
             "day": dt.datetime.fromtimestamp(entry_ts, KST).date().isoformat(),
             "market": sid.rsplit(":", 1)[0] if isinstance(sid, str) and ":" in sid else None,
-            "gross": pnl, "cost": cost, "net": pnl - FEE_RT - cost, "ind": ind}, None
+            "gross": pnl, "cost": cost, "net": pnl - FEE_RT - cost, "ind": ind, "epoch": rec.get("route_epoch")}, None
 
 
-def load_snapshots(paths, log=None):
-    """스냅샷 여러 개 → ({route키: [거래]}, {route키: {사유: 건수}}). 같은 거래는 한 번만."""
+def load_snapshots(paths, log=None, excluded=None):
+    """스냅샷 여러 개 → ({route키: [거래]}, {route키: {사유: 건수}}). 같은 거래는 한 번만.
+    excluded 에 집합을 주면 '진입 뒤 값' 이라 뺀 지표 이름을 거기에 모은다(감사용 보고)."""
     by_key, dropped, seen = {}, {}, set()
     for p in paths:
         with open(p, encoding="utf-8") as f:
@@ -131,6 +159,8 @@ def load_snapshots(paths, log=None):
                 if ident in seen:
                     continue
                 seen.add(ident)
+                if excluded is not None:
+                    excluded.update(k for k in (rec.get("inds") or {}) if not is_decision_key(k))
                 tr, why = to_trade(key, rec)
                 if tr is None:
                     dropped.setdefault(key, {})
@@ -143,6 +173,78 @@ def load_snapshots(paths, log=None):
     for rows in by_key.values():
         rows.sort(key=lambda t: t["entry_ts"])
     return by_key, dropped
+
+# ---------------------------------------------------------------------------------------------------------------------
+def _get(url, retries=6):
+    for i in range(retries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=20) as r:
+                time.sleep(0.12)
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and i < retries - 1:
+                time.sleep(1 + i)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if i < retries - 1:
+                time.sleep(1 + i)
+                continue
+            raise
+
+
+def fetch_btc_bars(t_from, t_to):
+    """KRW-BTC 5분봉 종가 {봉 시작 시각(초): 종가}, 봉 시작이 [t_from, t_to) 인 것."""
+    out, to = {}, int(t_to)
+    while to > t_from:
+        iso = dt.datetime.fromtimestamp(to, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = _get(UPBIT + "/candles/minutes/5?" + urllib.parse.urlencode({"market": "KRW-BTC", "to": iso, "count": 200}))
+        if not rows:
+            break
+        starts = [int(dt.datetime.fromisoformat(r["candle_date_time_utc"]).replace(tzinfo=UTC).timestamp()) for r in rows]
+        for t, r in zip(starts, rows):
+            if t_from <= t < t_to:
+                out[t] = float(r["trade_price"])
+        if min(starts) >= to:
+            break
+        to = min(starts)
+    return out
+
+
+def load_btc_bars(t_from, t_to, cache_path):
+    """캐시가 구간을 덮으면 그대로, 아니면 받아서 합쳐 저장."""
+    cache_path, bars = Path(cache_path), {}
+    if cache_path.exists():
+        bars = {int(k): float(v) for k, v in json.loads(cache_path.read_text(encoding="utf-8")).items()}
+    if not bars or min(bars) > t_from + 2 * BTC_BAR_SEC or max(bars) < t_to - 3 * BTC_BAR_SEC:
+        bars.update(fetch_btc_bars(t_from, t_to))
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({str(k): bars[k] for k in sorted(bars)}), encoding="utf-8")
+    return bars
+
+
+def btc_state(bars, entry_ts):
+    """진입 전에 끝난 마지막 5분봉 기준 BTC 수익률. 봉이 비어 있으면 그 항목은 뺀다."""
+    last = (int(entry_ts) - BTC_BAR_SEC) // BTC_BAR_SEC * BTC_BAR_SEC
+    now, out = bars.get(last), {}
+    if now:
+        for name, back in MARKET_IND:
+            ref = bars.get(last - back)
+            if ref:
+                out[name] = now / ref - 1.0
+    return out
+
+
+def attach_market(by_key, bars):
+    """모든 거래에 시장 상태 지표를 붙이고, 60분 지표가 붙은 거래 비율을 돌려준다."""
+    total = got = 0
+    for rows in by_key.values():
+        for t in rows:
+            st = btc_state(bars, t["entry_ts"])
+            t["ind"].update(st)
+            total += 1
+            got += 1 if MARKET_IND[-1][0] in st else 0
+    return got / float(total) if total else 0.0
 
 
 def split(trades):
@@ -207,20 +309,23 @@ def t_quantile(p, df):
 
 
 def cluster_stats(trades):
-    """거래 평균 순손익과 진입일 군집 표준오차 → dict(n, days, net, gross, win, se, t, df)."""
+    """거래 평균 순손익과 진입일 군집 표준오차 → dict(n, days, net, gross, win, se, t, df, daymean).
+    daymean = 하루를 한 표로 센 평균(보고용)."""
     n = len(trades)
     out = {"n": n, "days": len({t["day"] for t in trades}), "net": None, "gross": None, "win": None, "se": None, "t": None,
-           "df": None}
+           "df": None, "daymean": None}
     if n == 0:
         return out
     mean = sum(t["net"] for t in trades) / n
     out.update(net=mean, gross=sum(t["gross"] for t in trades) / n, win=sum(1 for t in trades if t["net"] > 0) / float(n))
     g = out["days"]
-    if g < 2:
-        return out
-    sums = {}
+    sums, counts = {}, {}
     for t in trades:
         sums[t["day"]] = sums.get(t["day"], 0.0) + (t["net"] - mean)
+        counts[t["day"]] = counts.get(t["day"], 0) + 1
+    out["daymean"] = mean + sum(sums[d] / counts[d] for d in sums) / g
+    if g < 2:
+        return out
     var = g / (g - 1.0) * sum(s * s for s in sums.values()) / (n * n)
     out["df"] = g - 1
     if var > 0:
@@ -303,28 +408,32 @@ def inventory(by_key, dropped, log):
             eligible.append(key)
         if st["n"] >= 20:
             cost = sorted(t["cost"] for t in rows)[len(rows) // 2]
-            log("  %-44s %s..%s %s book cost med %s%% %s" % (key[:44], rows[0]["day"], rows[-1]["day"], _line("", st),
-                                                              _p(cost, "{:.3f}"), "ELIGIBLE" if ok else ""))
+            lost = sum(dropped.get(key, {}).values())
+            log("  %-44s %s..%s %s book cost med %s%% kept %.0f%% epochs %d %s" % (
+                key[:44], rows[0]["day"], rows[-1]["day"], _line("", st), _p(cost, "{:.3f}"),
+                100.0 * st["n"] / (st["n"] + lost), len({t.get("epoch") for t in rows}), "ELIGIBLE" if ok else ""))
     small = sum(1 for k in by_key if len(by_key[k]) < 20)
     drop = {}
     for d in dropped.values():
         for why, c in d.items():
             drop[why] = drop.get(why, 0) + c
-    log("  (%d more routes with < 20 trades not shown; dropped records: %s)" % (small, drop or "none"))
+    log("  (%d more routes with < 20 trades not shown; dropped records: %s; kept = usable share of a route's records, "
+        "epochs = distinct route_epoch tags)" % (small, drop or "none"))
     return eligible
 
 
-def run(by_key, dropped=None, log=print):
+def run(by_key, dropped=None, log=print, excluded=None):
     """목록 → 탐색(TRAIN) → 잠금 → 판정(HOLDOUT). 반환: 결과 dict."""
     eligible = inventory(by_key, dropped or {}, log)
     log("ELIGIBLE routes (>= %d trades, >= %d days): %d" % (MIN_ROUTE_TRADES, MIN_ROUTE_DAYS, len(eligible)))
-    locked, shown = [], {}
+    locked, shown, used = [], {}, set()
     for key in eligible:
         train, hold = split(by_key[key])
         log("== %s | TRAIN %s..%s | HOLDOUT %s..%s ==" % (key, train[0]["day"], train[-1]["day"],
                                                          hold[0]["day"] if hold else "-", hold[-1]["day"] if hold else "-"))
         log(_line("   base TRAIN  ", cluster_stats(train)))
         scans = scan(train)
+        used.update(st["cond"][1] for st in scans)
         shown[key] = scans[:TOP_SHOW]
         for st in shown[key]:
             log(_line("   TRAIN %-30s" % ("%s %s %.4g" % (st["cond"][1], st["cond"][2], st["cond"][3])), st)
@@ -337,6 +446,8 @@ def run(by_key, dropped=None, log=print):
             log("   -> no condition qualified on TRAIN: nothing to carry to HOLDOUT")
         else:
             locked.append({"key": key, "cond": best["cond"], "train": {k: best[k] for k in ("n", "days", "net", "gross", "t")}})
+    log("INDICATORS offered as conditions (%d): %s" % (len(used), ", ".join(sorted(used)) or "-"))
+    log("INDICATORS excluded as post-entry (%d): %s" % (len(excluded or ()), ", ".join(sorted(excluded or ())) or "-"))
     log("LOCKED %d condition(s) on TRAIN. HOLDOUT is opened only for these." % len(locked))
     alpha = ALPHA / max(1, len(locked))
     verdicts = []
@@ -344,10 +455,11 @@ def run(by_key, dropped=None, log=print):
         hold = split(by_key[item["key"]])[1]
         base, st = cluster_stats(hold), judge(hold, item["cond"], alpha)
         verdicts.append({"key": item["key"], "cond": item["cond"], "train": item["train"], "hold_base_net": base["net"],
-                         "hold": {k: st[k] for k in ("n", "days", "net", "gross", "t", "low", "pass")}})
+                         "hold": {k: st[k] for k in ("n", "days", "net", "gross", "t", "daymean", "low", "pass")}})
         log("  %s + %s %s %.4g" % (item["key"], item["cond"][1], item["cond"][2], item["cond"][3]))
-        log(_line("     HOLDOUT base", base))
-        log(_line("     HOLDOUT cond", st) + " low %s%% => %s" % (_p(st["low"]), "PASS" if st["pass"] else "FAIL"))
+        log(_line("     HOLDOUT base", base) + " daymean %s%%" % _p(base["daymean"]))
+        log(_line("     HOLDOUT cond", st) + " daymean %s%% low %s%% => %s" % (
+            _p(st["daymean"]), _p(st["low"]), "PASS" if st["pass"] else "FAIL"))
     better = positive = total = 0
     for key in eligible:
         hold = split(by_key[key])[1]
@@ -366,7 +478,8 @@ def run(by_key, dropped=None, log=print):
         "PASS (candidates only - confirm with --frozen on trades after the freeze time)" if n_pass
         else ("FAIL" if locked else "NOTHING TO TEST"), n_pass, len(locked), alpha))
     return {"eligible": eligible, "locked": locked, "verdicts": verdicts, "freeze_ts": freeze,
-            "calibration": {"total": total, "beat_base": better, "positive": positive}}
+            "calibration": {"total": total, "beat_base": better, "positive": positive},
+            "indicators_offered": sorted(used), "indicators_excluded": sorted(excluded or ())}
 
 
 def forward(by_key, frozen, log=print):
@@ -382,8 +495,8 @@ def forward(by_key, frozen, log=print):
         out.append({"key": v["key"], "cond": v["cond"], "forward": {k: st[k] for k in ("n", "days", "net", "t", "low", "pass")}})
         log("  %s + %s %s %.4g" % (v["key"], v["cond"][1], v["cond"][2], v["cond"][3]))
         log(_line("     FORWARD base", base))
-        log(_line("     FORWARD cond", st) + " low %s%% => %s" % (
-            _p(st["low"]), "PASS" if st["pass"] else ("FAIL" if st["n"] >= HOLD_MIN_TRADES and st["days"] >= HOLD_MIN_DAYS
+        log(_line("     FORWARD cond", st) + " daymean %s%% low %s%% => %s" % (
+            _p(st["daymean"]), _p(st["low"]), "PASS" if st["pass"] else ("FAIL" if st["n"] >= HOLD_MIN_TRADES and st["days"] >= HOLD_MIN_DAYS
                                                       else "NOT ENOUGH YET")))
     return {"forward": out}
 
@@ -392,9 +505,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("snapshots", nargs="+", help="shadow_stats*.json (copies of the bot file, read-only)")
     ap.add_argument("--out", default="h27_result")
+    ap.add_argument("--no-market", action="store_true", help="skip the public BTC candle download (btc_* not tested)")
     ap.add_argument("--frozen", help="earlier h27_result.json: judge its PASS rules on trades after its freeze time")
     a = ap.parse_args(argv)
-    paths = sorted({p for pat in a.snapshots for p in (glob.glob(pat) or [pat])})
+    paths = sorted({p for pat in a.snapshots for p in glob.glob(pat)})
+    if not paths:
+        print("no snapshot file matches: %s" % ", ".join(a.snapshots))
+        return 2
     lines = []
 
     def log(s):
@@ -403,13 +520,23 @@ def main(argv=None):
 
     log("H27 SHADOW SALVAGE | fee %.2f%% round trip + book cost at %dk KRW | TRAIN first %.0f%% by entry time" % (
         100 * FEE_RT, SIZE_K, 100 * TRAIN_FRAC))
-    by_key, dropped = load_snapshots(paths, log=log)
+    excluded = set()
+    by_key, dropped = load_snapshots(paths, log=log, excluded=excluded)
+    out = Path(a.out)
+    entries = [t["entry_ts"] for rows in by_key.values() for t in rows]
+    if a.no_market or not entries:
+        log("MARKET STATE: UNAVAILABLE (skipped) - btc_* conditions not tested")
+    else:
+        try:
+            bars = load_btc_bars(min(entries) - MARKET_IND[-1][1] - 3 * BTC_BAR_SEC, max(entries), out / "btc_5m.json")
+            log("MARKET STATE: KRW-BTC 5m bars %d, attached to %.0f%% of trades" % (len(bars), 100 * attach_market(by_key, bars)))
+        except Exception as e:                                   # 시세를 못 받아도 봇 지표만으로 진행한다
+            log("MARKET STATE: UNAVAILABLE (%s: %s) - btc_* conditions not tested" % (type(e).__name__, e))
     if a.frozen:
         with open(a.frozen, encoding="utf-8") as f:
             result = forward(by_key, json.load(f), log=log)
     else:
-        result = run(by_key, dropped, log=log)
-    out = Path(a.out)
+        result = run(by_key, dropped, log=log, excluded=excluded)
     out.mkdir(parents=True, exist_ok=True)
     (out / "h27_brief.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (out / "h27_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
