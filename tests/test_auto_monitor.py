@@ -58,6 +58,13 @@ class CrashRebound(unittest.TestCase):
         done, pending = A.cr_events(bars(closes, gap_at=14), 0.0007)
         self.assertEqual((done, pending), ([], None))
 
+    def test_gap_inside_lookback_is_skipped(self):
+        closes = [100.0] * 13 + [95.0] + [99.0] * 25
+        done, pending = A.cr_events(bars(closes, gap_at=5), 0.0007)
+        self.assertEqual((done, pending), ([], None))
+        complete, _ = A.cr_events(bars(closes), 0.0007)
+        self.assertEqual(len(complete), 1)
+
 
 class H3AndSurge(unittest.TestCase):
     def test_h3_state_and_flip(self):
