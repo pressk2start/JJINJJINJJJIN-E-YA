@@ -46,15 +46,18 @@ jobs:
           fi
       - name: Show status
         run: cat scalp/research/forward/STATUS.md >> "$GITHUB_STEP_SUMMARY" || true
+      # 비밀값 이름은 봇의 .env · 고문의 auto-monitor 와 같게 쓴다 (TELEGRAM_TOKEN, TG_CHATS = 쉼표로 구분한 채팅 ID).
       - name: Telegram (optional, only when both secrets exist)
         env:
-          TG_TOKEN: ${{ secrets.FORWARD_TG_TOKEN }}
-          TG_CHAT: ${{ secrets.FORWARD_TG_CHAT }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHATS: ${{ secrets.TG_CHATS }}
         run: |
-          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then echo "telegram not configured"; exit 0; fi
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi
           python -X utf8 scalp/research/forward_watch.py --summary > "$RUNNER_TEMP/summary.txt"
-          curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text@${RUNNER_TEMP}/summary.txt"
+          for chat in $(echo "$TG_CHATS" | tr ',' ' '); do
+            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${chat}" --data-urlencode "text@${RUNNER_TEMP}/summary.txt"
+          done
       - name: Fail if any candidate could not be updated
         if: steps.run.outputs.code != '0'
         run: exit 1
