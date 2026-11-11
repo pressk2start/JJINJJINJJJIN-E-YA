@@ -329,22 +329,35 @@ class SurgeAndSharedH3(unittest.TestCase):
 
 
 class FrozenRuleFile(unittest.TestCase):
-    def test_the_advisors_rule_file_is_byte_for_byte_the_registered_one(self):
-        """급락 반등·주간 급등 규칙은 고문이 2026-11-10 에 고정했다. 파일이 바뀌면 전진 검증이 아니다.
-        규칙을 바꿔야 하면 새 후보로 등록하고 시작 시각을 새로 잡는다 — 이 해시만 고치지 않는다."""
-        raw = (ROOT / "scalp" / "research" / "auto_monitor.py").read_bytes().replace(b"\r\n", b"\n")
-        self.assertEqual(hashlib.sha256(raw).hexdigest(), "94a65c59acc8931e660f124bedbc9e29a3091960a1f37fee4bbfcdfc7931854f")
-        self.assertEqual(AM.FORWARD_START, "2026-11-11T00:00")
-        self.assertEqual((AM.CR_DROP, AM.CR_LOOK, AM.CR_HOLD, AM.CR_MIN_N, AM.CR_MIN_DAYS), (-0.04, 12, 12, 30, 10))
+    def sha(self, *parts):
+        raw = ROOT.joinpath(*parts).read_bytes().replace(b"\r\n", b"\n")
+        return hashlib.sha256(raw).hexdigest()
 
-    def test_the_original_rule_compares_twelve_bars_back_even_across_a_gap(self):
-        """원본의 동작을 그대로 적어 둔다: 비교 구간에 봉이 빠져 있어도(거래소 점검 등) 12봉 전 종가와 비교한다."""
-        closes = [100.0] * 12 + [100.0, 95.0] + [96.0] * 20
-        bars = five_min(closes, 1000)
-        bars = bars[:6] + [(m + 300, o, c) for m, o, c in bars[6:]]          # 6번째 봉 앞에 5시간 공백
-        done, _ = AM.cr_events(bars, 0.0007)
-        self.assertEqual(len(done), 1)
-        self.assertEqual(bars[13][0] - bars[1][0], 12 * 5 + 300)             # 신호 봉과 비교 봉 사이는 6시간
+    def test_the_registered_rule_file_has_not_changed(self):
+        """급락 반등·주간 급등 규칙은 고문이 고정했다(수정본 확정 2026-11-11). 파일이 바뀌면 전진 검증이 아니다.
+        규칙을 바꿔야 하면 새 후보로 등록하고 시작 시각을 새로 잡는다 — 이 해시만 고치지 않는다."""
+        self.assertEqual(self.sha("scalp", "research", "auto_monitor.py"),
+                         "b27aabc8fe3672678963cb08b6bc843a75d9a175141350fb853b5fef7655cdcd")
+        self.assertEqual(AM.FORWARD_START, "2026-11-11T00:00")
+        self.assertEqual((AM.CR_DROP, AM.CR_LOOK, AM.CR_HOLD, AM.CR_BAR, AM.CR_MIN_N, AM.CR_MIN_DAYS), (-0.04, 12, 12, 5, 30, 10))
+
+    def test_the_signal_needs_a_true_sixty_minute_lookback(self):
+        """고문이 확정한 정의: close[i]/close[i-12] - 1 <= -4% 이고 t[i] - t[i-12] 가 정확히 60분."""
+        closes = [100.0] * 13 + [95.0] + [97.0] * 20                          # 급락 뒤 97 로 회복(1시간 전 대비 -3%: 새 신호 없음)
+        whole = five_min(closes, 1000)
+        done, _ = AM.cr_events(whole, 0.0007)
+        self.assertEqual([t["entry_min"] for t in done], [1000 + 5 * 14])     # 봉이 다 있으면 사건
+        gapped = whole[:6] + [(m + 300, o, c) for m, o, c in whole[6:]]       # 비교 구간 안에 5시간 공백(거래소 점검)
+        self.assertEqual(gapped[13][0] - gapped[1][0], 12 * 5 + 300)          # 12봉 전이 실제로는 6시간 전
+        self.assertEqual(AM.cr_events(gapped, 0.0007), ([], None))            # 사건이 아니다
+        edge = five_min([100.0] * 13 + [96.0] + [96.0] * 20, 1000)            # 정확히 -4.0% 는 신호
+        self.assertEqual(len(AM.cr_events(edge, 0.0007)[0]), 1)
+
+    def test_the_h3_signal_file_is_operational_code(self):
+        """trend_paper.py 는 H3 실행기가 서버에서 불러 쓴다. 연구 변경에 섞어 고치지 않는다 —
+        고쳐야 하면 실행기처럼 검토를 받은 뒤 이 해시를 함께 바꾼다."""
+        self.assertEqual(self.sha("scalp", "research", "trend_paper.py"),
+                         "c913074c9df9f04c82f04845dbf235105928a03aea5d108962354b527789afbf")
 
 
 if __name__ == "__main__":
