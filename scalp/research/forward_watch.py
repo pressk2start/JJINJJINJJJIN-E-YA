@@ -24,15 +24,38 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              '첫 20기간, 한 번' 으로 좁힌다 (2026-11-11 고정. 그때까지 본 forward 수치는 11/02 의 2기간뿐).
   H3_trend   trend_paper (BTC·ETH, 전일 종가 > 50일 평균이면 보유). 시작 2026-10-24.
              통과/탈락 판정은 없다 — 신호 상태와 가상 성적을 기록만 한다 (근거는 9년 이력 검증, trend_history.py).
-대기 (규칙 정의가 오면 등록): 급락 반등 — 고문 세션의 후보.
+             H3 계산은 이 함수 하나만 쓴다. auto_monitor.h3_state 는 엔진에서 부르지 않고, 두 계산이 같다는 것만 테스트로 묶는다.
+             trend_paper.py 는 H3 실행기가 서버에서 불러 쓰는 운영 코드다(고문 2026-11-11) — 연구 변경에 섞어 고치지 않고,
+             고칠 때는 실행기처럼 검토를 받는다. 파일 해시를 테스트에 고정해 둔다.
+  CR_rebound 급락 반등 — 고문 세션이 2026-11-10 에 고정한 규칙. 계산은 auto_monitor.cr_events 를 그대로 부른다.
+             KRW-BTC/ETH/XRP/SOL 5분봉. 종가가 1시간 전 종가 대비 −4% 이하가 된 첫 봉 → 다음 봉 시가 매수, 60분 뒤 시가 매도.
+             코인당 동시에 1건. 비용 편도 BTC/ETH 0.07%, XRP/SOL 0.10%. 추적 시작 2026-11-11 00:00 UTC.
+             판정: 30건 이상·10일 이상이 처음 채워지는 시점까지의 거래로 한 번만 — 평균 순수익 > 0 이고 날짜 가중 평균 > 0 이면
+             PASS, 아니면 FAIL (auto_monitor.cr_summary 그대로). 봉 기준 PASS 는 실제 호가 체결을 확인한 것이 아니다.
+             등록 규칙(고문 확정 2026-11-11): close[i]/close[i-12] − 1 ≤ −4% 이고 t[i] − t[i-12] 가 정확히 60분일 때만 신호.
+             규칙 파일은 auto_monitor.py SHA-256 b27aabc8…cdcd 로 테스트에 고정한다 (고문 원본 94a65c59…854f + '정확히 60분' 3줄).
+             경위: 고문 원본은 봉 12개 전과 비교해서, 봉이 빠진 구간을 건너뛴 하락도 사건으로 잡았다 (예: 2026-11-09 업비트 점검
+             02:00~07:00 KST 직후 ETH, 355분 사이의 −4.4%). 제3세션이 고쳤고, 고문이 한 번 원본 유지를 지시했다가 과거 전체를
+             수정본으로 다시 집계한 뒤 수정본으로 확정했다 — 빠지는 거래는 대부분 거래소 점검·장애 직후라 실제 체결이 어려웠을
+             구간이고, 추적 시작 이후 사건이 0건일 때 바꿔서 전진 검증은 오염되지 않는다.
+             등록 규칙(수정본)의 과거 기준 수치 — 고문 집계, 처음 정한 통과 기준 넷을 모두 통과:
+               2017–20  1,190건, 평균 순수익 +0.219%, 일별 평균 하한 +0.257%, 상위 5일 제외 +0.323%
+               2021–26  1,134건, 평균 순수익 +0.361%, 일별 평균 하한 +0.373%, 상위 5일 제외 +0.440%
+             (참고: 원본 규칙이면 2017–20 1,198건 +0.260%, 2021–26 1,139건 +0.359%. 이 수치는 더 이상 기준이 아니다.)
+  BTC_surge  BTC 주간 급등 관찰 (auto_monitor.surge_weeks). 월요일 00:00 UTC 에 직전 7일 수익률 ≥ +7.45% 인 주와 전체 주의
+             BTC·ETH 주간 수익률을 기록한다. 판정 없음.
+엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
 
 안전장치
   - 종목 하나라도 시세를 못 받으면 그 후보는 이번 실행에서 장부를 건드리지 않는다 (빠진 종목 때문에 다른 종목이 뽑히는 것을 막음).
     바이낸스는 '그 종목 없음(400)' 과 '못 받음' 을 구분한다.
   - H2 는 끝난 UTC 일자까지만 쓴다 (오늘 일봉이 아직 안 생긴 종목 때문에 값이 달라지는 것을 막음).
+    급락 반등도 실행일 00:00 UTC 이전 봉까지만 쓴다 (같은 날 다시 돌려도 같은 결과).
+  - 급락 반등은 4종목 중 하나라도 못 받으면 그 실행에서 건드리지 않는다 (판정에 쓰는 거래 순서가 실행마다 달라지는 것을 막음).
   - 후보 하나가 실패해도 나머지는 갱신하고, 실패는 현황의 '경고' 와 종료 코드 1 로 알린다.
 한계: 가상 성적이며 실제 체결이 아니다. 실행 주기(주 1회) 사이에 상장폐지된 종목은 마지막 며칠 가격을 놓칠 수 있다.
       2단계(후보 자동 등록)는 아직 없다 — 지금은 사람이 등록한 후보만 추적한다.
+      급락 반등 자료는 매번 시작 시각부터 다시 받는다 (하루 약 6회 조회씩 늘어난다 — 1년이면 2천 회 남짓).
 
 실행
   python3 scalp/research/forward_watch.py              장부·현황 갱신
@@ -59,12 +82,15 @@ def _load(name):
 
 DF = _load("daily_factor_test")
 TP = _load("trend_paper")
+AM = _load("auto_monitor")
 
 FETCH_DAYS = 200
 H2_FIRST_DECISION = "2026-10-24"     # forward 첫 결정일 (매수는 다음 날 시가). 이후 3일 간격
 H2_DECIDE_AT = 20
 OUT_DIR = HERE / "forward"
-WAITING = (("급락 반등", "고문 세션의 후보 — 규칙 정의를 받으면 등록"),)
+CR_START = AM.parse_utc(AM.FORWARD_START)          # 2026-11-11 00:00 UTC. 고문이 고정한 값 — 바꾸지 않는다
+CR_WARMUP = dt.timedelta(hours=6)                   # 시작 직전 봉(1시간 전 종가 비교용). auto_monitor.run_weekly 와 같다
+WAITING = ()
 TOL = 1e-9
 
 
@@ -177,8 +203,64 @@ def h3_status(today, fetch_candles=None):
     return {"as_of": today, "assets": assets, "equity": total["equity"], "benchmark": total["benchmark_equity"]}
 
 
+def cr_rows(today, fetch_all=None):
+    """등록 시각 이후 진입해 끝난 급락 반등 거래 → [{market, entry_min, exit_min, drop, entry, exit, gross, net}] 시간순.
+    실행일 00:00 UTC 이전 봉만 쓴다. 한 종목이라도 못 받으면 예외."""
+    end = AM.parse_utc(today + "T00:00")
+    res = (fetch_all or AM.cr_all)(CR_START - CR_WARMUP, end)
+    failed = ["%s (%s)" % (m[4:], v) for m, v in res.items() if isinstance(v, Exception)]
+    if failed or set(res) != set(AM.CR_COST):
+        raise RuntimeError("5분봉을 못 받은 종목: %s" % (", ".join(failed) or "목록 불일치"))
+    first = AM.to_min(CR_START)
+    rows = [dict(t, market=m) for m, (done, _pending) in res.items() for t in done if t["entry_min"] >= first]
+    return sorted(rows, key=lambda t: (t["entry_min"], t["market"]))
+
+
+def merge_cr(old_rows, new_rows):
+    """merge_rows 와 같은 원칙(덧붙이기만). 거래는 (종목, 진입 시각)으로 구분한다."""
+    by_key = {(r["market"], r["entry_min"]): r for r in old_rows}
+    added, mismatch = 0, []
+    for r in new_rows:
+        key = (r["market"], r["entry_min"])
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = r
+            added += 1
+        elif abs(prev["net"] - r["net"]) > TOL or prev["exit_min"] != r["exit_min"]:
+            mismatch.append("%s %s" % (r["market"][4:], AM.kst(r["entry_min"])))
+    return sorted(by_key.values(), key=lambda t: (t["entry_min"], t["market"])), added, mismatch
+
+
+def _utc_day(minute):
+    return dt.datetime.fromtimestamp(minute * 60, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def cr_decide(entry, run_day):
+    """30건·10일이 처음 채워지는 거래까지로 한 번만 판정한다. 이미 판정이 있으면 건드리지 않는다."""
+    if entry.get("decision"):
+        return entry
+    days = set()
+    for k, t in enumerate(entry["rows"], 1):
+        days.add(_utc_day(t["entry_min"]))
+        if k >= AM.CR_MIN_N and len(days) >= AM.CR_MIN_DAYS:
+            stats = AM.cr_summary([(r["market"], r) for r in entry["rows"][:k]])
+            entry["decision"] = {"verdict": "PASS" if stats["verdict"].startswith("PASS") else "FAIL", "decided_on": run_day,
+                                 "trades": k, "stats": stats}
+            break
+    return entry
+
+
+def surge_rows(today, fetch_days=None):
+    """끝난 주(다음 월요일 시가가 있는 주)의 BTC 주간 급등 관찰 → [{monday, r7, surge, net{종목: 수익률}}]."""
+    now = AM.parse_utc(today + "T00:00")
+    need = (now.date() - CR_START.date()).days + 20
+    fetch_days = fetch_days or (lambda m: AM.fetch_days(m, need, now, keep_today=True))
+    days = {m: fetch_days(m) for m in AM.H3_MARKETS}
+    return [w for w in AM.surge_weeks(days, CR_START.strftime("%Y-%m-%d")) if set(w["net"]) == set(AM.H3_MARKETS)]
+
+
 # ---------------------------------------------------------------------------------------------------------------------
-def update(ledger, today, h2_inputs=None, h3_fetch=None, log=None):
+def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None):
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수."""
     log = log or (lambda s: None)
     warnings = []
@@ -202,6 +284,25 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, log=None):
         log("H3: status as of %s" % today)
     except Exception as e:
         warnings.append("H3: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
+    cr = ledger.setdefault("CR_rebound", {"rows": [], "decision": None})
+    try:
+        rows, added, mismatch = merge_cr(cr["rows"], cr_rows(today, cr_fetch))
+        cr["rows"] = rows
+        cr["updated"] = today
+        if mismatch:
+            warnings.append("급락 반등: 다시 계산한 값이 장부와 다른 거래 %d건 (%s) — 장부 값은 그대로 둠" % (len(mismatch), ", ".join(mismatch[:5])))
+        cr_decide(cr, today)
+        log("CR: %d trades in ledger (+%d)" % (len(rows), added))
+    except Exception as e:
+        warnings.append("급락 반등: 이번 실행에서 갱신하지 못함 — %s" % e)
+    sg = ledger.setdefault("BTC_surge", {"rows": []})
+    try:
+        known = {r["monday"] for r in sg["rows"]}
+        sg["rows"] = sorted(sg["rows"] + [w for w in surge_rows(today, surge_fetch) if w["monday"] not in known], key=lambda w: w["monday"])
+        sg["updated"] = today
+        log("SURGE: %d weeks in ledger" % len(sg["rows"]))
+    except Exception as e:
+        warnings.append("BTC 주간 급등: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
     ledger["last_run"] = today
     ledger["warnings"] = warnings
     return ledger, warnings
@@ -262,7 +363,45 @@ def render(ledger):
             _pct(h3["equity"] - 1), _pct(h3["benchmark"] - 1), n_tr), ""]
     else:
         out += ["아직 기록이 없습니다.", ""]
-    out += ["## 대기 중", ""] + ["- %s: %s" % w for w in WAITING] + [""]
+    cr = ledger.get("CR_rebound") or {"rows": []}
+    rows, dec = cr.get("rows", []), cr.get("decision")
+    n_days = len({_utc_day(t["entry_min"]) for t in rows})
+    if dec:
+        head = "판정 완료: %s (%s, 첫 %d건)" % ("통과" if dec["verdict"] == "PASS" else "탈락", dec["decided_on"], dec["trades"])
+    else:
+        head = "진행 중 (%d / %d건, %d / %d일)" % (len(rows), AM.CR_MIN_N, n_days, AM.CR_MIN_DAYS)
+    out += ["## 급락 반등 — " + head, "",
+            "BTC·ETH·XRP·SOL 이 1시간에 4%% 넘게 빠지면 다음 5분봉 시가에 사서 60분 뒤 판다. 추적 시작 2026-11-11, 자료 반영 %s." % cr.get("updated", "-"), ""]
+    if rows:
+        st = dec["stats"] if dec else AM.cr_summary([(t["market"], t) for t in rows])
+        out += ["| 항목 | %s | 기준 | 상태 |" % ("판정에 쓴 값" if dec else "지금까지"), "|---|---|---|---|",
+                "| 거래당 평균 (비용 후) | %s | 0 초과 | %s |" % (_pct(st["mean"]), _mark(st["mean"] > 0)),
+                "| 날짜 가중 평균 | %s | 0 초과 | %s |" % (_pct(st["day_mean"]), _mark(st["day_mean"] > 0)),
+                "| 승률 / 최악 거래 | %.0f%% / %s | 참고 | - |" % (100 * st["win"], _pct(st["worst"], 1)), ""]
+        if dec:
+            now = AM.cr_summary([(t["market"], t) for t in rows])
+            out += ["판정 이후 포함 전체 %d건: 거래당 %s, 날짜 가중 %s. 판정은 바뀌지 않습니다." % (now["n"], _pct(now["mean"]), _pct(now["day_mean"])), ""]
+        else:
+            out += ["아직 판정 전이라 위 숫자는 참고용입니다. 30건·10일이 처음 채워지는 거래까지로 한 번만 판정합니다.", ""]
+        out += ["최근 거래: " + " / ".join("%s %s 1시간 %s → %s" % (AM.kst(t["entry_min"]), t["market"][4:], _pct(t["drop"], 1), _pct(t["net"]))
+                                       for t in rows[-3:]), ""]
+    else:
+        out += ["아직 끝난 거래가 없습니다. 통과해도 봉 기준이며, 급락 순간의 실제 호가 체결은 따로 확인해야 합니다.", ""]
+    sg = ledger.get("BTC_surge") or {"rows": []}
+    out += ["## BTC 주간 급등 — 관찰만 (판정 없음)", ""]
+    if sg.get("rows"):
+        weeks = sg["rows"]
+        hit = [w for w in weeks if w["surge"]]
+
+        def avg(ws, m):
+            return _pct(sum(w["net"][m] for w in ws) / len(ws)) if ws else "-"
+        out += ["직전 7일에 BTC 가 7.45% 넘게 오른 주(급등 주)와 전체 주의 그다음 주 수익률.", "",
+                "| 구분 | 주 수 | BTC | ETH |", "|---|---|---|---|",
+                "| 전체 | %d | %s | %s |" % (len(weeks), avg(weeks, "KRW-BTC"), avg(weeks, "KRW-ETH")),
+                "| 급등 뒤 | %d | %s | %s |" % (len(hit), avg(hit, "KRW-BTC"), avg(hit, "KRW-ETH")), ""]
+    else:
+        out += ["아직 끝난 주가 없습니다 (첫 주는 2026-11-16 시작).", ""]
+    out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
     return "\n".join(out)
 
@@ -285,6 +424,16 @@ def summary(ledger):
         parts = ["%s %s%s" % (m.replace("KRW-", ""), "보유" if a["position"] else "현금",
                               "" if a["on"] else "(신호까지 %s)" % _pct(a["sma"] / a["close"] - 1, 1)) for m, a in h3["assets"].items()]
         lines.append("H3 추세: " + ", ".join(parts) + " | 가상 %s vs 보유 %s" % (_pct(h3["equity"] - 1), _pct(h3["benchmark"] - 1)))
+    cr = ledger.get("CR_rebound")
+    if cr is not None:
+        rows, dec = cr.get("rows", []), cr.get("decision")
+        if dec:
+            lines.append("급락 반등: 판정 %s (%s)" % ("통과" if dec["verdict"] == "PASS" else "탈락", dec["decided_on"]))
+        elif rows:
+            st = AM.cr_summary([(t["market"], t) for t in rows])
+            lines.append("급락 반등: %d/%d건 %d/%d일, 거래당 %s (판정 전)" % (st["n"], AM.CR_MIN_N, st["days"], AM.CR_MIN_DAYS, _pct(st["mean"])))
+        else:
+            lines.append("급락 반등: 발생 없음")
     for w in ledger.get("warnings", []):
         lines.append("경고: " + w)
     return "\n".join(lines)
