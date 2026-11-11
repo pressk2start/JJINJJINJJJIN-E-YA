@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import datetime as dt
+import hashlib
 import importlib.util
 import io
 import json
@@ -325,6 +326,25 @@ class SurgeAndSharedH3(unittest.TestCase):
             self.assertEqual(a["on"], b["on"])
             self.assertAlmostEqual(a["average"], b["sma"])
             self.assertAlmostEqual(a["close"], b["close"])
+
+
+class FrozenRuleFile(unittest.TestCase):
+    def test_the_advisors_rule_file_is_byte_for_byte_the_registered_one(self):
+        """급락 반등·주간 급등 규칙은 고문이 2026-11-10 에 고정했다. 파일이 바뀌면 전진 검증이 아니다.
+        규칙을 바꿔야 하면 새 후보로 등록하고 시작 시각을 새로 잡는다 — 이 해시만 고치지 않는다."""
+        raw = (ROOT / "scalp" / "research" / "auto_monitor.py").read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "94a65c59acc8931e660f124bedbc9e29a3091960a1f37fee4bbfcdfc7931854f")
+        self.assertEqual(AM.FORWARD_START, "2026-11-11T00:00")
+        self.assertEqual((AM.CR_DROP, AM.CR_LOOK, AM.CR_HOLD, AM.CR_MIN_N, AM.CR_MIN_DAYS), (-0.04, 12, 12, 30, 10))
+
+    def test_the_original_rule_compares_twelve_bars_back_even_across_a_gap(self):
+        """원본의 동작을 그대로 적어 둔다: 비교 구간에 봉이 빠져 있어도(거래소 점검 등) 12봉 전 종가와 비교한다."""
+        closes = [100.0] * 12 + [100.0, 95.0] + [96.0] * 20
+        bars = five_min(closes, 1000)
+        bars = bars[:6] + [(m + 300, o, c) for m, o, c in bars[6:]]          # 6번째 봉 앞에 5시간 공백
+        done, _ = AM.cr_events(bars, 0.0007)
+        self.assertEqual(len(done), 1)
+        self.assertEqual(bars[13][0] - bars[1][0], 12 * 5 + 300)             # 신호 봉과 비교 봉 사이는 6시간
 
 
 if __name__ == "__main__":
