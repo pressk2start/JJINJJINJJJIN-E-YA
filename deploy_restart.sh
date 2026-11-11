@@ -135,9 +135,7 @@ if [ "$NEED_SWEEP" = "1" ]; then
         # shellcheck disable=SC1091
         source /home/ubuntu/bot/.env
         set +a
-        # 배포 로그는 GitHub Actions 에 남는다(공개 저장소면 누구나 열람) → 토큰은 앞부분도 찍지 않는다.
-        if [ -n "$TELEGRAM_TOKEN" ]; then TG_STATE="설정됨"; else TG_STATE="없음"; fi
-        echo "[deploy] .env 로드 완료 (TELEGRAM_TOKEN: $TG_STATE)"
+        echo "[deploy] .env 로드 완료 (TG_TOKEN=${TELEGRAM_TOKEN:0:15}...)"
     fi
     # flock으로 lock 획득 후 백그라운드 실행. 이미 lock 잡혀 있으면 즉시 skip.
     (
