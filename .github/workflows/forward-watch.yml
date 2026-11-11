@@ -1,0 +1,60 @@
+name: Forward watch
+
+# 등록된 후보(H2·H3)를 매주 새 자료로 채점해 scalp/research/forward/ 의 장부와 현황을 갱신한다.
+# 공개 시세만 쓴다(키 없음). 거래 서버와 무관하고 봇 코드는 건드리지 않는다.
+# 이 워크플로가 main 에 올리는 커밋은 GITHUB_TOKEN 으로 푸시되므로 배포(deploy.yml)를 일으키지 않는다.
+on:
+  schedule:
+    - cron: "17 1 * * 1"   # 매주 월요일 01:17 UTC = 10:17 KST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forward-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Update ledger and status
+        id: run
+        run: |
+          set +e
+          python -X utf8 scalp/research/forward_watch.py
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Commit changes
+        run: |
+          git config user.name "forward-watch"
+          git config user.email "forward-watch@users.noreply.github.com"
+          git add scalp/research/forward
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "forward-watch: 장부·현황 갱신 $(date -u +%F)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+      - name: Show status
+        run: cat scalp/research/forward/STATUS.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Telegram (optional, only when both secrets exist)
+        env:
+          TG_TOKEN: ${{ secrets.FORWARD_TG_TOKEN }}
+          TG_CHAT: ${{ secrets.FORWARD_TG_CHAT }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then echo "telegram not configured"; exit 0; fi
+          python -X utf8 scalp/research/forward_watch.py --summary > "$RUNNER_TEMP/summary.txt"
+          curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text@${RUNNER_TEMP}/summary.txt"
+      - name: Fail if any candidate could not be updated
+        if: steps.run.outputs.code != '0'
+        run: exit 1
