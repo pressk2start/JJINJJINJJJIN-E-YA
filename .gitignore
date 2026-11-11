@@ -10,3 +10,21 @@ data/live_trades.jsonl
 data/live_trades.jsonl.bak
 pipeline_shadow.csv
 exec_quality.csv
+# 비밀·키 파일 — 절대 커밋하지 않는다 (2026-11-10: 저장소가 공개 상태라 안전망으로 추가)
+.env
+.env.*
+*.env
+*.pem
+*.ppk
+id_rsa*
+id_ed25519*
+# 봇 실행 중 생기는 자료 (계좌·거래 내역 포함)
+shadow_stats*.json
+shadow_blocked_stats*.json
+signal_stats.json
+trade_features.csv
+learned_weights.json
+batch_reports.csv
+bot_state*.json
+data/h3_reserved.json
+h3_state/

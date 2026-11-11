@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """shadow_salvage(H27) 테스트 — 심어 둔 '조건부 엣지'를 TRAIN 에서 찾아 HOLDOUT 에서 통과시키는지, 잡음은 통과시키지 않는지,
 진입 뒤에 생기는 값(mfe 등)을 조건으로 쓰지 않는지."""
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 import random
 import tempfile
@@ -170,6 +172,135 @@ class Salvage(unittest.TestCase):
         self.assertLess(fw["n"], 480 // 2)                          # 동결 이전 거래는 세지 않는다
         none_yet = SS.forward(by_key, frozen, log=lambda s: None)["forward"][0]["forward"]
         self.assertEqual((none_yet["n"], none_yet["pass"]), (0, False))
+
+
+def bars_from(prices, start):
+    """5분봉 종가 dict. prices[i] 는 start + 300*i 에 시작한 봉의 종가."""
+    return {int(start) + 300 * i: float(v) for i, v in enumerate(prices)}
+
+
+class MarketState(unittest.TestCase):
+    def test_uses_only_the_bar_that_closed_before_entry(self):
+        start = int(T0)                                             # 00:00 KST, 5분 경계
+        bars = bars_from([100 + i for i in range(40)], start)       # 봉 i 종가 = 100 + i
+        entry = start + 300 * 20 + 130                              # 봉 20 이 진행 중인 시각 → 마지막으로 끝난 봉은 19
+        st = SS.btc_state(bars, entry)
+        self.assertAlmostEqual(st["btc_ret_15m"], 119.0 / 116.0 - 1)
+        self.assertAlmostEqual(st["btc_ret_60m"], 119.0 / 107.0 - 1)
+        bars[start + 300 * 20] = 9999.0                             # 진행 중인 봉이 어떻게 끝나든 결과는 같다
+        self.assertEqual(SS.btc_state(bars, entry), st)
+        self.assertAlmostEqual(SS.btc_state(bars, start + 300 * 20)["btc_ret_15m"], 119.0 / 116.0 - 1)   # 정각 진입도 봉 19
+
+    def test_missing_bars_give_no_value_instead_of_a_guess(self):
+        start = int(T0)
+        bars = bars_from([100.0] * 40, start)
+        del bars[start + 300 * 7]                                   # 60분 전 기준 봉이 없다
+        st = SS.btc_state(bars, start + 300 * 20 + 10)
+        self.assertIn("btc_ret_15m", st)
+        self.assertNotIn("btc_ret_60m", st)
+        self.assertEqual(SS.btc_state({}, start + 6000), {})
+
+    def test_market_condition_can_rescue_a_route(self):
+        """코인 지표로는 안 갈리고 'BTC 가 직전 1시간에 빠졌는가' 로만 갈리는 route → btc_ret_60m low 가 잠기고 통과."""
+        rng = random.Random(21)
+        start = int(T0) - 7200
+        price, bars = 100.0, {}
+        for i in range(62 * 288 + 48):
+            price *= 1 + rng.gauss(0, 0.002)
+            bars[start + 300 * i] = price
+        recs = []
+        for d in range(60):
+            for i in range(8):
+                entry = T0 + d * 86400 + i * 3600 + 600
+                dip = SS.btc_state(bars, entry)["btc_ret_60m"] < -0.004
+                pnl = (0.008 if dip else -0.001) + rng.gauss(0, 0.005)
+                recs.append(rec(d, i, pnl, {"rsi_5m": rng.uniform(20, 80), "vr5": rng.uniform(1, 9)}))
+        by_key, dropped = load({"R1:strat": {"trade_records": recs}})
+        self.assertEqual(SS.attach_market(by_key, bars), 1.0)
+        out = SS.run(by_key, dropped, log=lambda s: None)
+        self.assertEqual(out["locked"][0]["cond"][1:3], ["btc_ret_60m", "<="])
+        self.assertTrue(out["verdicts"][0]["hold"]["pass"])
+
+    def test_download_pages_backwards_and_the_cache_is_reused(self):
+        origin, calls = 1790000100, []                              # 5분 경계
+
+        def fake_get(url):
+            to = dt.datetime.strptime(url.split("to=")[1].split("&")[0].replace("%3A", ":"), "%Y-%m-%dT%H:%M:%SZ")
+            to = int(to.replace(tzinfo=SS.UTC).timestamp())
+            calls.append(to)
+            last = (to - 1) // 300 * 300
+            starts = [t for t in range(last, last - 300 * 200, -300) if t >= origin]
+            return [{"candle_date_time_utc": dt.datetime.fromtimestamp(t, SS.UTC).strftime("%Y-%m-%dT%H:%M:%S"),
+                     "trade_price": 1000.0 + (t - origin) / 300} for t in starts]
+
+        real, SS._get = SS._get, fake_get
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cache = Path(tmp) / "btc_5m.json"
+                t_from, t_to = origin + 300 * 10, origin + 300 * 510
+                bars = SS.load_btc_bars(t_from, t_to, cache)
+                self.assertEqual((min(bars), max(bars), len(bars)), (t_from, t_to - 300, 500))
+                self.assertEqual(bars[t_from], 1010.0)
+                n = len(calls)
+                self.assertEqual(n, 3)                              # 200개씩 뒤로 세 번
+                self.assertEqual(SS.load_btc_bars(t_from, t_to, cache), bars)
+                self.assertEqual(len(calls), n)                     # 두 번째는 캐시만
+        finally:
+            SS._get = real
+
+
+class Cli(unittest.TestCase):
+    def test_runs_offline_and_skips_patterns_that_match_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "shadow_stats_a.json").write_text(json.dumps(synth(True)), encoding="utf-8")
+            out = Path(tmp) / "out"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = SS.main([str(Path(tmp) / "shadow_stats*.json"), str(Path(tmp) / "nowhere" / "*.json"),
+                                "--no-market", "--out", str(out)])
+                none = SS.main([str(Path(tmp) / "nowhere" / "*.json"), "--out", str(out)])
+            self.assertEqual((code, none), (0, 2))
+            brief = (out / "h27_brief.txt").read_text(encoding="utf-8")
+            self.assertIn("MARKET STATE: UNAVAILABLE", brief)
+            self.assertIn("H27 VERDICT: PASS", brief)
+
+    def test_records_with_an_impossible_time_are_dropped(self):
+        r = rec(0, 0, 0.001, {})
+        r["exit_ts"] = 120.0
+        self.assertEqual(SS.to_trade("k", r)[1], "bad_time")
+
+
+class Reporting(unittest.TestCase):
+    def test_daymean_counts_each_day_once(self):
+        def mk(day, net):
+            return {"day": day, "net": net, "gross": net, "ind": {}}
+        st = SS.cluster_stats([mk("a", 0.01)] * 9 + [mk("b", -0.01)])
+        self.assertAlmostEqual(st["net"], 0.008)                    # 거래 평균은 하루에 몰린 9건이 끌어올린다
+        self.assertAlmostEqual(st["daymean"], 0.0)                  # 하루 한 표로 세면 0
+
+    def test_excluded_names_and_kept_share_are_reported_for_audit(self):
+        stats = synth(True)
+        for r in stats["R1:strat"]["trade_records"][:48]:
+            del r["inds"]["ob_slip_buy_100k"]                       # 비용 지표가 없는 기록 10%
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "shadow_stats.json"
+            p.write_text(json.dumps(stats), encoding="utf-8")
+            excluded, lines = set(), []
+            by_key, dropped = SS.load_snapshots([str(p)], excluded=excluded)
+            out = SS.run(by_key, dropped, log=lines.append, excluded=excluded)
+        self.assertEqual(dropped["R1:strat"], {"no_cost": 48})
+        self.assertTrue(any("kept 90%" in ln for ln in lines))
+        self.assertEqual(out["indicators_excluded"], ["dd_peak_60s", "mfe_60s", "ob_exit_slip_sell_100k"])
+        self.assertIn("rsi_5m", out["indicators_offered"])
+        self.assertFalse(set(out["indicators_offered"]) & set(out["indicators_excluded"]))
+
+    def test_post_entry_keys_written_by_the_bot_are_all_excluded(self):
+        """bot.py 가 청산 시점에 inds 에 더하는 키(2026-11-10 대조)가 하나도 조건 후보가 되지 않는다."""
+        late = ["mfe_peak_sec", "mfe_30s", "dd_peak_30s", "mfe_60s", "dd_peak_60s", "mae_60s", "at_ob_slip", "at_trail_pct",
+                "at_tier", "at_max_hold", "ob_exit_bid1_krw", "ob_exit_ask1_krw", "ob_exit_slip_sell_100k",
+                "ob_exit_slip_sell_300k", "ob_exit_slip_sell_500k"]
+        self.assertFalse([k for k in late if SS.is_decision_key(k)])
+        for early in ("atr_pct", "rsi_5m", "ob_slip_buy_100k", "gate_dd_peak", "sve2_score", "tick_buy_10s", "btc_ret_60m"):
+            self.assertTrue(SS.is_decision_key(early))
 
 
 if __name__ == "__main__":
