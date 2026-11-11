@@ -137,9 +137,6 @@ def cr_events(bars, cost):
     어느 구간을 셀지는 호출하는 쪽이 entry_min / exit_min 으로 고른다(앞 거래가 뒤 신호를 막는 것은 여기서 처리)."""
     n, done, last, pending = len(bars), [], -1, None
     for i in range(CR_LOOK, n):
-        # 12봉이 정확히 60분이어야 한다. 중간에 5분봉이 빠지면 신호를 버린다.
-        if bars[i][0] - bars[i - CR_LOOK][0] != CR_LOOK * CR_BAR:
-            continue
         drop = bars[i][2] / bars[i - CR_LOOK][2] - 1
         if drop > CR_DROP:
             continue
