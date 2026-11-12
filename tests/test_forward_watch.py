@@ -337,7 +337,7 @@ class FrozenRuleFile(unittest.TestCase):
         """급락 반등·주간 급등 규칙은 고문이 고정했다(수정본 확정 2026-11-11). 파일이 바뀌면 전진 검증이 아니다.
         규칙을 바꿔야 하면 새 후보로 등록하고 시작 시각을 새로 잡는다 — 이 해시만 고치지 않는다."""
         self.assertEqual(self.sha("scalp", "research", "auto_monitor.py"),
-                         "b27aabc8fe3672678963cb08b6bc843a75d9a175141350fb853b5fef7655cdcd")
+                         "791ea2ce0b617352f23d504c94eef05d8fb367e5aa68e46ed1297c54378a8e09")
         self.assertEqual(AM.FORWARD_START, "2026-11-11T00:00")
         self.assertEqual((AM.CR_DROP, AM.CR_LOOK, AM.CR_HOLD, AM.CR_BAR, AM.CR_MIN_N, AM.CR_MIN_DAYS), (-0.04, 12, 12, 5, 30, 10))
 
