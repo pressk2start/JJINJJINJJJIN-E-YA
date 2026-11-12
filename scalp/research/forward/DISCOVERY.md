@@ -1,40 +1,55 @@
 # 후보 탐색 기록
 
-자동으로 만들어지는 파일입니다. 마지막 실행 2026-11-12 (UTC).
-아래는 2026-11-12 오전, 고문 틀로 바꾸기 전의 초안(60분봉·30종목·3분위)으로 전체 범위를 한 번 돌려 본 기록입니다(등록 잠김).
-같은 날 탐색 틀을 고문 지정(15분봉·고정 20종목·거래대금 3배·분위수 문턱·HOLDOUT 여섯 기준)으로 바꿨습니다. 다음 실행부터 그 틀의 기록으로 바뀝니다.
+자동으로 만들어지는 파일입니다. 마지막 실행 2026-11-12 (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.
 
 ```
-DISCOVER 2026-11-12 | 틀 1 (초안 — 등록 잠김) | 30종목 | 2023-11-13 ~ 2026-11-11 | TRAIN 앞 60%
-  받은 봉: ADA 27542, ARB 27532, ARK 27446, AVAX 27538, AXS 27534, BCH 27540, BTC 27545, DOGE 27541, ETH 27546, G 20398, HBAR 27536, ID 24145, IOST 27470, LINK 27537, LSK 27454, NEAR 27538, ONDO 21085, ONG 27482, SAND 27535, SEI 27535, SHIB 27540, SOL 27543, STEEM 27452, STX 27535, SUI 27536, T 27482, UNI 17973, XEC 27525, XLM 27536, XRP 27545
-거래 46315건, TRAIN < 2025-08-31 <= HOLDOUT
-== BREAKOUT/1 | TRAIN n=4398 days=578 net -0.272% t -5.52 | HOLDOUT n=2509 net -0.204% t -3.34
-   TRAIN 최상: btc_ret_24h >= 0.0206  n=1473 net -0.159% t -1.54
-   -> TRAIN 기준을 넘은 조건 없음
-== BREAKOUT/4 | TRAIN n=3910 days=576 net -0.220% t -2.67 | HOLDOUT n=2256 net -0.210% t -1.98
-   TRAIN 최상: btc_ret_24h >= 0.02035  n=1314 net +0.035% t +0.21
-   -> TRAIN 기준을 넘은 조건 없음
-== BREAKOUT/24 | TRAIN n=3131 days=568 net +0.190% t +0.97 | HOLDOUT n=1861 net -0.015% t -0.06
-   TRAIN 최상: btc_ret_24h >= 0.01921  n=1045 net +1.000% t +2.94
-   HOLDOUT 재현: n=548 days=98 net -0.222% t -0.45 => 재현 안 됨
-== CRASH/1 | TRAIN n=3688 days=452 net +0.192% t +0.83 | HOLDOUT n=1675 net -0.054% t -0.35
-   TRAIN 최상: compress <= 1.157  n=1223 net +0.155% t +1.13
-   -> TRAIN 기준을 넘은 조건 없음
-== CRASH/4 | TRAIN n=3281 days=451 net +0.438% t +1.24 | HOLDOUT n=1471 net -0.458% t -1.73
-   TRAIN 최상: btc_trend >= 0.1346  n=1096 net +0.684% t +1.97
-   -> TRAIN 기준을 넘은 조건 없음
-== CRASH/24 | TRAIN n=2279 days=423 net +1.608% t +2.22 | HOLDOUT n=1045 net -0.323% t -0.66
-   TRAIN 최상: compress <= 1.083  n=754 net +1.457% t +2.35
-   -> TRAIN 기준을 넘은 조건 없음
-== SURGE/1 | TRAIN n=4165 days=562 net -0.164% t -2.25 | HOLDOUT n=1893 net -0.321% t -2.99
-   TRAIN 최상: mkt_ret_1h >= 0.01899  n=1389 net +0.125% t +0.66
-   -> TRAIN 기준을 넘은 조건 없음
-== SURGE/4 | TRAIN n=3612 days=561 net +0.074% t +0.54 | HOLDOUT n=1629 net -0.476% t -2.78
-   TRAIN 최상: mkt_ret_1h >= 0.01994  n=1205 net +0.754% t +2.51
-   HOLDOUT 재현: n=425 days=44 net -0.352% t -1.00 => 재현 안 됨
-== SURGE/24 | TRAIN n=2374 days=546 net +0.968% t +3.09 | HOLDOUT n=1138 net +0.025% t +0.06
-   TRAIN 최상: btc_ret_24h <= -0.005979  n=791 net +2.428% t +3.83
-   HOLDOUT 재현: n=379 days=145 net +0.288% t +0.37 => 재현 안 됨
-훑은 조합 213개 → 발견 0개
-새로 등록할 후보 없음
+DISCOVER 2026-11-12 | 틀 2 (등록 잠김) | 30종목 15분봉 | 2022-11-13 ~ 2026-11-11 | TRAIN < 2025-04-07 <= HOLDOUT
+대상: ADA, ALGO, ARK, AWE, BCH, BOUNTY, BTC, CBK, CVC, DOGE, ETC, ETH, GLM, HBAR, HIVE, IOTA, LINK, MOC, NEAR, SAND, SHIB, SNT, SOL, STEEM, STX, TOKAMAK, TRX, WAVES, XLM, XRP
+거래 60169건
+== BREAKOUT/1h | TRAIN n=11716 days=852 net -0.394% t -13.13 | HOLDOUT n=6674 net -0.357% t -8.74
+   훑은 규칙 130개, TRAIN 선별 0개
+== BREAKOUT/24h | TRAIN n=5841 days=829 net +0.174% t +1.13 | HOLDOUT n=2870 net +0.109% t +0.57
+   훑은 규칙 131개, TRAIN 선별 42개
+   hour_kst <= 7                      TRAIN n=1186 net +1.257% t +3.94 | HOLDOUT n=741 net -0.078% 하한 -0.881% 전반 -0.215% 후반 +0.060% 상위5일 제외 -0.492% => 탈락
+   mkt_ret_1h >= 0.003732             TRAIN n=2915 net +0.722% t +3.53 | HOLDOUT n=1779 net +0.253% 하한 -0.840% 전반 +0.368% 후반 +0.139% 상위5일 제외 -0.060% => 탈락
+   vol_mult <= 5.653                  TRAIN n=2921 net +0.586% t +3.38 | HOLDOUT n=1667 net +0.185% 하한 -0.596% 전반 +0.119% 후반 +0.251% 상위5일 제외 -0.105% => 탈락
+   up_ratio >= 0.7667                 TRAIN n=2961 net +0.636% t +3.16 | HOLDOUT n=1475 net +0.255% 하한 -0.611% 전반 +0.356% 후반 +0.155% 상위5일 제외 -0.115% => 탈락
+   mkt_ret_1h >= 0.01446              TRAIN n=583 net +1.577% t +3.14 | HOLDOUT n=365 net +0.446% 하한 -0.466% 전반 +0.568% 후반 +0.325% 상위5일 제외 -0.310% => 탈락
+== BREAKOUT/4h | TRAIN n=9513 days=852 net -0.379% t -7.31 | HOLDOUT n=5206 net -0.354% t -4.88
+   훑은 규칙 131개, TRAIN 선별 0개
+== CRASH/1h | TRAIN n=2168 days=527 net -0.118% t -0.72 | HOLDOUT n=1053 net -0.190% t -0.90
+   훑은 규칙 127개, TRAIN 선별 6개
+   btc_ret_4h <= -0.03564             TRAIN n=218 net +2.895% t +6.44 | HOLDOUT n=77 net +2.962% 하한 -0.515% 전반 +1.471% 후반 +4.415% 상위5일 제외 -0.472% => 탈락
+   btc_ret_1h <= -0.02427             TRAIN n=217 net +2.528% t +5.00 | HOLDOUT n=76 net +3.383% 하한 +0.207% 전반 +1.545% 후반 +5.222% 상위5일 제외 +0.074% => 탈락
+   btc_ret_1d <= -0.03175             TRAIN n=434 net +1.278% t +2.81 | HOLDOUT n=191 net +0.659% 하한 -1.170% 전반 -0.867% 후반 +2.169% 상위5일 제외 -0.880% => 탈락
+   btc_ret_1d <= -0.05104             TRAIN n=217 net +1.528% t +2.43 | HOLDOUT n=105 net +2.133% 하한 +0.195% 전반 +0.168% 후반 +4.060% 상위5일 제외 +0.053% => 통과
+   ret_1d <= -0.094                   TRAIN n=433 net +0.838% t +2.06 | HOLDOUT n=154 net +1.272% 하한 -0.919% 전반 +0.160% 후반 +2.384% 상위5일 제외 -0.484% => 탈락
+== CRASH/24h | TRAIN n=1496 days=470 net +1.425% t +2.73 | HOLDOUT n=551 net -0.102% t -0.16
+   훑은 규칙 128개, TRAIN 선별 53개
+   btc_ret_1h <= -0.01039             TRAIN n=501 net +4.870% t +5.30 | HOLDOUT n=133 net +2.829% 하한 -0.168% 전반 +1.427% 후반 +4.210% 상위5일 제외 -0.444% => 탈락
+   ret_1d <= -0.09255                 TRAIN n=299 net +4.656% t +5.28 | HOLDOUT n=79 net +3.962% 하한 -1.266% 전반 +0.734% 후반 +7.109% 상위5일 제외 -1.780% => 탈락
+   ret_1d <= -0.05579                 TRAIN n=493 net +3.548% t +5.15 | HOLDOUT n=151 net +1.690% 하한 -0.192% 전반 -0.287% 후반 +3.641% 상위5일 제외 -1.490% => 탈락
+   mkt_ret_1h <= -0.03022             TRAIN n=494 net +4.904% t +5.05 | HOLDOUT n=77 net +2.227% 하한 -2.023% 전반 -0.812% 후반 +5.189% 상위5일 제외 -3.469% => 탈락
+   btc_ret_4h <= -0.02151             TRAIN n=302 net +6.517% t +5.03 | HOLDOUT n=75 net +4.033% 하한 -0.576% 전반 -0.446% 후반 +8.395% 상위5일 제외 -3.109% => 탈락
+== CRASH/4h | TRAIN n=1976 days=525 net -0.008% t -0.04 | HOLDOUT n=909 net -0.764% t -2.76
+   훑은 규칙 127개, TRAIN 선별 15개
+   btc_ret_1h <= -0.01691             TRAIN n=395 net +1.900% t +3.72 | HOLDOUT n=99 net +1.695% 하한 -0.619% 전반 +0.282% 후반 +3.080% 상위5일 제외 -1.808% => 탈락
+   mkt_ret_1h <= -0.04498             TRAIN n=395 net +2.058% t +3.58 | HOLDOUT n=67 net +1.318% 하한 -2.988% 전반 +0.213% 후반 +2.390% 상위5일 제외 n/a => 탈락
+   btc_ret_1h <= -0.0242              TRAIN n=198 net +2.841% t +3.33 | HOLDOUT n=64 net +2.708% 하한 -1.252% 전반 +0.403% 후반 +5.012% 상위5일 제외 -2.646% => 탈락
+   btc_ret_1h <= -0.009701            TRAIN n=661 net +1.340% t +3.08 | HOLDOUT n=199 net +0.242% 하한 -1.143% 전반 -0.532% 후반 +1.007% 상위5일 제외 -1.392% => 탈락
+   btc_ret_4h <= -0.03506             TRAIN n=198 net +2.759% t +3.02 | HOLDOUT n=57 net +2.654% 하한 -0.030% 전반 +0.274% 후반 +4.952% 상위5일 제외 -1.529% => 탈락
+== SURGE/1h | TRAIN n=2966 days=726 net -0.872% t -7.85 | HOLDOUT n=1210 net -1.262% t -6.99
+   훑은 규칙 129개, TRAIN 선별 0개
+== SURGE/24h | TRAIN n=1795 days=655 net -0.236% t -0.63 | HOLDOUT n=622 net -1.274% t -2.78
+   훑은 규칙 129개, TRAIN 선별 8개
+   hour_kst <= 4                      TRAIN n=182 net +2.624% t +2.77 | HOLDOUT n=71 net -1.109% 하한 -2.993% 전반 -2.840% 후반 +0.573% 상위5일 제외 -2.618% => 탈락
+   btc_ret_4h <= -0.01284             TRAIN n=179 net +4.303% t +2.64 | HOLDOUT n=44 net -4.888% 하한 -5.425% 전반 -5.809% 후반 -3.968% 상위5일 제외 -6.930% => 탈락
+   ret_1d <= -0.03968                 TRAIN n=180 net +3.034% t +2.39 | HOLDOUT n=74 net -0.745% 하한 -4.345% 전반 -3.512% 후반 +2.022% 상위5일 제외 -4.387% => 탈락
+   btc_ret_1d <= -0.02891             TRAIN n=184 net +3.543% t +2.22 | HOLDOUT n=86 net -0.294% 하한 -2.779% 전반 -1.245% 후반 +0.657% 상위5일 제외 -4.480% => 탈락
+   vol_mult <= 4.053                  TRAIN n=180 net +2.309% t +2.13 | HOLDOUT n=70 net +1.468% 하한 -1.265% 전반 +1.048% 후반 +1.888% 상위5일 제외 -0.822% => 탈락
+== SURGE/4h | TRAIN n=2572 days=724 net -1.148% t -7.07 | HOLDOUT n=1031 net -1.840% t -6.62
+   훑은 규칙 129개, TRAIN 선별 0개
+훑은 규칙 1161개 → TRAIN 선별 124개 → HOLDOUT 통과 1개
+후보 D-202611-01: 15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, btc_ret_1d <= -0.05104 (HOLDOUT 일 단위 하한 +0.195%)
+등록하지 않음: 틀이 아직 잠겨 있음(FRAME_APPROVED=False)
 ```

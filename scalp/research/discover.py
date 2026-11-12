@@ -505,6 +505,7 @@ def run(start_day, end_day, cut_day, markets, fetch=None, log=print):
     start_q, end_q = day_q(start_day), day_q(end_day)
     out("DISCOVER %s | 틀 %s%s | %d종목 15분봉 | %s ~ %s | TRAIN < %s <= HOLDOUT" % (
         end_day, ENGINE, "" if FRAME_APPROVED else " (등록 잠김)", len(markets), start_day, q_day(end_q - 1), cut_day))
+    out("대상: " + ", ".join(m[4:] for m in markets))               # 기록만 보고도 어떤 종목으로 돌렸는지 알 수 있게
     panel = load_panel(start_q - WARMUP_Q, end_q, markets, fetch, log=log)
     trades = build_trades(panel, start_q, end_q)
     out("거래 %d건" % len(trades))
