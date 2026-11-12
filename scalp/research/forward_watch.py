@@ -47,7 +47,7 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              BTC·ETH 주간 수익률을 기록한다. 판정 없음.
   자동 등록 후보  discover.py 가 달마다 '사건 × 조건 하나 × 보유 시간' 틀에서 찾아 forward/registry.json 에 등록한 것.
              등록 때 고정한 정의로 등록일 이후 거래만 채점한다. 판정은 30건·10일이 처음 채워질 때 한 번, 180일 안에 못 채우면 만료.
-             추적 중인 후보가 없으면 시세도 받지 않는다. 틀과 한계는 discover.py 머리말에 있다.
+             추적 중인 후보가 없으면 시세도 받지 않는다. 틀(고문 지정, 15분봉)과 한계는 discover.py 머리말에 있다.
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
 
 안전장치
@@ -311,15 +311,15 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
     active = [c for c in (registry or []) if c.get("status") == "ACTIVE"]
     cands = ledger.setdefault("candidates", {})
     open_now = [c for c in active if not (cands.get(c["id"]) or {}).get("decision")]
-    if open_now:                                                    # 추적 중인 후보가 있을 때만 60분봉을 받는다
+    if open_now:                                                    # 추적 중인 후보가 있을 때만 15분봉을 받는다
         try:
-            end_h = DISC.day_hour(today)
-            start_h = min(DISC.day_hour(c["registered"]) for c in open_now) - DISC.WARMUP_H
+            end_q = DISC.day_q(today)
+            start_q = min(DISC.day_q(c["registered"]) for c in open_now) - DISC.WARMUP_Q
             markets = tuple(sorted({m for c in open_now for m in c["universe"]}))
-            panel = (panel_loader or DISC.load_panel)(start_h, end_h, markets)
+            panel = (panel_loader or DISC.load_panel)(start_q, end_q, markets)
             for c in open_now:
                 entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
-                rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_h))
+                rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_q))
                 entry["rows"], entry["updated"] = rows, today
                 if mismatch:
                     warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(mismatch)))
