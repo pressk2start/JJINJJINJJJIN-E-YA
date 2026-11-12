@@ -15,7 +15,7 @@
 | Repo | JJINJJINJJJIN-E-YA (main) | 별도 새 repo 권장 | 물리적 분리 |
 | 디렉터리 | `/home/ubuntu/bot/` | `/home/ubuntu/swing/` | 다른 경로 |
 | systemd 유닛 | `upbit-bot.service` / `momentum-scanner.service` / `momentum-clm.service` | `swing.service` / `swing.timer` | 별도 unit |
-| GitHub Actions | `deploy.yml` (main push → SSH) | `swing-ci.yml` (모든 branch → 오프라인 유닛 테스트만) | 배포 workflow 분리 |
+| GitHub Actions | `deploy.yml` (수동 실행 → SSH, 2026-11-12부터. 그 전에는 main push) | `swing-ci.yml` (모든 branch → 오프라인 유닛 테스트만) | 배포 workflow 분리 |
 | 배포 스크립트 | `deploy_restart.sh` (bot.py + momentum-*) | `swing_deploy.sh` (swing.service만) | 실행 경로 분리 |
 | `.env` | `/home/ubuntu/bot/.env` (Upbit key A, AUTO_TRADE) | `/home/ubuntu/swing/.env` (별도 Upbit key 권장, TELEGRAM_TOKEN) | 파일 분리 |
 

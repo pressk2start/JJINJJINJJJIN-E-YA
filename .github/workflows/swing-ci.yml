@@ -1,6 +1,6 @@
 # swing-ci — 오프라인 유닛 테스트 러너 (Q2=(c) CI만 허용 범위).
 # 배포 아님: GitHub 러너에서 tests.py(오프라인)만 실행. 서버 무접촉, 시장데이터 관측 없음.
-# ⚠ main 브랜치 push는 기존 deploy.yml만 발동 (이 파일도 main에 있으면 함께 트리거되나 서버 무접촉이라 안전).
+# ⚠ 2026-11-12부터 deploy.yml 은 수동 실행 전용이다(main push 로 돌지 않는다). 이 파일은 서버 무접촉이라 안전.
 name: swing-ci
 on:
   push:
