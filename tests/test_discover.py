@@ -242,8 +242,10 @@ class Registry(unittest.TestCase):
 
     def with_world(self, fn):
         panel = world(planted=True)
-        saved = (D.fetch_bars, D.TRAIN_MIN_N, D.HOLD_MIN_N, D.UNIVERSE, D.HISTORY_DAYS, D.FRAME_APPROVED)
-        D.fetch_bars, D.UNIVERSE, D.HISTORY_DAYS, D.TRAIN_MIN_N, D.HOLD_MIN_N = serve(panel), tuple(sorted(panel)), 160, 40, 25
+        saved = (D.fetch_bars, D.TRAIN_MIN_N, D.HOLD_MIN_N, D.pick_universe, D.HISTORY_DAYS, D.FRAME_APPROVED)
+        self.asked = []
+        D.fetch_bars, D.HISTORY_DAYS, D.TRAIN_MIN_N, D.HOLD_MIN_N = serve(panel), 160, 40, 25
+        D.pick_universe = lambda as_of: self.asked.append(as_of) or tuple(sorted(panel))
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 buf = io.StringIO()
@@ -251,7 +253,7 @@ class Registry(unittest.TestCase):
                     fn(Path(tmp), D.q_day(Q0 + 220 * D.BARS_D))
                 return buf.getvalue()
         finally:
-            (D.fetch_bars, D.TRAIN_MIN_N, D.HOLD_MIN_N, D.UNIVERSE, D.HISTORY_DAYS, D.FRAME_APPROVED) = saved
+            (D.fetch_bars, D.TRAIN_MIN_N, D.HOLD_MIN_N, D.pick_universe, D.HISTORY_DAYS, D.FRAME_APPROVED) = saved
 
     def test_the_lock_blocks_registration_but_every_run_is_logged(self):
         def body(tmp, today):
@@ -269,6 +271,8 @@ class Registry(unittest.TestCase):
             self.assertEqual([c["event"] for c in reg], ["CRASH"])
             log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
             self.assertEqual((len(log), log[1]["locked"], log[1]["registered"]), (2, False, [reg[0]["id"]]))
+            self.assertEqual(set(self.asked), {log[0]["cut"]})          # 대상 종목은 HOLDOUT 시작일 기준으로 고른다
+            self.assertLess(log[0]["cut"], today)
         self.with_world(body)
 
     def test_a_trial_range_never_writes_anything(self):
@@ -278,16 +282,39 @@ class Registry(unittest.TestCase):
             self.assertEqual(list(tmp.iterdir()), [])
         self.assertIn("점검용 범위", self.with_world(body))
 
-    def test_an_empty_universe_does_nothing(self):
-        saved = D.UNIVERSE
-        D.UNIVERSE = ()
+    def test_repro_waits_for_the_advisors_fixed_list(self):
+        saved = D.REPRO_UNIVERSE
+        D.REPRO_UNIVERSE = ()
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                self.assertEqual(D.main(["--register"]), 0)
-            self.assertIn("대상 종목이 아직", buf.getvalue())
+                self.assertEqual(D.main(["--repro"]), 0)
+            self.assertIn("고문의 고정 20종목이 아직 없습니다", buf.getvalue())
         finally:
-            D.UNIVERSE = saved
+            D.REPRO_UNIVERSE = saved
+
+    def test_universe_is_picked_as_of_the_holdout_start(self):
+        value = {"KRW-USDT": 9e12, "KRW-AAA": 5e12, "KRW-BBB": 4e12, "KRW-CCC": 3e12, "KRW-BTC": 1e9, "KRW-DDD": 2e12, "KRW-NEW": 0.0}
+        top = D.pick_universe("2025-06-01", n=3, list_markets=lambda: list(value), daily_value=lambda m: value[m],
+                              listed_before=lambda m: m != "KRW-AAA")
+        self.assertEqual(top, ("KRW-BBB", "KRW-BTC", "KRW-CCC"))          # 스테이블코인·상장 2년 미만(AAA) 제외, BTC 는 항상 포함
+        urls = []
+
+        def fake_get(url):
+            urls.append(url)
+            if "market/all" in url:
+                return [{"market": "KRW-BTC"}, {"market": "KRW-AAA"}, {"market": "BTC-XYZ"}]
+            if "count=1&" in url:
+                return [{"candle_date_time_utc": "2023-05-01T00:00:00"}]
+            return [{"candle_date_time_utc": "2025-06-01T00:00:00", "candle_acc_trade_price": 9e15},      # 기준일 당일은 세지 않는다
+                    {"candle_date_time_utc": "2025-05-31T00:00:00", "candle_acc_trade_price": 2.0}]
+        real, D.AM.http_get = D.AM.http_get, fake_get
+        try:
+            self.assertEqual(D.pick_universe("2025-06-01", n=2), ("KRW-AAA", "KRW-BTC"))
+        finally:
+            D.AM.http_get = real
+        self.assertTrue(all("to=2025-06-01T00%3A00%3A00Z" in u for u in urls if "count=200" in u))      # 기준일 이전 자료만 요청
+        self.assertTrue(all("to=2023-06-02T00%3A00%3A00Z" in u for u in urls if "count=1&" in u))        # 2년 전에 이미 상장
 
     def test_repro_prints_base_one_hour_means_next_to_the_advisors(self):
         def tr(event, hold, day, net):
@@ -295,8 +322,9 @@ class Registry(unittest.TestCase):
         trades = [tr("SURGE", 4, "2024-05-01", -0.004), tr("SURGE", 4, "2025-05-01", -0.008), tr("SURGE", 16, "2024-05-01", 0.5),
                   tr("CRASH", 4, "2023-03-01", 0.002)]
         lines = D.repro_lines(trades, "2025-01-01")
-        self.assertIn("SURGE    여기 -0.400% (1건) / -0.800% (1건)   고문 -0.400% / -0.770%", lines[1])
-        self.assertIn("CRASH    여기 +0.200% (1건) / n/a (0건)", lines[3])
+        self.assertIn("SURGE    여기 1건 -0.400% / 1건 -0.800%   고문 1506건 -0.400% / 924건 -0.770%", lines[1])
+        self.assertIn("BREAKOUT 여기 0건 n/a / 0건 n/a   고문 8673건 -0.280% / 7205건 -0.270%", lines[2])
+        self.assertIn("CRASH    여기 1건 +0.200% / 0건 n/a   고문 1168건 +0.260% / 825건 -0.010%", lines[3])
 
 
 class Forward(unittest.TestCase):

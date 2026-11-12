@@ -8,12 +8,15 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
     찾은 것을 믿을지는 여기서 정하지 않는다 — 등록일 이후의 새 자료로 forward_watch 가 판정한다.
 
 틀 (고문 지정 2026-11-12. 번호는 고문 메시지의 항목 번호)
-  1 자료    업비트 15분봉, 고정 20종목(UNIVERSE), 최근 약 4년.
+  1 자료    업비트 15분봉, 최근 약 4년. 대상 종목은 'HOLDOUT 시작일 기준' 으로 고른다 (고문 2026-11-12 추가 지시):
+            그날 이전 200일 거래대금 상위 30종목, 그날 기준 상장 2년 이상, 스테이블코인 제외, BTC 는 항상 포함.
+            오늘 기준으로 고르면 뒤 구간에서 살아남은 코인만 들어가기 때문이다. 재현(8번)만 고문의 고정 20종목을 쓴다.
   2 사건    봉 하나가 끝난 시점에 판단한다. 셋 다 '그 봉의 거래대금이 직전 평균의 3배 이상' 이 붙는다.
             SURGE     15분 수익률 ≥ +3%
             CRASH     15분 수익률 ≤ −3%
             BREAKOUT  종가가 직전 1일의 고가를 넘음
-            다음 봉 시가에 사서 1시간·4시간 뒤 봉의 시가에 판다 (모집단 = 사건 3 × 보유 2). 한 종목·한 모집단에서 동시에 1건.
+            다음 봉 시가에 사서 1시간·4시간·24시간 뒤 봉의 시가에 판다 (모집단 = 사건 3 × 보유 3). 한 종목·한 모집단에서 동시에 1건.
+            (24시간 보유는 내 초안에 있던 것으로, 고문이 유지하라고 했다.)
             비용 편도 BTC·ETH 0.07%, 그 밖 0.10%.
   3 조건    지표 하나만 붙인다. 사건 봉이 끝난 시점에 알 수 있는 값만 쓴다.
             시장  btc_ret_1h · btc_ret_4h · btc_ret_1d · btc_above_50d(50일 평균 위=1) · btc_dist_50d(평균 대비 거리)
@@ -25,11 +28,12 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 한 달 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
             판정은 forward_watch 가 등록 이후 자료 30건·10일에서 한 번만 한다. 180일 안에 못 채우면 EXPIRED.
   7 기록    실행마다 훑은 규칙 수·선별 수·통과 수를 forward/scan_log.json 에 덧붙인다 (몇 개를 봤는지가 남아야 우연인지 판단할 수 있다).
-  8 재현    첫 실행은 고문 결과의 재현이다: --repro 는 2023–24 / 2025 이후로 나눠 조건 없는 1시간 보유의 평균을 고문 수치와 나란히 찍는다.
-            급등 −0.40% / −0.77%, 돌파 −0.28% / −0.27%, 급락 +0.26% / −0.01%, 통과 0. 다르면 구현 차이부터 찾는다.
+  8 재현    첫 실행은 고문 결과의 재현이다: --repro 는 고문의 고정 20종목을 2023–24 / 2025 이후로 나눠, 조건 없는 1시간 보유의
+            건수와 평균을 고문 수치와 나란히 찍는다. 급등 1,506건 −0.40% / 924건 −0.77%, 돌파 8,673건 −0.28% / 7,205건 −0.27%,
+            급락 1,168건 +0.26% / 825건 −0.01%, 통과 0. 다르면 구현 차이부터 찾는다. 맞으면 고문이 잠금 해제를 정한다.
 
-*** 아직 잠겨 있다. FRAME_APPROVED 가 False 인 동안 --register 는 기록만 남기고 후보를 등록하지 않는다.
-    풀기 전에 필요한 것: (가) 고문의 고정 20종목 목록(UNIVERSE 가 비어 있다) (나) 8번 재현이 맞는 것.
+*** 아직 잠겨 있다. FRAME_APPROVED 가 False 인 동안 --register 는 기록(훑은 수·탐색 결과)만 남기고 후보를 등록하지 않는다.
+    풀기 전에 필요한 것: (가) 고문의 고정 20종목 목록(REPRO_UNIVERSE 가 비어 있다) (나) 8번 재현이 맞는 것.
     틀을 고치면 ENGINE 번호를 올린다(옛 번호로 등록된 후보는 채점을 멈춘다). ***
 
 고문 틀에 적혀 있지 않아 내가 정한 것 (재현이 안 맞으면 여기부터 본다)
@@ -40,14 +44,14 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   · up_ratio 는 1일 수익률 기준, mkt_ret_1h 는 자기 종목 제외, same_events_1h 는 자기 사건 제외.
   · compress = 최근 1일 평균 변동 / 최근 7일 평균 변동.        · 달마다 도는 탐색의 구간 = 앞 60% TRAIN, 뒤 40% HOLDOUT.
   · 조건을 붙인 거래 = 기본 모집단(코인당 1건 규칙 적용 뒤)에서 조건을 통과한 거래. 등록 후 채점도 같은 방식이다.
-한계: 봉 기준이라 실제 호가 체결을 확인한 값이 아니다. 고정 20종목은 지금까지 살아남은 종목이라 과거 구간에 생존 편향이 있다
-      (등록 뒤의 전진 채점에는 없다). 초·분 단위와 호가는 다루지 않는다.
+한계: 봉 기준이라 실제 호가 체결을 확인한 값이 아니다. 업비트는 상장폐지된 종목의 시세를 주지 않아서, 대상을 HOLDOUT 시작일
+      기준으로 골라도 '그 뒤 상장폐지된 종목' 은 빠진다(등록 뒤의 전진 채점에는 이 편향이 없다). 초·분 단위와 호가는 다루지 않는다.
 
 이력: 2026-11-12 오전에 내 초안(60분봉·30종목·3분위)으로 전체를 한 번 돌렸다 — 조합 213개, 발견 0 (커밋 4b4ce75 의 DISCOVERY.md).
       같은 날 고문 틀로 바꿨다. 초안으로 등록된 후보는 없다.
 
 실행
-  python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH,... --repro     고문 수치 재현 (등록·기록 안 함)
+  python3 scalp/research/discover.py --repro [--markets KRW-BTC,KRW-ETH,...]   고문 수치 재현 (등록·기록 안 함)
   python3 scalp/research/discover.py --register                              달마다 도는 실행 (잠겨 있으면 기록만)
   python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH --days 90      작은 범위 점검 (등록·기록 안 함)
 """
@@ -79,11 +83,13 @@ SS = _load("shadow_salvage")        # 군집 통계 (H27 에서 쓴 것 그대�
 
 ENGINE = "2"
 FRAME_APPROVED = False              # 고문 목록을 넣고 재현이 맞으면 True 로. 그 전에는 등록하지 않는다
-UNIVERSE = ()                       # 고문의 고정 20종목 — 목록을 받으면 채운다
+REPRO_UNIVERSE = ()                 # 고문의 고정 20종목 (재현용) — 목록을 받으면 채운다
+UNIVERSE_N, LIQ_DAYS, MIN_LISTED_DAYS = 30, 200, 730
+STABLE = ("KRW-USDT", "KRW-USDC", "KRW-USD1", "KRW-USDE", "KRW-DAI", "KRW-TUSD")
 UTC = dt.timezone.utc
 BAR_MIN, BARS_H, BARS_D = 15, 4, 96
 HISTORY_DAYS, TRAIN_FRAC = 1460, 0.60
-MOVE, VOL_X, HOLDS = 0.03, 3.0, (BARS_H, 4 * BARS_H)
+MOVE, VOL_X, HOLDS = 0.03, 3.0, (BARS_H, 4 * BARS_H, BARS_D)
 VOL_MIN_BARS = 77                   # 거래대금 평균은 직전 96봉 중 80% 이상 있을 때만
 COST, COST_OTHER = {"KRW-BTC": 0.0007, "KRW-ETH": 0.0007}, 0.0010
 QUANT_LOW, QUANT_HIGH = (0.05, 0.10, 0.20, 0.33, 0.50), (0.50, 0.67, 0.80, 0.90, 0.95)
@@ -95,7 +101,9 @@ WARMUP_Q = 55 * BARS_D              # 지표 계산에 필요한 앞쪽 자료 (
 WORKERS = 6                         # 동시에 받는 종목 수. 전체 호출 간격은 auto_monitor.http_get 이 초당 8회 아래로 묶는다
 OUT_DIR = HERE / "forward"
 REPRO_START, REPRO_CUT = "2023-01-01", "2025-01-01"
-ADVISOR_REF = {"SURGE": (-0.0040, -0.0077), "BREAKOUT": (-0.0028, -0.0027), "CRASH": (0.0026, -0.0001)}   # 1시간 보유, 2023–24 / 2025 이후
+# 고문 결과 (1시간 보유, 조건 없음): (2023–24 건수, 평균), (2025 이후 건수, 평균)
+ADVISOR_REF = {"SURGE": ((1506, -0.0040), (924, -0.0077)), "BREAKOUT": ((8673, -0.0028), (7205, -0.0027)),
+               "CRASH": ((1168, 0.0026), (825, -0.0001))}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -170,6 +178,35 @@ def fetch_bars(market, start_q, end_q, get=None):
             break
         to = oldest
     return Bars(out)
+
+
+def pick_universe(as_of, n=UNIVERSE_N, list_markets=None, daily_value=None, listed_before=None):
+    """as_of(YYYY-MM-DD) 이전 LIQ_DAYS 일 거래대금 합이 큰 n 종목. 그날 기준 상장 MIN_LISTED_DAYS 일 이상만.
+    스테이블코인은 빼고 BTC 는 항상 넣는다. as_of 당일과 그 뒤의 자료는 쓰지 않는다."""
+    get = AM.http_get
+    list_markets = list_markets or (lambda: [m["market"] for m in get(AM.UPBIT + "/v1/market/all") if m["market"].startswith("KRW-")])
+    old_day = (dt.date.fromisoformat(as_of) - dt.timedelta(days=MIN_LISTED_DAYS)).isoformat()
+
+    def default_value(m):
+        rows = get("%s/v1/candles/days?market=%s&count=%d&to=%s" % (AM.UPBIT, m, LIQ_DAYS, urllib.parse.quote(as_of + "T00:00:00Z")))
+        return sum(float(r["candle_acc_trade_price"]) for r in rows if r["candle_date_time_utc"][:10] < as_of)
+
+    def default_listed(m):                                           # 그 날짜 이전의 일봉이 하나라도 있으면 그때 이미 상장돼 있었다
+        return bool(get("%s/v1/candles/days?market=%s&count=1&to=%s" % (AM.UPBIT, m, urllib.parse.quote(old_day + "T00:00:00Z"))))
+
+    daily_value, listed_before = daily_value or default_value, listed_before or default_listed
+    names = [m for m in list_markets() if m not in STABLE]
+    with ThreadPoolExecutor(WORKERS) as pool:
+        scored = sorted(zip(pool.map(daily_value, names), names), reverse=True)
+    top = []
+    for value, m in scored:                                          # 거래대금 순으로 내려가며 상장 기간을 확인한다
+        if len(top) >= n or value <= 0:
+            break
+        if listed_before(m):
+            top.append(m)
+    if "KRW-BTC" not in top:
+        top = ["KRW-BTC"] + top[:n - 1]
+    return tuple(sorted(top))
 
 
 def load_panel(start_q, end_q, markets, fetch=None, log=None):
@@ -477,15 +514,15 @@ def run(start_day, end_day, cut_day, markets, fetch=None, log=print):
 
 
 def repro_lines(trades, cut_day):
-    """고문 수치와 나란히: 조건 없는 1시간 보유의 평균 순수익 (앞 구간 / 뒤 구간)."""
-    lines = ["재현 대조 (조건 없음, 1시간 보유, 평균 순수익) — 앞 구간 < %s <= 뒤 구간" % cut_day]
+    """고문 수치와 나란히: 조건 없는 1시간 보유의 건수와 평균 순수익 (앞 구간 / 뒤 구간)."""
+    lines = ["재현 대조 (조건 없음, 1시간 보유: 건수와 평균 순수익) — 앞 구간 < %s <= 뒤 구간" % cut_day]
     for event in ("SURGE", "BREAKOUT", "CRASH"):
         rows = [t for t in trades if t["event"] == event and t["hold"] == BARS_H]
         a = [t["net"] for t in rows if t["day"] < cut_day]
         b = [t["net"] for t in rows if t["day"] >= cut_day]
-        ref = ADVISOR_REF[event]
-        lines.append("  %-8s 여기 %s (%d건) / %s (%d건)   고문 %s / %s" % (
-            event, _pct(mean(a)) if a else "n/a", len(a), _pct(mean(b)) if b else "n/a", len(b), _pct(ref[0]), _pct(ref[1])))
+        (n1, r1), (n2, r2) = ADVISOR_REF[event]
+        lines.append("  %-8s 여기 %d건 %s / %d건 %s   고문 %d건 %s / %d건 %s" % (
+            event, len(a), _pct(mean(a)) if a else "n/a", len(b), _pct(mean(b)) if b else "n/a", n1, _pct(r1), n2, _pct(r2)))
     return lines
 
 
@@ -495,20 +532,26 @@ def main(argv=None):
     ap.add_argument("--register", action="store_true")
     ap.add_argument("--repro", action="store_true", help="고문 설정(2023–24 / 2025 이후)으로 돌려 고문 수치와 대조")
     ap.add_argument("--days", type=int, default=HISTORY_DAYS)
-    ap.add_argument("--markets", help="쉼표로 구분. 기본은 UNIVERSE(고문의 고정 20종목)")
+    ap.add_argument("--markets", help="쉼표로 구분 (점검·재현용). 기본: 재현은 REPRO_UNIVERSE, 그 밖은 HOLDOUT 시작일 기준 상위 30종목")
     ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (기본은 오늘)")
     a = ap.parse_args(argv)
     today = a.today or dt.datetime.now(UTC).date().isoformat()
-    markets = tuple(a.markets.split(",")) if a.markets else UNIVERSE
-    if not markets:
-        print("대상 종목이 아직 정해지지 않았습니다(UNIVERSE 비어 있음). --markets 로 주거나 고문 목록을 넣은 뒤 실행하세요.")
-        return 0
     custom = bool(a.markets) or a.days != HISTORY_DAYS or a.repro
     if a.repro:
         start_day, cut_day = REPRO_START, REPRO_CUT
     else:
         start_day = (dt.date.fromisoformat(today) - dt.timedelta(days=a.days)).isoformat()
         cut_day = (dt.date.fromisoformat(start_day) + dt.timedelta(days=int(TRAIN_FRAC * a.days))).isoformat()
+    if a.markets:
+        markets = tuple(a.markets.split(","))
+    elif a.repro:
+        markets = REPRO_UNIVERSE
+        if not markets:
+            print("재현에 쓸 고문의 고정 20종목이 아직 없습니다(REPRO_UNIVERSE 비어 있음). --markets 로 주거나 목록을 넣은 뒤 실행하세요.")
+            return 0
+    else:
+        markets = pick_universe(cut_day)
+        print("대상 %d종목 (%s 이전 %d일 거래대금 기준): %s" % (len(markets), cut_day, LIQ_DAYS, ", ".join(m[4:] for m in markets)), flush=True)
     passed, counts, lines, trades = run(start_day, today, cut_day, markets, log=lambda s: print(s, flush=True))
     tail = repro_lines(trades, cut_day) if a.repro else []
     out = Path(a.out)
