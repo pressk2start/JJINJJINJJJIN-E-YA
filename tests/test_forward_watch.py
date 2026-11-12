@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("fw", ROOT / "scalp" / "research" / "forward_watch.py")
 FW = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FW)
-DF, TP, AM = FW.DF, FW.TP, FW.AM
+DF, TP, AM, DISC = FW.DF, FW.TP, FW.AM, FW.DISC
 D0 = dt.date(2026, 6, 1)
 
 
@@ -337,7 +337,7 @@ class FrozenRuleFile(unittest.TestCase):
         """급락 반등·주간 급등 규칙은 고문이 고정했다(수정본 확정 2026-11-11). 파일이 바뀌면 전진 검증이 아니다.
         규칙을 바꿔야 하면 새 후보로 등록하고 시작 시각을 새로 잡는다 — 이 해시만 고치지 않는다."""
         self.assertEqual(self.sha("scalp", "research", "auto_monitor.py"),
-                         "b27aabc8fe3672678963cb08b6bc843a75d9a175141350fb853b5fef7655cdcd")
+                         "791ea2ce0b617352f23d504c94eef05d8fb367e5aa68e46ed1297c54378a8e09")
         self.assertEqual(AM.FORWARD_START, "2026-11-11T00:00")
         self.assertEqual((AM.CR_DROP, AM.CR_LOOK, AM.CR_HOLD, AM.CR_BAR, AM.CR_MIN_N, AM.CR_MIN_DAYS), (-0.04, 12, 12, 5, 30, 10))
 
@@ -358,6 +358,89 @@ class FrozenRuleFile(unittest.TestCase):
         고쳐야 하면 실행기처럼 검토를 받은 뒤 이 해시를 함께 바꾼다."""
         self.assertEqual(self.sha("scalp", "research", "trend_paper.py"),
                          "c913074c9df9f04c82f04845dbf235105928a03aea5d108962354b527789afbf")
+
+
+def crash_panel(days, every=120, rebound=0.02):
+    """BTC 는 평평하고, 알트 하나가 every 봉(15분봉)마다 한 봉에 −5% 급락(거래대금 5배)한 뒤 다음 4봉에 걸쳐 rebound 만큼 되돌린다."""
+    q0 = DISC.day_q("2026-09-01")
+    btc = {q0 + k: (100.0, 100.0, 100.0, 100.0, 1e9) for k in range(days * 96)}
+    alt, price = {}, 100.0
+    for k in range(days * 96):
+        o, step, value = price, k % every, 1e9
+        if step == 0 and k:
+            price, value = o * 0.95, 5e9
+        elif 1 <= step <= 4:
+            price = o * (1 + rebound / 4.0)
+        alt[q0 + k] = (o, max(o, price), min(o, price), price, value)
+    return q0, {"KRW-BTC": DISC.Bars(btc), "KRW-AAA": DISC.Bars(alt)}
+
+
+def offline(panel=None):
+    """시세를 받지 않는 update 인자들."""
+    return dict(h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {}, cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST},
+                surge_fetch=lambda m: [], panel_loader=(lambda s, e, markets: {m: panel[m] for m in markets}) if panel else None)
+
+
+class RegisteredCandidates(unittest.TestCase):
+    def cand(self, registered, **kw):
+        base = {"id": "D-202610-01", "engine": DISC.ENGINE, "registered": registered, "event": "CRASH", "hold": 4, "cond": None,
+                "universe": ["KRW-BTC", "KRW-AAA"], "move": 0.03, "vol_x": 3.0, "cost": {"KRW-BTC": 0.0007}, "cost_other": 0.0010, "status": "ACTIVE"}
+        base.update(kw)
+        return base
+
+    def cut(self, panel, q0, days):
+        """days 일까지만 있는 시세 (그날 실행했을 때 받을 수 있는 만큼)."""
+        out = {}
+        for m, b in panel.items():
+            j = b.window(q0, q0 + days * 96 - 1)[1]
+            out[m] = DISC.Bars({b.ts[t]: (b.o[t], b.h[t], 0.0, b.c[t], b.v[t]) for t in range(j)})
+        return out
+
+    def test_trades_after_registration_are_scored_and_judged_once(self):
+        q0, panel = crash_panel(150)
+        reg = DISC.q_day(q0 + 70 * 96)
+        ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[self.cand(reg)], **offline(self.cut(panel, q0, 90)))
+        entry = ledger["candidates"]["D-202610-01"]
+        self.assertEqual(len(entry["rows"]), 16)                                     # 20일 동안 30시간마다 한 건
+        self.assertTrue(all(r["entry_q"] > DISC.day_q(reg) for r in entry["rows"]))
+        self.assertIsNone(entry["decision"])
+        self.assertIn("진행 중", FW.render(ledger))
+        ledger, _ = FW.update(ledger, DISC.q_day(q0 + 120 * 96), registry=[self.cand(reg)], **offline(self.cut(panel, q0, 120)))
+        entry = ledger["candidates"]["D-202610-01"]
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))
+        text = FW.render(ledger)
+        self.assertIn("| D-202610-01 | 15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, 조건 없음 |", text)
+        self.assertIn("| 통과 |", text)
+        self.assertIn("통과: D-202610-01", FW.summary(ledger))
+
+    def test_nothing_is_downloaded_when_no_candidate_is_open(self):
+        def boom(*a):
+            raise AssertionError("panel should not be loaded")
+        args = offline()
+        args["panel_loader"] = boom
+        ledger, warnings = FW.update({}, "2026-11-20", registry=[], **args)
+        self.assertEqual(ledger["candidates"], {})
+        closed = {"candidates": {"D-202610-01": {"rows": [], "decision": {"verdict": "FAIL", "decided_on": "2026-11-01", "trades": 30, "stats": None}}}}
+        FW.update(closed, "2026-11-20", registry=[self.cand("2026-10-01")], **args)   # 판정이 끝난 후보는 더 받지 않는다
+        self.assertIn("아직 등록된 후보가 없습니다", FW.render(ledger))
+
+    def test_a_failed_download_leaves_candidate_rows_alone(self):
+        q0, panel = crash_panel(150)
+        reg = DISC.q_day(q0 + 70 * 96)
+        ledger, _ = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[self.cand(reg)], **offline(self.cut(panel, q0, 90)))
+        before = copy.deepcopy(ledger["candidates"])
+        args = offline()
+        args["panel_loader"] = lambda s, e, markets: (_ for _ in ()).throw(RuntimeError("조회 실패"))
+        ledger, warnings = FW.update(ledger, DISC.q_day(q0 + 100 * 96), registry=[self.cand(reg)], **args)
+        self.assertEqual(ledger["candidates"], before)
+        self.assertTrue(any("자동 등록 후보" in w for w in warnings))
+
+    def test_a_candidate_from_an_older_frame_is_not_scored(self):
+        q0, panel = crash_panel(150)
+        reg = DISC.q_day(q0 + 70 * 96)
+        ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[self.cand(reg, engine="1")], **offline(self.cut(panel, q0, 90)))
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["rows"], [])
+        self.assertTrue(any("틀" in w for w in warnings))
 
 
 if __name__ == "__main__":

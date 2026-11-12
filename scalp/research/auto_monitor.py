@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """auto_monitor — 공개 시세만으로 (1) 매일 현재 상황을 수집하고 (2) 고정된 규칙의 전진 성적을 누적한다.
-주문 없음 · API 키 없음 · 표준 라이브러리만 사용. GitHub Actions(.github/workflows/auto-monitor.yml)가 실행한다.
+주문 없음 · API 키 없음 · 표준 라이브러리만 사용. 따로 도는 실행 설정은 없다 — forward_watch.py(Forward watch, 매주)가
+이 파일의 규칙 계산(cr_events·surge_weeks 등)을 불러 쓴다. 아래 daily/weekly 는 손으로 점검할 때만 돌린다.
 
 여기서 하는 일은 "새 규칙 찾기"가 아니다. 2026-11-10 에 고정한 규칙을 그 뒤 새로 생긴 시세에만 적용해 맞는지 본다.
 규칙·임계값을 결과를 보고 바꾸지 않는다(바꾸면 전진 검증이 아니다). 새 가설은 따로 등록해 FORWARD_START 를 새로 잡는다.

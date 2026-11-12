@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때만 되는가' 를 달마다 자동으로 묻고, 넘은 것만 후보로 등록한다.
+(공개 시세만, 키·주문 없음, 표준 라이브러리. GitHub Actions 월 1회 실행용 — 거래 서버에서 돌리지 않는다.)
+
+왜 (사용자 원칙, 2026-11-10): "급등하면 버는가" 가 아니라 "급등한 수많은 사례 중 어떤 조건일 때만 이어지는가" 를 물어야 한다.
+    지금까지는 사람이 한 번씩 손으로 돌렸다. 이 파일은 같은 질문을 정해진 틀 안에서 달마다 다시 묻는다.
+    찾은 것을 믿을지는 여기서 정하지 않는다 — 등록일 이후의 새 자료로 forward_watch 가 판정한다.
+
+틀 (고문 지정 2026-11-12. 번호는 고문 메시지의 항목 번호)
+  1 자료    업비트 15분봉, 고정 20종목(UNIVERSE), 최근 약 4년.
+  2 사건    봉 하나가 끝난 시점에 판단한다. 셋 다 '그 봉의 거래대금이 직전 평균의 3배 이상' 이 붙는다.
+            SURGE     15분 수익률 ≥ +3%
+            CRASH     15분 수익률 ≤ −3%
+            BREAKOUT  종가가 직전 1일의 고가를 넘음
+            다음 봉 시가에 사서 1시간·4시간 뒤 봉의 시가에 판다 (모집단 = 사건 3 × 보유 2). 한 종목·한 모집단에서 동시에 1건.
+            비용 편도 BTC·ETH 0.07%, 그 밖 0.10%.
+  3 조건    지표 하나만 붙인다. 사건 봉이 끝난 시점에 알 수 있는 값만 쓴다.
+            시장  btc_ret_1h · btc_ret_4h · btc_ret_1d · btc_above_50d(50일 평균 위=1) · btc_dist_50d(평균 대비 거리)
+                  · up_ratio(1일 수익률이 양수인 종목 비율) · mkt_ret_1h(다른 종목 1시간 수익률 평균) · same_events_1h(최근 1시간 안의 같은 사건 수)
+            종목  bar_size(사건 봉 크기) · vol_mult(거래대금 배수) · ret_1d · pos_1d_high(1일 고점 대비 위치) · compress(변동성 압축) · hour_kst
+  4 문턱    TRAIN 분위수 5·10·20·33·50% '이하' 와 50·67·80·90·95% '이상' (지표마다 최대 10개).
+  5 선별    TRAIN: 거래 ≥ 150건, 평균 순수익 > 0, t ≥ 2 인 것은 전부 HOLDOUT 으로 넘긴다.
+            HOLDOUT: 거래 ≥ 100건 · 평균 > 0 · 일 단위 하한 > 0 · 전반·후반 모두 > 0 · 날짜 가중 평균 > 0 · 상위 5일을 빼도 > 0.
+  6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 한 달 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+            판정은 forward_watch 가 등록 이후 자료 30건·10일에서 한 번만 한다. 180일 안에 못 채우면 EXPIRED.
+  7 기록    실행마다 훑은 규칙 수·선별 수·통과 수를 forward/scan_log.json 에 덧붙인다 (몇 개를 봤는지가 남아야 우연인지 판단할 수 있다).
+  8 재현    첫 실행은 고문 결과의 재현이다: --repro 는 2023–24 / 2025 이후로 나눠 조건 없는 1시간 보유의 평균을 고문 수치와 나란히 찍는다.
+            급등 −0.40% / −0.77%, 돌파 −0.28% / −0.27%, 급락 +0.26% / −0.01%, 통과 0. 다르면 구현 차이부터 찾는다.
+
+*** 아직 잠겨 있다. FRAME_APPROVED 가 False 인 동안 --register 는 기록만 남기고 후보를 등록하지 않는다.
+    풀기 전에 필요한 것: (가) 고문의 고정 20종목 목록(UNIVERSE 가 비어 있다) (나) 8번 재현이 맞는 것.
+    틀을 고치면 ENGINE 번호를 올린다(옛 번호로 등록된 후보는 채점을 멈춘다). ***
+
+고문 틀에 적혀 있지 않아 내가 정한 것 (재현이 안 맞으면 여기부터 본다)
+  · 15분 수익률 = 그 봉 종가 / 직전 봉 종가 − 1.            · 거래대금 평균 = 직전 96봉(1일), 80% 이상 있을 때만.
+  · 돌파 = 종가 > 직전 96봉의 최고 고가.                      · 진입부터 청산까지 빠진 봉이 하나라도 있으면(거래소 점검 등) 거래로 세지 않는다.
+  · t = 진입일(UTC)을 묶음으로 한 군집 t.                      · 일 단위 하한 = 일별 평균의 단측 95% 하한(정규 근사).
+  · 전반·후반 = HOLDOUT 거래를 시간순으로 반씩.               · 상위 5일 = 그날 순수익 합이 가장 큰 5일.
+  · up_ratio 는 1일 수익률 기준, mkt_ret_1h 는 자기 종목 제외, same_events_1h 는 자기 사건 제외.
+  · compress = 최근 1일 평균 변동 / 최근 7일 평균 변동.        · 달마다 도는 탐색의 구간 = 앞 60% TRAIN, 뒤 40% HOLDOUT.
+  · 조건을 붙인 거래 = 기본 모집단(코인당 1건 규칙 적용 뒤)에서 조건을 통과한 거래. 등록 후 채점도 같은 방식이다.
+한계: 봉 기준이라 실제 호가 체결을 확인한 값이 아니다. 고정 20종목은 지금까지 살아남은 종목이라 과거 구간에 생존 편향이 있다
+      (등록 뒤의 전진 채점에는 없다). 초·분 단위와 호가는 다루지 않는다.
+
+이력: 2026-11-12 오전에 내 초안(60분봉·30종목·3분위)으로 전체를 한 번 돌렸다 — 조합 213개, 발견 0 (커밋 4b4ce75 의 DISCOVERY.md).
+      같은 날 고문 틀로 바꿨다. 초안으로 등록된 후보는 없다.
+
+실행
+  python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH,... --repro     고문 수치 재현 (등록·기록 안 함)
+  python3 scalp/research/discover.py --register                              달마다 도는 실행 (잠겨 있으면 기록만)
+  python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH --days 90      작은 범위 점검 (등록·기록 안 함)
+"""
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import math
+import sys
+import urllib.parse
+from array import array
+from bisect import bisect_left, bisect_right
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from statistics import mean, stdev
+
+HERE = Path(__file__).resolve().parent
+
+
+def _load(name):
+    spec = importlib.util.spec_from_file_location(name, str(HERE / (name + ".py")))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+AM = _load("auto_monitor")          # 조회 함수(http_get)만 빌려 쓴다
+SS = _load("shadow_salvage")        # 군집 통계 (H27 에서 쓴 것 그대로)
+
+ENGINE = "2"
+FRAME_APPROVED = False              # 고문 목록을 넣고 재현이 맞으면 True 로. 그 전에는 등록하지 않는다
+UNIVERSE = ()                       # 고문의 고정 20종목 — 목록을 받으면 채운다
+UTC = dt.timezone.utc
+BAR_MIN, BARS_H, BARS_D = 15, 4, 96
+HISTORY_DAYS, TRAIN_FRAC = 1460, 0.60
+MOVE, VOL_X, HOLDS = 0.03, 3.0, (BARS_H, 4 * BARS_H)
+VOL_MIN_BARS = 77                   # 거래대금 평균은 직전 96봉 중 80% 이상 있을 때만
+COST, COST_OTHER = {"KRW-BTC": 0.0007, "KRW-ETH": 0.0007}, 0.0010
+QUANT_LOW, QUANT_HIGH = (0.05, 0.10, 0.20, 0.33, 0.50), (0.50, 0.67, 0.80, 0.90, 0.95)
+TRAIN_MIN_N, TRAIN_MIN_T, HOLD_MIN_N = 150, 2.0, 100
+Z95 = 1.6449
+MAX_NEW = 3
+FWD_MIN_N, FWD_MIN_DAYS, FWD_EXPIRE_DAYS = 30, 10, 180
+WARMUP_Q = 55 * BARS_D              # 지표 계산에 필요한 앞쪽 자료 (BTC 50일 평균)
+WORKERS = 6                         # 동시에 받는 종목 수. 전체 호출 간격은 auto_monitor.http_get 이 초당 8회 아래로 묶는다
+OUT_DIR = HERE / "forward"
+REPRO_START, REPRO_CUT = "2023-01-01", "2025-01-01"
+ADVISOR_REF = {"SURGE": (-0.0040, -0.0077), "BREAKOUT": (-0.0028, -0.0027), "CRASH": (0.0026, -0.0001)}   # 1시간 보유, 2023–24 / 2025 이후
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+def to_q(t):
+    """시각 → 15분봉 번호."""
+    return int(t.timestamp() // (60 * BAR_MIN))
+
+
+def day_q(day):
+    return to_q(dt.datetime.fromisoformat(day).replace(tzinfo=UTC))
+
+
+def q_day(q):
+    return dt.datetime.fromtimestamp(q * 60 * BAR_MIN, tz=UTC).strftime("%Y-%m-%d")
+
+
+class Bars(object):
+    """한 종목의 15분봉을 시간순 배열로 들고 있다. rows = {봉 번호: (시가, 고가, 저가, 종가, 거래대금)}."""
+    __slots__ = ("ts", "o", "h", "c", "v", "cv", "cc")
+
+    def __init__(self, rows):
+        items = sorted(rows.items())
+        self.ts = array("q", [q for q, _ in items])
+        self.o = array("d", [b[0] for _, b in items])
+        self.h = array("d", [b[1] for _, b in items])
+        self.c = array("d", [b[3] for _, b in items])
+        self.v = array("d", [b[4] for _, b in items])
+        self.cv, self.cc = array("d", [0.0]), array("d", [0.0])
+        for x in self.v:
+            self.cv.append(self.cv[-1] + x)
+        for x in self.c:
+            self.cc.append(self.cc[-1] + x)
+
+    def __len__(self):
+        return len(self.ts)
+
+    def idx(self, q):
+        i = bisect_left(self.ts, q)
+        return i if i < len(self.ts) and self.ts[i] == q else -1
+
+    def close(self, q):
+        i = self.idx(q)
+        return self.c[i] if i >= 0 else None
+
+    def ret(self, q, k):
+        a, z = self.close(q), self.close(q - k)
+        return a / z - 1 if a is not None and z else None
+
+    def window(self, q_from, q_to):
+        """봉 번호가 [q_from, q_to] 인 구간의 배열 위치 (i, j) — 반열린 구간 [i, j)."""
+        return bisect_left(self.ts, q_from), bisect_right(self.ts, q_to)
+
+
+def fetch_bars(market, start_q, end_q, get=None):
+    """[start_q, end_q) 의 15분봉 → Bars. end_q 는 포함하지 않으므로 진행 중인 봉은 들어오지 않는다."""
+    get = get or AM.http_get
+    out, to = {}, end_q
+    while True:
+        stamp = dt.datetime.fromtimestamp(to * 60 * BAR_MIN, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = get("%s/v1/candles/minutes/%d?market=%s&count=200&to=%s" % (AM.UPBIT, BAR_MIN, market, urllib.parse.quote(stamp)))
+        if not rows:
+            break
+        qs = []
+        for r in rows:
+            q = to_q(AM.parse_utc(r["candle_date_time_utc"]))
+            qs.append(q)
+            if start_q <= q < end_q:
+                out[q] = (float(r["opening_price"]), float(r["high_price"]), float(r["low_price"]), float(r["trade_price"]),
+                          float(r["candle_acc_trade_price"]))
+        oldest = min(qs)
+        if oldest <= start_q or len(rows) < 200 or oldest >= to:
+            break
+        to = oldest
+    return Bars(out)
+
+
+def load_panel(start_q, end_q, markets, fetch=None, log=None):
+    """{종목: Bars}. 한 종목이라도 못 받으면 예외 — 빠진 종목이 시장 지표를 바꾸는 것을 막는다."""
+    fetch = fetch or fetch_bars
+    with ThreadPoolExecutor(WORKERS) as pool:
+        panel = dict(zip(markets, pool.map(lambda m: fetch(m, start_q, end_q), markets)))
+    if log:
+        log("  받은 봉: " + ", ".join("%s %d" % (m[4:], len(panel[m])) for m in markets))
+    return panel
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+def detect(bars, move=MOVE, vol_x=VOL_X):
+    """한 종목의 사건 봉 → [(배열 위치, {사건: 15분 수익률}, 거래대금 배수)]. 직전 봉이 바로 앞 15분이 아니면 판단하지 않는다."""
+    ts, c, v, h, cv = bars.ts, bars.c, bars.v, bars.h, bars.cv
+    out, j = [], 0
+    for k in range(1, len(ts)):
+        q = ts[k]
+        while ts[j] < q - BARS_D:
+            j += 1
+        if ts[k - 1] != q - 1 or c[k - 1] <= 0 or k - j < VOL_MIN_BARS:
+            continue
+        avg = (cv[k] - cv[j]) / (k - j)
+        if avg <= 0 or v[k] < vol_x * avg:
+            continue
+        ret, events = c[k] / c[k - 1] - 1, {}
+        if ret >= move:
+            events["SURGE"] = ret
+        if ret <= -move:
+            events["CRASH"] = ret
+        if c[k] > max(h[j:k]):
+            events["BREAKOUT"] = ret
+        if events:
+            out.append((k, events, v[k] / avg))
+    return out
+
+
+def indicators(panel, market, k):
+    """배열 위치 k 의 봉이 끝난 시점에 알 수 있는 값만으로 만든 지표. 계산할 수 없는 항목은 넣지 않는다."""
+    b, btc, ind = panel[market], panel.get("KRW-BTC"), {}
+    q = b.ts[k]
+
+    def put(name, value):
+        if value is not None:
+            ind[name] = float(value)
+
+    put("bar_size", abs(b.c[k] / b.c[k - 1] - 1) if k and b.c[k - 1] > 0 else None)
+    put("ret_1d", b.ret(q, BARS_D))
+    i, j = b.window(q - BARS_D + 1, q)
+    if j - i >= VOL_MIN_BARS:
+        put("pos_1d_high", b.c[k] / max(b.h[i:j]) - 1)
+
+    def move(n):
+        i, j = b.window(q - n + 1, q)
+        vals = [abs(b.c[t] / b.c[t - 1] - 1) for t in range(max(i, 1), j) if b.ts[t - 1] == b.ts[t] - 1 and b.c[t - 1] > 0]
+        return mean(vals) if len(vals) >= 0.8 * n else None
+
+    short, long_ = move(BARS_D), move(7 * BARS_D)
+    if short is not None and long_:
+        put("compress", short / long_)
+    put("hour_kst", (dt.datetime.fromtimestamp((q + 1) * 60 * BAR_MIN, tz=UTC) + dt.timedelta(hours=9)).hour)
+    if btc is not None:
+        put("btc_ret_1h", btc.ret(q, BARS_H))
+        put("btc_ret_4h", btc.ret(q, 4 * BARS_H))
+        put("btc_ret_1d", btc.ret(q, BARS_D))
+        i, j = btc.window(q - 50 * BARS_D + 1, q)
+        now = btc.close(q)
+        if now is not None and j - i >= 45 * BARS_D:
+            avg = (btc.cc[j] - btc.cc[i]) / (j - i)
+            put("btc_dist_50d", now / avg - 1)
+            put("btc_above_50d", 1.0 if now > avg else 0.0)
+    day = [r for r in (panel[m].ret(q, BARS_D) for m in panel) if r is not None]
+    if len(day) >= max(2, len(panel) // 2):
+        put("up_ratio", sum(1 for r in day if r > 0) / float(len(day)))
+    hour = [r for r in (panel[m].ret(q, BARS_H) for m in panel if m != market) if r is not None]
+    if len(hour) >= max(1, (len(panel) - 1) // 2):
+        put("mkt_ret_1h", mean(hour))
+    return ind
+
+
+def build_trades(panel, start_q, end_q, move=MOVE, vol_x=VOL_X, cost=None, cost_other=COST_OTHER, only=None):
+    """사건 봉이 [start_q, end_q) 인 모든 모집단의 끝난 거래 → [{pop, event, hold, market, entry_q, exit_q, day, gross, net, ind}].
+    only=(사건, 보유 봉 수) 를 주면 그 모집단만. 한 종목·한 모집단에서 동시에 1건(앞 거래의 청산 봉까지 새 신호를 받지 않는다)."""
+    cost = COST if cost is None else cost
+    detected = {m: detect(panel[m], move, vol_x) for m in panel}
+    counts = {}
+    for m, found in detected.items():
+        for k, events, _ in found:
+            for name in events:
+                key = (name, panel[m].ts[k])
+                counts[key] = counts.get(key, 0) + 1
+    holds = (only[1],) if only else HOLDS
+    trades = []
+    for m in sorted(panel):
+        b, busy, c, n = panel[m], {}, cost.get(m, cost_other), len(panel[m])
+        for k, events, mult in detected[m]:
+            q = b.ts[k]
+            if not (start_q <= q < end_q) or k + 1 >= n or b.ts[k + 1] != q + 1:
+                continue
+            base = None
+            for name in sorted(events):
+                if only and name != only[0]:
+                    continue
+                for hold in holds:
+                    pop, x = "%s/%dh" % (name, hold // BARS_H), k + 1 + hold
+                    if q <= busy.get(pop, -1) or x >= n or b.ts[x] != q + 1 + hold:
+                        continue
+                    if base is None:
+                        base = indicators(panel, m, k)
+                        base["vol_mult"] = float(mult)
+                    ind = dict(base)
+                    ind["same_events_1h"] = float(sum(counts.get((name, q - d), 0) for d in range(BARS_H)) - 1)
+                    gross = b.o[x] / b.o[k + 1] - 1
+                    trades.append({"pop": pop, "event": name, "hold": hold, "market": m, "entry_q": q + 1, "exit_q": q + 1 + hold,
+                                   "day": q_day(q + 1), "gross": gross, "net": (1 + gross) * (1 - c) / (1 + c) - 1, "move": events[name],
+                                   "ind": ind})
+                    busy[pop] = q + hold
+    trades.sort(key=lambda t: (t["entry_q"], t["market"], t["pop"]))
+    return trades
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+def make_conditions(train):
+    """TRAIN 분위수로 조건 목록을 만든다 → [(이름, 지표, 연산, 문턱)]. 같은 (지표, 연산, 문턱)은 한 번만."""
+    conds, seen = [], set()
+    for name in sorted({k for t in train for k in t["ind"]}):
+        vals = sorted(t["ind"][name] for t in train if name in t["ind"])
+        if len(vals) < 0.8 * len(train) or vals[0] == vals[-1]:
+            continue
+        for op, quants in (("<=", QUANT_LOW), (">=", QUANT_HIGH)):
+            for p in quants:
+                thr = vals[min(len(vals) - 1, int(p * len(vals)))]
+                if (name, op, thr) not in seen:
+                    seen.add((name, op, thr))
+                    conds.append(("%s %s q%02d" % (name, op, round(100 * p)), name, op, thr))
+    return conds
+
+
+def holdout_checks(trades):
+    """HOLDOUT 여섯 기준 → dict(n, days, net, daymean, day_low, first, second, ex_top5, pass)."""
+    st = SS.cluster_stats(trades)
+    out = {"n": st["n"], "days": st["days"], "net": st["net"], "t": st["t"], "daymean": st["daymean"], "day_low": None, "first": None,
+           "second": None, "ex_top5": None}
+    if trades:
+        by_day = {}
+        for t in trades:
+            by_day.setdefault(t["day"], []).append(t["net"])
+        means = [mean(v) for v in by_day.values()]
+        if len(means) >= 2:
+            out["day_low"] = mean(means) - Z95 * stdev(means) / math.sqrt(len(means))
+        rows = sorted(trades, key=lambda t: (t["entry_q"], t["market"]))
+        half = len(rows) // 2
+        if half:
+            out["first"], out["second"] = mean(t["net"] for t in rows[:half]), mean(t["net"] for t in rows[half:])
+        best = set(sorted(by_day, key=lambda d: sum(by_day[d]), reverse=True)[:5])
+        rest = [x for d, v in by_day.items() if d not in best for x in v]
+        if rest:
+            out["ex_top5"] = mean(rest)
+    out["pass"] = bool(out["n"] >= HOLD_MIN_N and all(out[k] is not None and out[k] > 0
+                                                       for k in ("net", "day_low", "first", "second", "daymean", "ex_top5")))
+    return out
+
+
+def _pct(v):
+    return "n/a" if v is None else "%+.3f%%" % (100 * v)
+
+
+def _tt(v):
+    return "n/a" if v is None else "%+.2f" % v
+
+
+def _label(cond):
+    return "조건 없음" if cond is None else "%s %s %.4g" % (cond[1], cond[2], cond[3])
+
+
+def search(trades, cut_day, log=print):
+    """모집단마다 TRAIN 에서 선별하고 HOLDOUT 에서 여섯 기준을 본다 → (통과 목록, {scanned, selected, passed})."""
+    passed, counts = [], {"scanned": 0, "selected": 0, "passed": 0}
+    for pop in sorted({t["pop"] for t in trades}):
+        train = [t for t in trades if t["pop"] == pop and t["day"] < cut_day]
+        hold = [t for t in trades if t["pop"] == pop and t["day"] >= cut_day]
+        bt, bh = SS.cluster_stats(train), SS.cluster_stats(hold)
+        log("== %s | TRAIN n=%d days=%d net %s t %s | HOLDOUT n=%d net %s t %s" % (
+            pop, bt["n"], bt["days"], _pct(bt["net"]), _tt(bt["t"]), bh["n"], _pct(bh["net"]), _tt(bh["t"])))
+        options = [(None, bt)] + [(c, SS.cluster_stats([t for t in train if SS.passes(t, c)])) for c in make_conditions(train)]
+        counts["scanned"] += len(options)
+        chosen = [(c, st) for c, st in options
+                  if st["n"] >= TRAIN_MIN_N and st["net"] is not None and st["net"] > 0 and st["t"] is not None and st["t"] >= TRAIN_MIN_T]
+        counts["selected"] += len(chosen)
+        chosen.sort(key=lambda x: -x[1]["t"])
+        log("   훑은 규칙 %d개, TRAIN 선별 %d개" % (len(options), len(chosen)))
+        for rank, (cond, st) in enumerate(chosen):
+            hc = holdout_checks(hold if cond is None else [t for t in hold if SS.passes(t, cond)])
+            if rank < 5 or hc["pass"]:
+                log("   %-34s TRAIN n=%d net %s t %s | HOLDOUT n=%d net %s 하한 %s 전반 %s 후반 %s 상위5일 제외 %s => %s" % (
+                    _label(cond), st["n"], _pct(st["net"]), _tt(st["t"]), hc["n"], _pct(hc["net"]), _pct(hc["day_low"]), _pct(hc["first"]),
+                    _pct(hc["second"]), _pct(hc["ex_top5"]), "통과" if hc["pass"] else "탈락"))
+            if hc["pass"]:
+                counts["passed"] += 1
+                passed.append({"pop": pop, "event": pop.split("/")[0], "hold": train[0]["hold"] if train else hold[0]["hold"],
+                               "cond": list(cond) if cond else None,
+                               "train": {k: st[k] for k in ("n", "days", "net", "t")},
+                               "holdout": {k: hc[k] for k in ("n", "days", "net", "daymean", "day_low", "first", "second", "ex_top5")}})
+    return passed, counts
+
+
+def cand_key(c):
+    cond = c.get("cond")
+    return (c["event"], c["hold"], cond[1] if cond else None, cond[2] if cond else None)
+
+
+def register(registry, passed, run_day, universe):
+    """통과한 것 중 사건마다 1개(일 단위 하한이 가장 높은 것), 달에 MAX_NEW 개까지 → 새로 등록할 후보 목록."""
+    active = {cand_key(c) for c in registry if c.get("status") == "ACTIVE"}
+    taken = {c["id"] for c in registry}
+    new, used_events = [], set()
+    for f in sorted(passed, key=lambda f: -f["holdout"]["day_low"]):
+        spec = {"engine": ENGINE, "registered": run_day, "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
+                "move": MOVE, "vol_x": VOL_X, "cost": dict(COST), "cost_other": COST_OTHER, "train": f["train"], "holdout": f["holdout"],
+                "status": "ACTIVE"}
+        if f["event"] in used_events or cand_key(spec) in active or len(new) >= MAX_NEW:
+            continue
+        k = 1
+        while "D-%s-%02d" % (run_day[:7].replace("-", ""), k) in taken:
+            k += 1
+        spec["id"] = "D-%s-%02d" % (run_day[:7].replace("-", ""), k)
+        taken.add(spec["id"])
+        used_events.add(f["event"])
+        new.append(spec)
+    return new
+
+
+def describe(c):
+    move, mult = "%.0f%%" % (100 * c["move"]), "%.0f배" % c["vol_x"]
+    event = {"SURGE": "15분 +%s 이상 급등(거래대금 %s)" % (move, mult), "CRASH": "15분 −%s 이하 급락(거래대금 %s)" % (move, mult),
+             "BREAKOUT": "1일 고가 돌파(거래대금 %s)" % mult}.get(c["event"], c["event"])
+    return "%s → %d시간 보유, %s" % (event, c["hold"] // BARS_H, _label(c.get("cond")))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+def candidate_trades(panel, cand, end_q):
+    """등록된 후보의, 등록일 00:00 UTC 이후 사건에서 나온 끝난 거래. 등록 때 고정한 정의(문턱·비용)만 쓴다."""
+    if cand.get("engine") != ENGINE:
+        raise RuntimeError("후보 %s 는 틀 %s 로 등록됐고 지금 코드는 틀 %s 다 — 채점하지 않는다" % (cand.get("id"), cand.get("engine"), ENGINE))
+    rows = build_trades(panel, day_q(cand["registered"]), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
+                        only=(cand["event"], cand["hold"]))
+    cond = cand.get("cond")
+    if cond:
+        rows = [t for t in rows if SS.passes(t, cond)]
+    return [{k: t[k] for k in ("market", "entry_q", "exit_q", "day", "gross", "net", "move")} for t in rows]
+
+
+def merge_trades(old_rows, new_rows):
+    """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시)."""
+    by_key = {(r["market"], r["entry_q"]): r for r in old_rows}
+    added, mismatch = 0, []
+    for r in new_rows:
+        key = (r["market"], r["entry_q"])
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = r
+            added += 1
+        elif abs(prev["net"] - r["net"]) > 1e-9:
+            mismatch.append("%s %s" % (r["market"][4:], r["day"]))
+    return sorted(by_key.values(), key=lambda t: (t["entry_q"], t["market"])), added, mismatch
+
+
+def decide_once(entry, cand, run_day):
+    """30건·10일이 처음 채워지는 거래까지로 한 번만 판정. 180일이 지나도록 못 채우면 EXPIRED. 이미 판정이 있으면 그대로."""
+    if entry.get("decision"):
+        return entry
+    days = set()
+    for k, t in enumerate(entry["rows"], 1):
+        days.add(t["day"])
+        if k >= FWD_MIN_N and len(days) >= FWD_MIN_DAYS:
+            st = SS.cluster_stats(entry["rows"][:k])
+            entry["decision"] = {"verdict": "PASS" if st["net"] > 0 and st["daymean"] > 0 else "FAIL", "decided_on": run_day, "trades": k,
+                                 "stats": {x: st[x] for x in ("n", "days", "net", "t", "daymean")}}
+            return entry
+    age = (dt.date.fromisoformat(run_day) - dt.date.fromisoformat(cand["registered"])).days
+    if age > FWD_EXPIRE_DAYS:
+        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(entry["rows"]), "stats": None}
+    return entry
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+def run(start_day, end_day, cut_day, markets, fetch=None, log=print):
+    """탐색 한 번 → (통과 목록, 수치, 보고 줄들, 거래 목록)."""
+    lines = []
+
+    def out(s):
+        lines.append(s)
+        log(s)
+
+    start_q, end_q = day_q(start_day), day_q(end_day)
+    out("DISCOVER %s | 틀 %s%s | %d종목 15분봉 | %s ~ %s | TRAIN < %s <= HOLDOUT" % (
+        end_day, ENGINE, "" if FRAME_APPROVED else " (등록 잠김)", len(markets), start_day, q_day(end_q - 1), cut_day))
+    panel = load_panel(start_q - WARMUP_Q, end_q, markets, fetch, log=log)
+    trades = build_trades(panel, start_q, end_q)
+    out("거래 %d건" % len(trades))
+    passed, counts = search(trades, cut_day, out)
+    out("훑은 규칙 %d개 → TRAIN 선별 %d개 → HOLDOUT 통과 %d개" % (counts["scanned"], counts["selected"], counts["passed"]))
+    return passed, counts, lines, trades
+
+
+def repro_lines(trades, cut_day):
+    """고문 수치와 나란히: 조건 없는 1시간 보유의 평균 순수익 (앞 구간 / 뒤 구간)."""
+    lines = ["재현 대조 (조건 없음, 1시간 보유, 평균 순수익) — 앞 구간 < %s <= 뒤 구간" % cut_day]
+    for event in ("SURGE", "BREAKOUT", "CRASH"):
+        rows = [t for t in trades if t["event"] == event and t["hold"] == BARS_H]
+        a = [t["net"] for t in rows if t["day"] < cut_day]
+        b = [t["net"] for t in rows if t["day"] >= cut_day]
+        ref = ADVISOR_REF[event]
+        lines.append("  %-8s 여기 %s (%d건) / %s (%d건)   고문 %s / %s" % (
+            event, _pct(mean(a)) if a else "n/a", len(a), _pct(mean(b)) if b else "n/a", len(b), _pct(ref[0]), _pct(ref[1])))
+    return lines
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(OUT_DIR))
+    ap.add_argument("--register", action="store_true")
+    ap.add_argument("--repro", action="store_true", help="고문 설정(2023–24 / 2025 이후)으로 돌려 고문 수치와 대조")
+    ap.add_argument("--days", type=int, default=HISTORY_DAYS)
+    ap.add_argument("--markets", help="쉼표로 구분. 기본은 UNIVERSE(고문의 고정 20종목)")
+    ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (기본은 오늘)")
+    a = ap.parse_args(argv)
+    today = a.today or dt.datetime.now(UTC).date().isoformat()
+    markets = tuple(a.markets.split(",")) if a.markets else UNIVERSE
+    if not markets:
+        print("대상 종목이 아직 정해지지 않았습니다(UNIVERSE 비어 있음). --markets 로 주거나 고문 목록을 넣은 뒤 실행하세요.")
+        return 0
+    custom = bool(a.markets) or a.days != HISTORY_DAYS or a.repro
+    if a.repro:
+        start_day, cut_day = REPRO_START, REPRO_CUT
+    else:
+        start_day = (dt.date.fromisoformat(today) - dt.timedelta(days=a.days)).isoformat()
+        cut_day = (dt.date.fromisoformat(start_day) + dt.timedelta(days=int(TRAIN_FRAC * a.days))).isoformat()
+    passed, counts, lines, trades = run(start_day, today, cut_day, markets, log=lambda s: print(s, flush=True))
+    tail = repro_lines(trades, cut_day) if a.repro else []
+    out = Path(a.out)
+    path = out / "registry.json"
+    registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    new = register(registry, passed, today, markets)
+    for c in new:
+        tail.append("후보 %s: %s (HOLDOUT 일 단위 하한 %s)" % (c["id"], describe(c), _pct(c["holdout"]["day_low"])))
+    if not new:
+        tail.append("새로 등록할 후보 없음")
+    wrote = []
+    if a.register and not custom:
+        out.mkdir(parents=True, exist_ok=True)
+        if new and FRAME_APPROVED:
+            path.write_text(json.dumps(registry + new, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+            wrote = [c["id"] for c in new]
+            tail.append("등록함: %s" % ", ".join(wrote))
+        elif new:
+            tail.append("등록하지 않음: 틀이 아직 잠겨 있음(FRAME_APPROVED=False)")
+        log_path = out / "scan_log.json"
+        history = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
+        history.append(dict(counts, run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
+                            locked=not FRAME_APPROVED))
+        log_path.write_text(json.dumps(history, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        (out / "DISCOVERY.md").write_text("# 후보 탐색 기록\n\n자동으로 만들어지는 파일입니다. 마지막 실행 %s (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.\n\n```\n%s\n```\n" % (
+            today, "\n".join(lines + tail)), encoding="utf-8")
+    elif a.register and new:
+        tail.append("등록하지 않음: 점검용 범위로 돌린 결과")
+    print("\n".join(tail))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
