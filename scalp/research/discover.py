@@ -55,6 +55,7 @@ import importlib.util
 import json
 import sys
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import mean, median
 
@@ -84,6 +85,7 @@ HOLD_MIN_N, HOLD_MIN_DAYS, HOLD_MIN_T = 40, 15, 2.0
 MAX_NEW = 3
 FWD_MIN_N, FWD_MIN_DAYS, FWD_EXPIRE_DAYS = 30, 10, 180
 WARMUP_H = 55 * 24                  # 지표 계산에 필요한 앞쪽 자료 (50일 평균)
+WORKERS = 6                         # 동시에 받는 종목 수. 전체 호출 간격은 auto_monitor.http_get 이 초당 8회 아래로 묶는다
 OUT_DIR = HERE / "forward"
 
 
@@ -138,7 +140,9 @@ def pick_universe(today, n=UNIVERSE_N, list_markets=None, daily_value=None, list
         return bool(get("%s/v1/candles/days?market=%s&count=1&to=%s" % (AM.UPBIT, m, urllib.parse.quote(old_day + "T00:00:00Z"))))
 
     daily_value, listed_before = daily_value or default_value, listed_before or default_listed
-    scored = sorted(((daily_value(m), m) for m in list_markets() if m not in STABLE), reverse=True)
+    names = [m for m in list_markets() if m not in STABLE]
+    with ThreadPoolExecutor(WORKERS) as pool:
+        scored = sorted(zip(pool.map(daily_value, names), names), reverse=True)
     top = []
     for _, m in scored:                                              # 거래대금 순으로 내려가며 상장 기간을 확인한다
         if len(top) >= n:
@@ -153,11 +157,10 @@ def pick_universe(today, n=UNIVERSE_N, list_markets=None, daily_value=None, list
 def load_panel(start_h, end_h, markets, fetch=None, log=None):
     """{종목: {시: 봉}}. 한 종목이라도 못 받으면 예외 — 빠진 종목이 시장 지표를 바꾸는 것을 막는다."""
     fetch = fetch or fetch_hours
-    panel = {}
-    for m in markets:
-        panel[m] = fetch(m, start_h, end_h)
-        if log:
-            log("  %s %d bars" % (m, len(panel[m])))
+    with ThreadPoolExecutor(WORKERS) as pool:                       # 하나라도 실패하면 여기서 예외가 올라온다
+        panel = dict(zip(markets, pool.map(lambda m: fetch(m, start_h, end_h), markets)))
+    if log:
+        log("  받은 봉: " + ", ".join("%s %d" % (m[4:], len(panel[m])) for m in markets))
     return panel
 
 
