@@ -88,6 +88,12 @@ class DeployPaths(unittest.TestCase):
         self.assertIn("git add scalp/research/forward", wf)
         self.assertFalse(triggers(["scalp/research/forward/ledger.json", "scalp/research/forward/STATUS.md"], self.patterns))
 
+    def test_the_monthly_search_commit_never_reaches_the_server(self):
+        wf = (ROOT / ".github" / "workflows" / "discover.yml").read_text(encoding="utf-8")
+        self.assertIn("git add scalp/research/forward", wf)
+        self.assertFalse(triggers(["scalp/research/forward/registry.json", "scalp/research/forward/DISCOVERY.md"], self.patterns))
+        self.assertFalse(included("scalp/research/discover.py", self.patterns))
+
     def test_every_research_file_the_executor_loads_is_deployed(self):
         """H3 실행기가 scalp/research 에서 불러 쓰는 파일이 늘면 deploy.yml 에도 넣어야 한다."""
         src = (ROOT / "trend" / "h3_executor.py").read_text(encoding="utf-8")

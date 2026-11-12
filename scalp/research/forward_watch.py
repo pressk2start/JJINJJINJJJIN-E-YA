@@ -44,6 +44,9 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              (참고: 원본 규칙이면 2017–20 1,198건 +0.260%, 2021–26 1,139건 +0.359%. 이 수치는 더 이상 기준이 아니다.)
   BTC_surge  BTC 주간 급등 관찰 (auto_monitor.surge_weeks). 월요일 00:00 UTC 에 직전 7일 수익률 ≥ +7.45% 인 주와 전체 주의
              BTC·ETH 주간 수익률을 기록한다. 판정 없음.
+  자동 등록 후보  discover.py 가 달마다 '사건 × 조건 하나 × 보유 시간' 틀에서 찾아 forward/registry.json 에 등록한 것.
+             등록 때 고정한 정의로 등록일 이후 거래만 채점한다. 판정은 30건·10일이 처음 채워질 때 한 번, 180일 안에 못 채우면 만료.
+             추적 중인 후보가 없으면 시세도 받지 않는다. 틀과 한계는 discover.py 머리말에 있다.
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
 
 안전장치
@@ -83,6 +86,7 @@ def _load(name):
 DF = _load("daily_factor_test")
 TP = _load("trend_paper")
 AM = _load("auto_monitor")
+DISC = _load("discover")
 
 FETCH_DAYS = 200
 H2_FIRST_DECISION = "2026-10-24"     # forward 첫 결정일 (매수는 다음 날 시가). 이후 3일 간격
@@ -260,7 +264,7 @@ def surge_rows(today, fetch_days=None):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None):
+def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None, registry=None, panel_loader=None):
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수."""
     log = log or (lambda s: None)
     warnings = []
@@ -303,6 +307,25 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         log("SURGE: %d weeks in ledger" % len(sg["rows"]))
     except Exception as e:
         warnings.append("BTC 주간 급등: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
+    active = [c for c in (registry or []) if c.get("status") == "ACTIVE"]
+    cands = ledger.setdefault("candidates", {})
+    open_now = [c for c in active if not (cands.get(c["id"]) or {}).get("decision")]
+    if open_now:                                                    # 추적 중인 후보가 있을 때만 60분봉을 받는다
+        try:
+            end_h = DISC.day_hour(today)
+            start_h = min(DISC.day_hour(c["registered"]) for c in open_now) - DISC.WARMUP_H
+            markets = tuple(sorted({m for c in open_now for m in c["universe"]}))
+            panel = (panel_loader or DISC.load_panel)(start_h, end_h, markets)
+            for c in open_now:
+                entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
+                rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_h))
+                entry["rows"], entry["updated"] = rows, today
+                if mismatch:
+                    warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(mismatch)))
+                DISC.decide_once(entry, c, today)
+                log("%s: %d trades in ledger (+%d)" % (c["id"], len(rows), added))
+        except Exception as e:
+            warnings.append("자동 등록 후보: 이번 실행에서 갱신하지 못함 — %s" % e)
     ledger["last_run"] = today
     ledger["warnings"] = warnings
     return ledger, warnings
@@ -401,6 +424,21 @@ def render(ledger):
                 "| 급등 뒤 | %d | %s | %s |" % (len(hit), avg(hit, "KRW-BTC"), avg(hit, "KRW-ETH")), ""]
     else:
         out += ["아직 끝난 주가 없습니다 (첫 주는 2026-11-16 시작).", ""]
+    out += ["## 자동 등록 후보 — 달마다 탐색해 넘은 것만 등록", ""]
+    cands = ledger.get("candidates") or {}
+    if cands:
+        out += ["| 번호 | 규칙 | 등록 | 진행 | 거래당 평균 | 판정 |", "|---|---|---|---|---|---|"]
+        for cid in sorted(cands):
+            e = cands[cid]
+            rows, dec = e.get("rows", []), e.get("decision")
+            st = DISC.SS.cluster_stats(rows)
+            verdict = {"PASS": "통과", "FAIL": "탈락", "EXPIRED": "만료"}[dec["verdict"]] if dec else "진행 중"
+            out.append("| %s | %s | %s | %d / %d건, %d / %d일 | %s | %s |" % (
+                cid, e.get("rule", "-"), e.get("registered", "-"), st["n"], DISC.FWD_MIN_N, st["days"], DISC.FWD_MIN_DAYS,
+                "-" if st["net"] is None else _pct(st["net"]), verdict))
+        out += ["", "통과는 '후보' 라는 뜻입니다. 봉 기준이고 실제 호가 체결은 확인하지 않은 값입니다.", ""]
+    else:
+        out += ["아직 등록된 후보가 없습니다. 탐색 결과는 DISCOVERY.md 에 남습니다.", ""]
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
     return "\n".join(out)
@@ -434,6 +472,11 @@ def summary(ledger):
             lines.append("급락 반등: %d/%d건 %d/%d일, 거래당 %s (판정 전)" % (st["n"], AM.CR_MIN_N, st["days"], AM.CR_MIN_DAYS, _pct(st["mean"])))
         else:
             lines.append("급락 반등: 발생 없음")
+    cands = ledger.get("candidates") or {}
+    if cands:
+        done = [c for c, e in cands.items() if e.get("decision")]
+        passed = [c for c in done if cands[c]["decision"]["verdict"] == "PASS"]
+        lines.append("자동 등록 후보: %d개 추적, 판정 %d개%s" % (len(cands), len(done), " (통과: %s)" % ", ".join(sorted(passed)) if passed else ""))
     for w in ledger.get("warnings", []):
         lines.append("경고: " + w)
     return "\n".join(lines)
@@ -453,7 +496,9 @@ def main(argv=None):
         print(summary(ledger))
         return 0
     today = a.today or dt.datetime.now(dt.timezone.utc).date().isoformat()
-    ledger, warnings = update(ledger, today, log=lambda s: print(s, flush=True))
+    reg_path = out / "registry.json"
+    registry = json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.exists() else []
+    ledger, warnings = update(ledger, today, log=lambda s: print(s, flush=True), registry=registry)
     text = render(ledger)
     if not a.dry_run:
         out.mkdir(parents=True, exist_ok=True)
