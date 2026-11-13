@@ -30,6 +30,11 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
      그걸 넘으면(호가 고장) 보류하고 🚨 로 알린다. 청산 실패는 항상 🚨.
   8) 한 종목의 실패가 메모리에 남긴 변경은 버리고 디스크 상태로 되돌린다. 체결 반영은 저장을 마친 뒤에야 장부(jsonl)에 쓰고,
      장부 쓰기 실패는 거래를 반복시키지 않는다.
+  9) 설정 오류: 설정값이 틀리면(예: H3_CAPITAL_KRW 에 숫자가 아닌 글자) 아무것도 하지 않고 한 줄로 끝내며 텔레그램으로 알린다.
+     틀린 값 자체는 찍지 않는다(잘못 붙여 넣은 비밀값이 새지 않게) — 변수 이름과 글자 수만 알린다.
+  10) 복구 알림: 지난 실행이 주문 도중 끊겨 이번 실행이 그 체결을 반영했으면 텔레그램 줄에 그 사실을 적는다.
+  11) 매도 실패 뒤: 그날은 닫히지 않는다. 타이머의 두 번째 실행(00:11 UTC)과 다음 날 실행이 다시 판다(매도는 늦어도 실행한다).
+      그 사이에는 포지션이 열려 있고, 실패할 때마다 🚨 로 알린다.
   ※ 단타 봇의 LIVE_ENTRY_DISABLED=1 은 이 실행기와 무관하다. 이 실행기의 실주문은 H3_MODE 로만 켜고 끈다.
 
 환경변수
@@ -130,24 +135,43 @@ def load_env_file(path, environ=os.environ):
         pass
 
 
+def number_setting(environ, key, default=None):
+    """숫자 설정값 하나 → float. 비어 있으면 default. 숫자가 아니면 H3Error.
+    틀린 값은 찍지 않는다 — 잘못 붙여 넣은 비밀값이 로그나 텔레그램으로 새지 않게 글자 수만 알린다."""
+    raw = (environ.get(key) or "").strip().replace(",", "")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value):
+        raise H3Error("%s must be a number (got %d characters that are not a number)" % (key, len(raw)))
+    return value
+
+
+def telegram_settings(environ):
+    """→ (토큰, 채팅 번호 목록). 설정이 틀려 Config 를 만들지 못했을 때도 알림은 보낼 수 있게 따로 둔다."""
+    token = environ.get("TELEGRAM_TOKEN") or environ.get("TG_TOKEN") or ""
+    chats = environ.get("TG_CHATS") or environ.get("TELEGRAM_CHAT_ID") or environ.get("TG_CHAT") or ""
+    return token, [c.strip() for c in chats.split(",") if c.strip()]
+
+
 class Config(object):
     def __init__(self, environ=os.environ):
+        self.tg_token, self.tg_chats = telegram_settings(environ)
         self.mode = (environ.get("H3_MODE") or "SHADOW").strip().upper()
         if self.mode not in ("SHADOW", "LIVE"):
-            raise H3Error("H3_MODE must be SHADOW or LIVE, got %r" % self.mode)
-        raw = environ.get("H3_CAPITAL_KRW", "").strip().replace(",", "")
-        self.capital = float(raw) if raw else (DEFAULT_SHADOW_CAPITAL if self.mode == "SHADOW" else 0.0)
+            raise H3Error("H3_MODE must be SHADOW or LIVE (got %d characters)" % len(self.mode))
+        self.capital = number_setting(environ, "H3_CAPITAL_KRW", DEFAULT_SHADOW_CAPITAL if self.mode == "SHADOW" else 0.0)
         self.state_dir = Path(environ.get("H3_STATE_DIR") or (Path.home() / "h3_state"))
         self.bot_marker = Path(environ.get("H3_BOT_MARKER") or "/home/ubuntu/bot/data/h3_reserved.json")
         self.access = environ.get("UPBIT_ACCESS_KEY", "")
         self.secret = environ.get("UPBIT_SECRET_KEY", "")
-        self.tg_token = environ.get("TELEGRAM_TOKEN") or environ.get("TG_TOKEN") or ""
-        chats = environ.get("TG_CHATS") or environ.get("TELEGRAM_CHAT_ID") or environ.get("TG_CHAT") or ""
-        self.tg_chats = [c.strip() for c in chats.split(",") if c.strip()]
-        self.max_late_min = float(environ.get("H3_MAX_LATE_MIN") or 30)          # 이보다 늦은 실행의 매수는 보류
-        self.max_buy_slip_bp = float(environ.get("H3_MAX_BUY_SLIP_BP") or 30)    # 예상 체결가가 중간가보다 이만큼 넘게 불리하면 매수 거부
-        self.max_sell_slip_bp = float(environ.get("H3_MAX_SELL_SLIP_BP") or 150)  # 매도는 넉넉히: 이걸 넘으면 호가가 고장난 것
-        self.max_gap_pct = float(environ.get("H3_MAX_GAP_PCT") or 20)            # 현재가가 어제 종가에서 이만큼 벗어나면 매수 거부
+        self.max_late_min = number_setting(environ, "H3_MAX_LATE_MIN", 30.0)          # 이보다 늦은 실행의 매수는 보류
+        self.max_buy_slip_bp = number_setting(environ, "H3_MAX_BUY_SLIP_BP", 30.0)    # 예상 체결가가 중간가보다 이만큼 넘게 불리하면 매수 거부
+        self.max_sell_slip_bp = number_setting(environ, "H3_MAX_SELL_SLIP_BP", 150.0)  # 매도는 넉넉히: 이걸 넘으면 호가가 고장난 것
+        self.max_gap_pct = number_setting(environ, "H3_MAX_GAP_PCT", 20.0)            # 현재가가 어제 종가에서 이만큼 벗어나면 매수 거부
         if self.mode == "LIVE":
             if not (self.capital > 0 and math.isfinite(self.capital)):
                 raise H3Error("LIVE needs H3_CAPITAL_KRW > 0")
@@ -449,24 +473,28 @@ class Executor(object):
     def run_market(self, state, market, day, late_min):
         sleeve = state["sleeves"][market]
         pending = sleeve.get("pending")
+        recovered = None
         if pending and self.cfg.mode == "LIVE":                 # 지난 실행이 주문 도중 끊겼다 → 먼저 정리
-            fill = None
+            fill, side_ko = None, "매수" if pending["side"] == "bid" else "매도"
             if self.ex.order(pending["identifier"]) is not None:
                 try:
                     fill = self.live_fill(market, pending["side"], sleeve, pending)
                     fill["writeoff"] = pending.get("writeoff")
                 except NoFill:
                     bump_attempt(sleeve, pending["day"])        # 체결 0 으로 끝난 주문 → 다음 주문은 새 identifier
+                    self.alerts.append("%s: 중단됐던 %s 주문(%s)이 체결 없이 끝났음 — 다시 판단함" % (market[4:], side_ko, pending["day"]))
             if fill is not None:
                 self.apply_fill(sleeve, pending["side"], fill)
                 sleeve["last_day"] = pending["day"]
             sleeve["pending"] = None
             save_state(self.cfg, state)                         # 체결 반영과 pending 해제를 한 번에 저장한 뒤에야 장부를 쓴다
             if fill is not None:
-                self.safe_record(state, market, pending["day"], "BUY" if pending["side"] == "bid" else "SELL", fill,
-                                 pending.get("signal"), None, late_min, note="reconciled after restart")
-        if sleeve.get("last_day") == day:
-            return None                                         # 오늘 이미 처리
+                recovered = self.safe_record(state, market, pending["day"], "BUY" if pending["side"] == "bid" else "SELL", fill,
+                                             pending.get("signal"), None, late_min, note="reconciled after restart")
+                self.alerts.append("%s: 중단됐던 실행의 %s 체결을 반영함 (%s, %.8f개 @ %s)" % (
+                    market[4:], side_ko, pending["day"], fill["volume"], format(fill["avg"], ",.0f")))
+        if sleeve.get("last_day") == day:                       # 오늘 이미 처리. 방금 반영한 체결이 오늘 것이면 요약 줄에 싣는다
+            return recovered if recovered and recovered.get("day") == day else None
         sig, open_proxy = self.decide(market, day)
         mark = sig["close"]
         holding = sleeve["coin"] * mark >= MIN_ORDER_KRW
@@ -665,11 +693,20 @@ def smoke_test(cfg, exchange, bot_pids=None, now=None, sleep=time.sleep, market=
     except NoFill:
         cfg.smoke_path.unlink()                                 # 체결이 없었으니 남은 코인도 없다
         raise H3Error("smoke test: the buy order finished with no fill — nothing was bought")
-    volume = float(fmt_volume(min(buy["volume"], exchange.balances().get(currency, 0.0))))
-    if volume <= 0:
-        raise H3Error("smoke test: bought %.8f %s but the account has none — check the account, then delete %s" % (
-            buy["volume"], currency, cfg.smoke_path))
-    sell = runner.live_fill(market, "ask", None, {"identifier": rec["sell_id"], "volume": volume})
+    if recovered and exchange.order(rec["sell_id"]) is not None:
+        # 지난 시도가 매도 주문까지 냈다 → 잔고를 보지 않고 그 주문의 체결만 확인한다.
+        # (잔고부터 보면, 이미 다 팔려 잔고가 0 일 때 '산 것이 계좌에 없다' 는 틀린 오류로 끝나 사람이 파일을 지워야 했다.)
+        try:
+            sell = runner.live_fill(market, "ask", None, {"identifier": rec["sell_id"]})
+        except NoFill:
+            raise H3Error("smoke test: the earlier sell order finished with no fill — sell %.8f %s in the app, then delete %s" % (
+                buy["volume"], currency, cfg.smoke_path))
+    else:
+        volume = float(fmt_volume(min(buy["volume"], exchange.balances().get(currency, 0.0))))
+        if volume <= 0:
+            raise H3Error("smoke test: bought %.8f %s but the account has none — check the account, then delete %s" % (
+                buy["volume"], currency, cfg.smoke_path))
+        sell = runner.live_fill(market, "ask", None, {"identifier": rec["sell_id"], "volume": volume})
     left = max(0.0, buy["volume"] - sell["volume"])
     if left * sell["avg"] > SMOKE_DUST_KRW:
         raise H3Error("smoke test: %.8f %s (about %.0f KRW) is still unsold — sell it in the app, then delete %s" % (
@@ -700,18 +737,22 @@ def summary_line(cfg, state, day, rows, problems):
     return " | ".join(parts)
 
 
-def telegram_sender(cfg):
+def telegram_to(token, chats):
     def send(text):
-        if not (cfg.tg_token and cfg.tg_chats):
+        if not (token and chats):
             return
-        for chat in cfg.tg_chats:
+        for chat in chats:
             try:
                 body = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
                 urllib.request.urlopen(urllib.request.Request(
-                    "https://api.telegram.org/bot%s/sendMessage" % cfg.tg_token, data=body), timeout=10).read()
-            except Exception as exc:                            # 알림 실패가 실행을 막지 않는다
-                print("[h3] telegram failed: %s" % exc)
+                    "https://api.telegram.org/bot%s/sendMessage" % token, data=body), timeout=10).read()
+            except Exception as exc:                            # 알림 실패가 실행을 막지 않는다. 주소(토큰 포함)는 찍지 않는다
+                print("[h3] telegram failed: %s" % type(exc).__name__)
     return send
+
+
+def telegram_sender(cfg):
+    return telegram_to(cfg.tg_token, cfg.tg_chats)
 
 
 def status_text(cfg):
@@ -736,8 +777,10 @@ def main(argv=None):
     load_env_file(os.environ.get("H3_ENV_FILE") or "/home/ubuntu/bot/.env")
     try:
         cfg = Config()
-    except H3Error as exc:
+    except Exception as exc:                                    # 설정이 틀리면 아무것도 하지 않고 한 줄로 끝낸다
         print("[h3] config error: %s" % exc)
+        if not (a.status or a.dry_run):                         # 타이머 실행이 조용히 죽지 않게 알린다
+            telegram_to(*telegram_settings(os.environ))("H3 설정 오류 — 실행하지 않음: %s" % exc)
         return 2
     if a.status:
         print(status_text(cfg))
