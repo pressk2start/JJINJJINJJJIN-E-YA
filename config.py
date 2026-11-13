@@ -314,6 +314,7 @@ DEBUG_NEAR_MISS = True
 SILENT_MIDDLE_ALERTS = True        # 포지션 중간 상태(트레일 무장·스킵 사유·추매 등) → 로그만. False 면 텔레그램 발송
 TG_PIPELINE_REPORT_SEC = 3600      # compact 파이프라인/LIVE 요약 발송 간격 (초). 0 = 발송 안 함. 기존 600
 TG_RESEARCH_DETAIL = False         # 📋 RESEARCH DETAIL (수백 줄 shadow 노선 상세) 발송 여부. 파일엔 항상 기록
+TG_REPORT_BRIEF = True             # 요약을 3줄(상태·보유·지연)만 발송. False = 예전의 긴 요약. 상세는 어느 쪽이든 로그에 남는다
 TG_HEARTBEAT_SEC = 0               # 💓 생존 확인 발송 간격 (초). 0 = 발송 안 함 (systemd + 오류 알림으로 대체). 기존 600
 ALERT_TTL = 1800
 _SPIKE_WAVE_WINDOW = 1800

@@ -3626,6 +3626,23 @@ def _pipeline_inc(key, n=1, value=None, threshold=None, direction=None):
     return not _eval_all
 
 
+def _brief_report(live_cnt, live_wins, live_pnl, limit_str, guard_warn, open_markets, raw, gate_pass, sent, entry_disabled,
+                  scan_p95_s, slow_limit_s, cache_rate, suspend_block, deploy_hash, deploy_ts):
+    """텔레그램용 3줄 요약: 상태 · 보유 · 지연 (config.TG_REPORT_BRIEF, 고문 결정 2026-11-13).
+    긴 요약에 있던 A·A2 코호트 등은 이미 종료된 실험의 수치라 판단에 쓰이지 않도록 텔레그램에서 뺀다. 상세는 로그에만 남는다.
+    인자만 쓰는 순수 함수다 (전역을 읽지 않는다) — 테스트가 이 함수만 떼어 돌린다."""
+    wr = f" wr{live_wins / live_cnt * 100:.0f}%" if live_cnt > 0 else ""
+    state = f"{'🟢' if live_cnt > 0 else '⚪'} LIVE {live_cnt}전{live_wins}승{wr} PnL{live_pnl * 100:+.2f}%/{limit_str}{guard_warn}"
+    flow = f"누적 신호 {raw} → 통과 {gate_pass} → 주문 {sent}" + (" (진입 차단 중)" if entry_disabled else "")
+    names = ", ".join(m.replace("KRW-", "") for m in open_markets[:5]) + (" …" if len(open_markets) > 5 else "")
+    held = f"보유 {len(open_markets)}개" + (f" ({names})" if open_markets else "")
+    lag = f"지연 p95 {scan_p95_s:.1f}s{'⚠' if scan_p95_s > slow_limit_s else ''}" if scan_p95_s > 0 else "지연 측정 전"
+    lag += f" · cache {cache_rate:.0f}%"
+    if suspend_block > 0:
+        lag += f" · ⚠차단 {suspend_block}"
+    return "\n".join([f"{state} | {flow}", held, f"{lag} | {deploy_hash} 배포 {deploy_ts}"])
+
+
 def _pipeline_report(force=False):
     """10분마다 파이프라인 카운터 리포트 전송 (확장판: delta, 전환율, 값분포, 니어미스, Top-N)"""
     global _PIPELINE_LAST_REPORT_TS, _PIPELINE_PREV_SNAPSHOT, _PIPELINE_PREV_SNAPSHOT_TS
@@ -3939,10 +3956,19 @@ def _pipeline_report(force=False):
         if _pre_rows:
             lines.append(f"precut: {' '.join(_pre_rows)}")
 
-    # ━━━━ compact 메시지 전송 (항상) ━━━━
+    # ━━━━ compact 메시지: 로그에는 항상 전체를, 텔레그램에는 3줄 요약을 (config.TG_REPORT_BRIEF) ━━━━
     msg = "\n".join(lines)
     print(msg)
-    tg_send(msg)
+    _tg_msg = msg
+    if globals().get("TG_REPORT_BRIEF", True):
+        try:
+            _tg_msg = _brief_report(_live_cnt, _live_wins, _live_pnl, _limit_str, _guard_warn, _open_pos, _raw, _gp, _succ,
+                                    bool(globals().get("LIVE_ENTRY_DISABLED", False)), _scan_p95_s, REPORT_DEBUG_SCAN_P95_S,
+                                    _cache_rate, c.get('suspend_block', 0), _DEPLOY_GIT_HASH, _DEPLOY_TS_STR)
+        except Exception as _brief_err:                         # 요약을 만들지 못하면 예전처럼 전체를 보낸다
+            print(f"[REPORT] brief summary failed, sending the full report: {_brief_err}")
+            _tg_msg = msg
+    tg_send(_tg_msg)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # RESEARCH 리포트 — 별도 메시지 (데이터 있을 때만)
