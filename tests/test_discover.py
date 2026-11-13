@@ -415,6 +415,19 @@ class Forward(unittest.TestCase):
         self.assertEqual(D.decide_once(copy.deepcopy(thin), self.cand("2026-01-01", expire_days=730), "2027-06-01")["decision"], None)
         self.assertEqual(D.decide_once(thin, cand, "2027-01-02")["decision"]["verdict"], "EXPIRED")   # 표본 부족 종료 (탈락이 아니다)
 
+    def test_trades_after_the_deadline_cannot_fill_the_sample(self):
+        """제3세션 지적(2026-11-13): 기한 전 27건·9일, 기한 뒤 3건이 더 들어와 30건·10일이 돼도 PASS 가 아니라 EXPIRED 여야 한다."""
+        cand = self.cand(D.q_day(Q0), expire_days=20)                                              # 기한 = 시작 + 20일
+        early = [self.row(k, 0.01) for k in range(27)]                                             # 하루 3건 × 9일 (시작 0~8일째)
+        late = [self.row(90 + k, 0.01) for k in range(3)]                                          # 30일째 — 기한 밖
+        waiting = D.decide_once({"rows": list(early), "decision": None}, cand, D.q_day(Q0 + 20 * D.BARS_D))
+        self.assertIsNone(waiting["decision"])                                                     # 기한 당일까지는 기다린다
+        entry = D.decide_once({"rows": early + late, "decision": None}, cand, D.q_day(Q0 + 31 * D.BARS_D))
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("EXPIRED", 27))
+        filled = [self.row(k, 0.01) for k in range(30)]                                            # 기한 안에 30건·10일을 채웠다
+        entry = D.decide_once({"rows": filled + late, "decision": None}, cand, D.q_day(Q0 + 200 * D.BARS_D))
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))   # 실행이 늦었어도 그 자료로 판정한다
+
     def test_a_candidate_can_also_require_surviving_without_its_best_day(self):
         rows = [self.row(k, 0.20 if k < 3 else -0.001) for k in range(30)]                      # 첫날만 크게 벌고 나머지 9일은 조금씩 잃는다
         plain = D.decide_once({"rows": list(rows), "decision": None}, self.cand("2026-01-01"), "2026-03-01")

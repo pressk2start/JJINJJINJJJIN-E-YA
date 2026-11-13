@@ -506,23 +506,25 @@ def merge_trades(old_rows, new_rows):
 
 def decide_once(entry, cand, run_day):
     """30건·10일이 처음 채워지는 거래까지로 한 번만 판정. 기한(기본 12개월)이 지나도록 못 채우면 EXPIRED(표본 부족 종료, 탈락 아님).
+    표본은 기한 안에 진입한 거래만 센다 — 기한 뒤의 거래로 부족분을 채우지 못한다. 실행이 늦었어도 기한 안에 채웠으면 그 자료로 판정한다.
     후보에 verdict="ex_best_day" 가 있으면 '최고 수익일 하루를 빼도 날짜 가중 평균 > 0' 을 더 본다. 이미 판정이 있으면 그대로."""
     if entry.get("decision"):
         return entry
+    deadline = (dt.date.fromisoformat(cand_start(cand)) + dt.timedelta(days=cand.get("expire_days", FWD_EXPIRE_DAYS))).isoformat()
+    rows = [t for t in entry["rows"] if t["day"] <= deadline]
     days = set()
-    for k, t in enumerate(entry["rows"], 1):
+    for k, t in enumerate(rows, 1):
         days.add(t["day"])
         if k >= FWD_MIN_N and len(days) >= FWD_MIN_DAYS:
-            st = SS.cluster_stats(entry["rows"][:k])
+            st = SS.cluster_stats(rows[:k])
             ok, stats = st["net"] > 0 and st["daymean"] > 0, {x: st[x] for x in ("n", "days", "net", "t", "daymean")}
             if cand.get("verdict") == "ex_best_day":
-                stats["ex_best_day"] = ex_best_day(entry["rows"][:k])
+                stats["ex_best_day"] = ex_best_day(rows[:k])
                 ok = ok and stats["ex_best_day"] is not None and stats["ex_best_day"] > 0
             entry["decision"] = {"verdict": "PASS" if ok else "FAIL", "decided_on": run_day, "trades": k, "stats": stats}
             return entry
-    age = (dt.date.fromisoformat(run_day) - dt.date.fromisoformat(cand_start(cand))).days
-    if age > cand.get("expire_days", FWD_EXPIRE_DAYS):
-        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(entry["rows"]), "stats": None}
+    if run_day > deadline:
+        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(rows), "stats": None}
     return entry
 
 
