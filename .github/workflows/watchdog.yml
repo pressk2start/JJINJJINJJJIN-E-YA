@@ -1,0 +1,35 @@
+name: Schedule watchdog
+
+# 예약 실행이 빠졌는지 본다 (2026-11-13). Forward watch 는 월요일, 이 점검은 수요일에 돈다.
+# 가장 최근에 지난 예약일(월요일, 매월 1일)의 실행이 기록에 없거나 갱신되지 못한 항목이 있으면 실패로 끝나고 텔레그램으로 알린다.
+# 저장소에 아무것도 쓰지 않는다. 시세도 받지 않는다(장부 파일의 날짜만 읽는다).
+# 한계: GitHub 예약 자체가 통째로 멈추면 이 점검도 돌지 않는다. 월요일 요약이 안 오는 것이 그 신호다.
+on:
+  schedule:
+    - cron: "17 1 * * 3"   # 매주 수요일 01:17 UTC = 10:17 KST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Are the scheduled runs up to date
+        run: python -X utf8 scalp/research/forward_watch.py --stale-check | tee "$RUNNER_TEMP/stale.txt"; exit "${PIPESTATUS[0]}"
+      - name: Telegram on failure (only when both secrets exist)
+        if: failure()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHATS: ${{ secrets.TG_CHATS }}
+        run: |
+          { echo "[예약 점검] 자동 실행이 빠졌거나 갱신되지 못한 항목이 있습니다"; cat "$RUNNER_TEMP/stale.txt" 2>/dev/null || true; } > "$RUNNER_TEMP/msg.txt"
+          python3 -X utf8 scalp/research/tg_send.py "$RUNNER_TEMP/msg.txt"

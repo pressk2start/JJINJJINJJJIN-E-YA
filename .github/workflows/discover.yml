@@ -43,3 +43,11 @@ jobs:
           fi
       - name: Show result
         run: cat scalp/research/forward/DISCOVERY.md >> "$GITHUB_STEP_SUMMARY" || true
+      # 실행이 실패하면 한 줄 알린다 (고문 요청 2026-11-13). 비밀값이 없으면 아무것도 하지 않는다.
+      - name: Telegram on failure (only when both secrets exist)
+        if: failure()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHATS: ${{ secrets.TG_CHATS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 -X utf8 scalp/research/tg_send.py --text "[후보 탐색] 월간 실행 실패 — ${RUN_URL}"

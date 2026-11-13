@@ -11,7 +11,8 @@ on:
       - "scalp/research/discover.py"
       - "tests/test_forward_watch.py"
       - "tests/test_auto_monitor.py"
-      - "tests/test_deploy_paths.py"
+      - "tests/test_deploy_manual.py"
+      - ".github/workflows/deploy.yml"
       - "tests/test_discover.py"
       - ".github/workflows/research-checks.yml"
   workflow_dispatch:
@@ -36,7 +37,7 @@ jobs:
         run: |
           python -X utf8 -m unittest discover -s tests -p "test_forward_watch.py"
           python -X utf8 -m unittest discover -s tests -p "test_auto_monitor.py"
-          python -X utf8 -m unittest discover -s tests -p "test_deploy_paths.py"
+          python -X utf8 -m unittest discover -s tests -p "test_deploy_manual.py"
           if [ -f tests/test_discover.py ]; then python -X utf8 -m unittest discover -s tests -p "test_discover.py"; fi
       - name: Live dry run of the tracker (public data only, nothing is written)
         run: python -X utf8 scalp/research/forward_watch.py --dry-run

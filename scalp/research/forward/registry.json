@@ -1,0 +1,61 @@
+[
+ {
+  "cond": [
+   "BTC 4봉 수익률 <= -1.821%",
+   "btc_ret_1h",
+   "<=",
+   -0.01821
+  ],
+  "cost": {
+   "KRW-BTC": 0.0007,
+   "KRW-ETH": 0.0007
+  },
+  "cost_other": 0.001,
+  "engine": "3",
+  "event": "CRASH",
+  "expire_days": 730,
+  "hold": 4,
+  "holdout": {
+   "by": "advisor",
+   "n": 146,
+   "net": 0.01541,
+   "period": "2025-01-01 ~ 2026-11-09"
+  },
+  "id": "A-202611-01",
+  "move": 0.03,
+  "registered": "2026-11-13",
+  "source": "고문 정의 (2026-11-13) — 알트 동반 급락 반등. 탐색이 고른 것이 아니라 고문이 등록을 권한 후보",
+  "start": "2026-11-14",
+  "status": "ACTIVE",
+  "train": {
+   "by": "advisor",
+   "n": 244,
+   "net": 0.0145,
+   "period": "2023-01-01 ~ 2024-12-31"
+  },
+  "universe": [
+   "KRW-ADA",
+   "KRW-ALGO",
+   "KRW-APT",
+   "KRW-ARK",
+   "KRW-AXS",
+   "KRW-BTC",
+   "KRW-CELO",
+   "KRW-CHZ",
+   "KRW-DOGE",
+   "KRW-ETC",
+   "KRW-ETH",
+   "KRW-GMT",
+   "KRW-IQ",
+   "KRW-KAVA",
+   "KRW-POL",
+   "KRW-SAND",
+   "KRW-SOL",
+   "KRW-TRX",
+   "KRW-WAVES",
+   "KRW-XRP"
+  ],
+  "verdict": "ex_best_day",
+  "vol_x": 3.0
+ }
+]
