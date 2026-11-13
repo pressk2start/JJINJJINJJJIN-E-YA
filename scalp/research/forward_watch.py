@@ -43,6 +43,13 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
                2017–20  1,190건, 평균 순수익 +0.219%, 일별 평균 하한 +0.257%, 상위 5일 제외 +0.323%
                2021–26  1,134건, 평균 순수익 +0.361%, 일별 평균 하한 +0.373%, 상위 5일 제외 +0.440%
              (참고: 원본 규칙이면 2017–20 1,198건 +0.260%, 2021–26 1,139건 +0.359%. 이 수치는 더 이상 기준이 아니다.)
+  CR_variants 급락 반등 변형 3개 — 고문 권고(2026-11-12 "숫자만 다른 등록"). 기준 규칙과 같은 계산(crv_events)에 숫자 하나만 바꾼다.
+               CR_drop5   낙폭 기준 −5% (60분 보유)        CR_drop6   낙폭 기준 −6% (60분 보유)
+               CR_hold4h  낙폭 기준 −4%, 보유 4시간(5분봉 48개)
+             종목·비용·'정확히 60분'·코인당 동시 1건·판정 기준(30건·10일, 평균 > 0 · 날짜 가중 평균 > 0)은 CR_rebound 와 같다.
+             변형끼리는 서로 독립으로 센다. 추적 시작 2026-11-14 00:00 UTC (정의를 저장소에 올린 2026-11-13 의 다음 날).
+             위 숫자는 고문 표("−5%, −6%, 4시간 보유 · 같은 기준")를 쓰기 세션이 읽은 것이다 — 고문이 다르게 정하면 숫자와 시작 시각을
+             함께 다시 잡는다(그때까지 쌓인 변형 거래는 버린다). 알트 동반 급락 반등은 정의를 받지 못해 '대기 중' 에 둔다.
   BTC_surge  BTC 주간 급등 관찰 (auto_monitor.surge_weeks). 월요일 00:00 UTC 에 직전 7일 수익률 ≥ +7.45% 인 주와 전체 주의
              BTC·ETH 주간 수익률을 기록한다. 판정 없음.
   자동 등록 후보  discover.py 가 달마다 '사건 × 조건 하나 × 보유 시간' 틀에서 찾아 forward/registry.json 에 등록한 것.
@@ -65,6 +72,7 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
   python3 scalp/research/forward_watch.py              장부·현황 갱신
   python3 scalp/research/forward_watch.py --dry-run    계산만 하고 파일은 쓰지 않음
   python3 scalp/research/forward_watch.py --summary    장부만 읽어 짧은 요약을 출력 (시세 조회 없음)
+  python3 scalp/research/forward_watch.py --stale-check  예약 실행이 빠졌는지 확인 (장부 8일·탐색 기록 35일 넘게 묵으면 종료 코드 1)
 """
 import argparse
 import datetime as dt
@@ -95,7 +103,14 @@ H2_DECIDE_AT = 20
 OUT_DIR = HERE / "forward"
 CR_START = AM.parse_utc(AM.FORWARD_START)          # 2026-11-11 00:00 UTC. 고문이 고정한 값 — 바꾸지 않는다
 CR_WARMUP = dt.timedelta(hours=6)                   # 시작 직전 봉(1시간 전 종가 비교용). auto_monitor.run_weekly 와 같다
-WAITING = ()
+CRV_START = AM.parse_utc("2026-11-14T00:00")        # 변형 추적 시작 (UTC). 정의를 올린 다음 날 — 숫자를 바꾸면 이것도 다시 잡는다
+CR_VARIANTS = (
+    {"key": "CR_drop5", "name": "−5%", "rule": "1시간에 5% 넘게 빠지면 60분 보유", "drop": -0.05, "hold": 12},
+    {"key": "CR_drop6", "name": "−6%", "rule": "1시간에 6% 넘게 빠지면 60분 보유", "drop": -0.06, "hold": 12},
+    {"key": "CR_hold4h", "name": "4시간 보유", "rule": "1시간에 4% 넘게 빠지면 4시간 보유", "drop": -0.04, "hold": 48},
+)
+WAITING = (("알트 동반 급락 반등", "정의를 받지 못함 — 대상 종목, 알트 낙폭 기준, BTC 동반 조건, 보유 시간이 필요"),)
+STALE_LEDGER_DAYS, STALE_SCAN_DAYS = 8, 35          # 주간 실행은 7일, 월간 탐색은 최대 31일 간격
 TOL = 1e-9
 
 
@@ -221,6 +236,53 @@ def cr_rows(today, fetch_all=None):
     return sorted(rows, key=lambda t: (t["entry_min"], t["market"]))
 
 
+def crv_events(bars, cost, drop_thr, hold):
+    """auto_monitor.cr_events 와 같은 계산에 낙폭 기준과 보유 봉 수만 바꾼 것 → 끝난 거래 목록. bars = [(분, 시가, 종가)] 시간순.
+    drop_thr=AM.CR_DROP, hold=AM.CR_HOLD 를 주면 cr_events 의 끝난 거래와 같다 (테스트로 묶어 둔다)."""
+    look, bar, n, done, last = AM.CR_LOOK, AM.CR_BAR, len(bars), [], -1
+    for i in range(look, n):
+        if bars[i][0] - bars[i - look][0] != look * bar:           # 12봉이 정확히 60분일 때만
+            continue
+        drop = bars[i][2] / bars[i - look][2] - 1
+        if drop > drop_thr:
+            continue
+        e = i + 1
+        if e <= last:                                              # 앞 거래를 아직 들고 있다
+            continue
+        if e >= n:
+            break
+        if bars[e][0] - bars[i - 1][0] != 2 * bar:
+            continue
+        x = e + hold
+        if x >= n:                                                 # 보유 시간이 아직 안 지났다
+            break
+        if bars[x][0] - bars[e][0] != hold * bar:
+            continue
+        gross = bars[x][1] / bars[e][1] - 1
+        done.append({"entry_min": bars[e][0], "exit_min": bars[x][0], "drop": drop, "entry": bars[e][1], "exit": bars[x][1], "gross": gross,
+                     "net": (1 + gross) * (1 - cost) / (1 + cost) - 1})
+        last = x
+    return done
+
+
+def crv_rows(today, fetch_bars=None):
+    """변형별로, 추적 시작 이후 진입해 끝난 거래 → {key: [거래…]} 시간순. 5분봉은 종목당 한 번만 받아 세 변형에 같이 쓴다.
+    실행일 00:00 UTC 이전 봉만 쓴다. 한 종목이라도 못 받으면 예외(세 변형 모두 이번 실행에서 건드리지 않는다)."""
+    end = AM.parse_utc(today + "T00:00")
+    out = {v["key"]: [] for v in CR_VARIANTS}
+    if end <= CRV_START:
+        return out
+    first = AM.to_min(CRV_START)
+    for m, cost in AM.CR_COST.items():
+        try:
+            bars = (fetch_bars or AM.fetch_5m)(m, CRV_START - CR_WARMUP, end)
+        except Exception as e:
+            raise RuntimeError("5분봉을 못 받은 종목: %s (%s)" % (m[4:], e))
+        for v in CR_VARIANTS:
+            out[v["key"]] += [dict(t, market=m) for t in crv_events(bars, cost, v["drop"], v["hold"]) if t["entry_min"] >= first]
+    return {k: sorted(rows, key=lambda t: (t["entry_min"], t["market"])) for k, rows in out.items()}
+
+
 def merge_cr(old_rows, new_rows):
     """merge_rows 와 같은 원칙(덧붙이기만). 거래는 (종목, 진입 시각)으로 구분한다."""
     by_key = {(r["market"], r["entry_min"]): r for r in old_rows}
@@ -265,7 +327,8 @@ def surge_rows(today, fetch_days=None):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None, registry=None, panel_loader=None):
+def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None, registry=None, panel_loader=None,
+           crv_fetch=None):
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수."""
     log = log or (lambda s: None)
     warnings = []
@@ -300,6 +363,19 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         log("CR: %d trades in ledger (+%d)" % (len(rows), added))
     except Exception as e:
         warnings.append("급락 반등: 이번 실행에서 갱신하지 못함 — %s" % e)
+    crv = ledger.setdefault("CR_variants", {})
+    try:
+        for key, new_rows in crv_rows(today, crv_fetch).items():
+            entry = crv.setdefault(key, {"rows": [], "decision": None})
+            rows, added, mismatch = merge_cr(entry["rows"], new_rows)
+            entry["rows"], entry["updated"] = rows, today
+            if mismatch:
+                warnings.append("급락 반등 변형 %s: 다시 계산한 값이 장부와 다른 거래 %d건 (%s) — 장부 값은 그대로 둠" % (
+                    key, len(mismatch), ", ".join(mismatch[:5])))
+            cr_decide(entry, today)
+            log("%s: %d trades in ledger (+%d)" % (key, len(rows), added))
+    except Exception as e:
+        warnings.append("급락 반등 변형: 이번 실행에서 갱신하지 못함 — %s" % e)
     sg = ledger.setdefault("BTC_surge", {"rows": []})
     try:
         known = {r["monday"] for r in sg["rows"]}
@@ -411,6 +487,19 @@ def render(ledger):
                                        for t in rows[-3:]), ""]
     else:
         out += ["아직 끝난 거래가 없습니다. 통과해도 봉 기준이며, 급락 순간의 실제 호가 체결은 따로 확인해야 합니다.", ""]
+    crv = ledger.get("CR_variants") or {}
+    out += ["## 급락 반등 변형 — 숫자만 바꾼 3개 (판정 기준은 위와 같음)", "",
+            "같은 4종목, 같은 비용. 서로 독립으로 셉니다. 추적 시작 2026-11-14 (UTC).", "",
+            "| 변형 | 규칙 | 진행 | 거래당 평균 | 날짜 가중 | 판정 |", "|---|---|---|---|---|---|"]
+    for v in CR_VARIANTS:
+        e = crv.get(v["key"]) or {"rows": []}
+        rows, dec = e.get("rows", []), e.get("decision")
+        st = (dec["stats"] if dec else AM.cr_summary([(t["market"], t) for t in rows])) if rows else None
+        days = len({_utc_day(t["entry_min"]) for t in rows})
+        out.append("| %s | %s | %d / %d건, %d / %d일 | %s | %s | %s |" % (
+            v["name"], v["rule"], len(rows), AM.CR_MIN_N, days, AM.CR_MIN_DAYS, _pct(st["mean"]) if st else "-",
+            _pct(st["day_mean"]) if st else "-", ("통과" if dec["verdict"] == "PASS" else "탈락") if dec else "진행 중"))
+    out += ["", "숫자는 고문 표를 읽어 잡은 것입니다. 고문이 다르게 정하면 숫자와 시작일을 함께 다시 잡습니다.", ""]
     sg = ledger.get("BTC_surge") or {"rows": []}
     out += ["## BTC 주간 급등 — 관찰만 (판정 없음)", ""]
     if sg.get("rows"):
@@ -473,6 +562,14 @@ def summary(ledger):
             lines.append("급락 반등: %d/%d건 %d/%d일, 거래당 %s (판정 전)" % (st["n"], AM.CR_MIN_N, st["days"], AM.CR_MIN_DAYS, _pct(st["mean"])))
         else:
             lines.append("급락 반등: 발생 없음")
+    crv = ledger.get("CR_variants")
+    if crv is not None:
+        parts = []
+        for v in CR_VARIANTS:
+            e = crv.get(v["key"]) or {}
+            dec = e.get("decision")
+            parts.append("%s %s" % (v["name"], ("통과" if dec["verdict"] == "PASS" else "탈락") if dec else "%d건" % len(e.get("rows", []))))
+        lines.append("급락 반등 변형: " + ", ".join(parts))
     cands = ledger.get("candidates") or {}
     if cands:
         done = [c for c, e in cands.items() if e.get("decision")]
@@ -483,11 +580,29 @@ def summary(ledger):
     return "\n".join(lines)
 
 
+def stale(ledger, scan_log, today):
+    """예약 실행이 빠졌는지 → 문제 목록(없으면 빈 목록). 장부의 마지막 실행일과 탐색 기록의 마지막 실행일만 본다."""
+    def age(day):
+        return (dt.date.fromisoformat(today) - dt.date.fromisoformat(day)).days
+    out = []
+    last = ledger.get("last_run")
+    if not last:
+        out.append("주간 추적: 장부에 실행 기록이 없음")
+    elif age(last) > STALE_LEDGER_DAYS:
+        out.append("주간 추적: 마지막 실행 %s (%d일 전) — 예약 실행이 빠졌거나 실패함" % (last, age(last)))
+    if scan_log:
+        run = scan_log[-1].get("run")
+        if run and age(run) > STALE_SCAN_DAYS:
+            out.append("월간 탐색: 마지막 실행 %s (%d일 전) — 예약 실행이 빠졌거나 실패함" % (run, age(run)))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(OUT_DIR))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--stale-check", action="store_true")
     ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (시험용, 기본은 지금)")
     a = ap.parse_args(argv)
     out = Path(a.out)
@@ -497,6 +612,11 @@ def main(argv=None):
         print(summary(ledger))
         return 0
     today = a.today or dt.datetime.now(dt.timezone.utc).date().isoformat()
+    if a.stale_check:
+        log_path = out / "scan_log.json"
+        problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today)
+        print("\n".join(problems) if problems else "예약 실행 기록 정상 (주간 %s)" % ledger.get("last_run"))
+        return 1 if problems else 0
     reg_path = out / "registry.json"
     registry = json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.exists() else []
     ledger, warnings = update(ledger, today, log=lambda s: print(s, flush=True), registry=registry)

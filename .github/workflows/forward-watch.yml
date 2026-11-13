@@ -61,3 +61,16 @@ jobs:
       - name: Fail if any candidate could not be updated
         if: steps.run.outputs.code != '0'
         run: exit 1
+      # 실행이 실패했거나 갱신 못 한 후보가 있으면 한 줄 알린다 (고문 요청 2026-11-13). 비밀값이 없으면 아무것도 하지 않는다.
+      - name: Telegram on failure (only when both secrets exist)
+        if: failure()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHATS: ${{ secrets.TG_CHATS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi
+          for chat in $(echo "$TG_CHATS" | tr ',' ' '); do
+            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${chat}" --data-urlencode "text=[후보 추적] 주간 실행 실패 또는 갱신 못 한 항목 있음 — ${RUN_URL}"
+          done

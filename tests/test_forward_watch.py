@@ -142,7 +142,7 @@ class Fetching(unittest.TestCase):
         before = copy.deepcopy(ledger["H2_kimchi"])
         out, warnings = FW.update(ledger, "2026-11-10", h2_inputs=lambda: ({}, {}, ["KRW-X (TimeoutError)"]),
                                   h3_fetch=lambda m, d: (_ for _ in ()).throw(OSError("no network")),
-                                  cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: [])
+                                  cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: [], crv_fetch=lambda m, s, e: [])
         self.assertEqual(out["H2_kimchi"], before)
         self.assertEqual(len(warnings), 2)
         self.assertIn("H2", warnings[0])
@@ -254,7 +254,7 @@ class CrashRebound(unittest.TestCase):
         ledger = {"CR_rebound": {"rows": [cr_trade(0, 0.01)], "decision": None}}
         before = copy.deepcopy(ledger["CR_rebound"])
         out, warnings = FW.update(ledger, "2026-11-13", h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {},
-                                  cr_fetch=lambda s, e: res, surge_fetch=lambda m: [])
+                                  cr_fetch=lambda s, e: res, surge_fetch=lambda m: [], crv_fetch=lambda m, s, e: [])
         self.assertEqual(out["CR_rebound"], before)
         self.assertTrue(any("급락 반등" in w for w in warnings))
 
@@ -296,6 +296,140 @@ class CrashRebound(unittest.TestCase):
         self.assertIn("7/30건 3/10일", FW.summary(led))
 
 
+class CrashReboundVariants(unittest.TestCase):
+    """고문 권고 변형 3개: 기준 규칙과 같은 계산에 낙폭 기준·보유 시간만 다르다."""
+    START = AM.to_min(FW.CRV_START)
+
+    def bars(self, drop, start_min=None, drop_at=20, after=60):
+        closes = [100.0] * drop_at + [100.0 * (1 + drop)] + [100.0 * (1 + drop) * 1.01] * after
+        return five_min(closes, self.START + 60 if start_min is None else start_min)
+
+    def test_same_numbers_as_the_advisors_rule_give_the_same_trades(self):
+        rng = random.Random(3)
+        for _ in range(40):
+            closes, px = [], 100.0
+            for _k in range(400):
+                px *= 1 + rng.choice([0.0, 0.002, -0.002, -0.03, 0.01, -0.015])
+                closes.append(px)
+            bars = five_min(closes, 10_000_000)
+            for hole in sorted(rng.sample(range(30, 390), 6), reverse=True):      # 빠진 봉도 섞는다
+                del bars[hole]
+            done, _pending = AM.cr_events(bars, 0.0010)
+            self.assertEqual(FW.crv_events(bars, 0.0010, AM.CR_DROP, AM.CR_HOLD), done)
+
+    def test_each_variant_changes_exactly_one_number(self):
+        by_key = {v["key"]: v for v in FW.CR_VARIANTS}
+        self.assertEqual(sorted(by_key), ["CR_drop5", "CR_drop6", "CR_hold4h"])
+        self.assertEqual((by_key["CR_drop5"]["drop"], by_key["CR_drop5"]["hold"]), (-0.05, AM.CR_HOLD))
+        self.assertEqual((by_key["CR_drop6"]["drop"], by_key["CR_drop6"]["hold"]), (-0.06, AM.CR_HOLD))
+        self.assertEqual((by_key["CR_hold4h"]["drop"], by_key["CR_hold4h"]["hold"]), (AM.CR_DROP, 48))
+        self.assertGreater(FW.CRV_START, FW.CR_START)                              # 기준 규칙보다 늦게 등록됐다
+
+    def test_a_deeper_drop_enters_more_variants(self):
+        def keys(drop):
+            rows = FW.crv_rows("2026-11-20", lambda m, s, e: self.bars(drop) if m == "KRW-SOL" else five_min([100.0] * 90, self.START + 60))
+            return sorted(k for k, v in rows.items() if v)
+        self.assertEqual(keys(-0.045), ["CR_hold4h"])
+        self.assertEqual(keys(-0.055), ["CR_drop5", "CR_hold4h"])
+        self.assertEqual(keys(-0.065), ["CR_drop5", "CR_drop6", "CR_hold4h"])
+        self.assertEqual(keys(-0.030), [])
+
+    def test_hold_length_and_cost_follow_the_variant(self):
+        rows = FW.crv_rows("2026-11-20", lambda m, s, e: self.bars(-0.065) if m == "KRW-SOL" else [])
+        short, long_ = rows["CR_drop6"][0], rows["CR_hold4h"][0]
+        self.assertEqual(short["exit_min"] - short["entry_min"], 60)
+        self.assertEqual(long_["exit_min"] - long_["entry_min"], 240)
+        self.assertEqual(short["market"], "KRW-SOL")
+        self.assertAlmostEqual(short["net"], (1 + short["gross"]) * (1 - 0.0010) / (1 + 0.0010) - 1)   # SOL 비용 편도 0.10%
+
+    def test_only_entries_after_the_start_count_and_bars_are_fetched_once_per_coin(self):
+        asked = []
+
+        def fetch(m, start, end):
+            asked.append((m, start, end))
+            return self.bars(-0.065, start_min=self.START - 300) if m == "KRW-BTC" else []
+        rows = FW.crv_rows("2026-11-20", fetch)
+        self.assertEqual(rows, {"CR_drop5": [], "CR_drop6": [], "CR_hold4h": []})                    # 시작 전에 진입한 거래는 세지 않는다
+        self.assertEqual(asked, [(m, FW.CRV_START - FW.CR_WARMUP, AM.parse_utc("2026-11-20T00:00")) for m in AM.CR_COST])
+        asked.clear()
+        self.assertEqual(FW.crv_rows("2026-11-14", fetch), {"CR_drop5": [], "CR_drop6": [], "CR_hold4h": []})
+        self.assertEqual(asked, [])                                                                   # 시작일 전에는 시세도 받지 않는다
+
+    def test_update_appends_decides_once_and_survives_a_failed_fetch(self):
+        def good(m, s, e):
+            return self.bars(-0.065) if m == "KRW-SOL" else five_min([100.0] * 90, self.START + 60)
+        base = dict(h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {}, cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST},
+                    surge_fetch=lambda m: [])
+        ledger, _ = FW.update({}, "2026-11-20", crv_fetch=good, **base)
+        self.assertEqual({k: len(v["rows"]) for k, v in ledger["CR_variants"].items()}, {"CR_drop5": 1, "CR_drop6": 1, "CR_hold4h": 1})
+        self.assertIsNone(ledger["CR_variants"]["CR_drop5"]["decision"])
+        before = copy.deepcopy(ledger["CR_variants"])
+
+        def broken(m, s, e):
+            raise TimeoutError("조회 실패")
+        ledger, warnings = FW.update(ledger, "2026-11-21", crv_fetch=broken, **base)
+        self.assertEqual(ledger["CR_variants"], before)                                               # 못 받으면 장부를 건드리지 않는다
+        self.assertTrue(any("급락 반등 변형" in w for w in warnings))
+        rows = [cr_trade(k, 0.01) for k in range(40)]                                                 # 하루 3건씩 → 30건째에 10일
+        entry = FW.cr_decide({"rows": rows, "decision": None}, "2026-12-30")
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))    # 판정 기준은 기준 규칙과 같다
+
+    def test_status_shows_the_variants_and_what_is_still_waiting(self):
+        ledger, _ = FW.update({}, "2026-11-13", **offline())
+        text = FW.render(ledger)
+        self.assertIn("## 급락 반등 변형", text)
+        for v in FW.CR_VARIANTS:
+            self.assertIn("| %s | %s | 0 / 30건, 0 / 10일 | - | - | 진행 중 |" % (v["name"], v["rule"]), text)
+        self.assertIn("- 알트 동반 급락 반등: 정의를 받지 못함", text)
+        self.assertIn("급락 반등 변형: −5% 0건, −6% 0건, 4시간 보유 0건", FW.summary(ledger))
+
+
+class MissedRuns(unittest.TestCase):
+    def test_fresh_records_raise_nothing(self):
+        self.assertEqual(FW.stale({"last_run": "2026-11-16"}, [{"run": "2026-11-01"}], "2026-11-18"), [])
+        self.assertEqual(FW.stale({"last_run": "2026-11-16"}, [], "2026-11-24"), [])                  # 8일까지는 정상
+
+    def test_an_old_ledger_or_search_record_is_reported(self):
+        out = FW.stale({"last_run": "2026-11-16"}, [{"run": "2026-11-01"}], "2026-11-25")
+        self.assertEqual(len(out), 1)
+        self.assertIn("주간 추적: 마지막 실행 2026-11-16 (9일 전)", out[0])
+        out = FW.stale({"last_run": "2026-12-07"}, [{"run": "2026-11-01"}], "2026-12-09")
+        self.assertEqual(len(out), 1)
+        self.assertIn("월간 탐색: 마지막 실행 2026-11-01 (38일 전)", out[0])
+        self.assertTrue(FW.stale({}, [], "2026-11-25"))                                                # 장부가 비어 있어도 알린다
+
+    def test_command_line_exit_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "ledger.json").write_text(json.dumps({"last_run": "2026-11-16"}), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                self.assertEqual(FW.main(["--out", d, "--stale-check", "--today", "2026-11-18"]), 0)
+                self.assertEqual(FW.main(["--out", d, "--stale-check", "--today", "2026-11-30"]), 1)
+            self.assertIn("14일 전", buf.getvalue())
+
+
+class ScheduledWorkflows(unittest.TestCase):
+    """예약 워크플로는 실패하면 알리고, 빠진 실행은 따로 점검한다."""
+    WF = ROOT / ".github" / "workflows"
+
+    def test_each_scheduled_run_reports_its_own_failure(self):
+        for name in ("forward-watch.yml", "discover.yml", "watchdog.yml"):
+            text = (self.WF / name).read_text(encoding="utf-8")
+            steps = text.split("      - ")
+            last = steps[-1]
+            self.assertIn("if: failure()", last, name)                                                # 마지막 단계가 실패 알림이다
+            self.assertIn("sendMessage", last, name)
+            self.assertIn('if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi', last, name)
+
+    def test_the_watchdog_runs_between_weekly_runs_and_writes_nothing(self):
+        text = (self.WF / "watchdog.yml").read_text(encoding="utf-8")
+        self.assertIn('cron: "17 1 * * 3"', text)
+        self.assertIn('cron: "17 1 * * 1"', (self.WF / "forward-watch.yml").read_text(encoding="utf-8"))
+        self.assertIn("contents: read", text)
+        self.assertIn("forward_watch.py --stale-check", text)
+        for word in ("git push", "git commit", "contents: write"):
+            self.assertNotIn(word, text, word)
+
+
 class SurgeAndSharedH3(unittest.TestCase):
     def test_surge_weeks_are_recorded_once_complete_for_both_coins(self):
         d0 = dt.date(2026, 11, 2)
@@ -304,9 +438,9 @@ class SurgeAndSharedH3(unittest.TestCase):
         self.assertEqual([w["monday"] for w in weeks], ["2026-11-16"])               # 11/23 주는 다음 월요일 시가가 아직 없다
         self.assertTrue(weeks[0]["surge"])
         ledger, _ = FW.update({}, "2026-11-23", h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {},
-                              cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: rows)
+                              cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: rows, crv_fetch=lambda m, s, e: [])
         again, _ = FW.update(ledger, "2026-11-24", h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {},
-                             cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: rows)
+                             cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: rows, crv_fetch=lambda m, s, e: [])
         self.assertEqual(len(again["BTC_surge"]["rows"]), 1)                         # 같은 주를 두 번 적지 않는다
         self.assertIn("| 급등 뒤 | 1 |", FW.render(again))
 
@@ -378,7 +512,8 @@ def crash_panel(days, every=120, rebound=0.02):
 def offline(panel=None):
     """시세를 받지 않는 update 인자들."""
     return dict(h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {}, cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST},
-                surge_fetch=lambda m: [], panel_loader=(lambda s, e, markets: {m: panel[m] for m in markets}) if panel else None)
+                surge_fetch=lambda m: [], panel_loader=(lambda s, e, markets: {m: panel[m] for m in markets}) if panel else None,
+                crv_fetch=lambda m, s, e: [])
 
 
 class RegisteredCandidates(unittest.TestCase):
