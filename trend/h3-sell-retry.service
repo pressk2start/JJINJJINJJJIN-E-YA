@@ -1,0 +1,17 @@
+# H3 매도 재시도 (고문 결정 2026-11-13). h3-sell-retry.timer 가 10분마다 부른다.
+# LIVE 에서, 규칙상 팔아야 하는데 오늘 매도가 끝나지 않은 종목만 다시 판다. 매수는 하지 않는다.
+# 할 일이 없으면 시세도 받지 않고 조용히 끝난다. SHADOW 에서는 바로 끝난다.
+# 설치·enable 은 사람이 직접 한다. deploy_restart.sh 는 이 유닛을 건드리지 않는다.
+[Unit]
+Description=H3 sell retry (only when a required sell is still open)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot/trend
+EnvironmentFile=/home/ubuntu/bot/.env
+EnvironmentFile=-/home/ubuntu/h3_state/h3.env
+ExecStart=/usr/bin/python3 -u /home/ubuntu/bot/trend/h3_executor.py --sell-retry
+TimeoutStartSec=300

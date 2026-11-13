@@ -35,6 +35,11 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
   10) 복구 알림: 지난 실행이 주문 도중 끊겨 이번 실행이 그 체결을 반영했으면 텔레그램 줄에 그 사실을 적는다.
   11) 매도 실패 뒤: 그날은 닫히지 않는다. 타이머의 두 번째 실행(00:11 UTC)과 다음 날 실행이 다시 판다(매도는 늦어도 실행한다).
       그 사이에는 포지션이 열려 있고, 실패할 때마다 🚨 로 알린다.
+  12) 매도 재시도(--sell-retry, 고문 결정 2026-11-13): 별도 타이머(trend/h3-sell-retry.timer, 10분마다)가 부른다. LIVE 에서만 동작한다.
+      규칙상 팔아야 하는데(보유 중·신호 꺼짐) 오늘 처리가 끝나지 않은 종목만 다시 판다. 순서는 하루 실행과 같다 —
+      미처리 주문(pending)을 먼저 조회해 반영하고, 그 뒤에 판단한다. 매수는 절대 하지 않고, 보유 유지·현금 유지는 기록하지 않는다
+      (그것은 하루 실행의 일이다). 매도가 끝나면 그날은 닫혀 더 돌지 않는다. 할 일이 없으면 시세도 받지 않고 알림도 없다.
+      같은 실패가 이어질 때 알림은 한 시간에 한 번만 보낸다. 판단 자료(어제 일봉)가 없으면 조용히 넘어간다 — 그 문제는 하루 실행이 알린다.
   ※ 단타 봇의 LIVE_ENTRY_DISABLED=1 은 이 실행기와 무관하다. 이 실행기의 실주문은 H3_MODE 로만 켜고 끈다.
 
 환경변수
@@ -48,10 +53,12 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
   python3 h3_executor.py            하루치 실행(이미 했으면 아무것도 안 함)
   python3 h3_executor.py --status   슬리브·마지막 결정 출력
   python3 h3_executor.py --dry-run  결정만 계산해 출력 (상태·주문·텔레그램 없음)
+  python3 h3_executor.py --sell-retry   매도만 다시 시도 (위 12번). 타이머용 — 할 일이 없으면 아무것도 찍지 않는다
   python3 h3_executor.py --smoke-test   LIVE 전용. BTC 7,000원을 시장가로 사서 바로 판다(수수료 약 7원). 첫 실제 신호가
                                     오기 전에 인증·주문·identifier 조회·체결 집계·봇 분리 확인이 실거래소에서 도는지 본다.
                                     슬리브 장부는 건드리지 않는다.
-서버 설치는 trend/h3-executor.service·timer 를 사람이 직접 enable 한다. deploy_restart.sh 는 이것을 자동으로 켜지 않는다.
+서버 설치는 trend/h3-executor.service·timer (와 매도 재시도용 h3-sell-retry.service·timer)를 사람이 직접 enable 한다.
+deploy_restart.sh 는 이것들을 자동으로 켜지 않는다.
 """
 import argparse
 import base64
@@ -80,6 +87,7 @@ API = "https://api.upbit.com"
 FEE = 0.0005
 MIN_ORDER_KRW = 5000
 DEFAULT_SHADOW_CAPITAL = 1000000.0
+RETRY_ALERT_GAP_SEC = 3600            # 매도 재시도가 계속 실패할 때 알림 간격
 
 
 def load_rule():
@@ -470,7 +478,8 @@ class Executor(object):
                 sleeve["coin"] = 0.0
 
     # --- 종목 하나 ---
-    def run_market(self, state, market, day, late_min):
+    def run_market(self, state, market, day, late_min, sell_only=False):
+        """종목 하나의 하루치. sell_only=True(매도 재시도)면 미처리 주문 정리와 매도만 하고, 그 밖의 판단은 기록도 저장도 하지 않는다."""
         sleeve = state["sleeves"][market]
         pending = sleeve.get("pending")
         recovered = None
@@ -500,6 +509,8 @@ class Executor(object):
         holding = sleeve["coin"] * mark >= MIN_ORDER_KRW
         action = "BUY" if (sig["on"] and not holding) else "SELL" if (holding and not sig["on"]) else (
             "KEEP_HOLDING" if holding else "STAY_IN_CASH")
+        if sell_only and action != "SELL":                      # 재시도는 매도만 한다. 오늘을 닫지 않고 하루 실행에 맡긴다
+            return recovered
         late = late_min > self.cfg.max_late_min
         if action == "BUY" and late and not self.allow_late:
             raise H3Error("%s BUY held: this run is %.0f min after 09:00 KST (limit %.0f). Check the price, then run with "
@@ -650,6 +661,52 @@ class Executor(object):
         return rows, errors
 
 
+    def run_sell_retry(self):
+        """매도만 다시 시도한다 → (rows, errors). LIVE 전용. 타이머가 몇 분마다 부른다.
+        종목마다: 미처리 주문도 없고 (보유가 없거나 오늘 이미 처리됐으면) 아무것도 조회하지 않는다. 그 밖에는 run_market 을 sell_only 로 돈다 —
+        미처리 주문을 먼저 조회해 반영하고, 규칙상 매도일 때만 판다. 매수 주문은 어떤 경우에도 내지 않는다."""
+        if self.cfg.mode != "LIVE":
+            return [], []
+        now = self.now()
+        day = now.date().isoformat()
+        late_min = round((now - dt.datetime.combine(now.date(), dt.time(), tzinfo=dt.timezone.utc)).total_seconds() / 60, 1)
+        state = load_state(self.cfg)
+        rows, errors = [], []
+        for market in ASSETS:
+            sleeve = state["sleeves"][market]
+            if not sleeve.get("pending"):
+                if sleeve["coin"] <= 0 or sleeve.get("last_day") == day:
+                    continue                                    # 팔 것이 없거나 오늘 이미 처리됨
+                try:
+                    sig, _open = self.decide(market, day)
+                except Exception:
+                    continue                                    # 판단 자료가 없다 → 조용히 넘어간다 (자료 문제는 하루 실행이 알린다)
+                if sig["on"] or sleeve["coin"] * sig["close"] < MIN_ORDER_KRW:
+                    continue                                    # 규칙상 매도가 아니다 → 하루 실행의 일
+            try:
+                row = self.run_market(state, market, day, late_min, sell_only=True)
+                if row is not None:
+                    rows.append(row)
+                    if row.get("action") == "SELL" and row.get("note") is None:
+                        self.alerts.append("%s: 재시도 실행에서 매도함" % market[4:])
+            except Exception as exc:
+                errors.append("%s: %s" % (market, exc))
+                state = load_state(self.cfg)                    # 실패한 종목이 메모리에 남긴 변경은 버린다 (run 과 같다)
+        if errors:                                              # 같은 실패가 이어지면 알림은 RETRY_ALERT_GAP_SEC 에 한 번만
+            last = state.get("retry_alert_ts")
+            quiet = last is not None and (now - dt.datetime.fromisoformat(last)).total_seconds() < RETRY_ALERT_GAP_SEC
+            if rows or not quiet:
+                self.notify(summary_line(self.cfg, state, day, rows, errors + self.alerts))
+                state["retry_alert_ts"] = now.isoformat()
+                save_state(self.cfg, state)
+        elif rows or self.alerts:
+            self.notify(summary_line(self.cfg, state, day, rows, self.alerts))
+            if state.get("retry_alert_ts"):
+                state["retry_alert_ts"] = None
+                save_state(self.cfg, state)
+        return rows, errors
+
+
 SMOKE_KRW = 7000
 SMOKE_DUST_KRW = 100
 
@@ -770,6 +827,7 @@ def main(argv=None):
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--smoke-test", action="store_true")
+    ap.add_argument("--sell-retry", action="store_true", help="매도만 다시 시도 (타이머용). 할 일이 없으면 아무것도 하지 않는다")
     ap.add_argument("--allow-late", action="store_true", help="09:00 KST 에서 H3_MAX_LATE_MIN 분 넘게 늦은 실행에서도 매수를 허용")
     a = ap.parse_args(argv)
     # 사람이 ssh 로 직접 돌릴 때도 타이머와 같은 설정을 쓰도록: h3.env 먼저(우선), 그다음 봇의 .env (키·텔레그램)
@@ -779,11 +837,13 @@ def main(argv=None):
         cfg = Config()
     except Exception as exc:                                    # 설정이 틀리면 아무것도 하지 않고 한 줄로 끝낸다
         print("[h3] config error: %s" % exc)
-        if not (a.status or a.dry_run):                         # 타이머 실행이 조용히 죽지 않게 알린다
+        if not (a.status or a.dry_run or a.sell_retry):         # 타이머 실행이 조용히 죽지 않게 알린다 (재시도는 10분마다 도니 제외)
             telegram_to(*telegram_settings(os.environ))("H3 설정 오류 — 실행하지 않음: %s" % exc)
         return 2
     if a.status:
         print(status_text(cfg))
+        return 0
+    if a.sell_retry and cfg.mode != "LIVE":                     # SHADOW 에서는 다시 팔 것이 없다
         return 0
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
     lock = open(str(cfg.state_dir / "h3.lock"), "w")
@@ -810,6 +870,17 @@ def main(argv=None):
         notify("H3 LIVE 주문 경로 점검 OK: %s 7,000원 매수·매도 왕복, 비용 %.0f원" % (res["market"], res["krw_cost"]))
         return 0
     ex = Executor(cfg, Upbit(cfg.access, cfg.secret), notify=notify, allow_late=a.allow_late)
+    if a.sell_retry:
+        try:
+            rows, errors = ex.run_sell_retry()
+        except Exception as exc:                                # 상태 파일을 못 읽는 등. 알림은 하루 실행이 한다
+            print("[h3] sell-retry failed: %s" % exc)
+            return 1
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=False))
+        for err in errors:
+            print("[h3] ERROR %s" % err)
+        return 1 if errors else 0
     try:
         rows, errors = ex.run(dry_run=a.dry_run)
     except Exception as exc:

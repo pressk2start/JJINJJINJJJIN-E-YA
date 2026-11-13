@@ -1,0 +1,11 @@
+# 10분마다(매시 06·16·26·36·46·56분 UTC) 매도 재시도를 부른다. 하루 실행(00:01·00:11 UTC)과 겹치지 않는 분이다.
+# 같은 잠금 파일을 쓰므로 하루 실행과 동시에 돌지 않는다.
+[Unit]
+Description=H3 sell retry timer
+
+[Timer]
+OnCalendar=*-*-* *:06/10:00 UTC
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
