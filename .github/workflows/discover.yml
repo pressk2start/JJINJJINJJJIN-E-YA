@@ -2,7 +2,7 @@ name: Discover
 
 # 달마다 '사건 × 조건 하나 × 보유 시간' 틀에서 후보를 찾아 scalp/research/forward/ 에 기록한다 (discover.py).
 # 공개 시세만 쓴다(키 없음). 거래 서버와 무관하고 봇 코드는 건드리지 않는다.
-# 틀이 초안인 동안(discover.py 의 FRAME_APPROVED=False)은 탐색 기록(DISCOVERY.md)만 남기고 후보를 등록하지 않는다.
+# 등록 잠금은 2026-11-13 고문 승인으로 풀려 있다(discover.py 의 FRAME_APPROVED). 사건 종류마다 진행 중인 후보는 1개까지만 등록한다.
 # 등록된 후보의 채점과 판정은 Forward watch 가 매주 한다.
 on:
   schedule:

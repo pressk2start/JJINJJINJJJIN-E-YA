@@ -60,6 +60,10 @@ def serve(panel):
     return fetch
 
 
+def cand_rule(c):
+    return D.cand_key(c)
+
+
 class BarsAndEvents(unittest.TestCase):
     def bars(self, close, value, n=120):
         rows = flat(n)
@@ -234,7 +238,7 @@ class Search(unittest.TestCase):
         self.assertEqual(counts["passed"], len(passed))
         self.assertGreater(counts["scanned"], 100)
         self.assertGreaterEqual(counts["selected"], counts["passed"])
-        new = D.register([], passed, "2026-12-01", ("KRW-BTC",))
+        new, _held = D.register([], passed, "2026-12-01", ("KRW-BTC",))
         self.assertEqual([c["event"] for c in new], ["CRASH"])           # 사건마다 1개만 등록한다
         self.assertEqual(new[0]["id"], "D-202612-01")
 
@@ -249,15 +253,33 @@ class Registry(unittest.TestCase):
         return {"pop": "%s/%dh" % (event, hold // 4), "event": event, "hold": hold, "cond": [key, key, "<=", -0.01], "train": {},
                 "holdout": {"day_low": low}}
 
-    def test_one_per_event_best_lower_bound_first_and_no_duplicates(self):
+    def test_one_in_progress_candidate_per_event_and_the_rest_are_only_recorded(self):
         passed = [self.found("CRASH", 4, "a", 0.002), self.found("CRASH", 16, "a", 0.005), self.found("SURGE", 4, "b", 0.001),
                   self.found("BREAKOUT", 4, "c", 0.003), self.found("BREAKOUT", 16, "c", 0.0005)]
-        new = D.register([], passed, "2026-12-01", ("KRW-BTC", "KRW-AAA"))
-        self.assertEqual([(c["event"], c["hold"]) for c in new], [("CRASH", 16), ("BREAKOUT", 4), ("SURGE", 4)])
+        new, held = D.register([], passed, "2026-12-01", ("KRW-BTC", "KRW-AAA"))
+        self.assertEqual([(c["event"], c["hold"]) for c in new], [("CRASH", 16), ("BREAKOUT", 4), ("SURGE", 4)])   # 사건마다 하한이 가장 높은 것
         self.assertEqual([c["id"] for c in new], ["D-202612-01", "D-202612-02", "D-202612-03"])
         self.assertTrue(all(c["status"] == "ACTIVE" and c["engine"] == D.ENGINE and c["universe"] == ["KRW-BTC", "KRW-AAA"] for c in new))
-        again = D.register(new, passed, "2026-12-01", ("KRW-BTC", "KRW-AAA"))
-        self.assertEqual([(c["event"], c["hold"], c["id"]) for c in again], [("CRASH", 4, "D-202612-04"), ("BREAKOUT", 16, "D-202612-05")])
+        self.assertEqual([(c["event"], c["hold"], why[:11]) for c, why in held],
+                         [("CRASH", 4, "D-202612-01"), ("BREAKOUT", 16, "D-202612-02")])            # 같은 사건의 나머지는 기록만
+        again, held = D.register(new, passed, "2027-01-01", ("KRW-BTC", "KRW-AAA"))                  # 다음 달: 셋 다 아직 진행 중
+        self.assertEqual((again, len(held)), ([], 5))
+        again, held = D.register(new, passed, "2027-01-01", ("KRW-BTC", "KRW-AAA"), decided={"D-202612-01"})   # 급락 후보만 판정이 끝났다
+        self.assertEqual([(c["event"], c["hold"], c["id"]) for c in again], [("CRASH", 4, "D-202701-01")])
+        self.assertIn("같은 규칙이 전에 등록된 적 있음", [why for c, why in held if (c["event"], c["hold"]) == ("CRASH", 16)])   # 끝난 규칙을 다시 걸지 않는다
+
+    def test_crash_waits_for_the_advisors_candidate(self):
+        """급락은 고문이 등록한 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다 (고문 결정 2026-11-13)."""
+        registry = json.loads((ROOT / "scalp" / "research" / "forward" / "registry.json").read_text(encoding="utf-8"))
+        passed = [self.found("CRASH", 4, "btc_ret_1d", 0.004), self.found("SURGE", 4, "b", 0.001)]
+        new, held = D.register(registry, passed, "2026-12-01", ("KRW-BTC",))
+        self.assertEqual([c["event"] for c in new], ["SURGE"])
+        self.assertEqual([(c["event"], why) for c, why in held], [("CRASH", "A-202611-01 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)")])
+        new, held = D.register(registry, passed, "2027-06-01", ("KRW-BTC",), decided={"A-202611-01"})
+        self.assertEqual(sorted(c["event"] for c in new), ["CRASH", "SURGE"])
+
+    def test_the_lock_is_open_by_the_advisors_approval(self):
+        self.assertTrue(D.FRAME_APPROVED)
 
     def with_world(self, fn):
         panel = world(planted=True)
@@ -290,6 +312,15 @@ class Registry(unittest.TestCase):
             self.assertEqual([c["event"] for c in reg], ["CRASH"])
             log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
             self.assertEqual((len(log), log[1]["locked"], log[1]["registered"]), (2, False, [reg[0]["id"]]))
+            D.main(["--register", "--out", str(tmp), "--today", today])                       # 같은 통과가 또 나와도 진행 중이면 기록만
+            log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
+            self.assertEqual((log[2]["registered"], len(json.loads((tmp / "registry.json").read_text(encoding="utf-8")))), ([], 1))
+            self.assertTrue(log[2]["held"] and all(reg[0]["id"] + " 진행 중" in h["why"] for h in log[2]["held"]))
+            self.assertIn("통과했으나 등록하지 않음", (tmp / "DISCOVERY.md").read_text(encoding="utf-8"))
+            (tmp / "ledger.json").write_text(json.dumps({"candidates": {reg[0]["id"]: {"decision": {"verdict": "FAIL"}}}}), encoding="utf-8")
+            D.main(["--register", "--out", str(tmp), "--today", today])                       # 판정이 끝났어도 같은 규칙은 다시 걸지 않는다
+            log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
+            self.assertNotIn(cand_rule(reg[0]), [cand_rule(c) for c in json.loads((tmp / "registry.json").read_text(encoding="utf-8"))[1:]])
             self.assertEqual(set(self.asked), {log[0]["cut"]})          # 대상 종목은 HOLDOUT 시작일 기준으로 고른다
             self.assertLess(log[0]["cut"], today)
         self.with_world(body)
