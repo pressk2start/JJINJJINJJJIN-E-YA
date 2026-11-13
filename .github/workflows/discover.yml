@@ -50,9 +50,4 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi
-          for chat in $(echo "$TG_CHATS" | tr ',' ' '); do
-            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=${chat}" --data-urlencode "text=[후보 탐색] 월간 실행 실패 — ${RUN_URL}"
-          done
+        run: python3 -X utf8 scalp/research/tg_send.py --text "[후보 탐색] 월간 실행 실패 — ${RUN_URL}"

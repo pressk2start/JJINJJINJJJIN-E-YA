@@ -52,12 +52,8 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
         run: |
-          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi
           python -X utf8 scalp/research/forward_watch.py --summary > "$RUNNER_TEMP/summary.txt"
-          for chat in $(echo "$TG_CHATS" | tr ',' ' '); do
-            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=${chat}" --data-urlencode "text@${RUNNER_TEMP}/summary.txt"
-          done
+          python -X utf8 scalp/research/tg_send.py "$RUNNER_TEMP/summary.txt"
       - name: Fail if any candidate could not be updated
         if: steps.run.outputs.code != '0'
         run: exit 1
@@ -68,9 +64,4 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHATS" ]; then echo "telegram not configured"; exit 0; fi
-          for chat in $(echo "$TG_CHATS" | tr ',' ' '); do
-            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=${chat}" --data-urlencode "text=[후보 추적] 주간 실행 실패 또는 갱신 못 한 항목 있음 — ${RUN_URL}"
-          done
+        run: python3 -X utf8 scalp/research/tg_send.py --text "[후보 추적] 주간 실행 실패 또는 갱신 못 한 항목 있음 — ${RUN_URL}"

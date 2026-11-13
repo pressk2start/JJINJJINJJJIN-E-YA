@@ -91,6 +91,25 @@ class BarsAndEvents(unittest.TestCase):
         short[Q0 + 39] = (100.0, 100.0, 95.0, 95.0, 5e9)
         self.assertEqual(D.detect(D.Bars(short)), [])
 
+    def test_volume_base_is_the_median_of_the_previous_96_bars(self):
+        rows = flat(130)
+        for k in range(40, 60):                                         # 직전 1일 안의 큰 거래대금 20개 → 평균은 3 배로 뛰지만 중앙값은 그대로
+            rows[Q0 + k] = (100.0, 100.0, 100.0, 100.0, 1.1e10)
+        rows[Q0 + 129] = (100.0, 100.0, 96.0, 96.0, 4e9)                # 중앙값의 4배, 평균(약 3.1e9)의 1.3배
+        found = D.detect(D.Bars(rows))
+        self.assertEqual([(k, set(e)) for k, e, _m in found if k == 129], [(129, {"CRASH"})])
+        self.assertAlmostEqual(found[-1][2], 4.0)
+
+    def test_the_96_bars_are_counted_by_rows_not_by_clock_time(self):
+        rows = flat(200)
+        for k in range(120, 170):                                       # 50개 봉이 빠졌다 (거래 없음)
+            del rows[Q0 + k]
+        rows[Q0 + 199] = (100.0, 100.0, 96.0, 96.0, 4e9)
+        found = D.detect(D.Bars(rows))                                   # 직전 1일(96칸)에는 봉이 46개뿐이지만, 직전 96개 봉은 있다
+        self.assertEqual([set(e) for _k, e, _m in found], [{"CRASH"}])
+        few = {q: b for q, b in rows.items() if q >= Q0 + 110}          # 전체가 90개 남짓이면 판단하지 않는다
+        self.assertEqual(D.detect(D.Bars(few)), [])
+
     def test_bars_lookups(self):
         b = D.Bars({Q0: (1, 2, 0, 1.5, 10), Q0 + 1: (1.5, 3, 1, 3.0, 20), Q0 + 3: (3, 3, 3, 3.0, 30)})
         self.assertEqual((b.idx(Q0 + 1), b.idx(Q0 + 2)), (1, -1))
@@ -289,7 +308,7 @@ class Registry(unittest.TestCase):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 self.assertEqual(D.main(["--repro"]), 2)          # 돌지 않았으면 성공(0)으로 끝나지 않는다
-            self.assertIn("고문의 고정 20종목이 아직 없습니다", buf.getvalue())
+            self.assertIn("고문의 고정 20종목이 없습니다", buf.getvalue())
         finally:
             D.REPRO_UNIVERSE = saved
 
@@ -316,15 +335,45 @@ class Registry(unittest.TestCase):
         self.assertTrue(all("to=2025-06-01T00%3A00%3A00Z" in u for u in urls if "count=200" in u))      # 기준일 이전 자료만 요청
         self.assertTrue(all("to=2023-06-02T00%3A00%3A00Z" in u for u in urls if "count=1&" in u))        # 2년 전에 이미 상장
 
-    def test_repro_prints_base_one_hour_means_next_to_the_advisors(self):
-        def tr(event, hold, day, net):
-            return {"event": event, "hold": hold, "day": day, "net": net}
-        trades = [tr("SURGE", 4, "2024-05-01", -0.004), tr("SURGE", 4, "2025-05-01", -0.008), tr("SURGE", 16, "2024-05-01", 0.5),
-                  tr("CRASH", 4, "2023-03-01", 0.002)]
-        lines = D.repro_lines(trades, "2025-01-01")
-        self.assertIn("SURGE    여기 1건 -0.400% / 1건 -0.800%   고문 1506건 -0.400% / 924건 -0.770%", lines[1])
-        self.assertIn("BREAKOUT 여기 0건 n/a / 0건 n/a   고문 8673건 -0.280% / 7205건 -0.270%", lines[2])
-        self.assertIn("CRASH    여기 1건 +0.200% / 0건 n/a   고문 1168건 +0.260% / 825건 -0.010%", lines[3])
+    def advisor_world(self):
+        """고문 수치와 똑같이 나오도록 만든 거래 목록."""
+        def tr(event, hold, day, net, market="KRW-BTC", btc=0.0):
+            return {"event": event, "hold": hold, "day": day, "net": net, "market": market, "ind": {"btc_ret_1h": btc}}
+        front, back, trades = "2024-05-01", "2025-05-01", []
+        for (event, hold), ((n1, r1), (n2, r2)) in D.ADVISOR_REF.items():
+            if (event, hold) == ("SURGE", 4):
+                for coin, (a, b) in D.ADVISOR_SURGE_1H.items():
+                    trades += [tr(event, hold, front, r1, "KRW-" + coin)] * a + [tr(event, hold, back, r2, "KRW-" + coin)] * b
+            elif (event, hold) == ("CRASH", 4):
+                (a1, m1), (a2, m2) = D.ADVISOR_ALT["ref"]
+                trades += [tr(event, hold, front, m1, btc=-0.02)] * a1 + [tr(event, hold, front, (n1 * r1 - a1 * m1) / (n1 - a1))] * (n1 - a1)
+                trades += [tr(event, hold, back, m2, btc=-0.02)] * a2 + [tr(event, hold, back, (n2 * r2 - a2 * m2) / (n2 - a2))] * (n2 - a2)
+            else:
+                trades += [tr(event, hold, front, r1)] * n1 + [tr(event, hold, back, r2)] * n2
+        return trades, tr
+
+    def test_the_fixed_list_and_targets_are_the_advisors(self):
+        self.assertEqual(len(D.REPRO_UNIVERSE), 20)
+        self.assertEqual(sorted(m[4:] for m in D.REPRO_UNIVERSE), sorted(D.ADVISOR_SURGE_1H))
+        self.assertEqual(tuple(sum(v[i] for v in D.ADVISOR_SURGE_1H.values()) for i in (0, 1)),
+                         tuple(D.ADVISOR_REF[("SURGE", 4)][i][0] for i in (0, 1)))               # 코인별 건수의 합 = 전체 건수
+        self.assertEqual((D.REPRO_DATA_START, D.REPRO_START, D.REPRO_CUT, D.REPRO_END), ("2022-12-20", "2023-01-01", "2025-01-01", "2026-11-10"))
+
+    def test_repro_says_match_only_when_counts_are_exact_and_means_are_within_tolerance(self):
+        trades, tr = self.advisor_world()
+        lines, bad = D.repro_lines(trades)
+        self.assertEqual(bad, 0, "\n".join(lines))
+        self.assertIn("SURGE    1h  여기 1506건 -0.399% | 924건 -0.770%   고문 1506건 -0.399% | 924건 -0.770%   일치", lines[1])
+        self.assertIn("불일치 0", lines[7])
+        self.assertIn("알트 동반 급락", lines[8])
+        self.assertEqual(lines[-1], "결과: 전부 일치")
+        lines, bad = D.repro_lines(trades + [tr("SURGE", 4, "2024-06-01", -0.00399, "KRW-ADA")])          # 한 건만 더 있어도 어긋난다
+        self.assertEqual(bad, 2)                                                                       # 급등 1h 전체 건수 + ADA 코인별 건수
+        self.assertIn("ADA 45/32(고문 44/32)", lines[7])
+        lines, bad = D.repro_lines([dict(t, net=t["net"] + 0.0001) if (t["event"], t["hold"]) == ("BREAKOUT", 16) else t for t in trades])
+        self.assertEqual(bad, 1)                                                                       # 평균이 0.01%p 어긋나면 불일치
+        outside = [tr("SURGE", 4, "2022-12-25", 0.5), tr("SURGE", 4, "2026-11-10", 0.5)]               # 진입일이 범위 밖인 거래는 세지 않는다
+        self.assertEqual(D.repro_lines(trades + outside)[1], 0)
 
 
 class Forward(unittest.TestCase):
@@ -362,8 +411,27 @@ class Forward(unittest.TestCase):
         losing = {"rows": [self.row(k, -0.01) for k in range(40)], "decision": None}
         self.assertEqual(D.decide_once(losing, cand, "2026-02-08")["decision"]["verdict"], "FAIL")
         thin = {"rows": [self.row(k, 0.01) for k in range(5)], "decision": None}
-        self.assertIsNone(D.decide_once(thin, cand, "2026-06-01")["decision"])
-        self.assertEqual(D.decide_once(thin, cand, "2026-07-15")["decision"]["verdict"], "EXPIRED")
+        self.assertIsNone(D.decide_once(thin, cand, "2026-12-31")["decision"])                    # 12개월까지는 기다린다
+        self.assertEqual(D.decide_once(copy.deepcopy(thin), self.cand("2026-01-01", expire_days=730), "2027-06-01")["decision"], None)
+        self.assertEqual(D.decide_once(thin, cand, "2027-01-02")["decision"]["verdict"], "EXPIRED")   # 표본 부족 종료 (탈락이 아니다)
+
+    def test_a_candidate_can_also_require_surviving_without_its_best_day(self):
+        rows = [self.row(k, 0.20 if k < 3 else -0.001) for k in range(30)]                      # 첫날만 크게 벌고 나머지 9일은 조금씩 잃는다
+        plain = D.decide_once({"rows": list(rows), "decision": None}, self.cand("2026-01-01"), "2026-03-01")
+        self.assertEqual(plain["decision"]["verdict"], "PASS")
+        strict = D.decide_once({"rows": list(rows), "decision": None}, self.cand("2026-01-01", verdict="ex_best_day"), "2026-03-01")
+        self.assertEqual(strict["decision"]["verdict"], "FAIL")
+        self.assertAlmostEqual(strict["decision"]["stats"]["ex_best_day"], -0.001)
+        steady = [self.row(k, 0.01) for k in range(30)]
+        self.assertEqual(D.decide_once({"rows": steady, "decision": None}, self.cand("2026-01-01", verdict="ex_best_day"), "2026-03-01")["decision"]["verdict"], "PASS")
+
+    def test_scoring_starts_at_the_start_day_when_one_is_given(self):
+        panel = world(days=120, seed=8)
+        reg_day, later, end = D.q_day(Q0 + 80 * D.BARS_D), D.q_day(Q0 + 100 * D.BARS_D), Q0 + 120 * D.BARS_D
+        all_rows = D.candidate_trades(panel, self.cand(reg_day), end)
+        late = D.candidate_trades(panel, self.cand(reg_day, start=later), end)
+        self.assertTrue(0 < len(late) < len(all_rows))
+        self.assertGreaterEqual(min(r["entry_q"] for r in late), D.day_q(later) + 1)
 
     def test_ledger_rows_are_append_only(self):
         old = [self.row(0, 0.01), self.row(1, -0.02)]
