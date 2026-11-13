@@ -313,19 +313,22 @@ def _utc_day(minute):
 
 def cr_decide(entry, run_day, start=None):
     """30건·10일이 처음 채워지는 거래까지로 한 번만 판정한다. 이미 판정이 있으면 건드리지 않는다.
-    start(추적 시작 시각)를 주면, 그 뒤 CR_EXPIRE_DAYS 가 지나도록 못 채웠을 때 EXPIRED 로 끝낸다(표본 부족 종료, 탈락 아님)."""
+    start(추적 시작 시각)를 주면 기한이 생긴다: 시작 뒤 CR_EXPIRE_DAYS 안에 진입한 거래만 표본으로 세고, 그 안에 못 채웠으면
+    EXPIRED 로 끝낸다(표본 부족 종료, 탈락 아님). 기한 뒤의 거래로 부족분을 채우지 못한다. 실행이 늦었어도 기한 안에 채웠으면 판정한다."""
     if entry.get("decision"):
         return entry
+    deadline = (start.date() + dt.timedelta(days=CR_EXPIRE_DAYS)).isoformat() if start is not None else None
+    rows = [t for t in entry["rows"] if deadline is None or _utc_day(t["entry_min"]) <= deadline]
     days = set()
-    for k, t in enumerate(entry["rows"], 1):
+    for k, t in enumerate(rows, 1):
         days.add(_utc_day(t["entry_min"]))
         if k >= AM.CR_MIN_N and len(days) >= AM.CR_MIN_DAYS:
-            stats = AM.cr_summary([(r["market"], r) for r in entry["rows"][:k]])
+            stats = AM.cr_summary([(r["market"], r) for r in rows[:k]])
             entry["decision"] = {"verdict": "PASS" if stats["verdict"].startswith("PASS") else "FAIL", "decided_on": run_day,
                                  "trades": k, "stats": stats}
             return entry
-    if start is not None and (dt.date.fromisoformat(run_day) - start.date()).days > CR_EXPIRE_DAYS:
-        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(entry["rows"]), "stats": None}
+    if deadline is not None and run_day > deadline:
+        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(rows), "stats": None}
     return entry
 
 

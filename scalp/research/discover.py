@@ -28,6 +28,10 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   5 선별    TRAIN: 거래 ≥ 150건, 평균 순수익 > 0, t ≥ 2 인 것은 전부 HOLDOUT 으로 넘긴다.
             HOLDOUT: 거래 ≥ 100건 · 평균 > 0 · 일 단위 하한 > 0 · 전반·후반 모두 > 0 · 날짜 가중 평균 > 0 · 상위 5일을 빼도 > 0.
   6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 한 달 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+            사건 종류(급등·돌파·급락)마다 '진행 중인 후보'(등록됐고 아직 판정·만료 전)는 1개까지다 (고문 결정 2026-11-13).
+            진행 중인 것이 있으면 그 사건에서는 통과가 나와도 등록하지 않고 기록만 남긴다 — 같은 사건을 두 번 세지 않기 위해서다.
+            (급락은 고문이 등록한 알트 동반 급락 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다.)
+            같은 규칙(사건·보유·지표·방향)은 판정이 끝난 뒤에도 다시 등록하지 않는다 — 통과할 때까지 다시 거는 일을 막는다.
             판정은 forward_watch 가 등록 이후 자료 30건·10일에서 한 번만 한다. 12개월 안에 못 채우면 EXPIRED
             (고문 결정 2026-11-13: 자동 등록 후보 12개월, 급락 반등 계열 24개월. 만료 = 표본 부족 종료이지 탈락이 아니다).
   7 기록    실행마다 훑은 규칙 수·선별 수·통과 수를 forward/scan_log.json 에 덧붙인다 (몇 개를 봤는지가 남아야 우연인지 판단할 수 있다).
@@ -36,8 +40,8 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
             조건 없는 1시간·4시간 보유 여섯 모집단의 건수(정확히)와 평균(0.001%p 이내), 급등 1시간의 코인별 건수,
             알트 동반 급락 후보의 과거 수치를 고문 값과 나란히 찍고, 전부 맞으면 종료 코드 0. 맞으면 고문이 잠금 해제를 정한다.
 
-*** 아직 잠겨 있다. FRAME_APPROVED 가 False 인 동안 --register 는 기록(훑은 수·탐색 결과)만 남기고 후보를 등록하지 않는다.
-    잠금은 고문이 재현 결과를 보고 푼다. 틀을 고치면 ENGINE 번호를 올린다(옛 번호로 등록된 후보는 채점을 멈춘다). ***
+등록 잠금: 고문이 재현 일치를 확인하고 2026-11-13 에 풀었다(FRAME_APPROVED=True). False 로 두면 --register 는 기록만 남긴다.
+    틀을 고치면 ENGINE 번호를 올리고 잠금을 다시 건다(옛 번호로 등록된 후보는 채점을 멈춘다).
 
 고문 틀에 적혀 있지 않아 내가 정한 것
   · 15분 수익률 = 그 봉 종가 / 직전 봉 종가 − 1 (직전 봉이 정확히 15분 전일 때만).
@@ -55,7 +59,7 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
       scan_log.json 의 engine "2" 줄이다(규칙 1,161개, 통과 1개, 등록 없음).
       2026-11-13 고문이 재현 정의를 줬다: 기준은 '중앙값', 돌파에 수익률 > 0 (ENGINE 3). 어느 판으로도 등록된 후보는 없다.
       같은 날 재현: 여섯 모집단의 건수·평균, 급등 1시간의 코인별 건수 20종목, 알트 동반 급락 과거 수치(244건 +1.450% / 146건 +1.541%)가
-      고문 값과 전부 일치했다. 잠금 해제는 고문이 정한다.
+      고문 값과 전부 일치했다. 고문이 같은 날 잠금 해제를 승인했다(조건: 사건 종류마다 진행 중인 후보 1개까지).
 
 실행
   python3 scalp/research/discover.py --repro [--markets KRW-BTC,KRW-ETH,...]   고문 수치 재현 (등록·기록 안 함)
@@ -89,7 +93,7 @@ AM = _load("auto_monitor")          # 조회 함수(http_get)만 빌려 쓴다
 SS = _load("shadow_salvage")        # 군집 통계 (H27 에서 쓴 것 그대로)
 
 ENGINE = "3"                        # 3 = 고문 재현 정의(중앙값 기준·돌파에 수익률 > 0). 2 는 평균 기준이었다
-FRAME_APPROVED = False              # 고문이 재현 결과를 보고 푼다. 그 전에는 등록하지 않는다
+FRAME_APPROVED = True               # 고문 승인 2026-11-13 (재현 일치 확인 뒤). 틀을 고치면 다시 False 로
 REPRO_UNIVERSE = tuple("KRW-" + c for c in                         # 고문의 고정 20종목 (2026-11-13 수령)
                        "BTC ETH XRP DOGE SOL WAVES AXS ETC CHZ SAND IQ APT ADA GMT KAVA POL TRX CELO ARK ALGO".split())
 UNIVERSE_N, LIQ_DAYS, MIN_LISTED_DAYS = 30, 200, 730
@@ -434,25 +438,39 @@ def cand_key(c):
     return (c["event"], c["hold"], cond[1] if cond else None, cond[2] if cond else None)
 
 
-def register(registry, passed, run_day, universe):
-    """통과한 것 중 사건마다 1개(일 단위 하한이 가장 높은 것), 달에 MAX_NEW 개까지 → 새로 등록할 후보 목록."""
-    active = {cand_key(c) for c in registry if c.get("status") == "ACTIVE"}
+def register(registry, passed, run_day, universe, decided=()):
+    """통과한 것 중 새로 등록할 후보를 고른다 → (새 후보 목록, [(등록하지 않은 통과, 사유)]).
+    사건 종류마다 진행 중인 후보(등록됐고 decided 에 없는 것)는 1개까지 — 있으면 등록하지 않고 사유와 함께 돌려준다.
+    그래서 한 번의 실행에서도 사건마다 1개(일 단위 하한이 가장 높은 것)만 등록된다. 달에 MAX_NEW 개까지.
+    같은 규칙(사건·보유·지표·방향)은 전에 등록된 적이 있으면 다시 등록하지 않는다. decided = 판정·만료가 끝난 후보 번호들."""
+    decided = set(decided)
+    busy = {c["event"]: c["id"] for c in registry if c.get("status") == "ACTIVE" and c["id"] not in decided}
+    seen = {cand_key(c) for c in registry}
     taken = {c["id"] for c in registry}
-    new, used_events = [], set()
+    new, held = [], []
     for f in sorted(passed, key=lambda f: -f["holdout"]["day_low"]):
         spec = {"engine": ENGINE, "registered": run_day, "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
                 "move": MOVE, "vol_x": VOL_X, "cost": dict(COST), "cost_other": COST_OTHER, "train": f["train"], "holdout": f["holdout"],
                 "status": "ACTIVE"}
-        if f["event"] in used_events or cand_key(spec) in active or len(new) >= MAX_NEW:
+        why = None
+        if f["event"] in busy:
+            why = "%s 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)" % busy[f["event"]]
+        elif cand_key(spec) in seen:
+            why = "같은 규칙이 전에 등록된 적 있음"
+        elif len(new) >= MAX_NEW:
+            why = "한 달 등록 한도 %d개" % MAX_NEW
+        if why:
+            held.append((spec, why))
             continue
         k = 1
         while "D-%s-%02d" % (run_day[:7].replace("-", ""), k) in taken:
             k += 1
         spec["id"] = "D-%s-%02d" % (run_day[:7].replace("-", ""), k)
         taken.add(spec["id"])
-        used_events.add(f["event"])
+        busy[f["event"]] = spec["id"]
+        seen.add(cand_key(spec))
         new.append(spec)
-    return new
+    return new, held
 
 
 def describe(c):
@@ -506,23 +524,25 @@ def merge_trades(old_rows, new_rows):
 
 def decide_once(entry, cand, run_day):
     """30건·10일이 처음 채워지는 거래까지로 한 번만 판정. 기한(기본 12개월)이 지나도록 못 채우면 EXPIRED(표본 부족 종료, 탈락 아님).
+    표본은 기한 안에 진입한 거래만 센다 — 기한 뒤의 거래로 부족분을 채우지 못한다. 실행이 늦었어도 기한 안에 채웠으면 그 자료로 판정한다.
     후보에 verdict="ex_best_day" 가 있으면 '최고 수익일 하루를 빼도 날짜 가중 평균 > 0' 을 더 본다. 이미 판정이 있으면 그대로."""
     if entry.get("decision"):
         return entry
+    deadline = (dt.date.fromisoformat(cand_start(cand)) + dt.timedelta(days=cand.get("expire_days", FWD_EXPIRE_DAYS))).isoformat()
+    rows = [t for t in entry["rows"] if t["day"] <= deadline]
     days = set()
-    for k, t in enumerate(entry["rows"], 1):
+    for k, t in enumerate(rows, 1):
         days.add(t["day"])
         if k >= FWD_MIN_N and len(days) >= FWD_MIN_DAYS:
-            st = SS.cluster_stats(entry["rows"][:k])
+            st = SS.cluster_stats(rows[:k])
             ok, stats = st["net"] > 0 and st["daymean"] > 0, {x: st[x] for x in ("n", "days", "net", "t", "daymean")}
             if cand.get("verdict") == "ex_best_day":
-                stats["ex_best_day"] = ex_best_day(entry["rows"][:k])
+                stats["ex_best_day"] = ex_best_day(rows[:k])
                 ok = ok and stats["ex_best_day"] is not None and stats["ex_best_day"] > 0
             entry["decision"] = {"verdict": "PASS" if ok else "FAIL", "decided_on": run_day, "trades": k, "stats": stats}
             return entry
-    age = (dt.date.fromisoformat(run_day) - dt.date.fromisoformat(cand_start(cand))).days
-    if age > cand.get("expire_days", FWD_EXPIRE_DAYS):
-        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(entry["rows"]), "stats": None}
+    if run_day > deadline:
+        entry["decision"] = {"verdict": "EXPIRED", "decided_on": run_day, "trades": len(rows), "stats": None}
     return entry
 
 
@@ -629,10 +649,14 @@ def main(argv=None):
     out = Path(a.out)
     path = out / "registry.json"
     registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-    new = register(registry, passed, today, markets)
+    ledger_path = out / "ledger.json"                                # 판정·만료가 끝난 후보는 추적기의 장부에 적혀 있다
+    cands = (json.loads(ledger_path.read_text(encoding="utf-8")).get("candidates") or {}) if ledger_path.exists() else {}
+    new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if e.get("decision")})
     for c in new:
         tail.append("후보 %s: %s (HOLDOUT 일 단위 하한 %s)" % (c["id"], describe(c), _pct(c["holdout"]["day_low"])))
-    if not new:
+    for c, why in held:
+        tail.append("통과했으나 등록하지 않음: %s (HOLDOUT 일 단위 하한 %s) — %s" % (describe(c), _pct(c["holdout"]["day_low"]), why))
+    if not new and not held:
         tail.append("새로 등록할 후보 없음")
     wrote = []
     if a.register and not custom:
@@ -646,7 +670,7 @@ def main(argv=None):
         log_path = out / "scan_log.json"
         history = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
         history.append(dict(counts, run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
-                            locked=not FRAME_APPROVED))
+                            held=[{"rule": describe(c), "why": why} for c, why in held], locked=not FRAME_APPROVED))
         log_path.write_text(json.dumps(history, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         (out / "DISCOVERY.md").write_text("# 후보 탐색 기록\n\n자동으로 만들어지는 파일입니다. 마지막 실행 %s (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.\n\n```\n%s\n```\n" % (
             today, "\n".join(lines + tail)), encoding="utf-8")

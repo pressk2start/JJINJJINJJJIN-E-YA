@@ -385,6 +385,18 @@ class CrashReboundVariants(unittest.TestCase):
         self.assertIn("| −6% | 1시간에 6% 넘게 빠지면 60분 보유 | 5 / 30건, 2 / 10일 | -5.00% | -5.00% | 만료(표본 부족) |", FW.render(ledger))
         self.assertIn("−6% 만료(표본 부족)", FW.summary(ledger))
 
+    def test_trades_after_the_deadline_cannot_fill_the_sample(self):
+        """제3세션 지적(2026-11-13): 기한 뒤에 들어온 거래로 30건·10일을 채워도 PASS 가 아니라 EXPIRED."""
+        early = [cr_trade(k, 0.01) for k in range(27)]                                                # 하루 3건 × 9일 (기한 안)
+        late = [cr_trade(3 * 800 + k, 0.01) for k in range(3)]                                        # 시작 800일째 (기한 730일 밖)
+        entry = FW.cr_decide({"rows": early + late, "decision": None}, "2029-03-01", FW.CR_START)
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("EXPIRED", 27))
+        filled = [cr_trade(k, 0.01) for k in range(30)]                                               # 기한 안에 30건·10일
+        entry = FW.cr_decide({"rows": filled + late, "decision": None}, "2029-03-01", FW.CR_START)
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))    # 실행이 늦었어도 그 자료로 판정
+        same = FW.cr_decide({"rows": early + late, "decision": None}, "2029-03-01")                   # 기한이 없으면(시작 시각 없음) 전부 센다
+        self.assertEqual(same["decision"]["trades"], 30)
+
     def test_status_shows_the_variants_and_what_is_still_waiting(self):
         ledger, _ = FW.update({}, "2026-11-13", **offline())
         text = FW.render(ledger)
