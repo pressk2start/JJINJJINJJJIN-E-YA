@@ -288,7 +288,7 @@ class Registry(unittest.TestCase):
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                self.assertEqual(D.main(["--repro"]), 0)
+                self.assertEqual(D.main(["--repro"]), 2)          # 돌지 않았으면 성공(0)으로 끝나지 않는다
             self.assertIn("고문의 고정 20종목이 아직 없습니다", buf.getvalue())
         finally:
             D.REPRO_UNIVERSE = saved

@@ -549,7 +549,7 @@ def main(argv=None):
         markets = REPRO_UNIVERSE
         if not markets:
             print("재현에 쓸 고문의 고정 20종목이 아직 없습니다(REPRO_UNIVERSE 비어 있음). --markets 로 주거나 목록을 넣은 뒤 실행하세요.")
-            return 0
+            return 2                                                # 돌지 않은 것이 성공으로 보이지 않게 (0 = 탐색을 실제로 했다)
     else:
         markets = pick_universe(cut_day)
         print("대상 %d종목 (%s 이전 %d일 거래대금 기준): %s" % (len(markets), cut_day, LIQ_DAYS, ", ".join(m[4:] for m in markets)), flush=True)
