@@ -1327,8 +1327,13 @@ class TestOrderNumberPolicy(Base):
         ex.bal["BTC"] = 0.001                                                         # 장부에는 없는 코인 약 10만 원어치
         rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
         self.assertEqual(ex.placed, [])
-        self.assertIn("BTC 매수 거부: 계좌에는 0.00100000개가 있는데 장부에는 0.00000000개", errors[0])
+        self.assertIn("BTC 매수 거부: 계좌에는 0.00100000개(그중 주문에 잠긴 수량 0.00000000개)가 있는데 장부에는 0.00000000개", errors[0])
         self.assertEqual(HX.load_state(cfg)["sleeves"][BTC].get("sent") or [], [])    # 보내지 않았으니 번호도 쓰지 않았다
+        ex.bal["BTC"], ex.locked["BTC"] = 0.0, 0.001                                  # 사용 가능 잔고는 0 이지만 주문에 잠긴 코인이 있다
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
+        self.assertEqual(ex.placed, [])
+        self.assertIn("BTC 매수 거부: 계좌에는 0.00100000개(그중 주문에 잠긴 수량 0.00100000개)", errors[0])
+        ex.locked["BTC"] = 0.0
         ex.bal["BTC"] = 0.00000050                                                    # 먼지(최소 주문 금액 미만)는 막지 않는다
         rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
         self.assertEqual((errors, ex.placed), ([], ["h3-20261110-KRW-BTC-bid"]))
@@ -1418,11 +1423,15 @@ class TestOrderNumberPolicy(Base):
             self.assertEqual((code, sent), (0, []))                                   # 보여 주기만 — 알림 없음
             self.assertIn("장부에서 지울 수량", out)
             self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book)
-            code, out, sent = self.run_main(["--writeoff", "KRW-BTC", "--yes"], **live)
+            code, out, sent = self.run_main(["--writeoff", "KRW-BTC", "--yes", "--reason", "앱에서 직접 매도함"], **live)
             self.assertEqual(code, 0)
             self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], 0.0)
             self.assertEqual(len(sent), 1)
             self.assertIn("H3 LIVE 장부 정리(수동): 장부에서 지울 수량", sent[0][2])
+            self.assertIn("| 사유: 앱에서 직접 매도함", sent[0][2])
+            row = self.ledger(cfg)[-1]                                                # 정리 전·후 수량과 사유가 기록에 남는다
+            self.assertEqual((row["action"], row["coin_before"], row["coin"]), ("WRITEOFF", book, 0.0))
+            self.assertEqual(row["note"], "manual write-off after checking the account: 앱에서 직접 매도함")
             code, out, sent = self.run_main(["--writeoff", "KRW-BTC", "--yes"])       # SHADOW(기본) 에서는 거부
             self.assertEqual((code, sent), (1, []))
             self.assertIn("writeoff refused", out)

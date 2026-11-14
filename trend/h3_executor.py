@@ -28,7 +28,8 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
      · 한 실행에서 지난 주문의 체결을 반영했으면, 그 종목의 새 주문은 그 실행에서 내지 않는다(다음 실행이 다시 판단한다).
      · 매도는 새 번호로 다시 보낼 수 있다(계좌에 있는 만큼만 팔린다).
      · 매수는 하루에 한 번만 보낸다. 그 결과가 체결이 아니면(안 들어감·체결 0·불확실) 그날은 포기하고 다음 날 다시 판단한다.
-     · 매수 전에 계좌와 장부를 대조한다. 계좌의 코인이 장부보다 최소 주문 금액어치 이상 많으면 매수를 거부하고 알린다
+     · 매수 전에 계좌와 장부를 대조한다. 계좌의 코인(사용 가능 + 주문에 잠긴 수량)이 장부보다 최소 주문 금액어치 이상 많으면
+       매수를 거부하고 알린다
        (앞선 주문이 뒤늦게 체결됐을 수 있다 — 이중 매수를 막는 마지막 장치. 같은 계좌에 따로 산 BTC·ETH 가 있어도 거부된다).
      죽었다 살아나면 pending 의 identifier 로 주문을 조회해 체결을 반영한다(조회만 한다).
   3) 단타 봇과 분리: bot.py 는 자기가 사지 않은 잔고를 '유령 포지션'으로 입양해 판다. bot.py 가 H3_RESERVED_MARKETS 가드와 함께
@@ -85,6 +86,7 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
   python3 h3_executor.py --sell-retry   매도만 다시 시도 (위 12번). 타이머용 — 할 일이 없으면 아무것도 찍지 않는다
   python3 h3_executor.py --writeoff KRW-BTC        장부와 계좌의 차이를 보여 준다(바꾸지 않는다). LIVE 전용
   python3 h3_executor.py --writeoff KRW-BTC --yes  사람이 계좌를 확인한 뒤: 장부의 코인을 계좌에 있는 만큼으로 줄인다. 주문은 내지 않는다.
+                                    --reason "사유" 를 붙이면 장부 기록(정리 전·후 수량과 함께)과 알림에 남는다.
                                     계좌의 코인이 다른 주문에 묶여 있으면(locked) 거부한다.
   python3 h3_executor.py --smoke-test   LIVE 전용. BTC 7,000원을 시장가로 사서 바로 판다(수수료 약 7원). 첫 실제 신호가
                                     오기 전에 인증·주문·identifier 조회·체결 집계·봇 분리 확인이 실거래소에서 도는지 본다.
@@ -801,9 +803,10 @@ class Executor(object):
             ok, why = bot_guard_ok(self.cfg, market, self.bot_pids)
             if not ok:
                 raise H3Error("%s BUY refused: %s" % (market, why))
-            if (have - sleeve["coin"]) * sig["close"] >= MIN_ORDER_KRW:      # 계좌가 장부보다 많다(최소 주문 금액 미만의 차이는 먼지로 본다)
-                raise H3Error("%s 매수 거부: 계좌에는 %.8f개가 있는데 장부에는 %.8f개 — 앞선 주문이 뒤늦게 체결됐거나 따로 산 코인일 수 있음. "
-                              "계좌를 확인할 것" % (market[4:], have, sleeve["coin"]))
+            locked = self.ex.account(currency)[1]               # 주문에 잠긴 수량도 계좌의 코인이다 (고문 판정 2026-11-14)
+            if (have + locked - sleeve["coin"]) * sig["close"] >= MIN_ORDER_KRW:   # 계좌가 장부보다 많다(최소 주문 금액 미만의 차이는 먼지로 본다)
+                raise H3Error("%s 매수 거부: 계좌에는 %.8f개(그중 주문에 잠긴 수량 %.8f개)가 있는데 장부에는 %.8f개 — 앞선 주문이 뒤늦게 "
+                              "체결됐거나 따로 산 코인일 수 있음. 계좌를 확인할 것" % (market[4:], have + locked, locked, sleeve["coin"]))
             krw = int(sleeve["cash"] / (1 + FEE))
             if krw < MIN_ORDER_KRW:
                 raise H3Error("%s: sleeve cash %.0f below minimum order" % (market, sleeve["cash"]))
@@ -975,7 +978,7 @@ class Executor(object):
         return rows, errors
 
 
-def writeoff(cfg, exchange, market, confirm, now=None):
+def writeoff(cfg, exchange, market, confirm, now=None, reason=""):
     """사람이 계좌를 확인한 뒤 쓰는 장부 정리 → (바꿨는지, 보고 줄들). 주문은 내지 않는다.
     장부의 코인을 계좌에 실제로 있는 만큼(팔 수 있는 잔고)으로 줄인다. 계좌의 코인이 다른 주문에 묶여 있으면 거부한다
     (묶인 코인은 없어진 것이 아니다). confirm 이 False 면 보여 주기만 한다."""
@@ -1014,7 +1017,7 @@ def writeoff(cfg, exchange, market, confirm, now=None):
     try:
         append_ledger(cfg, {"ts": (now or utc_now)().isoformat(), "mode": cfg.mode, "day": (now or utc_now)().date().isoformat(),
                             "market": market, "action": "WRITEOFF", "coin_before": before, "coin": balance, "cash": sleeve["cash"],
-                            "note": "manual write-off after checking the account"})
+                            "note": "manual write-off after checking the account" + (": " + reason if reason else "")})
     except Exception as exc:                                    # 상태는 이미 바뀌었다 — '거부' 로 끝내지 않는다
         lines.append("주의: 장부 기록 파일(%s)에 이 정리를 남기지 못했습니다 — %s" % (cfg.ledger_path.name, exc))
     return True, lines
@@ -1169,6 +1172,7 @@ def main(argv=None):
     ap.add_argument("--sell-retry", action="store_true", help="매도만 다시 시도 (타이머용). 할 일이 없으면 아무것도 하지 않는다")
     ap.add_argument("--writeoff", metavar="MARKET", help="장부와 계좌의 차이를 보여 준다. --yes 를 붙이면 장부의 코인을 계좌에 맞춰 줄인다")
     ap.add_argument("--yes", action="store_true", help="--writeoff 를 실제로 적용")
+    ap.add_argument("--reason", default="", help="--writeoff --yes 와 함께: 정리하는 사유 (장부 기록과 알림에 남는다)")
     ap.add_argument("--allow-late", action="store_true", help="09:00 KST 에서 H3_MAX_LATE_MIN 분 넘게 늦은 실행에서도 매수를 허용")
     a = ap.parse_args(argv)
     if a.dry_run and (a.sell_retry or a.smoke_test or a.writeoff):   # 실주문을 내거나 장부를 바꾼다 — '시험만' 과 같이 쓰면 거부한다
@@ -1201,13 +1205,14 @@ def main(argv=None):
     notify = telegram_sender(cfg)
     if a.writeoff:
         try:
-            changed, lines = writeoff(cfg, Upbit(cfg.access, cfg.secret), a.writeoff.strip().upper(), a.yes)
+            changed, lines = writeoff(cfg, Upbit(cfg.access, cfg.secret), a.writeoff.strip().upper(), a.yes, reason=a.reason.strip())
         except Exception as exc:
             print("[h3] writeoff refused: %s" % exc)
             return 1
         print("\n".join("[h3] " + ln for ln in lines))
         if changed:
-            notify("H3 LIVE 장부 정리(수동): %s" % next(ln for ln in lines if ln.startswith("장부에서 지울")))
+            notify("H3 LIVE 장부 정리(수동): %s%s" % (next(ln for ln in lines if ln.startswith("장부에서 지울")),
+                                                    " | 사유: " + a.reason.strip() if a.reason.strip() else ""))
         return 0
     if a.smoke_test:
         try:
