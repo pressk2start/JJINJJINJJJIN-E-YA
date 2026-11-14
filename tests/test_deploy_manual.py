@@ -166,7 +166,7 @@ class NothingElseReachesTheServer(unittest.TestCase):
             if path.name == "deploy.yml":
                 continue
             body = "\n".join(code_lines(path.read_text(encoding="utf-8")))
-            for word in ("LIGHTSAIL", "ssh-action", "deploy_restart", "auto_deploy"):
+            for word in ("LIGHTSAIL", "ssh-action", "bash ./deploy_restart", "auto_deploy"):       # 경로 필터에 파일 이름이 나오는 것은 괜찮다
                 self.assertNotIn(word, body, "%s: %s" % (path.name, word))
 
     def test_scheduled_workflows_commit_only_the_forward_folder(self):
