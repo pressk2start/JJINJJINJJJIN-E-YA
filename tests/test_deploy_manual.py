@@ -123,7 +123,7 @@ class DeployScript(unittest.TestCase):
         self.assertEqual(self.src.count("sudo systemctl restart upbit-bot"), 1)
         restart = self.src.index("sudo systemctl restart upbit-bot")
         self.assertLess(self.src.rindex('if [ "$NEED_RESTART" = "1" ]; then', 0, restart), restart)
-        self.assertIn("sudo systemctl status upbit-bot --no-pager || true", self.src)   # 꺼져 있는 봇의 상태 조회가 배포를 실패시키지 않는다
+        self.assertIn("sudo systemctl status upbit-bot --no-pager -n 0 || true", self.src)   # 꺼져 있는 봇의 상태 조회가 배포를 실패시키지 않는다
 
     def test_config_changes_restart_the_bot_and_a_failed_check_fails_the_deploy(self):
         self.assertIn("cat bot.py config.py _a_clean_purity.py", self.src)
@@ -132,6 +132,16 @@ class DeployScript(unittest.TestCase):
         tail = self.src.rstrip().splitlines()[-4:]
         self.assertEqual(tail[0], 'if [ "$DEPLOY_FAILED" = "1" ]; then')
         self.assertEqual(tail[2].strip(), "exit 1")
+
+    def test_service_log_lines_never_reach_the_public_deploy_log(self):
+        """systemctl status 는 기본으로 서비스의 최근 로그 10줄을 같이 찍는다. 배포 기록은 공개라서 그 줄을 찍지 않게 한다."""
+        lines = [ln for ln in self.src.splitlines() if "systemctl status" in ln and not ln.lstrip().startswith("#")]
+        self.assertEqual(len(lines), 2)
+        for ln in lines:
+            self.assertIn("--no-pager -n 0", ln)
+        for ln in self.src.splitlines():                                              # 로그를 직접 찍는 명령도 없다
+            code = ln.split("#", 1)[0]
+            self.assertFalse(code.lstrip().startswith(("journalctl", "sudo journalctl")), ln)
 
     def test_scanners_and_units_are_still_left_alone(self):
         self.assertIn('if systemctl is-enabled "$svc" &>/dev/null; then', self.src)  # 꺼 둔 스캐너는 건드리지 않는다

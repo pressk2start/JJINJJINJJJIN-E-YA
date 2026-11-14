@@ -106,9 +106,11 @@ for svc in momentum-scanner momentum-clm; do
 done
 
 echo "[deploy] 완료 — $(date)"
-sudo systemctl status upbit-bot --no-pager || true      # 꺼져 있으면 0 이 아닌 값을 돌려준다 — 그것만으로 배포를 실패시키지 않는다
+# 상태만 보여 준다. -n 0 = 서비스의 최근 로그 줄은 찍지 않는다 — 이 출력은 공개 저장소의 배포 기록에 남는데,
+# 봇의 로그 줄에는 통신 오류 문구처럼 비밀값이 섞인 줄이 있을 수 있다 (2026-11-14 검토). 로그는 서버에서 journalctl 로 본다.
+sudo systemctl status upbit-bot --no-pager -n 0 || true      # 꺼져 있으면 0 이 아닌 값을 돌려준다 — 그것만으로 배포를 실패시키지 않는다
 for svc in momentum-scanner momentum-clm; do
-    systemctl is-enabled "$svc" &>/dev/null && sudo systemctl status "$svc" --no-pager
+    systemctl is-enabled "$svc" &>/dev/null && sudo systemctl status "$svc" --no-pager -n 0
 done
 true
 
