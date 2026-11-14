@@ -48,6 +48,8 @@ class FakeExchange(object):
         self.hide_trades = False         # 끝난 주문인데 체결 내역(trades)이 아직 안 붙은 응답을 흉내
         self.lookups = None              # [True, False, …] 를 주면 order() 가 False 차례에 "없음" 을 돌려준다(흔들리는 조회)
         self.locked = {}                 # 통화 -> 다른 주문에 묶인 수량
+        self.fail_markets = set()        # 이 종목의 주문은 넣기 전에 실패 (통신 오류)
+        self.reject_code = None          # 숫자를 주면 place 가 그 HTTP 코드로 거절된다 (주문이 만들어지지 않음)
 
     def orderbook(self, market):
         p = self.mid[market]
@@ -63,10 +65,12 @@ class FakeExchange(object):
         return self.bal.get(currency, 0.0), self.locked.get(currency, 0.0)
 
     def place(self, market, side, identifier, krw=None, volume=None):
-        if self.fail_before_accept or self.fail_side == side:
+        if self.fail_before_accept or self.fail_side == side or market in self.fail_markets:
             raise HX.H3Error("network down")
-        if identifier in self.orders:
-            raise HX.H3Error("identifier already exists")
+        if self.reject_code or identifier in self.orders:       # 거래소의 거절: HTTP 4xx 와 오류 이름이 온다
+            err = HX.H3Error("upbit POST /v1/orders -> %d %s" % (self.reject_code or 400, "identifier already exists" if identifier in self.orders else "rejected"))
+            err.code, err.name = self.reject_code or 400, "validation_error"
+            raise err
         cur = market.split("-")[1]
         p = self.mid[market]
         trades = []
@@ -661,7 +665,7 @@ class TestReviewFixes(Base):
         self.assertTrue(res["recovered"])
         self.assertLess(abs(ex.bal["BTC"]), 1e-8)               # 남은 수량을 팔았다
         self.assertFalse(cfg.smoke_path.exists())
-        self.assertEqual(ex.placed, ["h3-smoke-20261110000100-bid", "h3-smoke-20261110000100-ask"])   # 새 매수 없음
+        self.assertEqual(ex.placed, ["h3-smoke-20261110000100-bid", "h3-smoke-20261110010100-ask"])   # 새 매수 없음. 매도는 새 번호로
 
     def test_smoke_recovery_when_the_buy_never_reached_the_exchange(self):
         cfg = self.cfg("LIVE")
@@ -952,6 +956,7 @@ class TestSellRetry(Base):
             self.clock += dt.timedelta(minutes=10)
         self.assertEqual(len(self.sent), 1)                                                  # 알림은 한 번
         self.assertIn("🚨", self.sent[0])
+        self.assertNotIn("late", self.sent[0])                                               # 팔지 못했는데 '늦게 팔았다' 고 하지 않는다
         self.retry(cfg, ex)                                                                  # 01:06 — 한 시간이 지났다
         self.assertEqual(len(self.sent), 2)
         self.assertGreater(HX.load_state(cfg)["sleeves"][BTC]["coin"], 0)                    # 포지션은 그대로다
@@ -1449,6 +1454,444 @@ class TestOrderNumberPolicy(Base):
         text = HX.status_text(cfg)
         self.assertIn("KRW-BTC cash=1,000,000 coin=0.00000000 last_day=None pending=yes unknown_orders=1 sell_blocked=no", text)
         self.assertIn("KRW-ETH cash=1,000,000 coin=0.00000000 last_day=2026-11-10 pending=no unknown_orders=0 sell_blocked=no", text)
+
+
+class TestIndependentReview(Base):
+    """2026-11-14 독립 검토(#598)에서 나온 것: 옛 상태 파일의 번호, 이미 있던 번호, 거절된 주문, 알림 전에 적힌 표시,
+    묻히는 알림, 결과를 모르는 번호가 있을 때의 장부 정리, 일부만 붙은 체결 내역, 보유 중 계좌 대조, 점검 주문 복구."""
+
+    def runner(self, cfg, ex, notify=None):
+        return HX.Executor(cfg, ex, fetch_candles=lambda m, day: candles_for(m, day, self.ratio[m]),
+                           notify=notify or self.sent.append, now=lambda: self.clock, bot_pids=[], sleep=lambda s: None)
+
+    def retry(self, cfg, ex, notify=None):
+        return self.runner(cfg, ex, notify).run_sell_retry()
+
+    def sent_of(self, cfg, market=BTC):
+        return [(r["id"], r["status"]) for r in HX.load_state(cfg)["sleeves"][market].get("sent") or []]
+
+    # ---- 1) 옛 버전의 상태 파일(attempt 카운터)이 그날 것이어도 번호를 되풀이하지 않는다
+    def test_an_old_state_file_with_todays_attempt_counter_never_repeats_a_number(self):
+        day = "2026-11-11"
+        self.assertEqual(HX.order_identifier({"attempt": {"day": day, "n": 2}}, day, BTC, "bid"), "h3-20261111-KRW-BTC-bid-r3")
+        self.assertEqual(HX.order_identifier({"attempt": {"day": "2026-11-10", "n": 2}}, day, BTC, "bid"), "h3-20261111-KRW-BTC-bid")
+        taken = {"sent": [{"id": "h3-20261111-KRW-BTC-ask-r1", "day": "2026-11-10", "side": "ask", "status": "open"}]}
+        taken["sent"].append({"id": "h3-20261111-KRW-BTC-ask", "day": day, "side": "ask", "status": "nofill"})
+        self.assertEqual(HX.order_identifier(taken, day, BTC, "ask"), "h3-20261111-KRW-BTC-ask-r2")     # 적어 둔 번호와 겹치면 건너뛴다
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)                                                         # 11/11, 신호 꺼짐
+        state = HX.load_state(cfg)
+        s = state["sleeves"][BTC]
+        book, volume = s["coin"], float(HX.fmt_volume(s["coin"]))
+        s.pop("sent", None)                                                           # 옛 버전이 쓴 파일: sent 없음, attempt 와 pending(-r1)
+        s["attempt"] = {"day": day, "n": 1}
+        s["pending"] = {"day": day, "side": "ask", "identifier": "h3-20261111-KRW-BTC-ask-r1", "volume": volume, "writeoff": None,
+                        "signal": {"close": 0.95e8, "average": 1.0e8, "on": False}}
+        HX.save_state(cfg, state)
+        ex.sell_ratio = 0.4
+        ex.place(BTC, "ask", "h3-20261111-KRW-BTC-ask-r1", volume=volume)             # 옛 버전이 낸 주문: 40%만 체결
+        ex.sell_ratio = 1.0
+        rows, errors = self.executor(cfg, ex).run()                                   # 새 버전의 첫 실행: 그 체결을 한 번 반영한다
+        self.assertEqual(errors, [])
+        self.assertAlmostEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book * 0.6, places=7)
+        self.clock += dt.timedelta(minutes=10)
+        rows, errors = self.executor(cfg, ex).run()                                   # 남은 것을 한 번도 쓰지 않은 번호로 판다
+        self.assertEqual(errors, [])
+        self.assertEqual(ex.placed[-1], "h3-20261111-KRW-BTC-ask-r3")
+        self.assertEqual(len(set(ex.placed)), len(ex.placed))
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertLess(s["coin"], 1e-8)
+        self.assertAlmostEqual(s["coin"], ex.bal["BTC"], places=7)                    # 같은 체결을 두 번 더하지 않았다(장부 = 계좌)
+
+    # ---- 1) 보내기 전에 이미 있던 번호의 주문은 내 것으로 받아들이지 않는다
+    def test_an_order_that_already_exists_under_the_new_number_is_not_adopted(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        cash = HX.load_state(cfg)["sleeves"][BTC]["cash"]
+        ex.sell_ratio = 0.5
+        ex.place(BTC, "ask", "h3-20261111-KRW-BTC-ask", volume=float(HX.fmt_volume(book)))   # 장부가 모르는 주문이 그 번호로 이미 있다
+        ex.sell_ratio = 1.0
+        placed = list(ex.placed)
+        rows, errors = self.executor(cfg, ex).run()
+        self.assertIn("already exists at the exchange before sending", errors[0])
+        self.assertEqual(ex.placed, placed)                                           # 보내지 않았다
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertEqual((s["coin"], s["cash"], s["pending"]), (book, cash, None))    # 그 주문의 체결을 장부에 넣지 않았다
+        self.assertEqual(self.sent_of(cfg), [("h3-20261111-KRW-BTC-ask", "conflict")])
+        self.clock += dt.timedelta(minutes=10)
+        self.executor(cfg, ex).run()
+        self.assertEqual(ex.placed[-1], "h3-20261111-KRW-BTC-ask-r1")                 # 다음에는 다른 번호를 쓴다
+        self.assertEqual(self.sent_of(cfg)[0], ("h3-20261111-KRW-BTC-ask", "conflict"))   # 겹친 번호는 뒤에도 조회해 반영하지 않는다
+
+    def test_a_rejected_post_is_final_and_a_lookup_cannot_turn_it_into_a_fill(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        ex.reject_code = 400                                                          # 거래소가 요청을 거절했다 → 주문은 만들어지지 않았다
+        rows, errors = self.executor(cfg, ex).run()
+        self.assertIn("SELL FAILED", errors[0])
+        self.assertIn("not placed", errors[0])
+        self.assertEqual(self.sent_of(cfg), [("h3-20261111-KRW-BTC-ask", "rejected")])
+        self.assertIsNone(HX.load_state(cfg)["sleeves"][BTC]["pending"])
+        ex.reject_code = None
+        real, asked = ex.order, []
+        ex.order = lambda ident: (asked.append(ident), real(ident))[1]
+        self.clock += dt.timedelta(minutes=10)
+        rows, errors = self.executor(cfg, ex).run()
+        self.assertEqual((errors, ex.placed[-1]), ([], "h3-20261111-KRW-BTC-ask-r1"))
+        self.assertNotIn("h3-20261111-KRW-BTC-ask", asked)                            # 거절된 번호는 다시 조회하지 않는다 (목록이 불어나지 않는다)
+        ex.order = real
+        # 번호가 겹쳐 거절됐는데 조회에는 그 번호의 옛 주문이 보이는 경우 (보내기 전 조회가 놓쳤다)
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = dt.datetime(2026, 11, 10, 0, 1, 0, tzinfo=dt.timezone.utc)
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        ex.sell_ratio = 0.5
+        ex.place(BTC, "ask", "h3-20261111-KRW-BTC-ask", volume=float(HX.fmt_volume(book)))
+        ex.sell_ratio = 1.0
+        ex.lookups = [False]                                                          # 보내기 전 조회에는 "없음"
+        rows, errors = self.executor(cfg, ex).run()
+        self.assertIn("not placed", errors[0])
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book)            # 옛 주문의 체결을 받아들이지 않았다
+        self.assertEqual(self.sent_of(cfg), [("h3-20261111-KRW-BTC-ask", "rejected")])
+
+    def test_a_failed_lookup_before_sending_does_not_use_up_the_days_buy(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 0.95}
+        real = ex.order
+
+        def down(identifier):
+            raise OSError("timed out")                                                # 보내기 전 조회가 실패한다 → 주문은 나가지 않았다
+        ex.order = down
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
+        self.assertEqual((len(errors), ex.placed), (1, []))
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertEqual((s.get("pending"), s.get("sent") or []), (None, []))         # 보낸 것이 없으니 번호도 적지 않았다
+        ex.order = real
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()                      # 다음 실행이 그날의 매수를 한다
+        self.assertEqual((errors, ex.placed), ([], ["h3-20261110-KRW-BTC-bid"]))
+
+    def test_a_rejected_buy_is_still_the_one_buy_of_the_day(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 0.95}
+        ex.reject_code = 400
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
+        self.assertIn("not placed", errors[0])
+        ex.reject_code = None
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()
+        self.assertIn("매수 건너뜀", errors[0])
+        self.assertEqual(ex.placed, [])
+
+    # ---- 2)·9) '오늘 알렸음' 은 알림이 실제로 나간 뒤에 적는다
+    def test_the_blocked_day_is_recorded_only_after_the_alert_went_out(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.bal["BTC"] = 0.0
+        delivered = [False]
+        notify = lambda text: (self.sent.append(text), delivered[0])[1]
+        sent = len(self.sent)
+        rows, errors = self.runner(cfg, ex, notify).run()                             # 00:01: 텔레그램 전송 실패
+        self.assertIn("매도 불가", errors[0])
+        self.assertIsNone(HX.load_state(cfg)["sleeves"][BTC].get("sell_blocked"))     # 알림이 안 나갔으니 '알렸음' 도 없다
+        self.clock += dt.timedelta(minutes=5)
+        rows, errors = self.retry(cfg, ex, notify)                                    # 00:06: 다시 알리려 한다
+        self.assertIn("매도 불가", errors[0])
+        self.assertEqual(len(self.sent), sent + 2)
+        delivered[0] = True
+        self.clock += dt.timedelta(minutes=10)
+        rows, errors = self.retry(cfg, ex, notify)                                    # 00:16: 같은 문구라도 한 시간 제한에 묻히지 않는다
+        self.assertEqual(len(self.sent), sent + 3)
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["sell_blocked"], "2026-11-11")
+        self.clock += dt.timedelta(minutes=10)
+        self.assertEqual(self.retry(cfg, Untouchable(), notify), ([], []))            # 알린 뒤에는 조용하다
+        self.assertEqual(len(self.sent), sent + 3)
+
+    def test_a_run_killed_before_its_alert_does_not_silence_the_day(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 1.05}
+        self.executor(cfg, ex, bot_pids=[]).run()                                     # 11/10 둘 다 매수
+        self.next_day()
+        self.ratio = {BTC: 0.95, ETH: 0.95}
+        ex.bal["BTC"] = 0.0                                                           # BTC 는 팔 잔고가 없다
+        real = ex.place
+
+        def killed(market, side, identifier, **kw):
+            raise KeyboardInterrupt()                                                 # ETH 주문 도중 프로세스가 죽는다 (알림을 보내기 전)
+        ex.place = killed
+        sent = len(self.sent)
+        with self.assertRaises(KeyboardInterrupt):
+            self.executor(cfg, ex).run()
+        self.assertEqual(len(self.sent), sent)
+        self.assertIsNone(HX.load_state(cfg)["sleeves"][BTC].get("sell_blocked"))     # 알리지 못했으니 '알렸음' 도 없다
+        ex.place = real
+        self.clock += dt.timedelta(minutes=5)
+        rows, errors = self.retry(cfg, ex)                                            # 다음 실행이 알린다
+        self.assertTrue(any("BTC 매도 불가" in e for e in errors))
+        self.assertEqual(len(self.sent), sent + 1)
+
+    def test_the_retry_still_looks_for_an_unknown_sell_after_reporting_nothing_sellable(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.fail_after_accept, ex.lookups = True, [True, False]                        # 매도가 다 체결됐는데 "안 들어감" 으로 보인다
+        self.executor(cfg, ex).run()                                                  # 00:01
+        ex.fail_after_accept = False
+        ex.lookups = [False, False]
+        self.clock += dt.timedelta(minutes=5)
+        rows, errors = self.retry(cfg, ex)                                            # 00:06: 여전히 안 보이고 팔 잔고는 없다 → 매도 불가 알림
+        self.assertIn("매도 불가", errors[0])
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["sell_blocked"], "2026-11-11")
+        placed, sent = list(ex.placed), len(self.sent)
+        ex.lookups = [False]
+        self.clock += dt.timedelta(minutes=10)
+        self.assertEqual(self.retry(cfg, ex), ([], []))                               # 00:16: 아직 안 보인다 → 주문도 알림도 없다
+        self.assertEqual((ex.placed, len(self.sent)), (placed, sent))
+        self.clock += dt.timedelta(minutes=10)
+        rows, errors = self.retry(cfg, ex)                                            # 00:26: 보인다 → 그 체결을 반영하고 알린다
+        self.assertEqual((errors, ex.placed), ([], placed))
+        self.assertIn("안 들어간 줄 알았던 매도 주문", self.sent[-1])
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertLess(s["coin"], 1e-8)
+        self.assertGreater(s["cash"], 900000)
+
+    def test_a_long_lookup_of_unknown_numbers_stops_with_an_alert_instead_of_a_timeout(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        state = HX.load_state(cfg)
+        state["sleeves"][BTC]["sent"] = [{"id": "h3-20261111-KRW-BTC-ask-r%d" % k, "day": "2026-11-11", "side": "ask", "status": "open"}
+                                         for k in range(1, 6)]
+        HX.save_state(cfg, state)
+        real, ticks = HX.time.monotonic, [0.0]
+
+        def slow():
+            ticks[0] += 40.0                                                          # 조회 한 번에 40초씩 걸린다
+            return ticks[0]
+        HX.time.monotonic = slow
+        try:
+            placed = list(ex.placed)
+            rows, errors = self.executor(cfg, ex).run()
+        finally:
+            HX.time.monotonic = real
+        self.assertTrue(any("unknown order numbers took more than" in e for e in errors))
+        self.assertEqual(ex.placed, placed)                                           # 다 조회하지 못했으면 새 주문을 내지 않는다
+        self.assertIn("KRW-BTC: KRW-BTC: looking up 5 unknown order numbers", self.sent[-1])    # 조용히 죽지 않고 알린다
+
+    def test_the_hourly_limit_does_not_swallow_the_next_days_blocked_alert(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.bal["BTC"] = 0.0
+        sent = len(self.sent)
+        self.clock = dt.datetime(2026, 11, 11, 23, 16, 0, tzinfo=dt.timezone.utc)
+        self.retry(cfg, ex)                                                           # 23:16 재시도가 알렸다
+        self.assertEqual((len(self.sent), HX.load_state(cfg)["sleeves"][BTC]["sell_blocked"]), (sent + 1, "2026-11-11"))
+        self.clock = dt.datetime(2026, 11, 12, 0, 6, 0, tzinfo=dt.timezone.utc)
+        rows, errors = self.retry(cfg, ex)                                            # 다음 날 00:06, 하루 실행보다 먼저 닿았다 (50분 뒤, 같은 문구)
+        self.assertIn("매도 불가", errors[0])
+        self.assertEqual((len(self.sent), HX.load_state(cfg)["sleeves"][BTC]["sell_blocked"]), (sent + 2, "2026-11-12"))
+
+    def test_a_short_sale_is_alerted_again_if_the_first_alert_did_not_go_out(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.bal["BTC"] *= 0.5
+        delivered = [False]
+        notify = lambda text: (self.sent.append(text), delivered[0])[1]
+        rows, errors = self.runner(cfg, ex, notify).run()                             # 있는 만큼 팔았는데 알림 전송이 실패했다
+        self.assertEqual(errors, [])
+        self.assertIsNone(HX.load_state(cfg)["sleeves"][BTC].get("sell_blocked"))
+        delivered[0] = True
+        self.clock += dt.timedelta(minutes=5)
+        rows, errors = self.retry(cfg, ex, notify)                                    # 다음 실행이 '매도 불가' 로 다시 알린다
+        self.assertIn("매도 불가", errors[0])
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["sell_blocked"], "2026-11-11")
+
+    # ---- 4) 한 번만 나오는 알림은 다른 종목의 실패가 조용한 시간이어도 보낸다
+    def test_a_one_time_alert_is_sent_even_while_another_markets_error_is_quiet(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 1.05}
+        self.executor(cfg, ex, bot_pids=[]).run()                                     # 11/10 둘 다 매수
+        self.next_day()
+        self.ratio = {BTC: 0.95, ETH: 0.95}                                           # 11/11 둘 다 매도해야 한다
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        ex.fail_markets = {ETH}
+        ex.sell_ratio, ex.fail_after_accept, ex.lookups = 0.5, True, [True, False]    # BTC: 절반이 팔렸는데 "안 들어감" 으로 보인다
+        self.sent.clear()
+        self.executor(cfg, ex).run()                                                  # 00:01
+        ex.sell_ratio, ex.fail_after_accept = 1.0, False
+        ex.fail_markets, ex.lookups = {BTC, ETH}, [False, False]
+        self.clock += dt.timedelta(minutes=5)
+        self.retry(cfg, ex)                                                           # 00:06: BTC 새 번호도 실패, ETH 실패 → 알림
+        self.assertEqual(len(self.sent), 2)
+        ex.fail_markets = {ETH}
+        self.clock += dt.timedelta(minutes=10)
+        rows, errors = self.retry(cfg, ex)                                            # 00:16: BTC 의 첫 주문이 조회에 보인다. ETH 는 같은 실패(조용한 시간)
+        self.assertEqual((rows, len(errors)), ([], 1))
+        self.assertEqual(len(self.sent), 3)                                           # 그래도 BTC 의 알림은 나간다
+        self.assertIn("안 들어간 줄 알았던 매도 주문(h3-20261111-KRW-BTC-ask)이 체결돼 있었음", self.sent[-1])
+        self.assertAlmostEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book * 0.5, places=7)
+        self.clock += dt.timedelta(minutes=10)
+        self.retry(cfg, ex)                                                           # 00:26: BTC 는 나머지를 판다
+        self.assertLess(HX.load_state(cfg)["sleeves"][BTC]["coin"], 1e-8)
+
+    # ---- 3)·10) 장부 정리
+    def test_writeoff_waits_until_unknown_numbers_are_resolved(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        ex.sell_ratio, ex.fail_after_accept, ex.lookups = 0.6, True, [True, False]    # 60%가 팔렸는데 "안 들어감" 으로 보인다
+        self.executor(cfg, ex).run()
+        ex.sell_ratio, ex.fail_after_accept = 1.0, False
+        ex.lookups = [False] * 4                                                      # 조회는 계속 "없음"
+        ex.no_fill = True
+        self.clock += dt.timedelta(minutes=5)
+        self.retry(cfg, ex)                                                           # 새 번호는 체결 없이 끝났다 → 미처리 주문은 없다
+        ex.no_fill = False
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertEqual((s["pending"], s["coin"]), (None, book))
+        self.assertIn(("h3-20261111-KRW-BTC-ask", "open"), self.sent_of(cfg))
+        ex.lookups = None
+        changed, lines = HX.writeoff(cfg, ex, BTC, False)                             # 보여 주기는 한다
+        self.assertFalse(changed)
+        self.assertTrue(any("결과를 모르는 주문 번호 1개" in ln for ln in lines))
+        with self.assertRaises(HX.H3Error) as ctx:                                    # 바꾸는 것은 거부한다
+            HX.writeoff(cfg, ex, BTC, True)
+        self.assertIn("still unknown", str(ctx.exception))
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book)
+        self.clock += dt.timedelta(minutes=5)
+        self.executor(cfg, ex).run()                                                  # 00:11: 첫 주문이 조회에 보인다 → 그 체결을 반영
+        s = HX.load_state(cfg)["sleeves"][BTC]
+        self.assertAlmostEqual(s["coin"], book * 0.4, places=7)
+        self.assertAlmostEqual(s["coin"], ex.bal["BTC"], places=7)                    # 장부 = 계좌. 안 팔린 40%가 장부에서 사라지지 않았다
+
+    def test_writeoff_does_not_say_refused_after_it_changed_the_book(self):
+        ex = FakeExchange()
+        cfg = self.cfg("LIVE")
+        self.holding(cfg, ex)
+        ex.bal["BTC"] = 0.0
+        real_ledger, real_upbit = HX.append_ledger, HX.Upbit
+
+        def full(c, row):
+            raise OSError("No space left on device")
+        HX.append_ledger, HX.Upbit = full, (lambda access, secret: ex)
+        try:
+            code, out, sent = self.run_main(["--writeoff", "KRW-BTC", "--yes"], H3_MODE="LIVE", H3_CAPITAL_KRW="2000000",
+                                            UPBIT_ACCESS_KEY="ak", UPBIT_SECRET_KEY="sk")
+        finally:
+            HX.append_ledger, HX.Upbit = real_ledger, real_upbit
+        self.assertEqual(code, 0)
+        self.assertNotIn("refused", out)
+        self.assertIn("장부를 고쳤습니다", out)
+        self.assertIn("남기지 못했습니다", out)
+        self.assertEqual(len(sent), 1)                                                # 바뀐 사실은 알린다
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], 0.0)
+
+    # ---- 8) 체결 내역이 일부만 붙은 응답
+    def test_a_trades_list_shorter_than_the_executed_volume_is_not_final(self):
+        trade = {"price": "100000000", "volume": "0.01", "funds": "1000000"}
+        base = {"uuid": "u", "state": "done", "trades": [trade], "paid_fee": "500"}
+        with self.assertRaises(HX.H3Error) as ctx:
+            HX.parse_fill(dict(base, executed_volume="0.02"))
+        self.assertNotIsInstance(ctx.exception, HX.NoFill)
+        self.assertIn("trades are not listed yet", str(ctx.exception))
+        self.assertEqual(HX.parse_fill(dict(base, executed_volume="0.01"))["volume"], 0.01)
+        self.assertEqual(HX.parse_fill(dict(base, executed_volume="0.0100000001"))["volume"], 0.01)   # 표기 차이는 넘어간다
+        self.assertEqual(HX.parse_fill(base)["volume"], 0.01)                         # 그 칸이 없으면 내역대로
+
+    # ---- 7) 보유 유지인 날에도 계좌를 한 번 본다
+    def test_coins_missing_from_the_account_are_reported_on_a_keep_holding_day(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 0.95}
+        self.executor(cfg, ex, bot_pids=[]).run()                                     # 11/10 매수
+        book = HX.load_state(cfg)["sleeves"][BTC]["coin"]
+        self.next_day()
+        self.sent.clear()
+        rows, errors = self.executor(cfg, ex).run()                                   # 11/11 보유 유지, 계좌와 같다
+        self.assertFalse(any("🚨" in line for line in self.sent))
+        self.next_day()
+        ex.locked["BTC"], ex.bal["BTC"] = book, 0.0                                   # 11/12 누군가 전부 지정가 매도에 걸어 두었다
+        rows, errors = self.executor(cfg, ex).run()
+        self.assertEqual(([(r["market"], r["action"]) for r in rows], errors), ([(BTC, "KEEP_HOLDING"), (ETH, "STAY_IN_CASH")], []))
+        self.assertIn("🚨 BTC: 장부에는 %.8f개를 들고 있는데 계좌에서 팔 수 있는 수량은 0.00000000개 (다른 주문에 묶인 수량 %.8f개)" % (book, book), self.sent[-1])
+        self.assertEqual(HX.load_state(cfg)["sleeves"][BTC]["coin"], book)            # 장부는 바꾸지 않는다
+        sent = len(self.sent)
+        self.executor(cfg, ex).run()                                                  # 같은 날 다시 돌면 조용하다
+        self.assertEqual(len(self.sent), sent)
+        self.next_day()
+
+        def down(currency):
+            raise HX.H3Error("upbit GET /v1/accounts -> 500")
+        ex.account = down
+        rows, errors = self.executor(cfg, ex).run()                                   # 계좌를 못 봐도 그날 판단은 기록한다
+        self.assertEqual(([r["action"] for r in rows if r["market"] == BTC], errors), (["KEEP_HOLDING"], []))
+        self.assertIn("BTC: 계좌 대조를 하지 못함", self.sent[-1])
+
+    # ---- 5) 점검 주문 복구
+    def test_smoke_recovery_sells_under_a_new_number_that_is_saved_first(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        ex.fail_side = "ask"
+        with self.assertRaises(HX.H3Error):
+            HX.smoke_test(cfg, ex, bot_pids=[], now=lambda: self.clock, sleep=lambda s: None)
+        ex.fail_side = None
+        real, seen = ex.place, []
+
+        def spy(market, side, identifier, **kw):
+            seen.append((identifier, json.loads(cfg.smoke_path.read_text(encoding="utf-8")).get("sell_ids")))
+            return real(market, side, identifier, **kw)
+        ex.place = spy
+        later = self.clock + dt.timedelta(minutes=30)
+        res = HX.smoke_test(cfg, ex, bot_pids=[], now=lambda: later, sleep=lambda s: None)
+        self.assertEqual(seen, [("h3-smoke-20261110003100-ask", ["h3-smoke-20261110000100-ask", "h3-smoke-20261110003100-ask"])])
+        self.assertTrue(res["recovered"])
+        self.assertLess(abs(ex.bal["BTC"]), 1e-8)
+        self.assertFalse(cfg.smoke_path.exists())
+
+    def test_smoke_recovery_keeps_its_record_while_the_buy_may_only_be_invisible(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        ex.fail_after_accept, ex.lookups = True, [True, False]                        # 매수는 체결됐는데 "안 들어감" 으로 보인다
+        with self.assertRaises(HX.H3Error):
+            HX.smoke_test(cfg, ex, bot_pids=[], now=lambda: self.clock, sleep=lambda s: None)
+        ex.fail_after_accept = False
+        self.assertGreater(ex.bal["BTC"], 0)
+        ex.lookups = [False]                                                          # 복구 때도 매수 주문이 조회에 안 보인다
+        with self.assertRaises(HX.H3Error) as ctx:
+            HX.smoke_test(cfg, ex, bot_pids=[], now=lambda: self.clock, sleep=lambda s: None)
+        self.assertIn("not visible", str(ctx.exception))
+        self.assertTrue(cfg.smoke_path.exists())                                      # 기록을 지우지 않았다
+        later = self.clock + dt.timedelta(minutes=10)
+        res = HX.smoke_test(cfg, ex, bot_pids=[], now=lambda: later, sleep=lambda s: None)    # 보이게 되면 판다
+        self.assertTrue(res["recovered"])
+        self.assertLess(abs(ex.bal["BTC"]), 1e-8)
+        self.assertFalse(cfg.smoke_path.exists())
+
+    # ---- 텔레그램 전송 결과
+    def test_the_sender_reports_whether_anything_was_delivered(self):
+        real = HX.urllib.request.urlopen
+        calls = []
+
+        class Ok(object):
+            def read(self):
+                return b"{}"
+
+        def flaky(req, timeout=None):
+            calls.append(1)
+            if len(calls) % 2:
+                raise TimeoutError("https://api.telegram.org/botSECRET/sendMessage timed out")
+            return Ok()
+
+        def dead(req, timeout=None):
+            raise TimeoutError("https://api.telegram.org/botSECRET/sendMessage timed out")
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertTrue(HX.telegram_to("", [])("x"))                          # 보낼 곳이 없으면 실패가 아니다
+                HX.urllib.request.urlopen = flaky
+                self.assertTrue(HX.telegram_to("SECRET", ["1", "2"])("x"))            # 한 곳이라도 받으면 전달
+                HX.urllib.request.urlopen = dead
+                self.assertFalse(HX.telegram_to("SECRET", ["1", "2"])("x"))
+            self.assertNotIn("SECRET", buf.getvalue())                                # 토큰이 든 주소는 찍지 않는다
+        finally:
+            HX.urllib.request.urlopen = real
 
 
 if __name__ == "__main__":

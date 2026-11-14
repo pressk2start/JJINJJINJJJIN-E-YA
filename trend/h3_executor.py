@@ -20,7 +20,11 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
        상태 파일의 sent(보낸 번호 목록)와 pending 에 먼저 적고 저장한다. 주문 POST 자체는 재시도하지 않는다.
      · 실행할 때마다 먼저, 적어 둔 번호 중 결과를 모르는 것(open)을 전부 조회한다(조회만). 주문이 있으면 그 체결을 장부에 반영하고
        🚨 로 알린 뒤에야 오늘 할 일을 판단한다 — 이미 들어간 주문 위에 새 주문을 얹지 않는다. 주문이 없으면 번호를 남겨 두고
-       다음 실행이 다시 조회한다(SENT_KEEP_DAYS 일 뒤에는 '들어가지 않은 주문' 으로 보고 지운다).
+       다음 실행이 다시 조회한다(다음 날까지. 그 뒤에는 '들어가지 않은 주문' 으로 보고 지운다 — SENT_KEEP_DAYS).
+       조회가 SETTLE_BUDGET_SEC 초를 넘기면 멈추고 알린다(새 주문은 내지 않는다).
+     · 거래소가 요청을 거절(4xx)했으면 주문은 만들어지지 않은 것이다 → 그 번호는 결과가 정해진 것으로 적고 다시 조회하지 않는다.
+       보내려는 번호의 주문이 보내기도 전에 거래소에 있으면(번호가 겹쳤다) 그 주문을 받아들이지 않고 멈춘다.
+     · 옛 버전의 상태 파일에 그날의 attempt 카운터가 남아 있으면 그 버전이 썼을 번호도 건너뛴다.
      · 한 실행에서 지난 주문의 체결을 반영했으면, 그 종목의 새 주문은 그 실행에서 내지 않는다(다음 실행이 다시 판단한다).
      · 매도는 새 번호로 다시 보낼 수 있다(계좌에 있는 만큼만 팔린다).
      · 매수는 하루에 한 번만 보낸다. 그 결과가 체결이 아니면(안 들어감·체결 0·불확실) 그날은 포기하고 다음 날 다시 판단한다.
@@ -33,8 +37,11 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
   4) 잔고 확인: 매수 전 KRW 잔고, 매도 전 코인 잔고를 계좌에서 확인한다. 장부를 자동으로 지우는 일은 없다 (2026-11-14 고문 방침).
      · 계좌 잔고가 장부보다 적으면 있는 만큼만 팔고, 모자란 수량은 장부에 그대로 둔 채 🚨 로 알린다.
      · 팔 수 있는 잔고가 없거나 최소 주문 금액에 못 미치면(다른 주문에 묶였거나 밖에서 팔린 경우) 주문을 내지 않고
-       하루에 한 번만 🚨 로 알린다. 그날은 더 시도하지 않는다.
-     · 사람이 계좌를 확인한 뒤 --writeoff 로 장부를 맞춘다.
+       하루에 한 번만 🚨 로 알린다. 그날은 더 시도하지 않는다. '오늘 알렸음' 은 알림이 실제로 전달된 뒤에야 적는다 —
+       알리기 전에 죽거나 전송이 실패하면 다음 실행이 다시 알린다.
+     · 보유 유지로 판단한 날에도 계좌를 한 번 본다. 장부의 코인이 계좌에 없으면 🚨 로 알린다(장부는 바꾸지 않는다).
+     · 사람이 계좌를 확인한 뒤 --writeoff 로 장부를 맞춘다. 결과를 모르는 주문 번호가 남아 있으면 --writeoff 는 바꾸지 않는다
+       (그 주문이 뒤늦게 나타나면 같은 수량이 장부에서 두 번 빠진다).
   5) 자료 확인: 어제 일봉이 아직 없으면(거래소 지연) 아무것도 하지 않고 다음 실행에 맡긴다.
   6) 지연 실행: 09:00 KST 에서 H3_MAX_LATE_MIN(기본 30분) 넘게 늦은 실행의 매수는 보류하고 알린다(--allow-late 로만 실행).
      매도는 늦어도 실행한다 — 규칙상 나와야 할 포지션을 들고 있는 쪽이 더 위험하다.
@@ -53,11 +60,15 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
       미처리 주문(pending)을 먼저 조회해 반영하고, 그 뒤에 판단한다. 매수는 절대 하지 않고, 보유 유지·현금 유지는 기록하지 않는다
       (그것은 하루 실행의 일이다). 매도가 끝나면 그날은 닫혀 더 돌지 않는다. 할 일이 없으면 시세도 받지 않고 알림도 없다.
       같은 실패가 이어질 때 알림은 한 시간에 한 번만 보낸다. 판단 자료(어제 일봉)가 없으면 조용히 넘어간다 — 그 문제는 하루 실행이 알린다.
-  13) 체결 판독(2026-11-14 전체 검토 반영): 주문이 끝났다고 나오는데 체결 내역(trades)이 아직 비어 있고 체결 수량은 있으면
-      '체결 없음' 으로 보지 않는다 — 미처리 주문을 그대로 두고 다음 실행이 다시 확인한다(새 번호로 다시 주문하지 않는다).
+  13) 체결 판독(2026-11-14 전체 검토 반영): 주문이 끝났다고 나오는데 체결 내역(trades)이 아직 비어 있거나 체결 수량보다 적게
+      붙어 있으면 '체결 없음' 으로도 '그만큼 체결' 로도 보지 않는다 — 미처리 주문을 그대로 두고 다음 실행이 다시 확인한다.
   14) 미처리 주문 정리는 조회만 한다(confirm_order). 정리 단계에서는 어떤 주문도 새로 내지 않는다.
   15) 매도가 일부만 체결되면 그날을 닫지 않는다. 남은 수량은 다음 실행·재시도가 새 주문 번호로 다시 팔고, 🚨 로 알린다.
   16) SHADOW 로 도는데 LIVE 장부에 보유나 미처리 주문이 남아 있으면 매 실행 🚨 로 알린다(설정 파일이 사라져 모드가 바뀐 경우).
+  17) 매도 재시도의 알림: 같은 실패는 한 시간에 한 번이지만, 한 번만 나오는 알림(뒤늦게 찾은 체결, 팔 잔고 없음)은 그 제한과
+      무관하게 보낸다. '늦게 팔았다' 는 알림은 실제로 판 뒤에만 붙는다.
+  18) 점검 주문(--smoke-test) 복구: 매수는 다시 내지 않는다. 남은 수량의 매도는 새 번호를 기록 파일에 먼저 적고 보낸다.
+      매수 주문이 조회되지 않아도 계좌에 장부보다 많은 코인이 있으면 기록을 지우지 않는다(조회가 늦는 것일 수 있다).
   ※ 단타 봇의 LIVE_ENTRY_DISABLED=1 은 이 실행기와 무관하다. 이 실행기의 실주문은 H3_MODE 로만 켜고 끈다.
 
 환경변수
@@ -109,7 +120,8 @@ FEE = 0.0005
 MIN_ORDER_KRW = 5000
 DEFAULT_SHADOW_CAPITAL = 1000000.0
 RETRY_ALERT_GAP_SEC = 3600            # 매도 재시도가 계속 실패할 때 알림 간격
-SENT_KEEP_DAYS = 3                    # 결과를 모르는 주문 번호를 며칠 동안 다시 조회할지
+SENT_KEEP_DAYS = 1                    # 결과를 모르는 주문 번호를 며칠 더 조회할지 (1 = 다음 날까지)
+SETTLE_BUDGET_SEC = 90                # 한 종목의 모르는 번호 조회에 쓸 수 있는 시간. 넘으면 멈추고 알린다(서비스 제한 300초 안에서)
 
 
 def load_rule():
@@ -132,23 +144,39 @@ class NoFill(H3Error):
     """주문이 끝났는데(done/cancel) 체결이 0. 그 번호는 다시 쓸 수 없다 — 매도는 새 번호로 다시 내고, 매수는 그날 포기한다."""
 
 
+class NumberTaken(H3Error):
+    """보내려는 번호의 주문이 보내기도 전에 거래소에 있다(번호가 겹쳤다). 그 주문은 이번 것이 아니다 — 받아들이지 않고 멈춘다."""
+
+
 class SellBlocked(H3Error):
     """팔 수 있는 잔고가 없다(0 이거나 최소 주문 금액 미만). 장부는 그대로 두고 하루에 한 번만 알린다 — 사람이 확인한 뒤 --writeoff."""
 
 
 def sent_records(sleeve):
     """이 종목으로 보낸(보내려고 적어 둔) 주문 번호 목록 → [{"id", "day", "side", "status"}].
-    status: open = 결과를 아직 모른다 · applied = 체결을 장부에 반영했다 · nofill = 체결 없이 끝났다."""
+    status: open = 결과를 아직 모른다(실행할 때마다 다시 조회) · applied = 체결을 장부에 반영했다 · nofill = 체결 없이 끝났다 ·
+            rejected = 거래소가 요청을 거절했다(주문이 만들어지지 않았다) · conflict = 보내기 전에 이미 있던 번호라 보내지 않았다."""
     if not isinstance(sleeve.get("sent"), list):
         sleeve["sent"] = []
     return sleeve["sent"]
 
 
 def order_identifier(sleeve, day, market, side):
-    """다음에 쓸 주문 번호. 한 번 쓴 번호는 다시 쓰지 않는다 — 그날 그 방향으로 이미 적어 둔 번호 수만큼 뒤에 -rN 을 붙인다."""
-    n = sum(1 for r in sent_records(sleeve) if r["day"] == day and r["side"] == side)
+    """다음에 쓸 주문 번호. 한 번 쓴 번호는 다시 쓰지 않는다 — 그날 그 방향으로 이미 적어 둔 번호 수만큼 뒤에 -rN 을 붙이고,
+    적어 둔 번호와 겹치면 겹치지 않을 때까지 N 을 올린다. 옛 버전의 상태 파일에 그날의 attempt 카운터가 남아 있으면
+    그 버전이 썼을 번호(0 ~ n)도 건너뛴다."""
+    records = sent_records(sleeve)
+    used = {r["id"] for r in records}
+    n = sum(1 for r in records if r["day"] == day and r["side"] == side)
+    old = sleeve.get("attempt") or {}
+    if old.get("day") == day:
+        n += int(old.get("n") or 0) + 1
     base = "h3-%s-%s-%s" % (day.replace("-", ""), market, side)
-    return base if n == 0 else "%s-r%d" % (base, n)
+    while True:
+        ident = base if n == 0 else "%s-r%d" % (base, n)
+        if ident not in used:
+            return ident
+        n += 1
 
 
 def mark_sent(sleeve, day, identifier, side, status):
@@ -354,14 +382,14 @@ def parse_fill(order):
             raise H3Error("invalid trade in order %s" % order.get("uuid"))
         volume += vol
         funds += float(tr["funds"]) if tr.get("funds") is not None else price * vol
-    if volume <= 0:
-        try:
-            executed, count = float(order.get("executed_volume") or 0), int(order.get("trades_count") or 0)
-        except (TypeError, ValueError):
-            executed, count = 0.0, 0
-        if executed > 0 or count > 0:                             # 끝난 주문인데 체결 내역이 아직 안 붙었다 → '체결 없음' 이 아니다
-            raise H3Error("order %s is final and shows executed volume, but its trades are not listed yet — will reconcile on next run" %
-                          order.get("uuid"))
+    try:
+        executed, count = float(order.get("executed_volume") or 0), int(order.get("trades_count") or 0)
+    except (TypeError, ValueError):
+        executed, count = 0.0, 0
+    if executed > volume + 1e-9 + volume * 1e-9 or (volume <= 0 and count > 0):
+        # 끝난 주문인데 체결 내역이 아직 안 붙었거나 일부만 붙었다 → '체결 없음' 도 '이만큼 체결' 도 아니다. 다음 실행이 다시 본다
+        raise H3Error("order %s is final and shows executed volume %.8f, but only %.8f is in its trades list — "
+                      "trades are not listed yet; will reconcile on next run" % (order.get("uuid"), executed, volume))
     fee = float(order.get("paid_fee") or 0)
     if not (math.isfinite(fee) and fee >= 0):
         raise H3Error("invalid paid_fee in order %s" % order.get("uuid"))
@@ -483,6 +511,7 @@ class Executor(object):
         self.bot_pids = bot_pids
         self.sleep = sleep
         self.alerts = []
+        self.blocked = set()                                    # 이번 실행에서 '팔 수 있는 잔고 없음' 으로 끝난 종목 (알림이 나간 뒤에야 상태에 적는다)
 
     # --- 결정 ---
     def decide(self, market, day):
@@ -530,19 +559,33 @@ class Executor(object):
             raise NoFill("%s %s order %s finished with no fill" % (market, side, identifier))
         return fill
 
-    def live_fill(self, market, side, sleeve, pending):
-        """pending 이 이미 저장된 상태에서 호출. 주문이 없으면 내고, 있으면 조회만 한다."""
+    def number_is_free(self, market, side, identifier):
+        """보내려는 번호의 주문이 보내기도 전에 거래소에 있으면 NumberTaken(번호가 겹쳤다 — 그 주문은 이번 것이 아니다). 조회만 한다."""
+        if self.ex.order(identifier) is not None:
+            raise NumberTaken("%s %s: order number %s already exists at the exchange before sending — nothing was sent" % (
+                market, side, identifier))
+
+    def send_order(self, market, side, pending):
+        """번호가 이미 저장된 상태에서 호출한다. 주문을 한 번 보내고 그 체결을 확인한다. 다시 보내지 않는다.
+        거래소가 요청을 거절(4xx)했으면 주문은 만들어지지 않았다 → 조회에 무엇이 나오든 이번 주문으로 보지 않는다."""
         identifier = pending["identifier"]
-        if self.ex.order(identifier) is None:
-            try:
-                if side == "bid":
-                    self.ex.place(market, "bid", identifier, krw=pending["krw"])
-                else:
-                    self.ex.place(market, "ask", identifier, volume=pending["volume"])
-            except Exception as exc:                            # 시간 초과 등: 들어갔는지 모른다 → 조회로 확인, 재전송 금지
-                if self.ex.order(identifier) is None:          # 실제로 안 들어갔다 → pending 은 남기고 다음 실행이 다시 시도
-                    raise H3Error("%s %s order not placed: %s" % (market, side, exc))
+        try:
+            if side == "bid":
+                self.ex.place(market, "bid", identifier, krw=pending["krw"])
+            else:
+                self.ex.place(market, "ask", identifier, volume=pending["volume"])
+        except Exception as exc:                                # 시간 초과 등: 들어갔는지 모른다 → 조회로 확인, 재전송 금지
+            rejected = isinstance(exc, H3Error) and 400 <= (getattr(exc, "code", None) or 0) < 500
+            if rejected or self.ex.order(identifier) is None:
+                err = H3Error("%s %s order not placed: %s" % (market, side, exc))
+                err.sent_status = "rejected" if rejected else None   # 거절이 아니면 결과를 모른다 → 번호를 open 으로 남겨 다시 조회한다
+                raise err
         return self.confirm_order(market, side, identifier)
+
+    def live_fill(self, market, side, sleeve, pending):
+        """새 번호로 주문 하나: 번호가 비어 있는지 보고, 보내고, 체결을 확인한다 (점검 주문용. 번호 기록은 부르는 쪽이 먼저 한다)."""
+        self.number_is_free(market, side, pending["identifier"])
+        return self.send_order(market, side, pending)
 
     def apply_fill(self, sleeve, side, fill):
         if side == "bid":
@@ -559,8 +602,14 @@ class Executor(object):
         sleeve = state["sleeves"][market]
         records = sent_records(sleeve)
         dirty, found = False, 0
+        started = time.monotonic()
         for rec in records:
-            if rec["status"] != "open" or self.ex.order(rec["id"]) is None:
+            if rec["status"] != "open":
+                continue
+            if time.monotonic() - started > SETTLE_BUDGET_SEC:  # 조회가 밀려 서비스 시간 제한에 걸리면 알림도 없이 죽는다 → 먼저 멈추고 알린다
+                raise H3Error("%s: looking up %d unknown order numbers took more than %d s — stopped, no new order was sent" % (
+                    market, sum(1 for r in records if r["status"] == "open"), SETTLE_BUDGET_SEC))
+            if self.ex.order(rec["id"]) is None:
                 continue
             try:
                 fill = self.confirm_order(market, rec["side"], rec["id"])
@@ -582,10 +631,11 @@ class Executor(object):
             save_state(self.cfg, state)
         return found
 
-    def sell_remainder(self, sleeve, market, day, fill, mark):
+    def sell_remainder(self, sleeve, market, fill, mark):
         """매도 체결을 반영한 뒤 장부에 남은 것을 본다 → (그날을 닫지 않을 이유 또는 None, 알릴 줄들).
         계좌가 장부보다 적어 있는 만큼만 판 경우(short)는 🚨 로 알린다. 그러고도 팔 것이 장부에 남았으면 계좌에는 더 없으니
-        그날은 다시 시도하지 않게 표시한다(sell_blocked). 낸 주문이 일부만 체결된 경우는 다음 실행·재시도가 새 번호로 다시 판다."""
+        알림이 나간 뒤 그날은 다시 시도하지 않게 한다(self.blocked → commit_blocked). 낸 주문이 일부만 체결된 경우는
+        다음 실행·재시도가 새 번호로 다시 판다."""
         alerts = []
         short = bool(fill.get("short")) and fill["volume"] >= (fill.get("requested") or 0.0) * (1 - 1e-6)
         if short:                                               # 계좌에 있던 만큼은 다 팔렸다. 모자란 수량은 장부에 그대로 둔다
@@ -594,7 +644,7 @@ class Executor(object):
         if not self.sell_left(sleeve, mark):
             return None, alerts
         if short:
-            sleeve["sell_blocked"] = day
+            self.blocked.add(market)
             return "account held less than the book — remainder left on the book", alerts
         alerts.append("🚨 %s: 매도가 일부만 체결됨 — 남은 %.8f개는 다시 판다" % (market[4:], sleeve["coin"]))
         return "partial fill — remainder still held", alerts
@@ -621,7 +671,7 @@ class Executor(object):
                 self.apply_fill(sleeve, pending["side"], fill)
                 mark_sent(sleeve, pending["day"], pending["identifier"], pending["side"], "applied")
                 if pending["side"] == "ask":
-                    left, more = self.sell_remainder(sleeve, market, pending["day"], fill, (pending.get("signal") or {}).get("close"))
+                    left, more = self.sell_remainder(sleeve, market, fill, (pending.get("signal") or {}).get("close"))
                 if not left:                                    # 팔 것이 남았으면 그날을 닫지 않는다
                     sleeve["last_day"] = pending["day"]
             sleeve["pending"] = None
@@ -654,8 +704,6 @@ class Executor(object):
         if action == "BUY" and late and not self.allow_late:
             raise H3Error("%s BUY held: this run is %.0f min after 09:00 KST (limit %.0f). Check the price, then run with "
                           "--allow-late, or leave it and tomorrow's run decides again" % (market, late_min, self.cfg.max_late_min))
-        if action == "SELL" and late:                           # 매도는 늦어도 실행한다(규칙상 나와야 할 포지션) — 알리기만
-            self.alerts.append("%s: SELL executed %.0f min late" % (market, late_min))
         fill = None
         if action in ("BUY", "SELL"):
             side = "bid" if action == "BUY" else "ask"
@@ -674,16 +722,42 @@ class Executor(object):
                     raise
             self.apply_fill(sleeve, side, fill)
             if side == "ask":
-                left, more = self.sell_remainder(sleeve, market, day, fill, mark)
+                if late:                                        # 매도는 늦어도 실행한다(규칙상 나와야 할 포지션) — 판 뒤에 알리기만
+                    self.alerts.append("%s: SELL executed %.0f min late" % (market, late_min))
+                left, more = self.sell_remainder(sleeve, market, fill, mark)
                 self.alerts.extend(more)
                 if left:                                        # 팔아야 할 것이 장부에 남았다 → 오늘을 닫지 않는다
                     sleeve["pending"] = None
                     save_state(self.cfg, state)
                     return self.safe_record(state, market, day, action, fill, sig, open_proxy, late_min, note=left)
+        if action == "KEEP_HOLDING" and self.cfg.mode == "LIVE":
+            self.check_holding(market, sleeve)
         sleeve["last_day"] = day
         sleeve["pending"] = None
         save_state(self.cfg, state)
         return self.safe_record(state, market, day, action, fill, sig, open_proxy, late_min)
+
+    def commit_blocked(self, state, day, delivered):
+        """'팔 수 있는 잔고 없음' 알림이 실제로 나간 뒤에야 '오늘 알렸음'(sell_blocked)을 적는다.
+        알림 전에 죽거나 전송이 실패하면(delivered 가 False) 적지 않는다 → 다음 실행이 다시 알린다."""
+        if not self.blocked or delivered is False:
+            return
+        for market in self.blocked:
+            state["sleeves"][market]["sell_blocked"] = day
+        save_state(self.cfg, state)
+
+    def check_holding(self, market, sleeve):
+        """보유 유지로 판단한 날, 장부의 코인이 계좌에 실제로 있는지 본다(조회만). 모자라면 🚨 로 알린다 — 장부는 바꾸지 않는다.
+        신호가 켜져 있는 동안에는 주문이 없어 계좌를 볼 일이 없으므로, 여기서 하루에 한 번 본다."""
+        currency = market.split("-", 1)[1]
+        try:
+            balance, locked = self.ex.account(currency)
+        except Exception as exc:
+            self.alerts.append("%s: 계좌 대조를 하지 못함 — %s" % (market[4:], exc))
+            return
+        if balance < sleeve["coin"] * (1 - 1e-6):
+            self.alerts.append("🚨 %s: 장부에는 %.8f개를 들고 있는데 계좌에서 팔 수 있는 수량은 %.8f개 (다른 주문에 묶인 수량 %.8f개) — "
+                               "계좌를 확인할 것. 없어진 것이 맞으면 --writeoff %s" % (market[4:], sleeve["coin"], balance, locked, market))
 
     @staticmethod
     def sell_left(sleeve, mark):
@@ -741,8 +815,7 @@ class Executor(object):
             volume = float(fmt_volume(min(sleeve["coin"], have)))
             if volume * sig["close"] < MIN_ORDER_KRW:           # 팔 수 있는 잔고가 없다(0·먼지). 장부는 지우지 않고 하루 한 번만 알린다
                 locked = self.ex.account(currency)[1]
-                sleeve["sell_blocked"] = day
-                save_state(self.cfg, state)
+                self.blocked.add(market)                        # '오늘 알렸음' 은 알림이 나간 뒤에 적는다 (commit_blocked)
                 raise SellBlocked("🚨 %s 매도 불가: 장부에는 %.8f개가 있는데 계좌에서 팔 수 있는 수량은 %.8f개 (다른 주문에 묶인 수량 %.8f개). "
                                   "주문을 내지 않았고 장부도 그대로 둠 — 오늘은 더 시도하지 않음. 계좌를 확인한 뒤 --writeoff %s" % (
                                       market[4:], sleeve["coin"], have, locked, market))
@@ -750,15 +823,23 @@ class Executor(object):
                 pending["short"] = sleeve["coin"] - volume
             pending["volume"] = volume
             pending["pretrade"] = self.pretrade_check(market, side, sig, volume=pending["volume"])
+        try:                                                    # 번호를 적기 전에 본다: 이 조회가 실패하면 보낸 것이 없으니 아무것도 적지 않는다
+            self.number_is_free(market, side, pending["identifier"])     # (적고 나서 실패하면 '보낸 매수' 로 남아 그날 매수를 못 한다)
+        except NumberTaken:
+            mark_sent(sleeve, day, pending["identifier"], side, "conflict")     # 겹친 번호는 건너뛰도록 적어 둔다. 조회해 반영하지 않는다
+            save_state(self.cfg, state)
+            raise
         sleeve["pending"] = pending
         mark_sent(sleeve, day, pending["identifier"], side, "open")
         save_state(self.cfg, state)                              # 주문보다 먼저 기록 → 재시작해도 이 번호로 조회하고, 이 번호를 다시 쓰지 않는다
         try:
-            fill = self.live_fill(market, side, sleeve, pending)
-        except NoFill:
-            mark_sent(sleeve, day, pending["identifier"], side, "nofill")
-            sleeve["pending"] = None
-            save_state(self.cfg, state)
+            fill = self.send_order(market, side, pending)
+        except H3Error as exc:
+            final = "nofill" if isinstance(exc, NoFill) else getattr(exc, "sent_status", None)
+            if final:                                           # 결과가 정해졌다(체결 없음·거절) → 이 번호는 다시 조회하지 않는다
+                mark_sent(sleeve, day, pending["identifier"], side, final)
+                sleeve["pending"] = None
+                save_state(self.cfg, state)
             raise
         mark_sent(sleeve, day, pending["identifier"], side, "applied")      # 저장은 run_market 이 체결 반영과 함께 한 번에 한다
         fill["requested"], fill["short"] = pending.get("volume"), pending.get("short")
@@ -827,7 +908,8 @@ class Executor(object):
                 # 같은 체결을 두 번 더하게 된다 → 디스크에 저장된 상태로 되돌린다. 저장할 것은 각 단계가 직접 저장한다.
                 state = load_state(self.cfg)
         if rows or errors or self.alerts:
-            self.notify(summary_line(self.cfg, state, day, rows, errors + self.alerts))
+            delivered = self.notify(summary_line(self.cfg, state, day, rows, errors + self.alerts))
+            self.commit_blocked(state, day, delivered)
         return rows, errors
 
 
@@ -835,7 +917,8 @@ class Executor(object):
         """매도만 다시 시도한다 → (rows, errors). LIVE 전용. 타이머가 몇 분마다 부른다.
         종목마다: 미처리 주문도 없고 (보유가 없거나 오늘 이미 처리됐으면) 아무것도 조회하지 않는다. 그 밖에는 run_market 을 sell_only 로 돈다 —
         미처리 주문과 결과를 모르는 지난 번호를 먼저 조회해 반영하고, 규칙상 매도일 때만 판다. 매수 주문은 어떤 경우에도 내지 않는다.
-        (팔 것이 없는 종목의 '결과를 모르는 번호' 는 여기서 조회하지 않는다 — 하루 실행이 매번 조회한다.)"""
+        (팔 것이 없는 종목의 '결과를 모르는 번호' 는 여기서 조회하지 않는다 — 하루 실행이 매번 조회한다. 예외: 팔 잔고가 없다고
+        알린 종목에 결과를 모르는 매도 번호가 있으면 조회한다.)"""
         if self.cfg.mode != "LIVE":
             return [], []
         now = self.now()
@@ -846,8 +929,12 @@ class Executor(object):
         for market in ASSETS:
             sleeve = state["sleeves"][market]
             if not sleeve.get("pending"):
-                if sleeve["coin"] <= 0 or sleeve.get("last_day") == day or sleeve.get("sell_blocked") == day:
-                    continue                                    # 팔 것이 없거나, 오늘 이미 처리됐거나, 팔 수 있는 잔고가 없다고 오늘 알렸다
+                if sleeve["coin"] <= 0 or sleeve.get("last_day") == day:
+                    continue                                    # 팔 것이 없거나 오늘 이미 처리됨
+                unknown_sell = any(r["status"] == "open" and r["side"] == "ask" for r in sleeve.get("sent") or [])
+                if sleeve.get("sell_blocked") == day and not unknown_sell:
+                    continue                                    # 팔 수 있는 잔고가 없다고 오늘 알렸다. 단, 결과를 모르는 매도 번호가 있으면
+                                                                # 그 주문이 팔았을 수 있으니 조회하러 들어간다(주문은 내지 않는다)
                 try:
                     sig, _open = self.decide(market, day)
                 except Exception:
@@ -869,19 +956,22 @@ class Executor(object):
             for err in errors:
                 market, sig = err.split(":", 1)[0], retry_signature(err)
                 last = seen.get(market)
-                if not (last and last.get("sig") == sig
+                if market in self.blocked or not (              # '팔 잔고 없음' 은 하루 한 번짜리 알림이라 이 제한을 받지 않는다
+                        last and last.get("sig") == sig
                         and (now - dt.datetime.fromisoformat(last["ts"])).total_seconds() < RETRY_ALERT_GAP_SEC):
                     fresh = True                                # 다른 종목이거나 다른 원인이면 바로 알린다
                     seen[market] = {"ts": now.isoformat(), "sig": sig}
-            if rows or fresh:
-                self.notify(summary_line(self.cfg, state, day, rows, errors + self.alerts))
+            if rows or fresh or self.alerts:                    # 한 번만 나오는 알림(뒤늦게 찾은 체결 등)은 조용한 시간에도 보낸다
+                delivered = self.notify(summary_line(self.cfg, state, day, rows, errors + self.alerts))
                 state["retry_alerts"] = seen
                 save_state(self.cfg, state)
+                self.commit_blocked(state, day, delivered)
         elif rows or self.alerts:
-            self.notify(summary_line(self.cfg, state, day, rows, self.alerts))
+            delivered = self.notify(summary_line(self.cfg, state, day, rows, self.alerts))
             if state.get("retry_alerts"):
                 state["retry_alerts"] = {}
                 save_state(self.cfg, state)
+            self.commit_blocked(state, day, delivered)
         return rows, errors
 
 
@@ -903,8 +993,12 @@ def writeoff(cfg, exchange, market, confirm, now=None):
     if locked > 0:
         raise H3Error("%s: %.8f %s is locked in an open order — cancel it or wait for it; the coins are not gone" % (market, locked, currency))
     unknown = [r["id"] for r in sleeve.get("sent") or [] if r["status"] == "open"]
+    if unknown and confirm:                                     # 그 주문이 뒤늦게 나타나면 그 체결이 장부에 한 번 더 반영된다 → 결과가 정해진 뒤에만 바꾼다
+        raise H3Error("%s: the outcome of %d order number(s) is still unknown (%s) — every run looks them up again and they are "
+                      "dropped after %d day(s). Check the order history in the app; run --writeoff --yes after they are resolved" % (
+                          market, len(unknown), ", ".join(unknown[:5]), SENT_KEEP_DAYS))
     if unknown:
-        lines.append("주의: 결과를 모르는 주문 번호가 남아 있습니다 (%s). 다음 실행이 다시 조회합니다." % ", ".join(unknown))
+        lines.append("주의: 결과를 모르는 주문 번호 %d개가 남아 있어 지금은 --yes 로 바꿀 수 없습니다 (%s)." % (len(unknown), ", ".join(unknown[:5])))
     if balance >= sleeve["coin"] * (1 - 1e-6):
         lines.append("차이가 없습니다. 바꿀 것이 없습니다.")
         return False, lines
@@ -916,10 +1010,13 @@ def writeoff(cfg, exchange, market, confirm, now=None):
     before = sleeve["coin"]
     sleeve["coin"], sleeve["sell_blocked"] = balance, None
     save_state(cfg, state)
-    append_ledger(cfg, {"ts": (now or utc_now)().isoformat(), "mode": cfg.mode, "day": (now or utc_now)().date().isoformat(),
-                        "market": market, "action": "WRITEOFF", "coin_before": before, "coin": balance, "cash": sleeve["cash"],
-                        "note": "manual write-off after checking the account"})
     lines.append("장부를 고쳤습니다.")
+    try:
+        append_ledger(cfg, {"ts": (now or utc_now)().isoformat(), "mode": cfg.mode, "day": (now or utc_now)().date().isoformat(),
+                            "market": market, "action": "WRITEOFF", "coin_before": before, "coin": balance, "cash": sleeve["cash"],
+                            "note": "manual write-off after checking the account"})
+    except Exception as exc:                                    # 상태는 이미 바뀌었다 — '거부' 로 끝내지 않는다
+        lines.append("주의: 장부 기록 파일(%s)에 이 정리를 남기지 못했습니다 — %s" % (cfg.ledger_path.name, exc))
     return True, lines
 
 
@@ -958,7 +1055,15 @@ def smoke_test(cfg, exchange, bot_pids=None, now=None, sleep=time.sleep, market=
         _write_json(cfg.smoke_path, rec)                        # 주문보다 먼저 기록
     market = rec["market"]
     currency = market.split("-", 1)[1]
-    if recovered and exchange.order(rec["buy_id"]) is None:     # 매수 주문이 아예 안 들어갔던 경우 → 정리할 것 없음
+    if recovered and exchange.order(rec["buy_id"]) is None:
+        # 매수 주문이 조회되지 않는다. 정말 안 들어갔으면 정리할 것이 없다. 다만 조회가 늦는 것일 수도 있으니,
+        # 계좌에 H3 장부보다 많은 코인이 점검 금액의 절반어치 넘게 있으면 기록을 지우지 않고 멈춘다.
+        extra = exchange.balances().get(currency, 0.0) - load_state(cfg)["sleeves"][market]["coin"]
+        _asks, bids = exchange.orderbook(market)
+        if bids and extra * bids[0][0] >= rec["krw"] / 2.0:
+            raise H3Error("smoke test: the earlier buy order is not visible, but the account holds about %.0f KRW of %s beyond the "
+                          "H3 book — run --smoke-test again in a few minutes. If this message stays, sell it in the app and "
+                          "delete %s" % (extra * bids[0][0], currency, cfg.smoke_path))
         cfg.smoke_path.unlink()
         return {"market": market, "guard": guard, "recovered": True, "buy": None, "sell": None, "krw_cost": 0.0, "coin_left": 0.0}
     try:
@@ -967,20 +1072,32 @@ def smoke_test(cfg, exchange, bot_pids=None, now=None, sleep=time.sleep, market=
     except NoFill:
         cfg.smoke_path.unlink()                                 # 체결이 없었으니 남은 코인도 없다
         raise H3Error("smoke test: the buy order finished with no fill — nothing was bought")
-    if recovered and exchange.order(rec["sell_id"]) is not None:
-        # 지난 시도가 매도 주문까지 냈다 → 잔고를 보지 않고 그 주문의 체결만 확인한다.
+    sell, sell_ids = None, list(rec.get("sell_ids") or [rec["sell_id"]])
+    if recovered:
+        # 지난 시도가 낸 매도 주문부터 전부 조회한다 → 있으면 잔고를 보지 않고 그 체결만 확인한다.
         # (잔고부터 보면, 이미 다 팔려 잔고가 0 일 때 '산 것이 계좌에 없다' 는 틀린 오류로 끝나 사람이 파일을 지워야 했다.)
-        try:
-            sell = runner.confirm_order(market, "ask", rec["sell_id"])
-        except NoFill:
-            raise H3Error("smoke test: the earlier sell order finished with no fill — sell %.8f %s in the app, then delete %s" % (
-                buy["volume"], currency, cfg.smoke_path))
-    else:
+        for ident in sell_ids:
+            if exchange.order(ident) is None:
+                continue
+            try:
+                sell = runner.confirm_order(market, "ask", ident)
+                break
+            except NoFill:
+                continue                                        # 체결 없이 끝난 번호 → 아래에서 새 번호로 다시 판다
+    if sell is None:
         volume = float(fmt_volume(min(buy["volume"], exchange.balances().get(currency, 0.0))))
         if volume <= 0:
             raise H3Error("smoke test: bought %.8f %s but the account has none — check the account, then delete %s" % (
                 buy["volume"], currency, cfg.smoke_path))
-        sell = runner.live_fill(market, "ask", None, {"identifier": rec["sell_id"], "volume": volume})
+        ident = rec["sell_id"]
+        if recovered:                                           # 한 번 쓴 번호는 다시 쓸 수 없다 → 새 번호를 먼저 기록하고 보낸다
+            ident, k = "h3-smoke-%s-ask" % (now or utc_now)().strftime("%Y%m%d%H%M%S"), 1
+            while ident in sell_ids:
+                k += 1
+                ident = "h3-smoke-%s-ask-%d" % ((now or utc_now)().strftime("%Y%m%d%H%M%S"), k)
+            rec["sell_ids"] = sell_ids + [ident]
+            _write_json(cfg.smoke_path, rec)
+        sell = runner.live_fill(market, "ask", None, {"identifier": ident, "volume": volume})
     left = max(0.0, buy["volume"] - sell["volume"])
     if left * sell["avg"] > SMOKE_DUST_KRW:
         raise H3Error("smoke test: %.8f %s (about %.0f KRW) is still unsold — sell it in the app, then delete %s" % (
@@ -1013,15 +1130,19 @@ def summary_line(cfg, state, day, rows, problems):
 
 def telegram_to(token, chats):
     def send(text):
+        """→ 전달됐는가. 설정이 없으면(보낼 곳이 없음) True, 한 곳이라도 받으면 True, 전부 실패하면 False."""
         if not (token and chats):
-            return
+            return True
+        delivered = False
         for chat in chats:
             try:
                 body = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
                 urllib.request.urlopen(urllib.request.Request(
                     "https://api.telegram.org/bot%s/sendMessage" % token, data=body), timeout=10).read()
+                delivered = True
             except Exception as exc:                            # 알림 실패가 실행을 막지 않는다. 주소(토큰 포함)는 찍지 않는다
                 print("[h3] telegram failed: %s" % type(exc).__name__)
+        return delivered
     return send
 
 
