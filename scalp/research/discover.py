@@ -51,6 +51,8 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   · up_ratio 는 1일 수익률 기준, mkt_ret_1h 는 자기 종목 제외, same_events_1h 는 자기 사건 제외.
   · compress = 최근 1일 평균 변동 / 최근 7일 평균 변동.        · 달마다 도는 탐색의 구간 = 앞 60% TRAIN, 뒤 40% HOLDOUT.
   · 조건을 붙인 거래 = 기본 모집단(코인당 1건 규칙 적용 뒤)에서 조건을 통과한 거래. 등록 후 채점도 같은 방식이다.
+  · TRAIN = 진입도 청산도 HOLDOUT 시작일 전인 거래. 경계에 걸친 거래(앞에서 사서 뒤에서 판 것)는 양쪽 모두에서 뺀다.
+  · 등록된 후보는 자기 종목(universe)으로만 채점한다. 시장 지표(up_ratio 등)도 그 종목들만으로 계산한다 — 탐색 때와 같다.
 한계: 봉 기준이라 실제 호가 체결을 확인한 값이 아니다. 업비트는 상장폐지된 종목의 시세를 주지 않아서, 대상을 HOLDOUT 시작일
       기준으로 골라도 '그 뒤 상장폐지된 종목' 은 빠진다(등록 뒤의 전진 채점에는 이 편향이 없다). 초·분 단위와 호가는 다루지 않는다.
 
@@ -406,7 +408,8 @@ def search(trades, cut_day, log=print):
     """모집단마다 TRAIN 에서 선별하고 HOLDOUT 에서 여섯 기준을 본다 → (통과 목록, {scanned, selected, passed})."""
     passed, counts = [], {"scanned": 0, "selected": 0, "passed": 0}
     for pop in sorted({t["pop"] for t in trades}):
-        train = [t for t in trades if t["pop"] == pop and t["day"] < cut_day]
+        # 앞 구간에 사서 뒤 구간에 판 거래는 어느 쪽에도 넣지 않는다 — 뒤 구간의 가격이 TRAIN 선별에 섞이지 않게 (2026-11-14 검토)
+        train = [t for t in trades if t["pop"] == pop and t["day"] < cut_day and q_day(t["exit_q"]) < cut_day]
         hold = [t for t in trades if t["pop"] == pop and t["day"] >= cut_day]
         bt, bh = SS.cluster_stats(train), SS.cluster_stats(hold)
         log("== %s | TRAIN n=%d days=%d net %s t %s | HOLDOUT n=%d net %s t %s" % (
@@ -499,7 +502,11 @@ def candidate_trades(panel, cand, end_q):
     """등록된 후보의, 시작일 00:00 UTC 이후 사건에서 나온 끝난 거래. 등록 때 고정한 정의(문턱·비용)만 쓴다."""
     if cand.get("engine") != ENGINE:
         raise RuntimeError("후보 %s 는 틀 %s 로 등록됐고 지금 코드는 틀 %s 다 — 채점하지 않는다" % (cand.get("id"), cand.get("engine"), ENGINE))
-    rows = build_trades(panel, day_q(cand_start(cand)), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
+    missing = [m for m in cand["universe"] if m not in panel]
+    if missing:
+        raise RuntimeError("후보 %s 의 종목 시세가 없다: %s" % (cand.get("id"), ", ".join(m[4:] for m in missing[:5])))
+    own = {m: panel[m] for m in cand["universe"]}                   # 후보는 등록 때 고정한 자기 종목으로만 채점한다(다른 후보의 종목이 섞이지 않게)
+    rows = build_trades(own, day_q(cand_start(cand)), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
                         only=(cand["event"], cand["hold"]))
     cond = cand.get("cond")
     if cond:

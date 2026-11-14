@@ -14,6 +14,12 @@ on:
       - "tests/test_deploy_manual.py"
       - ".github/workflows/deploy.yml"
       - "tests/test_discover.py"
+      - "scalp/research/tg_send.py"
+      - "scalp/research/forward/registry.json"
+      - "deploy_restart.sh"
+      - ".github/workflows/forward-watch.yml"
+      - ".github/workflows/discover.yml"
+      - ".github/workflows/watchdog.yml"
       - ".github/workflows/research-checks.yml"
   workflow_dispatch:
 

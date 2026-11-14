@@ -227,6 +227,22 @@ class Search(unittest.TestCase):
         start, end, cut = D.q_day(Q0 + 60 * D.BARS_D), D.q_day(Q0 + 220 * D.BARS_D), D.q_day(Q0 + 156 * D.BARS_D)
         return D.run(start, end, cut, tuple(sorted(panel)), fetch=serve(panel), log=lambda s: None)
 
+    def test_a_trade_bought_before_the_cut_and_sold_after_it_is_in_neither_half(self):
+        """2026-11-14 검토: 경계에 걸친 거래가 TRAIN 에 들어가 뒤 구간의 가격이 선별에 섞였다."""
+        cut_q = D.day_q("2026-06-10")
+
+        def tr(entry_q, hold, net):
+            return {"pop": "CRASH/%dh" % (hold // 4), "event": "CRASH", "hold": hold, "market": "KRW-AAA", "entry_q": entry_q,
+                    "exit_q": entry_q + hold, "day": D.q_day(entry_q), "gross": net, "net": net, "move": -0.05, "ind": {"x": 1.0}}
+        inside = [tr(cut_q - 400 - 10 * k, 96, 0.01) for k in range(5)]                         # 청산까지 앞 구간에서 끝난다
+        straddle = tr(cut_q - 20, 96, 9.99)                                                     # 앞 구간에 사서 뒤 구간에 판다
+        after = [tr(cut_q + 10 * k, 96, 0.02) for k in range(3)]
+        seen = []
+        D.search(inside + [straddle] + after, "2026-06-10", log=seen.append)
+        self.assertIn("TRAIN n=5 ", seen[0])                                                    # 걸친 거래는 TRAIN 에 없다
+        self.assertIn("HOLDOUT n=3 ", seen[0])                                                  # HOLDOUT 에도 없다
+        self.assertIn("net +1.000%", seen[0])                                                   # 9.99 가 평균에 섞이지 않았다
+
     def test_a_planted_market_condition_is_selected_and_passes_all_six(self):
         passed, counts, lines, trades = self.run_world(world(planted=True))
         one = [f for f in passed if f["pop"] == "CRASH/1h"]
@@ -436,7 +452,8 @@ class Registry(unittest.TestCase):
 
 class Forward(unittest.TestCase):
     def cand(self, registered, **kw):
-        base = {"id": "D-1", "engine": D.ENGINE, "registered": registered, "event": "CRASH", "hold": 4, "cond": None, "universe": [],
+        base = {"id": "D-1", "engine": D.ENGINE, "registered": registered, "event": "CRASH", "hold": 4, "cond": None,
+                "universe": ["KRW-BTC"] + ["KRW-A%d" % i for i in range(7)],
                 "move": 0.03, "vol_x": 3.0, "cost": {"KRW-BTC": 0.0007}, "cost_other": 0.0010, "status": "ACTIVE"}
         base.update(kw)
         return base
@@ -495,6 +512,19 @@ class Forward(unittest.TestCase):
         self.assertAlmostEqual(strict["decision"]["stats"]["ex_best_day"], -0.001)
         steady = [self.row(k, 0.01) for k in range(30)]
         self.assertEqual(D.decide_once({"rows": steady, "decision": None}, self.cand("2026-01-01", verdict="ex_best_day"), "2026-03-01")["decision"]["verdict"], "PASS")
+
+    def test_a_candidate_is_scored_only_on_its_own_coins(self):
+        """2026-11-14 검토: 후보가 둘이면 서로의 종목이 섞여 채점됐다. 큰 패널을 넘겨도 자기 종목의 거래만 나와야 한다."""
+        panel = world(days=120, seed=8)
+        reg_day, end = D.q_day(Q0 + 80 * D.BARS_D), Q0 + 120 * D.BARS_D
+        small = ["KRW-BTC", "KRW-A0", "KRW-A1"]
+        rows = D.candidate_trades(panel, self.cand(reg_day, universe=small), end)                 # 패널에는 알트 7개가 다 들어 있다
+        self.assertTrue(rows)
+        self.assertLessEqual({r["market"] for r in rows}, set(small))
+        alone = D.candidate_trades({m: panel[m] for m in small}, self.cand(reg_day, universe=small), end)
+        self.assertEqual(rows, alone)                                                              # 자기 종목만 받았을 때와 완전히 같다
+        with self.assertRaises(RuntimeError):
+            D.candidate_trades({m: panel[m] for m in small}, self.cand(reg_day), end)             # 자기 종목의 시세가 빠져 있으면 채점하지 않는다
 
     def test_scoring_starts_at_the_start_day_when_one_is_given(self):
         panel = world(days=120, seed=8)

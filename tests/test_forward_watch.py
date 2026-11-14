@@ -456,10 +456,21 @@ class MissedRuns(unittest.TestCase):
         ledger = self.ledger("2026-11-16", H2_kimchi={"updated": "2026-11-11"})
         ledger["candidates"]["A-1"]["updated"] = "2026-11-09"
         ledger["CR_variants"]["CR_drop6"] = {}
-        out = FW.stale(ledger, [], "2026-11-18")
+        registry = [{"id": "A-1", "status": "ACTIVE", "registered": "2026-11-13"}, {"id": "D-0", "status": "ACTIVE", "registered": "2026-01-01"}]
+        out = FW.stale(ledger, [], "2026-11-18", registry)
         self.assertEqual(out, ["김치 프리미엄: 2026-11-16(월) 이후 갱신되지 못함 — 마지막 갱신 2026-11-11",
                                "급락 반등 변형 −6%: 2026-11-16(월) 이후 갱신되지 못함 — 마지막 갱신 없음",
                                "후보 A-1: 2026-11-16(월) 이후 갱신되지 못함 — 마지막 갱신 2026-11-09"])       # 판정이 끝난 D-0 은 보지 않는다
+
+    def test_a_registered_candidate_that_never_got_a_ledger_entry_is_caught(self):
+        """2026-11-14 검토: 첫 채점부터 실패해 장부에 없는 후보는 점검에 잡히지 않았다."""
+        ledger = self.ledger("2026-11-16")
+        ledger["candidates"] = {}
+        registry = [{"id": "A-202611-01", "status": "ACTIVE", "registered": "2026-11-13"},
+                    {"id": "D-202611-09", "status": "ACTIVE", "registered": "2026-11-17"}]            # 월요일 실행 뒤에 등록된 후보는 아직 기다리지 않는다
+        self.assertEqual(FW.stale(ledger, [], "2026-11-18", registry),
+                         ["후보 A-202611-01: 2026-11-16(월) 이후 갱신되지 못함 — 마지막 갱신 없음"])
+        self.assertEqual(FW.stale(ledger, [], "2026-11-18"), [])                                     # 등록부가 비어 있으면 볼 후보가 없다
 
     def test_command_line_exit_code(self):
         with tempfile.TemporaryDirectory() as d:
@@ -478,7 +489,9 @@ class ScheduledWorkflows(unittest.TestCase):
         for name in ("forward-watch.yml", "discover.yml", "watchdog.yml"):
             text = (self.WF / name).read_text(encoding="utf-8")
             last = text.split("      - ")[-1]
-            self.assertIn("if: failure()", last, name)                                                # 마지막 단계가 실패 알림이다
+            self.assertIn("failure()", last.split("\n")[1], name)                                    # 마지막 단계가 실패 알림이다
+            if name != "watchdog.yml":
+                self.assertIn("cancelled()", last.split("\n")[1], name)                              # 시간 초과로 취소돼도 알린다
             self.assertIn("scalp/research/tg_send.py", last, name)
             self.assertNotIn("curl", text, name)                                                      # 응답을 버리는 전송은 쓰지 않는다
             self.assertNotIn("sendMessage", text, name)
@@ -736,7 +749,38 @@ class RegisteredCandidates(unittest.TestCase):
         args["panel_loader"] = lambda s, e, markets: (_ for _ in ()).throw(RuntimeError("조회 실패"))
         ledger, warnings = FW.update(ledger, DISC.q_day(q0 + 100 * 96), registry=[self.cand(reg)], **args)
         self.assertEqual(ledger["candidates"], before)
-        self.assertTrue(any("자동 등록 후보" in w for w in warnings))
+        self.assertTrue(any("후보 D-202610-01: 이번 실행에서 갱신하지 못함" in w for w in warnings))
+
+    def test_candidates_do_not_share_coins_and_one_failure_does_not_stop_the_other(self):
+        """2026-11-14 검토: 후보 둘의 종목이 합쳐져 채점됐고, 하나가 실패하면 전부 멈췄다."""
+        q0, panel = crash_panel(120)
+        twin = {"KRW-BTC": panel["KRW-BTC"], "KRW-AAA": panel["KRW-AAA"], "KRW-BBB": panel["KRW-AAA"]}   # BBB 도 같은 식으로 급락한다
+        reg = DISC.q_day(q0 + 70 * 96)
+        one = self.cand(reg, id="D-202610-01", universe=["KRW-BTC", "KRW-AAA"])
+        two = self.cand(reg, id="D-202610-02", universe=["KRW-BTC", "KRW-BBB"], event="SURGE")
+        asked = []
+
+        def loader(start_q, end_q, markets):
+            asked.append(tuple(markets))
+            return {m: twin[m] for m in markets}
+        args = offline()
+        args["panel_loader"] = loader
+        ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[one, two], **args)
+        self.assertEqual(sorted(asked), [("KRW-AAA", "KRW-BTC"), ("KRW-BBB", "KRW-BTC")])            # 후보마다 자기 종목만 받는다
+        self.assertEqual({r["market"] for r in ledger["candidates"]["D-202610-01"]["rows"]}, {"KRW-AAA"})
+        alone, _ = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[one], **args)
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["rows"], alone["candidates"]["D-202610-01"]["rows"])   # 다른 후보가 있든 없든 같다
+
+        def flaky(start_q, end_q, markets):
+            if "KRW-BBB" in markets:
+                raise RuntimeError("조회 실패 (HTTP 404)")                                             # 한 후보의 종목이 상장폐지됐다
+            return {m: twin[m] for m in markets}
+        args["panel_loader"] = flaky
+        ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[two, one], **args)
+        self.assertTrue(ledger["candidates"]["D-202610-01"]["rows"])                                 # 다른 후보는 그대로 채점된다
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["updated"], DISC.q_day(q0 + 90 * 96))
+        self.assertNotIn("updated", ledger["candidates"]["D-202610-02"])                             # 실패한 후보는 갱신일이 찍히지 않는다
+        self.assertEqual([w for w in warnings if "후보" in w], ["후보 D-202610-02: 이번 실행에서 갱신하지 못함 — 조회 실패 (HTTP 404)"])
 
     def test_a_candidate_from_an_older_frame_is_not_scored(self):
         q0, panel = crash_panel(150)

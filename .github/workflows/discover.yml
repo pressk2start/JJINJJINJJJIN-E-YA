@@ -75,7 +75,7 @@ jobs:
         run: cat "$REPORT_OUT/DISCOVERY.md" >> "$GITHUB_STEP_SUMMARY"
       # 실행이 실패하면 한 줄 알린다 (고문 요청 2026-11-13). 비밀값이 없으면 아무것도 하지 않는다.
       - name: Telegram on failure (only when both secrets exist)
-        if: failure()
+        if: ${{ failure() || cancelled() }}   # 시간 초과로 취소된 경우도 알린다
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
