@@ -107,6 +107,13 @@ class Ledger(unittest.TestCase):
         FW.h2_decide(entry, "2027-01-05")
         self.assertEqual(entry["decision"], frozen)                                 # 한 번 적힌 판정은 바뀌지 않는다
 
+    def test_the_verdict_record_and_the_status_page_carry_the_delisting_bias_note(self):
+        """고문 판정 2026-11-14: 검사 절차(주 1회 실행)는 바꾸지 않고, 상장폐지 편향을 주석으로 남긴다."""
+        entry = FW.h2_decide({"rows": [row(k, 0.01, 0.0, 0.0) for k in range(FW.H2_DECIDE_AT)], "decision": None}, "2026-12-28")
+        self.assertIn("상장폐지 편향(통과 쪽)", entry["decision"]["note"])
+        text = FW.render({"H2_kimchi": {"rows": [row(0, 0.01)], "decision": None}, "last_run": "2026-11-16"})
+        self.assertIn("주의 — 상장폐지 편향(통과 쪽)", text)
+
     def test_a_losing_candidate_is_marked_fail(self):
         entry = {"rows": [row(3 * k, -0.01, 0.0, 0.0) for k in range(20)], "decision": None}
         FW.h2_decide(entry, "2026-12-28")
@@ -721,7 +728,7 @@ def offline(panel=None):
     """시세를 받지 않는 update 인자들."""
     return dict(h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {}, cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST},
                 surge_fetch=lambda m: [], panel_loader=(lambda s, e, markets: {m: panel[m] for m in markets}) if panel else None,
-                crv_fetch=lambda m, s, e: [])
+                crv_fetch=lambda m, s, e: [], list_markets=lambda: (_ for _ in ()).throw(RuntimeError("목록 조회 없음")))
 
 
 class RegisteredCandidates(unittest.TestCase):
@@ -808,6 +815,74 @@ class RegisteredCandidates(unittest.TestCase):
         self.assertEqual(ledger["candidates"]["D-202610-01"]["updated"], DISC.q_day(q0 + 90 * 96))
         self.assertNotIn("updated", ledger["candidates"]["D-202610-02"])                             # 실패한 후보는 갱신일이 찍히지 않는다
         self.assertEqual([w for w in warnings if "후보" in w], ["후보 D-202610-02: 이번 실행에서 갱신하지 못함 — 조회 실패 (HTTP 404)"])
+
+    # ---- 상장폐지 종목 (고문 판정 2026-11-14)
+    def three(self, days=150):
+        q0, panel = crash_panel(days)
+        flat = DISC.Bars({q: (100.0, 100.0, 100.0, 100.0, 1e9) for q in panel["KRW-BTC"].ts})
+        return q0, {"KRW-BTC": panel["KRW-BTC"], "KRW-AAA": panel["KRW-AAA"], "KRW-BBB": panel["KRW-AAA"]}, flat
+
+    def run_with(self, ledger, today, cand, panel, listed, asked=None):
+        args = offline(panel)
+        if asked is not None:
+            args["panel_loader"] = lambda s, e, markets: (asked.append(tuple(markets)), {m: panel[m] for m in markets})[1]
+        args["list_markets"] = listed
+        return FW.update(ledger, today, registry=[cand], **args)
+
+    def test_a_delisted_coin_stops_making_events_and_the_candidate_goes_on(self):
+        q0, panel, _flat = self.three()
+        reg = DISC.q_day(q0 + 80 * 96)                                                 # 등록 뒤 10일에 종목당 8건
+        cand = self.cand(reg, universe=["KRW-BTC", "KRW-AAA", "KRW-BBB"])
+        everything = lambda: ["KRW-BTC", "KRW-AAA", "KRW-BBB", "KRW-ZZZ"]
+        day1, day2 = DISC.q_day(q0 + 90 * 96), DISC.q_day(q0 + 100 * 96)
+        ledger, warnings = self.run_with({}, day1, cand, self.cut(panel, q0, 90), everything)
+        entry = ledger["candidates"]["D-202610-01"]
+        self.assertEqual((len(entry["rows"]), entry["delisted"], entry["decision"]), (16, {}, None))   # 두 종목이 8건씩
+        old_bbb = [r for r in entry["rows"] if r["market"] == "KRW-BBB"]
+        asked = []
+        ledger, warnings = self.run_with(ledger, day2, cand, self.cut(panel, q0, 100), lambda: ["KRW-BTC", "KRW-AAA"], asked)
+        entry = ledger["candidates"]["D-202610-01"]
+        self.assertEqual(asked, [("KRW-AAA", "KRW-BTC")])                              # 상장폐지된 종목의 시세는 더 받지 않는다
+        self.assertEqual(entry["delisted"], {"KRW-BBB": day2})
+        self.assertEqual([r for r in entry["rows"] if r["market"] == "KRW-BBB"], old_bbb)   # 이미 적힌 거래는 그대로
+        self.assertEqual(len([r for r in entry["rows"] if r["market"] == "KRW-AAA"]), 16)   # 남은 종목은 계속 채점
+        self.assertFalse(any("D-202610-01" in w for w in warnings))                    # 실패가 아니다 — 현황에만 표시
+        text = FW.render(ledger)
+        self.assertIn("· 상장폐지 1종목 |", text)
+        self.assertIn("- D-202610-01 상장폐지 종목: BBB(%s 확인)." % day2, text)
+        self.assertIn("D-202610-01 상장폐지 종목: BBB (남은 종목으로 계속 채점)", FW.summary(ledger))
+        ledger, _ = self.run_with(ledger, DISC.q_day(q0 + 120 * 96), cand, self.cut(panel, q0, 120), everything)   # 목록에 다시 보여도 넣지 않는다
+        entry = ledger["candidates"]["D-202610-01"]
+        self.assertEqual((entry["delisted"], [r for r in entry["rows"] if r["market"] == "KRW-BBB"]), ({"KRW-BBB": day2}, old_bbb))
+        self.assertEqual(entry["decision"]["delisted"], ["KRW-BBB"])                   # 판정 기록에도 남는다
+
+    def test_an_unusable_market_list_removes_nothing(self):
+        q0, panel, _flat = self.three()
+        reg = DISC.q_day(q0 + 70 * 96)
+        cand = self.cand(reg, universe=["KRW-BTC", "KRW-AAA", "KRW-BBB"])
+        for listed in (lambda: [], lambda: ["KRW-AAA"], lambda: (_ for _ in ()).throw(TimeoutError("조회 실패"))):
+            asked = []
+            ledger, warnings = self.run_with({}, DISC.q_day(q0 + 90 * 96), cand, self.cut(panel, q0, 90), listed, asked)
+            self.assertEqual(asked, [("KRW-AAA", "KRW-BBB", "KRW-BTC")])               # 목록이 비었거나 BTC 가 없거나 못 받으면 믿지 않는다
+            self.assertEqual(ledger["candidates"]["D-202610-01"]["delisted"], {})
+
+    def test_after_a_delisting_trades_that_appear_in_the_past_are_not_added(self):
+        q0, panel, flat = self.three()
+        reg = DISC.q_day(q0 + 70 * 96)
+        cand = self.cand(reg, universe=["KRW-BTC", "KRW-AAA", "KRW-BBB"])
+        quiet = {"KRW-BTC": panel["KRW-BTC"], "KRW-AAA": flat, "KRW-BBB": flat}       # 처음에는 AAA 에 사건이 없었다
+        day1, day2, day3 = (DISC.q_day(q0 + d * 96) for d in (90, 100, 110))
+        ledger, _ = self.run_with({}, day1, cand, self.cut(quiet, q0, 90), lambda: ["KRW-BTC", "KRW-AAA", "KRW-BBB"])
+        ledger, _ = self.run_with(ledger, day2, cand, self.cut(quiet, q0, 100), lambda: ["KRW-BTC", "KRW-AAA"])   # BBB 상장폐지
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["rows"], [])
+        ledger, warnings = self.run_with(ledger, day3, cand, self.cut(panel, q0, 110), lambda: ["KRW-BTC", "KRW-AAA"])   # 다시 계산하니 지난 구간에도 거래가 생겼다
+        rows = ledger["candidates"]["D-202610-01"]["rows"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["exit_q"] >= DISC.day_q(day2) - FW.LATE_OK_Q for r in rows))   # 지난 실행 뒤에 끝난 거래만 들어간다
+        self.assertEqual(len([w for w in warnings if "D-202610-01: 다시 계산한 값이 장부와 다른 거래" in w]), 1)
+        self.assertTrue(all("뒤늦게 나타남" in m for m in ledger["mismatch_seen"]["후보 D-202610-01"]))
+        ledger, warnings = self.run_with(ledger, DISC.q_day(q0 + 111 * 96), cand, self.cut(panel, q0, 111), lambda: ["KRW-BTC", "KRW-AAA"])
+        self.assertFalse(any("다시 계산한 값" in w for w in warnings))                  # 같은 것을 다시 경고하지 않는다
 
     def test_a_candidate_from_an_older_frame_is_not_scored(self):
         q0, panel = crash_panel(150)
