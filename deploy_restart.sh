@@ -1,21 +1,40 @@
 #!/bin/bash
-# deploy_restart.sh — bot.py + momentum_scanner 배포 + systemd 재시작
+# deploy_restart.sh — 서버 코드를 main 의 한 커밋으로 맞추고, 돌고 있던 봇을 새 코드로 다시 띄운다.
+# 2026-11-14 전체 검토 반영:
+#   · DEPLOY_SHA 를 주면 그 커밋이 지금의 main 일 때만 배포한다(check 뒤에 main 이 바뀌었으면 멈춘다).
+#   · 꺼져 있는 봇은 켜지 않는다(사람이 일부러 꺼 둔 봇을 배포가 되살리지 않게). 켜는 것은 사람이 직접 한다.
+#   · 봇이 불러 쓰는 config.py · _a_clean_purity.py 가 바뀌어도 재시작한다.
+#   · 재시작한 봇이 새 코드로 떴는지 확인되지 않으면 끝에서 실패(종료 코드 1)로 끝난다.
 set -e
+DEPLOY_FAILED=0
 
 echo "[deploy] 시작 — $(date)"
 
 cd /home/ubuntu/bot
 
-# 변경 전 bot.py 해시 저장
+# 변경 전 bot.py 해시 저장 (봇이 불러 쓰는 파일들의 묶음 해시도 같이)
+bot_files_hash() { cat bot.py config.py _a_clean_purity.py 2>/dev/null | md5sum | awk '{print $1}'; }
 OLD_BOT_HASH=$(md5sum bot.py 2>/dev/null | awk '{print $1}')
+OLD_FILES_HASH=$(bot_files_hash)
 # 이 스크립트 자신의 해시도 저장 (아래 재실행 판단용)
 SELF_PATH="/home/ubuntu/bot/deploy_restart.sh"
 OLD_SELF_HASH=$(md5sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
 
-# 최신 코드 가져오기
-echo "[deploy] git fetch + reset ..."
-git fetch origin main
-git reset --hard origin/main
+# 코드 가져오기. 재실행된 경우(DEPLOY_TARGET 있음)에는 첫 실행이 정한 커밋을 그대로 쓴다.
+if [ -z "$DEPLOY_TARGET" ]; then
+    echo "[deploy] git fetch ..."
+    git fetch origin main
+    DEPLOY_TARGET=$(git rev-parse origin/main)
+    if [ -n "$DEPLOY_SHA" ]; then                       # check 에서 본 커밋과 지금의 main 이 같아야 한다
+        case "$DEPLOY_TARGET" in
+            "$DEPLOY_SHA"*) ;;
+            *) echo "[deploy] ⛔ main 이 바뀌었다: 승인한 커밋 $DEPLOY_SHA, 지금 main $DEPLOY_TARGET — 배포하지 않는다. check 부터 다시 할 것"
+               exit 3 ;;
+        esac
+    fi
+    export DEPLOY_TARGET
+fi
+git reset --hard "$DEPLOY_TARGET"
 echo "[deploy] 코드 업데이트 완료: $(git log --oneline -1)"
 
 # 2026-11-09 사고 재발 방지: reset 이 이 스크립트 자체를 바꿨으면 새 버전으로 다시 실행한다.
@@ -33,14 +52,22 @@ fi
 # 정정: '실행 중인 프로세스가 지금 디스크의 bot.py 에서 시작됐는가' 로 판단한다. bot.py 가 기동 때 남기는 마커
 #       (pid + 자기 소스 md5)를 trend/bot_version_check.py 로 대조. 재시작 뒤에는 같은 검사로 새 프로세스를 확인한다.
 NEW_BOT_HASH=$(md5sum bot.py | awk '{print $1}')
+NEW_FILES_HASH=$(bot_files_hash)
 BOT_MARKER=/home/ubuntu/bot/data/h3_reserved.json
 bot_pid() { systemctl show -p MainPID --value upbit-bot 2>/dev/null || echo 0; }
+BOT_PID_NOW=$(bot_pid)
 NEED_RESTART=0
 RESTART_REASON=""
-if [ "$OLD_BOT_HASH" != "$NEW_BOT_HASH" ]; then
+if [ -z "$BOT_PID_NOW" ] || [ "$BOT_PID_NOW" = "0" ]; then
+    # 꺼져 있는 봇은 켜지 않는다. (전에는 '실행 중이 아님' 을 재시작 사유로 봐서, 일부러 꺼 둔 봇도 배포가 켰다.)
+    echo "[deploy] upbit-bot 이 실행 중이 아니다 → 건드리지 않는다. 켜려면 사람이 직접: sudo systemctl start upbit-bot"
+elif [ "$OLD_BOT_HASH" != "$NEW_BOT_HASH" ]; then
     NEED_RESTART=1
     RESTART_REASON="bot.py changed during this run"
-elif ! RESTART_REASON=$(python3 trend/bot_version_check.py --marker "$BOT_MARKER" --bot-file bot.py --pid "$(bot_pid)" 2>&1); then
+elif [ "$OLD_FILES_HASH" != "$NEW_FILES_HASH" ]; then
+    NEED_RESTART=1
+    RESTART_REASON="config.py or _a_clean_purity.py changed during this run"
+elif ! RESTART_REASON=$(python3 trend/bot_version_check.py --marker "$BOT_MARKER" --bot-file bot.py --pid "$BOT_PID_NOW" 2>&1); then
     NEED_RESTART=1
 fi
 if [ "$NEED_RESTART" = "1" ]; then
@@ -59,8 +86,9 @@ if [ "$NEED_RESTART" = "1" ]; then
     else
         echo "[deploy] ⚠⚠ 검증 실패: 봇이 새 코드로 떴는지 확인되지 않음 — $VERIFY_MSG"
         echo "[deploy] ⚠⚠ H3 실행기는 이 상태에서 매수를 거부한다. journalctl -u upbit-bot -n 30 으로 확인할 것."
+        DEPLOY_FAILED=1                                 # 나머지 단계는 마저 하되, 끝에서 실패로 끝낸다
     fi
-else
+elif [ -n "$BOT_PID_NOW" ] && [ "$BOT_PID_NOW" != "0" ]; then
     echo "[deploy] 재시작 불필요: $RESTART_REASON"
 fi
 
@@ -78,7 +106,7 @@ for svc in momentum-scanner momentum-clm; do
 done
 
 echo "[deploy] 완료 — $(date)"
-sudo systemctl status upbit-bot --no-pager
+sudo systemctl status upbit-bot --no-pager || true      # 꺼져 있으면 0 이 아닌 값을 돌려준다 — 그것만으로 배포를 실패시키지 않는다
 for svc in momentum-scanner momentum-clm; do
     systemctl is-enabled "$svc" &>/dev/null && sudo systemctl status "$svc" --no-pager
 done
@@ -153,4 +181,9 @@ if [ "$NEED_SWEEP" = "1" ]; then
     ) 9>/tmp/sweep_defense.lock
 else
     echo "[deploy] sweep 스킵 (사유: $SKIP_REASON)"
+fi
+
+if [ "$DEPLOY_FAILED" = "1" ]; then
+    echo "[deploy] ⛔ 봇이 새 코드로 떴는지 확인되지 않았다 — 이 배포는 실패로 끝난다"
+    exit 1
 fi
