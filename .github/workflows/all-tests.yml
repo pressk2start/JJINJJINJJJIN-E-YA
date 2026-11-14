@@ -1,0 +1,54 @@
+name: All tests
+
+# 저장소의 테스트 전부를 한 번에 돌린다 (고문 요청 2026-11-14). 다른 점검 워크플로는 자기 영역의 테스트만 돌려서,
+# 한 영역의 변경이 다른 영역의 테스트를 깨도 PR 에서 보이지 않았다. numpy 를 설치한다(테스트가 쓰는 외부 패키지는 이것 하나).
+# 키를 쓰지 않는다. 저장소에 아무것도 쓰지 않는다. 서버와 무관하다.
+on:
+  pull_request:
+  push:
+    branches: ["main", "claude/review-codebase-7fOpB"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: all-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  all-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install numpy
+        run: python -m pip install --disable-pip-version-check numpy
+      - name: Whole test suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -X utf8 -W ignore -m unittest discover -s tests 2>&1 | tee "$RUNNER_TEMP/tests.txt"
+      - name: H3 executor fault-injection check (1,500 fixed seeds with process kills, 500 without)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -X utf8 -W ignore tests/fuzz_h3_executor.py 0 1500 | tee "$RUNNER_TEMP/fuzz.txt"
+          python -B -X utf8 -W ignore tests/fuzz_h3_executor.py 0 500 --no-kills | tee -a "$RUNNER_TEMP/fuzz.txt"
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### 전체 테스트 (numpy 설치)"
+            echo '```'
+            tail -4 "$RUNNER_TEMP/tests.txt" 2>/dev/null || echo "(결과 없음)"
+            echo '```'
+            echo "### H3 무작위 장애 검사"
+            echo '```'
+            cat "$RUNNER_TEMP/fuzz.txt" 2>/dev/null || echo "(결과 없음)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
