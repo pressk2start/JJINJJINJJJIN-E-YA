@@ -442,6 +442,78 @@ class CrashReboundVariants(unittest.TestCase):
         self.assertIn("급락 반등 변형: −5% 0건, −6% 0건, 4시간 보유 0건", FW.summary(ledger))
 
 
+class VerdictHold(unittest.TestCase):
+    """고문 판정(2026-11-14 두 번째): 값이 달라진 거래가 판정에 쓰는 표본에 걸리면 그 항목의 판정을 보류로 표시한다."""
+
+    def variant_update(self, ledger, today, recomputed):
+        real = FW.crv_rows
+        FW.crv_rows = lambda day, fetch=None: {v["key"]: (recomputed if v["key"] == "CR_drop5" else []) for v in FW.CR_VARIANTS}
+        try:
+            return FW.update(ledger, today, **offline())
+        finally:
+            FW.crv_rows = real
+
+    def test_a_changed_trade_before_the_verdict_holds_the_verdict(self):
+        rows = [cr_trade(k, 0.01) for k in range(29)]                                # 판정 전(29건)
+        ledger = {"CR_variants": {"CR_drop5": {"rows": list(rows), "decision": None}}}
+        changed = [dict(rows[3], net=rows[3]["net"] + 0.02)]                          # 4번째 거래의 값이 달라졌다
+        ledger, warnings = self.variant_update(ledger, "2026-12-07", changed + [cr_trade(k, 0.01) for k in range(29, 40)])
+        entry = ledger["CR_variants"]["CR_drop5"]
+        self.assertEqual(len(entry["rows"]), 40)                                      # 거래는 계속 쌓인다
+        self.assertEqual(entry["rows"][3]["net"], rows[3]["net"])                     # 장부 값은 그대로
+        self.assertEqual(entry["hold"]["since"], "2026-12-07")
+        self.assertIsNone(entry["decision"])                                          # 30건·10일이 찼어도 판정하지 않는다
+        self.assertEqual(len([w for w in warnings if "다시 계산한 값" in w]), 1)
+        text = FW.render(ledger)
+        self.assertIn("| 진행 중 · 판정 보류(값 차이) |", text)
+        self.assertIn("## 판정 보류", text)
+        self.assertIn("- 급락 반등 변형 −5%: 2026-12-07 부터 — 값 차이: ", text)
+        self.assertIn("판정 보류(값 차이): 급락 반등 변형 −5%", FW.summary(ledger))
+        ledger = json.loads(json.dumps(ledger))
+        ledger, warnings = self.variant_update(ledger, "2026-12-14", changed)         # 다음 주: 같은 차이 → 경고는 없고 보류는 그대로
+        self.assertEqual(([w for w in warnings if "다시 계산한 값" in w], ledger["CR_variants"]["CR_drop5"]["decision"]), ([], None))
+        del ledger["CR_variants"]["CR_drop5"]["hold"]                                 # 고문이 확인하고 보류를 풀었다
+        ledger, warnings = self.variant_update(ledger, "2026-12-21", changed)
+        entry = ledger["CR_variants"]["CR_drop5"]
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"], entry.get("hold")), ("PASS", 30, None))
+
+    def test_after_the_verdict_only_a_change_inside_its_sample_holds_it(self):
+        rows = [cr_trade(k, 0.01) for k in range(40)]
+        entry = FW.cr_decide({"rows": list(rows), "decision": None}, "2026-12-01", FW.CRV_START)
+        self.assertEqual(entry["decision"]["trades"], 30)
+        ledger = {"CR_variants": {"CR_drop5": entry}}
+        outside = [dict(rows[35], net=rows[35]["net"] - 0.03)]                        # 판정에 쓰지 않은 36번째 거래
+        ledger, warnings = self.variant_update(ledger, "2026-12-07", outside)
+        self.assertEqual(len([w for w in warnings if "다시 계산한 값" in w]), 1)       # 알리기는 한다
+        self.assertIsNone(ledger["CR_variants"]["CR_drop5"].get("hold"))              # 판정 대상이 아니므로 보류하지 않는다
+        inside = [dict(rows[10], net=rows[10]["net"] - 0.03)]                         # 판정에 쓴 11번째 거래
+        ledger, warnings = self.variant_update(ledger, "2026-12-14", inside)
+        self.assertEqual(ledger["CR_variants"]["CR_drop5"]["hold"]["since"], "2026-12-14")
+        self.assertEqual(ledger["CR_variants"]["CR_drop5"]["decision"]["verdict"], "PASS")   # 적힌 판정은 지우지 않는다
+        self.assertIn("| 통과 · 판정 보류(값 차이) |", FW.render(ledger))
+
+    def test_a_changed_period_among_the_first_twenty_holds_the_kimchi_verdict(self):
+        rows = [row(k, 0.01) for k in range(FW.H2_DECIDE_AT)]
+        real = FW.h2_rows
+        args = offline()
+        args["h2_inputs"] = lambda: ({}, {}, [])
+        try:
+            FW.h2_rows = lambda data, bn, last: [dict(rows[5], strat=0.5)] + rows[6:]        # 6번째 기간의 값이 달라졌다
+            ledger, warnings = FW.update({"H2_kimchi": {"rows": list(rows), "decision": None}}, "2026-12-28", **args)
+        finally:
+            FW.h2_rows = real
+        h2 = ledger["H2_kimchi"]
+        self.assertEqual((h2["rows"][5]["strat"], h2["decision"]), (0.01, None))      # 장부 값은 그대로, 20기간이 찼어도 판정하지 않는다
+        self.assertEqual(h2["hold"]["why"], "값 차이: %s" % rows[5]["date"])
+        self.assertIn("## H2 김치 프리미엄 되돌림 — 진행 중 (20 / 20기간) · 판정 보류(값 차이)", FW.render(ledger))
+
+    def test_nothing_is_held_when_nothing_changed(self):
+        ledger, _ = FW.update({}, "2026-11-13", **offline())
+        self.assertEqual(FW.holds(ledger), [])
+        self.assertNotIn("## 판정 보류", FW.render(ledger))
+        self.assertNotIn("판정 보류", FW.summary(ledger))
+
+
 class MissedRuns(unittest.TestCase):
     """'며칠 지났나' 가 아니라 '가장 최근 예약일의 실행이 기록에 있나' 를 본다 (제3세션 지적 2026-11-13)."""
 
@@ -848,13 +920,31 @@ class RegisteredCandidates(unittest.TestCase):
         self.assertEqual(len([r for r in entry["rows"] if r["market"] == "KRW-AAA"]), 16)   # 남은 종목은 계속 채점
         self.assertFalse(any("D-202610-01" in w for w in warnings))                    # 실패가 아니다 — 현황에만 표시
         text = FW.render(ledger)
-        self.assertIn("· 상장폐지 1종목 |", text)
-        self.assertIn("- D-202610-01 상장폐지 종목: BBB(%s 확인)." % day2, text)
-        self.assertIn("D-202610-01 상장폐지 종목: BBB (남은 종목으로 계속 채점)", FW.summary(ledger))
+        self.assertIn("| 진행 중 · 자료 불완전(BBB %s) |" % day2, text)                  # 현황에 종목과 날짜가 보인다
+        self.assertIn("- D-202610-01 자료 불완전: BBB 가 %s 에 상장 목록에서 빠진 것을 확인." % day2, text)
+        self.assertIn("D-202610-01 자료 불완전: BBB 상장폐지 (남은 종목으로 계속 채점)", FW.summary(ledger))
         ledger, _ = self.run_with(ledger, DISC.q_day(q0 + 120 * 96), cand, self.cut(panel, q0, 120), everything)   # 목록에 다시 보여도 넣지 않는다
         entry = ledger["candidates"]["D-202610-01"]
         self.assertEqual((entry["delisted"], [r for r in entry["rows"] if r["market"] == "KRW-BBB"]), ({"KRW-BBB": day2}, old_bbb))
-        self.assertEqual(entry["decision"]["delisted"], ["KRW-BBB"])                   # 판정 기록에도 남는다
+        self.assertEqual(entry["decision"]["delisted"], {"KRW-BBB": day2})             # 판정문에도 종목과 날짜가 남는다
+        self.assertIn("| 통과 · 자료 불완전(BBB %s) |" % day2, FW.render(ledger))
+
+    def test_a_candidate_that_lost_a_coin_does_not_end_as_a_plain_expiry(self):
+        """고문 판정(두 번째): 종목이 빠져 표본이 모자란 것을 '표본 부족 만료' 로 처리하지 않는다."""
+        q0, panel, flat = self.three()
+        reg = DISC.q_day(q0 + 80 * 96)
+        quiet = {"KRW-BTC": panel["KRW-BTC"], "KRW-AAA": flat, "KRW-BBB": flat}       # 사건이 없어 표본이 차지 않는다
+        late = DISC.q_day(q0 + 100 * 96)                                              # 기한(10일)이 지난 날
+        gone = self.cand(reg, universe=["KRW-BTC", "KRW-AAA", "KRW-BBB"], expire_days=10)
+        ledger, _ = self.run_with({}, late, gone, self.cut(quiet, q0, 100), lambda: ["KRW-BTC", "KRW-AAA"])
+        dec = ledger["candidates"]["D-202610-01"]["decision"]
+        self.assertEqual((dec["verdict"], dec["delisted"]), ("INCOMPLETE", {"KRW-BBB": late}))
+        text = FW.render(ledger)
+        self.assertIn("| 자료 불완전(BBB %s) |" % late, text)
+        self.assertNotIn("만료(표본 부족)", text.split("## 자동 등록 후보")[1].split("## 대기 중")[0])
+        whole = self.cand(reg, universe=["KRW-BTC", "KRW-AAA", "KRW-BBB"], expire_days=10)
+        ledger, _ = self.run_with({}, late, whole, self.cut(quiet, q0, 100), lambda: ["KRW-BTC", "KRW-AAA", "KRW-BBB"])
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["decision"]["verdict"], "EXPIRED")   # 종목이 다 있으면 전과 같이 만료
 
     def test_an_unusable_market_list_removes_nothing(self):
         q0, panel, _flat = self.three()
@@ -881,6 +971,8 @@ class RegisteredCandidates(unittest.TestCase):
         self.assertTrue(all(r["exit_q"] >= DISC.day_q(day2) - FW.LATE_OK_Q for r in rows))   # 지난 실행 뒤에 끝난 거래만 들어간다
         self.assertEqual(len([w for w in warnings if "D-202610-01: 다시 계산한 값이 장부와 다른 거래" in w]), 1)
         self.assertTrue(all("뒤늦게 나타남" in m for m in ledger["mismatch_seen"]["후보 D-202610-01"]))
+        self.assertEqual(ledger["candidates"]["D-202610-01"]["hold"]["since"], day3)   # 판정 대상 구간이 달라진 것이므로 판정을 보류한다
+        self.assertIn("· 판정 보류(값 차이) |", FW.render(ledger))
         ledger, warnings = self.run_with(ledger, DISC.q_day(q0 + 111 * 96), cand, self.cut(panel, q0, 111), lambda: ["KRW-BTC", "KRW-AAA"])
         self.assertFalse(any("다시 계산한 값" in w for w in warnings))                  # 같은 것을 다시 경고하지 않는다
 
