@@ -42,7 +42,7 @@ class TestBotVersionCheck(unittest.TestCase):
         sh = (ROOT / "deploy_restart.sh").read_text(encoding="utf-8")
         self.assertIn("trend/bot_version_check.py --marker", sh)
         self.assertIn("검증 OK", sh)
-        self.assertLess(sh.index("git reset --hard origin/main"), sh.index("bot_version_check.py"))
+        self.assertLess(sh.index('git reset --hard "$DEPLOY_TARGET"'), sh.index("bot_version_check.py"))   # 코드를 맞춘 뒤에 확인한다
 
 
 if __name__ == "__main__":
