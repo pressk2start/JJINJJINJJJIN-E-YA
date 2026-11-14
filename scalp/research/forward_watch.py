@@ -348,6 +348,17 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수."""
     log = log or (lambda s: None)
     warnings = []
+    seen = ledger.setdefault("mismatch_seen", {})                  # 이미 알린 값 차이 (항목 → 표시 목록)
+
+    def fresh(item, mismatch):
+        """처음 보는 값 차이만 돌려주고 '알린 것' 으로 적어 둔다. 같은 차이는 다시 계산할 때마다 또 나오므로, 매번 경고로 올리면
+        그 주부터 모든 실행이 실패로 끝난다(전체 검토 18번). 처음 한 번만 실패로 알리고, 그 뒤로는 현황표에만 남긴다."""
+        known = set(seen.get(item, []))
+        new = [m for m in mismatch if m not in known]
+        if new:
+            seen[item] = sorted(known | set(new))
+        return new
+
     last_done = DF._shift(today, -1)
     h2 = ledger.setdefault("H2_kimchi", {"rows": [], "decision": None})
     try:
@@ -357,6 +368,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         rows, added, mismatch = merge_rows(h2["rows"], h2_rows(data, bn, last_done))
         h2["rows"] = rows
         h2["updated"] = today
+        mismatch = fresh("H2 김치 되돌림", mismatch)
         if mismatch:
             warnings.append("H2: 다시 계산한 값이 장부와 다른 기간 %d개 (%s) — 장부 값은 그대로 둠" % (len(mismatch), ", ".join(mismatch[:5])))
         h2_decide(h2, today)
@@ -373,6 +385,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         rows, added, mismatch = merge_cr(cr["rows"], cr_rows(today, cr_fetch))
         cr["rows"] = rows
         cr["updated"] = today
+        mismatch = fresh("급락 반등", mismatch)
         if mismatch:
             warnings.append("급락 반등: 다시 계산한 값이 장부와 다른 거래 %d건 (%s) — 장부 값은 그대로 둠" % (len(mismatch), ", ".join(mismatch[:5])))
         cr_decide(cr, today, CR_START)
@@ -385,6 +398,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             entry = crv.setdefault(key, {"rows": [], "decision": None})
             rows, added, mismatch = merge_cr(entry["rows"], new_rows)
             entry["rows"], entry["updated"] = rows, today
+            mismatch = fresh("급락 반등 변형 " + key, mismatch)
             if mismatch:
                 warnings.append("급락 반등 변형 %s: 다시 계산한 값이 장부와 다른 거래 %d건 (%s) — 장부 값은 그대로 둠" % (
                     key, len(mismatch), ", ".join(mismatch[:5])))
@@ -411,6 +425,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             panel = (panel_loader or DISC.load_panel)(start_q, end_q, tuple(sorted(c["universe"])))
             rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_q))
             entry["rows"], entry["updated"] = rows, today
+            mismatch = fresh("후보 " + c["id"], mismatch)
             if mismatch:
                 warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(mismatch)))
             DISC.decide_once(entry, c, today)
@@ -545,6 +560,11 @@ def render(ledger):
         out += ["아직 등록된 후보가 없습니다. 탐색 결과는 DISCOVERY.md 에 남습니다.", ""]
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
+    known = sorted((k, v) for k, v in (ledger.get("mismatch_seen") or {}).items() if v)
+    if known:
+        out += ["## 알려진 값 차이", "", "지난 봉을 다시 받아 계산한 값이 장부에 적힌 값과 달랐던 곳입니다. 장부 값은 바꾸지 않으며, "
+                "처음 발견한 실행에서 한 번만 경고로 알렸습니다.", ""]
+        out += ["- %s: %d건 (%s%s)" % (k, len(v), ", ".join(v[:5]), " 외" if len(v) > 5 else "") for k, v in known] + [""]
     return "\n".join(out)
 
 
