@@ -514,14 +514,18 @@ def candidate_trades(panel, cand, end_q):
     return [{k: t[k] for k in ("market", "entry_q", "exit_q", "day", "gross", "net", "move")} for t in rows]
 
 
-def merge_trades(old_rows, new_rows):
-    """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시)."""
+def merge_trades(old_rows, new_rows, not_before_q=None):
+    """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시).
+    not_before_q 를 주면 그 봉보다 앞에서 끝났는데 장부에 없던 거래는 넣지 않는다(지난 구간이 뒤늦게 달라진 것) — 표시만 돌려준다."""
     by_key = {(r["market"], r["entry_q"]): r for r in old_rows}
     added, mismatch = 0, []
     for r in new_rows:
         key = (r["market"], r["entry_q"])
         prev = by_key.get(key)
         if prev is None:
+            if not_before_q is not None and r["exit_q"] < not_before_q:
+                mismatch.append("%s %s #%d (뒤늦게 나타남)" % (r["market"][4:], r["day"], r["entry_q"]))
+                continue
             by_key[key] = r
             added += 1
         elif abs(prev["net"] - r["net"]) > 1e-9:
