@@ -525,7 +525,7 @@ def merge_trades(old_rows, new_rows):
             by_key[key] = r
             added += 1
         elif abs(prev["net"] - r["net"]) > 1e-9:
-            mismatch.append("%s %s" % (r["market"][4:], r["day"]))
+            mismatch.append("%s %s #%d" % (r["market"][4:], r["day"], r["entry_q"]))     # 진입 봉 번호까지 — 같은 날 두 거래를 구분한다
     return sorted(by_key.values(), key=lambda t: (t["entry_q"], t["market"])), added, mismatch
 
 

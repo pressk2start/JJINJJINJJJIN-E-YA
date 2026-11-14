@@ -375,6 +375,33 @@ class CrashReboundVariants(unittest.TestCase):
         entry = FW.cr_decide({"rows": rows, "decision": None}, "2026-12-30")
         self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))    # 판정 기준은 기준 규칙과 같다
 
+    def test_a_changed_value_is_a_warning_once_and_then_only_a_note(self):
+        """전체 검토 18번: 같은 값 차이가 매주 경고로 다시 올라오면 그 뒤 모든 실행이 실패로 끝난다."""
+        def good(m, s, e):
+            return self.bars(-0.065) if m == "KRW-SOL" else five_min([100.0] * 90, self.START + 60)
+        base = dict(h2_inputs=lambda: ({}, {}, ["x"]), h3_fetch=lambda m, d: {}, cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST},
+                    surge_fetch=lambda m: [])
+        ledger, _ = FW.update({}, "2026-11-20", crv_fetch=good, **base)
+        ledger["CR_variants"]["CR_drop5"]["rows"][0]["net"] += 0.01                                   # 장부 값과 다시 계산한 값이 달라졌다
+        kept = ledger["CR_variants"]["CR_drop5"]["rows"][0]["net"]
+        mine = lambda ws: [w for w in ws if "다시 계산한 값" in w]
+        ledger, warnings = FW.update(ledger, "2026-11-27", crv_fetch=good, **base)
+        self.assertEqual(len(mine(warnings)), 1)                                                      # 처음 한 번은 경고
+        self.assertIn("급락 반등 변형 CR_drop5: 다시 계산한 값이 장부와 다른 거래 1건", mine(warnings)[0])
+        self.assertEqual(ledger["CR_variants"]["CR_drop5"]["rows"][0]["net"], kept)                   # 장부 값은 그대로
+        ledger = json.loads(json.dumps(ledger))                                                       # 파일에 썼다 읽은 것과 같게
+        ledger, warnings = FW.update(ledger, "2026-12-04", crv_fetch=good, **base)
+        self.assertEqual(mine(warnings), [])                                                          # 같은 차이는 다시 경고하지 않는다
+        self.assertEqual(len(ledger["mismatch_seen"]["급락 반등 변형 CR_drop5"]), 1)
+        text = FW.render(ledger)
+        self.assertIn("## 알려진 값 차이", text)
+        self.assertIn("- 급락 반등 변형 CR_drop5: 1건 (SOL ", text)
+        ledger["CR_variants"]["CR_drop6"]["rows"][0]["net"] -= 0.02                                   # 다른 곳에서 새 차이가 생겼다
+        ledger, warnings = FW.update(ledger, "2026-12-11", crv_fetch=good, **base)
+        self.assertEqual(len(mine(warnings)), 1)                                                      # 새 차이는 바로 알린다
+        self.assertIn("CR_drop6", mine(warnings)[0])
+        self.assertNotIn("## 알려진 값 차이", FW.render(FW.update({}, "2026-11-13", **offline())[0]))   # 차이가 없으면 그 절도 없다
+
     def test_two_years_without_enough_trades_ends_as_expired_not_failed(self):
         thin = {"rows": [cr_trade(k, -0.05) for k in range(5)], "decision": None}
         self.assertIsNone(FW.cr_decide(thin, "2028-11-13", FW.CRV_START)["decision"])                 # 730일째까지는 기다린다
