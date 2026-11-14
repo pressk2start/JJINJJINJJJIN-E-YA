@@ -60,7 +60,8 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
   BTC_surge  BTC 주간 급등 관찰 (auto_monitor.surge_weeks). 월요일 00:00 UTC 에 직전 7일 수익률 ≥ +7.45% 인 주와 전체 주의
              BTC·ETH 주간 수익률을 기록한다. 판정 없음.
   자동 등록 후보  discover.py 가 달마다 '사건 × 조건 하나 × 보유 시간' 틀에서 찾아 forward/registry.json 에 등록한 것.
-             등록 때 고정한 정의로 등록일 이후 거래만 채점한다. 판정은 30건·10일이 처음 채워질 때 한 번, 180일 안에 못 채우면 만료.
+             등록 때 고정한 정의로 등록일 이후 거래만 채점한다. 판정은 30건·10일이 처음 채워질 때 한 번, 12개월 안에 못 채우면 만료.
+             후보마다 자기 종목만 받아 따로 채점한다(다른 후보의 종목이 섞이지 않고, 하나가 실패해도 나머지는 진행한다).
              추적 중인 후보가 없으면 시세도 받지 않는다. 틀(고문 지정, 15분봉)과 한계는 discover.py 머리말에 있다.
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
 
@@ -402,22 +403,20 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
     active = [c for c in (registry or []) if c.get("status") == "ACTIVE"]
     cands = ledger.setdefault("candidates", {})
     open_now = [c for c in active if not (cands.get(c["id"]) or {}).get("decision")]
-    if open_now:                                                    # 추적 중인 후보가 있을 때만 15분봉을 받는다
+    for c in open_now:                                              # 후보마다 따로: 자기 종목만 받아 채점하고, 하나가 실패해도 나머지는 진행한다
+        entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
         try:
             end_q = DISC.day_q(today)
-            start_q = min(DISC.day_q(DISC.cand_start(c)) for c in open_now) - DISC.WARMUP_Q
-            markets = tuple(sorted({m for c in open_now for m in c["universe"]}))
-            panel = (panel_loader or DISC.load_panel)(start_q, end_q, markets)
-            for c in open_now:
-                entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
-                rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_q))
-                entry["rows"], entry["updated"] = rows, today
-                if mismatch:
-                    warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(mismatch)))
-                DISC.decide_once(entry, c, today)
-                log("%s: %d trades in ledger (+%d)" % (c["id"], len(rows), added))
+            start_q = DISC.day_q(DISC.cand_start(c)) - DISC.WARMUP_Q
+            panel = (panel_loader or DISC.load_panel)(start_q, end_q, tuple(sorted(c["universe"])))
+            rows, added, mismatch = DISC.merge_trades(entry["rows"], DISC.candidate_trades(panel, c, end_q))
+            entry["rows"], entry["updated"] = rows, today
+            if mismatch:
+                warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(mismatch)))
+            DISC.decide_once(entry, c, today)
+            log("%s: %d trades in ledger (+%d)" % (c["id"], len(rows), added))
         except Exception as e:
-            warnings.append("자동 등록 후보: 이번 실행에서 갱신하지 못함 — %s" % e)
+            warnings.append("후보 %s: 이번 실행에서 갱신하지 못함 — %s" % (c["id"], e))
     ledger["last_run"] = today
     ledger["warnings"] = warnings
     return ledger, warnings
@@ -606,7 +605,7 @@ def expected_runs(today, daily=False):
     return (monday if monday >= FIRST_WEEKLY else None), (first if first >= FIRST_MONTHLY else None)
 
 
-def stale(ledger, scan_log, today, daily=False):
+def stale(ledger, scan_log, today, registry=(), daily=False):
     """예약 실행이 빠졌거나 일부 항목이 갱신되지 못했는지 → 문제 목록(없으면 빈 목록).
     '며칠 지났나' 가 아니라 '가장 최근 예약일의 실행이 기록에 있나' 를 본다. last_run 은 일부 항목이 실패해도 찍히므로,
     항목마다 따로 남는 갱신일(성공했을 때만 바뀜)도 같이 본다."""
@@ -622,7 +621,11 @@ def stale(ledger, scan_log, today, daily=False):
             items = [("김치 프리미엄", (ledger.get("H2_kimchi") or {}).get("updated")), ("H3 추세", (ledger.get("H3_trend") or {}).get("as_of")),
                      ("급락 반등", (ledger.get("CR_rebound") or {}).get("updated")), ("BTC 주간 급등", (ledger.get("BTC_surge") or {}).get("updated"))]
             items += [("급락 반등 변형 " + v["name"], ((ledger.get("CR_variants") or {}).get(v["key"]) or {}).get("updated")) for v in CR_VARIANTS]
-            items += [("후보 " + cid, e.get("updated")) for cid, e in sorted((ledger.get("candidates") or {}).items()) if not e.get("decision")]
+            cands = ledger.get("candidates") or {}                  # 등록부 기준으로 본다 — 한 번도 채점되지 못해 장부에 없는 후보도 잡는다
+            for c in sorted(registry, key=lambda c: c["id"]):
+                done = (cands.get(c["id"]) or {}).get("decision")
+                if c.get("status") == "ACTIVE" and not done and c.get("registered", "") <= weekly:
+                    items.append(("후보 " + c["id"], (cands.get(c["id"]) or {}).get("updated")))
             for name, day in items:
                 if not day or day < weekly:
                     out.append("%s: %s%s 이후 갱신되지 못함 — 마지막 갱신 %s" % (name, weekly, suffix, day or "없음"))
@@ -650,8 +653,9 @@ def main(argv=None):
         return 0
     today = a.today or dt.datetime.now(dt.timezone.utc).date().isoformat()
     if a.stale_check:
-        log_path = out / "scan_log.json"
-        problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today, daily=a.daily_schedule)
+        log_path, reg_file = out / "scan_log.json", out / "registry.json"
+        problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today,
+                         json.loads(reg_file.read_text(encoding="utf-8")) if reg_file.exists() else [], daily=a.daily_schedule)
         weekly, monthly = expected_runs(today, daily=a.daily_schedule)
         print("\n".join(problems) if problems else "예약 실행 기록 정상 (추적 %s 이후 실행 %s, 월간 기준일 %s)" % (
             weekly or "첫 예약 전", ledger.get("last_run"), monthly or "첫 예약 전"))
