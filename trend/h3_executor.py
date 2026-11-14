@@ -15,13 +15,26 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
 
 안전장치
   1) 하루 1회·재시작 안전: 종목별 last_day 로 같은 날 재실행은 아무것도 하지 않는다. 동시 실행은 파일 잠금으로 막는다.
-  2) 중복 주문 방지: 주문 전에 상태 파일에 pending(결정일·방향·identifier)을 먼저 쓴다. identifier 는 날짜·종목·방향으로 정해져
-     같은 주문을 두 번 낼 수 없다(거래소가 중복 identifier 를 거부). 죽었다 살아나면 identifier 로 주문을 조회해 체결을 반영한다.
-     주문 POST 는 재시도하지 않는다.
+  2) 중복 주문 방지 (2026-11-14 고문 방침으로 다시 정함). 업비트는 한 번 쓴 identifier 를 주문이 만들어졌든 아니든 다시 받지 않는다.
+     · 보낼 때마다 새 identifier 를 쓴다(h3-날짜-종목-방향, 그날 같은 방향 두 번째부터 -r1, -r2 …). 보내기 '전에' 그 번호를
+       상태 파일의 sent(보낸 번호 목록)와 pending 에 먼저 적고 저장한다. 주문 POST 자체는 재시도하지 않는다.
+     · 실행할 때마다 먼저, 적어 둔 번호 중 결과를 모르는 것(open)을 전부 조회한다(조회만). 주문이 있으면 그 체결을 장부에 반영하고
+       🚨 로 알린 뒤에야 오늘 할 일을 판단한다 — 이미 들어간 주문 위에 새 주문을 얹지 않는다. 주문이 없으면 번호를 남겨 두고
+       다음 실행이 다시 조회한다(SENT_KEEP_DAYS 일 뒤에는 '들어가지 않은 주문' 으로 보고 지운다).
+     · 한 실행에서 지난 주문의 체결을 반영했으면, 그 종목의 새 주문은 그 실행에서 내지 않는다(다음 실행이 다시 판단한다).
+     · 매도는 새 번호로 다시 보낼 수 있다(계좌에 있는 만큼만 팔린다).
+     · 매수는 하루에 한 번만 보낸다. 그 결과가 체결이 아니면(안 들어감·체결 0·불확실) 그날은 포기하고 다음 날 다시 판단한다.
+     · 매수 전에 계좌와 장부를 대조한다. 계좌의 코인이 장부보다 최소 주문 금액어치 이상 많으면 매수를 거부하고 알린다
+       (앞선 주문이 뒤늦게 체결됐을 수 있다 — 이중 매수를 막는 마지막 장치. 같은 계좌에 따로 산 BTC·ETH 가 있어도 거부된다).
+     죽었다 살아나면 pending 의 identifier 로 주문을 조회해 체결을 반영한다(조회만 한다).
   3) 단타 봇과 분리: bot.py 는 자기가 사지 않은 잔고를 '유령 포지션'으로 입양해 판다. bot.py 가 H3_RESERVED_MARKETS 가드와 함께
      떠 있다는 마커(data/h3_reserved.json 의 pid 가 실제 bot.py 프로세스)가 확인될 때만 LIVE 매수한다. 봇이 옛 코드로 돌고 있으면
      매수를 거부하고 알린다. 매도는 막지 않는다.
-  4) 잔고 확인: 매수 전 KRW 잔고, 매도 전 코인 잔고를 계좌에서 확인한다. 슬리브 수량보다 잔고가 적으면 있는 만큼만 팔고 알린다.
+  4) 잔고 확인: 매수 전 KRW 잔고, 매도 전 코인 잔고를 계좌에서 확인한다. 장부를 자동으로 지우는 일은 없다 (2026-11-14 고문 방침).
+     · 계좌 잔고가 장부보다 적으면 있는 만큼만 팔고, 모자란 수량은 장부에 그대로 둔 채 🚨 로 알린다.
+     · 팔 수 있는 잔고가 없거나 최소 주문 금액에 못 미치면(다른 주문에 묶였거나 밖에서 팔린 경우) 주문을 내지 않고
+       하루에 한 번만 🚨 로 알린다. 그날은 더 시도하지 않는다.
+     · 사람이 계좌를 확인한 뒤 --writeoff 로 장부를 맞춘다.
   5) 자료 확인: 어제 일봉이 아직 없으면(거래소 지연) 아무것도 하지 않고 다음 실행에 맡긴다.
   6) 지연 실행: 09:00 KST 에서 H3_MAX_LATE_MIN(기본 30분) 넘게 늦은 실행의 매수는 보류하고 알린다(--allow-late 로만 실행).
      매도는 늦어도 실행한다 — 규칙상 나와야 할 포지션을 들고 있는 쪽이 더 위험하다.
@@ -59,6 +72,9 @@ r"""h3_executor — H3 동결 규칙을 하루 1회 실행한다. 기본 SHADOW(
   python3 h3_executor.py --status   슬리브·마지막 결정 출력
   python3 h3_executor.py --dry-run  결정만 계산해 출력 (상태·주문·텔레그램 없음)
   python3 h3_executor.py --sell-retry   매도만 다시 시도 (위 12번). 타이머용 — 할 일이 없으면 아무것도 찍지 않는다
+  python3 h3_executor.py --writeoff KRW-BTC        장부와 계좌의 차이를 보여 준다(바꾸지 않는다). LIVE 전용
+  python3 h3_executor.py --writeoff KRW-BTC --yes  사람이 계좌를 확인한 뒤: 장부의 코인을 계좌에 있는 만큼으로 줄인다. 주문은 내지 않는다.
+                                    계좌의 코인이 다른 주문에 묶여 있으면(locked) 거부한다.
   python3 h3_executor.py --smoke-test   LIVE 전용. BTC 7,000원을 시장가로 사서 바로 판다(수수료 약 7원). 첫 실제 신호가
                                     오기 전에 인증·주문·identifier 조회·체결 집계·봇 분리 확인이 실거래소에서 도는지 본다.
                                     슬리브 장부는 건드리지 않는다.
@@ -93,6 +109,7 @@ FEE = 0.0005
 MIN_ORDER_KRW = 5000
 DEFAULT_SHADOW_CAPITAL = 1000000.0
 RETRY_ALERT_GAP_SEC = 3600            # 매도 재시도가 계속 실패할 때 알림 간격
+SENT_KEEP_DAYS = 3                    # 결과를 모르는 주문 번호를 며칠 동안 다시 조회할지
 
 
 def load_rule():
@@ -112,19 +129,35 @@ class H3Error(Exception):
 
 
 class NoFill(H3Error):
-    """주문이 끝났는데(done/cancel) 체결이 0. 같은 identifier 는 다시 쓸 수 없으므로 시도 번호를 올려 다시 낸다."""
+    """주문이 끝났는데(done/cancel) 체결이 0. 그 번호는 다시 쓸 수 없다 — 매도는 새 번호로 다시 내고, 매수는 그날 포기한다."""
+
+
+class SellBlocked(H3Error):
+    """팔 수 있는 잔고가 없다(0 이거나 최소 주문 금액 미만). 장부는 그대로 두고 하루에 한 번만 알린다 — 사람이 확인한 뒤 --writeoff."""
+
+
+def sent_records(sleeve):
+    """이 종목으로 보낸(보내려고 적어 둔) 주문 번호 목록 → [{"id", "day", "side", "status"}].
+    status: open = 결과를 아직 모른다 · applied = 체결을 장부에 반영했다 · nofill = 체결 없이 끝났다."""
+    if not isinstance(sleeve.get("sent"), list):
+        sleeve["sent"] = []
+    return sleeve["sent"]
 
 
 def order_identifier(sleeve, day, market, side):
-    attempt = sleeve.get("attempt") or {}
-    n = attempt.get("n", 0) if attempt.get("day") == day else 0
+    """다음에 쓸 주문 번호. 한 번 쓴 번호는 다시 쓰지 않는다 — 그날 그 방향으로 이미 적어 둔 번호 수만큼 뒤에 -rN 을 붙인다."""
+    n = sum(1 for r in sent_records(sleeve) if r["day"] == day and r["side"] == side)
     base = "h3-%s-%s-%s" % (day.replace("-", ""), market, side)
     return base if n == 0 else "%s-r%d" % (base, n)
 
 
-def bump_attempt(sleeve, day):
-    attempt = sleeve.get("attempt") or {}
-    sleeve["attempt"] = {"day": day, "n": (attempt.get("n", 0) if attempt.get("day") == day else 0) + 1}
+def mark_sent(sleeve, day, identifier, side, status):
+    """sent 목록에 번호를 적거나(없으면), 이미 있으면 상태만 바꾼다."""
+    for r in sent_records(sleeve):
+        if r["id"] == identifier:
+            r["status"] = status
+            return
+    sent_records(sleeve).append({"id": identifier, "day": day, "side": side, "status": status})
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -268,6 +301,13 @@ class Upbit(object):
         for acc in self._call("GET", "/v1/accounts", private=True):
             out[acc["currency"]] = float(acc.get("balance") or 0)
         return out
+
+    def account(self, currency):
+        """→ (팔 수 있는 잔고, 주문에 묶인 수량). 계좌에 그 통화가 없으면 (0, 0)."""
+        for acc in self._call("GET", "/v1/accounts", private=True):
+            if acc["currency"] == currency:
+                return float(acc.get("balance") or 0), float(acc.get("locked") or 0)
+        return 0.0, 0.0
 
     def place(self, market, side, identifier, krw=None, volume=None):
         body = {"market": market, "side": side, "identifier": identifier}
@@ -508,46 +548,93 @@ class Executor(object):
         if side == "bid":
             sleeve["cash"] = max(0.0, sleeve["cash"] - fill["funds"] - fill["fee"])
             sleeve["coin"] += fill["volume"]
-        else:
+        else:                                                   # 팔린 만큼만 줄인다. 계좌에 없던 수량도 자동으로 지우지 않는다
             sleeve["cash"] += fill["funds"] - fill["fee"]
             sleeve["coin"] = max(0.0, sleeve["coin"] - fill["volume"])
-            sold_all = fill["volume"] >= (fill.get("requested") or 0.0) * (1 - 1e-6)
-            if fill.get("writeoff") and sold_all:               # 계좌에 없던 수량은 장부에서도 지운다(없는 코인을 계속 들고 있지 않게)
-                sleeve["coin"] = 0.0                            # 단, 낸 주문이 일부만 체결됐으면 지우지 않는다(안 팔린 코인이 계좌에 있다)
+
+    def settle_sent(self, state, market, day, late_min):
+        """결과를 모르는 채 남은 주문 번호(open)를 전부 조회한다. 조회만 한다 — 여기서는 어떤 주문도 내지 않는다.
+        주문이 있고 체결됐으면 장부에 반영하고 🚨 로 알린다. 체결 없이 끝났으면 nofill 로 적는다. 주문이 없으면 그대로 두어
+        다음 실행이 다시 조회한다. 지난 날짜의 번호는 결과가 정해졌거나 SENT_KEEP_DAYS 일이 지났으면 목록에서 지운다."""
+        sleeve = state["sleeves"][market]
+        records = sent_records(sleeve)
+        dirty, found = False, 0
+        for rec in records:
+            if rec["status"] != "open" or self.ex.order(rec["id"]) is None:
+                continue
+            try:
+                fill = self.confirm_order(market, rec["side"], rec["id"])
+            except NoFill:
+                rec["status"], dirty = "nofill", True
+                continue
+            self.apply_fill(sleeve, rec["side"], fill)
+            rec["status"], found = "applied", found + 1
+            save_state(self.cfg, state)                         # 반영과 표시를 한 번에 저장한 뒤에야 장부를 쓴다(두 번 더하지 않게)
+            self.safe_record(state, market, rec["day"], "BUY" if rec["side"] == "bid" else "SELL", fill, None, None, late_min,
+                             note="late fill found by lookup (%s)" % rec["id"])
+            self.alerts.append("🚨 %s: 안 들어간 줄 알았던 %s 주문(%s)이 체결돼 있었음 — 장부에 반영함 (%.8f개 @ %s)" % (
+                market[4:], "매수" if rec["side"] == "bid" else "매도", rec["id"], fill["volume"], format(fill["avg"], ",.0f")))
+        oldest = TP._shift(day, -SENT_KEEP_DAYS)
+        keep = [r for r in records if r["day"] >= day or (r["status"] == "open" and r["day"] >= oldest)]
+        if len(keep) != len(records):
+            sleeve["sent"], dirty = keep, True
+        if dirty:
+            save_state(self.cfg, state)
+        return found
+
+    def sell_remainder(self, sleeve, market, day, fill, mark):
+        """매도 체결을 반영한 뒤 장부에 남은 것을 본다 → (그날을 닫지 않을 이유 또는 None, 알릴 줄들).
+        계좌가 장부보다 적어 있는 만큼만 판 경우(short)는 🚨 로 알린다. 그러고도 팔 것이 장부에 남았으면 계좌에는 더 없으니
+        그날은 다시 시도하지 않게 표시한다(sell_blocked). 낸 주문이 일부만 체결된 경우는 다음 실행·재시도가 새 번호로 다시 판다."""
+        alerts = []
+        short = bool(fill.get("short")) and fill["volume"] >= (fill.get("requested") or 0.0) * (1 - 1e-6)
+        if short:                                               # 계좌에 있던 만큼은 다 팔렸다. 모자란 수량은 장부에 그대로 둔다
+            alerts.append("🚨 %s: 계좌에 있던 %.8f개만 팔았음. 장부에 남은 %.8f개는 계좌에 없었음(다른 주문에 묶였거나 밖에서 팔림) — "
+                          "장부는 그대로 둠. 계좌를 확인한 뒤 --writeoff %s" % (market[4:], fill["volume"], sleeve["coin"], market))
+        if not self.sell_left(sleeve, mark):
+            return None, alerts
+        if short:
+            sleeve["sell_blocked"] = day
+            return "account held less than the book — remainder left on the book", alerts
+        alerts.append("🚨 %s: 매도가 일부만 체결됨 — 남은 %.8f개는 다시 판다" % (market[4:], sleeve["coin"]))
+        return "partial fill — remainder still held", alerts
 
     # --- 종목 하나 ---
     def run_market(self, state, market, day, late_min, sell_only=False):
         """종목 하나의 하루치. sell_only=True(매도 재시도)면 미처리 주문 정리와 매도만 하고, 그 밖의 판단은 기록도 저장도 하지 않는다."""
         sleeve = state["sleeves"][market]
         pending = sleeve.get("pending")
-        recovered = None
+        recovered, found = None, 0                              # found = 이번 실행이 지난 주문의 체결을 반영한 횟수
         if pending and self.cfg.mode == "LIVE":                 # 지난 실행이 주문 도중 끊겼다 → 먼저 정리
+            mark_sent(sleeve, pending["day"], pending["identifier"], pending["side"], "open")   # 옛 상태 파일의 pending 도 번호 목록에 올린다
             fill, side_ko = None, "매수" if pending["side"] == "bid" else "매도"
             if self.ex.order(pending["identifier"]) is not None:
                 try:
                     fill = self.confirm_order(market, pending["side"], pending["identifier"])   # 조회만 — 여기서는 주문을 내지 않는다
-                    fill["writeoff"], fill["requested"] = pending.get("writeoff"), pending.get("volume")
+                    fill["requested"], fill["short"] = pending.get("volume"), pending.get("short")
                 except NoFill:
-                    bump_attempt(sleeve, pending["day"])        # 체결 0 으로 끝난 주문 → 다음 주문은 새 identifier
+                    mark_sent(sleeve, pending["day"], pending["identifier"], pending["side"], "nofill")
                     self.alerts.append("%s: 중단됐던 %s 주문(%s)이 체결 없이 끝났음 — 다시 판단함" % (market[4:], side_ko, pending["day"]))
-            left = False
+            left, more = None, []
             if fill is not None:
+                found += 1
                 self.apply_fill(sleeve, pending["side"], fill)
-                left = pending["side"] == "ask" and self.sell_left(sleeve, (pending.get("signal") or {}).get("close"))
-                if left:
-                    bump_attempt(sleeve, pending["day"])        # 일부만 팔렸다 → 그날을 닫지 않고, 다음 매도는 새 주문 번호로
-                else:
+                mark_sent(sleeve, pending["day"], pending["identifier"], pending["side"], "applied")
+                if pending["side"] == "ask":
+                    left, more = self.sell_remainder(sleeve, market, pending["day"], fill, (pending.get("signal") or {}).get("close"))
+                if not left:                                    # 팔 것이 남았으면 그날을 닫지 않는다
                     sleeve["last_day"] = pending["day"]
             sleeve["pending"] = None
             save_state(self.cfg, state)                         # 체결 반영과 pending 해제를 한 번에 저장한 뒤에야 장부를 쓴다
             if fill is not None:
                 recovered = self.safe_record(state, market, pending["day"], "BUY" if pending["side"] == "bid" else "SELL", fill,
                                              pending.get("signal"), None, late_min,
-                                             note="reconciled after restart" + (" — partial fill, remainder still held" if left else ""))
+                                             note="reconciled after restart" + (" — " + left if left else ""))
                 self.alerts.append("%s: 중단됐던 실행의 %s 체결을 반영함 (%s, %.8f개 @ %s)" % (
                     market[4:], side_ko, pending["day"], fill["volume"], format(fill["avg"], ",.0f")))
-                if left:
-                    self.alerts.append("🚨 %s: 매도가 일부만 체결됨 — 남은 %.8f개는 다시 판다" % (market[4:], sleeve["coin"]))
+                self.alerts.extend(more)
+        if self.cfg.mode == "LIVE":                             # 결과를 모르는 지난 주문 번호를 전부 조회해 반영한 뒤에야 판단한다
+            found += self.settle_sent(state, market, day, late_min)
         if sleeve.get("last_day") == day:                       # 오늘 이미 처리. 방금 반영한 체결이 오늘 것이면 요약 줄에 싣는다
             return recovered if recovered and recovered.get("day") == day else None
         sig, open_proxy = self.decide(market, day)
@@ -556,6 +643,12 @@ class Executor(object):
         action = "BUY" if (sig["on"] and not holding) else "SELL" if (holding and not sig["on"]) else (
             "KEEP_HOLDING" if holding else "STAY_IN_CASH")
         if sell_only and action != "SELL":                      # 재시도는 매도만 한다. 오늘을 닫지 않고 하루 실행에 맡긴다
+            return recovered
+        if action == "SELL" and self.cfg.mode == "LIVE" and sleeve.get("sell_blocked") == day:
+            return recovered                                    # 팔 수 있는 잔고가 없다고 오늘 이미 알렸다 → 더 시도하지 않는다
+        if found and action in ("BUY", "SELL"):                 # 지난 주문의 체결을 방금 반영했다 → 이 실행에서는 새 주문을 내지 않는다
+            self.alerts.append("%s: 지난 주문의 체결을 반영했으므로 이번 실행에서는 새 %s 주문을 내지 않음 — 다음 실행이 다시 판단함" % (
+                market[4:], "매수" if action == "BUY" else "매도"))
             return recovered
         late = late_min > self.cfg.max_late_min
         if action == "BUY" and late and not self.allow_late:
@@ -573,18 +666,20 @@ class Executor(object):
             else:
                 try:
                     fill = self.live_order(state, market, side, day, sig)
+                except SellBlocked:
+                    raise                                       # 자체 문구(🚨)로 알린다. 주문은 나가지 않았고 오늘은 더 시도하지 않는다
                 except Exception as exc:
                     if side == "ask":                           # 청산 실패는 따로 크게 알린다
                         raise H3Error("🚨 %s SELL FAILED — position is still open: %s" % (market, exc))
                     raise
             self.apply_fill(sleeve, side, fill)
-            if side == "ask" and self.sell_left(sleeve, mark):  # 일부만 팔렸다 → 오늘을 닫지 않는다. 다음 실행·재시도가 새 번호로 다시 판다
-                bump_attempt(sleeve, day)
-                sleeve["pending"] = None
-                save_state(self.cfg, state)
-                self.alerts.append("🚨 %s: 매도가 일부만 체결됨 — 남은 %.8f개는 다시 판다" % (market[4:], sleeve["coin"]))
-                return self.safe_record(state, market, day, action, fill, sig, open_proxy, late_min,
-                                        note="partial fill — remainder still held")
+            if side == "ask":
+                left, more = self.sell_remainder(sleeve, market, day, fill, mark)
+                self.alerts.extend(more)
+                if left:                                        # 팔아야 할 것이 장부에 남았다 → 오늘을 닫지 않는다
+                    sleeve["pending"] = None
+                    save_state(self.cfg, state)
+                    return self.safe_record(state, market, day, action, fill, sig, open_proxy, late_min, note=left)
         sleeve["last_day"] = day
         sleeve["pending"] = None
         save_state(self.cfg, state)
@@ -617,15 +712,24 @@ class Executor(object):
         return {"mid": mid, "est_avg": est, "est_slip_bp": slip, "gap_pct": gap}
 
     def live_order(self, state, market, side, day, sig):
+        """실주문 하나를 낸다. 결과를 모르는 지난 번호의 조회(settle_sent)는 run_market 이 이 앞에서 이미 마쳤다."""
         sleeve = state["sleeves"][market]
         balances = self.ex.balances()
         currency = market.split("-", 1)[1]
+        have = balances.get(currency, 0.0)
         pending = {"day": day, "side": side, "identifier": order_identifier(sleeve, day, market, side),
                    "signal": {"close": sig["close"], "average": sig["average"], "on": sig["on"]}}
         if side == "bid":
+            earlier = [r["id"] for r in sent_records(sleeve) if r["day"] == day and r["side"] == "bid"]
+            if earlier:                                         # 매수는 하루에 한 번만 보낸다. 결과가 체결이 아니면 그날은 포기한다
+                raise H3Error("%s 매수 건너뜀: 오늘 이미 매수 주문을 보냈는데(%s) 체결로 끝나지 않았음 — 매수는 하루에 한 번만 보냄. "
+                              "내일 실행이 다시 판단함" % (market[4:], earlier[-1]))
             ok, why = bot_guard_ok(self.cfg, market, self.bot_pids)
             if not ok:
                 raise H3Error("%s BUY refused: %s" % (market, why))
+            if (have - sleeve["coin"]) * sig["close"] >= MIN_ORDER_KRW:      # 계좌가 장부보다 많다(최소 주문 금액 미만의 차이는 먼지로 본다)
+                raise H3Error("%s 매수 거부: 계좌에는 %.8f개가 있는데 장부에는 %.8f개 — 앞선 주문이 뒤늦게 체결됐거나 따로 산 코인일 수 있음. "
+                              "계좌를 확인할 것" % (market[4:], have, sleeve["coin"]))
             krw = int(sleeve["cash"] / (1 + FEE))
             if krw < MIN_ORDER_KRW:
                 raise H3Error("%s: sleeve cash %.0f below minimum order" % (market, sleeve["cash"]))
@@ -634,26 +738,30 @@ class Executor(object):
             pending["krw"] = krw
             pending["pretrade"] = self.pretrade_check(market, side, sig, krw=krw)
         else:
-            have = balances.get(currency, 0.0)
-            volume = min(sleeve["coin"], have)
-            if volume < sleeve["coin"] * (1 - 1e-6):
-                pending["writeoff"] = sleeve["coin"] - volume
-                self.alerts.append("%s: account holds %.8f but the book says %.8f — selling what is there and writing off %.8f" % (
-                    market, have, sleeve["coin"], pending["writeoff"]))
-            if volume <= 0:
-                raise H3Error("%s SELL impossible: no %s in the account (sold elsewhere?)" % (market, currency))
-            pending["volume"] = float(fmt_volume(volume))
+            volume = float(fmt_volume(min(sleeve["coin"], have)))
+            if volume * sig["close"] < MIN_ORDER_KRW:           # 팔 수 있는 잔고가 없다(0·먼지). 장부는 지우지 않고 하루 한 번만 알린다
+                locked = self.ex.account(currency)[1]
+                sleeve["sell_blocked"] = day
+                save_state(self.cfg, state)
+                raise SellBlocked("🚨 %s 매도 불가: 장부에는 %.8f개가 있는데 계좌에서 팔 수 있는 수량은 %.8f개 (다른 주문에 묶인 수량 %.8f개). "
+                                  "주문을 내지 않았고 장부도 그대로 둠 — 오늘은 더 시도하지 않음. 계좌를 확인한 뒤 --writeoff %s" % (
+                                      market[4:], sleeve["coin"], have, locked, market))
+            if volume < sleeve["coin"] * (1 - 1e-6):            # 계좌가 장부보다 적다 → 있는 만큼만 판다. 모자란 수량은 장부에 남긴다
+                pending["short"] = sleeve["coin"] - volume
+            pending["volume"] = volume
             pending["pretrade"] = self.pretrade_check(market, side, sig, volume=pending["volume"])
         sleeve["pending"] = pending
-        save_state(self.cfg, state)                              # 주문보다 먼저 기록 → 재시작해도 같은 identifier 로 조회
+        mark_sent(sleeve, day, pending["identifier"], side, "open")
+        save_state(self.cfg, state)                              # 주문보다 먼저 기록 → 재시작해도 이 번호로 조회하고, 이 번호를 다시 쓰지 않는다
         try:
             fill = self.live_fill(market, side, sleeve, pending)
         except NoFill:
-            bump_attempt(sleeve, day)
+            mark_sent(sleeve, day, pending["identifier"], side, "nofill")
             sleeve["pending"] = None
             save_state(self.cfg, state)
             raise
-        fill["writeoff"], fill["requested"] = pending.get("writeoff"), pending.get("volume")
+        mark_sent(sleeve, day, pending["identifier"], side, "applied")      # 저장은 run_market 이 체결 반영과 함께 한 번에 한다
+        fill["requested"], fill["short"] = pending.get("volume"), pending.get("short")
         fill["pretrade"] = pending.get("pretrade")
         return fill
 
@@ -726,7 +834,8 @@ class Executor(object):
     def run_sell_retry(self):
         """매도만 다시 시도한다 → (rows, errors). LIVE 전용. 타이머가 몇 분마다 부른다.
         종목마다: 미처리 주문도 없고 (보유가 없거나 오늘 이미 처리됐으면) 아무것도 조회하지 않는다. 그 밖에는 run_market 을 sell_only 로 돈다 —
-        미처리 주문을 먼저 조회해 반영하고, 규칙상 매도일 때만 판다. 매수 주문은 어떤 경우에도 내지 않는다."""
+        미처리 주문과 결과를 모르는 지난 번호를 먼저 조회해 반영하고, 규칙상 매도일 때만 판다. 매수 주문은 어떤 경우에도 내지 않는다.
+        (팔 것이 없는 종목의 '결과를 모르는 번호' 는 여기서 조회하지 않는다 — 하루 실행이 매번 조회한다.)"""
         if self.cfg.mode != "LIVE":
             return [], []
         now = self.now()
@@ -737,8 +846,8 @@ class Executor(object):
         for market in ASSETS:
             sleeve = state["sleeves"][market]
             if not sleeve.get("pending"):
-                if sleeve["coin"] <= 0 or sleeve.get("last_day") == day:
-                    continue                                    # 팔 것이 없거나 오늘 이미 처리됨
+                if sleeve["coin"] <= 0 or sleeve.get("last_day") == day or sleeve.get("sell_blocked") == day:
+                    continue                                    # 팔 것이 없거나, 오늘 이미 처리됐거나, 팔 수 있는 잔고가 없다고 오늘 알렸다
                 try:
                     sig, _open = self.decide(market, day)
                 except Exception:
@@ -774,6 +883,44 @@ class Executor(object):
                 state["retry_alerts"] = {}
                 save_state(self.cfg, state)
         return rows, errors
+
+
+def writeoff(cfg, exchange, market, confirm, now=None):
+    """사람이 계좌를 확인한 뒤 쓰는 장부 정리 → (바꿨는지, 보고 줄들). 주문은 내지 않는다.
+    장부의 코인을 계좌에 실제로 있는 만큼(팔 수 있는 잔고)으로 줄인다. 계좌의 코인이 다른 주문에 묶여 있으면 거부한다
+    (묶인 코인은 없어진 것이 아니다). confirm 이 False 면 보여 주기만 한다."""
+    if cfg.mode != "LIVE":
+        raise H3Error("--writeoff works on the LIVE book only")
+    if market not in ASSETS:
+        raise H3Error("unknown market %s (choose from %s)" % (market, ", ".join(ASSETS)))
+    state = load_state(cfg)
+    sleeve = state["sleeves"][market]
+    currency = market.split("-", 1)[1]
+    balance, locked = exchange.account(currency)
+    lines = ["%s 장부 %.8f | 계좌: 팔 수 있는 잔고 %.8f, 주문에 묶인 수량 %.8f" % (market, sleeve["coin"], balance, locked)]
+    if sleeve.get("pending"):
+        raise H3Error("%s has an unfinished order on the book — let the next run reconcile it first" % market)
+    if locked > 0:
+        raise H3Error("%s: %.8f %s is locked in an open order — cancel it or wait for it; the coins are not gone" % (market, locked, currency))
+    unknown = [r["id"] for r in sleeve.get("sent") or [] if r["status"] == "open"]
+    if unknown:
+        lines.append("주의: 결과를 모르는 주문 번호가 남아 있습니다 (%s). 다음 실행이 다시 조회합니다." % ", ".join(unknown))
+    if balance >= sleeve["coin"] * (1 - 1e-6):
+        lines.append("차이가 없습니다. 바꿀 것이 없습니다.")
+        return False, lines
+    gone = sleeve["coin"] - balance
+    lines.append("장부에서 지울 수량 %.8f %s (장부 %.8f → %.8f). 현금은 그대로입니다." % (gone, currency, sleeve["coin"], balance))
+    if not confirm:
+        lines.append("보여 주기만 했습니다. 실제로 바꾸려면 --yes 를 붙이세요.")
+        return False, lines
+    before = sleeve["coin"]
+    sleeve["coin"], sleeve["sell_blocked"] = balance, None
+    save_state(cfg, state)
+    append_ledger(cfg, {"ts": (now or utc_now)().isoformat(), "mode": cfg.mode, "day": (now or utc_now)().date().isoformat(),
+                        "market": market, "action": "WRITEOFF", "coin_before": before, "coin": balance, "cash": sleeve["cash"],
+                        "note": "manual write-off after checking the account"})
+    lines.append("장부를 고쳤습니다.")
+    return True, lines
 
 
 SMOKE_KRW = 7000
@@ -887,8 +1034,9 @@ def status_text(cfg):
     lines = ["H3 %s | capital %s | state %s" % (cfg.mode, format(state["capital"], ",.0f"), cfg.state_path)]
     for market in ASSETS:
         s = state["sleeves"][market]
-        lines.append("  %s cash=%s coin=%.8f last_day=%s pending=%s" % (
-            market, format(s["cash"], ",.0f"), s["coin"], s["last_day"], "yes" if s.get("pending") else "no"))
+        lines.append("  %s cash=%s coin=%.8f last_day=%s pending=%s unknown_orders=%d sell_blocked=%s" % (
+            market, format(s["cash"], ",.0f"), s["coin"], s["last_day"], "yes" if s.get("pending") else "no",
+            sum(1 for r in s.get("sent") or [] if r["status"] == "open"), s.get("sell_blocked") or "no"))
     return "\n".join(lines)
 
 
@@ -898,10 +1046,13 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--smoke-test", action="store_true")
     ap.add_argument("--sell-retry", action="store_true", help="매도만 다시 시도 (타이머용). 할 일이 없으면 아무것도 하지 않는다")
+    ap.add_argument("--writeoff", metavar="MARKET", help="장부와 계좌의 차이를 보여 준다. --yes 를 붙이면 장부의 코인을 계좌에 맞춰 줄인다")
+    ap.add_argument("--yes", action="store_true", help="--writeoff 를 실제로 적용")
     ap.add_argument("--allow-late", action="store_true", help="09:00 KST 에서 H3_MAX_LATE_MIN 분 넘게 늦은 실행에서도 매수를 허용")
     a = ap.parse_args(argv)
-    if a.dry_run and (a.sell_retry or a.smoke_test):            # 이 둘은 실주문을 낸다 — '시험만' 과 같이 쓰면 거부한다
-        print("[h3] --dry-run cannot be combined with --sell-retry or --smoke-test (those place real orders)")
+    if a.dry_run and (a.sell_retry or a.smoke_test or a.writeoff):   # 실주문을 내거나 장부를 바꾼다 — '시험만' 과 같이 쓰면 거부한다
+        print("[h3] --dry-run cannot be combined with --sell-retry, --smoke-test or --writeoff "
+              "(those place real orders or change the book)")
         return 2
     # 사람이 ssh 로 직접 돌릴 때도 타이머와 같은 설정을 쓰도록: h3.env 먼저(우선), 그다음 봇의 .env (키·텔레그램)
     load_env_file(str(Path(os.environ.get("H3_STATE_DIR") or (Path.home() / "h3_state")) / "h3.env"))
@@ -927,6 +1078,16 @@ def main(argv=None):
             print("[h3] another run holds the lock — exiting")
             return 0
     notify = telegram_sender(cfg)
+    if a.writeoff:
+        try:
+            changed, lines = writeoff(cfg, Upbit(cfg.access, cfg.secret), a.writeoff.strip().upper(), a.yes)
+        except Exception as exc:
+            print("[h3] writeoff refused: %s" % exc)
+            return 1
+        print("\n".join("[h3] " + ln for ln in lines))
+        if changed:
+            notify("H3 LIVE 장부 정리(수동): %s" % next(ln for ln in lines if ln.startswith("장부에서 지울")))
+        return 0
     if a.smoke_test:
         try:
             res = smoke_test(cfg, Upbit(cfg.access, cfg.secret))
