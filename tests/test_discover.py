@@ -348,6 +348,10 @@ class Registry(unittest.TestCase):
             self.assertIn("결과만 기록", (reports / "DISCOVERY.md").read_text(encoding="utf-8"))
         self.with_world(body)
 
+    def test_diagnostic_rejects_the_official_output_folder_before_fetching(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(D.main(["--report-only"]), 2)
+
     def test_a_trial_range_never_writes_anything(self):
         def body(tmp, today):
             D.FRAME_APPROVED = True
