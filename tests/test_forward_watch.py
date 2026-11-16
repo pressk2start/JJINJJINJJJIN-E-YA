@@ -418,6 +418,15 @@ class MissedRuns(unittest.TestCase):
         out.update(over)
         return out
 
+    def test_daily_schedule_checks_yesterday_and_keeps_monthly_separate(self):
+        self.assertEqual(FW.expected_runs("2026-11-17", daily=True), ("2026-11-16", None))
+        self.assertEqual(FW.expected_runs("2026-11-19", daily=True), ("2026-11-18", None))
+        self.assertEqual(FW.expected_runs("2026-12-02", daily=True), ("2026-12-01", "2026-12-01"))
+        self.assertTrue(FW.stale(self.ledger("2026-11-16"), [], "2026-11-19", daily=True))
+        self.assertEqual(FW.stale(self.ledger("2026-11-18"), [], "2026-11-19", daily=True), [])
+        broken = self.ledger("2026-11-18", H2_kimchi={"updated": "2026-11-16"})
+        self.assertIn("김치 프리미엄", FW.stale(broken, [], "2026-11-19", daily=True)[0])
+
     def test_expected_dates(self):
         self.assertEqual(FW.expected_runs("2026-11-15"), (None, None))                                 # 첫 예약 전
         self.assertEqual(FW.expected_runs("2026-11-16"), (None, None))                                 # 예약일 당일에는 아직 기다리지 않는다
@@ -474,10 +483,11 @@ class ScheduledWorkflows(unittest.TestCase):
             self.assertNotIn("curl", text, name)                                                      # 응답을 버리는 전송은 쓰지 않는다
             self.assertNotIn("sendMessage", text, name)
 
-    def test_the_watchdog_runs_between_weekly_runs_and_writes_nothing(self):
+    def test_the_daily_watchdog_writes_nothing(self):
         text = (self.WF / "watchdog.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "17 1 * * 3"', text)
-        self.assertIn('cron: "17 1 * * 1"', (self.WF / "forward-watch.yml").read_text(encoding="utf-8"))
+        self.assertIn('cron: "47 5 * * *"', text)
+        self.assertIn('cron: "17 1 * * *"', (self.WF / "forward-watch.yml").read_text(encoding="utf-8"))
+        self.assertIn("--daily-schedule", text)
         self.assertIn("contents: read", text)
         self.assertIn("forward_watch.py --stale-check", text)
         for word in ("git push", "git commit", "contents: write"):
