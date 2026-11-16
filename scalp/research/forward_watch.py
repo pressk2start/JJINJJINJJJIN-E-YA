@@ -68,7 +68,8 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
   값 차이         다시 계산한 값이 장부와 다르면 장부는 그대로 두고, 처음 발견한 실행에서 한 번만 경고(실패)로 알린다.
              그 뒤로는 현황의 '알려진 값 차이' 에만 남고, 새 차이가 생겼을 때만 다시 실패로 끝난다.
              달라진 거래가 판정에 쓰는 표본에 들어 있으면 그 항목의 판정을 보류로 표시한다(진행 중이면 판정하지 않는다).
-             보류는 고문이 확인한 뒤 ledger.json 에서 그 항목의 hold 를 지워야 풀린다.
+             보류 기록(hold)은 지우지 않는다. 달라진 값의 원본(장부 값과 다시 계산한 값)을 함께 남긴다. 해제는 고문 판정이
+             있을 때만: --release-hold "항목 이름" --reason "사유" 가 해제 기록(날짜, 사유)을 덧붙인다 (고문 판정 2026-11-16 ②).
   H2 주석        검사 절차(주 1회 실행)는 바꾸지 않는다. 상장폐지 편향(통과 쪽)을 현황과 판정 기록에 주석으로 남긴다.
              추적 중인 후보가 없으면 시세도 받지 않는다. 틀(고문 지정, 15분봉)과 한계는 discover.py 머리말에 있다.
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
@@ -130,6 +131,12 @@ CR_EXPIRE_DAYS = 730                                # 급락 반등 계열: 24�
 FIRST_WEEKLY, FIRST_MONTHLY = "2026-11-16", "2026-12-01"   # 첫 예약 실행일 (UTC). 그 전에는 빠진 실행이 있을 수 없다
 VERDICT = {"PASS": "통과", "FAIL": "탈락", "EXPIRED": "만료(표본 부족)", "INCOMPLETE": "자료 불완전"}
 HOLD_TAG = " · 판정 보류(값 차이)"
+
+
+def active_hold(entry):
+    """지금 걸려 있는 보류 기록(해제 기록이 없는 것) 또는 None."""
+    hold = (entry or {}).get("hold")
+    return hold if hold and not hold.get("released") else None
 TOL = 1e-9
 
 
@@ -214,7 +221,8 @@ def merge_rows(old_rows, new_rows, bad=None):
         elif any(abs(prev[k] - r[k]) > TOL for k in ("strat", "ew", "btc")) or prev.get("picks") != r.get("picks"):
             mismatch.append(r["date"])
             if bad is not None:
-                bad.append(r["date"])
+                keep = ("strat", "ew", "btc", "picks")
+                bad.append({"key": r["date"], "ledger": {k: prev.get(k) for k in keep}, "recomputed": {k: r.get(k) for k in keep}})
     return [by_date[d] for d in sorted(by_date)], added, mismatch
 
 
@@ -328,7 +336,8 @@ def merge_cr(old_rows, new_rows, bad=None):
         elif abs(prev["net"] - r["net"]) > TOL or prev["exit_min"] != r["exit_min"]:
             mismatch.append("%s %s" % (r["market"][4:], AM.kst(r["entry_min"])))
             if bad is not None:
-                bad.append(key)
+                keep = ("net", "exit_min")
+                bad.append({"key": key, "ledger": {k: prev.get(k) for k in keep}, "recomputed": {k: r.get(k) for k in keep}})
     return sorted(by_key.values(), key=lambda t: (t["entry_min"], t["market"])), added, mismatch
 
 
@@ -383,13 +392,20 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             seen[item] = sorted(known | set(new))
         return new
 
-    def hold_if_sampled(entry, new_labels, labels, keys, sample, always=()):
+    def hold_if_sampled(entry, new_labels, labels, bad, sample, always=()):
         """새로 드러난 값 차이가 판정에 쓰는 표본(sample: 거래 열쇠의 집합)에 걸리면 그 항목의 판정을 보류로 표시한다
-        (고문 판정 2026-11-14 두 번째). always 에 든 표시는 표본과 무관하게 걸린 것으로 본다(지난 구간에 뒤늦게 나타난 거래)."""
-        key_of = dict(zip(labels, keys))
-        hit = [lab for lab in new_labels if key_of.get(lab) in sample or lab in always]
-        if hit and not entry.get("hold"):
-            entry["hold"] = {"since": today, "why": "값 차이: " + ", ".join(hit[:5]) + (" 외 %d건" % (len(hit) - 5) if len(hit) > 5 else "")}
+        (고문 판정 2026-11-14 두 번째). always 에 든 표시는 표본과 무관하게 걸린 것으로 본다(지난 구간에 뒤늦게 나타난 거래).
+        보류 기록에는 달라진 값의 원본(장부 값과 다시 계산한 값)을 남긴다. 이미 걸려 있는 보류는 건드리지 않고,
+        해제된 보류가 있으면 지난 기록(hold_history)으로 옮긴 뒤 새로 건다 — 기록은 지우지 않는다."""
+        by_label = dict(zip(labels, bad))
+        hit = [lab for lab in new_labels if (by_label.get(lab) or {}).get("key") in sample or lab in always]
+        if not hit or active_hold(entry):
+            return
+        if entry.get("hold"):
+            entry.setdefault("hold_history", []).append(entry["hold"])
+        entry["hold"] = {"since": today, "why": "값 차이: " + ", ".join(hit[:5]) + (" 외 %d건" % (len(hit) - 5) if len(hit) > 5 else ""),
+                         "diffs": [{"what": lab, "ledger": by_label[lab]["ledger"], "recomputed": by_label[lab]["recomputed"]} for lab in hit],
+                         "released": None}
 
     last_done = DF._shift(today, -1)
     h2 = ledger.setdefault("H2_kimchi", {"rows": [], "decision": None})
@@ -405,7 +421,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         if new:
             warnings.append("H2: 다시 계산한 값이 장부와 다른 기간 %d개 (%s) — 장부 값은 그대로 둠" % (len(new), ", ".join(new[:5])))
             hold_if_sampled(h2, new, mismatch, bad, {r["date"] for r in rows[:H2_DECIDE_AT]})
-        if not h2.get("hold"):                                      # 보류 중이면 판정하지 않는다
+        if not active_hold(h2):                                     # 보류 중이면 판정하지 않는다
             h2_decide(h2, today)
         log("H2: %d periods in ledger (+%d)" % (len(rows), added))
     except Exception as e:
@@ -426,7 +442,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             warnings.append("급락 반등: 다시 계산한 값이 장부와 다른 거래 %d건 (%s) — 장부 값은 그대로 둠" % (len(new), ", ".join(new[:5])))
             used = (cr.get("decision") or {}).get("trades") or len(rows)    # 판정에 쓴(쓸) 거래: 판정 뒤에는 그때의 표본, 그 전에는 지금까지 전부
             hold_if_sampled(cr, new, mismatch, bad, {(r["market"], r["entry_min"]) for r in rows[:used]})
-        if not cr.get("hold"):
+        if not active_hold(cr):
             cr_decide(cr, today, CR_START)
         log("CR: %d trades in ledger (+%d)" % (len(rows), added))
     except Exception as e:
@@ -444,7 +460,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
                     key, len(new), ", ".join(new[:5])))
                 used = (entry.get("decision") or {}).get("trades") or len(rows)
                 hold_if_sampled(entry, new, mismatch, bad, {(r["market"], r["entry_min"]) for r in rows[:used]})
-            if not entry.get("hold"):
+            if not active_hold(entry):
                 cr_decide(entry, today, CRV_START)
             log("%s: %d trades in ledger (+%d)" % (key, len(rows), added))
     except Exception as e:
@@ -493,7 +509,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
                 warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(new)))
                 hold_if_sampled(entry, new, mismatch, bad, {(r["market"], r["entry_q"]) for r in rows},      # 판정 전이라 지금까지의 거래가 전부 표본이다
                                 always=[lab for lab in new if "뒤늦게 나타남" in lab])
-            if not entry.get("hold"):
+            if not active_hold(entry):
                 DISC.decide_once(entry, c, today)
             if entry.get("decision") and gone:                      # 자료 불완전: 판정 기록에 종목과 날짜를 남긴다
                 entry["decision"].setdefault("delisted", dict(gone))
@@ -526,7 +542,7 @@ def render(ledger):
             "통과" if dec["verdict"] == "PASS" else "탈락", dec["decided_on"], H2_DECIDE_AT, dec["periods"][0], dec["periods"][1])
     else:
         head = "진행 중 (%d / %d기간)" % (len(rows), H2_DECIDE_AT)
-    out += ["## H2 김치 프리미엄 되돌림 — " + head + (HOLD_TAG if h2.get("hold") else ""), "",
+    out += ["## H2 김치 프리미엄 되돌림 — " + head + (HOLD_TAG if active_hold(h2) else ""), "",
             "업비트 가격이 평소보다 싸진 종목 5개를 3일 보유. 추적 시작 2026-10-23, 자료 반영 %s." % h2.get("updated", "-"), "",
             "주의 — " + H2_BIAS_NOTE, ""]
     if rows:
@@ -570,7 +586,7 @@ def render(ledger):
         head = "판정 완료: %s (%s, 첫 %d건)" % (VERDICT[dec["verdict"]], dec["decided_on"], dec["trades"])
     else:
         head = "진행 중 (%d / %d건, %d / %d일)" % (len(rows), AM.CR_MIN_N, n_days, AM.CR_MIN_DAYS)
-    out += ["## 급락 반등 — " + head + (HOLD_TAG if cr.get("hold") else ""), "",
+    out += ["## 급락 반등 — " + head + (HOLD_TAG if active_hold(cr) else ""), "",
             "BTC·ETH·XRP·SOL 이 1시간에 4%% 넘게 빠지면 다음 5분봉 시가에 사서 60분 뒤 판다. 추적 시작 2026-11-11, 자료 반영 %s." % cr.get("updated", "-"), ""]
     if rows:
         st = (dec or {}).get("stats") or AM.cr_summary([(t["market"], t) for t in rows])
@@ -598,7 +614,7 @@ def render(ledger):
         days = len({_utc_day(t["entry_min"]) for t in rows})
         out.append("| %s | %s | %d / %d건, %d / %d일 | %s | %s | %s |" % (
             v["name"], v["rule"], len(rows), AM.CR_MIN_N, days, AM.CR_MIN_DAYS, _pct(st["mean"]) if st else "-",
-            _pct(st["day_mean"]) if st else "-", (VERDICT[dec["verdict"]] if dec else "진행 중") + (HOLD_TAG if e.get("hold") else "")))
+            _pct(st["day_mean"]) if st else "-", (VERDICT[dec["verdict"]] if dec else "진행 중") + (HOLD_TAG if active_hold(e) else "")))
     out += ["", "고문 정의(2026-11-13 확정). 24개월 안에 30건·10일을 못 채우면 만료로 끝납니다(탈락이 아니라 표본 부족).", ""]
     sg = ledger.get("BTC_surge") or {"rows": []}
     out += ["## BTC 주간 급등 — 관찰만 (판정 없음)", ""]
@@ -627,7 +643,7 @@ def render(ledger):
                 verdict += " · 자료 불완전"
             if e.get("delisted"):
                 verdict += "(%s)" % ", ".join("%s %s" % (m[4:], d) for m, d in sorted(e["delisted"].items()))
-            if e.get("hold"):
+            if active_hold(e):
                 verdict += HOLD_TAG
             out.append("| %s | %s | %s | %d / %d건, %d / %d일 | %s | %s |" % (
                 cid, e.get("rule", "-"), e.get("registered", "-"), st["n"], DISC.FWD_MIN_N, st["days"], DISC.FWD_MIN_DAYS,
@@ -643,11 +659,20 @@ def render(ledger):
         out += ["아직 등록된 후보가 없습니다. 탐색 결과는 DISCOVERY.md 에 남습니다.", ""]
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
-    held = holds(ledger)
+    held, freed = holds(ledger), holds(ledger, released=True)
     if held:
         out += ["## 판정 보류", "", "값이 달라진 거래가 판정에 쓰는 표본에 들어 있는 항목입니다. 진행 중이던 항목은 판정하지 않고, 이미 판정한 항목은 "
-                "그 판정을 확정으로 보지 않습니다. 고문이 확인한 뒤 ledger.json 에서 그 항목의 hold 를 지우면 풀립니다.", ""]
-        out += ["- %s: %s 부터 — %s" % (name, h.get("since", "-"), h.get("why", "-")) for name, h in held] + [""]
+                "그 판정을 확정으로 보지 않습니다. 보류 기록은 지우지 않습니다. 고문 판정이 있을 때만 해제 기록(날짜, 사유)을 덧붙여 풉니다: "
+                "forward_watch.py --release-hold \"항목 이름\" --reason \"사유\".", ""]
+        for name, h in held:
+            out.append("- %s: %s 부터 — %s" % (name, h.get("since", "-"), h.get("why", "-")))
+            for d in (h.get("diffs") or [])[:5]:
+                out.append("  - %s: 장부 %s → 다시 계산 %s" % (d["what"], _values(d.get("ledger")), _values(d.get("recomputed"))))
+        out.append("")
+    if freed:
+        out += ["## 해제된 보류", ""]
+        out += ["- %s: %s 보류(%s) → %s 해제 — %s" % (name, h.get("since", "-"), h.get("why", "-"), h["released"].get("on", "-"),
+                                                  h["released"].get("reason", "-")) for name, h in freed] + [""]
     known = sorted((k, v) for k, v in (ledger.get("mismatch_seen") or {}).items() if v)
     if known:
         out += ["## 알려진 값 차이", "", "지난 봉을 다시 받아 계산한 값이 장부에 적힌 값과 달랐던 곳입니다. 장부 값은 바꾸지 않으며, "
@@ -656,20 +681,42 @@ def render(ledger):
     return "\n".join(out)
 
 
-def holds(ledger):
-    """판정이 보류된 항목 → [(이름, hold 기록)]."""
+def _values(d):
+    """보류 기록에 남긴 값 한 벌을 한 줄로 (없으면 '없음')."""
+    if not d:
+        return "없음"
+    return ", ".join("%s=%s" % (k, ("%.6f" % v) if isinstance(v, float) else v) for k, v in sorted(d.items()) if v is not None) or "없음"
+
+
+def hold_entries(ledger):
+    """보류가 걸릴 수 있는 항목들 → [(이름, 항목)]."""
+    out = [("H2 김치 되돌림", ledger.get("H2_kimchi")), ("급락 반등", ledger.get("CR_rebound"))]
+    out += [("급락 반등 변형 " + v["name"], (ledger.get("CR_variants") or {}).get(v["key"])) for v in CR_VARIANTS]
+    out += [("후보 " + cid, e) for cid, e in sorted((ledger.get("candidates") or {}).items())]
+    return [(name, e) for name, e in out if e]
+
+
+def holds(ledger, released=False):
+    """판정이 보류된 항목 → [(이름, hold 기록)]. released=True 면 해제된 보류 기록(지난 것 포함)을 돌려준다."""
     out = []
-    for name, entry in (("H2 김치 되돌림", ledger.get("H2_kimchi")), ("급락 반등", ledger.get("CR_rebound"))):
-        if (entry or {}).get("hold"):
+    for name, entry in hold_entries(ledger):
+        if released:
+            out += [(name, h) for h in (entry.get("hold_history") or []) + [entry.get("hold")] if h and h.get("released")]
+        elif active_hold(entry):
             out.append((name, entry["hold"]))
-    for v in CR_VARIANTS:
-        e = (ledger.get("CR_variants") or {}).get(v["key"]) or {}
-        if e.get("hold"):
-            out.append(("급락 반등 변형 " + v["name"], e["hold"]))
-    for cid, e in sorted((ledger.get("candidates") or {}).items()):
-        if e.get("hold"):
-            out.append(("후보 " + cid, e["hold"]))
     return out
+
+
+def release_hold(ledger, name, reason, today):
+    """보류를 해제한다 — 기록을 지우지 않고 해제 기록(날짜, 사유)을 덧붙인다. 고문 판정이 있을 때만 쓴다.
+    → 해제한 hold 기록. 그 이름의 걸려 있는 보류가 없거나 사유가 비었으면 ValueError."""
+    if not (reason or "").strip():
+        raise ValueError("해제 사유(--reason)가 필요하다 — 고문 판정의 날짜와 내용을 적는다")
+    for item, entry in hold_entries(ledger):
+        if item == name and active_hold(entry):
+            entry["hold"]["released"] = {"on": today, "reason": reason.strip()}
+            return entry["hold"]
+    raise ValueError("걸려 있는 보류가 없다: %s (지금 걸린 것: %s)" % (name, ", ".join(n for n, _h in holds(ledger)) or "없음"))
 
 
 def summary(ledger):
@@ -774,6 +821,8 @@ def main(argv=None):
     ap.add_argument("--stale-check", action="store_true")
     ap.add_argument("--daily-schedule", action="store_true", help="일간 실행 일정으로 누락 점검")
     ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (시험용, 기본은 지금)")
+    ap.add_argument("--release-hold", metavar="NAME", help="판정 보류를 해제한다(고문 판정이 있을 때만). 현황의 '판정 보류' 에 적힌 항목 이름")
+    ap.add_argument("--reason", default="", help="--release-hold 와 함께: 해제 사유 (고문 판정의 날짜와 내용)")
     a = ap.parse_args(argv)
     out = Path(a.out)
     path = out / "ledger.json"
@@ -782,6 +831,16 @@ def main(argv=None):
         print(summary(ledger))
         return 0
     today = a.today or dt.datetime.now(dt.timezone.utc).date().isoformat()
+    if a.release_hold:                                              # 시세를 받지 않는다. 해제 기록만 덧붙이고 현황을 다시 쓴다
+        try:
+            hold = release_hold(ledger, a.release_hold, a.reason, today)
+        except ValueError as e:
+            print("해제하지 않음: %s" % e)
+            return 2
+        path.write_text(json.dumps(ledger, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        (out / "STATUS.md").write_text(render(ledger), encoding="utf-8")
+        print("해제 기록을 덧붙임: %s — %s 보류(%s) → %s 해제 (%s)" % (a.release_hold, hold["since"], hold["why"], today, a.reason.strip()))
+        return 0
     if a.stale_check:
         log_path, reg_file = out / "scan_log.json", out / "registry.json"
         problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today,

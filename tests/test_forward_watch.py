@@ -472,10 +472,31 @@ class VerdictHold(unittest.TestCase):
         ledger = json.loads(json.dumps(ledger))
         ledger, warnings = self.variant_update(ledger, "2026-12-14", changed)         # 다음 주: 같은 차이 → 경고는 없고 보류는 그대로
         self.assertEqual(([w for w in warnings if "다시 계산한 값" in w], ledger["CR_variants"]["CR_drop5"]["decision"]), ([], None))
-        del ledger["CR_variants"]["CR_drop5"]["hold"]                                 # 고문이 확인하고 보류를 풀었다
+        hold = ledger["CR_variants"]["CR_drop5"]["hold"]
+        self.assertEqual(hold["diffs"], [{"what": hold["diffs"][0]["what"], "ledger": {"net": rows[3]["net"], "exit_min": rows[3]["exit_min"]},
+                                          "recomputed": {"net": rows[3]["net"] + 0.02, "exit_min": rows[3]["exit_min"]}}])   # 달라진 값의 원본이 남는다
+        self.assertIn("장부 exit_min=", FW.render(ledger))
+        for bad in (("급락 반등 변형 −5%", "  "), ("급락 반등 변형 −6%", "고문 판정")):   # 사유가 없거나, 보류가 걸려 있지 않은 항목
+            with self.assertRaises(ValueError):
+                FW.release_hold(ledger, bad[0], bad[1], "2026-12-20")
+        FW.release_hold(ledger, "급락 반등 변형 −5%", "고문 판정 2026-12-20: 거래소의 시세 정정으로 확인", "2026-12-20")   # 고문 판정이 있어 해제한다
+        hold = ledger["CR_variants"]["CR_drop5"]["hold"]
+        self.assertEqual(hold["released"], {"on": "2026-12-20", "reason": "고문 판정 2026-12-20: 거래소의 시세 정정으로 확인"})
+        self.assertEqual((hold["since"], len(hold["diffs"])), ("2026-12-07", 1))      # 보류 기록은 지우지 않고 해제 기록을 덧붙인다
         ledger, warnings = self.variant_update(ledger, "2026-12-21", changed)
         entry = ledger["CR_variants"]["CR_drop5"]
-        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"], entry.get("hold")), ("PASS", 30, None))
+        self.assertEqual((entry["decision"]["verdict"], entry["decision"]["trades"]), ("PASS", 30))   # 해제 뒤에 판정한다
+        text = FW.render(ledger)
+        self.assertNotIn("판정 보류(값 차이) |", text)
+        self.assertIn("## 해제된 보류", text)
+        self.assertIn("- 급락 반등 변형 −5%: 2026-12-07 보류(값 차이: ", text)
+        self.assertIn("→ 2026-12-20 해제 — 고문 판정 2026-12-20: 거래소의 시세 정정으로 확인", text)
+        again = [dict(rows[7], net=rows[7]["net"] - 0.03)]                            # 그 뒤 표본 안에서 또 다른 차이가 드러났다
+        ledger, warnings = self.variant_update(ledger, "2026-12-28", again)
+        entry = ledger["CR_variants"]["CR_drop5"]
+        self.assertEqual((entry["hold"]["since"], entry["hold"]["released"]), ("2026-12-28", None))   # 새로 보류를 걸고
+        self.assertEqual([h["since"] for h in entry["hold_history"]], ["2026-12-07"])                # 지난 보류 기록은 남긴다
+        self.assertEqual(len(FW.holds(ledger, released=True)), 1)
 
     def test_after_the_verdict_only_a_change_inside_its_sample_holds_it(self):
         rows = [cr_trade(k, 0.01) for k in range(40)]
@@ -506,6 +527,28 @@ class VerdictHold(unittest.TestCase):
         self.assertEqual((h2["rows"][5]["strat"], h2["decision"]), (0.01, None))      # 장부 값은 그대로, 20기간이 찼어도 판정하지 않는다
         self.assertEqual(h2["hold"]["why"], "값 차이: %s" % rows[5]["date"])
         self.assertIn("## H2 김치 프리미엄 되돌림 — 진행 중 (20 / 20기간) · 판정 보류(값 차이)", FW.render(ledger))
+
+    def test_the_release_command_appends_a_record_and_needs_a_reason(self):
+        rows = [cr_trade(k, 0.01) for k in range(29)]
+        ledger = {"CR_variants": {"CR_drop5": {"rows": list(rows), "decision": None}}}
+        ledger, _ = self.variant_update(ledger, "2026-12-07", [dict(rows[3], net=rows[3]["net"] + 0.02)])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "ledger.json")
+            path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = FW.main(["--out", tmp, "--release-hold", "급락 반등 변형 −5%", "--today", "2026-12-20"])     # 사유가 없다
+            self.assertEqual(code, 2)
+            self.assertIsNone(json.loads(path.read_text(encoding="utf-8"))["CR_variants"]["CR_drop5"]["hold"]["released"])
+            with contextlib.redirect_stdout(buf):
+                code = FW.main(["--out", tmp, "--release-hold", "급락 반등 변형 −5%", "--reason", "고문 판정 2026-12-20", "--today", "2026-12-20"])
+            self.assertEqual(code, 0)
+            saved = json.loads(path.read_text(encoding="utf-8"))["CR_variants"]["CR_drop5"]["hold"]
+            self.assertEqual((saved["since"], saved["released"]), ("2026-12-07", {"on": "2026-12-20", "reason": "고문 판정 2026-12-20"}))
+            self.assertIn("## 해제된 보류", Path(tmp, "STATUS.md").read_text(encoding="utf-8"))
+            with contextlib.redirect_stdout(buf):
+                code = FW.main(["--out", tmp, "--release-hold", "급락 반등 변형 −5%", "--reason", "한 번 더", "--today", "2026-12-21"])
+            self.assertEqual(code, 2)                                                 # 이미 해제된 보류는 다시 해제할 것이 없다
 
     def test_nothing_is_held_when_nothing_changed(self):
         ledger, _ = FW.update({}, "2026-11-13", **offline())
