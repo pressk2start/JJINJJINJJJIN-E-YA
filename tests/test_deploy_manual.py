@@ -96,7 +96,9 @@ class ManualOnly(unittest.TestCase):
         between = lines[gate_end + 1:run]
         self.assertIn('""|*[!0-9a-f]*) echo "deploy 에는 check 가 찍어 준 커밋 번호(sha)가 필요하다"; exit 2 ;;', between)   # 빈 값·이상한 값은 거부
         self.assertTrue(any(ln.startswith('*) echo "main 이 바뀌었다') and ln.endswith("exit 3 ;;") for ln in between))    # main 이 바뀌었으면 멈춘다
-        self.assertEqual(lines[run], 'DEPLOY_SHA="$SHA" bash ./deploy_restart.sh')                                          # 스크립트에도 같은 번호를 넘긴다
+        self.assertEqual(lines[run], 'git show "$TARGET:deploy_restart.sh" > "$RUNNER"')                                   # 승인한 커밋의 스크립트를 꺼내서
+        self.assertEqual(lines[run + 1], 'DEPLOY_SHA="$SHA" DEPLOY_TARGET="$TARGET" bash "$RUNNER"')                        # 그 커밋만을 대상으로 돌린다
+        self.assertFalse(any("bash ./deploy_restart.sh" in ln for ln in lines))                                             # 서버에 있던 옛 스크립트는 돌리지 않는다
         check_part = lines[lines.index(GATE):gate_end]
         self.assertTrue(any("git rev-parse --short=12 origin/main" in ln for ln in check_part))                             # check 가 번호를 찍어 준다
 
@@ -205,7 +207,20 @@ class DeployScriptRuns(unittest.TestCase):
         script = (ROOT / "deploy_restart.sh").read_text(encoding="utf-8").replace("/home/ubuntu/bot", str(self.root))
         (self.root / "deploy_restart.sh").write_text(script, encoding="utf-8")
         stubs = {
-            "git": 'echo "git $*" >> "$CALLS"\ncase "$1 $2" in\n  "rev-parse origin/main") echo "$FAKE_MAIN" ;;\n  "log --oneline") echo "abc1234 msg" ;;\n  "log -1") echo "msg" ;;\nesac\nexit 0',
+            # FAKE_COMMITS/<커밋>/ 에 파일을 두면 reset --hard 가 그 파일들로 바꾸고 show 가 그 파일을 돌려준다.
+            # FAKE_MAIN_SEQ(파일)에 줄이 있으면 rev-parse origin/main 이 부를 때마다 한 줄씩 꺼내 쓴다(그 사이 main 이 바뀌는 것을 흉내).
+            "git": "\n".join([
+                'echo "git $*" >> "$CALLS"',
+                'case "$1 $2" in',
+                '  "rev-parse origin/main")',
+                '    if [ -n "$FAKE_MAIN_SEQ" ] && [ -s "$FAKE_MAIN_SEQ" ]; then head -1 "$FAKE_MAIN_SEQ"; sed -i 1d "$FAKE_MAIN_SEQ"; else echo "$FAKE_MAIN"; fi ;;',
+                '  "rev-parse --short=12") echo "${FAKE_MAIN:0:12}" ;;',
+                '  "log --oneline") echo "abc1234 msg" ;;',
+                '  "log -1") echo "msg" ;;',
+                '  "reset --hard") if [ -n "$FAKE_COMMITS" ] && [ -d "$FAKE_COMMITS/$3" ]; then cp -f "$FAKE_COMMITS/$3"/* "$FAKE_ROOT"/; fi ;;',
+                '  show\\ *) cat "$FAKE_COMMITS/${2%%:*}/${2#*:}" ;;',
+                'esac',
+                'exit 0']),
             "systemctl": 'echo "systemctl $*" >> "$CALLS"\ncase "$1" in\n  show) echo "$FAKE_PID" ;;\n  is-enabled) exit 1 ;;\n  status) [ "$FAKE_PID" = "0" ] && exit 3 ;;\nesac\nexit 0',
             "sudo": 'exec "$@"',
             "sleep": "exit 0",
@@ -215,15 +230,44 @@ class DeployScriptRuns(unittest.TestCase):
             path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
             path.chmod(0o755)
 
-    def run_script(self, pid, main="1111111aaaaaaa", sha=None):
+    def env(self, pid, main, **extra):
         env = dict(os.environ, PATH="%s%s%s" % (self.root / "bin", os.pathsep, os.environ["PATH"]), CALLS=str(self.root / "calls.log"),
-                   FAKE_PID=str(pid), FAKE_MAIN=main)
-        env.pop("DEPLOY_TARGET", None)
-        env.pop("DEPLOY_REEXEC", None)
-        if sha is not None:
-            env["DEPLOY_SHA"] = sha
+                   FAKE_PID=str(pid), FAKE_MAIN=main, FAKE_ROOT=str(self.root), FAKE_COMMITS=str(self.root / "commits"))
+        for name in ("DEPLOY_TARGET", "DEPLOY_REEXEC", "DEPLOY_SHA", "DEPLOY_OLD_BOT_HASH", "DEPLOY_OLD_FILES_HASH", "FAKE_MAIN_SEQ"):
+            env.pop(name, None)
+        env.update(extra)
         (self.root / "calls.log").write_text("", encoding="utf-8")
+        return env
+
+    def run_script(self, pid, main="1111111aaaaaaa", sha=None):
+        env = self.env(pid, main, **({"DEPLOY_SHA": sha} if sha is not None else {}))
         done = subprocess.run(["bash", str(self.root / "deploy_restart.sh")], env=env, capture_output=True, text=True, timeout=60)
+        return done.returncode, done.stdout + done.stderr, (self.root / "calls.log").read_text(encoding="utf-8")
+
+    def commit(self, sha, script=None, **files):
+        """가짜 커밋 하나: 그 커밋의 deploy_restart.sh(기본은 지금 저장소의 것)와 봇 파일들."""
+        folder = self.root / "commits" / sha
+        folder.mkdir(parents=True)
+        src = script if script is not None else (ROOT / "deploy_restart.sh").read_text(encoding="utf-8")
+        (folder / "deploy_restart.sh").write_text(src.replace("/home/ubuntu/bot", str(self.root)), encoding="utf-8")
+        for name in ("bot.py", "config.py", "_a_clean_purity.py"):
+            (folder / name).write_text(files.get(name.replace(".py", ""), "# %s\n" % name), encoding="utf-8")
+
+    def old_server_script(self):
+        """지금 서버(3154839)에 있는 스크립트를 디스크에 둔다. 돌았는지 알 수 있게 첫 줄에 표시를 남기게 한다."""
+        old = (ROOT / "tests" / "fixtures" / "deploy_restart_server_3154839.sh").read_text(encoding="utf-8")
+        old = old.replace("set -e\n", 'set -e\necho "OLD_SCRIPT_RAN" >> "$CALLS"\n', 1).replace("/home/ubuntu/bot", str(self.root))
+        (self.root / "deploy_restart.sh").write_text(old, encoding="utf-8")
+
+    def run_workflow(self, action, sha, pid, main, seq=None):
+        """deploy.yml 이 ssh 로 서버에서 돌리는 줄들을 그대로 돌린다."""
+        script = "\n".join(script_lines(text())).replace("/home/ubuntu/bot", str(self.root))
+        extra = {"ACTION": action, "SHA": sha}
+        if seq:
+            (self.root / "main_seq").write_text("\n".join(seq) + "\n", encoding="utf-8")
+            extra["FAKE_MAIN_SEQ"] = str(self.root / "main_seq")
+        done = subprocess.run(["bash", "-c", script], env=self.env(pid, main, **extra), capture_output=True, text=True, timeout=60,
+                              cwd=str(self.root))
         return done.returncode, done.stdout + done.stderr, (self.root / "calls.log").read_text(encoding="utf-8")
 
     def marker(self, pid):
@@ -261,6 +305,77 @@ class DeployScriptRuns(unittest.TestCase):
         code, out, calls = self.run_script(pid=0, main="1111111aaaaaaa", sha="1111111")        # 같은 커밋이면 진행한다
         self.assertEqual(code, 0, out)
         self.assertIn("git reset --hard 1111111aaaaaaa", calls)
+
+    # ---- 2026-11-16 제3세션 검토: 서버의 옛 스크립트에서 시작하는 첫 배포, 스크립트와 설정이 함께 바뀐 배포
+    X, Y = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    def test_the_first_deploy_goes_to_the_approved_commit_even_if_main_moves_right_after_the_check(self):
+        self.old_server_script()
+        self.commit(self.X)
+        self.commit(self.Y, bot="# unreviewed bot.py\n")
+        code, out, calls = self.run_workflow("deploy", self.X[:12], pid=0, main=self.Y, seq=[self.X])    # 워크플로가 본 뒤에 main 이 Y 로 바뀐다
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("OLD_SCRIPT_RAN", calls)                               # 서버에 있던 옛 스크립트는 돌지 않았다
+        self.assertIn("git reset --hard %s" % self.X, calls)                    # 승인한 커밋으로만 바뀐다
+        self.assertNotIn("reset --hard origin/main", calls)
+        self.assertNotIn(self.Y, calls)
+        self.assertEqual((self.root / "bot.py").read_text(encoding="utf-8"), "# bot.py\n")           # 검토하지 않은 코드는 내려오지 않았다
+        self.assertEqual(out.count("[deploy] 시작"), 1)                         # 승인한 스크립트가 한 번만 돈다(다시 실행하지 않는다)
+        self.assertIn("upbit-bot 이 실행 중이 아니다 → 건드리지 않는다", out)      # 첫 배포부터 '꺼 둔 봇은 켜지 않는다' 가 적용된다
+        self.assertNotIn("systemctl restart", calls)
+
+    def test_a_deploy_asked_for_after_main_moved_changes_nothing(self):
+        self.old_server_script()
+        self.commit(self.X)
+        self.commit(self.Y)
+        before = (self.root / "deploy_restart.sh").read_text(encoding="utf-8")
+        code, out, calls = self.run_workflow("deploy", self.X[:12], pid=0, main=self.Y)
+        self.assertEqual(code, 3, out)
+        self.assertNotIn("git reset", calls)
+        self.assertNotIn("OLD_SCRIPT_RAN", calls)
+        self.assertEqual((self.root / "deploy_restart.sh").read_text(encoding="utf-8"), before)
+        code, out, calls = self.run_workflow("check", "", pid=0, main=self.X)           # check 는 아무것도 바꾸지 않는다
+        self.assertEqual(code, 0, out)
+        self.assertIn("배포할 커밋 번호 (deploy 의 sha 칸에 넣는다): %s" % self.X[:12], out)
+        self.assertNotIn("git reset", calls)
+
+    def test_the_script_itself_refuses_a_target_that_is_not_the_approved_commit(self):
+        self.commit(self.Y)
+        env = self.env(0, self.Y, DEPLOY_SHA=self.X[:12], DEPLOY_TARGET=self.Y)        # 대상이 미리 정해져 있어도 승인 번호와 맞아야 한다
+        done = subprocess.run(["bash", str(self.root / "deploy_restart.sh")], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertNotIn("git reset", (self.root / "calls.log").read_text(encoding="utf-8"))
+
+    def test_the_first_deploy_restarts_a_running_bot_when_only_the_config_changed(self):
+        self.old_server_script()
+        self.commit(self.X, config="# config.py changed\n")
+        self.marker(4321)                                                       # 봇은 지금의 bot.py 로 돌고 있다 (bot.py 는 안 바뀐다)
+        code, out, calls = self.run_workflow("deploy", self.X[:12], pid=4321, main=self.X)
+        self.assertEqual(code, 0, out)
+        self.assertIn("봇 재시작: config.py or _a_clean_purity.py changed during this run", out)
+        self.assertIn("systemctl restart upbit-bot", calls)
+
+    def test_script_and_config_changed_together_still_restart_the_bot(self):
+        """스크립트가 새 버전으로 다시 실행될 때 '변경 전' 해시를 잃어, 설정이 바뀌었는데도 '재시작 불필요' 로 끝났다."""
+        newer = (ROOT / "deploy_restart.sh").read_text(encoding="utf-8") + "\n# a later version of this script\n"
+        self.commit(self.X, script=newer, config="# config.py changed\n")
+        self.marker(4321)
+        env = self.env(4321, self.X)
+        done = subprocess.run(["bash", str(self.root / "deploy_restart.sh")], env=env, capture_output=True, text=True, timeout=60)
+        out, calls = done.stdout + done.stderr, (self.root / "calls.log").read_text(encoding="utf-8")
+        self.assertEqual(done.returncode, 0, out)
+        self.assertIn("deploy_restart.sh 자체가 갱신됨 → 새 버전으로 재실행", out)   # 디스크의 스크립트를 직접 돌린 경우: 새 버전으로 넘어가고
+        self.assertIn("봇 재시작: config.py or _a_clean_purity.py changed during this run", out)   # 설정이 바뀐 것을 잊지 않는다
+        self.assertIn("systemctl restart upbit-bot", calls)
+        self.assertEqual(calls.count("systemctl restart upbit-bot"), 1)
+
+    def test_a_leftover_hash_in_the_environment_is_ignored_on_a_normal_run(self):
+        self.commit(self.X, config="# config.py changed\n")
+        self.marker(4321)
+        stale = hashlib.md5(b"# bot.py\n# config.py changed\n# _a_clean_purity.py\n").hexdigest()   # '바뀐 뒤' 의 해시가 환경에 남아 있다
+        env = self.env(4321, self.X, DEPLOY_OLD_FILES_HASH=stale, DEPLOY_OLD_BOT_HASH=hashlib.md5(b"# bot.py\n").hexdigest())
+        done = subprocess.run(["bash", str(self.root / "deploy_restart.sh")], env=env, capture_output=True, text=True, timeout=60)
+        self.assertIn("systemctl restart upbit-bot", (self.root / "calls.log").read_text(encoding="utf-8"), done.stdout + done.stderr)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,14 @@
 #   · 꺼져 있는 봇은 켜지 않는다(사람이 일부러 꺼 둔 봇을 배포가 되살리지 않게). 켜는 것은 사람이 직접 한다.
 #   · 봇이 불러 쓰는 config.py · _a_clean_purity.py 가 바뀌어도 재시작한다.
 #   · 재시작한 봇이 새 코드로 떴는지 확인되지 않으면 끝에서 실패(종료 코드 1)로 끝난다.
+# 2026-11-16 제3세션 검토 반영:
+#   · 배포 워크플로는 서버에 있던 옛 스크립트가 아니라 '승인한 커밋의 이 스크립트' 를 임시 파일로 꺼내 DEPLOY_TARGET 과 함께 돌린다.
+#     그래서 첫 코드 변경부터 승인한 커밋으로만 간다(옛 스크립트가 먼저 최신 main 을 받아 버리는 일이 없다).
+#   · 이 스크립트가 자기 자신을 새 버전으로 다시 실행할 때, 코드를 바꾸기 '전' 에 잰 해시를 넘겨준다. 넘기지 않으면 다시 실행된 쪽이
+#     바뀐 뒤의 파일로 '변경 전' 해시를 재서, 스크립트와 config.py 가 함께 바뀐 배포에서 재시작이 빠졌다.
 set -e
 DEPLOY_FAILED=0
+RUN_HASH=$(md5sum "$0" 2>/dev/null | awk '{print $1}')   # 지금 실제로 돌고 있는 스크립트의 해시 (cd 전에 잰다. 못 재면 빈 값)
 
 echo "[deploy] 시작 — $(date)"
 
@@ -14,35 +20,44 @@ cd /home/ubuntu/bot
 
 # 변경 전 bot.py 해시 저장 (봇이 불러 쓰는 파일들의 묶음 해시도 같이)
 bot_files_hash() { cat bot.py config.py _a_clean_purity.py 2>/dev/null | md5sum | awk '{print $1}'; }
-OLD_BOT_HASH=$(md5sum bot.py 2>/dev/null | awk '{print $1}')
-OLD_FILES_HASH=$(bot_files_hash)
+if [ -n "$DEPLOY_REEXEC" ] && [ -n "$DEPLOY_OLD_FILES_HASH" ]; then
+    # 다시 실행된 경우: 첫 실행이 코드를 바꾸기 전에 잰 값을 쓴다 (지금 재면 이미 바뀐 뒤다)
+    OLD_BOT_HASH="$DEPLOY_OLD_BOT_HASH"
+    OLD_FILES_HASH="$DEPLOY_OLD_FILES_HASH"
+else
+    OLD_BOT_HASH=$(md5sum bot.py 2>/dev/null | awk '{print $1}')
+    OLD_FILES_HASH=$(bot_files_hash)
+fi
 # 이 스크립트 자신의 해시도 저장 (아래 재실행 판단용)
 SELF_PATH="/home/ubuntu/bot/deploy_restart.sh"
 OLD_SELF_HASH=$(md5sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
 
-# 코드 가져오기. 재실행된 경우(DEPLOY_TARGET 있음)에는 첫 실행이 정한 커밋을 그대로 쓴다.
+# 코드 가져오기. DEPLOY_TARGET 이 이미 있으면(배포 워크플로가 정해 줬거나, 다시 실행된 경우) 그 커밋을 그대로 쓴다.
 if [ -z "$DEPLOY_TARGET" ]; then
     echo "[deploy] git fetch ..."
     git fetch origin main
     DEPLOY_TARGET=$(git rev-parse origin/main)
-    if [ -n "$DEPLOY_SHA" ]; then                       # check 에서 본 커밋과 지금의 main 이 같아야 한다
-        case "$DEPLOY_TARGET" in
-            "$DEPLOY_SHA"*) ;;
-            *) echo "[deploy] ⛔ main 이 바뀌었다: 승인한 커밋 $DEPLOY_SHA, 지금 main $DEPLOY_TARGET — 배포하지 않는다. check 부터 다시 할 것"
-               exit 3 ;;
-        esac
-    fi
-    export DEPLOY_TARGET
 fi
+if [ -n "$DEPLOY_SHA" ]; then                           # 올릴 커밋은 check 에서 본(승인한) 커밋이어야 한다 — 코드를 바꾸기 전에 확인한다
+    case "$DEPLOY_TARGET" in
+        "$DEPLOY_SHA"*) ;;
+        *) echo "[deploy] ⛔ main 이 바뀌었다: 승인한 커밋 $DEPLOY_SHA, 올리려는 커밋 $DEPLOY_TARGET — 배포하지 않는다. check 부터 다시 할 것"
+           exit 3 ;;
+    esac
+fi
+export DEPLOY_TARGET
 git reset --hard "$DEPLOY_TARGET"
 echo "[deploy] 코드 업데이트 완료: $(git log --oneline -1)"
 
 # 2026-11-09 사고 재발 방지: reset 이 이 스크립트 자체를 바꿨으면 새 버전으로 다시 실행한다.
 # bash 는 이미 연 옛 파일을 끝까지 실행하므로, 실행 도중 main 이 바뀌면 "새 코드 위에서 옛 배포 로직" 이 돈다.
 # 그날 옛 로직이 새 bot.py 를 올리면서 10/30 에 끈 페이퍼 스캐너를 다시 켰다. DEPLOY_REEXEC 는 무한 재실행 방지.
+# 2026-11-16: '지금 돌고 있는 스크립트' 가 새 버전과 같으면(배포 워크플로가 승인한 커밋의 스크립트를 꺼내 돌린 경우) 다시 실행하지 않는다.
+#   다시 실행할 때는 코드를 바꾸기 전에 잰 해시를 넘겨, 다시 실행된 쪽이 '무엇이 바뀌었는지' 를 잃지 않게 한다.
 NEW_SELF_HASH=$(md5sum "$SELF_PATH" | awk '{print $1}')
-if [ "$OLD_SELF_HASH" != "$NEW_SELF_HASH" ] && [ -z "$DEPLOY_REEXEC" ]; then
+if [ "${RUN_HASH:-$OLD_SELF_HASH}" != "$NEW_SELF_HASH" ] && [ -z "$DEPLOY_REEXEC" ]; then
     echo "[deploy] deploy_restart.sh 자체가 갱신됨 → 새 버전으로 재실행"
+    export DEPLOY_OLD_BOT_HASH="$OLD_BOT_HASH" DEPLOY_OLD_FILES_HASH="$OLD_FILES_HASH"
     DEPLOY_REEXEC=1 exec bash "$SELF_PATH" "$@"
 fi
 
