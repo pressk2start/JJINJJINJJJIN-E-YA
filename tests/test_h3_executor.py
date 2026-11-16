@@ -2031,6 +2031,58 @@ class TestUnresolvedOrders(Base):
         self.assertEqual([(r["market"], r["action"]) for r in rows], [(BTC, "KEEP_HOLDING"), (ETH, "STAY_IN_CASH")])
         self.assertIn("안 들어간 줄 알았던 매수 주문(h3-20261110-KRW-BTC-bid)이 체결돼 있었음", self.sent[-1])
 
+    def test_checks_ten_minutes_apart_count_even_when_the_timer_is_a_few_seconds_early(self):
+        """고문 판정 2026-11-16: 확인 간격을 타이머 간격(600초)과 같게 두면 1초만 일찍 돌아도 세어지지 않아 한 번씩 밀린다."""
+        self.assertEqual(HX.MISS_GAP_SEC, 540)
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.fail_side = "ask"
+        self.executor(cfg, ex).run()                                                  # 00:01:00 실패 ('없음' 1회)
+        ex.fail_side = None
+        self.clock += dt.timedelta(seconds=590)                                       # 00:10:50 — 10분에 10초 모자란다
+        rows, errors = self.retry_run(cfg, ex)
+        self.assertEqual(self.numbers(cfg), [("h3-20261111-KRW-BTC-ask", "open", 2)])  # 그래도 한 번으로 센다
+        self.clock += dt.timedelta(seconds=590)                                       # 00:20:40
+        rows, errors = self.retry_run(cfg, ex)                                        # 3회 → 그 주문은 없었다 → 같은 실행에서 다시 판다
+        self.assertEqual(errors, [])
+        self.assertEqual([x for x in ex.placed if "ask" in x], ["h3-20261111-KRW-BTC-ask-r1"])
+        self.assertLess(HX.load_state(cfg)["sleeves"][BTC]["coin"], 1e-8)
+
+    def test_checks_closer_than_nine_minutes_do_not_count(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.holding(cfg, ex)
+        ex.fail_side = "ask"
+        self.executor(cfg, ex).run()
+        ex.fail_side = None
+        for _ in range(3):                                                            # 5분 간격으로 세 번 더 본다 (5·10·15분 뒤)
+            self.clock += dt.timedelta(seconds=300)
+            self.retry_run(cfg, ex)
+        self.assertEqual(self.numbers(cfg), [("h3-20261111-KRW-BTC-ask", "open", 2)])  # 10분 뒤 것 하나만 세어졌다
+        self.assertEqual([x for x in ex.placed if "ask" in x], [])
+
+    def test_a_buy_stuck_on_the_account_check_tells_the_person_what_to_do(self):
+        cfg, ex = self.cfg("LIVE"), FakeExchange()
+        self.ratio = {BTC: 1.05, ETH: 0.95}
+        ex.fail_before_accept = True
+        self.executor(cfg, ex, bot_pids=[]).run()                                     # 11/10 00:01 매수가 들어갔는지 모른다
+        ex.fail_before_accept = False
+        ex.bal["BTC"], ex.locked["BTC"] = 0.0005, 0.0005                              # 계좌에 장부에 없는 코인이 있다(일부는 주문에 잠김)
+        self.minutes(10)
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()                      # 00:11 2회 — 아직 확인 중
+        self.assertIn("BTC 매수 보류: 결과를 모르는 주문 번호가 남아 있음", errors[0])
+        self.assertNotIn("할 일:", errors[0])
+        self.next_day()
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()                      # 다음 날: 3회인데 계좌가 장부보다 많다 → 풀리지 않는다
+        self.assertIn("BTC 매수 보류: 앞서 보낸 매수 주문이 조회되지 않는데 계좌의 코인이 장부보다 많아 확정하지 못함", errors[0])
+        self.assertIn("계좌 0.00100000개(그중 주문에 잠긴 수량 0.00050000개), 장부 0.00000000개", errors[0])
+        self.assertIn("할 일: 업비트 앱의 주문 내역에서 그 매수가 체결됐는지 확인할 것", errors[0])
+        self.assertIn("초과분을 앱에서 팔면(또는 옮기면) 다음 실행에서 자동으로 풀린다", errors[0])
+        self.assertEqual(ex.placed, [])
+        ex.bal["BTC"], ex.locked["BTC"] = 0.0, 0.0                                    # 사람이 초과분을 팔았다
+        self.minutes(10)
+        rows, errors = self.executor(cfg, ex, bot_pids=[]).run()                      # 다음 실행에서 자동으로 풀리고 산다
+        self.assertEqual((errors, ex.placed), ([], ["h3-20261111-KRW-BTC-bid"]))
+
     def test_which_unknown_numbers_hold_which_orders(self):
         cfg = self.cfg("LIVE")
         runner = self.executor(cfg, FakeExchange())
