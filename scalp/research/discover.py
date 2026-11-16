@@ -517,7 +517,8 @@ def candidate_trades(panel, cand, end_q):
 def merge_trades(old_rows, new_rows, not_before_q=None, bad=None):
     """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시).
     not_before_q 를 주면 그 봉보다 앞에서 끝났는데 장부에 없던 거래는 넣지 않는다(지난 구간이 뒤늦게 달라진 것) — 표시만 돌려준다.
-    bad(목록)를 주면 표시와 같은 순서로 그 거래의 열쇠 (종목, 진입 봉)를 넣는다."""
+    bad(목록)를 주면 표시와 같은 순서로 {"key": (종목, 진입 봉), "ledger": 장부 값, "recomputed": 다시 계산한 값} 을 넣는다
+    (뒤늦게 나타난 거래는 장부 값이 None)."""
     by_key = {(r["market"], r["entry_q"]): r for r in old_rows}
     added, mismatch = 0, []
     for r in new_rows:
@@ -527,14 +528,14 @@ def merge_trades(old_rows, new_rows, not_before_q=None, bad=None):
             if not_before_q is not None and r["exit_q"] < not_before_q:
                 mismatch.append("%s %s #%d (뒤늦게 나타남)" % (r["market"][4:], r["day"], r["entry_q"]))
                 if bad is not None:
-                    bad.append(key)
+                    bad.append({"key": key, "ledger": None, "recomputed": {"net": r["net"], "exit_q": r["exit_q"]}})
                 continue
             by_key[key] = r
             added += 1
         elif abs(prev["net"] - r["net"]) > 1e-9:
             mismatch.append("%s %s #%d" % (r["market"][4:], r["day"], r["entry_q"]))     # 진입 봉 번호까지 — 같은 날 두 거래를 구분한다
             if bad is not None:
-                bad.append(key)
+                bad.append({"key": key, "ledger": {"net": prev["net"]}, "recomputed": {"net": r["net"]}})
     return sorted(by_key.values(), key=lambda t: (t["entry_q"], t["market"])), added, mismatch
 
 
