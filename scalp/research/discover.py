@@ -630,6 +630,9 @@ def main(argv=None):
     ap.add_argument("--markets", help="쉼표로 구분 (점검·재현용). 기본: 재현은 REPRO_UNIVERSE, 그 밖은 HOLDOUT 시작일 기준 상위 30종목")
     ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (기본은 오늘)")
     a = ap.parse_args(argv)
+    if a.report_only and Path(a.out).resolve() == OUT_DIR.resolve():
+        print("--report-only는 월간 기록을 보호하기 위해 별도 --out 폴더가 필요합니다.")
+        return 2
     today = a.today or dt.datetime.now(UTC).date().isoformat()
     if a.repro:
         markets = tuple(a.markets.split(",")) if a.markets else REPRO_UNIVERSE
