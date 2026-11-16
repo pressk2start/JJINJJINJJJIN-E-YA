@@ -1,24 +1,28 @@
 name: Forward watch
 
-# 등록된 후보(H2·H3)를 매주 새 자료로 채점해 scalp/research/forward/ 의 장부와 현황을 갱신한다.
+# 등록된 후보를 매일 새 자료로 채점해 scalp/research/forward/ 의 장부와 현황을 갱신한다.
 # 공개 시세만 쓴다(키 없음). 거래 서버와 무관하고 봇 코드는 건드리지 않는다.
 # 배포(deploy.yml)는 사람이 직접 실행할 때만 돈다 — 이 워크플로가 main 에 올리는 커밋은 배포를 일으키지 않는다.
 on:
   schedule:
-    - cron: "17 1 * * 1"   # 매주 월요일 01:17 UTC = 10:17 KST
+    - cron: "17 1 * * *"   # 매일 01:17 UTC = 10:17 KST
+  # 주기 설정을 main에 반영하면 즉시 한 번 검증한다. 장부 커밋은 이 경로에 해당하지 않는다.
+  push:
+    branches: [main]
+    paths: [.github/workflows/forward-watch.yml]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: forward-watch
+  group: research-records
   cancel-in-progress: false
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,4 +68,4 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 -X utf8 scalp/research/tg_send.py --text "[후보 추적] 주간 실행 실패 또는 갱신 못 한 항목 있음 — ${RUN_URL}"
+        run: python3 -X utf8 scalp/research/tg_send.py --text "[후보 추적] 일간 실행 실패 또는 갱신 못 한 항목 있음 — ${RUN_URL}"
