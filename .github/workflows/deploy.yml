@@ -90,5 +90,5 @@ jobs:
             RUNNER=$(mktemp /tmp/deploy_restart.XXXXXX)
             trap 'rm -f "$RUNNER"' EXIT
             git show "$TARGET:deploy_restart.sh" > "$RUNNER"
-            DEPLOY_SHA="$SHA" DEPLOY_TARGET="$TARGET" bash "$RUNNER"
+            DEPLOY_SHA="$SHA" DEPLOY_TARGET="$TARGET" DEPLOY_REEXEC=1 bash "$RUNNER"
             echo "=== deploy done ==="
