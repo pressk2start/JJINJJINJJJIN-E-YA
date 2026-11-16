@@ -622,7 +622,9 @@ def repro(markets=None, fetch=None, log=print):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(OUT_DIR))
-    ap.add_argument("--register", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--register", action="store_true")
+    mode.add_argument("--report-only", action="store_true", help="탐색 결과만 별도 기록하고 후보는 등록하지 않음")
     ap.add_argument("--repro", action="store_true", help="고문 설정(2023–24 / 2025 이후)으로 돌려 고문 수치와 대조")
     ap.add_argument("--days", type=int, default=HISTORY_DAYS)
     ap.add_argument("--markets", help="쉼표로 구분 (점검·재현용). 기본: 재현은 REPRO_UNIVERSE, 그 밖은 HOLDOUT 시작일 기준 상위 30종목")
@@ -647,9 +649,10 @@ def main(argv=None):
     passed, counts, lines, trades = run(start_day, today, cut_day, markets, log=lambda s: print(s, flush=True))
     tail = []
     out = Path(a.out)
-    path = out / "registry.json"
+    state_dir = OUT_DIR if a.report_only else out
+    path = state_dir / "registry.json"
     registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-    ledger_path = out / "ledger.json"                                # 판정·만료가 끝난 후보는 추적기의 장부에 적혀 있다
+    ledger_path = state_dir / "ledger.json"                                # 판정·만료가 끝난 후보는 추적기의 장부에 적혀 있다
     cands = (json.loads(ledger_path.read_text(encoding="utf-8")).get("candidates") or {}) if ledger_path.exists() else {}
     new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if e.get("decision")})
     for c in new:
@@ -659,17 +662,19 @@ def main(argv=None):
     if not new and not held:
         tail.append("새로 등록할 후보 없음")
     wrote = []
-    if a.register and not custom:
+    if (a.register or a.report_only) and not custom:
         out.mkdir(parents=True, exist_ok=True)
-        if new and FRAME_APPROVED:
+        if a.register and new and FRAME_APPROVED:
             path.write_text(json.dumps(registry + new, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8")
             wrote = [c["id"] for c in new]
             tail.append("등록함: %s" % ", ".join(wrote))
+        elif a.report_only:
+            tail.append("탐색 점검: 결과만 기록함. 후보 등록·판정에는 영향 없음")
         elif new:
             tail.append("등록하지 않음: 틀이 아직 잠겨 있음(FRAME_APPROVED=False)")
         log_path = out / "scan_log.json"
         history = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
-        history.append(dict(counts, run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
+        history.append(dict(counts, mode="diagnostic" if a.report_only else "monthly", run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
                             held=[{"rule": describe(c), "why": why} for c, why in held], locked=not FRAME_APPROVED))
         log_path.write_text(json.dumps(history, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         (out / "DISCOVERY.md").write_text("# 후보 탐색 기록\n\n자동으로 만들어지는 파일입니다. 마지막 실행 %s (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.\n\n```\n%s\n```\n" % (
