@@ -11,6 +11,7 @@
 #     그래서 첫 배포부터 이 규칙이 적용된다(옛 스크립트가 먼저 그 순간의 main 을 받아 버리는 일이 없다).
 #   · 올릴 커밋(DEPLOY_TARGET)이 어디서 왔든 승인 번호와 대조하고, 지금의 main 이 그 커밋이 아니면(그 사이 main 이 바뀌었으면)
 #     아무것도 바꾸지 않고 종료 코드 3 으로 끝난다.
+#   · 배포가 연구 스크립트(sweep_defense)를 띄우던 블록을 지웠다. 이 스크립트는 .env 를 읽지 않는다.
 #   · 봇 파일의 '변경 전' 해시는 최초 실행에서 잰 값을 끝까지 쓴다. 이 스크립트가 자기 자신을 새 버전으로 다시 실행할 때 그 값을
 #     넘겨준다(넘기지 않으면 다시 실행된 쪽이 바뀐 뒤의 파일로 재서, 스크립트와 config.py 가 함께 바뀐 배포에서 재시작이 빠졌다).
 set -e
@@ -138,76 +139,8 @@ for svc in momentum-scanner momentum-clm; do
 done
 true
 
-# ── Research: sweep_defense 안전 조건부 실행 (2026-07-12 조언자 스펙 강화) ──
-# 이전 문제: bot.py route registry 변경 시 자동 sweep으로 CPU 포화 (병목 재발)
-# 현재 스펙:
-#   1) 커밋 메시지에 [sweep] 태그 있을 때만 실행 (opt-in, 기본은 skip)
-#   2) AUTO_TRADE=1 상태에서는 실행 거부 (LIVE 중 리소스 경합 방지)
-#   3) /tmp/sweep_defense.lock flock으로 중복 실행 방지
-#   4) 이미 sweep_defense.py 프로세스 있으면 신규 시작 안 함
-#   5) research/*.py 변경 자체는 트리거 조건이 아님 (조언자 명확화)
-echo "[deploy] sweep_defense 조건 검사..."
-
-LATEST_COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
-NEED_SWEEP=0
-SKIP_REASON=""
-
-if echo "$LATEST_COMMIT_MSG" | grep -qF "[sweep]"; then
-    echo "[deploy] 커밋 메시지에 [sweep] 태그 감지 → sweep 후보"
-    NEED_SWEEP=1
-else
-    SKIP_REASON="커밋 메시지에 [sweep] 태그 없음"
-fi
-
-# AUTO_TRADE=1 상태 확인 (실 매매 중이면 리소스 경합 방지)
-CURRENT_AUTO_TRADE="0"
-if [ -f /home/ubuntu/bot/.env ]; then
-    CURRENT_AUTO_TRADE=$(grep -E "^AUTO_TRADE=" /home/ubuntu/bot/.env | tail -1 | cut -d= -f2 | tr -d '"' | tr -d ' ')
-fi
-if [ "$NEED_SWEEP" = "1" ] && [ "$CURRENT_AUTO_TRADE" = "1" ]; then
-    NEED_SWEEP=0
-    SKIP_REASON="AUTO_TRADE=1 (LIVE 실 매매 중 리소스 경합 방지)"
-    echo "[deploy] $SKIP_REASON"
-fi
-
-# 이미 실행 중인 sweep_defense 프로세스 확인
-if [ "$NEED_SWEEP" = "1" ] && pgrep -f "research/sweep_defense.py" >/dev/null 2>&1; then
-    NEED_SWEEP=0
-    SKIP_REASON="sweep_defense.py 프로세스 이미 실행 중 (중복 방지)"
-    echo "[deploy] $SKIP_REASON"
-fi
-
-if [ "$NEED_SWEEP" = "1" ]; then
-    echo "[deploy] sweep_defense 실행 조건 통과 → flock 시도"
-    if ls /home/ubuntu/bot/research/data/*.parquet >/dev/null 2>&1; then
-        SWEEP_ARGS="--skip-download --stage all"
-    else
-        SWEEP_ARGS="--top-markets 30 --days 90 --stage all"
-    fi
-    if [ -f /home/ubuntu/bot/.env ]; then
-        set -a
-        # shellcheck disable=SC1091
-        source /home/ubuntu/bot/.env
-        set +a
-        # 배포 로그는 GitHub Actions 에 남는다(공개 저장소면 누구나 열람) → 토큰은 앞부분도 찍지 않는다.
-        if [ -n "$TELEGRAM_TOKEN" ]; then TG_STATE="설정됨"; else TG_STATE="없음"; fi
-        echo "[deploy] .env 로드 완료 (TELEGRAM_TOKEN: $TG_STATE)"
-    fi
-    # flock으로 lock 획득 후 백그라운드 실행. 이미 lock 잡혀 있으면 즉시 skip.
-    (
-        flock -n 9 || {
-            echo "[deploy] flock 획득 실패 → 다른 sweep 세션이 lock 보유 중, skip"
-            exit 0
-        }
-        nohup python3 -u /home/ubuntu/bot/research/sweep_defense.py $SWEEP_ARGS \
-            > /tmp/sweep_defense.log 2>&1 &
-        echo "[deploy] sweep_defense PID=$! args='$SWEEP_ARGS' log=/tmp/sweep_defense.log"
-        # 백그라운드로 넘긴 후 lock은 이 subshell 종료 시 해제됨.
-        # sweep 프로세스 자체는 nohup으로 독립 실행.
-    ) 9>/tmp/sweep_defense.lock
-else
-    echo "[deploy] sweep 스킵 (사유: $SKIP_REASON)"
-fi
+# (2026-11-16 고문 판정 ③) 여기 있던 sweep_defense 블록을 지웠다. 커밋 메시지에 [sweep] 이 있으면 거래 서버에서 연구 스크립트를
+# 띄우고 그때 .env 를 통째로 읽던 블록이다. 거래 서버에서는 연구를 돌리지 않는다. 배포는 코드를 맞추고 봇을 다시 띄우는 일만 한다.
 
 if [ "$DEPLOY_FAILED" = "1" ]; then
     echo "[deploy] ⛔ 봇이 새 코드로 떴는지 확인되지 않았다 — 이 배포는 실패로 끝난다"

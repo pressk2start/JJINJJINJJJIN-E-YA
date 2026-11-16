@@ -145,6 +145,14 @@ class DeployScript(unittest.TestCase):
             code = ln.split("#", 1)[0]
             self.assertFalse(code.lstrip().startswith(("journalctl", "sudo journalctl")), ln)
 
+    def test_the_deploy_starts_no_research_and_never_reads_the_env_file(self):
+        """고문 판정 2026-11-16 ③: 커밋 메시지의 [sweep] 으로 거래 서버에서 연구 스크립트를 띄우고 .env 를 통째로 읽던 블록을 지웠다."""
+        code = "\n".join(code_lines(self.src))
+        for gone in ("sweep_defense.py", "[sweep]", "source /home/ubuntu/bot/.env", "nohup", "AUTO_TRADE", "TELEGRAM_TOKEN"):
+            self.assertNotIn(gone, code)
+        self.assertNotRegex(code, r"(?m)^\s*(source|\.)\s+\S*\.env")
+        self.assertNotIn(".env", code)
+
     def test_scanners_and_units_are_still_left_alone(self):
         self.assertIn('if systemctl is-enabled "$svc" &>/dev/null; then', self.src)  # 꺼 둔 스캐너는 건드리지 않는다
         code = "\n".join(ln.split("#", 1)[0] for ln in self.src.splitlines())                # 주석을 뺀 실행 줄만
@@ -297,7 +305,7 @@ class DeployScriptRuns(unittest.TestCase):
         self.assertIn("systemctl restart upbit-bot", calls)
         self.assertEqual(code, 1, out)
         self.assertIn("이 배포는 실패로 끝난다", out)
-        self.assertIn("sweep 스킵", out)                                         # 나머지 단계는 마저 돈 뒤에 실패로 끝난다
+        self.assertIn("[deploy] 완료", out)                                       # 나머지 단계는 마저 돈 뒤에 실패로 끝난다
 
     def test_a_moved_main_stops_the_deploy_before_anything_changes(self):
         code, out, calls = self.run_script(pid=4321, main="2222222bbbbbbb", sha="1111111")
