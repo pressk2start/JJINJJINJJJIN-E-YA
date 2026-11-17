@@ -1,0 +1,56 @@
+name: Research cadence preview
+
+# 실제 공개 시세로 초안의 관찰표를 미리 확인한다. 공식 장부·등록부·알림·거래 서버에는 쓰지 않는다.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/research-cadence-preview.yml"
+      - "scalp/research/send_daily_summary.py"
+      - "scalp/research/forward_watch.py"
+      - "scalp/research/discover.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-cadence-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Copy public ledger into temporary preview directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/cadence-preview"
+          cp scalp/research/forward/ledger.json scalp/research/forward/registry.json "$RUNNER_TEMP/cadence-preview/"
+          python - "$RUNNER_TEMP/cadence-preview/ledger.json" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          ledger = json.loads(path.read_text(encoding="utf-8"))
+          ledger.pop("last_ok", None)
+          path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+          PY
+      - name: Calculate preview from actual public candles
+        run: python -X utf8 scalp/research/forward_watch.py --out "$RUNNER_TEMP/cadence-preview"
+      - name: Show preview
+        if: always()
+        run: |
+          echo "### 실제 시세 미리보기 — 공식 장부에 반영하지 않음" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/cadence-preview/STATUS.md" ]; then
+            cat "$RUNNER_TEMP/cadence-preview/STATUS.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "계산 결과 없음: 실행 로그를 확인하세요." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: research-cadence-preview
+          path: ${{ runner.temp }}/cadence-preview
+          retention-days: 7
