@@ -114,6 +114,38 @@ class Ledger(unittest.TestCase):
         text = FW.render({"H2_kimchi": {"rows": [row(0, 0.01)], "decision": None}, "last_run": "2026-11-16"})
         self.assertIn("주의 — 상장폐지 편향(통과 쪽)", text)
 
+    def test_daily_runs_touch_the_kimchi_item_only_once_a_week(self):
+        """추적은 매일 돌지만(2026-11-17) H2 는 등록된 절차대로 주 1회만 반영한다(고문 판정 2026-11-14)."""
+        calls = []
+        rows = [row(k, 0.01) for k in range(3)]
+
+        def inputs():
+            calls.append(1)
+            return {}, {}, []
+        real = FW.h2_rows
+        FW.h2_rows = lambda data, bn, last: rows
+        try:
+            args = offline()
+            args["h2_inputs"] = inputs
+            ledger, warnings = FW.update({}, "2026-11-23", **args)                                    # 월요일: 반영한다
+            self.assertEqual((len(calls), ledger["H2_kimchi"]["updated"], len(ledger["H2_kimchi"]["rows"])), (1, "2026-11-23", 3))
+            for day in ("2026-11-24", "2026-11-25", "2026-11-29"):                                    # 화·수·일: 건너뛴다(실패가 아니다)
+                ledger, warnings = FW.update(ledger, day, **args)
+                self.assertEqual((len(calls), ledger["H2_kimchi"]["updated"]), (1, "2026-11-23"))
+                self.assertFalse(any("H2" in w for w in warnings))
+            ledger, warnings = FW.update(ledger, "2026-11-30", **args)                                # 다음 월요일: 다시 반영한다
+            self.assertEqual((len(calls), ledger["H2_kimchi"]["updated"]), (2, "2026-11-30"))
+            args["h2_inputs"] = lambda: ({}, {}, ["KRW-X (TimeoutError)"])                            # 그다음 월요일에는 시세를 못 받았다
+            ledger, warnings = FW.update(ledger, "2026-12-07", **args)
+            self.assertTrue(any("H2: 이번 실행에서 갱신하지 못함" in w for w in warnings))
+            args["h2_inputs"] = inputs
+            ledger, warnings = FW.update(ledger, "2026-12-08", **args)                                # 화요일 실행이 그 주의 반영을 대신한다
+            self.assertEqual((len(calls), ledger["H2_kimchi"]["updated"]), (3, "2026-12-08"))
+        finally:
+            FW.h2_rows = real
+        self.assertEqual((FW.this_monday("2026-11-23"), FW.this_monday("2026-11-29"), FW.this_monday("2026-11-30")),
+                         ("2026-11-23", "2026-11-23", "2026-11-30"))
+
     def test_a_losing_candidate_is_marked_fail(self):
         entry = {"rows": [row(3 * k, -0.01, 0.0, 0.0) for k in range(20)], "decision": None}
         FW.h2_decide(entry, "2026-12-28")
@@ -573,8 +605,13 @@ class MissedRuns(unittest.TestCase):
         self.assertEqual(FW.expected_runs("2026-12-02", daily=True), ("2026-12-01", "2026-12-01"))
         self.assertTrue(FW.stale(self.ledger("2026-11-16"), [], "2026-11-19", daily=True))
         self.assertEqual(FW.stale(self.ledger("2026-11-18"), [], "2026-11-19", daily=True), [])
-        broken = self.ledger("2026-11-18", H2_kimchi={"updated": "2026-11-16"})
-        self.assertIn("김치 프리미엄", FW.stale(broken, [], "2026-11-19", daily=True)[0])
+        weekly_ok = self.ledger("2026-11-18", H2_kimchi={"updated": "2026-11-16"})                     # 김치 프리미엄은 주 1회: 월요일(11/16)에 반영됐으면 된다
+        self.assertEqual(FW.stale(weekly_ok, [], "2026-11-19", daily=True), [])
+        broken = self.ledger("2026-11-18", H2_kimchi={"updated": "2026-11-11"})                       # 이번 주 월요일 이후로 반영되지 못했다
+        self.assertEqual(FW.stale(broken, [], "2026-11-19", daily=True), ["김치 프리미엄: 2026-11-16(월) 이후 갱신되지 못함 — 마지막 갱신 2026-11-11"])
+        late = self.ledger("2026-11-18")
+        late["CR_rebound"]["updated"] = "2026-11-17"                                                  # 다른 항목은 어제 실행에서 갱신됐어야 한다
+        self.assertEqual(FW.stale(late, [], "2026-11-19", daily=True), ["급락 반등: 2026-11-18 이후 갱신되지 못함 — 마지막 갱신 2026-11-17"])
 
     def test_expected_dates(self):
         self.assertEqual(FW.expected_runs("2026-11-15"), (None, None))                                 # 첫 예약 전

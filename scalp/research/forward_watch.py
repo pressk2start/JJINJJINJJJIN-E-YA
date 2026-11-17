@@ -236,6 +236,16 @@ def listed_markets():
     return {m["market"] for m in AM.http_get(AM.UPBIT + "/v1/market/all") if m["market"].startswith("KRW-")}
 
 
+class _Skip(Exception):
+    """이번 실행에서는 그 항목을 반영하지 않는다(실패가 아니다)."""
+
+
+def this_monday(today):
+    """today 가 든 주의 월요일 (today 가 월요일이면 그날)."""
+    d = dt.date.fromisoformat(today)
+    return (d - dt.timedelta(days=d.weekday())).isoformat()
+
+
 def h2_decide(entry, run_day):
     """첫 H2_DECIDE_AT 기간이 찼고 아직 판정이 없으면 한 번만 판정해 적는다. 이미 있으면 건드리지 않는다."""
     rows = entry["rows"]
@@ -410,6 +420,10 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
     last_done = DF._shift(today, -1)
     h2 = ledger.setdefault("H2_kimchi", {"rows": [], "decision": None})
     try:
+        # 추적은 매일 돌지만 H2 는 주 1회만 반영한다 (고문 판정 2026-11-14: 등록된 검사 절차를 중간에 바꾸지 않는다 — H2 는
+        # 실행하는 날의 상장 목록으로 계산하므로 반영 주기가 달라지면 결과가 달라진다). 그 주 월요일 이후 첫 성공 실행이 반영한다.
+        if (h2.get("updated") or "") >= this_monday(today):
+            raise _Skip()
         data, bn, failed = (h2_inputs or (lambda: fetch_h2_inputs(log=log)))()
         if failed:
             raise RuntimeError("시세를 못 받은 종목 %d개: %s" % (len(failed), ", ".join(failed[:5])))
@@ -424,6 +438,8 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         if not active_hold(h2):                                     # 보류 중이면 판정하지 않는다
             h2_decide(h2, today)
         log("H2: %d periods in ledger (+%d)" % (len(rows), added))
+    except _Skip:
+        log("H2: 이번 주 반영은 끝났음(주 1회, %s) — 건너뜀" % h2.get("updated"))
     except Exception as e:
         warnings.append("H2: 이번 실행에서 갱신하지 못함 — %s" % e)
     try:
@@ -785,8 +801,10 @@ def expected_runs(today, daily=False):
 def stale(ledger, scan_log, today, registry=(), daily=False):
     """예약 실행이 빠졌거나 일부 항목이 갱신되지 못했는지 → 문제 목록(없으면 빈 목록).
     '며칠 지났나' 가 아니라 '가장 최근 예약일의 실행이 기록에 있나' 를 본다. last_run 은 일부 항목이 실패해도 찍히므로,
-    항목마다 따로 남는 갱신일(성공했을 때만 바뀜)도 같이 본다."""
+    항목마다 따로 남는 갱신일(성공했을 때만 바뀜)도 같이 본다.
+    매일 일정(daily)에서는 어제 실행을 기다린다. 김치 프리미엄(H2)만은 주 1회 반영이라 지난 월요일을 기다린다."""
     weekly, monthly = expected_runs(today, daily=daily)
+    h2_need = expected_runs(today)[0] if daily else weekly          # H2 가 반영됐어야 하는 가장 최근 월요일
     label = "일간 추적" if daily else "주간 추적"
     suffix = "" if daily else "(월)"
     out = []
@@ -795,7 +813,10 @@ def stale(ledger, scan_log, today, registry=(), daily=False):
         if not last or last < weekly:
             out.append("%s: %s%s 예약 실행이 기록에 없음 — 마지막 실행 %s" % (label, weekly, suffix, last or "없음"))
         else:
-            items = [("김치 프리미엄", (ledger.get("H2_kimchi") or {}).get("updated")), ("H3 추세", (ledger.get("H3_trend") or {}).get("as_of")),
+            h2_day = (ledger.get("H2_kimchi") or {}).get("updated")
+            if h2_need and (not h2_day or h2_day < h2_need):
+                out.append("김치 프리미엄: %s(월) 이후 갱신되지 못함 — 마지막 갱신 %s" % (h2_need, h2_day or "없음"))
+            items = [("H3 추세", (ledger.get("H3_trend") or {}).get("as_of")),
                      ("급락 반등", (ledger.get("CR_rebound") or {}).get("updated")), ("BTC 주간 급등", (ledger.get("BTC_surge") or {}).get("updated"))]
             items += [("급락 반등 변형 " + v["name"], ((ledger.get("CR_variants") or {}).get(v["key"]) or {}).get("updated")) for v in CR_VARIANTS]
             cands = ledger.get("candidates") or {}                  # 등록부 기준으로 본다 — 한 번도 채점되지 못해 장부에 없는 후보도 잡는다
