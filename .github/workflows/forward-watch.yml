@@ -79,13 +79,28 @@ jobs:
       # 경고를 실어 보낸다 — 세 번이 다 실패한 날에도 진행 숫자는 받는다. 사람이 돌린 실행과 push 실행은 결과와 무관하게 보낸다.
       # 비밀값 이름은 봇의 .env · 고문의 auto-monitor 와 같게 쓴다 (TELEGRAM_TOKEN, TG_CHATS = 쉼표로 구분한 채팅 ID).
       - name: Telegram daily summary (only when both secrets exist)
-        if: ${{ steps.gate.outputs.skip != '1' && (steps.run.outputs.code == '0' || github.event_name != 'schedule' || github.event.schedule == '25 8 * * *') }}
+        if: ${{ steps.gate.outputs.skip == '1' || (steps.gate.outputs.skip != '1' && (steps.run.outputs.code == '0' || github.event_name != 'schedule' || github.event.schedule == '25 8 * * *')) }}
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHATS: ${{ secrets.TG_CHATS }}
         run: |
           python -X utf8 scalp/research/forward_watch.py --summary > "$RUNNER_TEMP/summary.txt"
-          python -X utf8 scalp/research/tg_send.py "$RUNNER_TEMP/summary.txt"
+          python -X utf8 scalp/research/send_daily_summary.py "$RUNNER_TEMP/summary.txt"
+      - name: Save summary receipt
+        run: |
+          git config user.name "forward-watch"
+          git config user.email "forward-watch@users.noreply.github.com"
+          git add scalp/research/forward/ledger.json
+          if ! git diff --cached --quiet; then
+            git commit -m "forward-watch: 요약 전달 확인 $(date -u +%F)"
+            for try in 1 2 3; do
+              if git pull --rebase origin main && git push origin HEAD:main; then
+                exit 0
+              fi
+              sleep $((try * 15))
+            done
+            exit 1
+          fi
       - name: Fail if any candidate could not be updated
         if: steps.gate.outputs.skip != '1' && steps.run.outputs.code != '0'
         run: exit 1
