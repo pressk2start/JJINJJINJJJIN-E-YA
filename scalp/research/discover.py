@@ -460,7 +460,8 @@ def register(registry, passed, run_day, universe, decided=()):
     used = sum(1 for c in registry if c["id"].startswith(month))    # 이번 달에 이미 등록한 수
     new, held = [], []
     for f in sorted(passed, key=lambda f: -f["holdout"]["day_low"]):
-        spec = {"engine": ENGINE, "registered": run_day, "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
+        spec = {"engine": ENGINE, "registered": run_day, "start": (dt.date.fromisoformat(run_day) + dt.timedelta(days=1)).isoformat(),
+                "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
                 "move": MOVE, "vol_x": VOL_X, "cost": dict(COST), "cost_other": COST_OTHER, "train": f["train"], "holdout": f["holdout"],
                 "status": "ACTIVE"}
         why = None
@@ -682,7 +683,7 @@ def main(argv=None):
     registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     ledger_path = state_dir / "ledger.json"                                # 판정·만료가 끝난 후보는 추적기의 장부에 적혀 있다
     cands = (json.loads(ledger_path.read_text(encoding="utf-8")).get("candidates") or {}) if ledger_path.exists() else {}
-    new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if e.get("decision")})
+    new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if e.get("decision") and not (e.get("hold") and not e["hold"].get("released"))})
     for c in new:
         tail.append("후보 %s: %s (HOLDOUT 일 단위 하한 %s)" % (c["id"], describe(c), _pct(c["holdout"]["day_low"])))
     for c, why in held:
