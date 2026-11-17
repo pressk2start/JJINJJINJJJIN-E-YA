@@ -458,7 +458,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
     seen = ledger.setdefault("mismatch_seen", {})                  # 이미 알린 값 차이 (항목 → 표시 목록)
     # 새로 붙은 거래 목록(요약용). 지난 성공 실행의 요약에 실린 것은 날이 바뀌면 비우고, 실패한 날의 것은 다음 성공까지 남긴다.
     news = ledger.get("new") or {}
-    if news.get("day") != today and news.get("day") == ledger.get("last_ok"):
+    if news.get("day") != today and news.get("day") == ledger.get("summary_covers_run_day"):
         news = {}
     news = ledger["new"] = {"day": today, "items": list(news.get("items") or [])}
 
@@ -487,12 +487,16 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
         해제된 보류가 있으면 지난 기록(hold_history)으로 옮긴 뒤 새로 건다 — 기록은 지우지 않는다."""
         by_label = dict(zip(labels, bad))
         hit = [lab for lab in new_labels if (by_label.get(lab) or {}).get("key") in sample or lab in always]
-        if not hit or active_hold(entry):
+        if not hit:
+            return
+        diffs = [{"what": lab, "ledger": by_label[lab]["ledger"], "recomputed": by_label[lab]["recomputed"]} for lab in hit]
+        if active_hold(entry):
+            entry["hold"].setdefault("diffs", []).extend(diffs)
             return
         if entry.get("hold"):
             entry.setdefault("hold_history", []).append(entry["hold"])
         entry["hold"] = {"since": today, "why": "값 차이: " + ", ".join(hit[:5]) + (" 외 %d건" % (len(hit) - 5) if len(hit) > 5 else ""),
-                         "diffs": [{"what": lab, "ledger": by_label[lab]["ledger"], "recomputed": by_label[lab]["recomputed"]} for lab in hit],
+                         "diffs": diffs,
                          "released": None}
 
     last_done = DF._shift(today, -1)
