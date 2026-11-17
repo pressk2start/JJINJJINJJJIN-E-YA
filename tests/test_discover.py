@@ -329,7 +329,7 @@ class Registry(unittest.TestCase):
         def body(tmp, today):
             official, reports = tmp / "official", tmp / "reports"
             official.mkdir()
-            monthly = '[{"run": "2026-11-01"}]\\n'
+            monthly = '[{"run": "2026-11-01"}]\n'
             (official / "scan_log.json").write_text(monthly, encoding="utf-8")
             (official / "registry.json").write_text("[]", encoding="utf-8")
             saved_out = D.OUT_DIR
