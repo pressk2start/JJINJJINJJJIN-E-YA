@@ -325,6 +325,33 @@ class Registry(unittest.TestCase):
             self.assertLess(log[0]["cut"], today)
         self.with_world(body)
 
+    def test_diagnostic_records_without_registering_or_touching_monthly_history(self):
+        def body(tmp, today):
+            official, reports = tmp / "official", tmp / "reports"
+            official.mkdir()
+            monthly = '[{"run": "2026-11-01"}]\n'
+            (official / "scan_log.json").write_text(monthly, encoding="utf-8")
+            (official / "registry.json").write_text("[]", encoding="utf-8")
+            saved_out = D.OUT_DIR
+            D.OUT_DIR = official
+            try:
+                D.FRAME_APPROVED = True
+                self.assertEqual(D.main(["--report-only", "--out", str(reports), "--today", today]), 0)
+            finally:
+                D.OUT_DIR = saved_out
+            log = json.loads((reports / "scan_log.json").read_text(encoding="utf-8"))
+            self.assertGreater(log[0]["passed"], 0)
+            self.assertEqual((log[0]["mode"], log[0]["registered"]), ("diagnostic", []))
+            self.assertFalse((reports / "registry.json").exists())
+            self.assertEqual((official / "registry.json").read_text(encoding="utf-8"), "[]")
+            self.assertEqual((official / "scan_log.json").read_text(encoding="utf-8"), monthly)
+            self.assertIn("결과만 기록", (reports / "DISCOVERY.md").read_text(encoding="utf-8"))
+        self.with_world(body)
+
+    def test_diagnostic_rejects_the_official_output_folder_before_fetching(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(D.main(["--report-only"]), 2)
+
     def test_a_trial_range_never_writes_anything(self):
         def body(tmp, today):
             D.FRAME_APPROVED = True

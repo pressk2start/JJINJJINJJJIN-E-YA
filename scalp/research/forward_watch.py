@@ -595,25 +595,29 @@ def summary(ledger):
     return "\n".join(lines)
 
 
-def expected_runs(today):
+def expected_runs(today, daily=False):
     """오늘보다 앞선 가장 최근 예약일 → (주간 월요일, 월간 1일). 아직 첫 예약일 전이면 그 자리는 None.
     오늘이 예약일이면 오늘 것은 아직 기다리지 않는다(지난번 것만 본다)."""
     d = dt.date.fromisoformat(today)
     monday = (d - dt.timedelta(days=d.weekday() or 7)).isoformat()
+    if daily and today > "2026-11-17":
+        monday = (d - dt.timedelta(days=1)).isoformat()
     first = (d.replace(day=1) if d.day > 1 else (d - dt.timedelta(days=1)).replace(day=1)).isoformat()
     return (monday if monday >= FIRST_WEEKLY else None), (first if first >= FIRST_MONTHLY else None)
 
 
-def stale(ledger, scan_log, today):
+def stale(ledger, scan_log, today, daily=False):
     """예약 실행이 빠졌거나 일부 항목이 갱신되지 못했는지 → 문제 목록(없으면 빈 목록).
     '며칠 지났나' 가 아니라 '가장 최근 예약일의 실행이 기록에 있나' 를 본다. last_run 은 일부 항목이 실패해도 찍히므로,
     항목마다 따로 남는 갱신일(성공했을 때만 바뀜)도 같이 본다."""
-    weekly, monthly = expected_runs(today)
+    weekly, monthly = expected_runs(today, daily=daily)
+    label = "일간 추적" if daily else "주간 추적"
+    suffix = "" if daily else "(월)"
     out = []
     if weekly:
         last = ledger.get("last_run")
         if not last or last < weekly:
-            out.append("주간 추적: %s(월) 예약 실행이 기록에 없음 — 마지막 실행 %s" % (weekly, last or "없음"))
+            out.append("%s: %s%s 예약 실행이 기록에 없음 — 마지막 실행 %s" % (label, weekly, suffix, last or "없음"))
         else:
             items = [("김치 프리미엄", (ledger.get("H2_kimchi") or {}).get("updated")), ("H3 추세", (ledger.get("H3_trend") or {}).get("as_of")),
                      ("급락 반등", (ledger.get("CR_rebound") or {}).get("updated")), ("BTC 주간 급등", (ledger.get("BTC_surge") or {}).get("updated"))]
@@ -621,7 +625,7 @@ def stale(ledger, scan_log, today):
             items += [("후보 " + cid, e.get("updated")) for cid, e in sorted((ledger.get("candidates") or {}).items()) if not e.get("decision")]
             for name, day in items:
                 if not day or day < weekly:
-                    out.append("%s: %s(월) 이후 갱신되지 못함 — 마지막 갱신 %s" % (name, weekly, day or "없음"))
+                    out.append("%s: %s%s 이후 갱신되지 못함 — 마지막 갱신 %s" % (name, weekly, suffix, day or "없음"))
     if monthly:
         run = scan_log[-1].get("run") if scan_log else None
         if not run or run < monthly:
@@ -635,6 +639,7 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--stale-check", action="store_true")
+    ap.add_argument("--daily-schedule", action="store_true", help="일간 실행 일정으로 누락 점검")
     ap.add_argument("--today", help="UTC 날짜 YYYY-MM-DD (시험용, 기본은 지금)")
     a = ap.parse_args(argv)
     out = Path(a.out)
@@ -646,9 +651,9 @@ def main(argv=None):
     today = a.today or dt.datetime.now(dt.timezone.utc).date().isoformat()
     if a.stale_check:
         log_path = out / "scan_log.json"
-        problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today)
-        weekly, monthly = expected_runs(today)
-        print("\n".join(problems) if problems else "예약 실행 기록 정상 (주간 %s 이후 실행 %s, 월간 기준일 %s)" % (
+        problems = stale(ledger, json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else [], today, daily=a.daily_schedule)
+        weekly, monthly = expected_runs(today, daily=a.daily_schedule)
+        print("\n".join(problems) if problems else "예약 실행 기록 정상 (추적 %s 이후 실행 %s, 월간 기준일 %s)" % (
             weekly or "첫 예약 전", ledger.get("last_run"), monthly or "첫 예약 전"))
         return 1 if problems else 0
     reg_path = out / "registry.json"
