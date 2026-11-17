@@ -23,7 +23,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: research-records
+  # 월간 등록은 일간 채점과 직렬화하고, 별도 폴더의 진단 탐색은 동시에 계산한다.
+  group: ${{ (github.event.schedule == '7 2 1 * *' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'monthly')) && 'research-records' || 'research-diagnostic' }}
   cancel-in-progress: false
 
 jobs:
