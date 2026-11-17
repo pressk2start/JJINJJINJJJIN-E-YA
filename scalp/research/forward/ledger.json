@@ -1,28 +1,28 @@
 {
  "BTC_surge": {
   "rows": [],
-  "updated": "2026-11-16"
+  "updated": "2026-11-17"
  },
  "CR_rebound": {
   "decision": null,
   "rows": [],
-  "updated": "2026-11-16"
+  "updated": "2026-11-17"
  },
  "CR_variants": {
   "CR_drop5": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-16"
+   "updated": "2026-11-17"
   },
   "CR_drop6": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-16"
+   "updated": "2026-11-17"
   },
   "CR_hold4h": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-16"
+   "updated": "2026-11-17"
   }
  },
  "H2_kimchi": {
@@ -218,33 +218,33 @@
     "strat": -0.1241031655341939
    }
   ],
-  "updated": "2026-11-16"
+  "updated": "2026-11-17"
  },
  "H3_trend": {
-  "as_of": "2026-11-16",
+  "as_of": "2026-11-17",
   "assets": {
    "KRW-BTC": {
-    "benchmark": 0.8249086806823892,
-    "close": 89949000.0,
+    "benchmark": 0.8120788058155226,
+    "close": 88529000.0,
     "equity": 1.0,
-    "gap": -0.16715354081733746,
+    "gap": -0.17634784433849737,
     "on": false,
     "position": false,
-    "sma": 108001900.0,
+    "sma": 107483480.0,
     "trades": []
    },
    "KRW-ETH": {
-    "benchmark": 0.7877000049246219,
-    "close": 2526000.0,
+    "benchmark": 0.7746028551990344,
+    "close": 2482000.0,
     "equity": 1.0,
-    "gap": -0.2156594856763151,
+    "gap": -0.2237394366637685,
     "on": false,
     "position": false,
-    "sma": 3220540.0,
+    "sma": 3197380.0,
     "trades": []
    }
   },
-  "benchmark": 0.8063043428035055,
+  "benchmark": 0.7933408305072784,
   "equity": 1.0
  },
  "candidates": {
@@ -272,10 +272,10 @@
     }
    ],
    "rule": "15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, btc_ret_1h <= -0.01821",
-   "updated": "2026-11-16"
+   "updated": "2026-11-17"
   }
  },
- "last_run": "2026-11-16",
+ "last_run": "2026-11-17",
  "warnings": [
   "H2: 다시 계산한 값이 장부와 다른 기간 2개 (2026-11-03, 2026-11-06) — 장부 값은 그대로 둠"
  ]
