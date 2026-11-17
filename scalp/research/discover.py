@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때만 되는가' 를 달마다 자동으로 묻고, 넘은 것만 후보로 등록한다.
-(공개 시세만, 키·주문 없음, 표준 라이브러리. GitHub Actions 월 1회 실행용 — 거래 서버에서 돌리지 않는다.)
+r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때만 되는가' 를 정해진 날마다 자동으로 묻고, 넘은 것만 후보로 등록한다.
+(공개 시세만, 키·주문 없음, 표준 라이브러리. GitHub Actions 예약 실행용: 매주 월요일과 매월 1일 — 거래 서버에서 돌리지 않는다.)
 
 왜 (사용자 원칙, 2026-11-10): "급등하면 버는가" 가 아니라 "급등한 수많은 사례 중 어떤 조건일 때만 이어지는가" 를 물어야 한다.
     지금까지는 사람이 한 번씩 손으로 돌렸다. 이 파일은 같은 질문을 정해진 틀 안에서 달마다 다시 묻는다.
@@ -27,7 +27,11 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   4 문턱    TRAIN 분위수 5·10·20·33·50% '이하' 와 50·67·80·90·95% '이상' (지표마다 최대 10개).
   5 선별    TRAIN: 거래 ≥ 150건, 평균 순수익 > 0, t ≥ 2 인 것은 전부 HOLDOUT 으로 넘긴다.
             HOLDOUT: 거래 ≥ 100건 · 평균 > 0 · 일 단위 하한 > 0 · 전반·후반 모두 > 0 · 날짜 가중 평균 > 0 · 상위 5일을 빼도 > 0.
-  6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 한 달 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+  6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 달력 한 달에 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+            탐색은 매주 월요일과 매월 1일에 돌고 둘 다 등록한다(고문 판정 2026-11-17 ①). 한 달 상한은 그 달의 실행을 모두 합쳐 센다
+            (이 탐색이 등록한 D- 번호만 센다. 고문이 직접 등록한 A- 번호는 세지 않는다).
+            자주 돌수록 우연히 넘는 규칙을 만날 기회도 늘어난다 — 그래서 상한과 '사건마다 진행 중 1개' 는 그대로 두고,
+            실행마다 훑은 수를 7번 기록에 남긴다.
             사건 종류(급등·돌파·급락)마다 '진행 중인 후보'(등록됐고 아직 판정·만료 전)는 1개까지다 (고문 결정 2026-11-13).
             진행 중인 것이 있으면 그 사건에서는 통과가 나와도 등록하지 않고 기록만 남긴다 — 같은 사건을 두 번 세지 않기 위해서다.
             (급락은 고문이 등록한 알트 동반 급락 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다.)
@@ -65,7 +69,8 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
 
 실행
   python3 scalp/research/discover.py --repro [--markets KRW-BTC,KRW-ETH,...]   고문 수치 재현 (등록·기록 안 함)
-  python3 scalp/research/discover.py --register                              달마다 도는 실행 (잠겨 있으면 기록만)
+  python3 scalp/research/discover.py --register                              예약 실행(매주 월요일·매월 1일. 잠겨 있으면 기록만)
+  python3 scalp/research/discover.py --report-only --out 다른폴더             등록 없이 결과만 따로 기록 (점검용)
   python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH --days 90      작은 범위 점검 (등록·기록 안 함)
 """
 import argparse
@@ -444,12 +449,15 @@ def cand_key(c):
 def register(registry, passed, run_day, universe, decided=()):
     """통과한 것 중 새로 등록할 후보를 고른다 → (새 후보 목록, [(등록하지 않은 통과, 사유)]).
     사건 종류마다 진행 중인 후보(등록됐고 decided 에 없는 것)는 1개까지 — 있으면 등록하지 않고 사유와 함께 돌려준다.
-    그래서 한 번의 실행에서도 사건마다 1개(일 단위 하한이 가장 높은 것)만 등록된다. 달에 MAX_NEW 개까지.
+    그래서 한 번의 실행에서도 사건마다 1개(일 단위 하한이 가장 높은 것)만 등록된다.
+    달력 한 달에 MAX_NEW 개까지: 같은 달에 앞선 실행(주간·월간)이 등록한 것(D-YYYYMM- 번호)을 합쳐서 센다.
     같은 규칙(사건·보유·지표·방향)은 전에 등록된 적이 있으면 다시 등록하지 않는다. decided = 판정·만료가 끝난 후보 번호들."""
     decided = set(decided)
     busy = {c["event"]: c["id"] for c in registry if c.get("status") == "ACTIVE" and c["id"] not in decided}
     seen = {cand_key(c) for c in registry}
     taken = {c["id"] for c in registry}
+    month = "D-%s-" % run_day[:7].replace("-", "")
+    used = sum(1 for c in registry if c["id"].startswith(month))    # 이번 달에 이미 등록한 수
     new, held = [], []
     for f in sorted(passed, key=lambda f: -f["holdout"]["day_low"]):
         spec = {"engine": ENGINE, "registered": run_day, "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
@@ -460,15 +468,15 @@ def register(registry, passed, run_day, universe, decided=()):
             why = "%s 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)" % busy[f["event"]]
         elif cand_key(spec) in seen:
             why = "같은 규칙이 전에 등록된 적 있음"
-        elif len(new) >= MAX_NEW:
-            why = "한 달 등록 한도 %d개" % MAX_NEW
+        elif used + len(new) >= MAX_NEW:
+            why = "달력 한 달 등록 한도 %d개 (이번 달 %d개 등록됨)" % (MAX_NEW, used + len(new))
         if why:
             held.append((spec, why))
             continue
         k = 1
-        while "D-%s-%02d" % (run_day[:7].replace("-", ""), k) in taken:
+        while "%s%02d" % (month, k) in taken:
             k += 1
-        spec["id"] = "D-%s-%02d" % (run_day[:7].replace("-", ""), k)
+        spec["id"] = "%s%02d" % (month, k)
         taken.add(spec["id"])
         busy[f["event"]] = spec["id"]
         seen.add(cand_key(spec))
@@ -694,7 +702,7 @@ def main(argv=None):
             tail.append("등록하지 않음: 틀이 아직 잠겨 있음(FRAME_APPROVED=False)")
         log_path = out / "scan_log.json"
         history = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
-        history.append(dict(counts, mode="diagnostic" if a.report_only else "monthly", run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
+        history.append(dict(counts, mode="diagnostic" if a.report_only else "register", run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
                             held=[{"rule": describe(c), "why": why} for c, why in held], locked=not FRAME_APPROVED))
         log_path.write_text(json.dumps(history, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         (out / "DISCOVERY.md").write_text("# 후보 탐색 기록\n\n자동으로 만들어지는 파일입니다. 마지막 실행 %s (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.\n\n```\n%s\n```\n" % (
