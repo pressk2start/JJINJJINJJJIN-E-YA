@@ -284,6 +284,24 @@ class Registry(unittest.TestCase):
         self.assertEqual([(c["event"], c["hold"], c["id"]) for c in again], [("CRASH", 4, "D-202701-01")])
         self.assertIn("같은 규칙이 전에 등록된 적 있음", [why for c, why in held if (c["event"], c["hold"]) == ("CRASH", 16)])   # 끝난 규칙을 다시 걸지 않는다
 
+    def test_three_a_calendar_month_counts_every_run_of_that_month(self):
+        """탐색이 매주도 돈다(고문 판정 2026-11-17 ①). 한 달 상한 3개는 그 달의 실행을 모두 합쳐 센다."""
+        def done(cid, event, key, day):
+            return dict(self.found(event, 4, key, 0.001), id=cid, status="ACTIVE", registered=day, engine=D.ENGINE)
+        registry = [done("D-202612-01", "CRASH", "x", "2026-12-01"), done("D-202612-02", "SURGE", "y", "2026-12-07"),
+                    done("A-202612-01", "BREAKOUT", "z", "2026-12-03")]                               # 고문이 직접 등록한 것은 세지 않는다
+        decided = {c["id"] for c in registry}                                                         # 셋 다 판정이 끝나 사건 자리는 비어 있다
+        passed = [self.found("CRASH", 4, "a", 0.005), self.found("SURGE", 4, "b", 0.004), self.found("BREAKOUT", 4, "c", 0.003)]
+        new, held = D.register(registry, passed, "2026-12-14", ("KRW-BTC",), decided=decided)         # 12월 셋째 실행: 이번 달 자리는 하나 남았다
+        self.assertEqual([(c["event"], c["id"]) for c in new], [("CRASH", "D-202612-03")])
+        self.assertEqual([(c["event"], why) for c, why in held],
+                         [("SURGE", "달력 한 달 등록 한도 3개 (이번 달 3개 등록됨)"), ("BREAKOUT", "달력 한 달 등록 한도 3개 (이번 달 3개 등록됨)")])
+        new, held = D.register(registry + new, passed[1:], "2026-12-21", ("KRW-BTC",), decided=decided)   # 그 뒤의 12월 실행은 등록하지 못한다
+        self.assertEqual((new, len(held)), ([], 2))
+        new, held = D.register(registry, passed, "2027-01-04", ("KRW-BTC",), decided=decided)         # 달이 바뀌면 다시 3개
+        self.assertEqual([c["id"] for c in new], ["D-202701-01", "D-202701-02", "D-202701-03"])
+        self.assertEqual(D.MAX_NEW, 3)
+
     def test_crash_waits_for_the_advisors_candidate(self):
         """급락은 고문이 등록한 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다 (고문 결정 2026-11-13)."""
         registry = json.loads((ROOT / "scalp" / "research" / "forward" / "registry.json").read_text(encoding="utf-8"))
@@ -328,6 +346,7 @@ class Registry(unittest.TestCase):
             self.assertEqual([c["event"] for c in reg], ["CRASH"])
             log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
             self.assertEqual((len(log), log[1]["locked"], log[1]["registered"]), (2, False, [reg[0]["id"]]))
+            self.assertEqual(log[1]["mode"], "register")                                              # 주간이든 월간이든 등록 실행은 같은 이름으로 남는다
             D.main(["--register", "--out", str(tmp), "--today", today])                       # 같은 통과가 또 나와도 진행 중이면 기록만
             log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
             self.assertEqual((log[2]["registered"], len(json.loads((tmp / "registry.json").read_text(encoding="utf-8")))), ([], 1))

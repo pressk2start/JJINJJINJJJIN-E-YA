@@ -594,7 +594,7 @@ class MissedRuns(unittest.TestCase):
 
     def ledger(self, day, **over):
         out = {"last_run": day, "H2_kimchi": {"updated": day}, "H3_trend": {"as_of": day}, "CR_rebound": {"updated": day},
-               "BTC_surge": {"updated": day}, "CR_variants": {v["key"]: {"updated": day} for v in FW.CR_VARIANTS},
+               "BTC_surge": {"updated": day}, "CR_variants": {v["key"]: {"updated": day} for v in FW.CR_VARIANTS}, "observation": {"as_of": day},
                "candidates": {"A-1": {"updated": day, "decision": None}, "D-0": {"updated": "2026-01-01", "decision": {"verdict": "FAIL"}}}}
         out.update(over)
         return out
@@ -612,6 +612,32 @@ class MissedRuns(unittest.TestCase):
         late = self.ledger("2026-11-18")
         late["CR_rebound"]["updated"] = "2026-11-17"                                                  # 다른 항목은 어제 실행에서 갱신됐어야 한다
         self.assertEqual(FW.stale(late, [], "2026-11-19", daily=True), ["급락 반등: 2026-11-18 이후 갱신되지 못함 — 마지막 갱신 2026-11-17"])
+
+    def test_daily_schedule_waits_for_the_later_of_the_weekly_and_monthly_search(self):
+        """탐색은 매주 월요일과 매월 1일에 돈다(고문 판정 2026-11-17 ①). 둘 중 늦은 예약일의 실행이 기록에 있어야 한다."""
+        self.assertIsNone(FW.expected_search("2026-11-23"))                                            # 첫 주간 예약일 당일에는 아직 기다리지 않는다
+        self.assertEqual(FW.expected_search("2026-11-24"), ("2026-11-23", "주간"))
+        self.assertEqual(FW.expected_search("2026-12-01"), ("2026-11-30", "주간"))                      # 1일 당일: 지난 월요일 것만
+        self.assertEqual(FW.expected_search("2026-12-02"), ("2026-12-01", "월간"))                      # 월요일(11/30)보다 1일이 늦다
+        self.assertEqual(FW.expected_search("2026-12-08"), ("2026-12-07", "주간"))
+        self.assertEqual(dt.date.fromisoformat(FW.FIRST_SEARCH_WEEKLY).weekday(), 0)
+        ok = self.ledger("2026-11-23")
+        self.assertEqual(FW.stale(ok, [{"run": "2026-11-17"}], "2026-11-24", daily=True),
+                         ["주간 탐색: 2026-11-23 예약 실행이 기록에 없음 — 마지막 실행 2026-11-17"])
+        self.assertEqual(FW.stale(ok, [{"run": "2026-11-17"}, {"run": "2026-11-23"}], "2026-11-24", daily=True), [])
+        self.assertEqual(FW.stale(self.ledger("2026-12-01"), [{"run": "2026-11-30"}], "2026-12-02", daily=True),
+                         ["월간 탐색: 2026-12-01 예약 실행이 기록에 없음 — 마지막 실행 2026-11-30"])
+        self.assertEqual(FW.stale(self.ledger("2026-11-16"), [], "2026-11-24"), ["주간 추적: 2026-11-23(월) 예약 실행이 기록에 없음 — 마지막 실행 2026-11-16"])   # 옛 주간 일정은 월간 탐색만 본다
+
+    def test_the_observation_table_and_same_day_registrations(self):
+        old = self.ledger("2026-11-18", observation={"as_of": "2026-11-16"})                          # 관찰 표만 이틀째 못 받았다
+        self.assertEqual(FW.stale(old, [], "2026-11-19", daily=True), ["관찰 표: 2026-11-18 이후 갱신되지 못함 — 마지막 갱신 2026-11-16"])
+        ledger = self.ledger("2026-11-23")
+        ledger["candidates"] = {}
+        registry = [{"id": "D-202611-01", "status": "ACTIVE", "registered": "2026-11-23"},            # 어제 등록: 어제의 추적 실행이 등록보다 먼저 돌았을 수 있다
+                    {"id": "D-202611-02", "status": "ACTIVE", "registered": "2026-11-22"}]            # 그제 등록: 어제 실행에서 채점됐어야 한다
+        self.assertEqual(FW.stale(ledger, [{"run": "2026-11-23"}], "2026-11-24", registry, daily=True),
+                         ["후보 D-202611-02: 2026-11-23 이후 갱신되지 못함 — 마지막 갱신 없음"])
 
     def test_expected_dates(self):
         self.assertEqual(FW.expected_runs("2026-11-15"), (None, None))                                 # 첫 예약 전
@@ -682,10 +708,67 @@ class ScheduledWorkflows(unittest.TestCase):
             self.assertNotIn("curl", text, name)                                                      # 응답을 버리는 전송은 쓰지 않는다
             self.assertNotIn("sendMessage", text, name)
 
+    def steps(self, name):
+        """워크플로의 단계들 → {단계 이름: 단계 글}."""
+        text = (self.WF / name).read_text(encoding="utf-8")
+        out = {}
+        for block in text.split("\n      - ")[1:]:
+            block = "\n".join(ln for ln in block.split("\n") if not ln.strip().startswith("#"))
+            out[block.split("\n")[0].replace("name: ", "").strip()] = block
+        return text, out
+
+    def test_the_tracker_is_scheduled_three_times_a_day_and_later_slots_skip_a_finished_day(self):
+        """고문 판정 2026-11-17 ①: 예약을 하루 세 번 걸고, 그날(UTC) 이미 성공했으면 시세를 받지 않고 바로 끝난다."""
+        text, steps = self.steps("forward-watch.yml")
+        crons = [ln.split('"')[1] for ln in text.splitlines() if ln.strip().startswith("- cron:")]
+        self.assertEqual(crons, ["25 0 * * *", "25 4 * * *", "25 8 * * *"])
+        gate = steps["Already done today (scheduled runs only)"]
+        self.assertIn("if: github.event_name == 'schedule'", gate)                                    # 사람이 돌린 실행은 묻지 않고 돈다
+        self.assertIn("forward_watch.py --done-today", gate)
+        self.assertIn('echo "skip=1"', gate)
+        names = list(steps)
+        after = names[names.index("Already done today (scheduled runs only)") + 1:]
+        self.assertEqual(after[-1], "Telegram on failure (only when both secrets exist)")
+        for name in after[:-1]:                                                                       # 건너뛴 날에는 받지도, 올리지도, 보내지도, 실패로 끝나지도 않는다
+            cond = [ln for ln in steps[name].split("\n") if ln.strip().startswith("if:")]
+            self.assertEqual(len(cond), 1, name)
+            self.assertIn("steps.gate.outputs.skip != '1'", cond[0], name)
+        self.assertIn("steps.run.outputs.code != '0'", steps["Fail if any candidate could not be updated"])
+
+    def test_one_summary_a_day_and_the_last_slot_reports_even_a_failed_day(self):
+        text, steps = self.steps("forward-watch.yml")
+        cond = next(ln for ln in steps["Telegram daily summary (only when both secrets exist)"].split("\n") if ln.strip().startswith("if:"))
+        self.assertIn("steps.run.outputs.code == '0'", cond)                                          # 예약 실행은 경고 없이 끝났을 때만
+        self.assertIn("github.event_name != 'schedule'", cond)                                        # 사람이 돌린 실행은 결과와 무관하게
+        last = cond.split("github.event.schedule == '")[1].split("'")[0]
+        self.assertEqual(last, "25 8 * * *")                                                          # 그날의 마지막 예약은 실패했어도 보낸다
+        self.assertIn('cron: "%s"' % last, text)
+        self.assertIn("forward_watch.py --summary", steps["Telegram daily summary (only when both secrets exist)"])
+
+    def test_the_search_registers_on_both_schedules_and_does_not_queue_behind_the_tracker(self):
+        """고문 판정 2026-11-17 ①: 탐색은 매월 1일과 매주 월요일, 둘 다 --register."""
+        text, steps = self.steps("discover.yml")
+        self.assertIn('cron: "7 2 1 * *"', text)
+        self.assertIn('cron: "37 3 * * 1"', text)
+        pick = steps["Select register or diagnostic run"]
+        self.assertIn('if [ "$EVENT_NAME" = "schedule" ] ||', pick)                                   # 예약이면 어느 쪽이든 등록 실행
+        register, rest = pick.split("else")
+        self.assertIn("args=--register", register)
+        self.assertIn("out=scalp/research/forward\"", register)
+        self.assertIn("args=--report-only", rest)                                                     # 그 밖(push, 사람이 고른 diagnostic)은 별도 폴더
+        self.assertIn("weekly_discovery", rest)
+        self.assertIn("default: register", text)
+        tracker = (self.WF / "forward-watch.yml").read_text(encoding="utf-8")
+        group = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("group:")]
+        self.assertEqual(group, ["group: research-search"])                                           # 추적과 같은 묶음이면 기다리다 취소될 수 있다
+        self.assertIn("group: research-records", tracker)
+        for body in (text, tracker):                                                                  # 서로 밀리면 다시 받아서 올린다
+            self.assertIn("for try in 1 2 3; do", body)
+            self.assertIn("git pull --rebase origin main && git push origin HEAD:main", body)
+
     def test_the_daily_watchdog_writes_nothing(self):
         text = (self.WF / "watchdog.yml").read_text(encoding="utf-8")
         self.assertIn('cron: "47 5 * * *"', text)
-        self.assertIn('cron: "17 1 * * *"', (self.WF / "forward-watch.yml").read_text(encoding="utf-8"))
         self.assertIn("--daily-schedule", text)
         self.assertIn("contents: read", text)
         self.assertIn("forward_watch.py --stale-check", text)
@@ -1062,6 +1145,232 @@ class RegisteredCandidates(unittest.TestCase):
         ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[self.cand(reg, engine="1")], **offline(self.cut(panel, q0, 90)))
         self.assertEqual(ledger["candidates"]["D-202610-01"]["rows"], [])
         self.assertTrue(any("틀" in w for w in warnings))
+
+
+def clean(monday, **over):
+    """경고 없이 끝나는 update 인자들과 처음 장부. H2 는 그 주 반영이 끝난 것으로 둔다(건너뜀)."""
+    args = dict(h2_inputs=lambda: (_ for _ in ()).throw(AssertionError("H2 는 건너뛰어야 한다")), h3_fetch=lambda m, d: h3_candles(140, 0.01),
+                cr_fetch=lambda s, e: {m: ([], None) for m in AM.CR_COST}, surge_fetch=lambda m: [], crv_fetch=lambda m, s, e: [],
+                list_markets=lambda: (_ for _ in ()).throw(RuntimeError("목록 조회 없음")))
+    args.update(over)
+    return args, {"H2_kimchi": {"rows": [], "decision": None, "updated": monday}}
+
+
+class DailyRuns(unittest.TestCase):
+    """고문 판정 2026-11-17 ①: 매일 돌고(예약 하루 세 번), 하루 한 메시지에 새로 끝난 거래를 싣는다."""
+    START = AM.to_min(FW.CRV_START)
+
+    def sol_drop(self, m, s, e):
+        """SOL 만 추적 시작 뒤에 한 번 6.5% 빠진다 → 세 변형에 거래가 한 건씩."""
+        closes = [100.0] * 20 + [93.5] + [93.5 * 1.01] * 60
+        return five_min(closes, self.START + 60) if m == "KRW-SOL" else five_min([100.0] * 90, self.START + 60)
+
+    def test_only_a_run_without_warnings_marks_the_day_done(self):
+        args, ledger = clean("2026-11-16")
+        ledger, warnings = FW.update(ledger, "2026-11-20", **args)
+        self.assertEqual((warnings, ledger["last_ok"], ledger["last_run"]), ([], "2026-11-20", "2026-11-20"))
+        args["crv_fetch"] = lambda m, s, e: (_ for _ in ()).throw(TimeoutError("조회 실패"))
+        ledger, warnings = FW.update(ledger, "2026-11-21", **args)
+        self.assertTrue(warnings)
+        self.assertEqual((ledger["last_ok"], ledger["last_run"]), ("2026-11-20", "2026-11-21"))        # 실행은 했지만 끝난 날로 치지 않는다
+
+    def test_the_done_today_question_reads_only_the_ledger(self):
+        real = FW.update
+        FW.update = lambda *a, **k: (_ for _ in ()).throw(AssertionError("시세를 받으면 안 된다"))
+        try:
+            with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()) as buf:
+                self.assertEqual(FW.main(["--out", d, "--done-today", "--today", "2026-11-20"]), 1)    # 장부가 없으면 아직 안 끝난 것
+                (Path(d) / "ledger.json").write_text(json.dumps({"last_ok": "2026-11-20", "last_run": "2026-11-21"}), encoding="utf-8")
+                self.assertEqual(FW.main(["--out", d, "--done-today", "--today", "2026-11-20"]), 0)
+                self.assertEqual(FW.main(["--out", d, "--done-today", "--today", "2026-11-21"]), 1)    # 실행 기록(last_run)만으로는 끝난 것이 아니다
+                self.assertEqual(sorted(x.name for x in Path(d).iterdir()), ["ledger.json"])           # 아무것도 쓰지 않는다
+            self.assertIn("건너뜀", buf.getvalue())
+        finally:
+            FW.update = real
+
+    def test_new_trades_are_listed_once_with_coin_and_return(self):
+        args, ledger = clean("2026-11-16", crv_fetch=self.sol_drop)
+        ledger, warnings = FW.update(ledger, "2026-11-20", **args)
+        items = ledger["new"]["items"]
+        self.assertEqual((warnings, ledger["new"]["day"]), ([], "2026-11-20"))
+        self.assertEqual([(x["item"], x["market"]) for x in items],
+                         [("급락 반등 변형 −5%", "SOL"), ("급락 반등 변형 −6%", "SOL"), ("급락 반등 변형 4시간 보유", "SOL")])
+        rows = ledger["CR_variants"]["CR_drop5"]["rows"]
+        self.assertEqual((items[0]["net"], items[0]["when"]), (rows[0]["net"], AM.kst(rows[0]["entry_min"])))
+        text = FW.summary(ledger)
+        self.assertIn("새로 끝난 거래 3건:", text)
+        self.assertIn("  급락 반등 변형 −5% SOL " + AM.kst(rows[0]["entry_min"]) + " → " + FW._pct(rows[0]["net"]), text)
+        again, _ = FW.update(copy.deepcopy(ledger), "2026-11-20", **args)                              # 같은 날 다시 돌려도 두 번 적지 않는다
+        self.assertEqual(again["new"], ledger["new"])
+        ledger, _ = FW.update(ledger, "2026-11-21", **args)                                            # 어제 요약에 실린 것은 다음 날 비운다
+        self.assertEqual(ledger["new"], {"day": "2026-11-21", "items": []})
+        text = FW.summary(ledger)
+        self.assertIn("새로 끝난 거래 없음", text)
+        self.assertNotIn("SOL", text)                                                                 # 없으면 진행 숫자만
+
+    def test_trades_from_a_failed_day_stay_until_a_clean_run_reports_them(self):
+        broken = lambda m, d: (_ for _ in ()).throw(OSError("no network"))
+        args, ledger = clean("2026-11-16", crv_fetch=self.sol_drop, h3_fetch=broken)
+        ledger, warnings = FW.update(ledger, "2026-11-20", **args)                                     # 거래는 붙었지만 H3 를 못 받아 실패한 날
+        self.assertTrue(warnings)
+        self.assertEqual((len(ledger["new"]["items"]), ledger.get("last_ok")), (3, None))
+        good, _ = clean("2026-11-16", crv_fetch=self.sol_drop)
+        ledger, warnings = FW.update(ledger, "2026-11-21", **good)                                     # 다음 날 성공: 어제 것이 아직 실려 있다
+        self.assertEqual((warnings, len(ledger["new"]["items"]), ledger["new"]["day"], ledger["last_ok"]), ([], 3, "2026-11-21", "2026-11-21"))
+        ledger, _ = FW.update(ledger, "2026-11-22", **good)                                            # 그 요약이 나간 뒤에야 비운다
+        self.assertEqual(ledger["new"]["items"], [])
+
+    def test_new_periods_and_candidate_trades_are_listed_too_and_a_long_list_is_cut(self):
+        q0, panel = crash_panel(90)
+        cand = RegisteredCandidates().cand(DISC.q_day(q0 + 80 * 96))
+        today = DISC.q_day(q0 + 90 * 96)
+        args = offline(panel)
+        rows = [row(k, 0.01 * (k + 1)) for k in range(2)]
+        real = FW.h2_rows
+        FW.h2_rows = lambda data, bn, last: rows
+        try:
+            args["h2_inputs"] = lambda: ({}, {}, [])
+            ledger, _ = FW.update({"H2_kimchi": {"rows": rows[:1], "decision": None}}, today, registry=[cand], **args)
+        finally:
+            FW.h2_rows = real
+        items = ledger["new"]["items"]
+        self.assertEqual(items[0], {"item": "H2 김치 되돌림", "market": "A01", "when": rows[1]["date"] + " 매수", "net": 0.02})   # 이미 있던 기간은 적지 않는다
+        got = ledger["candidates"][cand["id"]]["rows"]
+        self.assertEqual(len(items), 1 + len(got))
+        self.assertEqual(items[1], {"item": "후보 " + cand["id"], "market": "AAA", "when": AM.kst(got[0]["entry_q"] * 15), "net": got[0]["net"]})
+        ledger["new"]["items"] = [dict(items[1], when="t%02d" % k) for k in range(FW.NEW_SHOW + 3)]
+        lines = FW.summary(ledger).splitlines()
+        self.assertIn("새로 끝난 거래 %d건:" % (FW.NEW_SHOW + 3), lines)
+        self.assertEqual(sum(1 for ln in lines if ln.startswith("  후보 ")), FW.NEW_SHOW)
+        self.assertIn("  외 3건", lines)
+
+
+class Observation(unittest.TestCase):
+    """고문 판정 2026-11-17 ①: 현황에 최근 7일·28일 관찰 표. 관찰용 — 판정과 등록에 쓰지 않는다."""
+
+    def setUp(self):
+        self.saved = DISC.REPRO_UNIVERSE
+        DISC.REPRO_UNIVERSE = ("KRW-BTC", "KRW-AAA")
+        self.q0, self.panel = crash_panel(90)
+        self.today = DISC.q_day(self.q0 + 90 * 96)
+        self.asked = []
+
+    def tearDown(self):
+        DISC.REPRO_UNIVERSE = self.saved
+
+    def loader(self, start_q, end_q, markets):
+        self.asked.append((start_q, end_q, tuple(markets)))
+        return {m: self.panel[m] for m in markets}
+
+    def expected(self, days):
+        """crash_panel 의 급락(120봉마다) 가운데 진입 봉이 직전 days 일에 든 것의 수와 거래당 순수익."""
+        end = self.q0 + 90 * 96
+        n = sum(1 for k in range(120, 90 * 96, 120) if end - days * 96 <= self.q0 + k + 1 < end)
+        gross = (1 + 0.02 / 4.0) ** 4 - 1
+        return n, (1 + gross) * (1 - 0.001) / (1 + 0.001) - 1
+
+    def test_the_three_basic_events_are_counted_over_seven_and_twenty_eight_days(self):
+        obs = FW.observe(self.today, list_markets=lambda: ["KRW-BTC", "KRW-AAA", "KRW-ZZZ"], panel_loader=self.loader)
+        end = DISC.day_q(self.today)
+        self.assertEqual(self.asked, [(end - 28 * 96 - FW.OBS_WARMUP_Q, end, ("KRW-BTC", "KRW-AAA"))])   # 28일과 앞쪽 자료만 받는다
+        self.assertEqual((obs["as_of"], obs["markets"], obs["missing"]), (self.today, 2, []))
+        self.assertEqual(sorted(obs["events"]), ["BREAKOUT", "CRASH", "SURGE"])
+        for days in (7, 28):
+            n, net = self.expected(days)
+            got = obs["events"]["CRASH"][str(days)]
+            self.assertEqual(got[0], n, days)
+            self.assertAlmostEqual(got[1], net, places=9)
+            self.assertEqual(obs["events"]["SURGE"][str(days)], [0, None])                             # 없는 사건은 0건, 평균 없음
+        self.assertEqual((self.expected(7)[0], self.expected(28)[0]), (5, 22))                         # 30시간마다 한 건
+        self.assertEqual(FW.OBS_DAYS, (7, 28))
+
+    def test_the_window_is_the_days_before_the_run_day(self):
+        pairs = [("2026-11-30", 9.0), ("2026-11-29", 0.01), ("2026-11-23", 0.03), ("2026-11-22", 0.05), ("2026-11-02", 0.07), ("2026-11-01", 9.0)]
+        self.assertEqual(FW.window_stats(pairs, "2026-11-30", 7), [2, 0.02])                           # 11/23 ~ 11/29. 실행일 당일은 세지 않는다
+        self.assertEqual(FW.window_stats(pairs, "2026-11-30", 28)[0], 4)                               # 11/02 ~ 11/29
+        self.assertAlmostEqual(FW.window_stats(pairs, "2026-11-30", 28)[1], 0.04)
+        self.assertEqual(FW.window_stats([], "2026-11-30", 7), [0, None])
+
+    def test_a_delisted_coin_is_left_out_and_named_and_an_unusable_list_removes_nothing(self):
+        obs = FW.observe(self.today, list_markets=lambda: ["KRW-BTC"], panel_loader=self.loader)
+        self.assertEqual((obs["markets"], obs["missing"], self.asked[-1][2]), (1, ["KRW-AAA"], ("KRW-BTC",)))
+        self.assertEqual(obs["events"]["CRASH"]["28"], [0, None])
+        for bad in (lambda: [], lambda: (_ for _ in ()).throw(TimeoutError("목록 조회 실패"))):          # 빈 목록, 조회 실패
+            obs = FW.observe(self.today, list_markets=bad, panel_loader=self.loader)
+            self.assertEqual((obs["markets"], obs["missing"]), (2, []))
+
+    def test_the_table_changes_nothing_else_in_the_ledger(self):
+        """관찰 표는 판정에도 등록에도 쓰지 않는다: 있든 없든 나머지 장부(거래, 판정, 보류)는 글자 하나 다르지 않다."""
+        cand = RegisteredCandidates().cand(DISC.q_day(self.q0 + 30 * 96))
+        args = offline(self.panel)
+        plain, _ = FW.update({}, self.today, registry=[cand], **args)
+        seen, _ = FW.update({}, self.today, registry=[cand], observer=lambda day: FW.observe(day, lambda: [], self.loader), **args)
+        self.assertIsNotNone(seen["candidates"][cand["id"]]["decision"])                               # 판정까지 간 장부로 비교한다
+        table = seen.pop("observation")
+        self.assertEqual(table["events"]["CRASH"]["28"][0], 22)
+        self.assertEqual(json.dumps(seen, sort_keys=True), json.dumps(plain, sort_keys=True))
+        reg_source = (ROOT / "scalp" / "research" / "discover.py").read_text(encoding="utf-8")
+        self.assertNotIn("observation", reg_source)                                                   # 탐색·등록 쪽은 이 값을 읽지 않는다
+
+    def test_a_failed_fetch_keeps_the_old_table_and_the_day_is_not_done(self):
+        args, ledger = clean("2026-11-16")
+        ledger["observation"] = {"as_of": "2026-11-19", "markets": 20, "missing": [], "events": {}}
+        before = copy.deepcopy(ledger["observation"])
+        ledger, warnings = FW.update(ledger, "2026-11-20", observer=lambda day: (_ for _ in ()).throw(TimeoutError("조회 실패")), **args)
+        self.assertEqual(warnings, ["관찰 표: 이번 실행에서 갱신하지 못함 — TimeoutError: 조회 실패"])
+        self.assertEqual((ledger["observation"], ledger.get("last_ok")), (before, None))               # 뒤의 예약이 다시 받는다
+        ledger, warnings = FW.update(ledger, "2026-11-20", observer=lambda day: dict(before, as_of=day), **args)
+        self.assertEqual((warnings, ledger["observation"]["as_of"], ledger["last_ok"]), ([], "2026-11-20", "2026-11-20"))
+
+    def test_the_real_run_computes_the_table(self):
+        got = {}
+
+        def spy(ledger, today, **kw):
+            got.update(kw)
+            return ledger, []
+        real = FW.update
+        FW.update = spy
+        try:
+            with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(FW.main(["--out", d, "--dry-run", "--today", "2026-11-20"]), 0)
+        finally:
+            FW.update = real
+        self.assertIs(got["observer"], FW.observe)
+
+    def test_status_shows_events_and_every_tracked_item_and_says_what_the_table_is_not_for(self):
+        today = "2026-11-30"
+
+        def trade(days_ago, net, market="KRW-BTC"):
+            entry = AM.to_min(AM.parse_utc(DF._shift(today, -days_ago) + "T03:00"))
+            return {"market": market, "entry_min": entry, "exit_min": entry + 60, "drop": -0.05, "entry": 1.0, "exit": 1.0, "gross": net, "net": net}
+        ledger = {"last_run": today, "warnings": [],
+                  "observation": {"as_of": today, "markets": 19, "missing": ["KRW-WAVES"],
+                                  "events": {"SURGE": {"7": [3, -0.004], "28": [11, -0.006]}, "BREAKOUT": {"7": [0, None], "28": [40, 0.001]},
+                                             "CRASH": {"7": [2, 0.01], "28": [9, -0.002]}}},
+                  "H2_kimchi": {"rows": [{"date": DF._shift(today, -5), "picks": [], "strat": -0.03, "ew": 0.0, "btc": 0.0},
+                                         {"date": DF._shift(today, -20), "picks": [], "strat": 0.01, "ew": 0.0, "btc": 0.0}], "decision": None},
+                  "CR_rebound": {"rows": [trade(40, 0.5), trade(28, 0.03), trade(8, 0.01), trade(7, 0.02), trade(1, -0.01)], "decision": None},
+                  "CR_variants": {"CR_drop5": {"rows": [trade(3, 0.004)], "decision": None}},
+                  "candidates": {"A-202611-01": {"rows": [{"market": "KRW-SAND", "entry_q": 1, "exit_q": 5, "day": DF._shift(today, -2),
+                                                           "gross": -0.012, "net": -0.014, "move": -0.04}], "decision": None}}}
+        text = FW.render(ledger)
+        self.assertIn("## 관찰 표 — 관찰용, 판정과 등록에 쓰지 않는다", text)
+        self.assertIn("이 표로 통과·탈락을 정하지 않고 후보를 등록하지도 않습니다", text)
+        self.assertIn("| 항목 | 최근 7일 건수 | 평균 | 최근 28일 건수 | 평균 |", text)
+        for line in ("| 급등 뒤 1시간 보유 (조건 없음) | 3 | -0.40% | 11 | -0.60% |", "| 돌파 뒤 1시간 보유 (조건 없음) | 0 | - | 40 | +0.10% |",
+                     "| 급락 뒤 1시간 보유 (조건 없음) | 2 | +1.00% | 9 | -0.20% |",
+                     "| H2 김치 되돌림 (3일 기간 단위) | 1 | -3.00% | 2 | -1.00% |",
+                     "| 급락 반등 | 2 | +0.50% | 4 | +1.25% |",                                        # 7일 전과 1일 전 / 28일 전까지. 40일 전은 어느 쪽에도 없다
+                     "| 급락 반등 변형 −5% | 1 | +0.40% | 1 | +0.40% |", "| 급락 반등 변형 −6% | 0 | - | 0 | - |",
+                     "| 후보 A-202611-01 | 1 | -1.40% | 1 | -1.40% |"):
+            self.assertIn(line, text)
+        self.assertIn("고문의 고정 20종목 가운데 19종목(상장 목록에 없어 뺀 종목: WAVES)의 15분봉", text)
+        self.assertIn("급등 -0.770%(924건)", text)                                                     # 고문 집계 과거 평균을 옆에 둔다
+        self.assertNotIn("관찰", FW.summary(ledger))                                                   # 텔레그램 요약에는 싣지 않는다
+        ledger["observation"].update(markets=20, missing=[])
+        self.assertIn("기본 사건(위 3줄): 고문의 고정 20종목의 15분봉.", FW.render(ledger))
+        del ledger["observation"]
+        self.assertIn("기본 사건(급등·돌파·급락)은 아직 계산된 값이 없습니다", FW.render(ledger))
 
 
 if __name__ == "__main__":
