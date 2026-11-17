@@ -1,0 +1,16 @@
+[
+ {
+  "scanned": 1159,
+  "selected": 143,
+  "passed": 0,
+  "mode": "diagnostic",
+  "run": "2026-11-17",
+  "engine": "3",
+  "markets": 30,
+  "start": "2022-11-18",
+  "cut": "2025-04-12",
+  "registered": [],
+  "held": [],
+  "locked": false
+ }
+]
