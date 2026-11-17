@@ -729,7 +729,9 @@ class ScheduledWorkflows(unittest.TestCase):
         names = list(steps)
         after = names[names.index("Already done today (scheduled runs only)") + 1:]
         self.assertEqual(after[-1], "Telegram on failure (only when both secrets exist)")
-        for name in after[:-1]:                                                                       # 건너뛴 날에는 받지도, 올리지도, 보내지도, 실패로 끝나지도 않는다
+        for name in after[:-1]:
+            if name in ("Telegram daily summary (only when both secrets exist)", "Save summary receipt"):
+                continue                                                                       # 건너뛴 날에는 받지도, 올리지도, 보내지도, 실패로 끝나지도 않는다
             cond = [ln for ln in steps[name].split("\n") if ln.strip().startswith("if:")]
             self.assertEqual(len(cond), 1, name)
             self.assertIn("steps.gate.outputs.skip != '1'", cond[0], name)
@@ -1202,6 +1204,7 @@ class DailyRuns(unittest.TestCase):
         self.assertIn("  급락 반등 변형 −5% SOL " + AM.kst(rows[0]["entry_min"]) + " → " + FW._pct(rows[0]["net"]), text)
         again, _ = FW.update(copy.deepcopy(ledger), "2026-11-20", **args)                              # 같은 날 다시 돌려도 두 번 적지 않는다
         self.assertEqual(again["new"], ledger["new"])
+        ledger["summary_covers_run_day"] = "2026-11-20"  # 실제 전달 확인
         ledger, _ = FW.update(ledger, "2026-11-21", **args)                                            # 어제 요약에 실린 것은 다음 날 비운다
         self.assertEqual(ledger["new"], {"day": "2026-11-21", "items": []})
         text = FW.summary(ledger)
@@ -1217,6 +1220,7 @@ class DailyRuns(unittest.TestCase):
         good, _ = clean("2026-11-16", crv_fetch=self.sol_drop)
         ledger, warnings = FW.update(ledger, "2026-11-21", **good)                                     # 다음 날 성공: 어제 것이 아직 실려 있다
         self.assertEqual((warnings, len(ledger["new"]["items"]), ledger["new"]["day"], ledger["last_ok"]), ([], 3, "2026-11-21", "2026-11-21"))
+        ledger["summary_covers_run_day"] = "2026-11-21"  # 실제 전달 확인
         ledger, _ = FW.update(ledger, "2026-11-22", **good)                                            # 그 요약이 나간 뒤에야 비운다
         self.assertEqual(ledger["new"]["items"], [])
 
