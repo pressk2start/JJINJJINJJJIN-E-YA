@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때만 되는가' 를 달마다 자동으로 묻고, 넘은 것만 후보로 등록한다.
-(공개 시세만, 키·주문 없음, 표준 라이브러리. GitHub Actions 월 1회 실행용 — 거래 서버에서 돌리지 않는다.)
+r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때만 되는가' 를 정해진 날마다 자동으로 묻고, 넘은 것만 후보로 등록한다.
+(공개 시세만, 키·주문 없음, 표준 라이브러리. GitHub Actions 예약 실행용: 등록은 매월 1일, 매주 월요일은 등록 없는 점검 — 거래 서버에서 돌리지 않는다.)
 
 왜 (사용자 원칙, 2026-11-10): "급등하면 버는가" 가 아니라 "급등한 수많은 사례 중 어떤 조건일 때만 이어지는가" 를 물어야 한다.
     지금까지는 사람이 한 번씩 손으로 돌렸다. 이 파일은 같은 질문을 정해진 틀 안에서 달마다 다시 묻는다.
@@ -27,7 +27,15 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   4 문턱    TRAIN 분위수 5·10·20·33·50% '이하' 와 50·67·80·90·95% '이상' (지표마다 최대 10개).
   5 선별    TRAIN: 거래 ≥ 150건, 평균 순수익 > 0, t ≥ 2 인 것은 전부 HOLDOUT 으로 넘긴다.
             HOLDOUT: 거래 ≥ 100건 · 평균 > 0 · 일 단위 하한 > 0 · 전반·후반 모두 > 0 · 날짜 가중 평균 > 0 · 상위 5일을 빼도 > 0.
-  6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 한 달 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+            HOLDOUT 줄에는 진입일 수, 일별 승률(일별 평균 > 0 인 날의 비율), 일별 중앙값도 찍는다 — 급락형은 거래가 몇 날에 몰려
+            진짜 표본 크기가 거래 수보다 날 수에 가깝다 (고문 판정 2026-11-19. 선별 기준은 바꾸지 않는다).
+  6 등록    통과한 것 중 사건마다 최대 1개(일 단위 하한이 가장 높은 것), 달력 한 달에 최대 3개. 등록 내용은 forward/registry.json 에 고정된다.
+            등록은 매월 1일 실행만 한다. 매주 월요일 실행은 --report-only 로 별도 폴더(forward/weekly_discovery)에 결과만 남긴다
+            (고문 판정 2026-11-18: 매주 같은 자료로 등록하면 우연히 넘는 규칙을 만날 기회만 늘어난다). 한 달 상한은 그 달의 실행을 모두 합쳐 센다
+            (그 달에 등록된 후보는 전부 센다 — 판정이 끝난 것도, 고문이 직접 등록한 A- 번호도. 덜 등록하는 쪽이 되돌리기 쉽다).
+            새 후보의 전진 채점은 등록 다음 날 00:00 UTC 부터다(고문이 직접 등록한 후보들과 같은 관례).
+            값 차이로 판정이 보류된 후보는 '끝난 후보' 로 치지 않는다 — 그 사건 자리는 보류가 풀릴 때까지 비지 않는다.
+            (사람이 따로 돌린 등록 실행도 같은 달이면 합쳐 센다.) 실행마다 훑은 수를 7번 기록에 남긴다.
             사건 종류(급등·돌파·급락)마다 '진행 중인 후보'(등록됐고 아직 판정·만료 전)는 1개까지다 (고문 결정 2026-11-13).
             진행 중인 것이 있으면 그 사건에서는 통과가 나와도 등록하지 않고 기록만 남긴다 — 같은 사건을 두 번 세지 않기 위해서다.
             (급락은 고문이 등록한 알트 동반 급락 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다.)
@@ -51,6 +59,8 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
   · up_ratio 는 1일 수익률 기준, mkt_ret_1h 는 자기 종목 제외, same_events_1h 는 자기 사건 제외.
   · compress = 최근 1일 평균 변동 / 최근 7일 평균 변동.        · 달마다 도는 탐색의 구간 = 앞 60% TRAIN, 뒤 40% HOLDOUT.
   · 조건을 붙인 거래 = 기본 모집단(코인당 1건 규칙 적용 뒤)에서 조건을 통과한 거래. 등록 후 채점도 같은 방식이다.
+  · TRAIN = 진입도 청산도 HOLDOUT 시작일 전인 거래. 경계에 걸친 거래(앞에서 사서 뒤에서 판 것)는 양쪽 모두에서 뺀다.
+  · 등록된 후보는 자기 종목(universe)으로만 채점한다. 시장 지표(up_ratio 등)도 그 종목들만으로 계산한다 — 탐색 때와 같다.
 한계: 봉 기준이라 실제 호가 체결을 확인한 값이 아니다. 업비트는 상장폐지된 종목의 시세를 주지 않아서, 대상을 HOLDOUT 시작일
       기준으로 골라도 '그 뒤 상장폐지된 종목' 은 빠진다(등록 뒤의 전진 채점에는 이 편향이 없다). 초·분 단위와 호가는 다루지 않는다.
 
@@ -63,7 +73,8 @@ r"""discover — '사건이 일어난 사례들 안에서 어떤 조건일 때�
 
 실행
   python3 scalp/research/discover.py --repro [--markets KRW-BTC,KRW-ETH,...]   고문 수치 재현 (등록·기록 안 함)
-  python3 scalp/research/discover.py --register                              달마다 도는 실행 (잠겨 있으면 기록만)
+  python3 scalp/research/discover.py --register                              예약 실행(매주 월요일·매월 1일. 잠겨 있으면 기록만)
+  python3 scalp/research/discover.py --report-only --out 다른폴더             등록 없이 결과만 따로 기록 (점검용)
   python3 scalp/research/discover.py --markets KRW-BTC,KRW-ETH --days 90      작은 범위 점검 (등록·기록 안 함)
 """
 import argparse
@@ -77,7 +88,7 @@ from array import array
 from bisect import bisect_left, bisect_right, insort
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean, median, stdev
 
 HERE = Path(__file__).resolve().parent
 
@@ -366,15 +377,17 @@ def make_conditions(train):
 
 
 def holdout_checks(trades):
-    """HOLDOUT 여섯 기준 → dict(n, days, net, daymean, day_low, first, second, ex_top5, pass)."""
+    """HOLDOUT 여섯 기준 → dict(n, days, net, daymean, day_low, first, second, ex_top5, day_win, day_median, pass).
+    day_win(일별 평균 > 0 인 날의 비율)과 day_median(일별 평균의 중앙값)은 표시용이다 — 통과 판단에 쓰지 않는다."""
     st = SS.cluster_stats(trades)
     out = {"n": st["n"], "days": st["days"], "net": st["net"], "t": st["t"], "daymean": st["daymean"], "day_low": None, "first": None,
-           "second": None, "ex_top5": None}
+           "second": None, "ex_top5": None, "day_win": None, "day_median": None}
     if trades:
         by_day = {}
         for t in trades:
             by_day.setdefault(t["day"], []).append(t["net"])
         means = [mean(v) for v in by_day.values()]
+        out["day_win"], out["day_median"] = sum(1 for m in means if m > 0) / float(len(means)), median(means)
         if len(means) >= 2:
             out["day_low"] = mean(means) - Z95 * stdev(means) / math.sqrt(len(means))
         rows = sorted(trades, key=lambda t: (t["entry_q"], t["market"]))
@@ -398,6 +411,13 @@ def _tt(v):
     return "n/a" if v is None else "%+.2f" % v
 
 
+def _days(hc):
+    """HOLDOUT 줄의 진입일 표시: '진입일 29일 일별승률 62% 일별중앙값 +0.410%'."""
+    if not hc["n"]:
+        return "진입일 0일"
+    return "진입일 %d일 일별승률 %.0f%% 일별중앙값 %s" % (hc["days"], 100 * hc["day_win"], _pct(hc["day_median"]))
+
+
 def _label(cond):
     return "조건 없음" if cond is None else "%s %s %.4g" % (cond[1], cond[2], cond[3])
 
@@ -406,11 +426,13 @@ def search(trades, cut_day, log=print):
     """모집단마다 TRAIN 에서 선별하고 HOLDOUT 에서 여섯 기준을 본다 → (통과 목록, {scanned, selected, passed})."""
     passed, counts = [], {"scanned": 0, "selected": 0, "passed": 0}
     for pop in sorted({t["pop"] for t in trades}):
-        train = [t for t in trades if t["pop"] == pop and t["day"] < cut_day]
+        # 앞 구간에 사서 뒤 구간에 판 거래는 어느 쪽에도 넣지 않는다 — 뒤 구간의 가격이 TRAIN 선별에 섞이지 않게 (2026-11-14 검토)
+        train = [t for t in trades if t["pop"] == pop and t["day"] < cut_day and q_day(t["exit_q"]) < cut_day]
         hold = [t for t in trades if t["pop"] == pop and t["day"] >= cut_day]
         bt, bh = SS.cluster_stats(train), SS.cluster_stats(hold)
-        log("== %s | TRAIN n=%d days=%d net %s t %s | HOLDOUT n=%d net %s t %s" % (
-            pop, bt["n"], bt["days"], _pct(bt["net"]), _tt(bt["t"]), bh["n"], _pct(bh["net"]), _tt(bh["t"])))
+        base = holdout_checks(hold)
+        log("== %s | TRAIN n=%d days=%d net %s t %s | HOLDOUT n=%d %s net %s t %s" % (
+            pop, bt["n"], bt["days"], _pct(bt["net"]), _tt(bt["t"]), bh["n"], _days(base), _pct(bh["net"]), _tt(bh["t"])))
         options = [(None, bt)] + [(c, SS.cluster_stats([t for t in train if SS.passes(t, c)])) for c in make_conditions(train)]
         counts["scanned"] += len(options)
         chosen = [(c, st) for c, st in options
@@ -421,15 +443,16 @@ def search(trades, cut_day, log=print):
         for rank, (cond, st) in enumerate(chosen):
             hc = holdout_checks(hold if cond is None else [t for t in hold if SS.passes(t, cond)])
             if rank < 5 or hc["pass"]:
-                log("   %-34s TRAIN n=%d net %s t %s | HOLDOUT n=%d net %s 하한 %s 전반 %s 후반 %s 상위5일 제외 %s => %s" % (
-                    _label(cond), st["n"], _pct(st["net"]), _tt(st["t"]), hc["n"], _pct(hc["net"]), _pct(hc["day_low"]), _pct(hc["first"]),
+                log("   %-34s TRAIN n=%d net %s t %s | HOLDOUT n=%d %s net %s 하한 %s 전반 %s 후반 %s 상위5일 제외 %s => %s" % (
+                    _label(cond), st["n"], _pct(st["net"]), _tt(st["t"]), hc["n"], _days(hc), _pct(hc["net"]), _pct(hc["day_low"]), _pct(hc["first"]),
                     _pct(hc["second"]), _pct(hc["ex_top5"]), "통과" if hc["pass"] else "탈락"))
             if hc["pass"]:
                 counts["passed"] += 1
                 passed.append({"pop": pop, "event": pop.split("/")[0], "hold": train[0]["hold"] if train else hold[0]["hold"],
                                "cond": list(cond) if cond else None,
                                "train": {k: st[k] for k in ("n", "days", "net", "t")},
-                               "holdout": {k: hc[k] for k in ("n", "days", "net", "daymean", "day_low", "first", "second", "ex_top5")}})
+                               "holdout": {k: hc[k] for k in ("n", "days", "net", "daymean", "day_low", "first", "second", "ex_top5", "day_win",
+                                                              "day_median")}})
     return passed, counts
 
 
@@ -441,15 +464,20 @@ def cand_key(c):
 def register(registry, passed, run_day, universe, decided=()):
     """통과한 것 중 새로 등록할 후보를 고른다 → (새 후보 목록, [(등록하지 않은 통과, 사유)]).
     사건 종류마다 진행 중인 후보(등록됐고 decided 에 없는 것)는 1개까지 — 있으면 등록하지 않고 사유와 함께 돌려준다.
-    그래서 한 번의 실행에서도 사건마다 1개(일 단위 하한이 가장 높은 것)만 등록된다. 달에 MAX_NEW 개까지.
+    그래서 한 번의 실행에서도 사건마다 1개(일 단위 하한이 가장 높은 것)만 등록된다.
+    달력 한 달에 MAX_NEW 개까지: 그 달에 등록된 후보(registered 가 같은 달)를 전부 합쳐서 센다.
+    새 후보의 전진 시작일(start)은 등록 다음 날이다.
     같은 규칙(사건·보유·지표·방향)은 전에 등록된 적이 있으면 다시 등록하지 않는다. decided = 판정·만료가 끝난 후보 번호들."""
     decided = set(decided)
     busy = {c["event"]: c["id"] for c in registry if c.get("status") == "ACTIVE" and c["id"] not in decided}
     seen = {cand_key(c) for c in registry}
     taken = {c["id"] for c in registry}
+    month = "D-%s-" % run_day[:7].replace("-", "")
+    used = sum(1 for c in registry if c.get("registered", "")[:7] == run_day[:7])    # 이번 달에 이미 등록된 수
     new, held = [], []
     for f in sorted(passed, key=lambda f: -f["holdout"]["day_low"]):
-        spec = {"engine": ENGINE, "registered": run_day, "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
+        spec = {"engine": ENGINE, "registered": run_day, "start": (dt.date.fromisoformat(run_day) + dt.timedelta(days=1)).isoformat(),
+                "event": f["event"], "hold": f["hold"], "cond": f["cond"], "universe": list(universe),
                 "move": MOVE, "vol_x": VOL_X, "cost": dict(COST), "cost_other": COST_OTHER, "train": f["train"], "holdout": f["holdout"],
                 "status": "ACTIVE"}
         why = None
@@ -457,20 +485,26 @@ def register(registry, passed, run_day, universe, decided=()):
             why = "%s 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)" % busy[f["event"]]
         elif cand_key(spec) in seen:
             why = "같은 규칙이 전에 등록된 적 있음"
-        elif len(new) >= MAX_NEW:
-            why = "한 달 등록 한도 %d개" % MAX_NEW
+        elif used + len(new) >= MAX_NEW:
+            why = "달력 한 달 등록 한도 %d개 (이번 달 %d개 등록됨)" % (MAX_NEW, used + len(new))
         if why:
             held.append((spec, why))
             continue
         k = 1
-        while "D-%s-%02d" % (run_day[:7].replace("-", ""), k) in taken:
+        while "%s%02d" % (month, k) in taken:
             k += 1
-        spec["id"] = "D-%s-%02d" % (run_day[:7].replace("-", ""), k)
+        spec["id"] = "%s%02d" % (month, k)
         taken.add(spec["id"])
         busy[f["event"]] = spec["id"]
         seen.add(cand_key(spec))
         new.append(spec)
     return new, held
+
+
+def settled(entry):
+    """장부의 후보 항목이 '끝난 후보' 인가: 판정·만료가 적혀 있고, 그 판정이 값 차이로 보류 중이 아니다."""
+    hold = entry.get("hold")
+    return bool(entry.get("decision")) and not (hold and not hold.get("released"))
 
 
 def describe(c):
@@ -499,7 +533,11 @@ def candidate_trades(panel, cand, end_q):
     """등록된 후보의, 시작일 00:00 UTC 이후 사건에서 나온 끝난 거래. 등록 때 고정한 정의(문턱·비용)만 쓴다."""
     if cand.get("engine") != ENGINE:
         raise RuntimeError("후보 %s 는 틀 %s 로 등록됐고 지금 코드는 틀 %s 다 — 채점하지 않는다" % (cand.get("id"), cand.get("engine"), ENGINE))
-    rows = build_trades(panel, day_q(cand_start(cand)), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
+    missing = [m for m in cand["universe"] if m not in panel]
+    if missing:
+        raise RuntimeError("후보 %s 의 종목 시세가 없다: %s" % (cand.get("id"), ", ".join(m[4:] for m in missing[:5])))
+    own = {m: panel[m] for m in cand["universe"]}                   # 후보는 등록 때 고정한 자기 종목으로만 채점한다(다른 후보의 종목이 섞이지 않게)
+    rows = build_trades(own, day_q(cand_start(cand)), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
                         only=(cand["event"], cand["hold"]))
     cond = cand.get("cond")
     if cond:
@@ -507,18 +545,28 @@ def candidate_trades(panel, cand, end_q):
     return [{k: t[k] for k in ("market", "entry_q", "exit_q", "day", "gross", "net", "move")} for t in rows]
 
 
-def merge_trades(old_rows, new_rows):
-    """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시)."""
+def merge_trades(old_rows, new_rows, not_before_q=None, bad=None):
+    """장부에 새 거래만 덧붙인다 → (합친 목록, 새로 붙은 수, 값이 달라진 거래 표시).
+    not_before_q 를 주면 그 봉보다 앞에서 끝났는데 장부에 없던 거래는 넣지 않는다(지난 구간이 뒤늦게 달라진 것) — 표시만 돌려준다.
+    bad(목록)를 주면 표시와 같은 순서로 {"key": (종목, 진입 봉), "ledger": 장부 값, "recomputed": 다시 계산한 값} 을 넣는다
+    (뒤늦게 나타난 거래는 장부 값이 None)."""
     by_key = {(r["market"], r["entry_q"]): r for r in old_rows}
     added, mismatch = 0, []
     for r in new_rows:
         key = (r["market"], r["entry_q"])
         prev = by_key.get(key)
         if prev is None:
+            if not_before_q is not None and r["exit_q"] < not_before_q:
+                mismatch.append("%s %s #%d (뒤늦게 나타남)" % (r["market"][4:], r["day"], r["entry_q"]))
+                if bad is not None:
+                    bad.append({"key": key, "ledger": None, "recomputed": {"net": r["net"], "exit_q": r["exit_q"]}})
+                continue
             by_key[key] = r
             added += 1
         elif abs(prev["net"] - r["net"]) > 1e-9:
-            mismatch.append("%s %s" % (r["market"][4:], r["day"]))
+            mismatch.append("%s %s #%d" % (r["market"][4:], r["day"], r["entry_q"]))     # 진입 봉 번호까지 — 같은 날 두 거래를 구분한다
+            if bad is not None:
+                bad.append({"key": key, "ledger": {"net": prev["net"]}, "recomputed": {"net": r["net"]}})
     return sorted(by_key.values(), key=lambda t: (t["entry_q"], t["market"])), added, mismatch
 
 
@@ -657,7 +705,7 @@ def main(argv=None):
     registry = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     ledger_path = state_dir / "ledger.json"                                # 판정·만료가 끝난 후보는 추적기의 장부에 적혀 있다
     cands = (json.loads(ledger_path.read_text(encoding="utf-8")).get("candidates") or {}) if ledger_path.exists() else {}
-    new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if e.get("decision")})
+    new, held = register(registry, passed, today, markets, decided={cid for cid, e in cands.items() if settled(e)})
     for c in new:
         tail.append("후보 %s: %s (HOLDOUT 일 단위 하한 %s)" % (c["id"], describe(c), _pct(c["holdout"]["day_low"])))
     for c, why in held:
@@ -677,7 +725,7 @@ def main(argv=None):
             tail.append("등록하지 않음: 틀이 아직 잠겨 있음(FRAME_APPROVED=False)")
         log_path = out / "scan_log.json"
         history = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
-        history.append(dict(counts, mode="diagnostic" if a.report_only else "monthly", run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
+        history.append(dict(counts, mode="diagnostic" if a.report_only else "register", run=today, engine=ENGINE, markets=len(markets), start=start_day, cut=cut_day, registered=wrote,
                             held=[{"rule": describe(c), "why": why} for c, why in held], locked=not FRAME_APPROVED))
         log_path.write_text(json.dumps(history, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         (out / "DISCOVERY.md").write_text("# 후보 탐색 기록\n\n자동으로 만들어지는 파일입니다. 마지막 실행 %s (UTC). 실행별 훑은 수는 scan_log.json 에 쌓입니다.\n\n```\n%s\n```\n" % (
