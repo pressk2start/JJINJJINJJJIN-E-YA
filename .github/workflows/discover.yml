@@ -1,6 +1,7 @@
 name: Discover
 
-# 매주 월요일과 매월 1일에 후보를 탐색하고, 넘은 것은 등록한다 (고문 판정 2026-11-17 ①. 둘 다 --register).
+# 매월 1일에 후보를 탐색해 넘은 것은 등록하고(--register), 매주 월요일에는 등록 없이 결과만 별도 폴더에 남긴다(--report-only).
+# 고문 판정 2026-11-18: 매주 같은 자료로 등록하면 우연히 넘는 규칙을 만날 기회만 늘어난다. 매일 하는 검증은 Forward watch 가 맡는다.
 # '사건 × 조건 하나 × 보유 시간' 틀로 scalp/research/forward/ 에 기록한다 (discover.py).
 # 등록 상한은 그대로다: 사건 종류마다 진행 중인 후보 1개까지, 달력 한 달에 3개까지(그 달의 실행을 모두 합쳐서).
 # 등록 잠금은 2026-11-13 고문 승인으로 풀려 있다(discover.py 의 FRAME_APPROVED).
@@ -9,7 +10,7 @@ name: Discover
 on:
   schedule:
     - cron: "7 2 1 * *"    # 매달 1일 11:07 KST: 탐색·등록
-    - cron: "37 3 * * 1"   # 매주 월요일 12:37 KST: 탐색·등록
+    - cron: "37 3 * * 1"   # 매주 월요일 12:37 KST: 탐색 점검 (등록 없음, forward/weekly_discovery)
   # 이 파일을 main 에 반영하면 등록 없이 한 번 돌려 본다(결과는 별도 폴더에만 남는다).
   push:
     branches: [main]
@@ -17,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "register = 탐색·등록(예약 실행과 같음) / diagnostic = 등록 없이 별도 폴더에 결과만 기록"
+        description: "diagnostic = 등록 없이 별도 폴더에 결과만 기록 / register = 탐색·등록(매월 1일 예약 실행과 같음)"
         type: choice
-        default: register
-        options: [register, diagnostic]
+        default: diagnostic
+        options: [diagnostic, register]
 
 permissions:
   contents: write
@@ -46,9 +47,10 @@ jobs:
         id: mode
         env:
           EVENT_NAME: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
           MANUAL_MODE: ${{ inputs.mode }}
         run: |
-          if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_MODE" != "diagnostic" ]; }; then
+          if [ "$CRON" = "7 2 1 * *" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_MODE" = "register" ]; }; then
             echo "args=--register" >> "$GITHUB_OUTPUT"
             echo "out=scalp/research/forward" >> "$GITHUB_OUTPUT"
           else

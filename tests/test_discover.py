@@ -258,6 +258,29 @@ class Search(unittest.TestCase):
         self.assertEqual([c["event"] for c in new], ["CRASH"])           # 사건마다 1개만 등록한다
         self.assertEqual(new[0]["id"], "D-202612-01")
 
+    def test_holdout_lines_show_entry_days_daily_win_rate_and_daily_median(self):
+        """고문 판정 2026-11-19: 급락형은 거래가 몇 날에 몰린다. HOLDOUT 줄에 진입일 수를 함께 찍는다 (선별 기준은 그대로)."""
+        trades = [{"day": d, "net": v, "gross": v, "entry_q": k, "market": "KRW-A"} for k, (d, v) in enumerate(
+            [("2025-05-01", 0.03), ("2025-05-01", 0.01), ("2025-05-02", -0.02), ("2025-05-03", 0.004)])]
+        hc = D.holdout_checks(trades)
+        self.assertEqual((hc["days"], round(hc["day_win"], 4)), (3, round(2 / 3.0, 4)))
+        self.assertAlmostEqual(hc["day_median"], 0.004)
+        self.assertEqual(D._days(hc), "진입일 3일 일별승률 67% 일별중앙값 +0.400%")
+        self.assertEqual(D._days(D.holdout_checks([])), "진입일 0일")
+        many = [{"day": "2025-%02d-%02d" % (6 + k // 28, 1 + k % 28), "net": 0.01 + 0.001 * (k % 7), "gross": 0.01, "entry_q": k, "market": "KRW-A"}
+                for k in range(120)]
+        self.assertTrue(D.holdout_checks(many)["pass"])
+        real = D.median
+        D.median = lambda v: -1.0                                                                     # 일별 중앙값이 음수여도 통과는 그대로 — 표시용이다
+        try:
+            self.assertEqual((D.holdout_checks(many)["pass"], D.holdout_checks(many)["day_median"]), (True, -1.0))
+        finally:
+            D.median = real
+        passed, counts, lines, _ = self.run_world(world())
+        rule_lines = [ln for ln in lines if "| HOLDOUT n=" in ln]
+        self.assertTrue(rule_lines and all("진입일 " in ln for ln in rule_lines))
+        self.assertTrue(all("day_win" in f["holdout"] and "day_median" in f["holdout"] for f in passed))
+
     def test_noise_passes_nothing(self):
         for seed in (1, 2, 3):
             passed, counts, _, _ = self.run_world(world(seed=seed, planted=False))
@@ -285,22 +308,37 @@ class Registry(unittest.TestCase):
         self.assertIn("같은 규칙이 전에 등록된 적 있음", [why for c, why in held if (c["event"], c["hold"]) == ("CRASH", 16)])   # 끝난 규칙을 다시 걸지 않는다
 
     def test_three_a_calendar_month_counts_every_run_of_that_month(self):
-        """탐색이 매주도 돈다(고문 판정 2026-11-17 ①). 한 달 상한 3개는 그 달의 실행을 모두 합쳐 센다."""
+        """탐색이 매주도 돈다(고문 판정 2026-11-17 ①). 한 달 상한 3개는 그 달에 등록된 후보를 전부 합쳐 센다."""
         def done(cid, event, key, day):
             return dict(self.found(event, 4, key, 0.001), id=cid, status="ACTIVE", registered=day, engine=D.ENGINE)
-        registry = [done("D-202612-01", "CRASH", "x", "2026-12-01"), done("D-202612-02", "SURGE", "y", "2026-12-07"),
-                    done("A-202612-01", "BREAKOUT", "z", "2026-12-03")]                               # 고문이 직접 등록한 것은 세지 않는다
-        decided = {c["id"] for c in registry}                                                         # 셋 다 판정이 끝나 사건 자리는 비어 있다
+        registry = [done("D-202612-01", "CRASH", "x", "2026-12-01"), done("D-202612-02", "SURGE", "y", "2026-12-07")]
+        decided = {"D-202612-01", "D-202612-02", "A-202612-01"}                                       # 판정이 끝나 사건 자리는 비어 있다 — 그래도 그 달의 수에는 든다
         passed = [self.found("CRASH", 4, "a", 0.005), self.found("SURGE", 4, "b", 0.004), self.found("BREAKOUT", 4, "c", 0.003)]
         new, held = D.register(registry, passed, "2026-12-14", ("KRW-BTC",), decided=decided)         # 12월 셋째 실행: 이번 달 자리는 하나 남았다
         self.assertEqual([(c["event"], c["id"]) for c in new], [("CRASH", "D-202612-03")])
         self.assertEqual([(c["event"], why) for c, why in held],
                          [("SURGE", "달력 한 달 등록 한도 3개 (이번 달 3개 등록됨)"), ("BREAKOUT", "달력 한 달 등록 한도 3개 (이번 달 3개 등록됨)")])
-        new, held = D.register(registry + new, passed[1:], "2026-12-21", ("KRW-BTC",), decided=decided)   # 그 뒤의 12월 실행은 등록하지 못한다
-        self.assertEqual((new, len(held)), ([], 2))
-        new, held = D.register(registry, passed, "2027-01-04", ("KRW-BTC",), decided=decided)         # 달이 바뀌면 다시 3개
+        again, held = D.register(registry + new, passed[1:], "2026-12-21", ("KRW-BTC",), decided=decided)   # 그 뒤의 12월 실행은 등록하지 못한다
+        self.assertEqual((again, len(held)), ([], 2))
+        manual = registry + [done("A-202612-01", "BREAKOUT", "z", "2026-12-03")]                      # 고문이 직접 등록한 것도 그 달의 수에 든다
+        new, held = D.register(manual, passed, "2026-12-14", ("KRW-BTC",), decided=decided)
+        self.assertEqual((new, len(held)), ([], 3))
+        new, held = D.register(manual, passed, "2027-01-04", ("KRW-BTC",), decided=decided)           # 달이 바뀌면 다시 3개
         self.assertEqual([c["id"] for c in new], ["D-202701-01", "D-202701-02", "D-202701-03"])
         self.assertEqual(D.MAX_NEW, 3)
+
+    def test_a_new_candidate_is_scored_from_the_day_after_registration(self):
+        """고문이 직접 등록한 후보들과 같은 관례: 전진 채점은 등록 다음 날 00:00 UTC 부터."""
+        new, _held = D.register([], [self.found("CRASH", 4, "a", 0.005)], "2026-11-30", ("KRW-BTC",))
+        self.assertEqual((new[0]["registered"], new[0]["start"], D.cand_start(new[0])), ("2026-11-30", "2026-12-01", "2026-12-01"))
+
+    def test_a_candidate_whose_verdict_is_on_hold_still_occupies_its_event(self):
+        """값 차이로 판정이 보류된 후보는 끝난 후보가 아니다 — 보류가 풀릴 때까지 그 사건에 새 후보를 걸지 않는다."""
+        verdict = {"verdict": "FAIL", "decided_on": "2026-12-01"}
+        self.assertTrue(D.settled({"decision": verdict}))
+        self.assertFalse(D.settled({"decision": None}))
+        self.assertFalse(D.settled({"decision": verdict, "hold": {"since": "2026-12-02", "released": None}}))
+        self.assertTrue(D.settled({"decision": verdict, "hold": {"since": "2026-12-02", "released": {"on": "2026-12-09", "reason": "고문 판정"}}}))
 
     def test_crash_waits_for_the_advisors_candidate(self):
         """급락은 고문이 등록한 A-202611-01 이 판정되거나 만료될 때까지 새로 등록하지 않는다 (고문 결정 2026-11-13)."""
@@ -352,6 +390,12 @@ class Registry(unittest.TestCase):
             self.assertEqual((log[2]["registered"], len(json.loads((tmp / "registry.json").read_text(encoding="utf-8")))), ([], 1))
             self.assertTrue(log[2]["held"] and all(reg[0]["id"] + " 진행 중" in h["why"] for h in log[2]["held"]))
             self.assertIn("통과했으나 등록하지 않음", (tmp / "DISCOVERY.md").read_text(encoding="utf-8"))
+            held_entry = {"decision": {"verdict": "FAIL"}, "hold": {"since": today, "why": "값 차이", "released": None}}
+            (tmp / "ledger.json").write_text(json.dumps({"candidates": {reg[0]["id"]: held_entry}}), encoding="utf-8")
+            D.main(["--register", "--out", str(tmp), "--today", today])                       # 판정이 보류 중이면 그 사건 자리는 비지 않는다
+            log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
+            self.assertEqual(log[-1]["registered"], [])
+            self.assertTrue(log[-1]["held"] and all(reg[0]["id"] + " 진행 중" in h["why"] for h in log[-1]["held"]))
             (tmp / "ledger.json").write_text(json.dumps({"candidates": {reg[0]["id"]: {"decision": {"verdict": "FAIL"}}}}), encoding="utf-8")
             D.main(["--register", "--out", str(tmp), "--today", today])                       # 판정이 끝났어도 같은 규칙은 다시 걸지 않는다
             log = json.loads((tmp / "scan_log.json").read_text(encoding="utf-8"))
