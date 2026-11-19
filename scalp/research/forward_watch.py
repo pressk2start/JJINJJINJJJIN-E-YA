@@ -90,6 +90,15 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              판정은 등록된 대로 봉 기준이다. 현황에 봉 기준 평균과 체결 기준 평균, 체결 자료가 있는 건수를 나란히 싣는다.
   진입일 수      (고문 판정 2026-11-19) 급락형은 거래가 급락일 몇 날에 몰린다. 진짜 표본 크기를 보이려고 현황의 각 후보에 진입일 수,
              일별 승률(일별 평균 > 0 인 날의 비율), 일별 중앙값을 싣는다. 등록·판정 기준은 바꾸지 않는다.
+  두 단계       (고문 판정 2026-11-19 ②) 30건·10일 판정은 '1단계 선별' 이라 부른다(기준 그대로) — '계속 볼 가치가 있다' 는 뜻이지
+             돈을 넣는 신호가 아니다. 판정 규칙이 진짜와 가짜를 잘 못 가리고, 드문 사건의 우위를 새 자료만으로 증명하려면 몇 년이 걸리기 때문이다.
+             현황에 2단계 네 항목의 충족 여부를 표시만 한다(자동 결정 없음. 돈은 고문과 사용자가 정한다):
+               ① 1단계 통과  ② 과거 봉 기준 우위(두 시기 중 낮은 쪽) − 체결 차이 95% 상한 > 0 (체결 자료 20건 이상)
+               ③ 체결 없음 10% 이하, 60초 체결 금액 중앙값 ≥ 주문 금액 × 10 (주문 금액 ORDER_KRW, 기본 100만 원)
+               ④ 전진 일별 평균 ≥ 과거 일별 평균 − 2 × 전진 표준오차
+             체결 차이 = 봉 기준 순수익 − 체결 기준 순수익(+ 면 실제가 나쁘다). 과거 값은 등록부의 train/holdout, 급락 반등 계열은 CR_PAST.
+             체결 기준은 공개 체결 내역으로 추정한 값이다 — 우리 주문 크기, 그때의 호가 잔량, 진입 지연은 들어 있지 않고, 봉과의 차이에는
+             60초 동안의 가격 움직임도 섞인다(제3세션 지적 2026-11-19).
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
 
 안전장치
@@ -160,6 +169,14 @@ FILL_FEE = 0.0005                                   # 체결 기준 수수료 �
 FILL_DAYS = 7                                       # 업비트가 체결 기록을 주는 기간: days_ago 1~7 (8 은 HTTP 400 — 2026-11-19 확인)
 NO_FILL, NO_DATA = "체결 없음", "체결 자료 없음"
 TICKS_PAGE, TICKS_MAX_PAGES = 500, 60               # 한 번에 받는 체결 수(업비트 최대), 한 구간에서 넘기는 쪽수 한도
+ORDER_KRW = 1000000                                 # 2단계 ③ 의 주문 금액 (설정값 — 고문 판정 2026-11-19 ②: 기본 100만 원)
+STAGE2_MIN_FILLS, STAGE2_MAX_NOFILL, STAGE2_DEPTH_X = 20, 0.10, 10
+# 2단계 ②·④ 의 과거 봉 기준 값 — 급락 반등 계열 (고문 집계, 머리말의 수치). (기간, 거래당 평균, 일별 평균). 일별 평균은 받지 못해 비워 둔다.
+CR_PAST = {"CR_rebound": (("2017–20", 0.00219, None), ("2021–26", 0.00361, None)),
+           "CR_drop5": (("2017–20", 0.0048, None), ("2021–26", 0.0068, None)),
+           "CR_drop6": (("2017–20", 0.0096, None), ("2021–26", 0.0102, None)),
+           "CR_hold4h": (("2017–20", 0.0028, None), ("2021–26", 0.0046, None))}
+STAGE1 = "1단계 선별"
 VERDICT = {"PASS": "통과", "FAIL": "탈락", "EXPIRED": "만료(표본 부족)", "INCOMPLETE": "자료 불완전"}
 HOLD_TAG = " · 판정 보류(값 차이)"
 
@@ -492,6 +509,76 @@ def fill_check(market, entry_ms, exit_ms, entry_open, exit_open, get=None):
     return out
 
 
+_T95 = (6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812, 1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734,
+        1.729, 1.725, 1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697)
+
+
+def t95(df):
+    """단측 95% t 분위수 (자유도 df ≥ 1). 30 까지는 표, 그 뒤는 근사(40: 1.685, 120: 1.658)."""
+    return _T95[df - 1] if df <= 30 else 1.645 + 1.6 / df
+
+
+def fill_stats(rows):
+    """한 항목의 체결 통계 (고문 판정 2026-11-19 ② 의 2).
+    tried = 체결 기록을 받은 거래(추정 가능 + 체결 없음), gap = 봉 기준 − 체결 기준(+ 면 실제가 나쁘다), gap_up95 = 그 평균의 단측 95% 상한,
+    depth = 거래마다 min(진입 60초 매수 체결 금액, 청산 60초 매도 체결 금액) 의 중앙값(체결 없음 포함 — 그때는 0)."""
+    ok = [t for t in rows if (t.get("fill") or {}).get("status") == "ok"]
+    tried = [t for t in rows if (t.get("fill") or {}).get("status") in ("ok", NO_FILL)]
+    gaps = [t["net"] - t["fill"]["net"] for t in ok]
+    out = {"rows": len(rows), "ok": len(ok), "tried": len(tried), "nodata": sum(1 for t in rows if (t.get("fill") or {}).get("status") == NO_DATA),
+           "nofill": len(tried) - len(ok), "gap": None, "gap_up95": None, "nofill_rate": None, "depth": None}
+    if gaps:
+        out["gap"] = sum(gaps) / len(gaps)
+    if len(gaps) >= 2:
+        sd = (sum((g - out["gap"]) ** 2 for g in gaps) / (len(gaps) - 1)) ** 0.5
+        out["gap_up95"] = out["gap"] + t95(len(gaps) - 1) * sd / len(gaps) ** 0.5
+    if tried:
+        out["nofill_rate"] = out["nofill"] / float(len(tried))
+        depths = [min(t["fill"].get("entry_bid_krw", 0), t["fill"].get("exit_ask_krw", 0)) for t in tried if "entry_bid_krw" in t["fill"]]
+        out["depth"] = median(depths) if depths else None
+    return out
+
+
+def stage2(rows, decision, past, day):
+    """2단계 네 항목 (고문 판정 2026-11-19 ②). 표시만 한다 — 자동 결정 없음. → [(충족 True / 미달 False / 판단 전 None, 설명)] 네 개.
+    past = [(기간, 과거 거래당 평균, 과거 일별 평균 또는 None)], day = 거래의 진입일(UTC)을 돌려주는 함수."""
+    out = []
+    v = (decision or {}).get("verdict")
+    out.append((None, "진행 중") if not v else (v == "PASS", VERDICT[v]))
+    fs = fill_stats(rows)
+    edge = min((p[1] for p in past), default=None)
+    if edge is None:
+        out.append((None, "과거 우위 미기록"))
+    elif fs["ok"] < STAGE2_MIN_FILLS or fs["gap_up95"] is None:
+        out.append((None, "체결 자료 %d / %d건 (과거 우위 %s)" % (fs["ok"], STAGE2_MIN_FILLS, _pct(edge))))
+    else:
+        val = edge - fs["gap_up95"]
+        out.append((val > 0, "%s − %s = %s (체결 %d건)" % (_pct(edge), _pct(fs["gap_up95"]), _pct(val), fs["ok"])))
+    if not fs["tried"]:
+        out.append((None, "체결 자료 없음"))
+    else:
+        depth_ok = fs["depth"] is not None and fs["depth"] >= ORDER_KRW * STAGE2_DEPTH_X
+        txt = "체결 없음 %s, 60초 체결 금액 중앙값 %s원 (기준 %s원, %d건)" % (
+            _rate(fs["nofill_rate"]), "-" if fs["depth"] is None else format(int(fs["depth"]), ","), format(ORDER_KRW * STAGE2_DEPTH_X, ","), fs["tried"])
+        ok = fs["nofill_rate"] <= STAGE2_MAX_NOFILL and depth_ok
+        out.append((ok if fs["tried"] >= STAGE2_MIN_FILLS else None, txt + ("" if fs["tried"] >= STAGE2_MIN_FILLS else " — 자료 부족")))
+    by_day = {}
+    for t in rows:
+        by_day.setdefault(day(t), []).append(t["net"])
+    means = [sum(x) / len(x) for x in by_day.values()]
+    past_day = min((p[2] for p in past if p[2] is not None), default=None)
+    if past_day is None:
+        out.append((None, "과거 일별 평균 미기록"))
+    elif len(means) < 2:
+        out.append((None, "전진 진입일 %d일 — 표준오차를 낼 수 없음" % len(means)))
+    else:
+        fwd = sum(means) / len(means)
+        se = (sum((m - fwd) ** 2 for m in means) / (len(means) - 1)) ** 0.5 / len(means) ** 0.5
+        floor = past_day - 2 * se
+        out.append((fwd >= floor, "전진 %s ≥ 과거 %s − 2 × %s = %s ? (%d일)" % (_pct(fwd), _pct(past_day), _pct(se), _pct(floor), len(means))))
+    return out
+
+
 def window_stats(pairs, today, days):
     """pairs = [(진입일 UTC, 비용 뒤 수익률)] 가운데 today 직전 days 일(UTC)에 든 것 → [건수, 평균(없으면 None)]."""
     first = DF._shift(today, -days)
@@ -714,6 +801,8 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             log("상장 목록을 받지 못함: %s" % type(e).__name__)
     for c in open_now:                                              # 후보마다 따로: 자기 종목만 받아 채점하고, 하나가 실패해도 나머지는 진행한다
         entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
+        entry["past"] = [[(part.get("period") or label), part.get("net"), part.get("daymean")] for label, part in (("앞 구간", c.get("train")), ("뒤 구간", c.get("holdout")))
+                         if part and part.get("net") is not None]     # 2단계 ②·④ 용 과거 봉 기준 값 (등록 때 고정된 값 그대로)
         try:
             # 상장폐지 종목 (고문 판정 2026-11-14): 이미 적힌 거래는 그대로 둔다. 그 종목은 새 사건을 만들지 않고 현황에 표시한다.
             # 후보는 남은 종목으로 계속 채점한다. 한 번 빠진 종목은 다시 넣지 않는다.
@@ -836,7 +925,7 @@ def render(ledger):
     rows, dec = cr.get("rows", []), cr.get("decision")
     n_days = len({_utc_day(t["entry_min"]) for t in rows})
     if dec:
-        head = "판정 완료: %s (%s, 첫 %d건)" % (VERDICT[dec["verdict"]], dec["decided_on"], dec["trades"])
+        head = "%s 끝: %s (%s, 첫 %d건)" % (STAGE1, VERDICT[dec["verdict"]], dec["decided_on"], dec["trades"])
     else:
         head = "진행 중 (%d / %d건, %d / %d일)" % (len(rows), AM.CR_MIN_N, n_days, AM.CR_MIN_DAYS)
     out += ["## 급락 반등 — " + head + (HOLD_TAG if active_hold(cr) else ""), "",
@@ -849,9 +938,9 @@ def render(ledger):
                 "| 승률 / 최악 거래 | %.0f%% / %s | 참고 | - |" % (100 * st["win"], _pct(st["worst"], 1)), ""]
         if dec:
             now = AM.cr_summary([(t["market"], t) for t in rows])
-            out += ["판정 이후 포함 전체 %d건: 거래당 %s, 날짜 가중 %s. 판정은 바뀌지 않습니다." % (now["n"], _pct(now["mean"]), _pct(now["day_mean"])), ""]
+            out += ["%s 이후 포함 전체 %d건: 거래당 %s, 날짜 가중 %s. 선별 결과는 바뀌지 않습니다." % (STAGE1, now["n"], _pct(now["mean"]), _pct(now["day_mean"])), ""]
         else:
-            out += ["아직 판정 전이라 위 숫자는 참고용입니다. 30건·10일이 처음 채워지는 거래까지로 한 번만 판정합니다.", ""]
+            out += ["아직 %s 전이라 위 숫자는 참고용입니다. 30건·10일이 처음 채워지는 거래까지로 한 번만 선별합니다(통과 = 계속 볼 가치가 있다는 뜻)." % STAGE1, ""]
         out += [_day_line([(_utc_day(t["entry_min"]), t["net"]) for t in rows]), ""]
         out += ["최근 거래: " + " / ".join("%s %s 1시간 %s → %s" % (AM.kst(t["entry_min"]), t["market"][4:], _pct(t["drop"], 1), _pct(t["net"]))
                                        for t in rows[-3:]), ""]
@@ -860,7 +949,7 @@ def render(ledger):
     crv = ledger.get("CR_variants") or {}
     out += ["## 급락 반등 변형 — 숫자만 바꾼 3개 (판정 기준은 위와 같음)", "",
             "같은 4종목, 같은 비용. 서로 독립으로 셉니다. 추적 시작 2026-11-14 (UTC).", "",
-            "| 변형 | 규칙 | 진행 | 거래당 평균 | 날짜 가중 | 일별 승률 | 일별 중앙값 | 판정 |", "|---|---|---|---|---|---|---|---|"]
+            "| 변형 | 규칙 | 진행 | 거래당 평균 | 날짜 가중 | 일별 승률 | 일별 중앙값 | %s |" % STAGE1, "|---|---|---|---|---|---|---|---|"]
     for v in CR_VARIANTS:
         e = crv.get(v["key"]) or {"rows": []}
         rows, dec = e.get("rows", []), e.get("decision")
@@ -888,7 +977,7 @@ def render(ledger):
     out += ["## 자동 등록 후보 — 매월 1일에 탐색해 넘은 것만 등록 (매주 월요일은 점검만)", ""]
     cands = ledger.get("candidates") or {}
     if cands:
-        out += ["| 번호 | 규칙 | 등록 | 진행 | 거래당 평균 | 일별 승률 | 일별 중앙값 | 판정 |", "|---|---|---|---|---|---|---|---|"]
+        out += ["| 번호 | 규칙 | 등록 | 진행 | 거래당 평균 | 일별 승률 | 일별 중앙값 | %s |" % STAGE1, "|---|---|---|---|---|---|---|---|"]
         for cid in sorted(cands):
             e = cands[cid]
             rows, dec = e.get("rows", []), e.get("decision")
@@ -904,7 +993,7 @@ def render(ledger):
             out.append("| %s | %s | %s | %d / %d건, %d / %d일 | %s | %s | %s | %s |" % (
                 cid, e.get("rule", "-"), e.get("registered", "-"), st["n"], DISC.FWD_MIN_N, st["days"], DISC.FWD_MIN_DAYS,
                 "-" if st["net"] is None else _pct(st["net"]), _rate(win), "-" if mid is None else _pct(mid), verdict))
-        out += ["", "통과는 '후보' 라는 뜻입니다. 판정은 봉 기준입니다. 실제 체결 기준 값은 아래 '체결 기준 확인' 에 있습니다. "
+        out += ["", "1단계 선별 통과는 '계속 볼 가치가 있다' 는 뜻이지 돈을 넣는 신호가 아닙니다. 선별은 봉 기준이고, 체결 기준과 2단계 점검은 아래에 있습니다. "
                 "일별 승률 = 거래가 있었던 날 가운데 그날 평균이 0 보다 큰 날의 비율, 일별 중앙값 = 그날 평균들의 중앙값.", ""]
         for cid in sorted(cands):
             gone = cands[cid].get("delisted") or {}
@@ -915,6 +1004,7 @@ def render(ledger):
     else:
         out += ["아직 등록된 후보가 없습니다. 탐색 결과는 DISCOVERY.md 에 남습니다.", ""]
     out += render_fills(ledger)
+    out += render_stage2(ledger)
     out += render_observation(ledger)
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
@@ -951,15 +1041,23 @@ def _day_line(pairs):
 
 
 def fill_items(ledger):
-    """체결 기준을 재는 항목 → [(이름, 거래 목록, 진입 시각(분) 함수)]. 고문 판정 2026-11-19: 급락 반등, 변형 3종, 자동 등록 후보."""
+    """체결 기준을 재는 항목 → [(이름, 장부 항목, 진입 시각(분) 함수, 진입일 함수, 과거 값)]. 고문 판정 2026-11-19: 급락 반등, 변형 3종,
+    자동 등록 후보. 과거 값 = [(기간, 거래당 평균, 일별 평균 또는 None)] — 급락 반등 계열은 CR_PAST, 후보는 등록부에서 옮겨 적은 값."""
     out = []
+
+    def cr_minute(t):
+        return t["entry_min"]
+
+    def cr_day(t):
+        return _utc_day(t["entry_min"])
     if ledger.get("CR_rebound") is not None:
-        out.append(("급락 반등", ledger["CR_rebound"].get("rows", []), lambda t: t["entry_min"]))
+        out.append(("급락 반등", ledger["CR_rebound"], cr_minute, cr_day, CR_PAST["CR_rebound"]))
     for v in CR_VARIANTS:
         e = (ledger.get("CR_variants") or {}).get(v["key"])
         if e is not None:
-            out.append(("급락 반등 변형 " + v["name"], e.get("rows", []), lambda t: t["entry_min"]))
-    out += [("후보 " + cid, e.get("rows", []), lambda t: t["entry_q"] * DISC.BAR_MIN) for cid, e in sorted((ledger.get("candidates") or {}).items())]
+            out.append(("급락 반등 변형 " + v["name"], e, cr_minute, cr_day, CR_PAST[v["key"]]))
+    out += [("후보 " + cid, e, lambda t: t["entry_q"] * DISC.BAR_MIN, lambda t: t["day"], [tuple(p) for p in e.get("past") or []])
+            for cid, e in sorted((ledger.get("candidates") or {}).items())]
     return out
 
 
@@ -971,22 +1069,30 @@ def render_fills(ledger):
 
     def avg(vals):
         return _pct(sum(vals) / len(vals)) if vals else "-"
-    out = ["## 체결 기준 확인 — 판정은 등록된 대로 봉 기준", "",
-           "봉 기준은 봉 시가에 사고 판 값(비용 편도 0.07~0.10%)입니다. 체결 기준은 업비트 공개 체결 기록으로 다시 계산한 값입니다: "
-           "진입 시각부터 60초 동안 실제로 체결된 시장가 매수(BID)의 금액가중 평균에 사서, 청산 시각부터 60초 동안 시장가 매도(ASK)의 "
-           "금액가중 평균에 판 것으로 보고 수수료 편도 0.05% 를 뺍니다. 업비트는 7일 안의 체결만 주므로 그보다 늦게 처음 채점된 거래는 "
-           "'체결 자료 없음' 입니다. 매수가 차이가 + 면 봉 시가보다 비싸게 산 것, 매도가 차이가 − 면 싸게 판 것입니다.", "",
-           "| 항목 | 끝난 거래 | 체결 확인 | 봉 기준 평균 | 같은 거래의 봉 기준 | 체결 기준 평균 | 매수가 − 봉 시가 | 매도가 − 봉 시가 | 체결 없음 / 자료 없음 |",
-           "|---|---|---|---|---|---|---|---|---|"]
+    out = ["## 체결 기준 확인 (공개 체결 내역으로 추정) — 1단계 선별은 등록된 대로 봉 기준", "",
+           "봉 기준은 봉 시가에 사고 판 값(비용 편도 0.07~0.10%)입니다. 체결 기준은 업비트 공개 체결 내역으로 추정한 값입니다: "
+           "진입 시각부터 60초 동안 체결된 시장가 매수(BID)의 평균가(가격×수량의 합 ÷ 수량의 합)에 사서, 청산 시각부터 60초 동안 "
+           "시장가 매도(ASK)의 평균가에 판 것으로 보고 수수료 편도 0.05% 를 뺍니다. 다른 사람들의 체결 평균이라 우리 주문 크기, 그때의 "
+           "호가 잔량, 진입 지연은 들어 있지 않고, 봉과의 차이에는 60초 동안의 가격 움직임도 섞입니다. '체결 없음' 은 그 방향의 시장가 "
+           "체결이 60초 동안 없었다는 뜻이지 주문이 불가능했다는 뜻은 아닙니다. 업비트는 7일 안의 체결만 주므로 그보다 늦게 처음 채점된 "
+           "거래는 '체결 자료 없음' 입니다.", "",
+           "체결 차이 = 같은 거래의 봉 기준 − 체결 기준(+ 면 실제가 나쁘다). 상한은 단측 95%. 60초 체결 금액 = 거래마다 진입 60초 매수 체결과 "
+           "청산 60초 매도 체결 중 작은 쪽, 그 중앙값. 매수가 차이 + 는 봉 시가보다 비싸게 산 것, 매도가 차이 − 는 싸게 판 것입니다. "
+           "추정 가능한 거래만의 평균은 체결이 어려운 거래가 빠져 좋아 보일 수 있으니 건수를 같이 보세요.", "",
+           "| 항목 | 끝난 거래 | 추정 가능 | 봉 기준 평균 | 같은 거래: 봉 → 체결 | 체결 차이 평균 (95% 상한) | 매수·매도가 − 봉 시가 | 체결 없음 | 60초 체결 금액 중앙값 | 자료 없음 |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
     recent = []
-    for name, rows, minute in items:
+    for name, entry, minute, _day, _past in items:
+        rows = entry.get("rows", [])
         ok = [t for t in rows if (t.get("fill") or {}).get("status") == "ok"]
-        none = sum(1 for t in rows if (t.get("fill") or {}).get("status") == NO_FILL)
-        nodata = sum(1 for t in rows if (t.get("fill") or {}).get("status") == NO_DATA)
-        out.append("| %s | %d | %d | %s | %s | %s | %s | %s | %d / %d |" % (
+        fs = fill_stats(rows)
+        out.append("| %s | %d | %d | %s | %s → %s | %s (%s) | %s / %s | %s | %s | %d |" % (
             name, len(rows), len(ok), avg([t["net"] for t in rows]), avg([t["net"] for t in ok]), avg([t["fill"]["net"] for t in ok]),
+            "-" if fs["gap"] is None else _pct(fs["gap"]), "-" if fs["gap_up95"] is None else _pct(fs["gap_up95"]),
             avg([t["fill"]["buy_vs_open"] for t in ok if t["fill"].get("buy_vs_open") is not None]),
-            avg([t["fill"]["sell_vs_open"] for t in ok if t["fill"].get("sell_vs_open") is not None]), none, nodata))
+            avg([t["fill"]["sell_vs_open"] for t in ok if t["fill"].get("sell_vs_open") is not None]),
+            "-" if fs["nofill_rate"] is None else "%s (%d / %d)" % (_rate(fs["nofill_rate"]), fs["nofill"], fs["tried"]),
+            "-" if fs["depth"] is None else format(int(fs["depth"]), ",") + "원", fs["nodata"]))
         recent += [(minute(t), name, t) for t in rows if t.get("fill")]
     out.append("")
     if recent:
@@ -1003,6 +1109,26 @@ def render_fills(ledger):
             else:
                 out.append(head + f["status"] + (" (%s)" % (money or f.get("why", "")) if (money or f.get("why")) else ""))
         out.append("")
+    return out
+
+
+def render_stage2(ledger):
+    """현황의 '2단계 점검' 절 (고문 판정 2026-11-19 ②). 표시만 한다 — 이 절이 무엇을 결정하지는 않는다."""
+    items = fill_items(ledger)
+    if not items:
+        return []
+
+    def cell(r):
+        return ("충족 — " if r[0] else "미달 — " if r[0] is False else "") + r[1]
+    out = ["## 2단계 점검 — 표시만 (자동 결정 없음. 소액 실거래 시험은 고문과 사용자가 정한다)", "",
+           "① 1단계 선별 통과  ② 과거 봉 기준 우위(두 시기 중 낮은 쪽) − 체결 차이 95%% 상한 > 0, 체결 자료 %d건 이상  "
+           "③ 체결 없음 %d%% 이하, 60초 체결 금액 중앙값 ≥ 주문 금액 %s원 × %d  ④ 전진 일별 평균 ≥ 과거 일별 평균 − 2 × 전진 표준오차. "
+           "충족·미달이 없는 칸은 아직 판단할 자료가 모자란 것입니다." % (STAGE2_MIN_FILLS, int(100 * STAGE2_MAX_NOFILL), format(ORDER_KRW, ","), STAGE2_DEPTH_X), "",
+           "| 항목 | ① 1단계 선별 | ② 과거 우위 − 체결 차이 상한 | ③ 체결 없음 · 60초 체결 금액 | ④ 전진 일별 평균 |", "|---|---|---|---|---|"]
+    for name, entry, _minute, day, past in items:
+        out.append("| %s | %s |" % (name, " | ".join(cell(r) for r in stage2(entry.get("rows", []), entry.get("decision"), past, day))))
+    out += ["", "과거 값: 급락 반등 계열은 고문 집계(2017–20, 2021–26의 거래당 평균), 후보는 등록 때 적힌 앞·뒤 구간 값. "
+            "'과거 일별 평균 미기록' 인 항목은 고문 집계 값을 받아 넣어야 ④ 를 볼 수 있습니다.", ""]
     return out
 
 
@@ -1106,7 +1232,7 @@ def summary(ledger):
     if cr is not None:
         rows, dec = cr.get("rows", []), cr.get("decision")
         if dec:
-            lines.append("급락 반등: 판정 %s (%s)" % (VERDICT[dec["verdict"]], dec["decided_on"]))
+            lines.append("급락 반등: %s %s (%s)" % (STAGE1, VERDICT[dec["verdict"]], dec["decided_on"]))
         elif rows:
             st = AM.cr_summary([(t["market"], t) for t in rows])
             lines.append("급락 반등: %d/%d건 %d/%d일, 거래당 %s (판정 전)" % (st["n"], AM.CR_MIN_N, st["days"], AM.CR_MIN_DAYS, _pct(st["mean"])))
@@ -1124,7 +1250,7 @@ def summary(ledger):
     if cands:
         done = [c for c, e in cands.items() if e.get("decision")]
         passed = [c for c in done if cands[c]["decision"]["verdict"] == "PASS"]
-        lines.append("자동 등록 후보: %d개 추적, 판정 %d개%s" % (len(cands), len(done), " (통과: %s)" % ", ".join(sorted(passed)) if passed else ""))
+        lines.append("자동 등록 후보: %d개 추적, %s 끝 %d개%s" % (len(cands), STAGE1, len(done), " (통과: %s)" % ", ".join(sorted(passed)) if passed else ""))
         for c in sorted(cands):
             if cands[c].get("delisted"):
                 lines.append("  %s 자료 불완전: %s 상장폐지 (남은 종목으로 계속 채점)" % (c, ", ".join(m[4:] for m in sorted(cands[c]["delisted"]))))
