@@ -448,7 +448,7 @@ class CrashReboundVariants(unittest.TestCase):
         self.assertEqual((thin["decision"]["verdict"], thin["decision"]["trades"]), ("EXPIRED", 5))
         self.assertIsNone(FW.cr_decide({"rows": [], "decision": None}, "2030-01-01")["decision"])     # 시작 시각을 안 주면 만료도 없다
         ledger, _ = FW.update({"CR_variants": {"CR_drop6": thin}}, "2026-11-13", **offline())
-        self.assertIn("| −6% | 1시간에 6% 넘게 빠지면 60분 보유 | 5 / 30건, 2 / 10일 | -5.00% | -5.00% | 0% | -5.00% | 만료(표본 부족) |", FW.render(ledger))
+        self.assertIn("| −6% | 1시간에 6% 넘게 빠지면 60분 보유 | 5 / 30건, 2 / 10일 | -5.00% | -5.00% | 0% | -5.00% | 0 / 5건 | 만료(표본 부족) |", FW.render(ledger))
         self.assertIn("−6% 만료(표본 부족)", FW.summary(ledger))
 
     def test_trades_after_the_deadline_cannot_fill_the_sample(self):
@@ -468,7 +468,7 @@ class CrashReboundVariants(unittest.TestCase):
         text = FW.render(ledger)
         self.assertIn("## 급락 반등 변형", text)
         for v in FW.CR_VARIANTS:
-            self.assertIn("| %s | %s | 0 / 30건, 0 / 10일 | - | - | - | - | 진행 중 |" % (v["name"], v["rule"]), text)
+            self.assertIn("| %s | %s | 0 / 30건, 0 / 10일 | - | - | - | - | 0 / 0건 | 진행 중 |" % (v["name"], v["rule"]), text)
         self.assertIn("고문 정의(2026-11-13 확정)", text)
         self.assertIn("## 대기 중\n\n- 없음", text)                                                  # 알트 동반 급락은 등록부(registry.json)로 옮겼다
         self.assertIn("급락 반등 변형: −5% 0건, −6% 0건, 4시간 보유 0건", FW.summary(ledger))
@@ -1400,15 +1400,21 @@ class Observation(unittest.TestCase):
 
 
 
-class FakeTicks(object):
-    """업비트 /v1/trades/ticks 흉내. trades = {종목: [(UTC 시각 ms, 가격, 수량, "ASK"|"BID")]}. 2026-11-19 에 확인한 동작 그대로:
-    days_ago 는 그 종목의 가장 최근 체결 날짜 기준, to 는 그날의 그 초 직전까지, 새 것부터 count 건, cursor 는 sequential_id 이전.
-    days_ago 가 7 을 넘으면 400."""
+def ms(text):
+    return int(AM.parse_utc(text).timestamp() * 1000)
 
-    def __init__(self, trades, loose_to=False):
+
+class FakeTicks(object):
+    """업비트 /v1/trades/ticks 흉내. trades = {종목: [(UTC 시각 ms, 가격, 수량, "ASK"|"BID")]}. 2026-11-20 에 실제 API 로 확인한 동작:
+    days_ago = 조회할 날짜와 '그 종목의 마지막 체결일' 의 일 단위 차이(1~7, 넘으면 400), to 는 그날의 그 초 직전까지, 새 것부터 count 건,
+    cursor 는 그 sequential_id 이전. count=1 에 to 가 없으면 가장 최근 체결 하나. wrong_day 를 주면 그만큼 뒤의 날을 준다(어긋난 응답 시험용).
+    latest 를 주면 그 시각에 체결 하나를 더해 그 종목의 마지막 체결일을 정한다."""
+
+    def __init__(self, trades, latest="2026-11-19T09:00", loose_to=False, wrong_day=0):
+        trades = {m: list(v) + ([(ms(latest), 1.0, 1.0, "BID")] if latest else []) for m, v in trades.items()}
         self.trades = {m: sorted(v, reverse=True) for m, v in trades.items()}
+        self.loose_to, self.wrong_day = loose_to, wrong_day
         self.calls = []
-        self.loose_to = loose_to                                                                       # to 의 그 초까지 주는 경우(우리 쪽 구간 거르기 시험용)
 
     def __call__(self, url):
         import urllib.parse
@@ -1417,51 +1423,49 @@ class FakeTicks(object):
         rows = self.trades.get(q["market"])
         if rows is None:
             raise RuntimeError("조회 실패 (HTTP 404)")
-        utc = dt.timezone.utc
-        out = []
-        latest = dt.datetime.fromtimestamp(rows[0][0] / 1000.0, tz=utc).date()
         ago = int(q.get("days_ago", 0))
-        if ago > 7:
+        if "days_ago" in q and not 1 <= ago <= 7:
             raise RuntimeError("조회 실패 (HTTP 400)")
-        day = latest - dt.timedelta(days=ago)
-        to = q.get("to")
-        for k, (ms, price, vol, side) in enumerate(rows):
-            t = dt.datetime.fromtimestamp(ms / 1000.0, tz=utc)
-            seq = ms * 10000 + (len(rows) - k)
-            if "count" in q and q["count"] == "1" and not to:
-                return [{"trade_date_utc": t.date().isoformat(), "timestamp": ms, "sequential_id": seq, "trade_price": price, "trade_volume": vol, "ask_bid": side}]
-            if t.date() != day or (to and t.strftime("%H%M%S") > to if self.loose_to else to and t.strftime("%H%M%S") >= to) or (
-                    "cursor" in q and seq >= int(q["cursor"])):
+        utc = dt.timezone.utc
+        last = dt.datetime.fromtimestamp(rows[0][0] / 1000.0, tz=utc)
+        if q.get("count") == "1" and "to" not in q:
+            return [{"trade_date_utc": last.date().isoformat(), "trade_time_utc": last.strftime("%H:%M:%S"), "timestamp": rows[0][0],
+                     "trade_price": rows[0][1], "trade_volume": rows[0][2], "ask_bid": rows[0][3], "sequential_id": rows[0][0] * 10000}]
+        day = last.date() - dt.timedelta(days=ago - self.wrong_day)
+        to, out = q.get("to"), []
+        for k, (ms_, price, vol, side) in enumerate(rows):
+            t = dt.datetime.fromtimestamp(ms_ / 1000.0, tz=utc)
+            seq = ms_ * 10000 + (len(rows) - k)
+            hms = t.strftime("%H%M%S")
+            if t.date() != day or (to and (hms > to if self.loose_to else hms >= to)) or ("cursor" in q and seq >= int(q["cursor"])):
                 continue
-            out.append({"trade_date_utc": t.date().isoformat(), "trade_time_utc": t.strftime("%H:%M:%S"), "timestamp": ms, "trade_price": price,
+            out.append({"trade_date_utc": t.date().isoformat(), "trade_time_utc": t.strftime("%H:%M:%S"), "timestamp": ms_, "trade_price": price,
                         "trade_volume": vol, "ask_bid": side, "sequential_id": seq})
-            if len(out) >= int(q["count"]):
+            if len(out) >= int(q.get("count", 1)):
                 break
         return out
 
 
-def ms(text):
-    return int(AM.parse_utc(text[:16]).timestamp() * 1000) + int(float(text[17:] or 0) * 1000) if len(text) > 16 else int(AM.parse_utc(text).timestamp() * 1000)
-
-
 class Fills(unittest.TestCase):
-    """고문 판정 2026-11-19: 봉 기준 수익이 실제 체결에서도 남는지 — 업비트 공개 체결 기록으로 다시 계산한다."""
+    """고문 판정 2026-11-19·20: 봉 기준 수익이 실제 체결에서도 남는지 — 업비트 공개 체결 내역으로 추정한다."""
     ENTRY, EXIT = "2026-11-15T01:15", "2026-11-15T02:15"
 
-    def world(self, extra=(), latest="2026-11-19T09:00"):
+    def world(self, extra=(), latest="2026-11-19T09:00", **kw):
         e, x = ms(self.ENTRY), ms(self.EXIT)
         trades = [(e - 1000, 50.0, 100.0, "BID"),                                  # 구간 앞: 세지 않는다
-                  (e + 1000, 61.0, 10.0, "BID"), (e + 20000, 62.0, 30.0, "BID"),   # 매수 VWAP = (610 + 1860) / 40 = 61.75
+                  (e + 1000, 61.0, 10.0, "BID"), (e + 20000, 62.0, 30.0, "BID"),   # 60초 매수 평균 = (610 + 1860) / 40 = 61.75
                   (e + 30000, 60.0, 50.0, "ASK"),                                  # 진입 구간의 매도 체결: 금액만 센다
                   (e + 60000, 99.0, 100.0, "BID"),                                 # 60초째: 구간 밖
-                  (x + 5000, 59.0, 20.0, "ASK"), (x + 50000, 60.0, 20.0, "ASK"),   # 매도 VWAP = 59.5
-                  (x + 10000, 59.8, 5.0, "BID"),
-                  (ms(latest), 1.0, 1.0, "BID")] + list(extra)                     # 그 종목의 가장 최근 체결
-        return FakeTicks({"KRW-KAVA": trades})
+                  (x + 5000, 59.0, 20.0, "ASK"), (x + 50000, 60.0, 20.0, "ASK"),   # 60초 매도 평균 = 59.5
+                  (x + 10000, 59.8, 5.0, "BID")] + list(extra)
+        return FakeTicks({"KRW-KAVA": trades}, latest=latest, **kw)
 
-    def test_buy_and_sell_are_the_amount_weighted_market_orders_of_the_first_sixty_seconds(self):
+    def check(self, get):
+        return FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
+
+    def test_sixty_second_values_are_the_amount_weighted_market_orders(self):
         get = self.world()
-        f = FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
+        f = self.check(get)
         self.assertEqual(f["status"], "ok")
         self.assertAlmostEqual(f["buy"], 61.75)
         self.assertAlmostEqual(f["sell"], 59.5)
@@ -1469,60 +1473,86 @@ class Fills(unittest.TestCase):
         self.assertAlmostEqual(f["buy_vs_open"], 61.75 / 61.4 - 1, places=9)
         self.assertAlmostEqual(f["sell_vs_open"], 59.5 / 59.4 - 1, places=9)
         self.assertEqual((f["entry_bid_krw"], f["entry_ask_krw"], f["exit_bid_krw"], f["exit_ask_krw"]), (2470, 3000, 299, 2380))
-        days = [u for u in get.calls if "days_ago" in u]
-        self.assertTrue(days and all("days_ago=4" in u for u in days))                                 # 11/19 기준 4일 전
-        self.assertTrue(any("to=011600" in u for u in days) and any("to=021600" in u for u in days))    # 각 구간 끝의 초 직전까지
-        self.assertEqual((FW.FILL_SEC, FW.FILL_FEE, FW.FILL_DAYS), (60, 0.0005, 7))
-        loose = self.world()
-        loose.loose_to = True                                                                          # 업비트가 60초째 체결까지 주더라도 우리 쪽에서 뺀다
-        self.assertAlmostEqual(FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, loose)["buy"], 61.75)
+        self.assertEqual(f["order_status"], "자료 부족")                                               # 60초 매수가 2,470원뿐: 100만 원이 안 찬다
+        self.assertTrue(get.calls[0].endswith("market=KRW-KAVA&count=1"))                             # 마지막 체결일을 먼저 묻는다
+        self.assertTrue(all("days_ago=4" in u for u in get.calls[1:]))                                 # 그 종목의 마지막 체결일(11/19) 기준 4일 전
+        self.assertTrue(any("to=011600" in u for u in get.calls) and any("to=021600" in u for u in get.calls))
+        self.assertEqual((FW.FILL_SEC, FW.FILL_FEE, FW.FILL_DAYS, FW.ORDER_KRW), (60, 0.0005, 7, 1000000))
+        self.assertAlmostEqual(self.check(self.world(loose_to=True))["buy"], 61.75)                    # 60초째 체결까지 받아도 우리 쪽에서 뺀다
 
-    def test_days_ago_counts_from_the_coins_own_latest_trade_date(self):
-        """오늘 아직 체결이 없는 종목은 업비트가 그 종목의 마지막 체결 날짜를 기준으로 센다 — 달력의 오늘로 세면 하루가 밀린다."""
-        get = self.world(latest="2026-11-18T23:00")
-        get.trades["KRW-KAVA"] = [t for t in get.trades["KRW-KAVA"] if t[0] < ms("2026-11-19T00:00")]
-        f = FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
-        self.assertEqual(f["status"], "ok")
-        self.assertTrue(all("days_ago=3" in u for u in get.calls if "days_ago" in u))
+    def test_days_ago_counts_from_the_coins_last_trade_date_as_the_api_actually_does(self):
+        """문서에는 '요청 시점과의 차이' 라고 적혀 있지만(제3세션 지적), 실제 API 는 그 종목의 마지막 체결일을 기준으로 센다
+        (2026-11-20 00:01 UTC: 오늘 체결이 없던 CARV·LSK 에 days_ago=1 → 11/18). 오늘 체결이 없는 종목에서도 날짜가 맞아야 한다."""
+        get = self.world(latest="2026-11-19T23:21")                                                    # 지금은 11/20 이지만 이 종목의 마지막 체결은 11/19
+        self.assertEqual(self.check(get)["status"], "ok")
+        self.assertTrue(all("days_ago=4" in u for u in get.calls[1:]))
+        bad = self.world(extra=[(ms("2026-11-16T01:00"), 1.0, 1.0, "BID")], wrong_day=1)            # 조회한 날보다 뒤의 날을 받았다
+        with self.assertRaises(RuntimeError):
+            self.check(bad)
 
-    def test_no_market_buy_or_sell_in_the_window_is_no_fill_and_the_amounts_stay(self):
+    def test_no_market_order_in_a_window_is_a_shortage_not_an_impossibility(self):
         get = self.world()
         get.trades["KRW-KAVA"] = [t for t in get.trades["KRW-KAVA"] if not (t[3] == "BID" and ms(self.ENTRY) <= t[0] < ms(self.ENTRY) + 60000)]
-        f = FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
-        self.assertEqual((f["status"], f["entry_bid_krw"], f["entry_ask_krw"], f["exit_ask_krw"]), ("체결 없음", 0, 3000, 2380))
+        f = self.check(get)
+        self.assertEqual((f["status"], f["order_status"], f["entry_bid_krw"], f["entry_ask_krw"], f["exit_ask_krw"]),
+                         ("60초 안 체결 자료 부족", "자료 부족", 0, 3000, 2380))
         self.assertNotIn("net", f)
         get = self.world()
         get.trades["KRW-KAVA"] = [t for t in get.trades["KRW-KAVA"] if not (t[3] == "ASK" and t[0] >= ms(self.EXIT))]
-        self.assertEqual(FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)["status"], "체결 없음")
+        self.assertEqual(self.check(get)["status"], "60초 안 체결 자료 부족")
+
+    def test_a_window_after_the_coins_last_trade_has_no_trades(self):
+        """거래가 멈춘 종목: 청산 창이 그 종목의 마지막 체결보다 뒤면 조회하지 않고 체결 없음으로 본다(음수 days_ago 를 보내지 않는다)."""
+        e = ms(self.ENTRY)
+        halted = FakeTicks({"KRW-KAVA": [(e + 1000, 61.0, 10.0, "BID")]}, latest=None)                 # 마지막 체결이 11/15 진입 창
+        f = FW.fill_check("KRW-KAVA", e, ms("2026-11-16T00:15"), 61.4, 59.4, halted)
+        self.assertEqual(f["status"], "60초 안 체결 자료 부족")
+        self.assertFalse([u for u in halted.calls if "days_ago=-" in u])
 
     def test_older_than_seven_days_is_no_data_without_asking_for_the_trades(self):
         get = self.world(latest="2026-11-23T00:30")
-        f = FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
-        self.assertEqual(f, {"status": "체결 자료 없음"})
-        self.assertEqual(len(get.calls), 1)                                                            # 최근 체결 하나만 묻고 끝
-        get = self.world(latest="2026-11-22T23:59")                                                    # 7일째까지는 받는다
-        self.assertEqual(FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)["status"], "ok")
+        self.assertEqual(self.check(get), {"status": "체결 자료 없음", "order_status": "체결 자료 없음"})
+        self.assertEqual(len(get.calls), 1)                                                            # 마지막 체결일만 묻고 끝
+        self.assertEqual(self.check(self.world(latest="2026-11-22T23:59"))["status"], "ok")            # 7일째까지는 받는다
 
-    def test_more_than_one_page_of_trades_is_followed_with_the_cursor(self):
+    def test_more_than_one_page_is_followed_with_the_cursor(self):
         e = ms(self.ENTRY)
-        busy = [(e + 2000 + k * 40, 70.0, 1.0, "BID") for k in range(1200)]                           # 60초 안에 1,200건 + 앞의 두 건
+        busy = [(e + 2000 + k * 40, 70.0, 1.0, "BID") for k in range(1200)]
         get = self.world(extra=busy)
-        f = FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, get)
+        f = self.check(get)
         self.assertAlmostEqual(f["buy"], (610 + 1860 + 70.0 * 1200) / (40 + 1200))
         self.assertGreaterEqual(sum(1 for u in get.calls if "cursor=" in u), 2)
         real = FW.TICKS_MAX_PAGES
         FW.TICKS_MAX_PAGES = 2
         try:
             with self.assertRaises(RuntimeError):                                                      # 끝까지 못 받으면 값을 내지 않는다
-                FW.fill_check("KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), 61.4, 59.4, self.world(extra=busy))
+                self.check(self.world(extra=busy))
         finally:
             FW.TICKS_MAX_PAGES = real
+
+    def test_order_size_values_take_the_first_million_won_of_each_side(self):
+        """고문 판정 2026-11-20 3: 신호 뒤 첫 100만 원어치 BID, 청산 뒤 첫 100만 원어치 ASK 의 평균가. 60초 안에 안 차면 자료 부족."""
+        e, x = ms(self.ENTRY), ms(self.EXIT)
+        big = [(e + 1000, 100.0, 6000.0, "BID"), (e + 5000, 101.0, 5000.0, "BID"), (e + 9000, 150.0, 9999.0, "BID"),   # 60만 + 40만 = 100만에서 멈춘다
+               (e + 2000, 99.0, 9999.0, "ASK"), (x + 2000, 98.0, 20000.0, "ASK"), (x + 3000, 10.0, 1.0, "ASK")]
+        f = self.check(FakeTicks({"KRW-KAVA": big}))
+        self.assertEqual(f["status"], "ok")
+        buy = 1000000.0 / (6000 + 400000.0 / 101)
+        self.assertEqual(f["order_status"], "ok")
+        self.assertAlmostEqual(f["order_buy"], buy)
+        self.assertAlmostEqual(f["order_sell"], 98.0)
+        self.assertAlmostEqual(f["order_net"], 98.0 * (1 - 0.0005) / (buy * (1 + 0.0005)) - 1, places=9)
+        self.assertAlmostEqual(f["order_buy_vs_open"], buy / 61.4 - 1, places=9)
+        self.assertNotAlmostEqual(f["buy"], f["order_buy"])                                            # 60초 값과 다르다 — 60초 값은 따로 남는다
+        thin = [t for t in big if not (t[3] == "BID" and t[1] != 100.0)]                               # 매수 체결 60만 원뿐
+        self.assertEqual(self.check(FakeTicks({"KRW-KAVA": thin}))["order_status"], "자료 부족")
+        self.assertIsNone(FW.order_price([(1, 100.0, 9999.0, "ASK")], "BID", 1000))
 
     def candidate(self):
         return {"id": "A-1", "engine": DISC.ENGINE, "registered": "2026-11-13", "start": "2026-11-14", "event": "CRASH", "hold": 4, "cond": None,
                 "universe": ["KRW-BTC", "KRW-KAVA"], "move": 0.03, "vol_x": 3.0, "cost": {"KRW-BTC": 0.0007}, "cost_other": 0.001, "status": "ACTIVE"}
 
-    def scored(self, fill_get, ledger=None, today="2026-11-19", listed=None):
+    def scored(self, fill_get, ledger=None, today="2026-11-19", tick_dir=None):
         """후보 A-1 의 11/15 KAVA 거래 한 건이 채점된 상태로 update 를 돌린다. 패널에는 진입·청산 봉의 시가가 있다."""
         q_in, q_out = ms(self.ENTRY) // 900000, ms(self.EXIT) // 900000
         row = {"market": "KRW-KAVA", "entry_q": q_in, "exit_q": q_out, "day": "2026-11-15", "gross": -0.0326, "net": -0.0345, "move": -0.04}
@@ -1530,57 +1560,106 @@ class Fills(unittest.TestCase):
         DISC.candidate_trades = lambda panel, cand, end_q: [dict(row)]
         bars = {q: (61.4 if q == q_in else 59.4 if q == q_out else 60.0, 62.0, 58.0, 60.0, 1e9) for q in range(q_in - 4, q_out + 4)}
         panel = {"KRW-BTC": DISC.Bars(bars), "KRW-KAVA": DISC.Bars(bars)}
-        args, start = clean("2026-11-16")                                                             # 다른 항목은 경고 없이 끝나게
+        args, start = clean("2026-11-16")
         args["panel_loader"] = lambda s, e, markets: {m: panel[m] for m in markets}
-        if listed is not None:
-            args["list_markets"] = lambda: listed
         try:
-            return FW.update(ledger if ledger is not None else start, today, registry=[self.candidate()], fill_get=fill_get, **args)
+            return FW.update(ledger if ledger is not None else start, today, registry=[self.candidate()], fill_get=fill_get, tick_dir=tick_dir, **args)
         finally:
             DISC.candidate_trades = real
 
-    def test_the_tracker_attaches_fills_once_and_reports_them_beside_the_bar_value(self):
+    def test_the_tracker_attaches_estimates_once_and_shows_them_with_counts(self):
         get = self.world()
         ledger, warnings = self.scored(get)
         f = ledger["candidates"]["A-1"]["rows"][0]["fill"]
-        self.assertEqual((warnings, f["status"]), ([], "ok"))
-        self.assertAlmostEqual(f["buy_vs_open"], 61.75 / 61.4 - 1, places=9)                           # 봉 시가는 그 후보의 패널에서
+        self.assertEqual((warnings, f["status"], f["order_status"]), ([], "ok", "자료 부족"))
         self.assertAlmostEqual(f["sell_vs_open"], 59.5 / 59.4 - 1, places=9)                           # 청산 봉의 시가와 비교한다
         n = len(get.calls)
         ledger, _ = self.scored(get, ledger, "2026-11-20")
         self.assertEqual(len(get.calls), n)                                                            # 이미 붙은 거래는 다시 받지 않는다
-        item = next(x for x in self.scored(self.world())[0]["new"]["items"])
-        self.assertAlmostEqual(item["fill"], f["net"])
+        item = self.scored(self.world())[0]["new"]["items"][0]
+        self.assertEqual((round(item["fill"], 9), item["order"]), (round(f["net"], 9), "자료 부족"))
         text = FW.render(ledger)
-        self.assertIn("## 체결 기준 확인 (공개 체결 내역으로 추정) — 1단계 선별은 등록된 대로 봉 기준", text)
-        self.assertIn("| 후보 A-1 | 1 | 1 | -3.45%% | -3.45%% → %s | %s (-) | %s / %s | 0%% (0 / 1) | 2,380원 | 0 |" % (
-            FW._pct(f["net"]), FW._pct(-0.0345 - f["net"]), FW._pct(f["buy_vs_open"]), FW._pct(f["sell_vs_open"])), text)   # 60초 체결 금액 = min(진입 매수 2,470, 청산 매도 2,380)
-        self.assertIn("- 후보 A-1 KAVA 11/15 10:15: 봉 -3.45%% → 체결 %s (매수가 %s, 매도가 %s / 60초 체결 금액: 진입 매수 2,470원·매도 3,000원, 청산 매수 299원·매도 2,380원)" % (
-            FW._pct(f["net"]), FW._pct(f["buy_vs_open"]), FW._pct(f["sell_vs_open"])), text)
-        self.assertIn("(체결 기준 %s)" % FW._pct(f["net"]), FW.summary(self.scored(self.world())[0]))
-        self.assertEqual(ledger["candidates"]["A-1"]["decision"], None)                                # 판정은 봉 기준 그대로(아직 1건)
+        self.assertIn("## 체결 내역 기반 추정 — 1단계 선별은 등록된 대로 봉 기준", text)
+        self.assertIn("| 후보 A-1 | 1 / 1건 | -3.45%% | -3.45%% → %s (1건) | - → - (0건) | - (-) | - / - | 0 / 1 | 1 / 1 | 2,380원 |" % FW._pct(f["net"]), text)
+        self.assertIn("- 후보 A-1 KAVA 11/15 10:15: 봉 -3.45%% → 60초 %s, 주문 크기 자료 부족 / 60초 체결 금액: 진입 매수 2,470원·매도 3,000원, 청산 매수 299원·매도 2,380원" % FW._pct(f["net"]), text)
+        self.assertIn("| 1 / 1건 | 진행 중 |", text)                                                  # 후보 표에도 '체결 자료 n / 전체 N건'
+        self.assertIn("(추정 60초 %s, 1,000,000원 자료 부족)" % FW._pct(f["net"]), FW.summary(self.scored(self.world())[0]))
+        self.assertNotIn("체결 기준", text.replace("체결 기준 비용", ""))                               # 옛 이름은 쓰지 않는다 (고문 판정 2026-11-20 1)
+
+    def test_raw_trades_are_kept_and_reused(self):
+        """고문 판정 2026-11-20 2: 거래마다 진입·청산 60초 창의 원본 체결을 forward/ticks/ 에 gzip JSON 으로."""
+        import gzip
+        with tempfile.TemporaryDirectory() as d:
+            ledger, _ = self.scored(self.world(), tick_dir=d)
+            path = Path(d) / "KRW-KAVA_20261115T0115_20261115T0215.json.gz"
+            body = json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+            self.assertEqual((body["market"], body["entry_ms"], body["window_sec"], body["fields"]),
+                             ("KRW-KAVA", ms(self.ENTRY), 60, ["timestamp_ms", "price", "volume", "ask_bid"]))
+            self.assertEqual(body["entry"], [[ms(self.ENTRY) + 1000, 61.0, 10.0, "BID"], [ms(self.ENTRY) + 20000, 62.0, 30.0, "BID"],
+                                             [ms(self.ENTRY) + 30000, 60.0, 50.0, "ASK"]])
+            self.assertEqual(len(body["exit"]), 3)
+            first = path.read_bytes()
+            FW.save_ticks(path, "KRW-KAVA", ms(self.ENTRY), ms(self.EXIT), *FW.load_ticks(path))
+            self.assertEqual(path.read_bytes(), first)                                                 # 같은 내용이면 같은 바이트
+            self.assertEqual(first[4:8], b"\x00\x00\x00\x00")                                         # gzip 머리의 시각을 0 으로(실행마다 파일이 바뀌지 않게)
+            old = copy.deepcopy(ledger)                                                                # 2026-11-20 전에 채점된 거래: 60초 값만 있다
+            f = old["candidates"]["A-1"]["rows"][0]["fill"]
+            for k in [k for k in f if k.startswith("order_")]:
+                del f[k]
+            f["net"] = -0.0441                                                                         # 이미 있는 60초 값은 건드리지 않는다
+
+            def down(url):
+                raise RuntimeError("조회 실패 (TimeoutError)")
+            again, warnings = self.scored(down, old, "2026-11-20", tick_dir=d)                         # 원본 파일이 있으면 받지 않고 그것으로
+            g = again["candidates"]["A-1"]["rows"][0]["fill"]
+            self.assertEqual((warnings, g["order_status"], g["net"]), ([], "자료 부족", -0.0441))
+
+    def test_the_raw_trade_folder_is_committed(self):
+        """워크플로는 scalp/research/forward 를 통째로 커밋한다. 연구 폴더의 무시 목록에 다른 용도의 ticks/ 가 있어 예외를 둔다."""
+        lines = (ROOT / "scalp" / "research" / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("!forward/ticks/", lines)
+        self.assertGreater(lines.index("!forward/ticks/"), lines.index("ticks/"))                      # 뒤에 와야 예외가 먹는다
+        self.assertEqual(FW.TICKS_DIR, "ticks")
+
+    def test_an_old_row_without_order_values_is_fetched_once_within_seven_days(self):
+        ledger, _ = self.scored(self.world())
+        f = ledger["candidates"]["A-1"]["rows"][0]["fill"]
+        for k in [k for k in f if k.startswith("order_")]:
+            del f[k]
+        f["status"] = "체결 없음"                                                                      # 옛 이름
+        get = self.world()
+        with tempfile.TemporaryDirectory() as d:
+            again, warnings = self.scored(get, ledger, "2026-11-20", tick_dir=d)
+            g = again["candidates"]["A-1"]["rows"][0]["fill"]
+            self.assertEqual((warnings, g["status"], g["order_status"]), ([], "60초 안 체결 자료 부족", "자료 부족"))
+            self.assertTrue(get.calls and list(Path(d).iterdir()))
+        late = copy.deepcopy(ledger)
+        for k in [k for k in late["candidates"]["A-1"]["rows"][0]["fill"] if k.startswith("order_")]:
+            del late["candidates"]["A-1"]["rows"][0]["fill"][k]
+        later, _ = self.scored(self.world(latest="2026-11-24T01:00"), late, "2026-11-24")
+        self.assertEqual(later["candidates"]["A-1"]["rows"][0]["fill"]["order_status"], "체결 자료 없음")
 
     def test_a_failed_lookup_is_retried_on_the_next_run_and_fails_that_run(self):
         def down(url):
             raise RuntimeError("조회 실패 (TimeoutError)")
         ledger, warnings = self.scored(down)
         self.assertNotIn("fill", ledger["candidates"]["A-1"]["rows"][0])
-        self.assertEqual(warnings, ["체결 기준: 1건 조회 실패 — 비워 두고 다음 실행에서 다시 받음 (후보 A-1 KAVA (RuntimeError))"])
+        self.assertEqual(warnings, ["체결 내역: 1건 조회 실패 — 비워 두고 다음 실행에서 다시 받음 (후보 A-1 KAVA (RuntimeError))"])
         self.assertIsNone(ledger.get("last_ok"))                                                       # 뒤의 예약이 다시 돈다
         ledger, warnings = self.scored(self.world(), ledger)
         self.assertEqual((warnings, ledger["candidates"]["A-1"]["rows"][0]["fill"]["status"]), ([], "ok"))
-        late, _ = self.scored(self.world(latest="2026-11-24T01:00"), self.scored(down)[0], "2026-11-24")   # 그사이 7일이 지났으면 자료 없음
-        self.assertEqual(late["candidates"]["A-1"]["rows"][0]["fill"], {"status": "체결 자료 없음"})
+        late, _ = self.scored(self.world(latest="2026-11-24T01:00"), self.scored(down)[0], "2026-11-24")
+        self.assertEqual(late["candidates"]["A-1"]["rows"][0]["fill"], {"status": "체결 자료 없음", "order_status": "체결 자료 없음"})
 
     def test_a_delisted_coin_is_no_data_without_a_lookup_and_nothing_runs_without_a_fetcher(self):
         get = self.world()
         ledger, warnings = self.scored(get, dict(clean("2026-11-16")[1], candidates={"A-1": {"rows": [], "decision": None, "delisted": {"KRW-KAVA": "2026-11-16"}}}))
         rows = ledger["candidates"]["A-1"]["rows"]
-        self.assertTrue(all(r["fill"] == {"status": "체결 자료 없음", "why": "상장폐지"} for r in rows))
+        self.assertTrue(all(r["fill"] == {"status": "체결 자료 없음", "order_status": "체결 자료 없음", "why": "상장폐지"} for r in rows))
         self.assertEqual(get.calls, [])
-        plain, _ = self.scored(None)                                                                   # 시험·점검 실행: 체결은 건드리지 않는다
+        plain, _ = self.scored(None)
         self.assertNotIn("fill", plain["candidates"]["A-1"]["rows"][0])
-        self.assertNotIn("체결 기준", FW.summary(plain))
+        self.assertNotIn("추정 60초", FW.summary(plain))
 
     def test_crash_rebound_rows_use_their_own_bar_prices_and_times(self):
         e = AM.to_min(AM.parse_utc(self.ENTRY))
@@ -1592,11 +1671,13 @@ class Fills(unittest.TestCase):
         f = ledger["CR_rebound"]["rows"][0]["fill"]
         self.assertEqual((warnings, f["status"]), ([], "ok"))
         self.assertAlmostEqual(f["buy_vs_open"], 61.75 / 61.4 - 1, places=9)
-        self.assertIn("| 급락 반등 | 1 | 1 | -3.20% | -3.20% → ", FW.render(ledger))
         self.assertEqual(ledger["CR_rebound"]["rows"][0]["market"], "KRW-BTC")
-        self.assertIn("| 급락 반등 변형 4시간 보유 | 0 | 0 | - | - → - | - (-) | - / - | - | - | 0 |", FW.render(ledger))
+        text = FW.render(ledger)
+        self.assertIn("| 급락 반등 | 1 / 1건 | -3.20% | -3.20% → ", text)
+        self.assertIn("| 급락 반등 변형 4시간 보유 | 0 / 0건 | - | - → - (0건) | - → - (0건) | - (-) | - / - | - | - | - |", text)
+        self.assertIn("체결 자료 1 / 전체 1건.", text)                                                 # 급락 반등 절에도 건수
 
-    def test_the_real_run_looks_up_fills(self):
+    def test_the_real_run_looks_up_fills_and_keeps_raw_trades_beside_the_ledger(self):
         got = {}
 
         def spy(ledger, today, **kw):
@@ -1606,10 +1687,12 @@ class Fills(unittest.TestCase):
         FW.update = spy
         try:
             with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+                FW.main(["--out", d, "--today", "2026-11-20"])
+                self.assertEqual((got["fill_get"], Path(got["tick_dir"])), (AM.http_get, Path(d) / "ticks"))
                 FW.main(["--out", d, "--dry-run", "--today", "2026-11-20"])
+                self.assertIsNone(got["tick_dir"])                                                     # 점검 실행은 파일을 쓰지 않는다
         finally:
             FW.update = real
-        self.assertIs(got["fill_get"], AM.http_get)
 
 
 class DayCounts(unittest.TestCase):
@@ -1631,79 +1714,124 @@ class DayCounts(unittest.TestCase):
                                          "decision": None}}}
         text = FW.render(ledger)
         self.assertIn("진입일 2일, 일별 승률 0%, 일별 중앙값 -1.00%.", text)
-        self.assertIn("| −5% | 1시간에 5% 넘게 빠지면 60분 보유 | 3 / 30건, 1 / 10일 | -1.00% | -1.00% | 0% | -1.00% | 진행 중 |", text)
-        self.assertIn("| +0.50% | 100% | +0.50% | 진행 중 |", text)                                    # 후보: 거래당 평균, 일별 승률, 일별 중앙값, 판정
+        self.assertIn("| −5% | 1시간에 5% 넘게 빠지면 60분 보유 | 3 / 30건, 1 / 10일 | -1.00% | -1.00% | 0% | -1.00% | 0 / 3건 | 진행 중 |", text)
+        self.assertIn("| +0.50% | 100% | +0.50% | 0 / 2건 | 진행 중 |", text)                                    # 후보: 거래당 평균, 일별 승률, 일별 중앙값, 판정
         self.assertIn("일별 승률 = 거래가 있었던 날 가운데", text)
 
 
 
-def filled(net, fill_net=None, status="ok", day="2026-11-15", bid=5e6, ask=5e6, market="KRW-KAVA", k=0):
-    """체결 값이 붙은 후보 거래 하나."""
-    f = {"status": status, "entry_bid_krw": int(bid), "entry_ask_krw": 0, "exit_bid_krw": 0, "exit_ask_krw": int(ask)}
+def filled(net, order_net=None, status="ok", day="2026-11-15", bid=2e7, ask=2e7, market="KRW-KAVA", k=0, order_status=None):
+    """체결 값이 붙은 후보 거래 하나. order_net 이 있으면 주문 크기 값도 ok."""
+    f = {"status": status, "entry_bid_krw": int(bid), "entry_ask_krw": 0, "exit_bid_krw": 0, "exit_ask_krw": int(ask), "order_krw": 1000000}
     if status == "ok":
-        f.update(net=fill_net, buy=1.0, sell=1.0, buy_vs_open=0.001, sell_vs_open=-0.002)
-    elif status == "체결 자료 없음":
-        f = {"status": status}
+        f.update(net=net - 0.001, buy=1.0, sell=1.0, buy_vs_open=0.001, sell_vs_open=-0.002)
+    if order_net is not None:
+        f.update(order_status="ok", order_net=order_net, order_buy=1.0, order_sell=1.0, order_buy_vs_open=0.002, order_sell_vs_open=-0.003)
+    else:
+        f["order_status"] = order_status or "자료 부족"
+    if status == "체결 자료 없음":
+        f = {"status": status, "order_status": status}
     return {"market": market, "entry_q": 1000 + k, "exit_q": 1004 + k, "day": day, "gross": net, "net": net, "move": -0.04, "fill": f}
 
 
+def by_q(t):
+    return t["entry_q"] * 15
+
+
+def by_day(t):
+    return t["day"]
+
+
 class StageTwo(unittest.TestCase):
-    """고문 판정 2026-11-19 ②: 지금 판정은 '1단계 선별'. 2단계 네 항목은 표시만 한다(자동 결정 없음)."""
+    """고문 판정 2026-11-19 ②·11-20: 지금 판정은 '1단계 선별'. 2단계는 체결 자료 20건·40건이 된 두 시점에만 보고 그 값을 고정한다."""
+    PAST = (("앞", 0.0145, 0.012), ("뒤", 0.01541, 0.015))
 
     def test_t_quantiles(self):
-        self.assertEqual((FW.t95(1), FW.t95(19), FW.t95(30)), (6.314, 1.729, 1.697))
-        self.assertAlmostEqual(FW.t95(40), 1.685)
-        self.assertAlmostEqual(FW.t95(120), 1.6583, places=3)
+        self.assertEqual((FW.t975(1), FW.t975(19), FW.t975(30), FW.t95(19)), (12.706, 2.093, 2.042, 1.729))
+        self.assertAlmostEqual(FW.t975(40), 2.02)
+        self.assertAlmostEqual(FW.t975(120), 1.98)
 
-    def test_fill_statistics(self):
+    def test_fill_statistics_use_the_order_size_values(self):
         rows = [filled(0.02, 0.015, k=0), filled(0.01, 0.002, k=1, bid=3e6, ask=9e6), filled(-0.01, -0.013, k=2),
-                filled(0.03, status="체결 없음", bid=0, ask=8e6, k=3), filled(0.0, status="체결 자료 없음", k=4)]
+                filled(0.03, None, k=3),                                                              # 60초 값은 있는데 100만 원이 안 찼다
+                filled(0.03, None, status="60초 안 체결 자료 부족", bid=0, ask=8e6, k=4), filled(0.0, status="체결 자료 없음", k=5)]
         fs = FW.fill_stats(rows)
-        self.assertEqual((fs["rows"], fs["ok"], fs["tried"], fs["nofill"], fs["nodata"]), (5, 3, 4, 1, 1))
+        self.assertEqual((fs["rows"], fs["tried"], fs["ok"], fs["nofill"], fs["order_ok"], fs["nodata"]), (6, 5, 4, 1, 3, 1))
         gaps = [0.005, 0.008, 0.003]
         mean = sum(gaps) / 3
         sd = (sum((g - mean) ** 2 for g in gaps) / 2) ** 0.5
         self.assertAlmostEqual(fs["gap"], mean)
-        self.assertAlmostEqual(fs["gap_up95"], mean + 2.920 * sd / 3 ** 0.5)
-        self.assertEqual(fs["nofill_rate"], 0.25)                                                     # 체결 자료 없음은 분모에 넣지 않는다
-        self.assertEqual(fs["depth"], (3e6 + 5e6) / 2)                                                # min(매수, 매도): 5,3,5,0 → 중앙값 4백만
-        self.assertEqual(FW.fill_stats([filled(0.01, 0.0)])["gap_up95"], None)                        # 한 건으로는 상한을 낼 수 없다
+        self.assertAlmostEqual(fs["gap_up975"], mean + 4.303 * sd / 3 ** 0.5)                         # 97.5% 상한
+        self.assertAlmostEqual(fs["gap60"], 0.001)
+        self.assertEqual(fs["short_rate"], 2 / 5.0)                                                   # 체결 자료 없음은 분모에 넣지 않는다
+        self.assertEqual(fs["depth"], sorted([2e7, 3e6, 2e7, 2e7, 0])[2])                             # min(매수, 매도) 의 중앙값
+        legacy = filled(0.01, None, status="체결 없음", k=6)                                            # 옛 이름도 같은 것으로 센다
+        self.assertEqual(FW.fill_stats([legacy])["nofill"], 1)
 
-    def stage(self, rows, decision=None, past=(("앞", 0.0145, 0.012), ("뒤", 0.01541, 0.015))):
-        return FW.stage2(rows, decision, list(past), lambda t: t["day"])
+    def twenty(self, gap=0.003, order=True, bid=2e7, days=20):
+        return [filled(0.012 + 0.001 * (k % 3), (0.012 + 0.001 * (k % 3) - gap) if order else None, day="2026-11-%02d" % (1 + k % days), k=k, bid=bid)
+                for k in range(20)]
 
-    def test_before_enough_fills_nothing_is_decided(self):
-        rows = [filled(0.01, 0.005, k=k) for k in range(3)]
-        r = self.stage(rows)
-        self.assertEqual([x[0] for x in r], [None, None, None, None])
-        self.assertEqual(r[0][1], "진행 중")
-        self.assertEqual(r[1][1], "체결 자료 3 / 20건 (과거 우위 +1.45%)")                            # 두 시기 중 낮은 쪽
-        self.assertIn("자료 부족", r[2][1])
-        self.assertEqual(r[3][1], "전진 진입일 1일 — 표준오차를 낼 수 없음")
+    def test_a_point_uses_the_first_n_trades_with_fill_data(self):
+        rows = self.twenty() + [filled(-0.05, -0.06, day="2026-11-25", k=30)]                          # 21번째: 20건 점검에 들어가지 않는다
+        self.assertIsNone(FW.stage2_point(rows[:19], 20, by_q, by_day))
+        p = FW.stage2_point(rows, 20, by_q, by_day)
+        self.assertEqual((p["n"], p["order_ok"], p["fwd_trades"], p["fwd_days"]), (20, 20, 20, 20))
+        self.assertAlmostEqual(p["gap"], 0.003)
+        self.assertAlmostEqual(p["short_rate"], 0.0)
+        self.assertEqual(p["depth"], 2e7)
+        nodata = [filled(0.0, status="체결 자료 없음", k=-1, day="2026-10-31")]                        # 체결 자료 없는 거래는 20건에 세지 않지만 전진 성적에는 든다
+        q = FW.stage2_point(nodata + rows, 20, by_q, by_day)
+        self.assertEqual((q["order_ok"], q["fwd_trades"], q["fwd_days"]), (20, 21, 21))
+
+    def cells(self, rows, past=None):
+        return FW.stage2_cells(FW.stage2_point(rows, 20, by_q, by_day), list(self.PAST if past is None else past))
 
     def test_each_item_is_met_or_missed_by_its_own_rule(self):
-        days = ["2026-11-%02d" % d for d in range(1, 21)]
-        good = [filled(0.012 + 0.001 * (k % 3), 0.009 + 0.001 * (k % 3), day=days[k], k=k, bid=2e7, ask=2e7) for k in range(20)]   # 차이 0.3%p
-        r = self.stage(good, {"verdict": "PASS"})
-        self.assertEqual([x[0] for x in r], [True, True, True, True])
-        self.assertTrue(r[1][1].startswith("+1.45% − +0.30% = +1.15% (체결 20건)"))
-        self.assertEqual(r[2][1], "체결 없음 0%, 60초 체결 금액 중앙값 20,000,000원 (기준 10,000,000원, 20건)")
-        wide = [dict(t, fill=dict(t["fill"], net=t["net"] - 0.016)) for t in good]                     # 체결 차이 1.6%p: 과거 우위를 다 먹는다
-        self.assertIs(self.stage(wide, {"verdict": "PASS"})[1][0], False)
-        thin = [dict(t, fill=dict(t["fill"], entry_bid_krw=9_000_000)) for t in good]                 # 60초 매수 체결이 주문의 9배
-        self.assertIs(self.stage(thin)[2][0], False)
-        missing = good[:17] + [filled(0.01, status="체결 없음", day=days[17 + k], k=17 + k) for k in range(3)]   # 체결 없음 15%
-        self.assertIs(self.stage(missing)[2][0], False)
-        bad = [dict(t, net=-0.01) for t in good]                                                      # 전진 일별 평균 -1%: 과거 1.2% 에서 크게 떨어짐
-        self.assertIs(self.stage(bad, {"verdict": "FAIL"})[0][0], False)
-        self.assertIs(self.stage(bad)[3][0], False)
-        near = [dict(t, net=0.0 if k % 2 else 0.02) for k, t in enumerate(good)]                       # 전진 1.0% < 과거 1.2% 지만 2 표준오차 안
-        r = self.stage(near)
-        self.assertIs(r[3][0], True)
-        self.assertIn("전진 +1.00% ≥ 과거 +1.20% − 2 ×", r[3][1])
-        self.assertEqual(self.stage(good, past=())[1][1], "과거 우위 미기록")
-        self.assertEqual(self.stage(good, past=(("2017–20", 0.002, None),))[3][1], "과거 일별 평균 미기록")
-        self.assertEqual((FW.ORDER_KRW, FW.STAGE2_MIN_FILLS, FW.STAGE2_MAX_NOFILL, FW.STAGE2_DEPTH_X), (1000000, 20, 0.10, 10))
+        r = self.cells(self.twenty())
+        self.assertEqual([x[0] for x in r], [True, True, True])
+        self.assertTrue(r[0][1].startswith("+1.45% − +0.30% = +1.15% (주문 크기 값 20건)"))            # 두 시기 중 낮은 쪽, 차이가 일정해 상한 = 평균
+        self.assertEqual(r[1][1], "자료 부족 0%, 60초 체결 금액 중앙값 20,000,000원 (기준 10,000,000원)")
+        self.assertIs(self.cells(self.twenty(gap=0.016))[0][0], False)                                 # 체결 차이 1.6%p: 과거 우위를 다 먹는다
+        self.assertIs(self.cells(self.twenty(bid=9e6))[1][0], False)                                   # 60초 매수 체결이 주문의 9배
+        short = self.twenty()[:17] + [dict(t, fill=dict(t["fill"], order_status="자료 부족")) for t in self.twenty()[17:]]   # 15% 자료 부족
+        self.assertIs(self.cells(short)[1][0], False)
+        bad = [dict(t, net=-0.01) for t in self.twenty()]
+        self.assertIs(self.cells(bad)[2][0], False)                                                    # 전진 -1% 는 과거 1.2% 에서 크게 떨어짐
+        near = [dict(t, net=0.0 if k % 2 else 0.02) for k, t in enumerate(self.twenty())]              # 전진 1.0% < 과거 1.2% 지만 2 표준오차 안
+        self.assertIs(self.cells(near)[2][0], True)
+        self.assertEqual(self.cells(self.twenty(), past=())[0][1], "과거 우위 미기록")
+        self.assertTrue(self.cells(self.twenty(), past=(("2017–20", 0.002, None),))[2][1].startswith("과거 일별 평균 미기록"))
+        one = self.twenty(order=False)
+        one[0] = self.twenty()[0]                                                                      # 주문 크기 값이 한 건뿐
+        self.assertEqual(self.cells(one)[0], (None, "주문 크기 값 1건 — 상한을 낼 수 없음"))
+        self.assertEqual((FW.STAGE2_POINTS, FW.STAGE2_MAX_SHORT, FW.STAGE2_DEPTH_X), ((20, 40), 0.10, 10))
+
+    def test_points_are_frozen_when_first_reached(self):
+        """고문 판정 2026-11-20 5: 각 점검 결과는 그 시점 값으로 고정한다(다시 계산해 덮어쓰지 않는다)."""
+        def cr_rows(n, net=0.01, gap=0.003):
+            return [dict(cr_trade(k, net), fill={"status": "ok", "net": net - gap, "entry_bid_krw": 20000000, "entry_ask_krw": 0, "exit_bid_krw": 0,
+                                                 "exit_ask_krw": 20000000, "order_status": "ok", "order_net": net - gap}) for k in range(n)]
+        args = offline()
+        ledger, _ = FW.update({"CR_rebound": {"rows": cr_rows(19), "decision": None}}, "2026-12-01", **args)
+        self.assertNotIn("stage2", ledger["CR_rebound"])
+        ledger["CR_rebound"]["rows"] = cr_rows(25)
+        ledger, _ = FW.update(ledger, "2026-12-02", **args)
+        point = ledger["CR_rebound"]["stage2"]["20"]
+        self.assertEqual((point["recorded"], point["n"], point["fwd_trades"]), ("2026-12-02", 20, 20))
+        frozen = copy.deepcopy(point)
+        ledger["CR_rebound"]["rows"] = cr_rows(25, gap=0.05)                                           # 그 뒤 값이 달라져도
+        ledger, _ = FW.update(ledger, "2026-12-03", **args)
+        self.assertEqual(ledger["CR_rebound"]["stage2"]["20"], frozen)                                 # 덮어쓰지 않는다
+        self.assertNotIn("40", ledger["CR_rebound"]["stage2"])
+        ledger["CR_rebound"]["rows"] = cr_rows(40, gap=0.05)
+        ledger, _ = FW.update(ledger, "2026-12-09", **args)
+        self.assertAlmostEqual(ledger["CR_rebound"]["stage2"]["40"]["gap"], 0.05)
+        text = FW.render(ledger)
+        self.assertIn("| 급락 반등 | 40 / 40건 | 통과 | 2026-12-02 기록 (전진 20건까지): ② 미달 +0.22% − +0.30% = -0.08% (주문 크기 값 20건) · "
+                      "③ 충족 자료 부족 0%, 60초 체결 금액 중앙값 20,000,000원 (기준 10,000,000원) · ④ 판단 못 함 과거 일별 평균 미기록 (전진 +1.00%, 7일) | "
+                      "2026-12-09 기록 (전진 40건까지): ② 미달 +0.22% − +5.00% = -4.78%", text)                # 1단계는 지금 값, 점검은 기록된 값
+        self.assertIn("| 급락 반등 변형 −5% | 0 / 0건 | 진행 중 | 점검 전 (체결 자료 0 / 20건) | 점검 전 (체결 자료 0 / 40건) |", text)
 
     def test_the_status_page_shows_both_stages_and_decides_nothing(self):
         q0, panel = crash_panel(150)
@@ -1717,9 +1845,8 @@ class StageTwo(unittest.TestCase):
         text = FW.render(ledger)
         self.assertEqual(entry["decision"], before)                                                   # 표시가 판정을 바꾸지 않는다
         self.assertIn("## 2단계 점검 — 표시만 (자동 결정 없음. 소액 실거래 시험은 고문과 사용자가 정한다)", text)
-        self.assertIn("| 후보 D-202610-01 | 충족 — 통과 | 체결 자료 0 / 20건 (과거 우위 +1.50%) | 체결 자료 없음 |", text)
-        self.assertIn("| 급락 반등 | 진행 중 | 체결 자료 0 / 20건 (과거 우위 +0.22%) | 체결 자료 없음 | 과거 일별 평균 미기록 |", text)
-        self.assertIn("| 번호 | 규칙 | 등록 | 진행 | 거래당 평균 | 일별 승률 | 일별 중앙값 | 1단계 선별 |", text)
+        self.assertIn("| 후보 D-202610-01 | 0 / 40건 | 통과 | 점검 전 (체결 자료 0 / 20건) | 점검 전 (체결 자료 0 / 40건) |", text)
+        self.assertIn("| 번호 | 규칙 | 등록 | 진행 | 거래당 평균 | 일별 승률 | 일별 중앙값 | 체결 자료 | 1단계 선별 |", text)
         self.assertIn("1단계 선별 통과는 '계속 볼 가치가 있다' 는 뜻이지 돈을 넣는 신호가 아닙니다", text)
         self.assertIn("자동 등록 후보: 1개 추적, 1단계 선별 끝 1개 (통과: D-202610-01)", FW.summary(ledger))
         self.assertEqual(FW.CR_PAST["CR_rebound"][0][1], 0.00219)                                    # 머리말의 고문 집계와 같은 값
