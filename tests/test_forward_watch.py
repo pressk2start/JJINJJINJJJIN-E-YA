@@ -1822,6 +1822,8 @@ class StageTwo(unittest.TestCase):
         self.assertEqual(self.cells(self.twenty(), past=(("2017–20", 0.002, None),))[2], (None, "과거 일별 평균 미기록"))
         near = [dict(t, net=0.0 if k % 2 else 0.012) for k, t in enumerate(self.twenty())]            # 전진 0.6% — 과거 1.2% 보다 낮지만 붕괴 증거는 아님
         self.assertIs(self.cells(near)[2][0], True)
+        flat = [dict(t, net=0.0065) for t in self.twenty()]                                            # 0.65%: 낮은 쪽(1.2%)의 절반 0.6% 는 넘고, 높은 쪽(1.5%)의 절반 0.75% 는 못 넘는다
+        self.assertIs(self.cells(flat)[2][0], True)
         one = self.twenty(order=False)
         for t in one:
             t["fill"]["status"] = "60초 안 체결 자료 부족"
