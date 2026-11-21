@@ -3,6 +3,8 @@ results/
 *.log
 ws/
 ticks/
+# 추적기가 남기는 공개 체결 원본(거래마다 작은 gzip — 고문 판정 2026-11-20)은 커밋한다. 위의 ticks/ 는 다른 틱 수집용
+!forward/ticks/
 
 # 재현성 산출물은 코드와 함께 커밋한다. 대용량 raw/feature 는 계속 제외.
 !reports/
