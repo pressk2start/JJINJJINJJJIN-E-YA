@@ -17,6 +17,7 @@
   "hold": 4,
   "holdout": {
    "by": "advisor",
+   "daymean": 0.00747,
    "n": 146,
    "net": 0.01541,
    "period": "2025-01-01 ~ 2026-11-09"
@@ -29,6 +30,7 @@
   "status": "ACTIVE",
   "train": {
    "by": "advisor",
+   "daymean": 0.00708,
    "n": 244,
    "net": 0.0145,
    "period": "2023-01-01 ~ 2024-12-31"
