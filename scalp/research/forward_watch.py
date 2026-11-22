@@ -57,6 +57,10 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              판정: 30건·10일, 평균 > 0, 날짜 가중 평균 > 0, 최고 수익일(일별 평균이 가장 높은 날) 하루를 빼도 날짜 가중 평균 > 0.
              추적 시작 2026-11-14 00:00 UTC, 만료 24개월. 과거 수치(고문): 2023–24 244건 +1.450% / 2025– 146건 +1.541%
              (discover.py --repro 가 같은 수치를 다시 계산해 대조한다).
+  급락 소진 반등  고문 직접 등록(판정 2026-11-22 ②·③). 알트 15분 −3% 이하 + 그 종목 4시간 −5.92% 이하 + BTC 24시간 −1.73% 이하, 거래대금 조건 없음.
+                 등록부에 세 항목으로 넣어 같은 경로로 채점한다: A-202611-02(주 대상 = 큰 5종목, 돈에 관한 판단은 이것으로만),
+                 A-202611-02-비교(나머지 14종목, 비교용), A-202611-02-체결(큰 5종목의 −3% 급락 전부에 체결 추정만 붙인다 — 판정 없음).
+                 BTC 는 지표용이라 거래로 적지 않는다. 손절도, 순간 폭락을 걸러 내는 조건도 없다 — 현황의 '위험과 배분' 절에 과거 위험을 싣는다.
   BTC_surge  BTC 주간 급등 관찰 (auto_monitor.surge_weeks). 월요일 00:00 UTC 에 직전 7일 수익률 ≥ +7.45% 인 주와 전체 주의
              BTC·ETH 주간 수익률을 기록한다. 판정 없음.
   자동 등록 후보  discover.py 가 매월 1일에 '사건 × 조건 하나 × 보유 시간' 틀에서 찾아 forward/registry.json 에 등록한 것 (매주 월요일은 점검만).
@@ -1023,8 +1027,12 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             log("상장 목록을 받지 못함: %s" % type(e).__name__)
     for c in open_now:                                              # 후보마다 따로: 자기 종목만 받아 채점하고, 하나가 실패해도 나머지는 진행한다
         entry = cands.setdefault(c["id"], {"rows": [], "decision": None, "rule": DISC.describe(c), "registered": c["registered"]})
-        entry["past"] = [[(part.get("period") or label), part.get("net"), part.get("daymean")] for label, part in (("앞 구간", c.get("train")), ("뒤 구간", c.get("holdout")))
-                         if part and part.get("net") is not None]     # 2단계 ②·④ 용 과거 봉 기준 값 (등록 때 고정된 값 그대로)
+        entry["past"] = [[(part.get("period") or label), part.get("net"), part.get("daymean")] for label, part in (
+            [(None, part) for part in c["past"]] if c.get("past") else (("앞 구간", c.get("train")), ("뒤 구간", c.get("holdout"))))
+                         if part and part.get("net") is not None]     # 2단계 ②·④ 용 과거 봉 기준 값 (등록 때 고정된 값 그대로). past = 기간 여러 개
+        for key in ("role", "risk"):                                 # 고문 판정 2026-11-22 ②·③: 역할(주 대상·비교용·체결 관찰)과 위험 표
+            if c.get(key) is not None:
+                entry[key] = c[key]
         try:
             # 상장폐지 종목 (고문 판정 2026-11-14): 이미 적힌 거래는 그대로 둔다. 그 종목은 새 사건을 만들지 않고 현황에 표시한다.
             # 후보는 남은 종목으로 계속 채점한다. 한 번 빠진 종목은 다시 넣지 않는다.
@@ -1068,7 +1076,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
                 warnings.append("후보 %s: 다시 계산한 값이 장부와 다른 거래 %d건 — 장부 값은 그대로 둠" % (c["id"], len(new)))
                 hold_if_sampled(entry, new, mismatch, bad, {(r["market"], r["entry_q"]) for r in rows},      # 판정 전이라 지금까지의 거래가 전부 표본이다
                                 always=[lab for lab in new if "뒤늦게 나타남" in lab])
-            if not active_hold(entry):
+            if not active_hold(entry) and not observe_only(entry):
                 DISC.decide_once(entry, c, today)
             if entry.get("decision") and gone:                      # 자료 불완전: 판정 기록에 종목과 날짜를 남긴다
                 entry["decision"].setdefault("delisted", dict(gone))
@@ -1085,7 +1093,7 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             warnings.append("관찰 표: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
     if fill_errors:
         warnings.append("체결 내역: %d건 조회 실패 — 비워 두고 다음 실행에서 다시 받음 (%s)" % (len(fill_errors), ", ".join(fill_errors[:5])))
-    for _name, entry, minute, day, _past in fill_items(ledger):    # 2·3단계 점검: 시점이 처음 된 실행의 값으로 고정한다
+    for _name, entry, minute, day, _past in staged_items(ledger):  # 2·3단계 점검: 시점이 처음 된 실행의 값으로 고정한다
         rows = entry.get("rows", [])
         for n, min_days in STAGE2_POINTS:
             if str(n) not in (entry.get("stage2") or {}):
@@ -1223,7 +1231,9 @@ def render(ledger):
             e = cands[cid]
             rows, dec = e.get("rows", []), e.get("decision")
             st = DISC.SS.cluster_stats(rows)
-            verdict = VERDICT[dec["verdict"]] if dec else "진행 중"
+            verdict = VERDICT[dec["verdict"]] if dec else ("판정 없음" if observe_only(e) else "진행 중")
+            if e.get("role") in ROLE_NOTE:
+                verdict += " (%s)" % ROLE_NOTE[e["role"]]
             if e.get("delisted") and not (dec and dec["verdict"] == "INCOMPLETE"):
                 verdict += " · 자료 불완전"
             if e.get("delisted"):
@@ -1244,6 +1254,7 @@ def render(ledger):
                             cid, ", ".join("%s 가 %s 에 상장 목록에서 빠진 것을 확인" % (m[4:], d) for m, d in sorted(gone.items()))), ""]
     else:
         out += ["아직 등록된 후보가 없습니다. 탐색 결과는 DISCOVERY.md 에 남습니다.", ""]
+    out += render_risk(ledger)
     out += render_fills(ledger)
     out += render_stage2(ledger)
     out += render_stage3(ledger)
@@ -1287,6 +1298,59 @@ def _fill_count(rows, short=False):
     """'체결 자료 n / 전체 N건' (고문 판정 2026-11-20 4: 후보마다 반드시 같이 싣는다)."""
     n = sum(1 for t in rows if _status(t.get("fill")) in ("ok", NO_FILL))
     return ("%d / %d건" if short else "체결 자료 %d / 전체 %d건.") % (n, len(rows))
+
+
+ROLE_NOTE = {"main": "주 대상", "compare": "비교용 — 돈에 관한 판단에 쓰지 않음", "observe": "체결 관찰 전용 — 판정 없음"}
+SLOTS = 5                                                           # 가상 추적의 배분 관례: 자금 5칸, 신호마다 1칸, 동시 5종목까지 (고문 판정 2026-11-22 ③)
+
+
+def slot_result(rows, slots=SLOTS):
+    """배분 관례로 본 전진 성적 → (잡은 거래 수, 건너뛴 거래 수, 자금 대비 누적 수익). 진입 순서대로 한 칸씩 쓰고, 칸이 다 차 있으면 건너뛴다.
+    같은 봉에 든 신호는 종목 이름 순(주 대상은 종목이 5개라 칸이 모자랄 일이 없다). 그 봉 시가에 청산되는 자리는 비었다고 본다. 복리 없음."""
+    open_x, taken, skipped, total = [], 0, 0, 0.0
+    for t in sorted(rows, key=lambda t: (t["entry_q"], t["market"])):
+        open_x = [x for x in open_x if x > t["entry_q"]]
+        if len(open_x) >= slots:
+            skipped += 1
+            continue
+        open_x.append(t["exit_q"])
+        taken, total = taken + 1, total + t["net"] / slots
+    return taken, skipped, total
+
+
+def render_risk(ledger):
+    """현황의 '위험과 배분' 절 (고문 판정 2026-11-22 ③ 3). 등록부에 적어 둔 과거 위험 값과, 배분 관례로 본 전진 성적. 표시만 한다."""
+    items = [(cid, e) for cid, e in sorted((ledger.get("candidates") or {}).items()) if e.get("risk")]
+    if not items:
+        return []
+    out = ["## 위험과 배분 (표시만)", "",
+           "이 규칙에는 손절도, 순간 폭락을 걸러 내는 조건도 없습니다(진입 시점에는 가장 좋았던 날과 구별되지 않습니다). 위험은 한 번에 넣는 금액으로 조절합니다. "
+           "가상 추적의 배분 관례는 자금 %d칸, 신호마다 1칸, 동시 %d종목까지입니다. 실제 금액은 사용자가 따로 정합니다." % (SLOTS, SLOTS), "",
+           "| 번호 | 과거: 신호 뒤 60분 안 최대 추가 하락 (중앙값 / 하위 10%% / 하위 1%%) | 과거 배분 모의 (최대 낙폭 / 최악의 하루) | 전진: 배분 관례 누적 (잡은 / 건너뛴) |",
+           "|---|---|---|---|"]
+    for cid, e in items:
+        r = e["risk"]
+        taken, skipped, total = slot_result(e.get("rows", []))
+        out.append("| %s | %s / %s / %s (%s, %d건) | %s / %s (%s) | %s (%d / %d) |" % (
+            cid, _pct(r["dd_median"]), _pct(r["dd_p10"]), _pct(r["dd_p01"]), r["dd_period"], r["dd_n"], _pct(r["sim_mdd"], 1), _pct(r["sim_worst_day"], 1), r["sim_period"],
+            _pct(total) if taken else "-", taken, skipped))
+    out.append("")
+    for cid, e in items:
+        worst = e["risk"].get("worst") or []
+        if worst:
+            out.append("- %s 과거에 가장 나빴던 사건(60분 안 최저 → 60분 뒤): %s" % (
+                cid, ", ".join("%s %s → %s" % (w[0], _pct(w[1], 1), _pct(w[2], 1)) for w in worst)))
+    return out + [""]
+
+
+def observe_only(entry):
+    """체결 관찰 전용 항목(고문 판정 2026-11-22 ② 4): 체결 추정만 쌓고 1·2·3단계 판정을 하지 않는다."""
+    return entry.get("role") == "observe"
+
+
+def staged_items(ledger):
+    """2·3단계 점검을 하는 항목 = 체결 추정 항목에서 체결 관찰 전용을 뺀 것."""
+    return [x for x in fill_items(ledger) if not observe_only(x[1])]
 
 
 def fill_items(ledger):
@@ -1375,7 +1439,7 @@ def render_fills(ledger):
 def render_stage2(ledger):
     """현황의 '2단계 점검 — 소액 시험 자격' 절 (고문 판정 2026-11-20 ②). 표시만 한다 — 이 절이 무엇을 결정하지는 않는다.
     점검 값은 시점이 처음 된 날 장부에 고정된 것을 그대로 쓴다. 과거 값과의 비교만 여기서 한다."""
-    items = fill_items(ledger)
+    items = staged_items(ledger)
     if not items:
         return []
 
@@ -1414,7 +1478,7 @@ def render_stage2(ledger):
 
 def render_stage3(ledger):
     """현황의 '3단계 점검 — 증액 기준' 절 (고문 판정 2026-11-20 ②). 전진 일별 평균의 99% 하한 > 0. 표시만 한다."""
-    items = fill_items(ledger)
+    items = staged_items(ledger)
     if not items:
         return []
     out = ["## 3단계 점검 — 증액 기준 (표시만)", "",
