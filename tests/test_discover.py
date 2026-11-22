@@ -359,7 +359,9 @@ class Registry(unittest.TestCase):
         self.assertEqual([c["event"] for c in new], ["SURGE"])
         self.assertEqual([(c["event"], why) for c, why in held], [("CRASH", "A-202611-01 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)")])
         new, held = D.register(registry, passed, "2027-06-01", ("KRW-BTC",), decided={"A-202611-01"})
-        self.assertEqual(sorted(c["event"] for c in new), ["CRASH", "SURGE"])
+        self.assertEqual([(c["event"], why) for c, why in held], [("CRASH", "A-202611-02 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)")])   # 고문이 예외로 더 등록한 것이 남아 있다
+        new, held = D.register(registry, passed, "2027-06-01", ("KRW-BTC",), decided={"A-202611-01", "A-202611-02"})
+        self.assertEqual(sorted(c["event"] for c in new), ["CRASH", "SURGE"])                          # 비교용·체결 관찰 항목은 자리를 차지하지 않는다
 
     def test_engine_four_is_locked_until_the_advisor_reads_it(self):
         """고문 판정 2026-11-19 ②: 4판은 잠근 채로 올리고, 고문이 읽은 뒤 푼다. 사건·거래 정의는 3판과 같아 3판 후보는 그대로 채점한다."""
@@ -573,6 +575,35 @@ class Forward(unittest.TestCase):
         self.assertTrue(0 < len(some) < len(rows))                                               # 조건이 거래를 거른다
         with self.assertRaises(RuntimeError):
             D.candidate_trades(panel, self.cand(reg_day, engine="1"), end)
+
+    def test_several_conditions_a_candidate_only_indicator_and_indicator_only_markets(self):
+        """고문 판정 2026-11-22 ②·③: 조건 여러 개(모두 채워야 한다), 등록 후보 전용 지표 ret_4h, 지표용으로만 넣은 종목(no_trade)."""
+        panel = world(days=120, seed=8)
+        reg_day, end = D.q_day(Q0 + 80 * D.BARS_D), Q0 + 120 * D.BARS_D
+        key = lambda r: (r["market"], r["entry_q"])
+        r4 = lambda r: panel[r["market"]].ret(r["entry_q"] - 1, 4 * D.BARS_H)
+        base = D.candidate_trades(panel, self.cand(reg_day, vol_x=0.0), end)
+        self.assertTrue({key(r) for r in D.candidate_trades(panel, self.cand(reg_day), end)} <= {key(r) for r in base})   # 거래대금 조건을 빼면 사건이 줄지 않는다
+        vals = sorted(v for v in map(r4, base) if v is not None)
+        thr = vals[len(vals) // 2]
+        one = D.candidate_trades(panel, self.cand(reg_day, vol_x=0.0, conds=[["a", "ret_4h", "<=", thr]]), end)
+        self.assertEqual({key(r) for r in one}, {key(r) for r in base if r4(r) is not None and r4(r) <= thr})   # 그 종목의 16봉 수익으로 거른다
+        self.assertTrue(0 < len(one) < len(base))
+        btc_only = D.candidate_trades(panel, self.cand(reg_day, vol_x=0.0, cond=["b", "btc_ret_1d", "<=", 0.0]), end)
+        both = D.candidate_trades(panel, self.cand(reg_day, vol_x=0.0, conds=[["a", "ret_4h", "<=", thr], ["b", "btc_ret_1d", "<=", 0.0]]), end)
+        self.assertEqual({key(r) for r in both}, {key(r) for r in one} & {key(r) for r in btc_only})   # 둘 다 채운 것만
+        self.assertTrue(len(both) < len(one) and len(both) < len(btc_only))
+        self.assertEqual(D.cand_conds(self.cand(reg_day, cond=["b", "btc_ret_1d", "<=", 0.0])), [["b", "btc_ret_1d", "<=", 0.0]])   # 예전 방식도 그대로
+        self.assertEqual(D.cand_conds(self.cand(reg_day)), [])
+        seen = {n for t in D.build_trades(panel, Q0, end) for n in t["ind"]}                           # 탐색이 훑는 지표 목록은 그대로다
+        self.assertNotIn("ret_4h", seen)
+        self.assertIn("btc_ret_1d", seen)
+        busiest = max({r["market"] for r in base}, key=lambda m: sum(1 for r in base if r["market"] == m))
+        kept = D.candidate_trades(panel, self.cand(reg_day, vol_x=0.0, no_trade=[busiest]), end)
+        self.assertEqual({key(r) for r in kept}, {key(r) for r in base if r["market"] != busiest})     # 지표용 종목은 거래로 적지 않는다
+        text = D.describe(self.cand(reg_day, vol_x=0.0, label="주 대상", conds=[["a", "ret_4h", "<=", -0.0592], ["b", "btc_ret_1d", "<=", -0.0173]]))
+        self.assertEqual(text, "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [주 대상]")
+        self.assertEqual(D.describe(self.cand(reg_day)), "15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, 조건 없음")
 
     def row(self, k, net, per_day=3):
         entry = Q0 + (k // per_day) * D.BARS_D + (k % per_day) * 20

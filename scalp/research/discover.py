@@ -446,6 +446,16 @@ def _label(cond):
     return "조건 없음" if cond is None else "%s %s %.4g" % (cond[1], cond[2], cond[3])
 
 
+# 등록 후보 채점에만 쓰는 지표 → 거슬러 볼 봉 수 (고문 판정 2026-11-22 ②·③). 탐색이 훑는 지표 목록(indicators)에는 넣지 않는다 —
+# 넣으면 4판의 탐색 범위가 달라진다. ret_4h = 그 종목의 4시간 수익(신호 봉 종가 ÷ 16봉 전 종가 − 1), 두 봉이 다 있을 때만.
+CAND_ONLY = {"ret_4h": 4 * BARS_H}
+
+
+def cand_conds(cand):
+    """후보의 조건 목록. 예전 방식(cond 하나)과 새 방식(conds 여러 개 — 모두 채워야 한다)을 둘 다 받는다."""
+    return [list(c) for c in (cand.get("conds") or ([cand["cond"]] if cand.get("cond") else []))]
+
+
 def search(trades, cut_day, log=print, end_day=None):
     """모집단마다 TRAIN 에서 선별하고 HOLDOUT 에서 일곱 기준을 본다 → (통과 목록, {scanned, selected, passed}).
     end_day(뒤 구간 끝, 포함 안 함)는 예상 판정 시점 계산에 쓴다. 주지 않으면 마지막 진입일 다음 날."""
@@ -498,7 +508,10 @@ def register(registry, passed, run_day, universe, decided=()):
     새 후보의 전진 시작일(start)은 등록 다음 날이다.
     같은 규칙(사건·보유·지표·방향)은 전에 등록된 적이 있으면 다시 등록하지 않는다. decided = 판정·만료가 끝난 후보 번호들."""
     decided = set(decided)
-    busy = {c["event"]: c["id"] for c in registry if c.get("status") == "ACTIVE" and c["id"] not in decided}
+    busy = {}
+    for c in registry:                                               # 비교용·체결 관찰 항목(role)은 후보 자리를 차지하지 않는다. 먼저 등록된 것을 이름으로 든다
+        if c.get("status") == "ACTIVE" and c["id"] not in decided and c.get("role") not in ("compare", "observe"):
+            busy.setdefault(c["event"], c["id"])
     seen = {cand_key(c) for c in registry}
     taken = {c["id"] for c in registry}
     month = "D-%s-" % run_day[:7].replace("-", "")
@@ -539,10 +552,12 @@ def settled(entry):
 
 
 def describe(c):
-    move, mult = "%.0f%%" % (100 * c["move"]), "%.0f배" % c["vol_x"]
+    move, mult = "%.0f%%" % (100 * c["move"]), ("%.0f배" % c["vol_x"]) if c["vol_x"] else "조건 없음"
     event = {"SURGE": "15분 +%s 이상 급등(거래대금 %s)" % (move, mult), "CRASH": "15분 −%s 이하 급락(거래대금 %s)" % (move, mult),
              "BREAKOUT": "1일 고가 돌파(거래대금 %s)" % mult}.get(c["event"], c["event"])
-    return "%s → %d시간 보유, %s" % (event, c["hold"] // BARS_H, _label(c.get("cond")))
+    conds = cand_conds(c)
+    text = "%s → %d시간 보유, %s" % (event, c["hold"] // BARS_H, " 그리고 ".join(_label(x) for x in conds) if conds else _label(None))
+    return text + (" [%s]" % c["label"] if c.get("label") else "")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -571,9 +586,14 @@ def candidate_trades(panel, cand, end_q):
     own = {m: panel[m] for m in cand["universe"]}                   # 후보는 등록 때 고정한 자기 종목으로만 채점한다(다른 후보의 종목이 섞이지 않게)
     rows = build_trades(own, day_q(cand_start(cand)), end_q, cand["move"], cand["vol_x"], cand["cost"], cand["cost_other"],
                         only=(cand["event"], cand["hold"]))
-    cond = cand.get("cond")
-    if cond:
-        rows = [t for t in rows if SS.passes(t, cond)]
+    conds = cand_conds(cand)
+    for name in sorted({c[1] for c in conds} & set(CAND_ONLY)):     # 등록 후보 전용 지표는 여기서만 계산한다
+        for t in rows:
+            v = own[t["market"]].ret(t["entry_q"] - 1, CAND_ONLY[name])
+            if v is not None:
+                t["ind"][name] = float(v)
+    skip = set(cand.get("no_trade") or ())                           # 지표용으로만 넣은 종목(BTC)은 사건은 세되 거래로 적지 않는다
+    rows = [t for t in rows if t["market"] not in skip and all(SS.passes(t, c) for c in conds)]
     return [{k: t[k] for k in ("market", "entry_q", "exit_q", "day", "gross", "net", "move")} for t in rows]
 
 

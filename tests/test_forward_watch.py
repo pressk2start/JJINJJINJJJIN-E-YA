@@ -903,6 +903,110 @@ class AdvisorCandidate(unittest.TestCase):
         self.assertEqual(ledger["candidates"]["A-202611-01"]["rows"], [])
 
 
+class SecondCandidate(unittest.TestCase):
+    """A-202611-02 (고문 판정 2026-11-22 ②·③): 급락 소진 반등. 주 대상(큰 5종목)·비교용(나머지 14종목)·체결 관찰 세 항목으로 등록한다."""
+    BIG = ["KRW-ADA", "KRW-DOGE", "KRW-ETH", "KRW-SOL", "KRW-XRP"]
+
+    def entries(self):
+        reg = json.loads((ROOT / "scalp" / "research" / "forward" / "registry.json").read_text(encoding="utf-8"))
+        by = {c["id"]: c for c in reg}
+        return by["A-202611-02"], by["A-202611-02-비교"], by["A-202611-02-체결"]
+
+    def test_the_registered_definitions_are_the_advisors(self):
+        main, comp, obs = self.entries()
+        for c in (main, comp, obs):
+            self.assertEqual((c["event"], c["hold"], c["move"], c["vol_x"]), ("CRASH", 4, 0.03, 0.0))        # 15분 −3%, 거래대금 조건 없음, 4봉 보유
+            self.assertEqual((c["cost"], c["cost_other"], c["no_trade"]), ({"KRW-BTC": 0.0007, "KRW-ETH": 0.0007}, 0.001, ["KRW-BTC"]))   # BTC 는 지표용
+            self.assertEqual((c["registered"], c["start"], c["status"], c["engine"]), ("2026-11-22", "2026-11-23", "ACTIVE", "4"))
+            self.assertIn(c["engine"], DISC.SAME_TRADES)
+        for c in (main, comp):
+            self.assertEqual([x[1:] for x in c["conds"]], [["ret_4h", "<=", -0.0592], ["btc_ret_1d", "<=", -0.0173]])   # 반올림해 고정한 문턱
+            self.assertEqual((c["verdict"], c["expire_days"]), ("ex_best_day", 730))                               # 1단계는 A-202611-01 과 같은 방식
+            self.assertEqual([x["period"] for x in c["past"]], ["2017–22", "2023–24", "2025–26"])
+            self.assertTrue(all(x["by"] == "tracker" and x["n"] > 0 for x in c["past"]))
+        self.assertEqual((main["role"], comp["role"], obs["role"]), ("main", "compare", "observe"))
+        self.assertEqual(sorted(main["universe"]), sorted(["KRW-BTC"] + self.BIG))                              # 주 대상 = 큰 5종목
+        self.assertEqual(sorted(obs["universe"]), sorted(main["universe"]))
+        self.assertIsNone(obs.get("cond"))                                                                       # 체결 관찰은 조건 없이 급락 전부
+        self.assertNotIn("conds", obs)
+        rest = set(comp["universe"]) - {"KRW-BTC"}
+        self.assertEqual(len(rest), 14)
+        self.assertFalse(rest & set(self.BIG))
+        self.assertEqual(rest | set(main["universe"]), set(DISC.REPRO_UNIVERSE))                                 # 합치면 고문의 고정 20종목
+        self.assertEqual([(x["net"], x["daymean"]) for x in main["past"]], [(0.01322, 0.01517), (0.02553, 0.0192), (0.0174, 0.01999)])   # 추적기 관례로 다시 낸 값
+        self.assertEqual((main["risk"]["sim_mdd"], main["risk"]["sim_worst_day"], main["risk"]["sim_skipped"]), (-0.114, -0.0697, 0))
+
+    def world(self, alt_drop, btc_drop, days=90, every=120):
+        """알트가 every 봉마다 한 봉에 alt_drop 만큼 급락한 뒤 4봉에 걸쳐 2% 되돌리고, 같은 봉에서 BTC 도 btc_drop 만큼 빠졌다가 되돌아오는 세계."""
+        q0 = DISC.day_q("2026-09-01")
+        out = {}
+        for m, drop, back in (("KRW-BTC", btc_drop, None), ("KRW-ETH", alt_drop, 0.02)):
+            rows, price = {}, 100.0
+            for k in range(days * 96):
+                o, step = price, k % every
+                if step == 0 and k:
+                    price = o * (1 + drop)
+                elif 1 <= step <= 4:
+                    price = o * (1 + (back / 4.0 if back is not None else -drop / 4.0))
+                rows[q0 + k] = (o, max(o, price), min(o, price), price, 1e9)
+            out[m] = DISC.Bars(rows)
+        return q0, out
+
+    def run_one(self, c, alt_drop, btc_drop, **kw):
+        q0, panel = self.world(alt_drop, btc_drop, **kw)
+        c = dict(c, universe=["KRW-BTC", "KRW-ETH"], registered=DISC.q_day(q0 + 59 * 96), start=DISC.q_day(q0 + 60 * 96))
+        ledger, warnings = FW.update({}, DISC.q_day(q0 + 90 * 96), registry=[c], **offline(panel))
+        self.assertFalse([w for w in warnings if "후보" in w])
+        return ledger, ledger["candidates"][c["id"]]
+
+    def test_the_main_entry_scores_only_when_both_conditions_hold_and_never_trades_btc(self):
+        main = self.entries()[0]
+        ledger, entry = self.run_one(main, -0.07, -0.02)                                                # 그 종목 4시간 −7%, BTC 24시간 −2%
+        self.assertEqual(len(entry["rows"]), 24)
+        self.assertEqual({r["market"] for r in entry["rows"]}, {"KRW-ETH"})
+        self.assertEqual(self.run_one(main, -0.05, -0.02)[1]["rows"], [])                               # 4시간 −5% 는 −5.92% 에 못 미친다
+        self.assertEqual(self.run_one(main, -0.07, -0.01)[1]["rows"], [])                               # BTC 24시간 −1% 는 −1.73% 에 못 미친다
+        self.assertEqual(self.run_one(main, -0.07, -0.04)[1]["rows"] and {r["market"] for r in self.run_one(main, -0.07, -0.04)[1]["rows"]}, {"KRW-ETH"})   # BTC 가 −4% 급락해도 BTC 는 사지 않는다
+        self.assertEqual([p[0] for p in entry["past"]], ["2017–22", "2023–24", "2025–26"])              # 과거 값 세 기간이 장부로 옮겨진다
+        self.assertEqual(min(p[1] for p in entry["past"]), 0.01322)
+        self.assertEqual(entry["role"], "main")
+        text = FW.render(ledger)
+        self.assertIn("| A-202611-02 | 15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [주 대상: 큰 5종목] |", text)
+        self.assertIn("진행 중 (주 대상)", text)
+        self.assertIn("## 위험과 배분 (표시만)", text)
+        self.assertIn("| A-202611-02 | -1.17% / -4.95% / -20.06% (2023–26, 90건) | -11.4% / -7.0% (2017-09 ~ 2026-11) |", text)
+        self.assertIn("ADA 2024-12-03 13:45 -43.9% → -7.5%", text)                                      # 가장 나빴던 사건 5건
+
+    def test_the_observe_entry_records_every_crash_and_is_never_judged(self):
+        obs = self.entries()[2]
+        ledger, entry = self.run_one(obs, -0.05, 0.0, every=60)                                         # 조합 조건을 못 채운 급락도 전부 적는다
+        self.assertGreaterEqual(len(entry["rows"]), DISC.FWD_MIN_N)
+        self.assertGreaterEqual(len({r["day"] for r in entry["rows"]}), DISC.FWD_MIN_DAYS)
+        self.assertIsNone(entry["decision"])                                                             # 30건·10일을 넘겨도 판정하지 않는다
+        self.assertFalse(entry.get("stage2") or entry.get("stage3"))
+        judged, e2 = self.run_one(dict(obs, role="main"), -0.05, 0.0, every=60)                          # 같은 거래라도 관찰 전용이 아니면 판정이 난다
+        self.assertIsNotNone(e2["decision"])
+        text = FW.render(ledger)
+        self.assertIn("판정 없음 (체결 관찰 전용 — 판정 없음)", text)
+        self.assertNotIn("후보 A-202611-02-체결", "\n".join(FW.render_stage2(ledger) + FW.render_stage3(ledger)))
+        self.assertIn("후보 A-202611-02-체결", "\n".join(FW.render_fills(ledger)))                        # 체결 추정 표에는 나온다
+        self.assertIn("후보 A-202611-02-체결", [x[0] for x in FW.staged_items(judged)])                   # 판정하는 항목은 2·3단계에 들어간다
+        self.assertNotIn("후보 A-202611-02-체결", [x[0] for x in FW.staged_items(ledger)])                # 관찰 전용은 빠진다
+        self.assertIn("후보 A-202611-02-체결", [x[0] for x in FW.fill_items(ledger)])
+
+    def test_the_allocation_convention_uses_five_slots_and_skips_when_full(self):
+        def tr(m, entry, net):
+            return {"market": m, "entry_q": entry, "exit_q": entry + 4, "net": net}
+        same = [tr("KRW-A%d" % i, 100, 0.05) for i in range(7)]                                          # 같은 봉에 7종목 → 5개만 잡는다
+        self.assertEqual(FW.slot_result(same)[:2], (5, 2))
+        self.assertAlmostEqual(FW.slot_result(same)[2], 0.05)                                            # 다섯 칸 × 5% ÷ 5칸 = 자금의 5%
+        late = same + [tr("KRW-Z1", 103, 0.10), tr("KRW-Z2", 104, 0.10)]                                 # 103 봉은 아직 꽉 차 있고, 104 봉 시가에 자리가 빈다
+        self.assertEqual(FW.slot_result(late)[:2], (6, 3))
+        self.assertAlmostEqual(FW.slot_result(late)[2], 0.05 + 0.02)
+        self.assertEqual(FW.slot_result([]), (0, 0, 0.0))
+        self.assertEqual(FW.SLOTS, 5)
+
+
 class SurgeAndSharedH3(unittest.TestCase):
     def test_surge_weeks_are_recorded_once_complete_for_both_coins(self):
         d0 = dt.date(2026, 11, 2)
