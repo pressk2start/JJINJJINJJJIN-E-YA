@@ -1007,6 +1007,109 @@ class SecondCandidate(unittest.TestCase):
         self.assertEqual(FW.SLOTS, 5)
 
 
+class ConditionLog(unittest.TestCase):
+    """전진 조건 기록 (고문 판정 2026-11-22 ⑤): 급락 사건마다 조건 값을 forward/conditions.csv 에 붙이고 현황에 조건별 표를 싣는다. 관찰용."""
+
+    def world(self, crash_day="2026-11-21", bar=40):
+        q0, n = DISC.day_q("2026-11-15"), 12 * 96
+        hit = DISC.day_q(crash_day) + bar
+        out = {}
+        for m, drop in (("KRW-BTC", 0.0), ("KRW-ETH", -0.05)):
+            rows, price = {}, 100.0
+            for k in range(n):
+                o = price
+                if q0 + k == hit:
+                    price = o * (1 + drop)
+                rows[q0 + k] = (o, max(o, price), min(o, price), price, 1e9)
+            out[m] = DISC.Bars(rows)
+        return out
+
+    def run_cond(self, today, world, path, prev=None, write=True, markets=("KRW-BTC", "KRW-ETH")):
+        asked = []
+
+        def loader(s, e, want):
+            asked.append((s, e, tuple(want)))
+            return {m: world[m] for m in want}
+
+        def get(url):                                                                                # 5분봉: 어느 덩어리든 100 원으로 평평하다
+            end = AM.to_min(AM.parse_utc(url.split("to=")[1].replace("%3A", ":")))
+            return [{"candle_date_time_utc": dt.datetime.fromtimestamp(t * 60, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                     "opening_price": 100.0, "high_price": 100.0, "low_price": 100.0, "trade_price": 100.0} for t in range(end - 1000, end, 5)]
+        got = FW.conditions(today, prev, path=path, write=write, list_markets=lambda: list(markets) + ["KRW-ZZZ"], panel_loader=loader, get=get)
+        return got, asked
+
+    def test_events_are_appended_once_from_the_start_day_and_rescanned_from_the_day_before(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / FW.COND_FILE
+            world = self.world()
+            dry, _ = self.run_cond("2026-11-22", world, path, write=False)
+            self.assertEqual((dry["events"], dry["added"]), (1, 1))
+            self.assertFalse(path.exists())                                                          # 시험 실행은 파일을 건드리지 않는다
+            got, asked = self.run_cond("2026-11-22", world, path)
+            self.assertEqual((got["since"], got["through"], got["events"], got["added"]), ("2026-11-21", "2026-11-22", 1, 1))
+            self.assertEqual(asked, [(DISC.day_q("2026-11-21") - FW.COND_WARMUP_Q, DISC.day_q("2026-11-22"), ("KRW-BTC", "KRW-ETH"))])
+            self.assertEqual(sorted(got["missing"]), sorted(m for m in DISC.REPRO_UNIVERSE if m not in ("KRW-BTC", "KRW-ETH")))
+            rows = FW.CL.load(path)
+            self.assertEqual([(r["종목"], r["구분"], r["날"]) for r in rows], [("ETH", "알트만", "2026-11-21")])
+            self.assertEqual(rows[0]["① 60분"], FW.CL.text(FW.CL.net("KRW-ETH", 0.0)))
+            self.assertEqual([c["key"] for c in got["table"]], list(FW.CL.KEYS))
+            before = path.read_text(encoding="utf-8")
+            again, asked = self.run_cond("2026-11-24", world, path, prev=got)
+            self.assertEqual((again["events"], again["added"]), (1, 0))                               # 같은 사건은 다시 적지 않는다
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(asked[0][0], DISC.day_q("2026-11-21") - FW.COND_WARMUP_Q)                # 지난 실행(11-22)의 하루 전부터 다시 훑는다
+            later, asked = self.run_cond("2026-11-26", world, path, prev=again)
+            self.assertEqual(asked[0][0], DISC.day_q("2026-11-23") - FW.COND_WARMUP_Q)
+        with tempfile.TemporaryDirectory() as tmp:                                                    # 시작일(연구 자료 끝 다음 날) 앞의 사건은 적지 않는다
+            early, _ = self.run_cond("2026-11-22", self.world("2026-11-20"), Path(tmp) / FW.COND_FILE)
+            self.assertEqual(early["events"], 0)
+            late, _ = self.run_cond("2026-11-22", self.world("2026-11-21", bar=94), Path(tmp) / FW.COND_FILE)   # 신호 뒤 60분이 아직 안 지났다
+            self.assertEqual(late["events"], 0)
+            next_day, _ = self.run_cond("2026-11-23", self.world("2026-11-21", bar=94), Path(tmp) / FW.COND_FILE, prev=late)
+            self.assertEqual(next_day["events"], 1)                                                   # 다음 실행에서 줍는다
+        self.assertEqual(FW.CL.START_DAY, "2026-11-21")
+
+    def test_the_tracker_keeps_the_last_table_when_the_step_fails_and_never_touches_verdicts(self):
+        prev = {"since": "2026-11-21", "through": "2026-11-22", "events": 3, "added": 0, "missing": [], "table": [], "past": None}
+
+        def boom(day, old):
+            raise RuntimeError("시세 조회 실패")
+        ledger, warnings = FW.update({"conditions": prev}, "2026-11-23", cond_log=boom, **offline())
+        self.assertEqual(ledger["conditions"], prev)
+        self.assertEqual([w for w in warnings if "조건 기록" in w], ["조건 기록: 이번 실행에서 갱신하지 못함 — RuntimeError: 시세 조회 실패"])
+        ledger, warnings = FW.update({"conditions": prev}, "2026-11-23", cond_log=lambda day, old: dict(old, through=day, events=4, added=1), **offline())
+        self.assertEqual((ledger["conditions"]["through"], ledger["conditions"]["events"]), ("2026-11-23", 4))
+        self.assertFalse([w for w in warnings if "조건 기록" in w])
+        untouched, _ = FW.update({}, "2026-11-23", **offline())                                       # 함수를 주지 않으면 건드리지 않는다
+        self.assertNotIn("conditions", untouched)
+
+    def test_status_shows_the_table_with_past_values_and_hides_small_samples(self):
+        cells = [{"key": "1", "label": "1번 BTC 직접", "n": 3, "days": 3, "ok": False, "means": [None] * 4, "up": None, "down": None},
+                 {"key": "4", "label": "4번 BTC 조건 없는 알트 급락", "n": 40, "days": 12, "ok": True, "means": [-0.001, -0.002, 0.001, 0.0123], "up": 0.031, "down": -0.022}]
+        ledger = {"last_run": "2026-12-20", "warnings": [],
+                  "conditions": {"since": "2026-11-21", "through": "2026-12-20", "events": 43, "added": 2, "missing": ["KRW-WAVES"], "table": cells,
+                                 "past": {"period": "2017-09 ~ 2026-11-19", "cells": {"1": [1663, 804, -0.0002], "4": [7039, 1822, -0.002]}}}}
+        text = FW.render(ledger)
+        self.assertIn("## 조건별 전진 표 — 관찰용, 판정과 등록에 쓰지 않는다", text)
+        self.assertIn("지금까지 43건, 자료 반영 2026-12-20 (상장 목록에 없어 뺀 종목: WAVES).", text)
+        self.assertIn("| 1번 BTC 직접 | 3 | 3 | 표본 부족 | - | - | - | - | - | 1663 / 804 · -0.02% |", text)       # 10일 미만이면 값을 싣지 않는다
+        self.assertIn("| 4번 BTC 조건 없는 알트 급락 | 40 | 12 | -0.10% | -0.20% | +0.10% | +1.23% | +3.10% | -2.20% | 7039 / 1822 · -0.20% |", text)
+        self.assertIn("| 과거 (2017-09 ~ 2026-11-19): 사건 / 날 · 60분 |", text)
+        self.assertNotIn("조건별", FW.summary(ledger))                                                 # 텔레그램 요약에는 싣지 않는다
+        ledger["conditions"]["past"] = None
+        self.assertIn("| 1번 BTC 직접 | 3 | 3 | 표본 부족 | - | - | - | - | - | - |", FW.render(ledger))
+        del ledger["conditions"]
+        self.assertNotIn("조건별 전진 표", FW.render(ledger))
+
+    def test_the_past_table_in_the_repository_matches_the_code(self):
+        past = json.loads((ROOT / "scalp" / "research" / "forward" / FW.COND_PAST).read_text(encoding="utf-8"))
+        self.assertEqual([c["key"] for c in past["table"]], list(FW.CL.KEYS))
+        self.assertEqual((past["period"], past["events"]), ("2017-09 ~ 2026-11-19", 11222))
+        by = {c["key"]: c for c in past["table"]}
+        self.assertEqual((by["combo"]["n"], by["combo"]["days"], by["combo-big5"]["n"]), (2148, 384, 515))   # 9년 급락 보고서의 조합 건수와 같다
+        self.assertEqual(by["5a"]["n"], 9559)
+
+
 class SurgeAndSharedH3(unittest.TestCase):
     def test_surge_weeks_are_recorded_once_complete_for_both_coins(self):
         d0 = dt.date(2026, 11, 2)
