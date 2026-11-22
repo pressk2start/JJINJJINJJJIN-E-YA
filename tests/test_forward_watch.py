@@ -872,7 +872,8 @@ class AdvisorCandidate(unittest.TestCase):
         self.assertEqual(sorted(c["universe"]), sorted(DISC.REPRO_UNIVERSE))                          # 고문의 고정 20종목
         self.assertEqual((c["cost"], c["cost_other"]), ({"KRW-BTC": 0.0007, "KRW-ETH": 0.0007}, 0.001))
         self.assertEqual((c["registered"], c["start"]), ("2026-11-13", "2026-11-14"))                 # 등록 다음 날 00:00 UTC 부터
-        self.assertEqual((c["verdict"], c["expire_days"], c["status"], c["engine"]), ("ex_best_day", 730, "ACTIVE", DISC.ENGINE))
+        self.assertEqual((c["verdict"], c["expire_days"], c["status"], c["engine"]), ("ex_best_day", 730, "ACTIVE", "3"))
+        self.assertIn(c["engine"], DISC.SAME_TRADES)                                                  # 4판에서도 그대로 채점한다
 
     def world(self, btc_drop):
         """crash_panel 과 같은 알트 급락에, 같은 봉에서 BTC 도 btc_drop 만큼 빠졌다가 4봉에 걸쳐 되돌아오는 세계."""

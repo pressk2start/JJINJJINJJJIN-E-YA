@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import random
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -280,6 +281,16 @@ class Search(unittest.TestCase):
         rule_lines = [ln for ln in lines if "| HOLDOUT n=" in ln]
         self.assertTrue(rule_lines and all("진입일 " in ln for ln in rule_lines))
         self.assertTrue(all("day_win" in f["holdout"] and "day_median" in f["holdout"] for f in passed))
+        per_rule = [ln for ln in rule_lines if not ln.startswith("==")]
+        self.assertTrue(per_rule and all(re.search(r" 비용2배 [+-]\d", ln) for ln in per_rule))       # 4판: 비용 2배 평균도 찍는다
+        later = D.q_day(Q0 + 250 * D.BARS_D)                                                           # 자료는 220일째에 끝나도 뒤 구간은 실행일까지다
+        passed_late, _c, _l, _t = D.run(D.q_day(Q0 + 60 * D.BARS_D), later, D.q_day(Q0 + 156 * D.BARS_D), tuple(sorted(world())),
+                                        fetch=serve(world()), log=lambda s: None)
+        late_span = (dt.date.fromisoformat(later) - dt.date.fromisoformat(D.q_day(Q0 + 156 * D.BARS_D))).days
+        self.assertTrue(passed_late and all(f["holdout"]["span_days"] == late_span for f in passed_late))
+        span = (dt.date.fromisoformat(D.q_day(Q0 + 220 * D.BARS_D)) - dt.date.fromisoformat(D.q_day(Q0 + 156 * D.BARS_D))).days
+        self.assertTrue(passed and all(f["holdout"]["span_days"] == span for f in passed))              # 뒤 구간 = 경계 ~ 실행일
+        self.assertTrue(all(abs(f["holdout"]["expect_days"] - D.expect_days(f["holdout"], span)) < 1e-9 for f in passed))
 
     def test_noise_passes_nothing(self):
         for seed in (1, 2, 3):
@@ -350,8 +361,38 @@ class Registry(unittest.TestCase):
         new, held = D.register(registry, passed, "2027-06-01", ("KRW-BTC",), decided={"A-202611-01"})
         self.assertEqual(sorted(c["event"] for c in new), ["CRASH", "SURGE"])
 
-    def test_the_lock_is_open_by_the_advisors_approval(self):
-        self.assertTrue(D.FRAME_APPROVED)
+    def test_engine_four_is_locked_until_the_advisor_reads_it(self):
+        """고문 판정 2026-11-19 ②: 4판은 잠근 채로 올리고, 고문이 읽은 뒤 푼다. 사건·거래 정의는 3판과 같아 3판 후보는 그대로 채점한다."""
+        self.assertEqual((D.ENGINE, D.FRAME_APPROVED, D.SAME_TRADES, D.COST_STRESS), ("4", False, ("3", "4"), 2.0))
+
+    def test_a_rule_that_would_take_more_than_a_year_to_judge_is_not_registered(self):
+        slow = dict(self.found("SURGE", 4, "b", 0.009), holdout={"day_low": 0.009, "expect_days": 400.0})
+        fast = dict(self.found("SURGE", 16, "c", 0.001), holdout={"day_low": 0.001, "expect_days": 90.0})
+        new, held = D.register([], [slow, fast], "2026-12-01", ("KRW-BTC",))
+        self.assertEqual([(c["event"], c["hold"]) for c in new], [("SURGE", 16)])                     # 느린 것이 하한은 높아도 빠른 것이 자리를 얻는다
+        self.assertEqual([why for _c, why in held], ["예상 판정 시점 13.1개월 — 기한 12개월 안에 30건·10일을 채우기 어렵다"])
+        edge = dict(slow, holdout={"day_low": 0.009, "expect_days": float(D.FWD_EXPIRE_DAYS)})       # 딱 12개월은 받는다
+        self.assertEqual(len(D.register([], [edge], "2026-12-01", ("KRW-BTC",))[0]), 1)
+
+    def test_expected_verdict_time_comes_from_holdout_frequency(self):
+        hc = {"n": 146, "days": 20}
+        self.assertAlmostEqual(D.expect_days(hc, 678), max(30 * 678 / 146.0, 10 * 678 / 20.0))         # 알트 동반 급락 뒤 구간: 날 수가 묶는다(약 11개월)
+        self.assertAlmostEqual(D.expect_days(hc, 678), 339.0)
+        self.assertIsNone(D.expect_days({"n": 0, "days": 0}, 678))
+
+    def test_the_cost_doubled_mean_must_stay_positive(self):
+        def tr(k, gross, market="KRW-AAA"):
+            return {"day": "2025-%02d-%02d" % (6 + k // 28, 1 + k % 28), "gross": gross, "net": (1 + gross) * (1 - 0.001) / (1 + 0.001) - 1,
+                    "entry_q": k, "market": market}
+        thin = [tr(k, 0.0028 + 0.0004 * (k % 3)) for k in range(120)]                                   # 비용 뒤 +0.1%, 비용 2배면 −0.1% 근처
+        hc = D.holdout_checks(thin)
+        self.assertGreater(hc["net"], 0)
+        self.assertLess(hc["net_2x"], 0)
+        self.assertFalse(hc["pass"])
+        self.assertAlmostEqual(D.stressed(thin[0]), (1 + 0.0028) * (1 - 0.002) / (1 + 0.002) - 1)
+        self.assertAlmostEqual(D.stressed(tr(0, 0.01, "KRW-BTC")), (1.01) * (1 - 0.0014) / (1 + 0.0014) - 1)   # BTC·ETH 는 0.07% × 2
+        fat = [tr(k, 0.01 + 0.001 * (k % 3)) for k in range(120)]
+        self.assertTrue(D.holdout_checks(fat)["pass"])
 
     def with_world(self, fn):
         panel = world(planted=True)
