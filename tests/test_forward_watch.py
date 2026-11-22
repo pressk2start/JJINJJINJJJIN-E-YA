@@ -1410,6 +1410,18 @@ class Observation(unittest.TestCase):
             self.assertEqual(obs["events"]["SURGE"][str(days)], [0, None])                             # 없는 사건은 0건, 평균 없음
         self.assertEqual((self.expected(7)[0], self.expected(28)[0]), (5, 22))                         # 30시간마다 한 건
         self.assertEqual(FW.OBS_DAYS, (7, 28))
+        self.assertEqual(obs["events0"], obs["events"])                                                # 이 세계의 급락은 모두 거래대금 5배라 두 표가 같다
+
+    def test_events_without_the_volume_condition_are_counted_separately(self):
+        """고문 판정 11/22 ⑤ 5: '조건 없음' 줄에는 거래대금 3배가 걸려 있었다. 3배 조건이 없는 사건을 따로 센다."""
+        q0, panel = crash_panel(40)
+        b = panel["KRW-AAA"]
+        quiet = DISC.Bars({b.ts[i]: (b.o[i], b.h[i], min(b.o[i], b.c[i]), b.c[i], 1e9) for i in range(len(b))})   # 같은 급락, 거래대금은 평소 그대로
+        world = {"KRW-BTC": panel["KRW-BTC"], "KRW-AAA": quiet}
+        obs = FW.observe(DISC.q_day(q0 + 40 * 96), list_markets=lambda: ["KRW-BTC", "KRW-AAA"], panel_loader=lambda s, e, markets: {m: world[m] for m in markets})
+        self.assertEqual(obs["events"]["CRASH"]["28"], [0, None])                                      # 3배 조건으로는 사건이 아니다
+        self.assertEqual(obs["events0"]["CRASH"]["28"][0], 22)                                         # 조건을 빼면 30시간마다 한 건
+        self.assertGreater(obs["events0"]["CRASH"]["28"][1], 0)
 
     def test_the_window_is_the_days_before_the_run_day(self):
         pairs = [("2026-11-30", 9.0), ("2026-11-29", 0.01), ("2026-11-23", 0.03), ("2026-11-22", 0.05), ("2026-11-02", 0.07), ("2026-11-01", 9.0)]
@@ -1473,7 +1485,9 @@ class Observation(unittest.TestCase):
         ledger = {"last_run": today, "warnings": [],
                   "observation": {"as_of": today, "markets": 19, "missing": ["KRW-WAVES"],
                                   "events": {"SURGE": {"7": [3, -0.004], "28": [11, -0.006]}, "BREAKOUT": {"7": [0, None], "28": [40, 0.001]},
-                                             "CRASH": {"7": [2, 0.01], "28": [9, -0.002]}}},
+                                             "CRASH": {"7": [2, 0.01], "28": [9, -0.002]}},
+                                  "events0": {"SURGE": {"7": [5, -0.003], "28": [20, -0.005]}, "BREAKOUT": {"7": [1, 0.002], "28": [70, 0.0]},
+                                              "CRASH": {"7": [4, 0.005], "28": [15, -0.001]}}},
                   "H2_kimchi": {"rows": [{"date": DF._shift(today, -5), "picks": [], "strat": -0.03, "ew": 0.0, "btc": 0.0},
                                          {"date": DF._shift(today, -20), "picks": [], "strat": 0.01, "ew": 0.0, "btc": 0.0}], "decision": None,
                                 "updated": "2026-11-23"},
@@ -1487,8 +1501,10 @@ class Observation(unittest.TestCase):
         self.assertIn("## 관찰 표 — 관찰용, 판정과 등록에 쓰지 않는다", text)
         self.assertIn("이 표로 통과·탈락을 정하지 않고 후보를 등록하지도 않습니다", text)
         self.assertIn("| 항목 | 최근 7일 건수 | 평균 | 최근 28일 건수 | 평균 |", text)
-        for line in ("| 급등 뒤 1시간 보유 (조건 없음) | 3 | -0.40% | 11 | -0.60% |", "| 돌파 뒤 1시간 보유 (조건 없음) | 0 | - | 40 | +0.10% |",
-                     "| 급락 뒤 1시간 보유 (조건 없음) | 2 | +1.00% | 9 | -0.20% |",
+        for line in ("| 급등 뒤 1시간 보유 (거래대금 3배) | 3 | -0.40% | 11 | -0.60% |", "| 돌파 뒤 1시간 보유 (거래대금 3배) | 0 | - | 40 | +0.10% |",
+                     "| 급락 뒤 1시간 보유 (거래대금 3배) | 2 | +1.00% | 9 | -0.20% |",                 # 지표 조건은 없어도 거래대금 3배는 걸려 있다 (고문 판정 11/22 ⑤ 5)
+                     "| 급등 뒤 1시간 보유 (거래대금 조건 없음) | 5 | -0.30% | 20 | -0.50% |", "| 돌파 뒤 1시간 보유 (거래대금 조건 없음) | 1 | +0.20% | 70 | +0.00% |",
+                     "| 급락 뒤 1시간 보유 (거래대금 조건 없음) | 4 | +0.50% | 15 | -0.10% |",
                      "| H2 김치 되돌림 (3일 기간 단위) (자료 반영 2026-11-23) | 1 | -3.00% | 2 | -1.00% |",   # 주 1회 반영이라 날짜를 붙인다
                      "| 급락 반등 | 2 | +0.50% | 4 | +1.25% |",                                        # 7일 전과 1일 전 / 28일 전까지. 40일 전은 어느 쪽에도 없다
                      "| 급락 반등 변형 −5% | 1 | +0.40% | 1 | +0.40% |", "| 급락 반등 변형 −6% | 0 | - | 0 | - |",
@@ -1497,9 +1513,15 @@ class Observation(unittest.TestCase):
             self.assertIn(line, text)
         self.assertIn("고문의 고정 20종목 가운데 19종목(상장 목록에 없어 뺀 종목: WAVES)의 15분봉", text)
         self.assertIn("급등 -0.770%(924건)", text)                                                     # 고문 집계 과거 평균을 옆에 둔다
+        self.assertNotIn("(조건 없음) |", text)                                                        # 예전 라벨은 남지 않는다
+        self.assertIn("기본 사건(위 6줄)", text)
         self.assertNotIn("관찰", FW.summary(ledger))                                                   # 텔레그램 요약에는 싣지 않는다
         ledger["observation"].update(markets=20, missing=[])
-        self.assertIn("기본 사건(위 3줄): 고문의 고정 20종목의 15분봉.", FW.render(ledger))
+        self.assertIn("기본 사건(위 6줄): 고문의 고정 20종목의 15분봉.", FW.render(ledger))
+        del ledger["observation"]["events0"]                                                         # 예전 장부(3배 줄만 있음)도 그대로 읽는다
+        old = FW.render(ledger)
+        self.assertIn("기본 사건(위 3줄): 고문의 고정 20종목의 15분봉.", old)
+        self.assertNotIn("거래대금 조건 없음) |", old)
         del ledger["observation"]
         self.assertIn("기본 사건(급등·돌파·급락)은 아직 계산된 값이 없습니다", FW.render(ledger))
 

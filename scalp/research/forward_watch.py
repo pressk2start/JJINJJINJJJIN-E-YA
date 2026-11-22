@@ -800,12 +800,15 @@ def observe(today, list_markets=None, panel_loader=None):
     end_q = DISC.day_q(today)
     start_q = end_q - max(OBS_DAYS) * DISC.BARS_D
     panel = (panel_loader or DISC.load_panel)(start_q - OBS_WARMUP_Q, end_q, markets)
-    trades = [t for t in DISC.build_trades(panel, start_q, end_q) if t["hold"] == DISC.BARS_H]
-    events = {}
-    for name, _label in OBS_EVENTS:
-        pairs = [(t["day"], t["net"]) for t in trades if t["event"] == name]
-        events[name] = {str(n): window_stats(pairs, today, n) for n in OBS_DAYS}
-    return {"as_of": today, "markets": len(markets), "missing": missing, "events": events}
+    out = {"as_of": today, "markets": len(markets), "missing": missing}
+    # events = 거래대금 3배 조건이 걸린 사건(탐색의 기본 정의, VOL_X), events0 = 거래대금 조건 없는 사건 (고문 판정 2026-11-22 ⑤ 5)
+    for key, vol_x in (("events", DISC.VOL_X), ("events0", 0.0)):
+        trades = [t for t in DISC.build_trades(panel, start_q, end_q, vol_x=vol_x) if t["hold"] == DISC.BARS_H]
+        out[key] = {}
+        for name, _label in OBS_EVENTS:
+            pairs = [(t["day"], t["net"]) for t in trades if t["event"] == name]
+            out[key][name] = {str(n): window_stats(pairs, today, n) for n in OBS_DAYS}
+    return out
 
 
 def observed_items(ledger):
@@ -1534,8 +1537,10 @@ def render_observation(ledger):
 
     obs = ledger.get("observation")
     if obs:
-        for name, label in OBS_EVENTS:
-            out.append("| %s 뒤 1시간 보유 (조건 없음) |%s" % (label, cells([obs["events"][name][str(n)] for n in OBS_DAYS])))
+        for name, label in OBS_EVENTS:                              # 지표 조건은 없지만 거래대금 3배는 걸려 있다 — 그대로 적는다
+            out.append("| %s 뒤 1시간 보유 (거래대금 %.0f배) |%s" % (label, DISC.VOL_X, cells([obs["events"][name][str(n)] for n in OBS_DAYS])))
+            if obs.get("events0"):
+                out.append("| %s 뒤 1시간 보유 (거래대금 조건 없음) |%s" % (label, cells([obs["events0"][name][str(n)] for n in OBS_DAYS])))
     for name, pairs, updated in observed_items(ledger):
         if not updated:                                             # 한 번도 채점되지 못한 항목을 '0건' 으로 보이지 않게 한다
             out.append("| %s (아직 채점 전) |%s" % (name, " - | - |" * len(OBS_DAYS)))
@@ -1550,7 +1555,8 @@ def render_observation(ledger):
         if obs.get("missing"):
             scope += " 가운데 %d종목(상장 목록에 없어 뺀 종목: %s)" % (obs["markets"], ", ".join(m[4:] for m in obs["missing"]))
         out += ["기본 사건(위 %d줄): %s의 15분봉. 사건 봉 다음 봉 시가에 사서 1시간 뒤 시가에 판 것으로 계산합니다. 자료 반영 %s. "
-                "참고로 같은 20종목의 2025-01 ~ 2026-11 평균은 %s 입니다(고문 집계)." % (len(OBS_EVENTS), scope, obs["as_of"], ref), ""]
+                "참고로 같은 20종목의 2025-01 ~ 2026-11 평균(거래대금 %.0f배 기준)은 %s 입니다(고문 집계)." % (
+                    len(OBS_EVENTS) * (2 if obs.get("events0") else 1), scope, obs["as_of"], DISC.VOL_X, ref), ""]
     else:
         out += ["기본 사건(급등·돌파·급락)은 아직 계산된 값이 없습니다.", ""]
     out += ["등록 후보는 추적을 시작한 뒤의 거래만 장부에 있습니다. 시작한 지 28일이 안 된 항목의 28일 칸은 시작일부터의 값입니다. "
