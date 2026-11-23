@@ -26,5 +26,19 @@
   "registered": [],
   "held": [],
   "locked": false
+ },
+ {
+  "scanned": 1158,
+  "selected": 143,
+  "passed": 0,
+  "mode": "diagnostic",
+  "run": "2026-11-23",
+  "engine": "4",
+  "markets": 30,
+  "start": "2022-11-24",
+  "cut": "2025-04-18",
+  "registered": [],
+  "held": [],
+  "locked": true
  }
 ]
