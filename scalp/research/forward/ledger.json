@@ -11,7 +11,7 @@
     "surge": false
    }
   ],
-  "updated": "2026-11-23"
+  "updated": "2026-11-24"
  },
  "CR_rebound": {
   "decision": null,
@@ -46,18 +46,18 @@
     "net": -0.008854539635167136
    }
   ],
-  "updated": "2026-11-23"
+  "updated": "2026-11-24"
  },
  "CR_variants": {
   "CR_drop5": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   },
   "CR_drop6": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   },
   "CR_hold4h": {
    "decision": null,
@@ -92,7 +92,7 @@
      "net": -0.02771261697839178
     }
    ],
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   }
  },
  "H2_kimchi": {
@@ -408,30 +408,30 @@
   "updated": "2026-11-23"
  },
  "H3_trend": {
-  "as_of": "2026-11-23",
+  "as_of": "2026-11-24",
   "assets": {
    "KRW-BTC": {
-    "benchmark": 0.7663076082025619,
-    "close": 83560000.0,
+    "benchmark": 0.7677932691950082,
+    "close": 83726000.0,
     "equity": 1.0,
-    "gap": -0.19548098317692586,
+    "gap": -0.1887051666242573,
     "on": false,
     "position": false,
-    "sma": 103863300.0,
+    "sma": 103200460.0,
     "trades": []
    },
    "KRW-ETH": {
-    "benchmark": 0.7334403846329021,
-    "close": 2352000.0,
+    "benchmark": 0.728762831159478,
+    "close": 2336000.0,
     "equity": 1.0,
-    "gap": -0.22704805973288467,
+    "gap": -0.2254436457200456,
     "on": false,
     "position": false,
-    "sma": 3042880.0,
+    "sma": 3015920.0,
     "trades": []
    }
   },
-  "benchmark": 0.749873996417732,
+  "benchmark": 0.7482780501772431,
   "equity": 1.0
  },
  "candidates": {
@@ -513,7 +513,7 @@
     }
    ],
    "rule": "15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, btc_ret_1h <= -0.01821",
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   },
   "A-202611-02": {
    "decision": null,
@@ -581,7 +581,7 @@
    "role": "main",
    "rows": [],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [주 대상: 큰 5종목]",
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   },
   "A-202611-02-비교": {
    "decision": null,
@@ -652,7 +652,7 @@
    "role": "compare",
    "rows": [],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [비교용: 나머지 14종목]",
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   },
   "A-202611-02-체결": {
    "decision": null,
@@ -662,11 +662,825 @@
    "role": "observe",
    "rows": [],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, 조건 없음 [체결 관찰: 큰 5종목의 15분 −3% 급락 전부]",
-   "updated": "2026-11-23"
+   "updated": "2026-11-24"
   }
  },
- "last_ok": "2026-11-23",
- "last_run": "2026-11-23",
+ "conditions": {
+  "added": 4,
+  "events": 4,
+  "missing": [],
+  "past": {
+   "cells": {
+    "1": [
+     1663,
+     804,
+     -0.0002196077647476898
+    ],
+    "2": [
+     2518,
+     396,
+     0.006753100189326751
+    ],
+    "2x3": [
+     1659,
+     347,
+     0.007201518621313123
+    ],
+    "3": [
+     1161,
+     290,
+     0.007508495364664105
+    ],
+    "4": [
+     7039,
+     1822,
+     -0.0020000840050117606
+    ],
+    "4h-only": [
+     907,
+     393,
+     0.005467916270177854
+    ],
+    "4x3": [
+     4881,
+     1666,
+     -0.0029588475412030005
+    ],
+    "5a": [
+     9559,
+     1886,
+     -0.0010534583467292115
+    ],
+    "5b": [
+     9559,
+     1886,
+     -0.002984711532703977
+    ],
+    "6-2-hi": [
+     1113,
+     252,
+     0.004368517451911514
+    ],
+    "6-2-lo": [
+     666,
+     228,
+     0.014321120194656702
+    ],
+    "6-2-mid": [
+     739,
+     282,
+     0.007694929187070808
+    ],
+    "6-4-hi": [
+     2638,
+     931,
+     0.0002734246460685654
+    ],
+    "6-4-lo": [
+     2160,
+     1027,
+     -0.003005127267254149
+    ],
+    "6-4-mid": [
+     2241,
+     1202,
+     -0.0019454330695533888
+    ],
+    "7-2-a": [
+     335,
+     113,
+     0.010008911949360868
+    ],
+    "7-2-b": [
+     524,
+     149,
+     0.009794000613227185
+    ],
+    "7-2-c": [
+     648,
+     212,
+     0.009526277921907755
+    ],
+    "7-2-d": [
+     1011,
+     272,
+     0.006759953215828631
+    ],
+    "7-4-a": [
+     1092,
+     423,
+     0.003284069720368723
+    ],
+    "7-4-b": [
+     1066,
+     512,
+     0.001639701517325682
+    ],
+    "7-4-c": [
+     1320,
+     682,
+     0.0003901272383978012
+    ],
+    "7-4-d": [
+     3561,
+     1510,
+     -0.0039196205870780055
+    ],
+    "8-1-dn": [
+     1184,
+     609,
+     -0.0005247300036489692
+    ],
+    "8-1-up": [
+     479,
+     287,
+     0.0007409330305292862
+    ],
+    "8-2-dn": [
+     2142,
+     317,
+     0.00628818902735032
+    ],
+    "8-2-up": [
+     376,
+     112,
+     0.00918105196712018
+    ],
+    "8-3-dn": [
+     994,
+     232,
+     0.008150578979679558
+    ],
+    "8-3-up": [
+     167,
+     85,
+     0.007370146974789917
+    ],
+    "8-4-dn": [
+     4191,
+     1203,
+     -0.00022764517264357858
+    ],
+    "8-4-up": [
+     2848,
+     1026,
+     -0.0036623008784314962
+    ],
+    "alone": [
+     6781,
+     1807,
+     -0.002066093427143051
+    ],
+    "b24-only": [
+     2330,
+     667,
+     -0.00017330739574916864
+    ],
+    "big5": [
+     1760,
+     517,
+     0.0036658467363820378
+    ],
+    "co": [
+     1617,
+     340,
+     0.002920909102780787
+    ],
+    "combo": [
+     2148,
+     384,
+     0.009473412207847138
+    ],
+    "combo-big5": [
+     515,
+     162,
+     0.015331679934597298
+    ],
+    "lag": [
+     1161,
+     290,
+     0.007508495364664105
+    ],
+    "neither": [
+     4174,
+     1455,
+     -0.0037843099370731778
+    ],
+    "rest14": [
+     7799,
+     1838,
+     -0.0011467699134687628
+    ]
+   },
+   "period": "2017-09 ~ 2026-11-19"
+  },
+  "since": "2026-11-21",
+  "table": [
+   {
+    "days": 1,
+    "down": null,
+    "key": "1",
+    "label": "1번 BTC 직접 (1시간 −1.821% 이하로 처음 내려간 봉)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 1,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "2",
+    "label": "2번 알트 급락 + 그때 BTC 1시간 −1.821% 이하",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "2x3",
+    "label": "2번 + 거래대금 3배 이상",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "3",
+    "label": "3번 BTC 신호 뒤 15~60분의 알트 급락",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "4",
+    "label": "4번 BTC 조건 없는 알트 급락 (BTC 1시간 > −1.821%)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "4x3",
+    "label": "4번 + 거래대금 3배 이상",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "co",
+    "label": "구분: 동반",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "lag",
+    "label": "구분: 후행",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "alone",
+    "label": "구분: 알트만",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "5a",
+    "label": "5번 알트 급락 전체 — ① 바로 진입",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "5b",
+    "label": "5번 알트 급락 전체 — ② 반등 확인 뒤 진입 (미진입 0건은 0)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "6-2-lo",
+    "label": "6번 2번 중 BTC 보다 가장 더 빠짐 (차 ≤ -2.9%)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "6-2-mid",
+    "label": "6번 2번 중 중간",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "6-2-hi",
+    "label": "6번 2번 중 덜 빠짐 (차 > -1.8%)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "6-4-lo",
+    "label": "6번 4번 중 BTC 보다 가장 더 빠짐 (차 ≤ -4.0%)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "6-4-mid",
+    "label": "6번 4번 중 중간",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "6-4-hi",
+    "label": "6번 4번 중 덜 빠짐 (차 > -3.1%)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-2-a",
+    "label": "7번 2번 중 거래대금 1.5배 미만",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-2-b",
+    "label": "7번 2번 중 1.5~3배",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-2-c",
+    "label": "7번 2번 중 3~6배",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-2-d",
+    "label": "7번 2번 중 6배 이상",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-4-a",
+    "label": "7번 4번 중 거래대금 1.5배 미만",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-4-b",
+    "label": "7번 4번 중 1.5~3배",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "7-4-c",
+    "label": "7번 4번 중 3~6배",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "7-4-d",
+    "label": "7번 4번 중 6배 이상",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-1-up",
+    "label": "8번 1번 중 BTC 24시간 수익 > 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 1,
+    "down": null,
+    "key": "8-1-dn",
+    "label": "8번 1번 중 BTC 24시간 수익 ≤ 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 1,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-2-up",
+    "label": "8번 2번 중 BTC 24시간 수익 > 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-2-dn",
+    "label": "8번 2번 중 BTC 24시간 수익 ≤ 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-3-up",
+    "label": "8번 3번 중 BTC 24시간 수익 > 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-3-dn",
+    "label": "8번 3번 중 BTC 24시간 수익 ≤ 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "8-4-up",
+    "label": "8번 4번 중 BTC 24시간 수익 > 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "8-4-dn",
+    "label": "8번 4번 중 BTC 24시간 수익 ≤ 0",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "big5",
+    "label": "큰 5종목의 급락 (ETH·XRP·SOL·DOGE·ADA)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "rest14",
+    "label": "나머지 14종목의 급락",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "combo",
+    "label": "4시간 조건 + BTC24 조건 (등록 규칙의 조합)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "combo-big5",
+    "label": "조합 중 큰 5종목",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "4h-only",
+    "label": "4시간 조건만 (BTC24 조건은 못 채움)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 0,
+    "down": null,
+    "key": "b24-only",
+    "label": "BTC24 조건만 (4시간 조건은 못 채움)",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 0,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "neither",
+    "label": "둘 다 못 채움",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 3,
+    "ok": false,
+    "up": null
+   }
+  ],
+  "through": "2026-11-24"
+ },
+ "last_ok": "2026-11-24",
+ "last_run": "2026-11-24",
  "mismatch_seen": {
   "H2 김치 되돌림": [
    "2026-11-03",
@@ -674,47 +1488,72 @@
   ]
  },
  "new": {
-  "day": "2026-11-23",
-  "items": [
-   {
-    "item": "H2 김치 되돌림",
-    "market": "ERA, ADA, SAND, SHIB, LSK",
-    "net": -0.05280702783602953,
-    "when": "2026-11-18 매수"
-   }
-  ]
+  "day": "2026-11-24",
+  "items": []
  },
  "observation": {
-  "as_of": "2026-11-23",
+  "as_of": "2026-11-24",
   "events": {
    "BREAKOUT": {
     "28": [
-     125,
-     -0.006266266399385553
+     150,
+     -0.005466871201486608
     ],
     "7": [
-     24,
-     -0.010906284640756913
+     50,
+     -0.00583543844763921
     ]
    },
    "CRASH": {
     "28": [
-     35,
-     -0.010247078997471024
+     36,
+     -0.012655824049799416
     ],
     "7": [
      5,
-     -0.004828856269445403
+     -0.0355321738634085
     ]
    },
    "SURGE": {
     "28": [
-     30,
-     -0.017703272990585252
+     44,
+     -0.008156354258798742
     ],
     "7": [
-     7,
-     -0.04626127246394829
+     20,
+     -0.0038575055822575423
+    ]
+   }
+  },
+  "events0": {
+   "BREAKOUT": {
+    "28": [
+     212,
+     -0.004443452381806342
+    ],
+    "7": [
+     62,
+     -0.00531907129125555
+    ]
+   },
+   "CRASH": {
+    "28": [
+     37,
+     -0.012839331220768599
+    ],
+    "7": [
+     5,
+     -0.0355321738634085
+    ]
+   },
+   "SURGE": {
+    "28": [
+     44,
+     -0.008156354258798742
+    ],
+    "7": [
+     20,
+     -0.0038575055822575423
     ]
    }
   },
