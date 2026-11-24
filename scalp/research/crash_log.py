@@ -162,9 +162,10 @@ def event_id(m, t):
     return "%s_%s" % (m[4:], dt.datetime.fromtimestamp(t * 60, tz=UTC).strftime("%Y%m%dT%H%M"))
 
 
-def rows(panel, five, start_q, end_q, known=()):
+def rows(panel, five, start_q, end_q, known=(), missed=None):
     """사건 봉이 [start_q, end_q) 이고 신호 뒤 60분이 end_q 안에 다 들어온 사건의 줄 목록(시각·종목 순). known 에 있는 ID 는 건너뛴다.
-    panel = {종목: 15분봉(Bars — ts, o, c, v)}. BTC 가 있어야 한다. 5분봉이 모자란 사건은 넣지 않는다(다음 실행에서 다시 본다)."""
+    panel = {종목: 15분봉(Bars — ts, o, c, v)}. BTC 가 있어야 한다. 5분봉이 모자란 사건은 넣지 않는다(다음 실행에서 다시 본다) —
+    missed(목록)를 주면 그런 사건의 ID 를 넣는다."""
     btc = panel[BTC]
     sig_btc = btc_signals(btc)
     sig_set = set(sig_btc)
@@ -181,6 +182,8 @@ def rows(panel, five, start_q, end_q, known=()):
             continue
         got = path(m, t, five)
         if got is None:
+            if missed is not None:
+                missed.append(event_id(m, t))
             continue
         r15 = b.c[i] / b.c[i - 1] - 1
         ref = st.median(b.v[i - VOLB:i])
