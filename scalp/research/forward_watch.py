@@ -116,6 +116,10 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              3단계(증액 기준): 전진 일별 평균의 99% 하한 > 0. 점검은 전진 진입일 30·60·90일이 처음 된 때만, 그때 값으로 고정한다.
              전진은 지금 가상 거래(봉 기준)뿐이다 — 실거래가 생기면 함께 센다.
              과거 값(거래당 평균, 일별 평균)은 고문 집계: 급락 반등 계열은 CR_PAST, 후보는 등록부의 train/holdout.
+  조건별 전진 표 (고문 판정 2026-11-22 ⑤, 사용자 지적) 장부는 거래마다 신호 낙폭·60분 수익·체결·짝만 남긴다. 사용자 설계(급락 반등 검토안
+               1~8번과 '볼 값')가 새 자료에서도 쌓이도록, 고정 20종목의 15분 −3% 급락 전부(거래대금 조건 없음)와 BTC 직접 사건을
+               사건마다 forward/conditions.csv 에 한 줄씩 붙인다(crash_log.py — 과거 9년 파일과 같은 정의·같은 열, 뒤에 붙이기만 한다).
+               현황에는 그 줄들을 조건별로 묶은 표를 과거 9년 값과 나란히 싣는다. 관찰용이다 — 판정에도 등록에도 쓰지 않는다.
   짝 관찰       (고문 판정 2026-11-20 ② 7) 자동 등록 후보의 거래마다 같은 진입·청산 시각의 BTC·ETH 봉 기준 수익(비용 편도 0.07%)을
              함께 적고, 현황에 '신호 종목 vs BTC vs ETH' 평균을 나란히 싣는다. 판정 없음 — 알트 동반 급락의 수익이 시장 전체의 반등인지 보려는 것.
 엔진은 이것 하나다 (고문 지시 2026-11-11): auto_monitor.py 는 규칙 계산을 빌려 쓰는 파일이고, 따로 도는 워크플로는 두지 않는다.
@@ -162,6 +166,7 @@ DF = _load("daily_factor_test")
 TP = _load("trend_paper")
 AM = _load("auto_monitor")
 DISC = _load("discover")
+CL = _load("crash_log")                             # 전진 조건 기록 (고문 판정 2026-11-22 ⑤)
 
 FETCH_DAYS = 200
 H2_FIRST_DECISION = "2026-10-24"     # forward 첫 결정일 (매수는 다음 날 시가). 이후 3일 간격
@@ -183,6 +188,9 @@ OBS_DAYS = (7, 28)                                  # 관찰 표의 창 (실행�
 OBS_EVENTS = (("SURGE", "급등"), ("BREAKOUT", "돌파"), ("CRASH", "급락"))
 OBS_WARMUP_Q = 3 * DISC.BARS_D                      # 거래대금 기준(직전 96개 봉의 중앙값)에 필요한 앞쪽 자료
 OBS_TAG = "관찰용, 판정과 등록에 쓰지 않는다"
+COND_FILE = "conditions.csv"                        # 전진 조건 기록: 급락 사건마다 한 줄 (forward/ 아래, 뒤에 붙이기만 한다)
+COND_WARMUP_Q = 3 * DISC.BARS_D                     # 직전 96개 봉(거래대금 중앙값)과 BTC 24시간 수익에 필요한 앞쪽 자료
+COND_PAST = "conditions_past.json"                  # 같은 표를 과거 9년 자료로 낸 값 (같은 코드로 한 번 계산해 둔 것. 비교용)
 NEW_SHOW = 12                                       # 요약에 싣는 새 거래 줄 수 (넘으면 '외 N건')
 FILL_SEC = 60                                       # 진입·청산 시각부터 이만큼(초) 동안의 실제 체결로 값을 낸다 (고문 판정 2026-11-19)
 FILL_FEE = 0.0005                                   # 추정에 쓰는 수수료 편도 (업비트 원화 시장)
@@ -800,12 +808,50 @@ def observe(today, list_markets=None, panel_loader=None):
     end_q = DISC.day_q(today)
     start_q = end_q - max(OBS_DAYS) * DISC.BARS_D
     panel = (panel_loader or DISC.load_panel)(start_q - OBS_WARMUP_Q, end_q, markets)
-    trades = [t for t in DISC.build_trades(panel, start_q, end_q) if t["hold"] == DISC.BARS_H]
-    events = {}
-    for name, _label in OBS_EVENTS:
-        pairs = [(t["day"], t["net"]) for t in trades if t["event"] == name]
-        events[name] = {str(n): window_stats(pairs, today, n) for n in OBS_DAYS}
-    return {"as_of": today, "markets": len(markets), "missing": missing, "events": events}
+    out = {"as_of": today, "markets": len(markets), "missing": missing}
+    # events = 거래대금 3배 조건이 걸린 사건(탐색의 기본 정의, VOL_X), events0 = 거래대금 조건 없는 사건 (고문 판정 2026-11-22 ⑤ 5)
+    for key, vol_x in (("events", DISC.VOL_X), ("events0", 0.0)):
+        trades = [t for t in DISC.build_trades(panel, start_q, end_q, vol_x=vol_x) if t["hold"] == DISC.BARS_H]
+        out[key] = {}
+        for name, _label in OBS_EVENTS:
+            pairs = [(t["day"], t["net"]) for t in trades if t["event"] == name]
+            out[key][name] = {str(n): window_stats(pairs, today, n) for n in OBS_DAYS}
+    return out
+
+
+def conditions(today, prev=None, path=None, write=True, list_markets=None, panel_loader=None, get=None, past_path=None):
+    """전진 조건 기록 (고문 판정 2026-11-22 ⑤, 사용자 지적). 고정 20종목의 15분 −3% 급락 전부(거래대금 조건 없음)와 BTC 직접 사건마다
+    조건 값과 신호 뒤 60분의 움직임을 path(CSV)에 한 줄씩 붙인다. 정의·열은 과거 9년 파일과 같다(crash_log.py). 관찰용 — 판정·등록에 쓰지 않는다.
+    연구 자료 끝 다음 날(CL.START_DAY)부터 소급하고, 그 뒤로는 지난 실행의 하루 전부터 다시 훑는다(이미 적은 사건 ID 는 건너뛴다).
+    신호 뒤 60분이 아직 안 지난 사건과 5분봉을 못 받은 사건은 적지 않는다. write=False 면 파일을 건드리지 않고 표만 계산한다.
+    past_path 는 같은 표를 과거 9년 자료로 낸 파일(conditions_past.json). 있으면 칸마다 과거 값을 옆에 싣는다.
+    → {"since", "through", "events": 적힌 사건 수, "added": 이번에 붙인 수, "missing": [뺀 종목], "table": 조건별 표의 칸, "past": 과거 값 또는 None}"""
+    missing = []
+    try:
+        got = set((list_markets or listed_markets)())
+        if "KRW-BTC" in got:
+            missing = sorted(m for m in DISC.REPRO_UNIVERSE if m not in got)
+    except Exception:
+        pass
+    markets = tuple(m for m in DISC.REPRO_UNIVERSE if m not in missing)
+    since = CL.START_DAY
+    if prev and prev.get("through"):                                # 지난 실행의 하루 전부터: 그때 60분이 안 지나 못 적은 사건을 줍는다
+        since = max(since, (dt.date.fromisoformat(prev["through"]) - dt.timedelta(days=1)).isoformat())
+    start_q, end_q = DISC.day_q(since), DISC.day_q(today)
+    old = CL.load(path) if path else []
+    new = []
+    if end_q > start_q:
+        panel = (panel_loader or DISC.load_panel)(start_q - COND_WARMUP_Q, end_q, markets)
+        five = CL.FiveMin(fetch=CL.upbit_fetch5(get or AM.http_get, AM.UPBIT))
+        new = CL.rows(panel, five, start_q, end_q, known={r["사건 ID"] for r in old})
+    added = CL.append(path, new) if (path and write) else 0
+    rows = CL.load(path) if (path and write) else old + [{k: CL.text(r.get(k)) for k in CL.COLUMNS} for r in new]
+    past = None
+    if past_path and Path(past_path).exists():
+        got = json.loads(Path(past_path).read_text(encoding="utf-8"))
+        past = {"period": got["period"], "cells": {c["key"]: [c["n"], c["days"], c["means"][3]] for c in got["table"]}}
+    return {"since": CL.START_DAY, "through": today, "events": len(rows), "added": added if write else len(new), "missing": missing, "table": CL.table(rows),
+            "past": past}
 
 
 def observed_items(ledger):
@@ -829,11 +875,12 @@ def observed_items(ledger):
 
 # ---------------------------------------------------------------------------------------------------------------------
 def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None, registry=None, panel_loader=None,
-           crv_fetch=None, list_markets=None, observer=None, fill_get=None, tick_dir=None):
+           crv_fetch=None, list_markets=None, observer=None, fill_get=None, tick_dir=None, cond_log=None):
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수.
     observer(today) 는 관찰 표의 기본 사건 부분을 돌려주는 함수(실행 때는 observe). 주지 않으면 그 부분은 건드리지 않는다.
     fill_get(url) 은 체결 기록 조회 함수(실행 때는 auto_monitor.http_get). 주지 않으면 체결 내역 기반 추정은 건드리지 않는다.
-    tick_dir 은 원본 체결을 남길 폴더(실행 때는 forward/ticks)."""
+    tick_dir 은 원본 체결을 남길 폴더(실행 때는 forward/ticks).
+    cond_log(today, 지난 값) 은 전진 조건 기록을 갱신하고 요약을 돌려주는 함수(실행 때는 conditions). 주지 않으면 건드리지 않는다."""
     log = log or (lambda s: None)
     warnings = []
     seen = ledger.setdefault("mismatch_seen", {})                  # 이미 알린 값 차이 (항목 → 표시 목록)
@@ -1091,6 +1138,12 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             log("관찰 표: %s 까지" % today)
         except Exception as e:
             warnings.append("관찰 표: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
+    if cond_log is not None:                                        # 전진 조건 기록 — 판정·등록과 무관하다. 못 받으면 지난 값을 그대로 둔다
+        try:
+            ledger["conditions"] = cond_log(today, ledger.get("conditions"))
+            log("조건 기록: %d건 (+%d)" % (ledger["conditions"]["events"], ledger["conditions"]["added"]))
+        except Exception as e:
+            warnings.append("조건 기록: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
     if fill_errors:
         warnings.append("체결 내역: %d건 조회 실패 — 비워 두고 다음 실행에서 다시 받음 (%s)" % (len(fill_errors), ", ".join(fill_errors[:5])))
     for _name, entry, minute, day, _past in staged_items(ledger):  # 2·3단계 점검: 시점이 처음 된 실행의 값으로 고정한다
@@ -1260,6 +1313,7 @@ def render(ledger):
     out += render_stage3(ledger)
     out += render_pairs(ledger)
     out += render_observation(ledger)
+    out += render_conditions(ledger)
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
     held, freed = holds(ledger), holds(ledger, released=True)
@@ -1518,6 +1572,34 @@ def render_pairs(ledger):
     return out
 
 
+def render_conditions(ledger):
+    """현황의 '조건별 전진 표' 절 (고문 판정 2026-11-22 ⑤ 4). 관찰용 — 표시만 한다."""
+    cond = ledger.get("conditions")
+    if not cond:
+        return []
+    out = ["## 조건별 전진 표 — %s" % OBS_TAG, "",
+           "사용자 설계(급락 반등 검토안 1~8번)의 조건을 새 자료에서도 봅니다. 고정 20종목의 15분 −3%% 급락 전부(거래대금 조건 없음)와 BTC 직접 사건을 "
+           "%s 00:00 UTC 부터 사건마다 %s 에 적고(과거 9년 파일과 같은 정의·같은 열), 그 줄들을 조건별로 묶은 표입니다. "
+           "지금까지 %d건, 자료 반영 %s%s." % (cond["since"], COND_FILE, cond["events"], cond["through"],
+                                    " (상장 목록에 없어 뺀 종목: %s)" % ", ".join(m[4:] for m in cond["missing"]) if cond.get("missing") else ""),
+           "5·15·30·60분 = 신호 다음 15분봉의 첫 체결가에 사서 그 시점 5분봉 종가에 판 값(비용 뒤, 같은 시각의 사건을 먼저 평균하고 날마다 평균한 값). "
+           "최대 반등·최대 추가 하락 = 신호 뒤 60분 안의 값의 중앙값(비용 빼기 전 — 그 값에 팔 수 있었다는 뜻이 아닙니다). "
+           "구간 경계는 과거 보고서 값으로 고정했습니다. 날 수가 %d일 미만인 칸은 '표본 부족' 으로 두고 값을 싣지 않습니다. "
+           "칸마다 표본이 작아 몇 달은 참고용입니다. 1분 급등은 넣지 않습니다(과거 1년 비용 뒤 마이너스로 종료)." % CL.MIN_DAYS, "",
+           "| 조건 | 사건 | 날 | 5분 | 15분 | 30분 | 60분 | 최대 반등 | 최대 추가 하락 | 과거 (%s): 사건 / 날 · 60분 |" % ((cond.get("past") or {}).get("period") or "-"),
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    cells = (cond.get("past") or {}).get("cells") or {}
+    for c in cond["table"]:
+        if c["ok"]:
+            vals = " | ".join("-" if v is None else _pct(v) for v in list(c["means"]) + [c["up"], c["down"]])
+        else:
+            vals = "표본 부족 | - | - | - | - | -"
+        old = cells.get(c.get("key"))
+        out.append("| %s | %d | %d | %s | %s |" % (c["label"], c["n"], c["days"], vals,
+                                                 "-" if not old else "%d / %d · %s" % (old[0], old[1], "-" if old[2] is None else _pct(old[2]))))
+    return out + ["과거 값은 같은 코드를 2017-09 부터의 15분봉·5분봉에 돌린 것입니다(이미 여러 번 본 자료라 새 자료와 같은 무게로 읽지 않습니다).", ""]
+
+
 def render_observation(ledger):
     """현황의 관찰 표 (고문 판정 2026-11-17 ①). 기본 사건은 실행 때 계산해 둔 값(ledger["observation"]), 등록 후보는 장부의 거래에서."""
     today = ledger.get("last_run")
@@ -1534,8 +1616,10 @@ def render_observation(ledger):
 
     obs = ledger.get("observation")
     if obs:
-        for name, label in OBS_EVENTS:
-            out.append("| %s 뒤 1시간 보유 (조건 없음) |%s" % (label, cells([obs["events"][name][str(n)] for n in OBS_DAYS])))
+        for name, label in OBS_EVENTS:                              # 지표 조건은 없지만 거래대금 3배는 걸려 있다 — 그대로 적는다
+            out.append("| %s 뒤 1시간 보유 (거래대금 %.0f배) |%s" % (label, DISC.VOL_X, cells([obs["events"][name][str(n)] for n in OBS_DAYS])))
+            if obs.get("events0"):
+                out.append("| %s 뒤 1시간 보유 (거래대금 조건 없음) |%s" % (label, cells([obs["events0"][name][str(n)] for n in OBS_DAYS])))
     for name, pairs, updated in observed_items(ledger):
         if not updated:                                             # 한 번도 채점되지 못한 항목을 '0건' 으로 보이지 않게 한다
             out.append("| %s (아직 채점 전) |%s" % (name, " - | - |" * len(OBS_DAYS)))
@@ -1550,7 +1634,8 @@ def render_observation(ledger):
         if obs.get("missing"):
             scope += " 가운데 %d종목(상장 목록에 없어 뺀 종목: %s)" % (obs["markets"], ", ".join(m[4:] for m in obs["missing"]))
         out += ["기본 사건(위 %d줄): %s의 15분봉. 사건 봉 다음 봉 시가에 사서 1시간 뒤 시가에 판 것으로 계산합니다. 자료 반영 %s. "
-                "참고로 같은 20종목의 2025-01 ~ 2026-11 평균은 %s 입니다(고문 집계)." % (len(OBS_EVENTS), scope, obs["as_of"], ref), ""]
+                "참고로 같은 20종목의 2025-01 ~ 2026-11 평균(거래대금 %.0f배 기준)은 %s 입니다(고문 집계)." % (
+                    len(OBS_EVENTS) * (2 if obs.get("events0") else 1), scope, obs["as_of"], DISC.VOL_X, ref), ""]
     else:
         out += ["기본 사건(급등·돌파·급락)은 아직 계산된 값이 없습니다.", ""]
     out += ["등록 후보는 추적을 시작한 뒤의 거래만 장부에 있습니다. 시작한 지 28일이 안 된 항목의 28일 칸은 시작일부터의 값입니다. "
@@ -1776,7 +1861,8 @@ def main(argv=None):
     reg_path = out / "registry.json"
     registry = json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.exists() else []
     ledger, warnings = update(ledger, today, log=lambda s: print(s, flush=True), registry=registry, observer=observe, fill_get=AM.http_get,
-                              tick_dir=None if a.dry_run else out / TICKS_DIR)
+                              tick_dir=None if a.dry_run else out / TICKS_DIR,
+                              cond_log=lambda day, prev: conditions(day, prev, path=out / COND_FILE, write=not a.dry_run, past_path=out / COND_PAST))
     text = render(ledger)
     if not a.dry_run:
         out.mkdir(parents=True, exist_ok=True)
