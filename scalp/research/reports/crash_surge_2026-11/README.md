@@ -27,3 +27,4 @@
 - `scn/surge_fill.md` 와 `crash9/threshold_diff.md` 는 원자료를 다시 센 것이다: `python3 -I scn/surge_fill.py scn/surge_signals.csv.gz OUT.md`, `python3 -I crash9/threshold_diff.py WORK/long/report15.md.pkl OUT.md`.
 - 고정 20종목은 지금 상장된 종목이라 상장폐지 종목이 빠져 있다(실제보다 좋게 나오는 쪽). 수익은 봉 가격 기준이고 실제 체결은 확인하지 않았다.
 - **1분 급등의 호가 3칸 조건:** 호가 3칸 조건의 호가 단위는 신호 봉 앞 120봉부터 **뒤 10봉까지**의 가격 차에서 추정했다 — 신호 뒤의 가격이 쓰였다(제3세션 지적). 3칸 조건을 붙이지 않은 결과도 모두 음수라 결론은 같다. 실시간 조건으로 쓰려면 가격대별 호가 단위표로 계산해야 한다.
+- 같은 1분봉 1년치로 한 다른 검토: `../vol_lag_2026-11/report.md` (횡보 중 거래 증가, 뒤처진 알트 — 2026-11-25, 둘 다 기준 미달).
