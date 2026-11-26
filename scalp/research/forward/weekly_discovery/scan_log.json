@@ -40,5 +40,24 @@
   "registered": [],
   "held": [],
   "locked": true
+ },
+ {
+  "scanned": 1159,
+  "selected": 149,
+  "passed": 1,
+  "mode": "diagnostic",
+  "run": "2026-11-26",
+  "engine": "4",
+  "markets": 30,
+  "start": "2022-11-27",
+  "cut": "2025-04-21",
+  "registered": [],
+  "held": [
+   {
+    "rule": "15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, btc_ret_1h <= -0.0233",
+    "why": "A-202611-01 진행 중 (사건 종류마다 진행 중인 후보는 1개까지)"
+   }
+  ],
+  "locked": false
  }
 ]
