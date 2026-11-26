@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -577,6 +578,69 @@ class VerdictHold(unittest.TestCase):
         self.assertEqual(h2["hold"]["why"], "값 차이: %s" % rows[5]["date"])
         self.assertIn("## H2 김치 프리미엄 되돌림 — 진행 중 (20 / 20기간) · 판정 보류(값 차이)", FW.render(ledger))
 
+    def test_a_coin_leaving_the_days_top_list_explains_changed_picks_without_a_hold(self):
+        """고문 판정 2026-11-26 ① 4-①: 상위 목록에서 종목이 빠지면 다음 순위가 들어와 선정까지 바뀐다(BLUR 가 빠지면 11/18 기간의 LSK 가 ZRO 로).
+        장부에 남긴 상위 목록(universe)에 지금 없는 종목이 있으면 strat·picks 가 달라도 보류하지 않는다."""
+        lists = {"picks": ["KRW-LSK"], "members": ["KRW-A01", "KRW-LSK"], "universe": ["KRW-A01", "KRW-BLUR", "KRW-LSK"]}
+        old = dict(row(1, 0.01, ew=0.02), **lists)
+        new = dict(old, picks=["KRW-ZRO"], strat=0.03, ew=0.025)
+        here = {"KRW-A01", "KRW-LSK", "KRW-ZRO"}
+        self.assertEqual(FW.listing_reason(old, new, here), "그날의 상위 목록 종목이 지금 상장 목록에 없음: BLUR")
+        self.assertIsNone(FW.listing_reason(old, new, here | {"KRW-BLUR"}))                             # 다 있는데 선정이 달라졌으면 지금처럼 보류한다
+        self.assertIsNone(FW.listing_reason(dict(old, universe=None), new, here))                       # 상위 목록을 남기지 않은 줄은 이 사유로 가릴 수 없다
+        rows = [dict(row(k, 0.01, ew=0.02), **lists) for k in range(FW.H2_DECIDE_AT)]
+        changed = dict(rows[5], picks=["KRW-ZRO"], strat=0.03, ew=0.025)
+        real, args = FW.h2_rows, offline()
+        try:
+            FW.h2_rows = lambda data, bn, last: [changed] + rows[6:]
+            args["h2_inputs"] = lambda: ({m: {} for m in here | {"KRW-USDT"}}, {}, [])                    # BLUR 는 지금 자료에 없다
+            ledger, warnings = FW.update({"H2_kimchi": {"rows": [dict(r) for r in rows], "decision": None}}, "2026-12-28", **args)
+            h2 = ledger["H2_kimchi"]
+            self.assertFalse([w for w in warnings if w.startswith("H2")])
+            self.assertIsNone(h2.get("hold"))
+            self.assertEqual((h2["rows"][5]["picks"], h2["rows"][5]["strat"]), (["KRW-LSK"], 0.01))       # 장부 값은 그대로
+            self.assertEqual(h2["listing_diffs"], {rows[5]["date"]: {"found": "2026-12-28", "why": "그날의 상위 목록 종목이 지금 상장 목록에 없음: BLUR"}})
+            args["h2_inputs"] = lambda: ({m: {} for m in here | {"KRW-USDT", "KRW-BLUR"}}, {}, [])        # BLUR 가 있는데 선정이 달라졌다 → 보류
+            held, warnings = FW.update({"H2_kimchi": {"rows": [dict(r) for r in rows], "decision": None}}, "2026-12-28", **args)
+            self.assertTrue([w for w in warnings if w.startswith("H2: 다시 계산한 값이 장부와 다른 기간 1개")])
+            self.assertEqual(held["H2_kimchi"]["hold"]["why"], "값 차이: %s" % rows[5]["date"])
+        finally:
+            FW.h2_rows = real
+
+    def test_old_periods_get_their_member_and_top_lists_once(self):
+        """고문 판정 2026-11-26 ① 4-①: 다시 계산한 값이 장부와 완전히 같았던 7기간에만 목록을 채운다. 11/03·11/06 은 채우지 않는다."""
+        consts = FW.H2_OLD_LISTS
+        self.assertEqual(sorted(consts), ["2026-10-25", "2026-10-28", "2026-10-31", "2026-11-09", "2026-11-12", "2026-11-15", "2026-11-18"])
+        self.assertEqual([len(consts[d][0].split()) for d in sorted(consts)], [43, 41, 41, 36, 36, 37, 36])   # 고문이 대조한 구성 종목 수
+        for d, (members, top) in consts.items():
+            members, top = members.split(), top.split()
+            self.assertEqual((len(top), top, members), (DF.TOP_N, sorted(set(top)), sorted(set(members))), d)
+            self.assertTrue(set(members) <= set(top), d)
+        self.assertEqual([d for d in sorted(consts) if "BLUR" in consts[d][0].split()], ["2026-11-09", "2026-11-12", "2026-11-15", "2026-11-18"])
+        self.assertEqual([d for d in sorted(consts) if "BLUR" in consts[d][1].split()], ["2026-11-09", "2026-11-12", "2026-11-15", "2026-11-18"])
+        book = json.loads((ROOT / "scalp" / "research" / "forward" / "ledger.json").read_text(encoding="utf-8"))["H2_kimchi"]["rows"]
+        seen = [r for r in book if r["date"] in consts]
+        self.assertEqual(len(seen), 7)
+        for r in seen:                                                                                  # 장부의 그 줄의 선정 종목이 상수의 구성 종목 안에 있다
+            self.assertTrue({m[4:] for m in r["picks"]} <= set(consts[r["date"]][0].split()), r["date"])
+        first = consts["2026-10-25"][0].split()[0]
+        make = lambda: [{"date": "2026-10-25", "picks": ["KRW-" + first], "strat": 0.01, "ew": 0.0, "btc": 0.0},
+                        {"date": "2026-11-03", "picks": ["KRW-" + first], "strat": 0.01, "ew": 0.0, "btc": 0.0},            # 상수에 없는 기간
+                        {"date": "2026-11-09", "picks": ["KRW-BLUR"], "strat": 0.01, "ew": 0.0, "btc": 0.0, "members": ["KRW-X"]},   # 목록이 이미 있다
+                        {"date": "2026-11-12", "picks": ["KRW-NOPE"], "strat": 0.01, "ew": 0.0, "btc": 0.0}]                 # 선정 종목이 상수에 없다 — 다른 줄이다
+        rows = make()
+        self.assertEqual(FW.h2_backfill(rows), 1)
+        self.assertEqual(rows[0]["members"], ["KRW-" + c for c in consts["2026-10-25"][0].split()])
+        self.assertEqual(rows[0]["universe"], ["KRW-" + c for c in consts["2026-10-25"][1].split()])
+        self.assertEqual((rows[0]["strat"], rows[0]["picks"]), (0.01, ["KRW-" + first]))                 # 값은 건드리지 않는다
+        self.assertEqual(["members" in r for r in rows], [True, False, True, False])
+        self.assertEqual((rows[2]["members"], "universe" in rows[2]), (["KRW-X"], False))
+        self.assertEqual(FW.h2_backfill(rows), 0)                                                       # 한 번만 채운다
+        this_week = {"H2_kimchi": {"rows": make(), "decision": None, "updated": "2026-11-23"}}          # 이번 주 반영이 이미 끝난 날에도 채운다
+        ledger, _ = FW.update(this_week, "2026-11-27", **offline())
+        self.assertEqual(["members" in r for r in ledger["H2_kimchi"]["rows"]], [True, False, True, False])
+        self.assertEqual(ledger["H2_kimchi"]["updated"], "2026-11-23")
+
     def test_a_kimchi_difference_explained_by_a_delisting_is_recorded_without_a_hold(self):
         """고문 판정 2026-11-24 ② 3: ew 만 다르고 구성 종목이 목록에서 빠졌으면(또는 구성 목록이 없는 옛 기간이면) 보류하지 않고 적어만 둔다."""
         old = dict(row(1, 0.01, ew=0.02), members=["KRW-A01", "KRW-B02", "KRW-GONE"])
@@ -585,10 +649,14 @@ class VerdictHold(unittest.TestCase):
         self.assertEqual(FW.listing_reason(old, new, here), "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: GONE")
         self.assertIsNone(FW.listing_reason(old, new, here | {"KRW-GONE"}))                             # 구성 종목이 다 있는데 값이 다르면 설명되지 않는다
         self.assertEqual(FW.listing_reason(row(1, 0.01, ew=0.02), row(1, 0.01, ew=0.03), here), "비교 기준선(ew)만 다름 — 구성 종목 목록이 없는 옛 기간")
-        self.assertIsNone(FW.listing_reason(old, dict(new, strat=0.5), here))                           # 전략 수익이 달라졌으면 상장 목록 탓으로 보지 않는다
-        self.assertIsNone(FW.listing_reason(old, dict(new, btc=0.5), here))
-        self.assertIsNone(FW.listing_reason(old, dict(new, picks=["KRW-B02"]), here))
-        self.assertEqual(FW.listing_reason(old, dict(new, strat=0.5, picks=["KRW-B02"]), here - {"KRW-A01"}), "선정 종목이 지금 상장 목록에 없음: A01")
+        whole = here | {"KRW-GONE"}
+        self.assertIsNone(FW.listing_reason(old, dict(new, strat=0.5), whole))                          # 목록의 종목이 다 있는데 전략 수익이 달라졌으면 상장 목록 탓으로 보지 않는다
+        self.assertIsNone(FW.listing_reason(old, dict(new, btc=0.5), whole))
+        self.assertIsNone(FW.listing_reason(old, dict(new, picks=["KRW-B02"]), whole))
+        gone = "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: GONE"
+        self.assertEqual(FW.listing_reason(old, dict(new, strat=0.5, picks=["KRW-B02"]), here), gone)   # 목록의 종목이 빠졌으면 strat·picks 가 달라도 상장 목록 변화다 (고문 판정 2026-11-26 ① 4-①)
+        self.assertEqual(FW.listing_reason(old, dict(new, strat=0.5, picks=["KRW-B02"]), here - {"KRW-A01"}), "선정 종목이 지금 상장 목록에 없음: A01; " + gone)
+        self.assertEqual(FW.listing_reason(row(1, 0.01, ew=0.02), row(1, 0.5, ew=0.03), here), None)    # 목록이 없는 옛 기간이라도 strat 이 다르면 설명되지 않는다
         self.assertIsNone(FW.listing_reason(old, new, None))                                            # 지금 목록을 모르면 가리지 않는다
         rows = [dict(row(k, 0.01, ew=0.02), members=["KRW-A01", "KRW-GONE"]) for k in range(FW.H2_DECIDE_AT)]
         real, args = FW.h2_rows, offline()
@@ -1174,6 +1242,96 @@ class ConditionLog(unittest.TestCase):
         by = {c["key"]: c for c in past["table"]}
         self.assertEqual((by["combo"]["n"], by["combo"]["days"], by["combo-big5"]["n"]), (2148, 384, 515))   # 9년 급락 보고서의 조합 건수와 같다
         self.assertEqual(by["5a"]["n"], 9559)
+        self.assertEqual((by["day-first"]["n"], by["day-repeat"]["n"], by["day-first"]["days"]), (5489, 4070, 1886))   # 같은 종목의 그날 첫 급락과 그 뒤 (판정 11/25 ①)
+
+
+class MarketFlags(unittest.TestCase):
+    """유의·주의 표시 기록 (고문 판정 2026-11-24 ③ 4-③)."""
+
+    def listing(self, flags=None, drop=()):
+        flags = flags or {}
+        asked = []
+
+        def get(url):
+            asked.append(url)
+            quiet = {k: False for k in FW.FLAG_CAUTION}
+            out = [{"market": "BTC-ETH", "market_event": {"warning": True, "caution": dict(quiet)}}]   # 원화 시장이 아닌 것은 보지 않는다
+            for m in DISC.REPRO_UNIVERSE + ("KRW-NEW",):
+                if m in drop:
+                    continue
+                warning, caution = flags.get(m, (False, ()))
+                out.append({"market": m, "market_event": {"warning": warning, "caution": dict(quiet, **{c: True for c in caution})}})
+            return out
+        return get, asked
+
+    def test_each_run_appends_the_days_flags_for_the_fixed_coins_once(self):
+        get, asked = self.listing({"KRW-WAVES": (True, ()), "KRW-KAVA": (True, ("TRADING_VOLUME_SOARING", "GLOBAL_PRICE_DIFFERENCES")),
+                                   "KRW-ALGO": (False, ("PRICE_FLUCTUATIONS",)), "KRW-NEW": (True, ())}, drop=("KRW-IQ",))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "forward" / FW.FLAG_FILE
+            got = FW.market_flags("2026-11-26", path=path, get=get)
+            self.assertTrue(asked[0].endswith("/v1/market/all?is_details=true"))
+            self.assertEqual(got, {"day": "2026-11-26", "added": 20, "unlisted": ["KRW-IQ"],
+                                   "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []},
+                                               {"market": "KRW-KAVA", "warning": True, "caution": ["GLOBAL_PRICE_DIFFERENCES", "TRADING_VOLUME_SOARING"]},
+                                               {"market": "KRW-ALGO", "warning": False, "caution": ["PRICE_FLUCTUATIONS"]}]})   # 고정 20종목만 본다
+            first = path.read_text(encoding="utf-8")
+            lines = first.splitlines()
+            self.assertEqual((lines[0], len(lines)), ("날(UTC),종목,상장,유의,주의", 21))
+            self.assertIn("2026-11-26,BTC,1,0,", lines)
+            self.assertIn("2026-11-26,WAVES,1,1,", lines)
+            self.assertIn("2026-11-26,KAVA,1,1,GLOBAL_PRICE_DIFFERENCES;TRADING_VOLUME_SOARING", lines)
+            self.assertIn("2026-11-26,ALGO,1,0,PRICE_FLUCTUATIONS", lines)
+            self.assertIn("2026-11-26,IQ,0,,", lines)                                                   # 목록에 없는 종목도 한 줄 남긴다
+            self.assertEqual(FW.market_flags("2026-11-26", path=path, get=get)["added"], 0)             # 같은 날 다시 돌아도 또 붙이지 않는다
+            self.assertEqual(path.read_text(encoding="utf-8"), first)
+            calm, _ = self.listing()
+            later = FW.market_flags("2026-11-27", path=path, get=calm)
+            self.assertEqual((later["added"], later["flagged"], later["unlisted"]), (20, [], []))
+            second = path.read_text(encoding="utf-8")
+            self.assertTrue(second.startswith(first))                                                   # 앞에 적은 줄은 그대로 — 뒤에 붙이기만 한다
+            self.assertEqual((second.count("\n"), second.count("날(UTC)")), (41, 1))
+            dry = Path(tmp) / "dry" / FW.FLAG_FILE
+            self.assertEqual(FW.market_flags("2026-11-26", path=dry, write=False, get=get)["added"], 0)  # 시험 실행은 파일을 만들지 않는다
+            self.assertFalse(dry.exists())
+            broken, _ = self.listing(drop=("KRW-BTC",))
+            with self.assertRaises(RuntimeError):                                                       # 목록이 비정상이면 적지 않는다
+                FW.market_flags("2026-11-28", path=path, get=broken)
+            self.assertEqual(path.read_text(encoding="utf-8"), second)
+
+    def test_the_tracker_warns_when_the_flags_cannot_be_read_and_never_touches_verdicts(self):
+        prev = {"day": "2026-11-25", "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []}], "unlisted": [], "added": 20}
+
+        def boom(day):
+            raise RuntimeError("목록 조회 실패")
+        ledger, warnings = FW.update({"market_flags": prev}, "2026-11-26", flag_log=boom, **offline())
+        self.assertEqual(ledger["market_flags"], prev)                                                 # 못 받으면 지난 값을 그대로 둔다
+        self.assertEqual([w for w in warnings if "유의" in w], ["유의·주의 표시: 이번 실행에서 받지 못함 — RuntimeError: 목록 조회 실패"])
+        self.assertNotEqual(ledger.get("last_ok"), "2026-11-26")                                       # 경고로 끝나 뒤의 예약이 다시 받는다(소급해 받을 수 없다)
+        ledger, warnings = FW.update({"market_flags": prev}, "2026-11-26", flag_log=lambda day: dict(prev, day=day, flagged=[]), **offline())
+        self.assertEqual((ledger["market_flags"]["day"], ledger["market_flags"]["flagged"]), ("2026-11-26", []))
+        self.assertFalse([w for w in warnings if "유의" in w])
+        untouched, _ = FW.update({}, "2026-11-26", **offline())                                       # 함수를 주지 않으면 건드리지 않는다
+        self.assertNotIn("market_flags", untouched)
+        self.assertIn("flag_log=lambda day: market_flags(day, path=out / FLAG_FILE, write=not a.dry_run)", inspect.getsource(FW.main))
+
+    def test_status_shows_the_flagged_coins_on_one_line(self):
+        ledger = {"last_run": "2026-11-26", "warnings": [],
+                  "market_flags": {"day": "2026-11-26", "added": 20, "unlisted": ["KRW-IQ"],
+                                   "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []},
+                                               {"market": "KRW-KAVA", "warning": True, "caution": ["GLOBAL_PRICE_DIFFERENCES", "NEW_KIND"]},
+                                               {"market": "KRW-ALGO", "warning": False, "caution": ["PRICE_FLUCTUATIONS"]}]}}
+        text = FW.render(ledger)
+        line = [x for x in text.splitlines() if "유의·주의 표시" in x]
+        self.assertEqual(len(line), 1)
+        self.assertIn("(2026-11-26 기준, 고정 20종목 — 관찰용, 판정과 등록에 쓰지 않는다): "
+                      "WAVES 유의 · KAVA 유의, 주의(국내외 가격 차이·NEW_KIND) · ALGO 주의(가격 급등락). 상장 목록에 없는 종목: IQ.", line[0])
+        self.assertIn("market_flags.csv", line[0])
+        self.assertNotIn("유의", FW.summary(ledger))                                                   # 텔레그램 요약에는 싣지 않는다
+        ledger["market_flags"].update(flagged=[], unlisted=[])
+        self.assertIn("관찰용, 판정과 등록에 쓰지 않는다): 없음. 날마다", FW.render(ledger))
+        del ledger["market_flags"]
+        self.assertNotIn("유의·주의 표시", FW.render(ledger))
 
 
 class SurgeAndSharedH3(unittest.TestCase):

@@ -75,6 +75,8 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
              보류 기록(hold)은 지우지 않는다. 달라진 값의 원본(장부 값과 다시 계산한 값)을 함께 남긴다. 보류 중에 새로 드러난
              차이도 같은 기록에 덧붙인다(제3세션 지적 2026-11-17). 보류 중인 후보는 탐색에서 '끝난 후보' 로 치지 않는다. 해제는 고문 판정이
              있을 때만: --release-hold "항목 이름" --reason "사유" 가 해제 기록(날짜, 사유)을 덧붙인다 (고문 판정 2026-11-16 ②).
+  유의·주의      (고문 판정 2026-11-24 ③) 매 실행마다 업비트의 유의·주의 표시(market_event)를 고정 20종목에 대해 forward/market_flags.csv 에
+             날짜별로 붙이고(뒤에 붙이기만), 현황에 지금 표시가 붙은 종목을 한 줄로 싣는다. 관찰용 — 등록 규칙과 판정은 건드리지 않는다.
   H2 주석        검사 절차(주 1회 실행)는 바꾸지 않는다. 상장폐지 편향(통과 쪽)을 현황과 판정 기록에 주석으로 남긴다.
              추적 중인 후보가 없으면 시세도 받지 않는다. 틀(고문 지정, 15분봉)과 한계는 discover.py 머리말에 있다.
   실행 주기      (고문 판정 2026-11-17 ①) 매일 돈다. 예약은 하루 세 번(00:25·04:25·08:25 UTC) 걸려 있고, 그날(UTC) 이미 경고 없이
@@ -143,9 +145,11 @@ r"""forward_watch — 등록된 후보를 '등록일 이후에 생긴 자료' �
                                                        어제(UTC) 추적 실행과 가장 최근 탐색 예약일(월요일·매월 1일)의 실행이 기록에 있는지 확인 (없으면 종료 코드 1)
 """
 import argparse
+import csv
 import datetime as dt
 import gzip
 import importlib.util
+import io
 import json
 import sys
 import urllib.error
@@ -191,6 +195,10 @@ OBS_TAG = "관찰용, 판정과 등록에 쓰지 않는다"
 COND_FILE = "conditions.csv"                        # 전진 조건 기록: 급락 사건마다 한 줄 (forward/ 아래, 뒤에 붙이기만 한다)
 COND_WARMUP_Q = 3 * DISC.BARS_D                     # 직전 96개 봉(거래대금 중앙값)과 BTC 24시간 수익에 필요한 앞쪽 자료
 COND_PAST = "conditions_past.json"                  # 같은 표를 과거 9년 자료로 낸 값 (같은 코드로 한 번 계산해 둔 것. 비교용)
+FLAG_FILE = "market_flags.csv"                      # 유의·주의 표시 기록: 날마다 고정 20종목에 한 줄씩 (forward/ 아래, 뒤에 붙이기만 한다)
+FLAG_COLUMNS = ("날(UTC)", "종목", "상장", "유의", "주의")
+FLAG_CAUTION = {"PRICE_FLUCTUATIONS": "가격 급등락", "TRADING_VOLUME_SOARING": "거래량 급등", "DEPOSIT_AMOUNT_SOARING": "입금량 급등",
+                "GLOBAL_PRICE_DIFFERENCES": "국내외 가격 차이", "CONCENTRATION_OF_SMALL_ACCOUNTS": "소수 계정 집중"}   # 업비트 market_event.caution 의 이름
 NEW_SHOW = 12                                       # 요약에 싣는 새 거래 줄 수 (넘으면 '외 N건')
 FILL_SEC = 60                                       # 진입·청산 시각부터 이만큼(초) 동안의 실제 체결로 값을 낸다 (고문 판정 2026-11-19)
 FILL_FEE = 0.0005                                   # 추정에 쓰는 수수료 편도 (업비트 원화 시장)
@@ -291,25 +299,63 @@ def h2_rows(data, bn, last_done_day):
 
 
 def listing_reason(prev, new, present):
-    """장부의 기간(prev)과 다시 계산한 기간(new)의 값 차이가 상장 목록 변화로 설명되면 그 사유, 아니면 None (고문 판정 2026-11-24 ② 3).
+    """장부의 기간(prev)과 다시 계산한 기간(new)의 값 차이가 상장 목록 변화로 설명되면 그 사유, 아니면 None (고문 판정 2026-11-24 ② 3, 2026-11-26 ① 4-①).
     present = 지금 자료에 있는 종목들. H2 는 실행하는 날의 상장 목록으로 계산하므로, 거래지원이 끝난 종목은 지난 기간에서도 빠진다.
-    - 선정 종목(picks) 가운데 지금 자료에 없는 것이 있으면 → 그 이름.
-    - ew 만 다르고 strat·btc·picks 가 같을 때: 구성 종목(members) 가운데 지금 없는 것이 있으면 그 이름, 구성 목록이 없는 옛 기간이면 그렇게 적는다.
-    - 구성 종목이 다 있는데 값이 다르거나 strat·btc 가 다르면 None(지금처럼 보류한다)."""
+    - 장부에 적힌 선정 종목(picks)·비교 기준선 구성 종목(members)·그날의 상위 목록(universe) 가운데 지금 자료에 없는 것이 하나라도 있으면
+      → 상장 목록 변화로 보고 그 이름을 적는다. strat·picks 가 달라졌어도 같다 — 상위 목록에서 종목이 빠지면 다음 순위가 들어와 선정까지 바뀐다.
+    - 없는 종목이 없을 때: ew 만 다르고 strat·btc·picks 가 같으며 구성 목록이 없는 옛 기간이면 그렇게 적는다.
+    - 그 밖에는(목록의 종목이 다 있는데 값이 다르면) None — 지금처럼 보류한다."""
     if present is None:
         return None
-    gone = [m for m in (prev.get("picks") or []) if m not in present]
-    if gone:
-        return "선정 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
+    seen, parts = set(), []
+    for label, key in (("선정 종목이", "picks"), ("비교 기준선(ew) 구성 종목이", "members"), ("그날의 상위 목록 종목이", "universe")):
+        gone = [m for m in (prev.get(key) or []) if m not in present and m not in seen]
+        seen.update(gone)
+        if gone:
+            parts.append("%s 지금 상장 목록에 없음: %s" % (label, ", ".join(m.replace("KRW-", "") for m in gone)))
+    if parts:
+        return "; ".join(parts)
     same = all(abs(prev[k] - new[k]) <= TOL for k in ("strat", "btc")) and prev.get("picks") == new.get("picks")
-    if not same:
-        return None
-    if prev.get("members") is None:
+    if same and prev.get("members") is None:
         return "비교 기준선(ew)만 다름 — 구성 종목 목록이 없는 옛 기간"
-    gone = [m for m in prev["members"] if m not in present]
-    if gone:
-        return "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
     return None
+
+
+# 옛 기간의 구성 목록 (고문 판정 2026-11-26 ① 4-①). 목록을 남기기 전에 적힌 기간에는 members·universe 가 없어, 거래지원이 끝난 종목 탓에 값이
+# 달라져도 원인을 가릴 수 없다. 2026-11-26 의 자료(BLUR 상장 중)로 다시 계산해 strat·ew·btc·picks 가 장부와 완전히 같았던 7기간의 목록을
+# 여기에 적어 두고, 장부의 그 줄에 한 번 채운다. 11/03·11/06 은 이미 값이 달라(SOPH·ZIL 거래지원 종료) 채우지 않는다.
+H2_OLD_LISTS = {                                     # 매수일: (비교 기준선 구성 종목, 그날의 상위 목록). 종목 이름은 KRW- 를 떼고 빈칸으로 이었다
+    "2026-10-25": ("2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ETH FIL HBAR JTO LA LINK NEAR ONDO PENGU PEPE POL PUMP PYTH SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL W WLD XLM XPL XRP ZRO",
+                   "2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CAP CHIP DATA DOGE DRV ENA ETH FIL FLOCK FOLD HBAR JTO LA LINK NEAR ONDO PENGU PEPE POL PUMP PYTH SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL W WLD XLM XPL XRP ZRO"),
+    "2026-10-28": ("2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ERA ETH FIL HBAR JTO LA LINK NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CAP CC CHIP DATA DOGE DOS DRV ENA ERA ETH FIL FOLD HBAR JTO LA LINK LIT NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-10-31": ("AAVE ADA APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ERA ETH FIL HBAR JTO LA LINK LSK MEGA NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "AAVE ADA APT ARB ARK AVAX AXS BCH BTC CAP CC CHIP DATA DOGE DOS DRV ENA ERA ETH FIL FOLD HBAR JTO LA LINK LIT LSK MEGA NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-11-09": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BFC BIRB BLUR BTC CAP CHIP DATA DOGE DOOD DOS DRV ELSA ENA ERA ETH FOLD HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+    "2026-11-12": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS DRV ELSA ENA ERA ETH FOLD HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+    "2026-11-15": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "AAVE ADA APT ARB AVAX B3 BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS ELSA ENA ERA ETH HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-11-18": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS ELSA ENA ERA ETH HBAR IRYS LA LINK LIT LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+}
+
+
+def h2_backfill(rows):
+    """구성 목록이 없는 옛 기간에 members·universe 를 채운다 → 채운 기간 수. 목록이 이미 있는 줄과 상수에 없는 기간은 건드리지 않는다.
+    상수의 구성 종목에 그 줄의 선정 종목이 다 들어 있지 않으면(다른 줄의 것이면) 채우지 않는다."""
+    n = 0
+    for r in rows:
+        got = H2_OLD_LISTS.get(r.get("date"))
+        if not got or "members" in r or "universe" in r:
+            continue
+        members, uni = (["KRW-" + c for c in s.split()] for s in got)
+        if not set(r.get("picks") or []) <= set(members):
+            continue
+        r["members"], r["universe"] = members, uni
+        n += 1
+    return n
 
 
 def merge_rows(old_rows, new_rows, bad=None, present=None):
@@ -881,6 +927,43 @@ def conditions(today, prev=None, path=None, write=True, list_markets=None, panel
             "past": past, "no5m": no5m, "rescanned": short}
 
 
+def market_flags(today, path=None, write=True, get=None):
+    """유의·주의 표시 기록 (고문 판정 2026-11-24 ③ 4-③). 업비트 /v1/market/all?is_details=true 의 market_event 를 고정 20종목에 대해 읽어
+    path(CSV)에 그날(UTC) 치 20줄을 붙인다 — 뒤에 붙이기만 하고, 그날 치가 이미 있으면 다시 붙이지 않는다. 이 표시는 나중에 소급해 받을 수 없다.
+    관찰용이다 — 등록 규칙과 판정은 건드리지 않는다. 주의 열에는 업비트가 준 이름을 그대로 적는다(여럿이면 ';' 로 잇는다).
+    목록에 없는 종목(거래지원 종료)은 상장 0 으로 적는다. write=False 면 파일을 건드리지 않는다.
+    → {"day", "flagged": [{"market", "warning", "caution": [이름]}], "unlisted": [종목], "added": 붙인 줄 수}"""
+    got = {m["market"]: m.get("market_event") or {} for m in (get or AM.http_get)(AM.UPBIT + "/v1/market/all?is_details=true")}
+    if "KRW-BTC" not in got:
+        raise RuntimeError("상장 목록이 비정상이다 (KRW-BTC 없음)")
+    rows, flagged, unlisted = [], [], []
+    for m in DISC.REPRO_UNIVERSE:
+        ev = got.get(m)
+        if ev is None:
+            unlisted.append(m)
+            rows.append([today, m[4:], "0", "", ""])
+            continue
+        caution = sorted(k for k, v in (ev.get("caution") or {}).items() if v)
+        rows.append([today, m[4:], "1", "1" if ev.get("warning") else "0", ";".join(caution)])
+        if ev.get("warning") or caution:
+            flagged.append({"market": m, "warning": bool(ev.get("warning")), "caution": caution})
+    added = 0
+    if path and write:
+        path = Path(path)
+        old = path.read_text(encoding="utf-8") if path.exists() else ""
+        if not any(line.split(",")[0] == today for line in old.splitlines()[1:]):
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            if not old:
+                w.writerow(FLAG_COLUMNS)
+            w.writerows(rows)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8", newline="") as f:
+                f.write(("" if not old or old.endswith("\n") else "\n") + buf.getvalue())
+            added = len(rows)
+    return {"day": today, "flagged": flagged, "unlisted": unlisted, "added": added}
+
+
 def observed_items(ledger):
     """관찰 표의 '등록 후보' 부분 → [(이름, [(진입일 UTC, 비용 뒤 수익률)], 자료 반영일 또는 None)]. 장부에 적힌 거래만 쓴다(시세 조회 없음)."""
     out = []
@@ -902,12 +985,13 @@ def observed_items(ledger):
 
 # ---------------------------------------------------------------------------------------------------------------------
 def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fetch=None, log=None, registry=None, panel_loader=None,
-           crv_fetch=None, list_markets=None, observer=None, fill_get=None, tick_dir=None, cond_log=None):
+           crv_fetch=None, list_markets=None, observer=None, fill_get=None, tick_dir=None, cond_log=None, flag_log=None):
     """장부를 갱신한다 → (장부, 경고 목록). h2_inputs() 는 (data, bn, failed) 를 돌려주는 함수.
     observer(today) 는 관찰 표의 기본 사건 부분을 돌려주는 함수(실행 때는 observe). 주지 않으면 그 부분은 건드리지 않는다.
     fill_get(url) 은 체결 기록 조회 함수(실행 때는 auto_monitor.http_get). 주지 않으면 체결 내역 기반 추정은 건드리지 않는다.
     tick_dir 은 원본 체결을 남길 폴더(실행 때는 forward/ticks).
-    cond_log(today, 지난 값) 은 전진 조건 기록을 갱신하고 요약을 돌려주는 함수(실행 때는 conditions). 주지 않으면 건드리지 않는다."""
+    cond_log(today, 지난 값) 은 전진 조건 기록을 갱신하고 요약을 돌려주는 함수(실행 때는 conditions). 주지 않으면 건드리지 않는다.
+    flag_log(today) 는 유의·주의 표시를 적고 요약을 돌려주는 함수(실행 때는 market_flags). 주지 않으면 건드리지 않는다."""
     log = log or (lambda s: None)
     warnings = []
     seen = ledger.setdefault("mismatch_seen", {})                  # 이미 알린 값 차이 (항목 → 표시 목록)
@@ -1009,6 +1093,9 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
 
     last_done = DF._shift(today, -1)
     h2 = ledger.setdefault("H2_kimchi", {"rows": [], "decision": None})
+    filled = h2_backfill(h2.get("rows") or [])                      # 주 1회 반영을 건너뛰는 날에도 채운다(값은 건드리지 않는다)
+    if filled:
+        log("H2: 옛 기간 %d개에 구성 목록(members·universe)을 채움" % filled)
     try:
         # 추적은 매일 돌지만 H2 는 주 1회만 반영한다 (고문 판정 2026-11-14: 등록된 검사 절차를 중간에 바꾸지 않는다 — H2 는
         # 실행하는 날의 상장 목록으로 계산하므로 반영 주기가 달라지면 결과가 달라진다). 그 주 월요일 이후 첫 성공 실행이 반영한다.
@@ -1177,6 +1264,12 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             log("조건 기록: %d건 (+%d)" % (ledger["conditions"]["events"], ledger["conditions"]["added"]))
         except Exception as e:
             warnings.append("조건 기록: 이번 실행에서 갱신하지 못함 — %s: %s" % (type(e).__name__, e))
+    if flag_log is not None:                                        # 유의·주의 표시 — 판정·등록과 무관하다. 나중에 소급해 받을 수 없어, 못 받으면 경고로 끝내 뒤의 예약이 다시 받게 한다
+        try:
+            ledger["market_flags"] = flag_log(today)
+            log("유의·주의 표시: %d종목 (+%d줄)" % (len(ledger["market_flags"]["flagged"]), ledger["market_flags"]["added"]))
+        except Exception as e:
+            warnings.append("유의·주의 표시: 이번 실행에서 받지 못함 — %s: %s" % (type(e).__name__, e))
     if fill_errors:
         warnings.append("체결 내역: %d건 조회 실패 — 비워 두고 다음 실행에서 다시 받음 (%s)" % (len(fill_errors), ", ".join(fill_errors[:5])))
     for _name, entry, minute, day, _past in staged_items(ledger):  # 2·3단계 점검: 시점이 처음 된 실행의 값으로 고정한다
@@ -1346,6 +1439,7 @@ def render(ledger):
     out += render_stage3(ledger)
     out += render_pairs(ledger)
     out += render_observation(ledger)
+    out += render_flags(ledger)
     out += render_conditions(ledger)
     out += ["## 대기 중", ""] + (["- %s: %s" % w for w in WAITING] or ["- 없음"]) + [""]
     out += ["## 경고", ""] + (["- " + w for w in ledger.get("warnings", [])] or ["- 없음"]) + [""]
@@ -1605,6 +1699,18 @@ def render_pairs(ledger):
                                                avg([t["pair"]["KRW-ETH"] for t in rows if "KRW-ETH" in t["pair"]])))
     out.append("")
     return out
+
+
+def render_flags(ledger):
+    """현황의 유의·주의 표시 한 줄 (고문 판정 2026-11-24 ③ 4-③). 관찰용 — 표시만 한다."""
+    mf = ledger.get("market_flags")
+    if not mf:
+        return []
+    what = lambda f: ", ".join((["유의"] if f["warning"] else []) + (["주의(%s)" % "·".join(FLAG_CAUTION.get(c, c) for c in f["caution"])] if f["caution"] else []))
+    marks = " · ".join("%s %s" % (f["market"][4:], what(f)) for f in mf["flagged"]) or "없음"
+    gone = " 상장 목록에 없는 종목: %s." % ", ".join(m[4:] for m in mf["unlisted"]) if mf.get("unlisted") else ""
+    return ["**업비트 유의·주의 표시** (%s 기준, 고정 20종목 — %s): %s.%s 날마다 %s 에 적습니다(이 표시는 나중에 소급해 받을 수 없습니다)." % (
+        mf["day"], OBS_TAG, marks, gone, FLAG_FILE), ""]
 
 
 def render_conditions(ledger):
@@ -1899,7 +2005,8 @@ def main(argv=None):
     registry = json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.exists() else []
     ledger, warnings = update(ledger, today, log=lambda s: print(s, flush=True), registry=registry, observer=observe, fill_get=AM.http_get,
                               tick_dir=None if a.dry_run else out / TICKS_DIR,
-                              cond_log=lambda day, prev: conditions(day, prev, path=out / COND_FILE, write=not a.dry_run, past_path=out / COND_PAST))
+                              cond_log=lambda day, prev: conditions(day, prev, path=out / COND_FILE, write=not a.dry_run, past_path=out / COND_PAST),
+                              flag_log=lambda day: market_flags(day, path=out / FLAG_FILE, write=not a.dry_run))
     text = render(ledger)
     if not a.dry_run:
         out.mkdir(parents=True, exist_ok=True)

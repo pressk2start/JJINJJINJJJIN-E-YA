@@ -239,6 +239,27 @@ class Table(unittest.TestCase):
         self.assertEqual(CL.MIN_DAYS, 10)
         self.assertEqual((CL.REL_CUTS, CL.MULT_CUTS), ({"2번": (-0.029, -0.018), "4번": (-0.040, -0.031)}, (1.5, 3.0, 6.0)))
 
+    def test_the_first_crash_of_a_coins_day_is_separated_from_its_repeats(self):
+        rows = []
+        for k in range(12):                                                                            # 12일, 날마다 IQ 가 세 번(뒤의 것을 먼저 넣는다), GMT 가 한 번
+            day = "2026-12-%02d" % (1 + k)
+            for coin, hour, net60 in (("IQ", 9, 0.05), ("IQ", 1, 0.01), ("GMT", 3, 0.01), ("IQ", 5, 0.03)):
+                r = self.row(k, coin=coin, net60=net60)
+                r.update({"사건 ID": "%s_%d_%d" % (coin, k, hour), "날": day, "신호 시각(UTC)": "%s %02d:00" % (day, hour)})
+                rows.append(r)
+            direct = self.row(k, kind="BTC 직접", coin="BTC", net60=-0.5)                              # BTC 직접 사건은 알트 급락이 아니다 — 세지 않는다
+            direct.update({"날": day, "신호 시각(UTC)": "%s 00:00" % day})
+            rows.append(direct)
+        first, again = self.cell(rows, "day-first"), self.cell(rows, "day-repeat")
+        self.assertEqual((first["label"], again["label"]), ("그 종목의 그날(UTC) 첫 급락", "그 종목의 그날 두 번째 이후 급락"))
+        self.assertEqual((first["n"], first["days"], again["n"], again["days"]), (24, 12, 24, 12))     # 첫 급락: IQ 01시와 GMT. 그 뒤: IQ 05시·09시
+        self.assertAlmostEqual(first["means"][3], 0.01)                                               # 시각이 가장 이른 것이 첫 급락이다(넣은 순서가 아니다)
+        self.assertAlmostEqual(again["means"][3], 0.04)
+        self.assertEqual(first["n"] + again["n"], self.cell(rows, "5a")["n"])                          # 알트 급락 전체를 둘로 나눈 것이다
+        nxt = self.row(0, coin="IQ")
+        nxt.update({"사건 ID": "IQ_next", "날": "2026-12-13", "신호 시각(UTC)": "2026-12-13 00:15"})       # 날이 바뀌면 다시 첫 급락이다
+        self.assertEqual((self.cell(rows + [nxt], "day-first")["n"], self.cell(rows + [nxt], "day-repeat")["n"]), (25, 24))
+
     def test_days_weigh_the_same_and_the_other_scenarios_are_separated(self):
         rows = [self.row(k, net60=0.01) for k in range(12)] + [self.row(0, coin="GMT", net60=0.13), self.row(100, coin="KAVA", net60=0.05)]
         rows[-1]["날"], rows[-1]["신호 시각(UTC)"] = rows[0]["날"], rows[0]["날"] + " 05:00"              # 같은 날의 다른 시각
