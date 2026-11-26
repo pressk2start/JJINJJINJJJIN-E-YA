@@ -276,6 +276,7 @@ def kimchi_periods(data, bn, start, end):
         ew = hold_returns(data, list(dev), d_in, d_out)
         if rs and ew and d_in in btc and d_out in btc:
             rows.append({"date": d_in, "picks": picks, "dev_pct": [round(dev[m] * 100, 3) for m in picks],
+                         "members": sorted(ew),                      # 비교 기준선(ew)에 들어간 종목 — 나중에 값이 달라졌을 때 원인을 가린다 (고문 판정 2026-11-24 ② 3)
                          "pick_pct": [round(rs[m] * 100, 3) if m in rs else None for m in picks],   # 종목별 비용 후 수익 (진단용)
                          "strat": statistics.mean(rs.values()), "ew": statistics.mean(ew.values()),
                          "btc": btc[d_out][0] / btc[d_in][0] - 1})

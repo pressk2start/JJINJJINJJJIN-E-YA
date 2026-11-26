@@ -290,9 +290,32 @@ def h2_rows(data, bn, last_done_day):
     return [r for r in rows if r["date"] >= DF.FORWARD_START]
 
 
-def merge_rows(old_rows, new_rows, bad=None):
+def listing_reason(prev, new, present):
+    """장부의 기간(prev)과 다시 계산한 기간(new)의 값 차이가 상장 목록 변화로 설명되면 그 사유, 아니면 None (고문 판정 2026-11-24 ② 3).
+    present = 지금 자료에 있는 종목들. H2 는 실행하는 날의 상장 목록으로 계산하므로, 거래지원이 끝난 종목은 지난 기간에서도 빠진다.
+    - 선정 종목(picks) 가운데 지금 자료에 없는 것이 있으면 → 그 이름.
+    - ew 만 다르고 strat·btc·picks 가 같을 때: 구성 종목(members) 가운데 지금 없는 것이 있으면 그 이름, 구성 목록이 없는 옛 기간이면 그렇게 적는다.
+    - 구성 종목이 다 있는데 값이 다르거나 strat·btc 가 다르면 None(지금처럼 보류한다)."""
+    if present is None:
+        return None
+    gone = [m for m in (prev.get("picks") or []) if m not in present]
+    if gone:
+        return "선정 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
+    same = all(abs(prev[k] - new[k]) <= TOL for k in ("strat", "btc")) and prev.get("picks") == new.get("picks")
+    if not same:
+        return None
+    if prev.get("members") is None:
+        return "비교 기준선(ew)만 다름 — 구성 종목 목록이 없는 옛 기간"
+    gone = [m for m in prev["members"] if m not in present]
+    if gone:
+        return "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
+    return None
+
+
+def merge_rows(old_rows, new_rows, bad=None, present=None):
     """장부에 새 기간만 덧붙인다 → (합친 목록, 새로 붙은 수, 불일치 날짜들). 이미 적힌 기간은 그대로 둔다.
-    bad(목록)를 주면 불일치한 기간의 열쇠(날짜)를 같은 순서로 넣는다."""
+    bad(목록)를 주면 불일치한 기간의 열쇠(날짜)를 같은 순서로 넣는다. present(지금 자료에 있는 종목들)를 주면 값 차이가 상장 목록 변화로
+    설명되는지도 가려 bad 의 "listing" 에 사유를 적는다(설명되지 않으면 None)."""
     by_date = {r["date"]: r for r in old_rows}
     added, mismatch = 0, []
     for r in new_rows:
@@ -304,7 +327,8 @@ def merge_rows(old_rows, new_rows, bad=None):
             mismatch.append(r["date"])
             if bad is not None:
                 keep = ("strat", "ew", "btc", "picks")
-                bad.append({"key": r["date"], "ledger": {k: prev.get(k) for k in keep}, "recomputed": {k: r.get(k) for k in keep}})
+                bad.append({"key": r["date"], "ledger": {k: prev.get(k) for k in keep}, "recomputed": {k: r.get(k) for k in keep},
+                            "listing": listing_reason(prev, r, present)})
     return [by_date[d] for d in sorted(by_date)], added, mismatch
 
 
@@ -835,23 +859,26 @@ def conditions(today, prev=None, path=None, write=True, list_markets=None, panel
         pass
     markets = tuple(m for m in DISC.REPRO_UNIVERSE if m not in missing)
     since = CL.START_DAY
-    if prev and prev.get("through"):                                # 지난 실행의 하루 전부터: 그때 60분이 안 지나 못 적은 사건을 줍는다
+    old = CL.load(path) if path else []
+    short = bool(prev) and len(old) < (prev.get("events") or 0)     # 파일의 줄이 장부에 적힌 수보다 적다(파일이 없어졌거나 잘렸다) → 처음부터 다시 훑는다
+    if prev and prev.get("through") and not short:                  # 지난 실행의 하루 전부터: 그때 60분이 안 지나 못 적은 사건을 줍는다
         since = max(since, (dt.date.fromisoformat(prev["through"]) - dt.timedelta(days=1)).isoformat())
     start_q, end_q = DISC.day_q(since), DISC.day_q(today)
-    old = CL.load(path) if path else []
-    new = []
+    new, missed = [], []
     if end_q > start_q:
         panel = (panel_loader or DISC.load_panel)(start_q - COND_WARMUP_Q, end_q, markets)
         five = CL.FiveMin(fetch=CL.upbit_fetch5(get or AM.http_get, AM.UPBIT))
-        new = CL.rows(panel, five, start_q, end_q, known={r["사건 ID"] for r in old})
+        new = CL.rows(panel, five, start_q, end_q, known={r["사건 ID"] for r in old}, missed=missed)
     added = CL.append(path, new) if (path and write) else 0
     rows = CL.load(path) if (path and write) else old + [{k: CL.text(r.get(k)) for k in CL.COLUMNS} for r in new]
     past = None
     if past_path and Path(past_path).exists():
         got = json.loads(Path(past_path).read_text(encoding="utf-8"))
         past = {"period": got["period"], "cells": {c["key"]: [c["n"], c["days"], c["means"][3]] for c in got["table"]}}
+    have = {r["사건 ID"] for r in rows}                                # 5분봉이 없어 못 적은 사건: 지난 실행에서 못 적은 것도 이어서 센다(나중에 적히면 뺀다)
+    no5m = sorted((set((prev or {}).get("no5m") or []) | set(missed)) - have)
     return {"since": CL.START_DAY, "through": today, "events": len(rows), "added": added if write else len(new), "missing": missing, "table": CL.table(rows),
-            "past": past}
+            "past": past, "no5m": no5m, "rescanned": short}
 
 
 def observed_items(ledger):
@@ -992,15 +1019,21 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
             raise RuntimeError("시세를 못 받은 종목 %d개: %s" % (len(failed), ", ".join(failed[:5])))
         bad = []
         had = {r["date"] for r in h2["rows"]}
-        rows, added, mismatch = merge_rows(h2["rows"], h2_rows(data, bn, last_done), bad=bad)
+        rows, added, mismatch = merge_rows(h2["rows"], h2_rows(data, bn, last_done), bad=bad, present=set(data) or None)   # 자료가 비었으면 가리지 않는다
         note_new("H2 김치 되돌림", had, rows, lambda r: r["date"], lambda r: ", ".join(m[4:] for m in r.get("picks", [])),
                  lambda r: r["date"] + " 매수", value="strat")
         h2["rows"] = rows
         h2["updated"] = today
         new = fresh("H2 김치 되돌림", mismatch)
-        if new:
-            warnings.append("H2: 다시 계산한 값이 장부와 다른 기간 %d개 (%s) — 장부 값은 그대로 둠" % (len(new), ", ".join(new[:5])))
-            hold_if_sampled(h2, new, mismatch, bad, {r["date"] for r in rows[:H2_DECIDE_AT]})
+        why = {b["key"]: b.get("listing") for b in bad}
+        soft = [d for d in new if why.get(d)]                       # 상장 목록 변화로 설명되는 차이: 보류하지 않고 적어만 둔다 (고문 판정 2026-11-24 ② 3)
+        hard = [d for d in new if not why.get(d)]
+        if soft:
+            h2.setdefault("listing_diffs", {}).update({d: {"found": today, "why": why[d]} for d in soft})
+            log("H2: 상장 목록 변화로 값이 달라진 기간 %d개 (%s) — 보류하지 않음, 장부 값은 그대로 둠" % (len(soft), ", ".join(soft[:5])))
+        if hard:
+            warnings.append("H2: 다시 계산한 값이 장부와 다른 기간 %d개 (%s) — 장부 값은 그대로 둠" % (len(hard), ", ".join(hard[:5])))
+            hold_if_sampled(h2, hard, mismatch, bad, {r["date"] for r in rows[:H2_DECIDE_AT]})
         if not active_hold(h2):                                     # 보류 중이면 판정하지 않는다
             h2_decide(h2, today)
         log("H2: %d periods in ledger (+%d)" % (len(rows), added))
@@ -1334,7 +1367,9 @@ def render(ledger):
     if known:
         out += ["## 알려진 값 차이", "", "지난 봉을 다시 받아 계산한 값이 장부에 적힌 값과 달랐던 곳입니다. 장부 값은 바꾸지 않으며, "
                 "처음 발견한 실행에서 한 번만 경고로 알렸습니다.", ""]
-        out += ["- %s: %d건 (%s%s)" % (k, len(v), ", ".join(v[:5]), " 외" if len(v) > 5 else "") for k, v in known] + [""]
+        out += ["- %s: %d건 (%s%s)" % (k, len(v), ", ".join(v[:5]), " 외" if len(v) > 5 else "") for k, v in known]
+        soft = sorted(((ledger.get("H2_kimchi") or {}).get("listing_diffs") or {}).items())
+        out += ["  - H2 %s: 상장 목록 변화로 본다 — %s (보류하지 않음, %s 발견)" % (d, v["why"], v["found"]) for d, v in soft] + [""]
     return "\n".join(out)
 
 
@@ -1580,8 +1615,10 @@ def render_conditions(ledger):
     out = ["## 조건별 전진 표 — %s" % OBS_TAG, "",
            "사용자 설계(급락 반등 검토안 1~8번)의 조건을 새 자료에서도 봅니다. 고정 20종목의 15분 −3%% 급락 전부(거래대금 조건 없음)와 BTC 직접 사건을 "
            "%s 00:00 UTC 부터 사건마다 %s 에 적고(과거 9년 파일과 같은 정의·같은 열), 그 줄들을 조건별로 묶은 표입니다. "
-           "지금까지 %d건, 자료 반영 %s%s." % (cond["since"], COND_FILE, cond["events"], cond["through"],
-                                    " (상장 목록에 없어 뺀 종목: %s)" % ", ".join(m[4:] for m in cond["missing"]) if cond.get("missing") else ""),
+           "지금까지 %d건, 자료 반영 %s%s.%s" % (cond["since"], COND_FILE, cond["events"], cond["through"],
+                                      " (상장 목록에 없어 뺀 종목: %s)" % ", ".join(m[4:] for m in cond["missing"]) if cond.get("missing") else "",
+                                      " 5분봉이 없어 적지 못한 사건 %d건%s." % (len(cond["no5m"]), " (%s%s)" % (", ".join(cond["no5m"][:5]), " 외" if len(cond["no5m"]) > 5 else ""))
+                                      if cond.get("no5m") else ""),
            "5·15·30·60분 = 신호 다음 15분봉의 첫 체결가에 사서 그 시점 5분봉 종가에 판 값(비용 뒤, 같은 시각의 사건을 먼저 평균하고 날마다 평균한 값). "
            "최대 반등·최대 추가 하락 = 신호 뒤 60분 안의 값의 중앙값(비용 빼기 전 — 그 값에 팔 수 있었다는 뜻이 아닙니다). "
            "구간 경계는 과거 보고서 값으로 고정했습니다. 날 수가 %d일 미만인 칸은 '표본 부족' 으로 두고 값을 싣지 않습니다. "

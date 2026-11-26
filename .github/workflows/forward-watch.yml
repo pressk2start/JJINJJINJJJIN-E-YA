@@ -19,6 +19,15 @@ on:
     branches: [main]
     paths: [.github/workflows/forward-watch.yml]
   workflow_dispatch:
+    inputs:
+      release_hold:
+        description: "판정 보류를 해제할 항목 이름 (현황의 '판정 보류' 에 적힌 그대로. 고문 판정이 있을 때만. 비워 두면 평소처럼 갱신만 한다)"
+        required: false
+        default: ""
+      reason:
+        description: "해제 사유 (고문 판정의 날짜와 내용)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -46,6 +55,13 @@ jobs:
           if python -X utf8 scalp/research/forward_watch.py --done-today; then
             echo "skip=1" >> "$GITHUB_OUTPUT"
           fi
+      # 사람이 직접 돌릴 때만: 항목 이름을 적었으면 해제 기록을 먼저 덧붙인다(시세 조회 없음). 사유가 없거나 이름이 틀리면 여기서 멈춘다.
+      - name: Release a hold (manual runs with an item name only)
+        if: steps.gate.outputs.skip != '1' && github.event_name == 'workflow_dispatch' && inputs.release_hold != ''
+        env:
+          HOLD_NAME: ${{ inputs.release_hold }}
+          HOLD_REASON: ${{ inputs.reason }}
+        run: python -X utf8 scalp/research/forward_watch.py --release-hold "$HOLD_NAME" --reason "$HOLD_REASON"
       - name: Update ledger and status
         id: run
         if: steps.gate.outputs.skip != '1'

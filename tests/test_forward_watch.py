@@ -577,6 +577,44 @@ class VerdictHold(unittest.TestCase):
         self.assertEqual(h2["hold"]["why"], "값 차이: %s" % rows[5]["date"])
         self.assertIn("## H2 김치 프리미엄 되돌림 — 진행 중 (20 / 20기간) · 판정 보류(값 차이)", FW.render(ledger))
 
+    def test_a_kimchi_difference_explained_by_a_delisting_is_recorded_without_a_hold(self):
+        """고문 판정 2026-11-24 ② 3: ew 만 다르고 구성 종목이 목록에서 빠졌으면(또는 구성 목록이 없는 옛 기간이면) 보류하지 않고 적어만 둔다."""
+        old = dict(row(1, 0.01, ew=0.02), members=["KRW-A01", "KRW-B02", "KRW-GONE"])
+        new = dict(old, ew=0.03)
+        here = {"KRW-A01", "KRW-B02", "KRW-C03"}
+        self.assertEqual(FW.listing_reason(old, new, here), "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: GONE")
+        self.assertIsNone(FW.listing_reason(old, new, here | {"KRW-GONE"}))                             # 구성 종목이 다 있는데 값이 다르면 설명되지 않는다
+        self.assertEqual(FW.listing_reason(row(1, 0.01, ew=0.02), row(1, 0.01, ew=0.03), here), "비교 기준선(ew)만 다름 — 구성 종목 목록이 없는 옛 기간")
+        self.assertIsNone(FW.listing_reason(old, dict(new, strat=0.5), here))                           # 전략 수익이 달라졌으면 상장 목록 탓으로 보지 않는다
+        self.assertIsNone(FW.listing_reason(old, dict(new, btc=0.5), here))
+        self.assertIsNone(FW.listing_reason(old, dict(new, picks=["KRW-B02"]), here))
+        self.assertEqual(FW.listing_reason(old, dict(new, strat=0.5, picks=["KRW-B02"]), here - {"KRW-A01"}), "선정 종목이 지금 상장 목록에 없음: A01")
+        self.assertIsNone(FW.listing_reason(old, new, None))                                            # 지금 목록을 모르면 가리지 않는다
+        rows = [dict(row(k, 0.01, ew=0.02), members=["KRW-A01", "KRW-GONE"]) for k in range(FW.H2_DECIDE_AT)]
+        real, args = FW.h2_rows, offline()
+        args["h2_inputs"] = lambda: ({"KRW-A01": {}, "KRW-USDT": {}}, {}, [])                           # GONE 은 지금 자료에 없다
+        try:
+            FW.h2_rows = lambda data, bn, last: [dict(rows[5], ew=0.05), dict(rows[7], ew=0.07)] + rows[8:]
+            ledger, warnings = FW.update({"H2_kimchi": {"rows": list(rows), "decision": None}}, "2026-12-28", **args)
+            h2 = ledger["H2_kimchi"]
+            self.assertFalse([w for w in warnings if w.startswith("H2")])                               # 실패로 알리지 않는다
+            self.assertIsNone(h2.get("hold"))
+            self.assertIsNotNone(h2["decision"])                                                        # 20기간이 찼으니 판정은 그대로 한다
+            self.assertEqual((h2["rows"][5]["ew"], h2["rows"][7]["ew"]), (0.02, 0.02))                  # 장부 값은 그대로
+            self.assertEqual(sorted(h2["listing_diffs"]), [rows[5]["date"], rows[7]["date"]])
+            self.assertEqual(h2["listing_diffs"][rows[5]["date"]], {"found": "2026-12-28", "why": "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: GONE"})
+            text = FW.render(ledger)
+            self.assertIn("  - H2 %s: 상장 목록 변화로 본다 — 비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: GONE (보류하지 않음, 2026-12-28 발견)" % rows[5]["date"], text)
+            self.assertNotIn("판정 보류(값 차이)", text)
+            args["h2_inputs"] = lambda: ({"KRW-A01": {}, "KRW-GONE": {}}, {}, [])                       # 구성 종목이 다 있는데 값이 다르면 지금처럼 보류한다
+            FW.h2_rows = lambda data, bn, last: [dict(rows[5], ew=0.05)] + rows[6:]
+            held, warnings = FW.update({"H2_kimchi": {"rows": list(rows), "decision": None}}, "2026-12-28", **args)
+            self.assertEqual(held["H2_kimchi"]["hold"]["why"], "값 차이: %s" % rows[5]["date"])
+            self.assertTrue([w for w in warnings if w.startswith("H2")])
+            self.assertIsNone(held["H2_kimchi"]["decision"])
+        finally:
+            FW.h2_rows = real
+
     def test_the_release_command_appends_a_record_and_needs_a_reason(self):
         rows = [cr_trade(k, 0.01) for k in range(29)]
         ledger = {"CR_variants": {"CR_drop5": {"rows": list(rows), "decision": None}}}
@@ -751,6 +789,12 @@ class ScheduledWorkflows(unittest.TestCase):
             self.assertEqual(len(cond), 1, name)
             self.assertIn("steps.gate.outputs.skip != '1'", cond[0], name)
         self.assertIn("steps.run.outputs.code != '0'", steps["Fail if any candidate could not be updated"])
+        release = steps["Release a hold (manual runs with an item name only)"]                       # 사람이 직접 돌릴 때만, 항목 이름을 적었을 때만 (고문 판정 2026-11-24 ②)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.release_hold != ''", release)
+        self.assertIn('forward_watch.py --release-hold "$HOLD_NAME" --reason "$HOLD_REASON"', release)   # 입력은 환경 변수로만 넘긴다
+        self.assertIn("HOLD_NAME: ${{ inputs.release_hold }}", release)
+        self.assertNotIn("${{ inputs", release.split("run:")[1])
+        self.assertLess(names.index("Release a hold (manual runs with an item name only)"), names.index("Update ledger and status"))
 
     def test_one_summary_a_day_and_the_last_slot_reports_even_a_failed_day(self):
         text, steps = self.steps("forward-watch.yml")
@@ -1068,6 +1112,28 @@ class ConditionLog(unittest.TestCase):
             next_day, _ = self.run_cond("2026-11-23", self.world("2026-11-21", bar=94), Path(tmp) / FW.COND_FILE, prev=late)
             self.assertEqual(next_day["events"], 1)                                                   # 다음 실행에서 줍는다
         self.assertEqual(FW.CL.START_DAY, "2026-11-21")
+
+    def test_events_without_five_minute_bars_are_counted_and_a_short_file_is_rebuilt(self):
+        """고문 판정 2026-11-24 ① 2: 5분봉이 없어 못 적은 사건 수를 보이고, 파일의 줄이 장부보다 적으면 시작일부터 다시 훑는다."""
+        world = self.world()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / FW.COND_FILE
+            loader = lambda s, e, want: {m: world[m] for m in want}
+            none = FW.conditions("2026-11-22", None, path=path, list_markets=lambda: ["KRW-BTC", "KRW-ETH"], panel_loader=loader, get=lambda url: [])
+            self.assertEqual((none["events"], len(none["no5m"]), none["rescanned"]), (0, 1, False))     # 5분봉을 못 받았다
+            self.assertTrue(none["no5m"][0].startswith("ETH_20261121T"))
+            self.assertIn("5분봉이 없어 적지 못한 사건 1건 (%s)." % none["no5m"][0], FW.render({"last_run": "2026-11-22", "warnings": [], "conditions": none}))
+            got, asked = self.run_cond("2026-11-23", world, path, prev=none)
+            self.assertEqual((got["events"], got["no5m"]), (1, []))                                     # 다음 실행에서 적히면 못 적은 목록에서 빠진다
+            self.assertNotIn("5분봉이 없어", FW.render({"last_run": "2026-11-23", "warnings": [], "conditions": got}))
+            keep = dict(got, no5m=["XRP_20261122T0100"])                                                # 훑는 구간을 벗어난 것은 계속 남는다
+            later, asked = self.run_cond("2026-11-27", world, path, prev=keep)
+            self.assertEqual((later["no5m"], later["rescanned"]), (["XRP_20261122T0100"], False))
+            self.assertEqual(asked[0][0], DISC.day_q("2026-11-22") - FW.COND_WARMUP_Q)                  # 지난 실행(11-23)의 하루 전부터
+            path.unlink()                                                                               # 파일이 사라졌다 → 장부에 적힌 수보다 적다
+            again, asked = self.run_cond("2026-11-28", world, path, prev=later)
+            self.assertEqual((again["events"], again["added"], again["rescanned"]), (1, 1, True))
+            self.assertEqual(asked[0][0], DISC.day_q("2026-11-21") - FW.COND_WARMUP_Q)                  # 시작일부터 다시
 
     def test_the_tracker_keeps_the_last_table_when_the_step_fails_and_never_touches_verdicts(self):
         prev = {"since": "2026-11-21", "through": "2026-11-22", "events": 3, "added": 0, "missing": [], "table": [], "past": None}
