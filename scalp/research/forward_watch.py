@@ -299,25 +299,63 @@ def h2_rows(data, bn, last_done_day):
 
 
 def listing_reason(prev, new, present):
-    """장부의 기간(prev)과 다시 계산한 기간(new)의 값 차이가 상장 목록 변화로 설명되면 그 사유, 아니면 None (고문 판정 2026-11-24 ② 3).
+    """장부의 기간(prev)과 다시 계산한 기간(new)의 값 차이가 상장 목록 변화로 설명되면 그 사유, 아니면 None (고문 판정 2026-11-24 ② 3, 2026-11-26 ① 4-①).
     present = 지금 자료에 있는 종목들. H2 는 실행하는 날의 상장 목록으로 계산하므로, 거래지원이 끝난 종목은 지난 기간에서도 빠진다.
-    - 선정 종목(picks) 가운데 지금 자료에 없는 것이 있으면 → 그 이름.
-    - ew 만 다르고 strat·btc·picks 가 같을 때: 구성 종목(members) 가운데 지금 없는 것이 있으면 그 이름, 구성 목록이 없는 옛 기간이면 그렇게 적는다.
-    - 구성 종목이 다 있는데 값이 다르거나 strat·btc 가 다르면 None(지금처럼 보류한다)."""
+    - 장부에 적힌 선정 종목(picks)·비교 기준선 구성 종목(members)·그날의 상위 목록(universe) 가운데 지금 자료에 없는 것이 하나라도 있으면
+      → 상장 목록 변화로 보고 그 이름을 적는다. strat·picks 가 달라졌어도 같다 — 상위 목록에서 종목이 빠지면 다음 순위가 들어와 선정까지 바뀐다.
+    - 없는 종목이 없을 때: ew 만 다르고 strat·btc·picks 가 같으며 구성 목록이 없는 옛 기간이면 그렇게 적는다.
+    - 그 밖에는(목록의 종목이 다 있는데 값이 다르면) None — 지금처럼 보류한다."""
     if present is None:
         return None
-    gone = [m for m in (prev.get("picks") or []) if m not in present]
-    if gone:
-        return "선정 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
+    seen, parts = set(), []
+    for label, key in (("선정 종목이", "picks"), ("비교 기준선(ew) 구성 종목이", "members"), ("그날의 상위 목록 종목이", "universe")):
+        gone = [m for m in (prev.get(key) or []) if m not in present and m not in seen]
+        seen.update(gone)
+        if gone:
+            parts.append("%s 지금 상장 목록에 없음: %s" % (label, ", ".join(m.replace("KRW-", "") for m in gone)))
+    if parts:
+        return "; ".join(parts)
     same = all(abs(prev[k] - new[k]) <= TOL for k in ("strat", "btc")) and prev.get("picks") == new.get("picks")
-    if not same:
-        return None
-    if prev.get("members") is None:
+    if same and prev.get("members") is None:
         return "비교 기준선(ew)만 다름 — 구성 종목 목록이 없는 옛 기간"
-    gone = [m for m in prev["members"] if m not in present]
-    if gone:
-        return "비교 기준선(ew) 구성 종목이 지금 상장 목록에 없음: " + ", ".join(m.replace("KRW-", "") for m in gone)
     return None
+
+
+# 옛 기간의 구성 목록 (고문 판정 2026-11-26 ① 4-①). 목록을 남기기 전에 적힌 기간에는 members·universe 가 없어, 거래지원이 끝난 종목 탓에 값이
+# 달라져도 원인을 가릴 수 없다. 2026-11-26 의 자료(BLUR 상장 중)로 다시 계산해 strat·ew·btc·picks 가 장부와 완전히 같았던 7기간의 목록을
+# 여기에 적어 두고, 장부의 그 줄에 한 번 채운다. 11/03·11/06 은 이미 값이 달라(SOPH·ZIL 거래지원 종료) 채우지 않는다.
+H2_OLD_LISTS = {                                     # 매수일: (비교 기준선 구성 종목, 그날의 상위 목록). 종목 이름은 KRW- 를 떼고 빈칸으로 이었다
+    "2026-10-25": ("2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ETH FIL HBAR JTO LA LINK NEAR ONDO PENGU PEPE POL PUMP PYTH SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL W WLD XLM XPL XRP ZRO",
+                   "2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CAP CHIP DATA DOGE DRV ENA ETH FIL FLOCK FOLD HBAR JTO LA LINK NEAR ONDO PENGU PEPE POL PUMP PYTH SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL W WLD XLM XPL XRP ZRO"),
+    "2026-10-28": ("2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ERA ETH FIL HBAR JTO LA LINK NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "2Z AAVE ADA ALGO APT ARB ARK AVAX AXS BCH BTC CAP CC CHIP DATA DOGE DOS DRV ENA ERA ETH FIL FOLD HBAR JTO LA LINK LIT NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-10-31": ("AAVE ADA APT ARB ARK AVAX AXS BCH BTC CHIP DOGE ENA ERA ETH FIL HBAR JTO LA LINK LSK MEGA NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "AAVE ADA APT ARB ARK AVAX AXS BCH BTC CAP CC CHIP DATA DOGE DOS DRV ENA ERA ETH FIL FOLD HBAR JTO LA LINK LIT LSK MEGA NEAR ONDO PENGU PEPE PUMP SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-11-09": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BFC BIRB BLUR BTC CAP CHIP DATA DOGE DOOD DOS DRV ELSA ENA ERA ETH FOLD HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+    "2026-11-12": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS DRV ELSA ENA ERA ETH FOLD HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+    "2026-11-15": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP ZRO",
+                   "AAVE ADA APT ARB AVAX B3 BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS ELSA ENA ERA ETH HBAR IRYS LA LINK LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP ZRO"),
+    "2026-11-18": ("AAVE ADA APT ARB AVAX BCH BLUR BTC CHIP DOGE ENA ERA ETH HBAR LA LINK LSK MEGA NEAR ONDO PENGU PEPE SAND SEI SHIB SOL STX SUI TRUMP TRX UNI VIRTUAL WLD XLM XPL XRP",
+                   "AAVE ADA APT ARB AVAX BCH BEAM BIRB BLUR BTC CAP CC CHIP DATA DOGE DOOD DOS ELSA ENA ERA ETH HBAR IRYS LA LINK LIT LSK MEGA NEAR ONDO PENGU PEPE QUID SAND SEI SHIB SLX SOL SOON STX SUI TRUMP TRX UNI UP2 VIRTUAL WLD XLM XPL XRP"),
+}
+
+
+def h2_backfill(rows):
+    """구성 목록이 없는 옛 기간에 members·universe 를 채운다 → 채운 기간 수. 목록이 이미 있는 줄과 상수에 없는 기간은 건드리지 않는다.
+    상수의 구성 종목에 그 줄의 선정 종목이 다 들어 있지 않으면(다른 줄의 것이면) 채우지 않는다."""
+    n = 0
+    for r in rows:
+        got = H2_OLD_LISTS.get(r.get("date"))
+        if not got or "members" in r or "universe" in r:
+            continue
+        members, uni = (["KRW-" + c for c in s.split()] for s in got)
+        if not set(r.get("picks") or []) <= set(members):
+            continue
+        r["members"], r["universe"] = members, uni
+        n += 1
+    return n
 
 
 def merge_rows(old_rows, new_rows, bad=None, present=None):
@@ -1055,6 +1093,9 @@ def update(ledger, today, h2_inputs=None, h3_fetch=None, cr_fetch=None, surge_fe
 
     last_done = DF._shift(today, -1)
     h2 = ledger.setdefault("H2_kimchi", {"rows": [], "decision": None})
+    filled = h2_backfill(h2.get("rows") or [])                      # 주 1회 반영을 건너뛰는 날에도 채운다(값은 건드리지 않는다)
+    if filled:
+        log("H2: 옛 기간 %d개에 구성 목록(members·universe)을 채움" % filled)
     try:
         # 추적은 매일 돌지만 H2 는 주 1회만 반영한다 (고문 판정 2026-11-14: 등록된 검사 절차를 중간에 바꾸지 않는다 — H2 는
         # 실행하는 날의 상장 목록으로 계산하므로 반영 주기가 달라지면 결과가 달라진다). 그 주 월요일 이후 첫 성공 실행이 반영한다.

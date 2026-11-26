@@ -59,6 +59,8 @@ class TestDailyFactor(unittest.TestCase):
         data["KRW-K0"][d] = (1400 * 1.02, 1400 * 0.99, 1e9)            # today discount -1% → deviation -3%
         rows = DF.kimchi_periods(data, bn, day(100), day(110))
         self.assertTrue(rows and all(r["members"] == sorted(r["members"]) and set(r["picks"]) <= set(r["members"]) for r in rows))   # 비교 기준선 구성 종목을 남긴다
+        self.assertTrue(all(r["universe"] == sorted(r["universe"]) and set(r["members"]) <= set(r["universe"]) for r in rows))       # 그날의 상위 목록도 남긴다 (고문 판정 2026-11-26 ① 4)
+        self.assertEqual(rows[0]["universe"], ["KRW-BTC"] + ["KRW-K%d" % i for i in range(6)])                                       # 바이낸스 짝이 없는 종목(BTC)도 상위 목록에는 든다
         self.assertEqual(rows[0]["picks"][0], "KRW-K0")
         self.assertLess(rows[0]["dev_pct"][0], -2.5)
         self.assertEqual(len(rows[0]["pick_pct"]), len(rows[0]["picks"]))          # 종목별 수익 기록

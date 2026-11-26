@@ -262,7 +262,8 @@ def kimchi_periods(data, bn, start, end):
         return s[day][1] / (b[day] * fx[day][1]) - 1
 
     while _shift(d, 1 + KP_HOLD) <= end:
-        uni = [m for m in universe(data, _shift(d, 1)) if m in bn]
+        top = universe(data, _shift(d, 1))
+        uni = [m for m in top if m in bn]
         dev = {}
         for m in uni:
             p = prem(m, d)
@@ -277,6 +278,7 @@ def kimchi_periods(data, bn, start, end):
         if rs and ew and d_in in btc and d_out in btc:
             rows.append({"date": d_in, "picks": picks, "dev_pct": [round(dev[m] * 100, 3) for m in picks],
                          "members": sorted(ew),                      # 비교 기준선(ew)에 들어간 종목 — 나중에 값이 달라졌을 때 원인을 가린다 (고문 판정 2026-11-24 ② 3)
+                         "universe": sorted(top),                    # 그날의 거래대금 상위 목록 — 여기서 종목이 빠지면 다음 순위가 들어와 선정이 달라진다 (고문 판정 2026-11-26 ① 4)
                          "pick_pct": [round(rs[m] * 100, 3) if m in rs else None for m in picks],   # 종목별 비용 후 수익 (진단용)
                          "strat": statistics.mean(rs.values()), "ew": statistics.mean(ew.values()),
                          "btc": btc[d_out][0] / btc[d_in][0] - 1})
