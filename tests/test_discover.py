@@ -363,9 +363,10 @@ class Registry(unittest.TestCase):
         new, held = D.register(registry, passed, "2027-06-01", ("KRW-BTC",), decided={"A-202611-01", "A-202611-02"})
         self.assertEqual(sorted(c["event"] for c in new), ["CRASH", "SURGE"])                          # 비교용·체결 관찰 항목은 자리를 차지하지 않는다
 
-    def test_engine_four_is_locked_until_the_advisor_reads_it(self):
-        """고문 판정 2026-11-19 ②: 4판은 잠근 채로 올리고, 고문이 읽은 뒤 푼다. 사건·거래 정의는 3판과 같아 3판 후보는 그대로 채점한다."""
-        self.assertEqual((D.ENGINE, D.FRAME_APPROVED, D.SAME_TRADES, D.COST_STRESS), ("4", False, ("3", "4"), 2.0))
+    def test_engine_four_is_unlocked_by_the_advisors_verdict(self):
+        """고문 판정 2026-11-19 ②: 4판은 잠근 채로 올렸다. 고문 판정 2026-11-22 ④ 2번: 읽은 뒤 풀었다.
+        사건·거래 정의는 3판과 같아 3판 후보는 그대로 채점한다."""
+        self.assertEqual((D.ENGINE, D.FRAME_APPROVED, D.SAME_TRADES, D.COST_STRESS), ("4", True, ("3", "4"), 2.0))
 
     def test_a_rule_that_would_take_more_than_a_year_to_judge_is_not_registered(self):
         slow = dict(self.found("SURGE", 4, "b", 0.009), holdout={"day_low": 0.009, "expect_days": 400.0})
