@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -1174,6 +1175,96 @@ class ConditionLog(unittest.TestCase):
         by = {c["key"]: c for c in past["table"]}
         self.assertEqual((by["combo"]["n"], by["combo"]["days"], by["combo-big5"]["n"]), (2148, 384, 515))   # 9년 급락 보고서의 조합 건수와 같다
         self.assertEqual(by["5a"]["n"], 9559)
+        self.assertEqual((by["day-first"]["n"], by["day-repeat"]["n"], by["day-first"]["days"]), (5489, 4070, 1886))   # 같은 종목의 그날 첫 급락과 그 뒤 (판정 11/25 ①)
+
+
+class MarketFlags(unittest.TestCase):
+    """유의·주의 표시 기록 (고문 판정 2026-11-24 ③ 4-③)."""
+
+    def listing(self, flags=None, drop=()):
+        flags = flags or {}
+        asked = []
+
+        def get(url):
+            asked.append(url)
+            quiet = {k: False for k in FW.FLAG_CAUTION}
+            out = [{"market": "BTC-ETH", "market_event": {"warning": True, "caution": dict(quiet)}}]   # 원화 시장이 아닌 것은 보지 않는다
+            for m in DISC.REPRO_UNIVERSE + ("KRW-NEW",):
+                if m in drop:
+                    continue
+                warning, caution = flags.get(m, (False, ()))
+                out.append({"market": m, "market_event": {"warning": warning, "caution": dict(quiet, **{c: True for c in caution})}})
+            return out
+        return get, asked
+
+    def test_each_run_appends_the_days_flags_for_the_fixed_coins_once(self):
+        get, asked = self.listing({"KRW-WAVES": (True, ()), "KRW-KAVA": (True, ("TRADING_VOLUME_SOARING", "GLOBAL_PRICE_DIFFERENCES")),
+                                   "KRW-ALGO": (False, ("PRICE_FLUCTUATIONS",)), "KRW-NEW": (True, ())}, drop=("KRW-IQ",))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "forward" / FW.FLAG_FILE
+            got = FW.market_flags("2026-11-26", path=path, get=get)
+            self.assertTrue(asked[0].endswith("/v1/market/all?is_details=true"))
+            self.assertEqual(got, {"day": "2026-11-26", "added": 20, "unlisted": ["KRW-IQ"],
+                                   "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []},
+                                               {"market": "KRW-KAVA", "warning": True, "caution": ["GLOBAL_PRICE_DIFFERENCES", "TRADING_VOLUME_SOARING"]},
+                                               {"market": "KRW-ALGO", "warning": False, "caution": ["PRICE_FLUCTUATIONS"]}]})   # 고정 20종목만 본다
+            first = path.read_text(encoding="utf-8")
+            lines = first.splitlines()
+            self.assertEqual((lines[0], len(lines)), ("날(UTC),종목,상장,유의,주의", 21))
+            self.assertIn("2026-11-26,BTC,1,0,", lines)
+            self.assertIn("2026-11-26,WAVES,1,1,", lines)
+            self.assertIn("2026-11-26,KAVA,1,1,GLOBAL_PRICE_DIFFERENCES;TRADING_VOLUME_SOARING", lines)
+            self.assertIn("2026-11-26,ALGO,1,0,PRICE_FLUCTUATIONS", lines)
+            self.assertIn("2026-11-26,IQ,0,,", lines)                                                   # 목록에 없는 종목도 한 줄 남긴다
+            self.assertEqual(FW.market_flags("2026-11-26", path=path, get=get)["added"], 0)             # 같은 날 다시 돌아도 또 붙이지 않는다
+            self.assertEqual(path.read_text(encoding="utf-8"), first)
+            calm, _ = self.listing()
+            later = FW.market_flags("2026-11-27", path=path, get=calm)
+            self.assertEqual((later["added"], later["flagged"], later["unlisted"]), (20, [], []))
+            second = path.read_text(encoding="utf-8")
+            self.assertTrue(second.startswith(first))                                                   # 앞에 적은 줄은 그대로 — 뒤에 붙이기만 한다
+            self.assertEqual((second.count("\n"), second.count("날(UTC)")), (41, 1))
+            dry = Path(tmp) / "dry" / FW.FLAG_FILE
+            self.assertEqual(FW.market_flags("2026-11-26", path=dry, write=False, get=get)["added"], 0)  # 시험 실행은 파일을 만들지 않는다
+            self.assertFalse(dry.exists())
+            broken, _ = self.listing(drop=("KRW-BTC",))
+            with self.assertRaises(RuntimeError):                                                       # 목록이 비정상이면 적지 않는다
+                FW.market_flags("2026-11-28", path=path, get=broken)
+            self.assertEqual(path.read_text(encoding="utf-8"), second)
+
+    def test_the_tracker_warns_when_the_flags_cannot_be_read_and_never_touches_verdicts(self):
+        prev = {"day": "2026-11-25", "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []}], "unlisted": [], "added": 20}
+
+        def boom(day):
+            raise RuntimeError("목록 조회 실패")
+        ledger, warnings = FW.update({"market_flags": prev}, "2026-11-26", flag_log=boom, **offline())
+        self.assertEqual(ledger["market_flags"], prev)                                                 # 못 받으면 지난 값을 그대로 둔다
+        self.assertEqual([w for w in warnings if "유의" in w], ["유의·주의 표시: 이번 실행에서 받지 못함 — RuntimeError: 목록 조회 실패"])
+        self.assertNotEqual(ledger.get("last_ok"), "2026-11-26")                                       # 경고로 끝나 뒤의 예약이 다시 받는다(소급해 받을 수 없다)
+        ledger, warnings = FW.update({"market_flags": prev}, "2026-11-26", flag_log=lambda day: dict(prev, day=day, flagged=[]), **offline())
+        self.assertEqual((ledger["market_flags"]["day"], ledger["market_flags"]["flagged"]), ("2026-11-26", []))
+        self.assertFalse([w for w in warnings if "유의" in w])
+        untouched, _ = FW.update({}, "2026-11-26", **offline())                                       # 함수를 주지 않으면 건드리지 않는다
+        self.assertNotIn("market_flags", untouched)
+        self.assertIn("flag_log=lambda day: market_flags(day, path=out / FLAG_FILE, write=not a.dry_run)", inspect.getsource(FW.main))
+
+    def test_status_shows_the_flagged_coins_on_one_line(self):
+        ledger = {"last_run": "2026-11-26", "warnings": [],
+                  "market_flags": {"day": "2026-11-26", "added": 20, "unlisted": ["KRW-IQ"],
+                                   "flagged": [{"market": "KRW-WAVES", "warning": True, "caution": []},
+                                               {"market": "KRW-KAVA", "warning": True, "caution": ["GLOBAL_PRICE_DIFFERENCES", "NEW_KIND"]},
+                                               {"market": "KRW-ALGO", "warning": False, "caution": ["PRICE_FLUCTUATIONS"]}]}}
+        text = FW.render(ledger)
+        line = [x for x in text.splitlines() if "유의·주의 표시" in x]
+        self.assertEqual(len(line), 1)
+        self.assertIn("(2026-11-26 기준, 고정 20종목 — 관찰용, 판정과 등록에 쓰지 않는다): "
+                      "WAVES 유의 · KAVA 유의, 주의(국내외 가격 차이·NEW_KIND) · ALGO 주의(가격 급등락). 상장 목록에 없는 종목: IQ.", line[0])
+        self.assertIn("market_flags.csv", line[0])
+        self.assertNotIn("유의", FW.summary(ledger))                                                   # 텔레그램 요약에는 싣지 않는다
+        ledger["market_flags"].update(flagged=[], unlisted=[])
+        self.assertIn("관찰용, 판정과 등록에 쓰지 않는다): 없음. 날마다", FW.render(ledger))
+        del ledger["market_flags"]
+        self.assertNotIn("유의·주의 표시", FW.render(ledger))
 
 
 class SurgeAndSharedH3(unittest.TestCase):

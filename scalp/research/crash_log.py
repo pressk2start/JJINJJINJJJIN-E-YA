@@ -254,7 +254,7 @@ REL_CUTS = {"2번": (-0.029, -0.018), "4번": (-0.040, -0.031)}     # 6번 알�
 MULT_CUTS = (1.5, 3.0, 6.0)                                      # 7번 거래대금 배수 구간
 KEYS = ("1", "2", "2x3", "3", "4", "4x3", "co", "lag", "alone", "5a", "5b", "6-2-lo", "6-2-mid", "6-2-hi", "6-4-lo", "6-4-mid", "6-4-hi",
         "7-2-a", "7-2-b", "7-2-c", "7-2-d", "7-4-a", "7-4-b", "7-4-c", "7-4-d", "8-1-up", "8-1-dn", "8-2-up", "8-2-dn", "8-3-up", "8-3-dn", "8-4-up", "8-4-dn",
-        "big5", "rest14", "combo", "combo-big5", "4h-only", "b24-only", "neither")   # 칸의 고정 이름 — 과거 값과 맞출 때 쓴다(라벨에는 건수가 들어가 달라질 수 있다)
+        "big5", "rest14", "combo", "combo-big5", "4h-only", "b24-only", "neither", "day-first", "day-repeat")   # 칸의 고정 이름 — 과거 값과 맞출 때 쓴다(라벨에는 건수가 들어가 달라질 수 있다)
 
 
 def _f(r, k):
@@ -323,6 +323,11 @@ def table(all_rows):
             _cell("4시간 조건만 (BTC24 조건은 못 채움)", [r for r in alt if c4(r) and not cb(r)]),
             _cell("BTC24 조건만 (4시간 조건은 못 채움)", [r for r in alt if cb(r) and not c4(r)]),
             _cell("둘 다 못 채움", [r for r in alt if not c4(r) and not cb(r)])]
+    seen, first, again = set(), [], []                                # 같은 종목의 그날(UTC) 첫 급락과 그 뒤의 급락 (고문 판정 2026-11-25 ①). 날·종목으로만 가른다
+    for r in sorted(alt, key=lambda r: (r["날"], r["종목"], r["신호 시각(UTC)"])):
+        (again if (r["날"], r["종목"]) in seen else first).append(r)
+        seen.add((r["날"], r["종목"]))
+    out += [_cell("그 종목의 그날(UTC) 첫 급락", first), _cell("그 종목의 그날 두 번째 이후 급락", again)]
     if len(out) != len(KEYS):
         raise RuntimeError("조건별 표의 칸 수가 이름 목록과 다르다")
     for key, c in zip(KEYS, out):
