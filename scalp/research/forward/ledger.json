@@ -11,7 +11,7 @@
     "surge": false
    }
   ],
-  "updated": "2026-11-26"
+  "updated": "2026-11-27"
  },
  "CR_rebound": {
   "decision": null,
@@ -46,18 +46,18 @@
     "net": -0.008854539635167136
    }
   ],
-  "updated": "2026-11-26"
+  "updated": "2026-11-27"
  },
  "CR_variants": {
   "CR_drop5": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   },
   "CR_drop6": {
    "decision": null,
    "rows": [],
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   },
   "CR_hold4h": {
    "decision": null,
@@ -92,7 +92,7 @@
      "net": -0.02771261697839178
     }
    ],
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   }
  },
  "H2_kimchi": {
@@ -175,6 +175,51 @@
      -0.087
     ],
     "ew": -0.008071320214226673,
+    "members": [
+     "KRW-2Z",
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-ALGO",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-POL",
+     "KRW-PUMP",
+     "KRW-PYTH",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-W",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ],
     "pick_pct": [
      0.678,
      -11.056,
@@ -189,7 +234,59 @@
      "KRW-APT",
      "KRW-BCH"
     ],
-    "strat": -0.024509517816041625
+    "strat": -0.024509517816041625,
+    "universe": [
+     "KRW-2Z",
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-ALGO",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DRV",
+     "KRW-ENA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-FLOCK",
+     "KRW-FOLD",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-POL",
+     "KRW-PUMP",
+     "KRW-PYTH",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-SOON",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-W",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ]
    },
    {
     "btc": -0.033782279608192356,
@@ -202,6 +299,49 @@
      -0.207
     ],
     "ew": -0.03448456317888198,
+    "members": [
+     "KRW-2Z",
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-ALGO",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-PUMP",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ],
     "pick_pct": [
      -1.268,
      3.104,
@@ -216,7 +356,59 @@
      "KRW-ADA",
      "KRW-2Z"
     ],
-    "strat": -0.02035538792684548
+    "strat": -0.02035538792684548,
+    "universe": [
+     "KRW-2Z",
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-ALGO",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CC",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOS",
+     "KRW-DRV",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-FOLD",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LIT",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-PUMP",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-SOON",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ]
    },
    {
     "btc": -0.004723230228673492,
@@ -229,6 +421,49 @@
      -0.354
     ],
     "ew": -0.03862646693585867,
+    "members": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-PUMP",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ],
     "pick_pct": [
      -10.852,
      -18.246,
@@ -243,7 +478,59 @@
      "KRW-HBAR",
      "KRW-UNI"
     ],
-    "strat": -0.07259684872106895
+    "strat": -0.07259684872106895,
+    "universe": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-ARK",
+     "KRW-AVAX",
+     "KRW-AXS",
+     "KRW-BCH",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CC",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOS",
+     "KRW-DRV",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FIL",
+     "KRW-FOLD",
+     "KRW-HBAR",
+     "KRW-JTO",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LIT",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-PUMP",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-SOON",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ]
    },
    {
     "btc": -0.004321237725948612,
@@ -310,6 +597,44 @@
      -0.237
     ],
     "ew": -0.03069516880233701,
+    "members": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ],
     "pick_pct": [
      -3.721,
      -9.523,
@@ -324,7 +649,59 @@
      "KRW-SEI",
      "KRW-LINK"
     ],
-    "strat": -0.0398210741729742
+    "strat": -0.0398210741729742,
+    "universe": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BEAM",
+     "KRW-BFC",
+     "KRW-BIRB",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOOD",
+     "KRW-DOS",
+     "KRW-DRV",
+     "KRW-ELSA",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FOLD",
+     "KRW-HBAR",
+     "KRW-IRYS",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-QUID",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-UP2",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ]
    },
    {
     "btc": -0.11443321573082976,
@@ -337,6 +714,44 @@
      -0.019
     ],
     "ew": -0.13004428497246484,
+    "members": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ],
     "pick_pct": [
      -15.173,
      -6.312,
@@ -351,7 +766,59 @@
      "KRW-ADA",
      "KRW-SAND"
     ],
-    "strat": -0.1241031655341939
+    "strat": -0.1241031655341939,
+    "universe": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BEAM",
+     "KRW-BIRB",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CC",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOOD",
+     "KRW-DOS",
+     "KRW-DRV",
+     "KRW-ELSA",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-FOLD",
+     "KRW-HBAR",
+     "KRW-IRYS",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-QUID",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-UP2",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ]
    },
    {
     "btc": -0.00580714864499865,
@@ -364,6 +831,45 @@
      -0.235
     ],
     "ew": 0.028472131235439867,
+    "members": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ],
     "pick_pct": [
      4.654,
      2.297,
@@ -378,7 +884,59 @@
      "KRW-LA",
      "KRW-TRX"
     ],
-    "strat": 0.025261010445900546
+    "strat": 0.025261010445900546,
+    "universe": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-B3",
+     "KRW-BCH",
+     "KRW-BEAM",
+     "KRW-BIRB",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CC",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOOD",
+     "KRW-DOS",
+     "KRW-ELSA",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-IRYS",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-QUID",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-UP2",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP",
+     "KRW-ZRO"
+    ]
    },
    {
     "btc": -0.08157120217342084,
@@ -391,6 +949,44 @@
      -0.178
     ],
     "ew": -0.08995613584791062,
+    "members": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CHIP",
+     "KRW-DOGE",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SOL",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ],
     "pick_pct": [
      1.407,
      -6.915,
@@ -405,36 +1001,88 @@
      "KRW-SHIB",
      "KRW-LSK"
     ],
-    "strat": -0.05280702783602953
+    "strat": -0.05280702783602953,
+    "universe": [
+     "KRW-AAVE",
+     "KRW-ADA",
+     "KRW-APT",
+     "KRW-ARB",
+     "KRW-AVAX",
+     "KRW-BCH",
+     "KRW-BEAM",
+     "KRW-BIRB",
+     "KRW-BLUR",
+     "KRW-BTC",
+     "KRW-CAP",
+     "KRW-CC",
+     "KRW-CHIP",
+     "KRW-DATA",
+     "KRW-DOGE",
+     "KRW-DOOD",
+     "KRW-DOS",
+     "KRW-ELSA",
+     "KRW-ENA",
+     "KRW-ERA",
+     "KRW-ETH",
+     "KRW-HBAR",
+     "KRW-IRYS",
+     "KRW-LA",
+     "KRW-LINK",
+     "KRW-LIT",
+     "KRW-LSK",
+     "KRW-MEGA",
+     "KRW-NEAR",
+     "KRW-ONDO",
+     "KRW-PENGU",
+     "KRW-PEPE",
+     "KRW-QUID",
+     "KRW-SAND",
+     "KRW-SEI",
+     "KRW-SHIB",
+     "KRW-SLX",
+     "KRW-SOL",
+     "KRW-SOON",
+     "KRW-STX",
+     "KRW-SUI",
+     "KRW-TRUMP",
+     "KRW-TRX",
+     "KRW-UNI",
+     "KRW-UP2",
+     "KRW-VIRTUAL",
+     "KRW-WLD",
+     "KRW-XLM",
+     "KRW-XPL",
+     "KRW-XRP"
+    ]
    }
   ],
   "updated": "2026-11-23"
  },
  "H3_trend": {
-  "as_of": "2026-11-26",
+  "as_of": "2026-11-27",
   "assets": {
    "KRW-BTC": {
-    "benchmark": 0.7520470968244506,
-    "close": 82005000.0,
+    "benchmark": 0.7540646611351802,
+    "close": 82226000.0,
     "equity": 1.0,
-    "gap": -0.19468754014041434,
+    "gap": -0.18751902106249185,
     "on": false,
     "position": false,
-    "sma": 101830040.0,
+    "sma": 101203600.0,
     "trades": []
    },
    "KRW-ETH": {
-    "benchmark": 0.7166011921285753,
-    "close": 2298000.0,
+    "benchmark": 0.715042007637434,
+    "close": 2293000.0,
     "equity": 1.0,
-    "gap": -0.22396849946981312,
+    "gap": -0.2192394650104873,
     "on": false,
     "position": false,
-    "sma": 2961220.0,
+    "sma": 2936880.0,
     "trades": []
    }
   },
-  "benchmark": 0.734324144476513,
+  "benchmark": 0.7345533343863071,
   "equity": 1.0
  },
  "candidates": {
@@ -516,7 +1164,7 @@
     }
    ],
    "rule": "15분 −3% 이하 급락(거래대금 3배) → 1시간 보유, btc_ret_1h <= -0.01821",
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   },
   "A-202611-02": {
    "decision": null,
@@ -584,7 +1232,7 @@
    "role": "main",
    "rows": [],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [주 대상: 큰 5종목]",
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   },
   "A-202611-02-비교": {
    "decision": null,
@@ -796,7 +1444,7 @@
     }
    ],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, ret_4h <= -0.0592 그리고 btc_ret_1d <= -0.0173 [비교용: 나머지 14종목]",
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   },
   "A-202611-02-체결": {
    "decision": null,
@@ -806,12 +1454,12 @@
    "role": "observe",
    "rows": [],
    "rule": "15분 −3% 이하 급락(거래대금 조건 없음) → 1시간 보유, 조건 없음 [체결 관찰: 큰 5종목의 15분 −3% 급락 전부]",
-   "updated": "2026-11-26"
+   "updated": "2026-11-27"
   }
  },
  "conditions": {
-  "added": 9,
-  "events": 24,
+  "added": 2,
+  "events": 26,
   "missing": [],
   "no5m": [],
   "past": {
@@ -1001,6 +1649,16 @@
      162,
      0.015331679934597298
     ],
+    "day-first": [
+     5489,
+     1886,
+     -0.0003290251007271242
+    ],
+    "day-repeat": [
+     4070,
+     861,
+     0.0005173107611948055
+    ],
     "lag": [
      1161,
      290,
@@ -1083,7 +1741,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "4",
     "label": "4번 BTC 조건 없는 알트 급락 (BTC 1시간 > −1.821%)",
@@ -1093,12 +1751,12 @@
      null,
      null
     ],
-    "n": 22,
+    "n": 24,
     "ok": false,
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "4x3",
     "label": "4번 + 거래대금 3배 이상",
@@ -1108,7 +1766,7 @@
      null,
      null
     ],
-    "n": 19,
+    "n": 21,
     "ok": false,
     "up": null
    },
@@ -1143,7 +1801,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "alone",
     "label": "구분: 알트만",
@@ -1153,12 +1811,12 @@
      null,
      null
     ],
-    "n": 21,
+    "n": 23,
     "ok": false,
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "5a",
     "label": "5번 알트 급락 전체 — ① 바로 진입",
@@ -1168,12 +1826,12 @@
      null,
      null
     ],
-    "n": 22,
+    "n": 24,
     "ok": false,
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "5b",
     "label": "5번 알트 급락 전체 — ② 반등 확인 뒤 진입 (미진입 0건은 0)",
@@ -1183,7 +1841,7 @@
      null,
      null
     ],
-    "n": 22,
+    "n": 24,
     "ok": false,
     "up": null
    },
@@ -1233,7 +1891,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "6-4-lo",
     "label": "6번 4번 중 BTC 보다 가장 더 빠짐 (차 ≤ -4.0%)",
@@ -1243,7 +1901,7 @@
      null,
      null
     ],
-    "n": 13,
+    "n": 15,
     "ok": false,
     "up": null
    },
@@ -1383,7 +2041,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "7-4-d",
     "label": "7번 4번 중 6배 이상",
@@ -1393,7 +2051,7 @@
      null,
      null
     ],
-    "n": 18,
+    "n": 20,
     "ok": false,
     "up": null
    },
@@ -1488,7 +2146,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "8-4-up",
     "label": "8번 4번 중 BTC 24시간 수익 > 0",
@@ -1498,7 +2156,7 @@
      null,
      null
     ],
-    "n": 6,
+    "n": 8,
     "ok": false,
     "up": null
    },
@@ -1533,7 +2191,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "rest14",
     "label": "나머지 14종목의 급락",
@@ -1543,7 +2201,7 @@
      null,
      null
     ],
-    "n": 22,
+    "n": 24,
     "ok": false,
     "up": null
    },
@@ -1608,7 +2266,7 @@
     "up": null
    },
    {
-    "days": 4,
+    "days": 5,
     "down": null,
     "key": "neither",
     "label": "둘 다 못 채움",
@@ -1618,15 +2276,64 @@
      null,
      null
     ],
-    "n": 9,
+    "n": 11,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 5,
+    "down": null,
+    "key": "day-first",
+    "label": "그 종목의 그날(UTC) 첫 급락",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 10,
+    "ok": false,
+    "up": null
+   },
+   {
+    "days": 2,
+    "down": null,
+    "key": "day-repeat",
+    "label": "그 종목의 그날 두 번째 이후 급락",
+    "means": [
+     null,
+     null,
+     null,
+     null
+    ],
+    "n": 14,
     "ok": false,
     "up": null
    }
   ],
-  "through": "2026-11-26"
+  "through": "2026-11-27"
  },
- "last_ok": "2026-11-26",
- "last_run": "2026-11-26",
+ "last_ok": "2026-11-27",
+ "last_run": "2026-11-27",
+ "market_flags": {
+  "added": 20,
+  "day": "2026-11-27",
+  "flagged": [
+   {
+    "caution": [],
+    "market": "KRW-WAVES",
+    "warning": true
+   },
+   {
+    "caution": [
+     "GLOBAL_PRICE_DIFFERENCES"
+    ],
+    "market": "KRW-KAVA",
+    "warning": true
+   }
+  ],
+  "unlisted": []
+ },
  "mismatch_seen": {
   "H2 김치 되돌림": [
    "2026-11-03",
@@ -1634,89 +2341,72 @@
   ]
  },
  "new": {
-  "day": "2026-11-26",
-  "items": [
-   {
-    "fill": -0.0183280609,
-    "item": "후보 A-202611-02-비교",
-    "market": "KAVA",
-    "net": -0.014046315857180969,
-    "order": "자료 부족",
-    "when": "11/25 15:30"
-   },
-   {
-    "fill": "60초 안 체결 자료 부족",
-    "item": "후보 A-202611-02-비교",
-    "market": "WAVES",
-    "net": -0.06664590470258469,
-    "order": "자료 부족",
-    "when": "11/25 15:30"
-   }
-  ]
+  "day": "2026-11-27",
+  "items": []
  },
  "observation": {
-  "as_of": "2026-11-26",
+  "as_of": "2026-11-27",
   "events": {
    "BREAKOUT": {
     "28": [
-     129,
-     -0.008190910326026628
+     137,
+     -0.008295108991114311
     ],
     "7": [
-     47,
-     -0.011873574728594688
+     54,
+     -0.010407033958627774
     ]
    },
    "CRASH": {
     "28": [
-     51,
-     -0.012859917618532677
+     47,
+     -0.01319497600654249
     ],
     "7": [
-     19,
-     -0.018957496482829416
+     21,
+     -0.01590229109875041
     ]
    },
    "SURGE": {
     "28": [
-     55,
-     -0.012977626228304904
+     54,
+     -0.014561103133024984
     ],
     "7": [
-     29,
-     -0.012396297155119876
+     31,
+     -0.013294473751285592
     ]
    }
   },
   "events0": {
    "BREAKOUT": {
     "28": [
-     187,
-     -0.006287676959907536
+     213,
+     -0.006209148439880029
     ],
     "7": [
-     60,
-     -0.009790826741793398
+     83,
+     -0.007776552058894779
     ]
    },
    "CRASH": {
     "28": [
-     55,
-     -0.012227430923493494
+     51,
+     -0.01248660342263672
     ],
     "7": [
-     22,
-     -0.016245443002048884
+     24,
+     -0.013798142747711462
     ]
    },
    "SURGE": {
     "28": [
      56,
-     -0.012622156641838338
+     -0.013879373667306657
     ],
     "7": [
-     30,
-     -0.011752131562821788
+     33,
+     -0.012214364923505364
     ]
    }
   },
